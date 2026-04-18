@@ -44,6 +44,7 @@ export type Database = {
           email: string
           id: string
           source: string | null
+          use_case: string | null
           utm_campaign: string | null
         }
         Insert: {
@@ -51,6 +52,7 @@ export type Database = {
           email: string
           id?: string
           source?: string | null
+          use_case?: string | null
           utm_campaign?: string | null
         }
         Update: {
@@ -58,6 +60,7 @@ export type Database = {
           email?: string
           id?: string
           source?: string | null
+          use_case?: string | null
           utm_campaign?: string | null
         }
         Relationships: []
