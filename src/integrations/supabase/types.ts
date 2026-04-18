@@ -14,6 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
+      adapter_requests: {
+        Row: {
+          created_at: string
+          email: string
+          id: string
+          notes: string | null
+          provider_name: string
+        }
+        Insert: {
+          created_at?: string
+          email: string
+          id?: string
+          notes?: string | null
+          provider_name: string
+        }
+        Update: {
+          created_at?: string
+          email?: string
+          id?: string
+          notes?: string | null
+          provider_name?: string
+        }
+        Relationships: []
+      }
       waitlist: {
         Row: {
           created_at: string
