@@ -13,18 +13,25 @@ import { ArrowRight } from "lucide-react";
 export const Route = createFileRoute("/integrations")({
   head: () => ({
     meta: [
-      { title: "Integrations — OrangeRails" },
+      { title: "Integrations — 22+ Bitcoin adapters | OrangeRails" },
       {
         name: "description",
         content:
-          "Banking, exchanges, wallets, mining pools, Lightning, and files. All normalized into a single API shape.",
+          "Connect Bitcoin Core, BTCPay, Blink, LND, Kraken, Coinbase, mining pools, and more. 22+ adapters normalized into one API. Build your own with the SDK.",
       },
-      { property: "og:title", content: "Integrations — OrangeRails" },
+      { property: "og:title", content: "Every Bitcoin integration, in one place — OrangeRails" },
       {
         property: "og:description",
         content:
-          "Every Bitcoin integration, in one place. 22+ adapters and counting.",
+          "Banking, exchanges, wallets, mining pools, Lightning, and files. 22+ adapters normalized into a single API shape.",
       },
+      { property: "og:image", content: "/og-image.jpg" },
+      { property: "og:image:width", content: "1200" },
+      { property: "og:image:height", content: "630" },
+      { name: "twitter:title", content: "Every Bitcoin integration, in one place — OrangeRails" },
+      { name: "twitter:description", content: "22+ adapters: Bitcoin Core, BTCPay, Blink, LND, Kraken, mining pools, Lightning, and more." },
+      { name: "twitter:image", content: "/og-image.jpg" },
+      { rel: "canonical", href: "https://orangerails.com/integrations" },
     ],
   }),
   component: IntegrationsPage,

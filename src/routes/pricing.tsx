@@ -17,17 +17,24 @@ import { Lock } from "lucide-react";
 export const Route = createFileRoute("/pricing")({
   head: () => ({
     meta: [
-      { title: "Pricing — OrangeRails" },
+      { title: "Pricing — Free self-host, $15/yr personal, usage-based API | OrangeRails" },
       {
         name: "description",
         content:
-          "Free to self-host. $15/yr for individuals. Subscription for teams. Usage-based for developers. Zero-knowledge on every tier.",
+          "Free to self-host. $15/yr for individuals. $49/mo for teams. Usage-based for developers. Zero-knowledge mode included on every tier — privacy is never paywalled.",
       },
-      { property: "og:title", content: "Pricing — OrangeRails" },
+      { property: "og:title", content: "Pricing — Priced for who you actually are | OrangeRails" },
       {
         property: "og:description",
-        content: "Priced for who you actually are. Three pricing models. Zero-knowledge always included.",
+        content: "Three pricing models for three audiences. Zero-knowledge always included. Same code, same guarantees, every tier.",
       },
+      { property: "og:image", content: "/og-image.jpg" },
+      { property: "og:image:width", content: "1200" },
+      { property: "og:image:height", content: "630" },
+      { name: "twitter:title", content: "Pricing — Priced for who you actually are | OrangeRails" },
+      { name: "twitter:description", content: "Free self-host · $15/yr personal · $49/mo team · usage-based API. Zero-knowledge on every tier." },
+      { name: "twitter:image", content: "/og-image.jpg" },
+      { rel: "canonical", href: "https://orangerails.com/pricing" },
     ],
   }),
   component: PricingPage,

@@ -8,18 +8,25 @@ import { ArrowRight, Scale, Network, HandCoins, Lock, GitPullRequest } from "luc
 export const Route = createFileRoute("/open-source")({
   head: () => ({
     meta: [
-      { title: "Open Source Philosophy — OrangeRails" },
+      { title: "Open Source — Apache 2.0, zero-knowledge by architecture | OrangeRails" },
       {
         name: "description",
         content:
-          "Open source is not a marketing strategy. It's the architecture. Apache 2.0, zero-knowledge by design, audit yourself.",
+          "Open source is not a marketing strategy — it's the architecture. Why Apache 2.0, why the moat is not the code, and why our zero-knowledge guarantee is mechanical, not promissory.",
       },
-      { property: "og:title", content: "Open Source Philosophy — OrangeRails" },
+      { property: "og:title", content: "Open source is not a marketing strategy. It's the architecture." },
       {
         property: "og:description",
         content:
-          "Why Apache 2.0. Why the moat is not the code. Why zero-knowledge is mechanical, not promissory.",
+          "Apache 2.0. Split-connector zero-knowledge. Audit the code yourself. The OrangeRails philosophy.",
       },
+      { property: "og:image", content: "/og-image.jpg" },
+      { property: "og:image:width", content: "1200" },
+      { property: "og:image:height", content: "630" },
+      { name: "twitter:title", content: "Open source is not a marketing strategy. It's the architecture." },
+      { name: "twitter:description", content: "Apache 2.0. Zero-knowledge by design. Audit the code yourself." },
+      { name: "twitter:image", content: "/og-image.jpg" },
+      { rel: "canonical", href: "https://orangerails.com/open-source" },
     ],
   }),
   component: OpenSourcePage,

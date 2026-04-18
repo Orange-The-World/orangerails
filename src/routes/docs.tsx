@@ -10,17 +10,24 @@ import {
 export const Route = createFileRoute("/docs")({
   head: () => ({
     meta: [
-      { title: "Documentation — OrangeRails" },
+      { title: "Docs — Quickstart, API reference, self-hosting | OrangeRails" },
       {
         name: "description",
         content:
-          "Everything you need to integrate, self-host, or build on OrangeRails.",
+          "Developer documentation for OrangeRails: 10-minute quickstart, REST API reference, self-hosting with Docker and Helm, adapter SDK, and zero-knowledge architecture.",
       },
-      { property: "og:title", content: "Documentation — OrangeRails" },
+      { property: "og:title", content: "Developer documentation — OrangeRails" },
       {
         property: "og:description",
-        content: "Quickstart, API reference, self-hosting guide, and more.",
+        content: "Quickstart in 10 minutes. API reference. Self-hosting guide. Adapter SDK. Zero-knowledge architecture.",
       },
+      { property: "og:image", content: "/og-image.jpg" },
+      { property: "og:image:width", content: "1200" },
+      { property: "og:image:height", content: "630" },
+      { name: "twitter:title", content: "Developer documentation — OrangeRails" },
+      { name: "twitter:description", content: "Quickstart, API reference, self-hosting, adapter SDK." },
+      { name: "twitter:image", content: "/og-image.jpg" },
+      { rel: "canonical", href: "https://orangerails.com/docs" },
     ],
   }),
   component: DocsPage,
