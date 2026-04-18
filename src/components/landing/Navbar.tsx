@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { Zap, Github } from "lucide-react";
 import { Button } from "@/components/ui/button";
+
+const navLinks = [
+  { to: "#features", label: "Features", external: true },
+  { to: "/integrations", label: "Integrations", external: false },
+  { to: "/docs", label: "Docs", external: false },
+  { to: "#pricing", label: "Pricing", external: true },
+] as const;
 
 export function Navbar() {
   const [scrolled, setScrolled] = useState(false);
@@ -13,7 +21,12 @@ export function Navbar() {
   }, []);
 
   const scrollToWaitlist = () => {
-    document.getElementById("waitlist")?.scrollIntoView({ behavior: "smooth" });
+    const el = document.getElementById("waitlist");
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth" });
+    } else {
+      window.location.href = "/#waitlist";
+    }
   };
 
   return (
@@ -25,16 +38,28 @@ export function Navbar() {
       }`}
     >
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-        <a href="#" className="flex items-center gap-2 font-semibold tracking-tight">
+        <Link to="/" className="flex items-center gap-2 font-semibold tracking-tight">
           <Zap className="h-5 w-5 fill-primary text-primary" strokeWidth={2.5} />
           <span className="text-lg">OrangeRails</span>
-        </a>
+        </Link>
 
         <nav className="hidden items-center gap-8 text-sm text-muted-foreground md:flex">
-          <a href="#features" className="transition-colors hover:text-foreground">Features</a>
-          <a href="#integrations" className="transition-colors hover:text-foreground">Integrations</a>
-          <a href="#" className="transition-colors hover:text-foreground">Docs</a>
-          <a href="#" className="transition-colors hover:text-foreground">Pricing</a>
+          {navLinks.map((link) =>
+            link.external ? (
+              <a key={link.to} href={link.to} className="transition-colors hover:text-foreground">
+                {link.label}
+              </a>
+            ) : (
+              <Link
+                key={link.to}
+                to={link.to}
+                className="transition-colors hover:text-foreground"
+                activeProps={{ className: "text-foreground" }}
+              >
+                {link.label}
+              </Link>
+            )
+          )}
         </nav>
 
         <div className="flex items-center gap-2">
