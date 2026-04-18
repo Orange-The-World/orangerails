@@ -1,17 +1,33 @@
+import { Link } from "@tanstack/react-router";
 import { Zap } from "lucide-react";
 
-const cols = [
+type FooterLink = { label: string; to?: string; href?: string };
+
+const cols: { title: string; links: FooterLink[] }[] = [
   {
     title: "Product",
-    links: ["Features", "Integrations", "Pricing", "Docs"],
+    links: [
+      { label: "Integrations", to: "/integrations" },
+      { label: "Pricing", to: "/pricing" },
+      { label: "Docs", to: "/docs" },
+    ],
   },
   {
     title: "Company",
-    links: ["About", "Blog", "Security", "Open Source Philosophy"],
+    links: [
+      { label: "About", href: "#" },
+      { label: "Blog", href: "#" },
+      { label: "Security", href: "#" },
+      { label: "Open Source Philosophy", to: "/open-source" },
+    ],
   },
   {
     title: "Connect",
-    links: ["GitHub", "Twitter", "Nostr"],
+    links: [
+      { label: "GitHub", href: "#" },
+      { label: "Twitter", href: "#" },
+      { label: "Nostr", href: "#" },
+    ],
   },
 ];
 
@@ -21,10 +37,10 @@ export function Footer() {
       <div className="mx-auto max-w-6xl px-6 py-16">
         <div className="grid gap-10 md:grid-cols-4">
           <div>
-            <a href="#" className="flex items-center gap-2 font-semibold">
+            <Link to="/" className="flex items-center gap-2 font-semibold">
               <Zap className="h-5 w-5 fill-primary text-primary" strokeWidth={2.5} />
               <span>OrangeRails</span>
-            </a>
+            </Link>
             <p className="mt-3 max-w-xs text-sm text-muted-foreground">
               Open-source, zero-knowledge financial rails for Bitcoin businesses.
             </p>
@@ -35,10 +51,19 @@ export function Footer() {
               <h4 className="text-sm font-semibold">{col.title}</h4>
               <ul className="mt-4 space-y-2.5 text-sm text-muted-foreground">
                 {col.links.map((l) => (
-                  <li key={l}>
-                    <a href="#" className="transition-colors hover:text-foreground">
-                      {l}
-                    </a>
+                  <li key={l.label}>
+                    {l.to ? (
+                      <Link to={l.to} className="transition-colors hover:text-foreground">
+                        {l.label}
+                      </Link>
+                    ) : (
+                      <a
+                        href={l.href}
+                        className="transition-colors hover:text-foreground"
+                      >
+                        {l.label}
+                      </a>
+                    )}
                   </li>
                 ))}
               </ul>
