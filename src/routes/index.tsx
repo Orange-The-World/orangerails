@@ -33,6 +33,27 @@ export const Route = createFileRoute("/")({
       { name: "twitter:image", content: "/og-image.jpg" },
       { rel: "canonical", href: "https://orangerails.com/" },
     ],
+    scripts: [
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "SoftwareApplication",
+          name: "OrangeRails",
+          applicationCategory: "FinanceApplication",
+          operatingSystem: "Web, Linux, macOS, Docker",
+          description:
+            "Open-source, zero-knowledge alternative to Plaid built for Bitcoin. Connect banks, exchanges, wallets, mining pools, and Lightning nodes through one normalized API.",
+          url: "https://orangerails.com/",
+          license: "https://www.apache.org/licenses/LICENSE-2.0",
+          offers: [
+            { "@type": "Offer", name: "Self-host", price: "0", priceCurrency: "USD" },
+            { "@type": "Offer", name: "Personal", price: "15", priceCurrency: "USD" },
+          ],
+          publisher: { "@type": "Organization", name: "OrangeRails", url: "https://orangerails.com" },
+        }),
+      },
+    ],
   }),
   component: Index,
 });
