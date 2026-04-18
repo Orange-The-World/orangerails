@@ -1,26 +1,48 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { Toaster } from "@/components/ui/sonner";
+import { Navbar } from "@/components/landing/Navbar";
+import { Hero } from "@/components/landing/Hero";
+import { PlaidProblem } from "@/components/landing/PlaidProblem";
+import { Features } from "@/components/landing/Features";
+import { Comparison } from "@/components/landing/Comparison";
+import { Integrations } from "@/components/landing/Integrations";
+import { WaitlistCta } from "@/components/landing/WaitlistCta";
+import { Footer } from "@/components/landing/Footer";
 
 export const Route = createFileRoute("/")({
+  head: () => ({
+    meta: [
+      { title: "OrangeRails — Open-source Bitcoin financial rails" },
+      {
+        name: "description",
+        content:
+          "The open-source, zero-knowledge alternative to Plaid, built for Bitcoin. Self-hostable. Apache 2.0.",
+      },
+      { property: "og:title", content: "OrangeRails — Open-source Bitcoin financial rails" },
+      {
+        property: "og:description",
+        content:
+          "The alternative to Plaid that can't read your data — because it can't. Open source. Zero knowledge. Built for Bitcoin.",
+      },
+    ],
+  }),
   component: Index,
 });
 
-// IMPORTANT: Replace this placeholder. For sites with multiple pages (About, Services, Contact, etc.),
-// create separate route files (about.tsx, services.tsx, contact.tsx) — don't put all pages in this file.
-function PlaceholderIndex() {
+function Index() {
   return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
+    <div className="min-h-screen bg-background text-foreground antialiased">
+      <Navbar />
+      <main>
+        <Hero />
+        <PlaidProblem />
+        <Features />
+        <Comparison />
+        <Integrations />
+        <WaitlistCta />
+      </main>
+      <Footer />
+      <Toaster richColors position="top-center" />
     </div>
   );
-}
-
-function Index() {
-  return <PlaceholderIndex />;
 }
