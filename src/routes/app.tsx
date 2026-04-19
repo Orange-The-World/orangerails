@@ -40,8 +40,25 @@ type DecryptedTxRow = NormalizedTransaction & {
 };
 
 // Providers available in Phase 1. Grows as we add adapters.
+// Each provider ships with:
+//   description: short one-liner for the dropdown
+//   apiKeyUrl:   deep link to where the user creates their API key
+//   steps:       numbered instructions shown inline in the dialog
+//   scopeHint:   what permission/scope the user should pick when creating the key
 const PROVIDERS = [
-  { type: 'blink', name: 'Blink', description: 'Lightning + USD stablecoin. Get your API key at dashboard.blink.sv.' },
+  {
+    type: 'blink',
+    name: 'Blink',
+    description: 'Lightning + USD stablecoin wallet by Galoy.',
+    apiKeyUrl: 'https://dashboard.blink.sv/api-keys',
+    steps: [
+      'Sign in to the Blink dashboard.',
+      'Go to Settings → API keys (or use the link above).',
+      'Create a new key with read-only access — we only need to read your transactions.',
+      'Copy the key and paste it below before it disappears (Blink only shows it once).',
+    ],
+    scopeHint: 'read-only',
+  },
 ] as const;
 
 // ------------------------------------------------------------------
@@ -486,13 +503,39 @@ function AddConnectionDialog({
             )}
           </div>
 
+          {providerMeta && (
+            <div className="rounded-md border border-orange-500/30 bg-orange-500/5 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-medium uppercase tracking-wide text-orange-600 dark:text-orange-400">
+                  How to get your {providerMeta.name} API key
+                </div>
+                <a
+                  href={providerMeta.apiKeyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-medium text-primary hover:underline whitespace-nowrap"
+                >
+                  Open {providerMeta.name} dashboard ↗
+                </a>
+              </div>
+              <ol className="text-xs text-muted-foreground space-y-1 list-decimal pl-4">
+                {providerMeta.steps.map((step, i) => (
+                  <li key={i}>{step}</li>
+                ))}
+              </ol>
+              <div className="text-xs text-muted-foreground italic">
+                Permission scope to pick: <span className="font-medium not-italic">{providerMeta.scopeHint}</span>
+              </div>
+            </div>
+          )}
+
           <div className="space-y-1">
             <label className="text-sm font-medium">Label <span className="text-muted-foreground">(optional)</span></label>
             <input
               type="text"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
-              placeholder="My Blink wallet"
+              placeholder={`My ${providerMeta?.name ?? 'account'}`}
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
             />
           </div>
@@ -505,6 +548,7 @@ function AddConnectionDialog({
               onChange={(e) => setApiKey(e.target.value)}
               required
               autoComplete="off"
+              placeholder="Paste the key you just copied"
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
             />
           </div>
