@@ -67,6 +67,15 @@ async function sync(apiKey, cursor = null) {
 
 function normalize(tx, walletCurrency) {
   const type = tx.initiationVia?.paymentHash ? 'lightning' : 'onchain'
+  // Blink returns createdAt as a Unix timestamp in SECONDS. Postgres
+  // timestamptz requires an ISO 8601 string, so we convert here. If
+  // the value is already a string (defensive against future schema
+  // change), pass it through.
+  const timestamp = typeof tx.createdAt === 'number'
+    ? new Date(tx.createdAt * 1000).toISOString()
+    : typeof tx.createdAt === 'string' && /^\d+$/.test(tx.createdAt)
+      ? new Date(Number(tx.createdAt) * 1000).toISOString()
+      : tx.createdAt
   return {
     id: tx.id,
     adapter: 'blink',
@@ -76,7 +85,7 @@ function normalize(tx, walletCurrency) {
     currency: tx.settlementCurrency || walletCurrency,
     fee_sats: tx.settlementFee ?? 0,
     description: tx.memo ?? null,
-    timestamp: tx.createdAt,
+    timestamp,
     status: tx.status,
     raw: tx
   }

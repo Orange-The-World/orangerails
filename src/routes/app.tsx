@@ -203,7 +203,10 @@ function AppHome() {
             external_id: tx.id,
             encrypted_payload: await encryptTransaction(tx),
             payload_key_version: 1,
-            occurred_at: tx.timestamp,
+            // Defense in depth: coerce any adapter timestamp to ISO 8601
+            // before handing it to Postgres. Adapters *should* return ISO,
+            // but bugs happen (Blink returned Unix seconds in v0.1.0).
+            occurred_at: toIsoTimestamp(tx.timestamp),
           })),
         );
         const { error: upsertErr } = await supabase
@@ -580,6 +583,28 @@ function AddConnectionDialog({
 // ------------------------------------------------------------------
 // Helpers
 // ------------------------------------------------------------------
+
+/**
+ * Coerce adapter-provided timestamps to ISO 8601.
+ * Accepts: ISO string (pass-through), Unix seconds (number or numeric string),
+ * Unix milliseconds (>= 10^12). Defensive against adapter bugs like the one
+ * that surfaced when Blink returned Unix seconds where we expected ISO.
+ */
+function toIsoTimestamp(v: unknown): string {
+  if (typeof v === 'string' && /^\d+$/.test(v)) {
+    const n = Number(v);
+    return new Date(n >= 1e12 ? n : n * 1000).toISOString();
+  }
+  if (typeof v === 'number') {
+    return new Date(v >= 1e12 ? v : v * 1000).toISOString();
+  }
+  if (typeof v === 'string') {
+    const parsed = new Date(v);
+    if (!isNaN(parsed.getTime())) return parsed.toISOString();
+  }
+  // Last resort: throw so the adapter bug is surfaced, not silently corrupted.
+  throw new Error(`Adapter returned invalid timestamp: ${JSON.stringify(v)}`);
+}
 
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
