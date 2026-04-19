@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useVault } from '@/context/VaultContext';
 import { MIN_PASSWORD_LENGTH } from '@/lib/vault';
+import { formatError } from '@/lib/format-error';
 
 export const Route = createFileRoute('/signup')({
   component: SignupPage,
@@ -98,8 +99,13 @@ function SignupPage() {
         userId = signupData.user.id;
       } else {
         // Resume path — session already exists, just finish the vault.
+        // Refresh the JWT first so RLS sees the most recent user state
+        // (email confirmation, etc.) — stale JWT would fail auth.uid() checks.
+        const { error: refreshError } = await supabase.auth.refreshSession();
+        if (refreshError) throw refreshError;
+
         const { data: { session } } = await supabase.auth.getSession();
-        if (!session) {
+        if (!session?.user?.id) {
           throw new Error('Session lost. Please sign in again.');
         }
         userId = session.user.id;
@@ -118,7 +124,8 @@ function SignupPage() {
 
       navigate({ to: '/app' });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      console.error('Signup submit error:', err);
+      setError(formatError(err));
       setSubmitting(false);
     }
   }

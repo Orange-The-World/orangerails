@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
+import { formatError } from '@/lib/format-error';
 
 export const Route = createFileRoute('/login')({
   component: LoginPage,
@@ -24,7 +25,8 @@ function LoginPage() {
       // Logged in. Next step is the vault unlock page.
       navigate({ to: '/unlock' });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      console.error('Login error:', err);
+      setError(formatError(err));
       setSubmitting(false);
     }
   }
