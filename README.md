@@ -7,6 +7,7 @@
 **Open-source. Zero-knowledge. Bitcoin-first.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-F7931A.svg)](./LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/MorningRevolution/orangerails/ci.yml?branch=main&label=CI)](./.github/workflows/ci.yml)
 [![Status: Early Development](https://img.shields.io/badge/Status-Early%20Development-yellow.svg)](./docs/OrangeRails-Implementation-Plan.md)
 [![Architecture: Session-Based ZKA](https://img.shields.io/badge/Architecture-Session--Based%20ZKA-informational.svg)](./docs/OrangeRails-Architecture.md)
 [![Self-Hostable: Yes](https://img.shields.io/badge/Self--Hostable-Yes-success.svg)](#self-host-in-under-30-minutes)
