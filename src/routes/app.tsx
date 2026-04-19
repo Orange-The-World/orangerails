@@ -16,14 +16,17 @@ export const Route = createFileRoute('/app')({
 interface Connection {
   id: string;
   provider_type: string;
-  label: string | null;
+  encrypted_label: string | null;
   encrypted_credentials: string;
   credentials_key_version: number;
   status: 'active' | 'error' | 'disconnected';
   last_sync_at: string | null;
   last_sync_cursor: string | null;
-  last_error: string | null;
+  encrypted_last_error: string | null;
   created_at: string;
+  // Derived client-side after decryption. Never stored in the DB row.
+  decrypted_label?: string | null;
+  decrypted_last_error?: string | null;
 }
 
 interface EncryptedTxRow {
@@ -67,7 +70,7 @@ const PROVIDERS = [
 
 function AppHome() {
   const navigate = useNavigate();
-  const { isUnlocked, lock, encryptCredentials, decryptCredentials, encryptTransaction, decryptTransaction } = useVault();
+  const { isUnlocked, lock, encryptCredentials, decryptCredentials, encryptText, decryptText, encryptTransaction, decryptTransaction } = useVault();
 
   const [email, setEmail] = useState<string | null>(null);
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -103,7 +106,22 @@ function AppHome() {
         .select('*')
         .order('created_at', { ascending: false });
       if (connErr) throw connErr;
-      setConnections((conns ?? []) as Connection[]);
+
+      // Decrypt label + last_error on each connection with the user's ORT subkey.
+      const decryptedConns = await Promise.all(
+        (conns ?? []).map(async (c: Connection): Promise<Connection> => {
+          let decrypted_label: string | null = null;
+          let decrypted_last_error: string | null = null;
+          if (c.encrypted_label) {
+            try { decrypted_label = await decryptText(c.encrypted_label); } catch { /* ignore */ }
+          }
+          if (c.encrypted_last_error) {
+            try { decrypted_last_error = await decryptText(c.encrypted_last_error); } catch { /* ignore */ }
+          }
+          return { ...c, decrypted_label, decrypted_last_error };
+        }),
+      );
+      setConnections(decryptedConns);
 
       const { data: txs, error: txErr } = await supabase
         .from('encrypted_transactions')
@@ -132,7 +150,7 @@ function AppHome() {
     } finally {
       setLoading(false);
     }
-  }, [decryptTransaction]);
+  }, [decryptTransaction, decryptText]);
 
   useEffect(() => {
     if (isUnlocked) void refresh();
@@ -147,11 +165,13 @@ function AppHome() {
     if (!session) throw new Error('Not authenticated');
 
     const encrypted = await encryptCredentials({ api_key: params.apiKey });
+    const labelPlaintext = params.label || params.provider;
+    const encrypted_label = await encryptText(labelPlaintext);
 
     const { error: insertErr } = await supabase.from('connections').insert({
       user_id: session.user.id,
       provider_type: params.provider,
-      label: params.label || params.provider,
+      encrypted_label,
       encrypted_credentials: encrypted,
       credentials_key_version: 1,
       status: 'active',
@@ -222,19 +242,25 @@ function AppHome() {
           last_sync_at: new Date().toISOString(),
           last_sync_cursor: next_cursor,
           status: 'active',
-          last_error: null,
+          encrypted_last_error: null,
         })
         .eq('id', conn.id);
       if (updErr) throw updErr;
 
-      setNotice(`Synced ${newTxs.length} transaction${newTxs.length === 1 ? '' : 's'} from ${conn.label || conn.provider_type}.`);
+      setNotice(`Synced ${newTxs.length} transaction${newTxs.length === 1 ? '' : 's'} from ${conn.decrypted_label || conn.provider_type}.`);
       await refresh();
     } catch (e) {
       const msg = formatError(e);
       setErr(msg);
+      // Encrypt the error message before storing — error bodies from
+      // upstream providers can contain identifying context.
+      let encrypted_last_error: string | null = null;
+      try {
+        encrypted_last_error = await encryptText(msg.slice(0, 500));
+      } catch { /* vault locked; leave null */ }
       await supabase
         .from('connections')
-        .update({ status: 'error', last_error: msg.slice(0, 500) })
+        .update({ status: 'error', encrypted_last_error })
         .eq('id', conn.id);
       await refresh();
     } finally {
@@ -243,7 +269,7 @@ function AppHome() {
   }
 
   async function handleDelete(conn: Connection) {
-    if (!confirm(`Delete the ${conn.label || conn.provider_type} connection? Synced transactions for this connection will also be removed.`)) return;
+    if (!confirm(`Delete the ${conn.decrypted_label || conn.provider_type} connection? Synced transactions for this connection will also be removed.`)) return;
     const { error: delErr } = await supabase.from('connections').delete().eq('id', conn.id);
     if (delErr) {
       setErr(formatError(delErr));
@@ -382,7 +408,7 @@ function ConnectionRow({ conn, syncing, onSync, onDelete }: {
   return (
     <div className="rounded-md border p-4 flex items-center justify-between gap-4">
       <div className="flex-1 min-w-0">
-        <div className="font-medium truncate">{conn.label || conn.provider_type}</div>
+        <div className="font-medium truncate">{conn.decrypted_label || conn.provider_type}</div>
         <div className="text-xs text-muted-foreground flex items-center gap-2 mt-1">
           <span className="uppercase">{conn.provider_type}</span>
           <span>·</span>
@@ -390,8 +416,8 @@ function ConnectionRow({ conn, syncing, onSync, onDelete }: {
           <span>·</span>
           <span>{conn.last_sync_at ? `Synced ${timeAgo(conn.last_sync_at)}` : 'Never synced'}</span>
         </div>
-        {conn.last_error && (
-          <div className="text-xs text-destructive mt-1 truncate">Last error: {conn.last_error}</div>
+        {conn.decrypted_last_error && (
+          <div className="text-xs text-destructive mt-1 truncate">Last error: {conn.decrypted_last_error}</div>
         )}
       </div>
       <div className="flex items-center gap-2">

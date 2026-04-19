@@ -32,7 +32,7 @@ import {
   useRef,
   type ReactNode,
 } from 'react';
-import { deriveMEK, generateVaultSalt, createVaultVerifier, verifyVaultPassword, isPasswordAcceptable } from '@/lib/vault';
+import { deriveMEK, generateVaultSalt, createVaultVerifier, verifyVaultPassword, isPasswordAcceptable, encryptString, decryptString } from '@/lib/vault';
 import { deriveVerifierKey, deriveCredentialsKey, deriveTransactionsKey } from '@/lib/key-derivation';
 import {
   encryptCredentials as encryptCredentialsFields,
@@ -83,6 +83,17 @@ interface VaultContextValue {
 
   /** Decrypt a credentials ciphertext. Throws if vault is locked or key is wrong. */
   decryptCredentials(ciphertextB64: string): Promise<CredentialsPayload>;
+
+  /**
+   * Encrypt an arbitrary string of user content (labels, memos, error
+   * messages). Uses the transactions subkey — same key the transaction
+   * payloads use — so the same caller can decrypt everything with one
+   * derived key. Do NOT use for credentials; use encryptCredentials.
+   */
+  encryptText(plaintext: string): Promise<string>;
+
+  /** Decrypt a string previously produced by encryptText. */
+  decryptText(ciphertextB64: string): Promise<string>;
 
   /** Encrypt a normalized transaction. */
   encryptTransaction(transaction: NormalizedTransaction): Promise<string>;
@@ -209,6 +220,18 @@ export function VaultProvider({ children }: VaultProviderProps) {
     return decryptCredentialsFields(ciphertextB64, mek, saltB64);
   }, [saltB64]);
 
+  const encryptText = useCallback(async (plaintext: string): Promise<string> => {
+    const { mek, saltB64 } = requireUnlocked();
+    const key = await deriveTransactionsKey(mek, saltB64);
+    return encryptString(plaintext, key);
+  }, [saltB64]);
+
+  const decryptText = useCallback(async (ciphertextB64: string): Promise<string> => {
+    const { mek, saltB64 } = requireUnlocked();
+    const key = await deriveTransactionsKey(mek, saltB64);
+    return decryptString(ciphertextB64, key);
+  }, [saltB64]);
+
   const encryptTransaction = useCallback(async (transaction: NormalizedTransaction): Promise<string> => {
     const { mek, saltB64 } = requireUnlocked();
     return encryptTransactionField(transaction, mek, saltB64);
@@ -247,6 +270,8 @@ export function VaultProvider({ children }: VaultProviderProps) {
     lock,
     encryptCredentials,
     decryptCredentials,
+    encryptText,
+    decryptText,
     encryptTransaction,
     decryptTransaction,
     exportCredentialsKeyForSync,
