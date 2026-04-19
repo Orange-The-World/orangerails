@@ -133,9 +133,27 @@ export async function deriveMEK(
 
 /**
  * Import a 32-byte raw key for AES-256-GCM use.
- * Used by the HKDF-derived subkeys in key-derivation.ts.
+ *
+ * extractable=true is required for subkeys that need to be handed to the
+ * sync edge function in-transit. The server uses them in-memory for a
+ * single sync request and discards them; never persists. For pure-client
+ * encryption/decryption this extra capability is unused and harmless.
+ *
+ * If a caller wants a hardened non-extractable key (e.g., a verifier key
+ * that is only ever used locally), call `importAesKeyNonExtractable` below.
  */
 export async function importAesKey(rawBytes: ArrayBuffer): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    'raw',
+    rawBytes,
+    { name: 'AES-GCM' },
+    /* extractable */ true,
+    ['encrypt', 'decrypt'],
+  );
+}
+
+/** Import a CryptoKey that can NEVER be extracted back into raw bytes. */
+export async function importAesKeyNonExtractable(rawBytes: ArrayBuffer): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'raw',
     rawBytes,

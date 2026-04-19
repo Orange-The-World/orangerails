@@ -17,7 +17,7 @@
  * See docs/OrangeRails-Architecture.md §5.2 (Key Hierarchy).
  */
 
-import { importAesKey } from './vault';
+import { importAesKey, importAesKeyNonExtractable } from './vault';
 
 // ------------------------------------------------------------------
 // HKDF context strings — one per purpose, never reused.
@@ -87,9 +87,26 @@ export async function deriveTransactionsKey(mek: CryptoKey, saltB64: string): Pr
 
 /**
  * Convenience: derive the verifier subkey (for `user_vault_meta.vault_verifier_ciphertext`).
+ *
+ * The verifier subkey is ALWAYS non-extractable — it is used only for local
+ * decryption of the verifier ciphertext, never transmitted anywhere.
  */
 export async function deriveVerifierKey(mek: CryptoKey, saltB64: string): Promise<CryptoKey> {
-  return deriveSubkey(mek, HKDF_CONTEXTS.ORANGERAILS_VERIFIER_V1, saltB64);
+  const saltBytes = base64ToBytes(saltB64);
+  const infoBytes = new TextEncoder().encode(HKDF_CONTEXTS.ORANGERAILS_VERIFIER_V1);
+
+  const rawBits = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: saltBytes as BufferSource,
+      info: infoBytes as BufferSource,
+    },
+    mek,
+    256,
+  );
+
+  return importAesKeyNonExtractable(rawBits);
 }
 
 // ------------------------------------------------------------------
