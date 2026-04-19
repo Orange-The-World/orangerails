@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useVault } from '@/context/VaultContext';
 import { MIN_PASSWORD_LENGTH } from '@/lib/vault';
@@ -8,9 +8,19 @@ export const Route = createFileRoute('/signup')({
   component: SignupPage,
 });
 
+type Mode = 'loading' | 'fresh' | 'resume' | 'unknown';
+
 function SignupPage() {
   const navigate = useNavigate();
   const { setupVault } = useVault();
+
+  // Mode detection:
+  // - 'fresh'   : no session yet. Show the full form (email + both passwords).
+  // - 'resume'  : session exists but no user_vault_meta row. Show only vault fields.
+  // - 'loading' : checking the session + vault-meta on mount.
+  // - 'unknown' : edge case (session exists + vault exists). We redirect to /unlock.
+  const [mode, setMode] = useState<Mode>('loading');
+  const [resumeEmail, setResumeEmail] = useState<string>(''); // readonly display for resume mode
 
   const [email, setEmail] = useState('');
   const [accountPassword, setAccountPassword] = useState('');
@@ -21,15 +31,46 @@ function SignupPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // On mount: figure out which mode we're in.
+  useEffect(() => {
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        setMode('fresh');
+        return;
+      }
+
+      setResumeEmail(session.user.email ?? '');
+
+      // Check if vault metadata already exists for this user.
+      const { data: vaultMeta } = await supabase
+        .from('user_vault_meta')
+        .select('user_id')
+        .eq('user_id', session.user.id)
+        .maybeSingle();
+
+      if (vaultMeta) {
+        // Already fully set up — send them to unlock.
+        setMode('unknown');
+        navigate({ to: '/unlock' });
+        return;
+      }
+
+      // Session but no vault: came back from email verification. Finish vault setup.
+      setMode('resume');
+    })();
+  }, [navigate]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
 
+    // Vault-password validations apply to both modes.
     if (vaultPassword !== vaultPasswordConfirm) {
       setError('Vault passwords do not match.');
       return;
     }
-    if (vaultPassword === accountPassword) {
+    if (mode === 'fresh' && vaultPassword === accountPassword) {
       setError('Vault password must be different from your account password.');
       return;
     }
@@ -40,83 +81,111 @@ function SignupPage() {
 
     setSubmitting(true);
     try {
-      // 1. Create the Supabase Auth user (email + account password).
-      const { data: signupData, error: signupError } = await supabase.auth.signUp({
-        email,
-        password: accountPassword,
-      });
-      if (signupError) throw signupError;
-      if (!signupData.session) {
-        setError('Check your email to confirm your account, then return here to finish vault setup.');
-        setSubmitting(false);
-        return;
+      let userId: string;
+
+      if (mode === 'fresh') {
+        // Fresh signup path — create auth user + session.
+        const { data: signupData, error: signupError } = await supabase.auth.signUp({
+          email,
+          password: accountPassword,
+        });
+        if (signupError) throw signupError;
+        if (!signupData.session || !signupData.user) {
+          throw new Error(
+            'No active session after signup. Disable email-confirmation in your Supabase project settings, or contact support.',
+          );
+        }
+        userId = signupData.user.id;
+      } else {
+        // Resume path — session already exists, just finish the vault.
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) {
+          throw new Error('Session lost. Please sign in again.');
+        }
+        userId = session.user.id;
       }
 
-      // 2. Set up the vault — generates salt, derives MEK, creates verifier.
+      // Set up the vault regardless of path.
       const { saltB64, verifierCiphertext, keyVersion } = await setupVault(vaultPassword);
 
-      // 3. Upload the vault metadata.
       const { error: metaError } = await supabase.from('user_vault_meta').insert({
-        user_id: signupData.session.user.id,
+        user_id: userId,
         vault_salt: saltB64,
         vault_verifier_ciphertext: verifierCiphertext,
         vault_key_version: keyVersion,
       });
       if (metaError) throw metaError;
 
-      // 4. Land in the authenticated app.
       navigate({ to: '/app' });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
+      setError(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
   }
+
+  if (mode === 'loading' || mode === 'unknown') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-sm text-muted-foreground">Loading...</div>
+      </div>
+    );
+  }
+
+  const isResume = mode === 'resume';
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background px-4">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-2">
-          <h1 className="text-2xl font-semibold">Create your OrangeRails account</h1>
+          <h1 className="text-2xl font-semibold">
+            {isResume ? 'Finish setting up your vault' : 'Create your OrangeRails account'}
+          </h1>
           <p className="text-sm text-muted-foreground">
-            Zero-knowledge from day one. Your vault password never leaves this browser.
+            {isResume
+              ? 'Your account is verified. Set your vault password to finish.'
+              : 'Zero-knowledge from day one. Your vault password never leaves this browser.'}
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-1">
-            <label htmlFor="email" className="text-sm font-medium">
-              Email
-            </label>
-            <input
-              id="email"
-              type="email"
-              required
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-            />
-          </div>
+          {isResume ? (
+            <div className="rounded-md border bg-muted/30 p-3 text-sm">
+              <div className="text-xs text-muted-foreground">Signed in as</div>
+              <div className="font-medium">{resumeEmail}</div>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-1">
+                <label htmlFor="email" className="text-sm font-medium">Email</label>
+                <input
+                  id="email"
+                  type="email"
+                  required
+                  autoComplete="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                />
+              </div>
 
-          <div className="space-y-1">
-            <label htmlFor="account-password" className="text-sm font-medium">
-              Account password
-            </label>
-            <input
-              id="account-password"
-              type="password"
-              required
-              autoComplete="new-password"
-              minLength={8}
-              value={accountPassword}
-              onChange={(e) => setAccountPassword(e.target.value)}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-            />
-            <p className="text-xs text-muted-foreground">
-              Used for signing in. Recoverable via email.
-            </p>
-          </div>
+              <div className="space-y-1">
+                <label htmlFor="account-password" className="text-sm font-medium">Account password</label>
+                <input
+                  id="account-password"
+                  type="password"
+                  required
+                  autoComplete="new-password"
+                  minLength={8}
+                  value={accountPassword}
+                  onChange={(e) => setAccountPassword(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Used for signing in. Recoverable via email.
+                </p>
+              </div>
+            </>
+          )}
 
           <div className="space-y-1">
             <label htmlFor="vault-password" className="text-sm font-medium">
@@ -133,7 +202,7 @@ function SignupPage() {
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
             />
             <p className="text-xs text-muted-foreground">
-              Encrypts your provider credentials. <strong>We cannot recover this.</strong>
+              Encrypts your provider credentials. <strong>We cannot recover this.</strong>{' '}
               Minimum {MIN_PASSWORD_LENGTH} characters.
             </p>
           </div>
@@ -180,15 +249,28 @@ function SignupPage() {
             disabled={submitting}
             className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {submitting ? 'Creating account...' : 'Create account'}
+            {submitting ? (isResume ? 'Setting up vault...' : 'Creating account...') : (isResume ? 'Finish setup' : 'Create account')}
           </button>
 
-          <p className="text-center text-sm text-muted-foreground">
-            Already have an account?{' '}
-            <Link to="/login" className="text-primary hover:underline">
-              Sign in
-            </Link>
-          </p>
+          {!isResume && (
+            <p className="text-center text-sm text-muted-foreground">
+              Already have an account?{' '}
+              <Link to="/login" className="text-primary hover:underline">Sign in</Link>
+            </p>
+          )}
+
+          {isResume && (
+            <button
+              type="button"
+              onClick={async () => {
+                await supabase.auth.signOut();
+                setMode('fresh');
+              }}
+              className="w-full text-sm text-muted-foreground hover:underline"
+            >
+              Not you? Sign out and start over
+            </button>
+          )}
         </form>
       </div>
     </div>
