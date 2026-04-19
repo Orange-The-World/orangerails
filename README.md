@@ -106,7 +106,7 @@ This is the same architecture used by [Bitwarden](https://bitwarden.com/help/bit
 
 ## Status
 
-**Early development.** The OrangeRails API is live at `orangerails.bitcoinsherpa.io` with a minimal Blink adapter as a proof of concept. The full hub — auth, vault, Link widget, multi-adapter sync engine — is in active build following [the Implementation Plan](./docs/OrangeRails-Implementation-Plan.md).
+**Early development.** The OrangeRails API is live at `api.orangerails.com` with a minimal Blink adapter as a proof of concept. The full hub — auth, vault, Link widget, multi-adapter sync engine — is in active build following [the Implementation Plan](./docs/OrangeRails-Implementation-Plan.md).
 
 We are shipping in thin vertical slices. The first deliverable is a single end-to-end user flow: sign up, connect Blink, see your transactions flow into a connected app, end-to-end zero-knowledge.
 
@@ -145,7 +145,7 @@ BTCPay Server · xpub watch-only wallets · Kraken · River · Strike · LND · 
 
 ```bash
 # Hosted option — one line
-curl -fsSL https://orangerails.bitcoinsherpa.io/install.sh | sh
+curl -fsSL https://api.orangerails.com/install.sh | sh
 
 # Self-hosted — Docker Compose
 git clone https://github.com/MorningRevolution/orangerails
@@ -160,7 +160,7 @@ docker compose up -d
 **Today's proof-of-concept API** (passthrough mode, no auth, no ZKA — will be replaced):
 
 ```bash
-curl https://orangerails.bitcoinsherpa.io/health
+curl https://api.orangerails.com/health
 # → {"status":"ok","service":"orangerails-api","version":"0.1.0"}
 ```
 

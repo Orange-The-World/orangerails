@@ -26,7 +26,7 @@ Deno.serve(async (req: Request) => {
     const { api_key, cursor } = body ?? {};
     if (!api_key || typeof api_key !== 'string') return jsonResponse({ error: 'api_key required' }, 400, cors);
 
-    const orBase = Deno.env.get('OR_API_URL') ?? 'https://orangerails.bitcoinsherpa.io';
+    const orBase = Deno.env.get('OR_API_URL') ?? 'https://api.orangerails.com';
     const orRes = await fetch(`${orBase}/sync/blink`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

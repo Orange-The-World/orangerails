@@ -41,7 +41,7 @@ Additional principles:
 **What exists today:**
 
 - `/home/orangerails/` on the Umbrel-Box: Express.js API server (port 3003). Single endpoint `/sync/blink` that proxies to Blink's GraphQL API with an API key passed in the request body. **This is a passthrough, not a hub.** No auth, no storage, no ZKA.
-- `orangerails.bitcoinsherpa.io` DNS + Caddy TLS: working. Endpoint reachable, TLS cert auto-provisioned.
+- `api.orangerails.com` DNS + Caddy TLS: working. Endpoint reachable, TLS cert auto-provisioned.
 - Marketing site docs in Lovable (OR-01/02/03 prompts) — not yet deployed to Lovable.
 - GitHub repo `MorningRevolution/orangerails` with founding documents.
 - BitBooks Vault V3 (`MorningRevolution/bitbooks-vault` main branch): a Blink-specific Connections page, a `sync-blink` edge function, and a `connectors` table. **All three were built against the old (wrong) passthrough architecture and must be reworked.**
@@ -78,7 +78,7 @@ Additional principles:
 
 ### 3.2 OrangeRails server changes
 
-1. **Leave** the `/sync/blink` passthrough endpoint running on `orangerails.bitcoinsherpa.io`. It's harmless and useful for smoke testing until Phase 1 is ready.
+1. **Leave** the `/sync/blink` passthrough endpoint running on `api.orangerails.com`. It's harmless and useful for smoke testing until Phase 1 is ready.
 2. **Tag** the current state as `v0.1.0-passthrough` in git so we can reference it historically.
 
 ### 3.3 Exit criteria
@@ -114,7 +114,7 @@ A separate Supabase project from BitBooks V3. This is important — we want clea
 
 1. Create new Supabase project `orangerails-prod` (and a separate `orangerails-dev`).
 2. Configure auth providers: email + password, email magic link. (Passkey support deferred to Phase 5.)
-3. Configure allowed origins for Edge Functions to include `orangerails.bitcoinsherpa.io` (final domain TBD post-Roark-approval).
+3. Configure allowed origins for Edge Functions to include `api.orangerails.com` (final domain TBD post-Roark-approval).
 4. Generate an OR_API_KEY for BitBooks V3 (used server-to-server for app-level authentication; see §4.6).
 
 ### 4.3 Database schema (Phase 1 tables)
@@ -301,10 +301,10 @@ Server behavior:
 
 ### 5.1 Link widget flow
 
-Served at `orangerails.bitcoinsherpa.io/link`. Opens as a popup or same-window redirect. Parameters passed by the host app (BitBooks):
+Served at `api.orangerails.com/link`. Opens as a popup or same-window redirect. Parameters passed by the host app (BitBooks):
 
 ```
-https://orangerails.bitcoinsherpa.io/link
+https://api.orangerails.com/link
   ?app_id=bitbooks
   &redirect_uri=https://bitbooks.com/callback
   &state=<CSRF-token>
@@ -346,7 +346,7 @@ The `@orangerails/link-sdk` npm package handles the popup, redirect back, token 
 
 ### 5.3 Phase 2 exit criteria
 
-- `orangerails.bitcoinsherpa.io/link` is live and serves the widget.
+- `api.orangerails.com/link` is live and serves the widget.
 - From a test BitBooks-V3-like app, a user can click "Connect" and complete the flow.
 - Access tokens are issued and stored in `user_app_grants`.
 - BitBooks can call `POST /api/v1/sync` with the access token and receive transactions.
@@ -463,7 +463,7 @@ The adapter SDK is a separate npm package (`@orangerails/adapter-sdk`) so commun
 
 ### 8.3 Documentation
 
-- [ ] Public docs site at `docs.orangerails.com` (or `orangerails.bitcoinsherpa.io/docs` pre-domain swap).
+- [ ] Public docs site at `docs.orangerails.com` (or `api.orangerails.com/docs` pre-domain swap).
 - [ ] Architecture diagram video (3-5 min).
 - [ ] "How to audit us" guide for power users.
 - [ ] Adapter SDK guide for community contributors.
