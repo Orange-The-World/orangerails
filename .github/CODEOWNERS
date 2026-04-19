@@ -1,0 +1,30 @@
+# CODEOWNERS — who gets auto-requested as a reviewer for each area.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Format: <pattern>  <owner> [<owner> ...]
+# Match precedence: LAST matching line wins. Catch-all goes first.
+
+# Default owner — every path, unless overridden below.
+*                               @MorningRevolution
+
+# Adapters — new connectors expand the trust surface. Require an owner review.
+/server/adapters/               @MorningRevolution
+
+# Server + auth + sync logic.
+/server/                        @MorningRevolution
+
+# Supabase schema + RLS — migrations are the source of truth.
+/supabase/                      @MorningRevolution
+
+# Cryptographic primitives (vault key derivation, ciphertext shape, link widget).
+/src/lib/                       @MorningRevolution
+
+# Docs — narrative surface of the project.
+/README.md                      @MorningRevolution
+/CONTRIBUTING.md                @MorningRevolution
+/SECURITY.md                    @MorningRevolution
+/CODE_OF_CONDUCT.md             @MorningRevolution
+/docs/                          @MorningRevolution
+
+# GitHub workflows + community health files.
+/.github/                       @MorningRevolution
