@@ -1,11 +1,8 @@
 # FUNDING.yml — where to support OrangeRails development.
 # Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
-#
-# Enable the channels you actually accept on. Unused keys should stay commented
-# out so the sponsor button only shows real options. The `github:` line below
-# silently no-ops until GitHub Sponsors is enrolled for the owner account.
 
+# GitHub Sponsors — approved and live.
 github: [MorningRevolution]
 
-# custom: ["https://your-lightning-address-or-site"]
-# open_collective: orangerails
+# Lightning address — planned. Uncomment once an LN address is live.
+# custom: ["lightning:YOUR-LN-ADDRESS@YOUR-DOMAIN"]
