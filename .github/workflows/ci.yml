@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # The project is managed with Bun (bun.lockb, bunfig.toml).
       # The older workflow used `npm ci` which broke on every dep add
