@@ -24,16 +24,21 @@
  *   }
  */
 
+import { createContext, useContext, useState, useCallback, useRef, type ReactNode } from "react";
 import {
-  createContext,
-  useContext,
-  useState,
-  useCallback,
-  useRef,
-  type ReactNode,
-} from 'react';
-import { deriveMEK, generateVaultSalt, createVaultVerifier, verifyVaultPassword, isPasswordAcceptable, encryptString, decryptString } from '@/lib/vault';
-import { deriveVerifierKey, deriveCredentialsKey, deriveTransactionsKey } from '@/lib/key-derivation';
+  deriveMEK,
+  generateVaultSalt,
+  createVaultVerifier,
+  verifyVaultPassword,
+  isPasswordAcceptable,
+  encryptString,
+  decryptString,
+} from "@/lib/vault";
+import {
+  deriveVerifierKey,
+  deriveCredentialsKey,
+  deriveTransactionsKey,
+} from "@/lib/key-derivation";
 import {
   encryptCredentials as encryptCredentialsFields,
   decryptCredentials as decryptCredentialsFields,
@@ -41,12 +46,18 @@ import {
   decryptTransaction as decryptTransactionField,
   type CredentialsPayload,
   type NormalizedTransaction,
-} from '@/lib/crypto-fields';
+} from "@/lib/crypto-fields";
 import {
   ensurePqcKeypairs as ensurePqcKeypairsImpl,
   type EnsurePqcKeypairsResult,
   type SupabaseLike as PqcSupabaseLike,
-} from '@/lib/pqc-lifecycle';
+} from "@/lib/pqc-lifecycle";
+import {
+  grantCoAdmin as grantCoAdminImpl,
+  loadAdminSubkeysDirect,
+  revokeCoAdmin as revokeCoAdminImpl,
+  type AdminSubkeys,
+} from "@/lib/co-admin";
 
 // ------------------------------------------------------------------
 // Types
@@ -78,7 +89,12 @@ interface VaultContextValue {
    * Unlock the vault using the entered password + server-stored salt + verifier.
    * Returns true on success (MEK now in memory), false on wrong password.
    */
-  unlock(password: string, saltB64: string, verifierCiphertext: string, keyVersion?: number): Promise<boolean>;
+  unlock(
+    password: string,
+    saltB64: string,
+    verifierCiphertext: string,
+    keyVersion?: number,
+  ): Promise<boolean>;
 
   /** Clear the MEK from memory. Subsequent encrypt/decrypt calls will throw. */
   lock(): void;
@@ -126,6 +142,78 @@ interface VaultContextValue {
    * keys feature consumes this output.
    */
   ensurePqcKeypairs(supabase: PqcSupabaseLike, userId: string): Promise<EnsurePqcKeypairsResult>;
+
+  // ------------------------------------------------------------------
+  // Co-admin methods
+  // ------------------------------------------------------------------
+
+  /**
+   * Grant full co-admin access to the user identified by targetEmail.
+   * The owner's vault password is re-confirmed to derive subkeys as raw bytes.
+   * Inserts rows into workspace_admins + wrapped_data_keys.
+   */
+  grantCoAdmin(params: {
+    ownerUserId: string;
+    ownerSaltB64: string;
+    ownerPassword: string;
+    targetEmail: string;
+    existingKeyId: string | null;
+    supabaseUrl: string;
+    accessToken: string;
+    supabase: GrantSupabaseLike;
+  }): Promise<{ workspaceKeyId: string }>;
+
+  /**
+   * Revoke a co-admin grant. Deletes workspace_admins + wrapped_data_keys rows.
+   * RLS ensures only the owner can revoke.
+   */
+  revokeCoAdmin(params: {
+    ownerWorkspaceKeyId: string;
+    adminUserId: string;
+    ownerUserId: string;
+    supabase: GrantSupabaseLike;
+  }): Promise<void>;
+
+  /**
+   * Load an owner's subkeys so the admin can decrypt their data.
+   * The admin must already be unlocked.
+   * Returns the two AES-GCM CryptoKeys for use in encrypt/decrypt operations.
+   */
+  loadAdminSubkeys(params: {
+    ownerWorkspaceKeyId: string;
+    wrappedCiphertextB64: string;
+    kemSecretWrapped: string;
+  }): Promise<AdminSubkeys>;
+}
+
+/** Narrow Supabase surface needed for grant/revoke operations. */
+export interface GrantSupabaseLike {
+  from(table: string): {
+    select(cols: string): {
+      eq(
+        col: string,
+        val: string,
+      ): {
+        maybeSingle(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
+        single(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
+      };
+    };
+    insert(
+      row: Record<string, unknown>,
+    ): Promise<{ data: Record<string, unknown>[] | null; error: unknown }>;
+    delete(): {
+      eq(
+        col: string,
+        val: string,
+      ): {
+        eq(col: string, val: string): Promise<{ error: unknown }>;
+        then(fn: (v: { error: unknown }) => void): Promise<{ error: unknown }>;
+      };
+    };
+    update(vals: Record<string, unknown>): {
+      eq(col: string, val: string): Promise<{ error: unknown }>;
+    };
+  };
 }
 
 // ------------------------------------------------------------------
@@ -137,7 +225,7 @@ const VaultContext = createContext<VaultContextValue | null>(null);
 export function useVault(): VaultContextValue {
   const ctx = useContext(VaultContext);
   if (!ctx) {
-    throw new Error('useVault must be called from within <VaultProvider>');
+    throw new Error("useVault must be called from within <VaultProvider>");
   }
   return ctx;
 }
@@ -185,27 +273,30 @@ export function VaultProvider({ children }: VaultProviderProps) {
   // ------------------------------------------------------------------
   // Unlock: returning user.
   // ------------------------------------------------------------------
-  const unlock = useCallback(async (
-    password: string,
-    storedSaltB64: string,
-    verifierCiphertext: string,
-    _keyVersion: number = 1,
-  ): Promise<boolean> => {
-    try {
-      const mek = await deriveMEK(password, storedSaltB64);
-      const verifierKey = await deriveVerifierKey(mek, storedSaltB64);
-      const ok = await verifyVaultPassword(verifierKey, verifierCiphertext);
-      if (!ok) return false;
+  const unlock = useCallback(
+    async (
+      password: string,
+      storedSaltB64: string,
+      verifierCiphertext: string,
+      _keyVersion: number = 1,
+    ): Promise<boolean> => {
+      try {
+        const mek = await deriveMEK(password, storedSaltB64);
+        const verifierKey = await deriveVerifierKey(mek, storedSaltB64);
+        const ok = await verifyVaultPassword(verifierKey, verifierCiphertext);
+        if (!ok) return false;
 
-      mekRef.current = mek;
-      setSaltB64(storedSaltB64);
-      setIsUnlocked(true);
-      return true;
-    } catch {
-      // Any error (including wrong-password decryption failure) means unlock failed.
-      return false;
-    }
-  }, []);
+        mekRef.current = mek;
+        setSaltB64(storedSaltB64);
+        setIsUnlocked(true);
+        return true;
+      } catch {
+        // Any error (including wrong-password decryption failure) means unlock failed.
+        return false;
+      }
+    },
+    [],
+  );
 
   // ------------------------------------------------------------------
   // Lock: clear the MEK.
@@ -221,42 +312,60 @@ export function VaultProvider({ children }: VaultProviderProps) {
   // ------------------------------------------------------------------
   const requireUnlocked = (): { mek: CryptoKey; saltB64: string } => {
     if (!mekRef.current || !saltB64) {
-      throw new Error('Vault is locked. Call unlock() before encrypting or decrypting.');
+      throw new Error("Vault is locked. Call unlock() before encrypting or decrypting.");
     }
     return { mek: mekRef.current, saltB64 };
   };
 
-  const encryptCredentials = useCallback(async (payload: CredentialsPayload): Promise<string> => {
-    const { mek, saltB64 } = requireUnlocked();
-    return encryptCredentialsFields(payload, mek, saltB64);
-  }, [saltB64]);
+  const encryptCredentials = useCallback(
+    async (payload: CredentialsPayload): Promise<string> => {
+      const { mek, saltB64 } = requireUnlocked();
+      return encryptCredentialsFields(payload, mek, saltB64);
+    },
+    [saltB64],
+  );
 
-  const decryptCredentials = useCallback(async (ciphertextB64: string): Promise<CredentialsPayload> => {
-    const { mek, saltB64 } = requireUnlocked();
-    return decryptCredentialsFields(ciphertextB64, mek, saltB64);
-  }, [saltB64]);
+  const decryptCredentials = useCallback(
+    async (ciphertextB64: string): Promise<CredentialsPayload> => {
+      const { mek, saltB64 } = requireUnlocked();
+      return decryptCredentialsFields(ciphertextB64, mek, saltB64);
+    },
+    [saltB64],
+  );
 
-  const encryptText = useCallback(async (plaintext: string): Promise<string> => {
-    const { mek, saltB64 } = requireUnlocked();
-    const key = await deriveTransactionsKey(mek, saltB64);
-    return encryptString(plaintext, key);
-  }, [saltB64]);
+  const encryptText = useCallback(
+    async (plaintext: string): Promise<string> => {
+      const { mek, saltB64 } = requireUnlocked();
+      const key = await deriveTransactionsKey(mek, saltB64);
+      return encryptString(plaintext, key);
+    },
+    [saltB64],
+  );
 
-  const decryptText = useCallback(async (ciphertextB64: string): Promise<string> => {
-    const { mek, saltB64 } = requireUnlocked();
-    const key = await deriveTransactionsKey(mek, saltB64);
-    return decryptString(ciphertextB64, key);
-  }, [saltB64]);
+  const decryptText = useCallback(
+    async (ciphertextB64: string): Promise<string> => {
+      const { mek, saltB64 } = requireUnlocked();
+      const key = await deriveTransactionsKey(mek, saltB64);
+      return decryptString(ciphertextB64, key);
+    },
+    [saltB64],
+  );
 
-  const encryptTransaction = useCallback(async (transaction: NormalizedTransaction): Promise<string> => {
-    const { mek, saltB64 } = requireUnlocked();
-    return encryptTransactionField(transaction, mek, saltB64);
-  }, [saltB64]);
+  const encryptTransaction = useCallback(
+    async (transaction: NormalizedTransaction): Promise<string> => {
+      const { mek, saltB64 } = requireUnlocked();
+      return encryptTransactionField(transaction, mek, saltB64);
+    },
+    [saltB64],
+  );
 
-  const decryptTransaction = useCallback(async (ciphertextB64: string): Promise<NormalizedTransaction> => {
-    const { mek, saltB64 } = requireUnlocked();
-    return decryptTransactionField(ciphertextB64, mek, saltB64);
-  }, [saltB64]);
+  const decryptTransaction = useCallback(
+    async (ciphertextB64: string): Promise<NormalizedTransaction> => {
+      const { mek, saltB64 } = requireUnlocked();
+      return decryptTransactionField(ciphertextB64, mek, saltB64);
+    },
+    [saltB64],
+  );
 
   // ------------------------------------------------------------------
   // Raw subkey export (for a single sync-request handoff only).
@@ -264,14 +373,14 @@ export function VaultProvider({ children }: VaultProviderProps) {
   const exportCredentialsKeyForSync = useCallback(async (): Promise<string> => {
     const { mek, saltB64 } = requireUnlocked();
     const key = await deriveCredentialsKey(mek, saltB64);
-    const raw = await crypto.subtle.exportKey('raw', key);
+    const raw = await crypto.subtle.exportKey("raw", key);
     return arrayBufferToBase64(raw);
   }, [saltB64]);
 
   const exportTransactionsKeyForSync = useCallback(async (): Promise<string> => {
     const { mek, saltB64 } = requireUnlocked();
     const key = await deriveTransactionsKey(mek, saltB64);
-    const raw = await crypto.subtle.exportKey('raw', key);
+    const raw = await crypto.subtle.exportKey("raw", key);
     return arrayBufferToBase64(raw);
   }, [saltB64]);
 
@@ -279,6 +388,92 @@ export function VaultProvider({ children }: VaultProviderProps) {
     async (supabase: PqcSupabaseLike, userId: string): Promise<EnsurePqcKeypairsResult> => {
       const { mek, saltB64 } = requireUnlocked();
       return ensurePqcKeypairsImpl({ userId, mek, saltB64, supabase });
+    },
+    [saltB64],
+  );
+
+  // ------------------------------------------------------------------
+  // Co-admin: grant.
+  // ------------------------------------------------------------------
+  const grantCoAdmin = useCallback(
+    async (params: {
+      ownerUserId: string;
+      ownerSaltB64: string;
+      ownerPassword: string;
+      targetEmail: string;
+      existingKeyId: string | null;
+      supabaseUrl: string;
+      accessToken: string;
+      supabase: GrantSupabaseLike;
+    }) => {
+      requireUnlocked(); // gate: vault must be unlocked
+      const { supabaseUrl, accessToken, targetEmail, supabase, ...rest } = params;
+
+      // Resolve email → userId + kemPublicKey via edge function.
+      const res = await fetch(`${supabaseUrl}/functions/v1/pqc-lookup-user`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email: targetEmail }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(
+          (detail as { error?: string }).error ?? `Lookup failed (HTTP ${res.status})`,
+        );
+      }
+      const { userId: targetUserId, kemPublicKey: targetKemPubB64 } = (await res.json()) as {
+        userId: string;
+        kemPublicKey: string;
+      };
+
+      return grantCoAdminImpl({
+        ...rest,
+        targetUserId,
+        targetKemPubB64,
+        supabase: supabase as unknown as Parameters<typeof grantCoAdminImpl>[0]["supabase"],
+      });
+    },
+    [saltB64],
+  );
+
+  // ------------------------------------------------------------------
+  // Co-admin: revoke.
+  // ------------------------------------------------------------------
+  const revokeCoAdmin = useCallback(
+    async (params: {
+      ownerWorkspaceKeyId: string;
+      adminUserId: string;
+      ownerUserId: string;
+      supabase: GrantSupabaseLike;
+    }) => {
+      requireUnlocked();
+      return revokeCoAdminImpl({
+        ...params,
+        supabase: params.supabase as unknown as Parameters<typeof revokeCoAdminImpl>[0]["supabase"],
+      });
+    },
+    [saltB64],
+  );
+
+  // ------------------------------------------------------------------
+  // Co-admin: load admin subkeys (consume flow).
+  // ------------------------------------------------------------------
+  const loadAdminSubkeys = useCallback(
+    async (params: {
+      ownerWorkspaceKeyId: string;
+      wrappedCiphertextB64: string;
+      kemSecretWrapped: string;
+    }): Promise<AdminSubkeys> => {
+      const { mek, saltB64: s } = requireUnlocked();
+      return loadAdminSubkeysDirect({
+        wrappedCiphertextB64: params.wrappedCiphertextB64,
+        kemSecretWrapped: params.kemSecretWrapped,
+        adminMek: mek,
+        adminSaltB64: s,
+      });
     },
     [saltB64],
   );
@@ -301,6 +496,9 @@ export function VaultProvider({ children }: VaultProviderProps) {
     exportCredentialsKeyForSync,
     exportTransactionsKeyForSync,
     ensurePqcKeypairs,
+    grantCoAdmin,
+    revokeCoAdmin,
+    loadAdminSubkeys,
   };
 
   return <VaultContext.Provider value={value}>{children}</VaultContext.Provider>;
@@ -312,7 +510,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
-  let binary = '';
+  let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary);
 }
