@@ -159,7 +159,10 @@ export async function ensurePqcKeypairs(
   const wrapKey = await derivePqcSecretWrapKey(mek, saltB64);
   const row = await buildPqcKeyMaterial(wrapKey);
 
-  const update = await supabase.from("user_vault_meta").update(row).eq("user_id", userId);
+  const update = await supabase
+    .from("user_vault_meta")
+    .update(row as unknown as Record<string, unknown>)
+    .eq("user_id", userId);
 
   if (update.error) {
     throw update.error;
