@@ -200,6 +200,11 @@ export type Database = {
           created_at: string
           kdf_algorithm: string
           kdf_params: Json
+          kem_public_key: string | null
+          kem_secret_wrapped: string | null
+          pqc_key_version: number
+          sig_public_key: string | null
+          sig_secret_wrapped: string | null
           updated_at: string
           user_id: string
           vault_key_version: number
@@ -210,6 +215,11 @@ export type Database = {
           created_at?: string
           kdf_algorithm?: string
           kdf_params?: Json
+          kem_public_key?: string | null
+          kem_secret_wrapped?: string | null
+          pqc_key_version?: number
+          sig_public_key?: string | null
+          sig_secret_wrapped?: string | null
           updated_at?: string
           user_id: string
           vault_key_version?: number
@@ -220,6 +230,11 @@ export type Database = {
           created_at?: string
           kdf_algorithm?: string
           kdf_params?: Json
+          kem_public_key?: string | null
+          kem_secret_wrapped?: string | null
+          pqc_key_version?: number
+          sig_public_key?: string | null
+          sig_secret_wrapped?: string | null
           updated_at?: string
           user_id?: string
           vault_key_version?: number
@@ -252,6 +267,33 @@ export type Database = {
           source?: string | null
           use_case?: string | null
           utm_campaign?: string | null
+        }
+        Relationships: []
+      }
+      wrapped_data_keys: {
+        Row: {
+          algorithm: string
+          created_at: string
+          data_key_id: string
+          id: string
+          recipient_user_id: string
+          wrapped_ciphertext: string
+        }
+        Insert: {
+          algorithm?: string
+          created_at?: string
+          data_key_id: string
+          id?: string
+          recipient_user_id: string
+          wrapped_ciphertext: string
+        }
+        Update: {
+          algorithm?: string
+          created_at?: string
+          data_key_id?: string
+          id?: string
+          recipient_user_id?: string
+          wrapped_ciphertext?: string
         }
         Relationships: []
       }

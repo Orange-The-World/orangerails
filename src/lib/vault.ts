@@ -177,7 +177,7 @@ export async function encryptString(plaintext: string, key: CryptoKey): Promise<
   const ciphertextBuffer = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     key,
-    stringToBytes(plaintext),
+    stringToBytes(plaintext) as BufferSource,
   );
 
   const ciphertext = new Uint8Array(ciphertextBuffer);
