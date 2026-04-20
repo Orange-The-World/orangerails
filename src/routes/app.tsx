@@ -4,6 +4,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { useVault } from '@/context/VaultContext';
 import { formatError } from '@/lib/format-error';
 import type { NormalizedTransaction } from '@/lib/crypto-fields';
+import { PqcDebugPanel } from '@/components/PqcDebugPanel';
 
 export const Route = createFileRoute('/app')({
   component: AppHome,
@@ -316,6 +317,8 @@ function AppHome() {
         <div className="rounded-md border bg-green-500/5 border-green-500/40 p-3 text-xs text-green-700 dark:text-green-400">
           ✓ Session-based zero-knowledge active. Keys live only in this browser tab's memory.
         </div>
+
+        <PqcDebugPanel />
 
         {notice && (
           <div className="rounded-md border p-3 text-sm bg-muted/30">{notice}</div>
