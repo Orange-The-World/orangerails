@@ -4,6 +4,7 @@
 consumed by any feature. The upcoming role-scoped-keys PR wires them in.
 
 **Files:**
+
 - `src/lib/pqc.ts` — hybrid X25519 + ML-KEM-768 KEM + ML-DSA-65 signer.
 - `src/lib/key-wrapping.ts` — per-recipient data-key wrapping strategy map.
 - `src/lib/signatures.ts` — signature strategy map + base64 helpers.
@@ -37,11 +38,11 @@ RSA keys become recoverable in hours once a CRQC exists.
 
 Grover halves the effective strength of symmetric primitives:
 
-| Primitive     | Pre-Grover | Post-Grover | Status for OrangeRails          |
-|---------------|-----------:|------------:|---------------------------------|
-| AES-256       |      256 b |       128 b | ✅ Still safe                     |
-| AES-128       |      128 b |        64 b | ❌ Would be weakened              |
-| SHA-256       |      128 b |        85 b | ✅ Still above any real threshold |
+| Primitive | Pre-Grover | Post-Grover | Status for OrangeRails            |
+| --------- | ---------: | ----------: | --------------------------------- |
+| AES-256   |      256 b |       128 b | ✅ Still safe                     |
+| AES-128   |      128 b |        64 b | ❌ Would be weakened              |
+| SHA-256   |      128 b |        85 b | ✅ Still above any real threshold |
 
 OrangeRails uses AES-256-GCM everywhere. Grover does not force any change.
 
@@ -92,22 +93,37 @@ data-at-rest key wrapping, one layer below TLS.
 
 ## 3 · Why @noble/post-quantum
 
-| Option                        | Pros                                                                  | Cons                                                     |
-|-------------------------------|-----------------------------------------------------------------------|----------------------------------------------------------|
+| Option                            | Pros                                                                                                                                                                                                                                      | Cons                                                                                      |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | **@noble/post-quantum** (this PR) | Pure TypeScript. Zero native bindings. ~50 KB gzipped total with @noble/curves. Works inside Lovable's Vite build without extra toolchain. Single-author (Paul Miller) with an established audit track record across the @noble/\* suite. | Single-implementation risk; we pin a regression test to catch silent behavioural changes. |
-| `liboqs-wasm`                 | Same underlying reference implementations; broad algorithm coverage.  | WASM glue, extra build plumbing, larger bundle, tighter coupling to Emscripten toolchain. |
-| `oqs-provider` (native)       | Production-grade.                                                     | Not usable in a browser/Edge runtime. Server-only.       |
-| Rolling our own               | —                                                                     | Do not do this.                                          |
+| `liboqs-wasm`                     | Same underlying reference implementations; broad algorithm coverage.                                                                                                                                                                      | WASM glue, extra build plumbing, larger bundle, tighter coupling to Emscripten toolchain. |
+| `oqs-provider` (native)           | Production-grade.                                                                                                                                                                                                                         | Not usable in a browser/Edge runtime. Server-only.                                        |
+| Rolling our own                   | —                                                                                                                                                                                                                                         | Do not do this.                                                                           |
 
 The trade is in our favour: at the browser / Edge-function layer
 we want a small, inspectable, pure-TS library, and we want the same
 module in both places. `@noble/post-quantum` gives us that.
 
-> **Audit citations pending.** The `@noble/*` suite has a history of
-> third-party audits, but the exact audit reports for the
-> `@noble/post-quantum` release used here should be linked from the
-> package README before relying on audit claims in customer-facing
-> copy. This file will be updated as that reference lands.
+### Audit status (as pinned in this PR)
+
+- **`@noble/curves` 2.2.0** — self-audited, April 2026. The earlier
+  `@noble/curves` 1.6.0 release was independently audited by Cure53
+  (September 2024); the report ships inside the installed package at
+  `node_modules/@noble/curves/audit/2024-09-cure53-audit-nbl4.pdf` and
+  is also linked from [cure53.de](https://cure53.de/audit-report_noble-crypto-libs.pdf).
+  The X25519 code path we use dates to that audited 1.6.0 lineage with
+  incremental changes since.
+- **`@noble/post-quantum` 0.6.1** — self-audited, April 2026. **No
+  independent third-party audit has been completed yet.** The package
+  README states this explicitly. This is the single largest residual
+  risk of the library choice. Mitigations: (a) we pin the exact version
+  via `bun.lockb`, (b) hybrid mode means a break in ML-KEM-768 alone
+  does not collapse the construction — X25519 still has to fall too,
+  (c) we track upstream audit news and will re-pin when an independent
+  audit lands.
+
+Both READMEs also note the author practices "rare releasing" to
+minimize re-audit churn, which suits our pin-and-track strategy.
 
 ---
 
@@ -145,10 +161,10 @@ The registry pattern in `key-wrapping.ts` and `signatures.ts` is
 designed so that stepping up algorithm strength is a one-line patch
 plus a `pqc_key_version` bump:
 
-| Change                 | Files touched                                              | Data migration                                               |
-|------------------------|------------------------------------------------------------|--------------------------------------------------------------|
+| Change                           | Files touched                                       | Data migration                                                            |
+| -------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------- |
 | ML-KEM-768 → ML-KEM-1024 (Cat 5) | new entry in `KEY_WRAP_STRATEGIES` + constant sizes | re-run `ensurePqcKeypairs` per user; old rows stay readable until re-wrap |
-| ML-DSA-65 → ML-DSA-87 (Cat 5)    | new entry in `SIG_STRATEGIES`                      | re-sign on next write; old signatures verify under v1 strategy |
+| ML-DSA-65 → ML-DSA-87 (Cat 5)    | new entry in `SIG_STRATEGIES`                       | re-sign on next write; old signatures verify under v1 strategy            |
 
 No schema change needed. The `algorithm` column on
 `wrapped_data_keys` and the `pqc_key_version` on `user_vault_meta`
@@ -164,9 +180,8 @@ carry the forward-compatibility marker.
   ACVP requires a small helper that drives the AES-CTR_DRBG used in
   the NIST submission package. Worth adding but not a gate for
   shipping this layer.
-- **Route integration.** Wiring `ensurePqcKeypairs` into the
-  `unlock.tsx` / `signup.tsx` post-unlock paths is deliberately not
-  part of this PR — it belongs with the role-scoped-keys feature
-  that actually consumes the generated keys.
-- **Audit-report citations** for the `@noble/*` suite version pinned
-  here.
+- **Route integration.** `ensurePqcKeypairs` is wired into signup
+  (synchronous, blocks vault creation) and unlock (fire-and-forget
+  with console-warn on failure) so real users get PQC keys generated
+  on their very first session. The debug panel remains as a
+  validation surface until the role-scoped-keys PR lands.

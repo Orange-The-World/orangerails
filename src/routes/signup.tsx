@@ -1,32 +1,32 @@
-import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
-import { useEffect, useState } from 'react';
-import { supabase } from '@/integrations/supabase/client';
-import { useVault } from '@/context/VaultContext';
-import { MIN_PASSWORD_LENGTH } from '@/lib/vault';
-import { formatError } from '@/lib/format-error';
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { useVault } from "@/context/VaultContext";
+import { MIN_PASSWORD_LENGTH } from "@/lib/vault";
+import { formatError } from "@/lib/format-error";
 
-export const Route = createFileRoute('/signup')({
+export const Route = createFileRoute("/signup")({
   component: SignupPage,
 });
 
-type Mode = 'loading' | 'fresh' | 'resume' | 'unknown';
+type Mode = "loading" | "fresh" | "resume" | "unknown";
 
 function SignupPage() {
   const navigate = useNavigate();
-  const { setupVault } = useVault();
+  const { setupVault, ensurePqcKeypairs } = useVault();
 
   // Mode detection:
   // - 'fresh'   : no session yet. Show the full form (email + both passwords).
   // - 'resume'  : session exists but no user_vault_meta row. Show only vault fields.
   // - 'loading' : checking the session + vault-meta on mount.
   // - 'unknown' : edge case (session exists + vault exists). We redirect to /unlock.
-  const [mode, setMode] = useState<Mode>('loading');
-  const [resumeEmail, setResumeEmail] = useState<string>(''); // readonly display for resume mode
+  const [mode, setMode] = useState<Mode>("loading");
+  const [resumeEmail, setResumeEmail] = useState<string>(""); // readonly display for resume mode
 
-  const [email, setEmail] = useState('');
-  const [accountPassword, setAccountPassword] = useState('');
-  const [vaultPassword, setVaultPassword] = useState('');
-  const [vaultPasswordConfirm, setVaultPasswordConfirm] = useState('');
+  const [email, setEmail] = useState("");
+  const [accountPassword, setAccountPassword] = useState("");
+  const [vaultPassword, setVaultPassword] = useState("");
+  const [vaultPasswordConfirm, setVaultPasswordConfirm] = useState("");
   const [acknowledgedUnrecoverable, setAcknowledgedUnrecoverable] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
@@ -35,30 +35,32 @@ function SignupPage() {
   // On mount: figure out which mode we're in.
   useEffect(() => {
     (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
       if (!session) {
-        setMode('fresh');
+        setMode("fresh");
         return;
       }
 
-      setResumeEmail(session.user.email ?? '');
+      setResumeEmail(session.user.email ?? "");
 
       // Check if vault metadata already exists for this user.
       const { data: vaultMeta } = await supabase
-        .from('user_vault_meta')
-        .select('user_id')
-        .eq('user_id', session.user.id)
+        .from("user_vault_meta")
+        .select("user_id")
+        .eq("user_id", session.user.id)
         .maybeSingle();
 
       if (vaultMeta) {
         // Already fully set up — send them to unlock.
-        setMode('unknown');
-        navigate({ to: '/unlock' });
+        setMode("unknown");
+        navigate({ to: "/unlock" });
         return;
       }
 
       // Session but no vault: came back from email verification. Finish vault setup.
-      setMode('resume');
+      setMode("resume");
     })();
   }, [navigate]);
 
@@ -68,15 +70,15 @@ function SignupPage() {
 
     // Vault-password validations apply to both modes.
     if (vaultPassword !== vaultPasswordConfirm) {
-      setError('Vault passwords do not match.');
+      setError("Vault passwords do not match.");
       return;
     }
-    if (mode === 'fresh' && vaultPassword === accountPassword) {
-      setError('Vault password must be different from your account password.');
+    if (mode === "fresh" && vaultPassword === accountPassword) {
+      setError("Vault password must be different from your account password.");
       return;
     }
     if (!acknowledgedUnrecoverable) {
-      setError('You must acknowledge that a lost vault password cannot be recovered.');
+      setError("You must acknowledge that a lost vault password cannot be recovered.");
       return;
     }
 
@@ -84,7 +86,7 @@ function SignupPage() {
     try {
       let userId: string;
 
-      if (mode === 'fresh') {
+      if (mode === "fresh") {
         // Fresh signup path — create auth user + session.
         const { data: signupData, error: signupError } = await supabase.auth.signUp({
           email,
@@ -93,7 +95,7 @@ function SignupPage() {
         if (signupError) throw signupError;
         if (!signupData.session || !signupData.user) {
           throw new Error(
-            'No active session after signup. Disable email-confirmation in your Supabase project settings, or contact support.',
+            "No active session after signup. Disable email-confirmation in your Supabase project settings, or contact support.",
           );
         }
         userId = signupData.user.id;
@@ -104,9 +106,11 @@ function SignupPage() {
         const { error: refreshError } = await supabase.auth.refreshSession();
         if (refreshError) throw refreshError;
 
-        const { data: { session } } = await supabase.auth.getSession();
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
         if (!session?.user?.id) {
-          throw new Error('Session lost. Please sign in again.');
+          throw new Error("Session lost. Please sign in again.");
         }
         userId = session.user.id;
       }
@@ -114,7 +118,7 @@ function SignupPage() {
       // Set up the vault regardless of path.
       const { saltB64, verifierCiphertext, keyVersion } = await setupVault(vaultPassword);
 
-      const { error: metaError } = await supabase.from('user_vault_meta').insert({
+      const { error: metaError } = await supabase.from("user_vault_meta").insert({
         user_id: userId,
         vault_salt: saltB64,
         vault_verifier_ciphertext: verifierCiphertext,
@@ -122,15 +126,24 @@ function SignupPage() {
       });
       if (metaError) throw metaError;
 
-      navigate({ to: '/app' });
+      // Generate PQC keypairs (hybrid KEM + ML-DSA-65) on the fresh vault
+      // meta row. Blocking here so every new user lands on /app with their
+      // PQC material already provisioned — the forthcoming role-scoped keys
+      // feature assumes this row is populated.
+      await ensurePqcKeypairs(
+        supabase as unknown as Parameters<typeof ensurePqcKeypairs>[0],
+        userId,
+      );
+
+      navigate({ to: "/app" });
     } catch (err) {
-      console.error('Signup submit error:', err);
+      console.error("Signup submit error:", err);
       setError(formatError(err));
       setSubmitting(false);
     }
   }
 
-  if (mode === 'loading' || mode === 'unknown') {
+  if (mode === "loading" || mode === "unknown") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-sm text-muted-foreground">Loading...</div>
@@ -138,19 +151,19 @@ function SignupPage() {
     );
   }
 
-  const isResume = mode === 'resume';
+  const isResume = mode === "resume";
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background px-4">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-2">
           <h1 className="text-2xl font-semibold">
-            {isResume ? 'Finish setting up your vault' : 'Create your OrangeRails account'}
+            {isResume ? "Finish setting up your vault" : "Create your OrangeRails account"}
           </h1>
           <p className="text-sm text-muted-foreground">
             {isResume
-              ? 'Your account is verified. Set your vault password to finish.'
-              : 'Zero-knowledge from day one. Your vault password never leaves this browser.'}
+              ? "Your account is verified. Set your vault password to finish."
+              : "Zero-knowledge from day one. Your vault password never leaves this browser."}
           </p>
         </div>
 
@@ -163,7 +176,9 @@ function SignupPage() {
           ) : (
             <>
               <div className="space-y-1">
-                <label htmlFor="email" className="text-sm font-medium">Email</label>
+                <label htmlFor="email" className="text-sm font-medium">
+                  Email
+                </label>
                 <input
                   id="email"
                   type="email"
@@ -176,7 +191,9 @@ function SignupPage() {
               </div>
 
               <div className="space-y-1">
-                <label htmlFor="account-password" className="text-sm font-medium">Account password</label>
+                <label htmlFor="account-password" className="text-sm font-medium">
+                  Account password
+                </label>
                 <input
                   id="account-password"
                   type="password"
@@ -209,8 +226,8 @@ function SignupPage() {
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
             />
             <p className="text-xs text-muted-foreground">
-              Encrypts your provider credentials. <strong>We cannot recover this.</strong>{' '}
-              Minimum {MIN_PASSWORD_LENGTH} characters.
+              Encrypts your provider credentials. <strong>We cannot recover this.</strong> Minimum{" "}
+              {MIN_PASSWORD_LENGTH} characters.
             </p>
           </div>
 
@@ -239,9 +256,9 @@ function SignupPage() {
               className="mt-1"
             />
             <label htmlFor="ack" className="text-xs text-muted-foreground">
-              I understand that if I lose my vault password, my encrypted credentials
-              and transactions will be permanently unrecoverable. OrangeRails cannot
-              reset a password it never stored.
+              I understand that if I lose my vault password, my encrypted credentials and
+              transactions will be permanently unrecoverable. OrangeRails cannot reset a password it
+              never stored.
             </label>
           </div>
 
@@ -256,13 +273,21 @@ function SignupPage() {
             disabled={submitting}
             className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {submitting ? (isResume ? 'Setting up vault...' : 'Creating account...') : (isResume ? 'Finish setup' : 'Create account')}
+            {submitting
+              ? isResume
+                ? "Setting up vault..."
+                : "Creating account..."
+              : isResume
+                ? "Finish setup"
+                : "Create account"}
           </button>
 
           {!isResume && (
             <p className="text-center text-sm text-muted-foreground">
-              Already have an account?{' '}
-              <Link to="/login" className="text-primary hover:underline">Sign in</Link>
+              Already have an account?{" "}
+              <Link to="/login" className="text-primary hover:underline">
+                Sign in
+              </Link>
             </p>
           )}
 
@@ -271,7 +296,7 @@ function SignupPage() {
               type="button"
               onClick={async () => {
                 await supabase.auth.signOut();
-                setMode('fresh');
+                setMode("fresh");
               }}
               className="w-full text-sm text-muted-foreground hover:underline"
             >
