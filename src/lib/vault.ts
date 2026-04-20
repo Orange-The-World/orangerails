@@ -24,7 +24,7 @@
  *    enforcing that at the import boundary prevents accidental leakage.
  */
 
-import { argon2id } from 'hash-wasm';
+import { argon2id } from "hash-wasm";
 
 // ------------------------------------------------------------------
 // Configuration — bumped via vault_key_version, never mutated in place.
@@ -35,21 +35,21 @@ export const ARGON2ID_V1 = Object.freeze({
   memorySize: 65536, // KiB — OWASP 2023 recommended
   iterations: 3,
   parallelism: 4,
-  hashLength: 32,    // 256-bit output → AES-256 key
+  hashLength: 32, // 256-bit output → AES-256 key
 } as const);
 
 /** Minimum vault password length. Enforced on setup. */
 export const MIN_PASSWORD_LENGTH = 12;
 
 /** Public string a successful decryption will produce, proving the key is correct. */
-export const VAULT_VERIFIER_PLAINTEXT = 'orangerails-vault-verifier-v1';
+export const VAULT_VERIFIER_PLAINTEXT = "orangerails-vault-verifier-v1";
 
 // ------------------------------------------------------------------
 // Encoding helpers — base64 is our on-the-wire format.
 // ------------------------------------------------------------------
 
 function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
+  let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
 }
@@ -113,17 +113,17 @@ export async function deriveMEK(
     iterations: ARGON2ID_V1.iterations,
     memorySize: ARGON2ID_V1.memorySize,
     hashLength: ARGON2ID_V1.hashLength,
-    outputType: 'binary',
+    outputType: "binary",
   });
 
   // Import as HKDF material. Non-extractable — the key can be used to derive
   // further keys but cannot be read out of the CryptoKey object.
   return crypto.subtle.importKey(
-    'raw',
+    "raw",
     hashBytes as BufferSource,
-    { name: 'HKDF' },
+    { name: "HKDF" },
     /* extractable */ false,
-    ['deriveKey', 'deriveBits'],
+    ["deriveKey", "deriveBits"],
   );
 }
 
@@ -143,24 +143,18 @@ export async function deriveMEK(
  * that is only ever used locally), call `importAesKeyNonExtractable` below.
  */
 export async function importAesKey(rawBytes: ArrayBuffer): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'raw',
-    rawBytes,
-    { name: 'AES-GCM' },
-    /* extractable */ true,
-    ['encrypt', 'decrypt'],
-  );
+  return crypto.subtle.importKey("raw", rawBytes, { name: "AES-GCM" }, /* extractable */ true, [
+    "encrypt",
+    "decrypt",
+  ]);
 }
 
 /** Import a CryptoKey that can NEVER be extracted back into raw bytes. */
 export async function importAesKeyNonExtractable(rawBytes: ArrayBuffer): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'raw',
-    rawBytes,
-    { name: 'AES-GCM' },
-    /* extractable */ false,
-    ['encrypt', 'decrypt'],
-  );
+  return crypto.subtle.importKey("raw", rawBytes, { name: "AES-GCM" }, /* extractable */ false, [
+    "encrypt",
+    "decrypt",
+  ]);
 }
 
 /**
@@ -175,7 +169,7 @@ export async function encryptString(plaintext: string, key: CryptoKey): Promise<
   crypto.getRandomValues(iv);
 
   const ciphertextBuffer = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
+    { name: "AES-GCM", iv },
     key,
     stringToBytes(plaintext) as BufferSource,
   );
@@ -197,16 +191,12 @@ export async function encryptString(plaintext: string, key: CryptoKey): Promise<
 export async function decryptString(ciphertextB64: string, key: CryptoKey): Promise<string> {
   const combined = base64ToBytes(ciphertextB64);
   if (combined.length < 12 + 16) {
-    throw new Error('Ciphertext too short to be valid AES-GCM output');
+    throw new Error("Ciphertext too short to be valid AES-GCM output");
   }
   const iv = combined.slice(0, 12);
   const ciphertext = combined.slice(12);
 
-  const plaintextBuffer = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    ciphertext,
-  );
+  const plaintextBuffer = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
 
   return bytesToString(new Uint8Array(plaintextBuffer));
 }
@@ -261,22 +251,61 @@ export async function verifyVaultPassword(
  * integration happens in the UI layer. This is the library-level bottom
  * floor.
  */
-export function isPasswordAcceptable(password: string): { ok: true } | { ok: false; reason: string } {
+export function isPasswordAcceptable(
+  password: string,
+): { ok: true } | { ok: false; reason: string } {
   if (password.length < MIN_PASSWORD_LENGTH) {
     return { ok: false, reason: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` };
   }
   const lower = password.toLowerCase();
-  const blocklist = ['password', '123456', 'qwerty', 'letmein', 'orangerails', 'bitcoin'];
-  if (blocklist.some(bad => lower.includes(bad))) {
-    return { ok: false, reason: 'Password contains a common weak pattern.' };
+  const blocklist = ["password", "123456", "qwerty", "letmein", "orangerails", "bitcoin"];
+  if (blocklist.some((bad) => lower.includes(bad))) {
+    return { ok: false, reason: "Password contains a common weak pattern." };
   }
   if (/^[a-z]+$/i.test(password)) {
-    return { ok: false, reason: 'Password must contain more than just letters.' };
+    return { ok: false, reason: "Password must contain more than just letters." };
   }
   if (/^[0-9]+$/.test(password)) {
-    return { ok: false, reason: 'Password cannot be digits only.' };
+    return { ok: false, reason: "Password cannot be digits only." };
   }
   return { ok: true };
+}
+
+// ------------------------------------------------------------------
+// Raw MEK bytes — for the co-admin grant flow only.
+// ------------------------------------------------------------------
+
+/**
+ * Re-run Argon2id and return the raw 32-byte hash.
+ *
+ * This is the ONLY sanctioned way to get extractable key material from the
+ * vault password. It is used exclusively in the co-admin grant flow, where
+ * the owner must re-confirm their vault password so the browser can
+ * concatenate credentials+transactions subkeys into a 64-byte blob and wrap
+ * it for the recipient's PQC public key.
+ *
+ * The returned bytes are transient: callers must derive subkeys from them
+ * immediately and then let the array be garbage-collected. Never persist or
+ * log the returned value.
+ *
+ * @param password   The user's vault password (re-confirmed in the dialog).
+ * @param saltBase64 The per-user salt (from user_vault_meta.vault_salt).
+ */
+export async function deriveMekRaw(password: string, saltBase64: string): Promise<Uint8Array> {
+  const passwordBytes = stringToBytes(password);
+  const saltBytes = base64ToBytes(saltBase64);
+
+  const hashBytes = await argon2id({
+    password: passwordBytes,
+    salt: saltBytes,
+    parallelism: ARGON2ID_V1.parallelism,
+    iterations: ARGON2ID_V1.iterations,
+    memorySize: ARGON2ID_V1.memorySize,
+    hashLength: ARGON2ID_V1.hashLength,
+    outputType: "binary",
+  });
+
+  return hashBytes as Uint8Array;
 }
 
 // ------------------------------------------------------------------
