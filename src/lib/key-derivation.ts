@@ -30,6 +30,8 @@ export const HKDF_CONTEXTS = Object.freeze({
   ORANGERAILS_TRANSACTIONS_V1: 'orangerails-txns-v1',
   /** Encrypts the vault verifier ciphertext for password-correctness checks. */
   ORANGERAILS_VERIFIER_V1: 'orangerails-verifier-v1',
+  /** Encrypts the user's PQC secret keys (hybrid KEM + ML-DSA) at rest. */
+  ORANGERAILS_PQC_SECRET_WRAP_V1: 'orangerails-pqc-secret-wrap-v1',
 } as const);
 
 export type HkdfContext = (typeof HKDF_CONTEXTS)[keyof typeof HKDF_CONTEXTS];
@@ -83,6 +85,18 @@ export async function deriveCredentialsKey(mek: CryptoKey, saltB64: string): Pro
  */
 export async function deriveTransactionsKey(mek: CryptoKey, saltB64: string): Promise<CryptoKey> {
   return deriveSubkey(mek, HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1, saltB64);
+}
+
+/**
+ * Convenience: derive the subkey used to wrap PQC secret keys at rest.
+ *
+ * Extractable so the same AES-256-GCM CryptoKey can be handed to
+ * encryptString/decryptString in src/lib/vault.ts. The wrapped
+ * output lives in user_vault_meta.kem_secret_wrapped and
+ * user_vault_meta.sig_secret_wrapped.
+ */
+export async function derivePqcSecretWrapKey(mek: CryptoKey, saltB64: string): Promise<CryptoKey> {
+  return deriveSubkey(mek, HKDF_CONTEXTS.ORANGERAILS_PQC_SECRET_WRAP_V1, saltB64);
 }
 
 /**
