@@ -11,6 +11,11 @@ lerna-debug.log*
 node_modules
 node_modules/
 
+# npm lockfile — the project uses Bun. package-lock.json would go stale
+# every time Lovable adds a dep (it only updates bun.lockb), breaking CI.
+# bun.lockb is the single source of truth.
+package-lock.json
+
 # Build outputs
 dist
 dist-ssr
