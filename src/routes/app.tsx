@@ -478,7 +478,7 @@ function AddConnectionDialog({
   onClose: () => void;
   onSubmit: (p: { provider: string; label: string; apiKey: string }) => Promise<void>;
 }) {
-  const [provider, setProvider] = useState(PROVIDERS[0].type);
+  const [provider, setProvider] = useState<string>(PROVIDERS[0].type);
   const [label, setLabel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [submitting, setSubmitting] = useState(false);
