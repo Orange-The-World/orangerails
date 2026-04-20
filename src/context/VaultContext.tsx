@@ -42,6 +42,11 @@ import {
   type CredentialsPayload,
   type NormalizedTransaction,
 } from '@/lib/crypto-fields';
+import {
+  ensurePqcKeypairs as ensurePqcKeypairsImpl,
+  type EnsurePqcKeypairsResult,
+  type SupabaseLike as PqcSupabaseLike,
+} from '@/lib/pqc-lifecycle';
 
 // ------------------------------------------------------------------
 // Types
@@ -110,6 +115,17 @@ interface VaultContextValue {
 
   /** Same as above for the transactions subkey. */
   exportTransactionsKeyForSync(): Promise<string>;
+
+  /**
+   * Generate the user's hybrid KEM + ML-DSA signing keypairs if they
+   * don't exist yet, then publish public keys + MEK-wrapped secrets to
+   * user_vault_meta. Idempotent — a second call is a no-op.
+   *
+   * Intended for invocation from the post-unlock path in a route that
+   * already holds the Supabase client and user id. The future role-scoped
+   * keys feature consumes this output.
+   */
+  ensurePqcKeypairs(supabase: PqcSupabaseLike, userId: string): Promise<EnsurePqcKeypairsResult>;
 }
 
 // ------------------------------------------------------------------
@@ -259,6 +275,14 @@ export function VaultProvider({ children }: VaultProviderProps) {
     return arrayBufferToBase64(raw);
   }, [saltB64]);
 
+  const ensurePqcKeypairs = useCallback(
+    async (supabase: PqcSupabaseLike, userId: string): Promise<EnsurePqcKeypairsResult> => {
+      const { mek, saltB64 } = requireUnlocked();
+      return ensurePqcKeypairsImpl({ userId, mek, saltB64, supabase });
+    },
+    [saltB64],
+  );
+
   // ------------------------------------------------------------------
   // Assemble the context value.
   // ------------------------------------------------------------------
@@ -276,6 +300,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
     decryptTransaction,
     exportCredentialsKeyForSync,
     exportTransactionsKeyForSync,
+    ensurePqcKeypairs,
   };
 
   return <VaultContext.Provider value={value}>{children}</VaultContext.Provider>;
