@@ -174,12 +174,17 @@ carry the forward-compatibility marker.
 
 ## 6 · Follow-ups tracked against this layer
 
-- **Independent NIST ACVP KATs.** Current tests pin library-behaviour
-  regression vectors rather than independent NIST ACVP KAT vectors —
-  see the caveat in `src/lib/__tests__/pqc.test.ts`. Reproducing
-  ACVP requires a small helper that drives the AES-CTR_DRBG used in
-  the NIST submission package. Worth adding but not a gate for
-  shipping this layer.
+- **Extended NIST ACVP coverage.** We already run 2 NIST ACVP AFT
+  keygen vectors per algorithm (ML-KEM-768 and ML-DSA-65) against
+  `@noble/post-quantum`'s output directly — see
+  `src/lib/__tests__/fixtures/` and `pqc.test.ts`. A natural next
+  step is to extend coverage to ACVP encapsulation and signing tests
+  (more tcIds, wider input variety). For now the keygen KATs establish
+  FIPS 203 / 204 compliance of the primitives we actually ship.
+  Legacy note: the older NIST submission-package KAT format (separate
+  from ACVP) feeds a 48-byte seed through AES-CTR_DRBG to produce the
+  `d`/`z`/`seed` inputs. Reproducing those would require a DRBG helper
+  we do not need for ACVP AFT-style vectors used here.
 - **Route integration.** `ensurePqcKeypairs` is wired into signup
   (synchronous, blocks vault creation) and unlock (fire-and-forget
   with console-warn on failure) so real users get PQC keys generated
