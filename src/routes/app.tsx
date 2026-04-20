@@ -109,7 +109,8 @@ function AppHome() {
 
       // Decrypt label + last_error on each connection with the user's ORT subkey.
       const decryptedConns = await Promise.all(
-        (conns ?? []).map(async (c: Connection): Promise<Connection> => {
+        (conns ?? []).map(async (raw): Promise<Connection> => {
+          const c = raw as unknown as Connection;
           let decrypted_label: string | null = null;
           let decrypted_last_error: string | null = null;
           if (c.encrypted_label) {
