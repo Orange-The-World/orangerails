@@ -38,6 +38,196 @@ export type Database = {
         }
         Relationships: []
       }
+      apps: {
+        Row: {
+          client_secret: string
+          created_at: string
+          description: string | null
+          id: string
+          name: string
+          redirect_uri_pattern: string | null
+          slug: string
+          updated_at: string
+        }
+        Insert: {
+          client_secret: string
+          created_at?: string
+          description?: string | null
+          id?: string
+          name: string
+          redirect_uri_pattern?: string | null
+          slug: string
+          updated_at?: string
+        }
+        Update: {
+          client_secret?: string
+          created_at?: string
+          description?: string | null
+          id?: string
+          name?: string
+          redirect_uri_pattern?: string | null
+          slug?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      connections: {
+        Row: {
+          created_at: string
+          credentials_key_version: number
+          encrypted_credentials: string
+          encrypted_label: string | null
+          encrypted_last_error: string | null
+          id: string
+          last_sync_at: string | null
+          last_sync_cursor: string | null
+          provider_type: string
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          credentials_key_version?: number
+          encrypted_credentials: string
+          encrypted_label?: string | null
+          encrypted_last_error?: string | null
+          id?: string
+          last_sync_at?: string | null
+          last_sync_cursor?: string | null
+          provider_type: string
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          credentials_key_version?: number
+          encrypted_credentials?: string
+          encrypted_label?: string | null
+          encrypted_last_error?: string | null
+          id?: string
+          last_sync_at?: string | null
+          last_sync_cursor?: string | null
+          provider_type?: string
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      encrypted_transactions: {
+        Row: {
+          connection_id: string
+          encrypted_payload: string
+          external_id: string
+          fetched_at: string
+          id: string
+          occurred_at: string
+          payload_key_version: number
+        }
+        Insert: {
+          connection_id: string
+          encrypted_payload: string
+          external_id: string
+          fetched_at?: string
+          id?: string
+          occurred_at: string
+          payload_key_version?: number
+        }
+        Update: {
+          connection_id?: string
+          encrypted_payload?: string
+          external_id?: string
+          fetched_at?: string
+          id?: string
+          occurred_at?: string
+          payload_key_version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "encrypted_transactions_connection_id_fkey"
+            columns: ["connection_id"]
+            isOneToOne: false
+            referencedRelation: "connections"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_app_grants: {
+        Row: {
+          access_token_hash: string
+          app_id: string
+          granted_at: string
+          granted_scopes: string[]
+          id: string
+          last_used_at: string | null
+          revoked_at: string | null
+          user_id: string
+        }
+        Insert: {
+          access_token_hash: string
+          app_id: string
+          granted_at?: string
+          granted_scopes?: string[]
+          id?: string
+          last_used_at?: string | null
+          revoked_at?: string | null
+          user_id: string
+        }
+        Update: {
+          access_token_hash?: string
+          app_id?: string
+          granted_at?: string
+          granted_scopes?: string[]
+          id?: string
+          last_used_at?: string | null
+          revoked_at?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "user_app_grants_app_id_fkey"
+            columns: ["app_id"]
+            isOneToOne: false
+            referencedRelation: "apps"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_vault_meta: {
+        Row: {
+          created_at: string
+          kdf_algorithm: string
+          kdf_params: Json
+          updated_at: string
+          user_id: string
+          vault_key_version: number
+          vault_salt: string
+          vault_verifier_ciphertext: string
+        }
+        Insert: {
+          created_at?: string
+          kdf_algorithm?: string
+          kdf_params?: Json
+          updated_at?: string
+          user_id: string
+          vault_key_version?: number
+          vault_salt: string
+          vault_verifier_ciphertext: string
+        }
+        Update: {
+          created_at?: string
+          kdf_algorithm?: string
+          kdf_params?: Json
+          updated_at?: string
+          user_id?: string
+          vault_key_version?: number
+          vault_salt?: string
+          vault_verifier_ciphertext?: string
+        }
+        Relationships: []
+      }
       waitlist: {
         Row: {
           created_at: string
