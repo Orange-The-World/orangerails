@@ -94,7 +94,7 @@ const TX_QUERY = `
               initiationVia {
                 __typename
                 ... on InitiationViaLn { paymentHash }
-                ... on InitiationViaOnChain { txHash address }
+                ... on InitiationViaOnChain { address }
                 ... on InitiationViaIntraLedger { counterPartyUsername }
               }
               settlementVia {
@@ -120,7 +120,7 @@ interface BlinkTxNode {
   createdAt: string | number;
   settlementAmount: number;
   settlementCurrency: string;
-  initiationVia: { __typename: string; paymentHash?: string; txHash?: string; counterPartyUsername?: string };
+  initiationVia: { __typename: string; paymentHash?: string; address?: string; counterPartyUsername?: string };
   settlementVia: { __typename: string; counterPartyUsername?: string; transactionHash?: string };
 }
 
