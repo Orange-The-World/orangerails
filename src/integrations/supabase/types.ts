@@ -122,6 +122,9 @@ export type Database = {
           encrypted_payload: string
           external_id: string
           fetched_at: string
+          hmac_counterparty: string | null
+          hmac_direction: string | null
+          hmac_type: string | null
           id: string
           occurred_at: string
           payload_key_version: number
@@ -131,6 +134,9 @@ export type Database = {
           encrypted_payload: string
           external_id: string
           fetched_at?: string
+          hmac_counterparty?: string | null
+          hmac_direction?: string | null
+          hmac_type?: string | null
           id?: string
           occurred_at: string
           payload_key_version?: number
@@ -140,6 +146,9 @@ export type Database = {
           encrypted_payload?: string
           external_id?: string
           fetched_at?: string
+          hmac_counterparty?: string | null
+          hmac_direction?: string | null
+          hmac_type?: string | null
           id?: string
           occurred_at?: string
           payload_key_version?: number
@@ -198,11 +207,13 @@ export type Database = {
       user_vault_meta: {
         Row: {
           created_at: string
+          enc_mek_ciphertext: string | null
           kdf_algorithm: string
           kdf_params: Json
           kem_public_key: string | null
           kem_secret_wrapped: string | null
           pqc_key_version: number
+          recovery_ciphertext: string | null
           sig_public_key: string | null
           sig_secret_wrapped: string | null
           updated_at: string
@@ -214,11 +225,13 @@ export type Database = {
         }
         Insert: {
           created_at?: string
+          enc_mek_ciphertext?: string | null
           kdf_algorithm?: string
           kdf_params?: Json
           kem_public_key?: string | null
           kem_secret_wrapped?: string | null
           pqc_key_version?: number
+          recovery_ciphertext?: string | null
           sig_public_key?: string | null
           sig_secret_wrapped?: string | null
           updated_at?: string
@@ -230,11 +243,13 @@ export type Database = {
         }
         Update: {
           created_at?: string
+          enc_mek_ciphertext?: string | null
           kdf_algorithm?: string
           kdf_params?: Json
           kem_public_key?: string | null
           kem_secret_wrapped?: string | null
           pqc_key_version?: number
+          recovery_ciphertext?: string | null
           sig_public_key?: string | null
           sig_secret_wrapped?: string | null
           updated_at?: string
@@ -326,6 +341,14 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      get_coadmin_emails: {
+        Args: { user_ids: string[] }
+        Returns: {
+          email: string
+          user_id: string
+        }[]
+      }
+      get_or_vault_salt: { Args: never; Returns: string }
       lookup_user_for_coadmin: {
         Args: { target_email: string }
         Returns: {
