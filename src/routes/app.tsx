@@ -5,6 +5,7 @@ import { useVault } from "@/context/VaultContext";
 import type { GrantSupabaseLike } from "@/context/VaultContext";
 import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
+import { encryptString, decryptString } from "@/lib/vault";
 
 function formatErrorVerbose(err: unknown): string {
   const msg = formatError(err);
@@ -289,17 +290,36 @@ function AppHome() {
   }, [activeWorkspace, myKemSecretWrapped, loadAdminSubkeys]);
 
   // Load connections + decrypt recent transactions.
+  // When activeWorkspace is set, only load the owner's connections and use
+  // their subkeys for decryption. When null, only load the current user's own.
   const refresh = useCallback(async () => {
     setLoading(true);
     setErr(null);
     try {
+      // Resolve which user's connections to show and which keys to use.
+      const isAdminView = !!activeWorkspace;
+      let txnsKey: CryptoKey | null = null;
+      if (isAdminView) {
+        // Warm the credentials key cache too — avoids a cold load on first Sync.
+        await getActiveCredentialsKey();
+        txnsKey = await getActiveTransactionsKey();
+        if (!txnsKey) throw new Error("Could not load workspace keys.");
+      }
+
+      // Determine which user's connections to fetch.
+      const currentSession = await supabase.auth.getSession();
+      const myId = currentSession.data.session?.user.id;
+      if (!myId) throw new Error("Not authenticated");
+      const targetUserId = isAdminView ? activeWorkspace!.ownerUserId : myId;
+
       const { data: conns, error: connErr } = await supabase
         .from("connections")
         .select("*")
+        .eq("user_id", targetUserId)
         .order("created_at", { ascending: false });
       if (connErr) throw connErr;
 
-      // Decrypt label + last_error on each connection with the user's ORT subkey.
+      // Decrypt label + last_error using the appropriate key.
       const decryptedConns = await Promise.all(
         (conns ?? []).map(async (raw): Promise<Connection> => {
           const c = raw as unknown as Connection;
@@ -307,14 +327,18 @@ function AppHome() {
           let decrypted_last_error: string | null = null;
           if (c.encrypted_label) {
             try {
-              decrypted_label = await decryptText(c.encrypted_label);
+              decrypted_label = isAdminView
+                ? await decryptString(c.encrypted_label, txnsKey!)
+                : await decryptText(c.encrypted_label);
             } catch {
               /* ignore — label is cosmetic */
             }
           }
           if (c.encrypted_last_error) {
             try {
-              const raw = await decryptText(c.encrypted_last_error);
+              const raw = isAdminView
+                ? await decryptString(c.encrypted_last_error, txnsKey!)
+                : await decryptText(c.encrypted_last_error);
               decrypted_last_error = raw || "(empty error — check browser console for details)";
             } catch {
               decrypted_last_error = "(could not decrypt error — check browser console)";
@@ -325,20 +349,25 @@ function AppHome() {
       );
       setConnections(decryptedConns);
 
-      const { data: txs, error: txErr } = await supabase
+      // Fetch only transactions belonging to the target user's connections.
+      const connIds = (conns ?? []).map((c) => (c as unknown as Connection).id);
+      const txQuery = supabase
         .from("encrypted_transactions")
         .select("id, connection_id, external_id, encrypted_payload, occurred_at")
         .order("occurred_at", { ascending: false })
         .limit(50);
+      const { data: txs, error: txErr } = connIds.length > 0
+        ? await txQuery.in("connection_id", connIds)
+        : await txQuery.in("connection_id", ["00000000-0000-0000-0000-000000000000"]);
       if (txErr) throw txErr;
 
-      // Decrypt each transaction in parallel. Ones that fail to decrypt
-      // (wrong key version, corruption) are filtered out so a single bad
-      // row doesn't poison the whole list.
+      // Decrypt each transaction with the appropriate key.
       const decrypted = await Promise.all(
         (txs ?? []).map(async (row: EncryptedTxRow): Promise<DecryptedTxRow | null> => {
           try {
-            const tx = await decryptTransaction(row.encrypted_payload);
+            const tx = isAdminView
+              ? JSON.parse(await decryptString(row.encrypted_payload, txnsKey!)) as NormalizedTransaction
+              : await decryptTransaction(row.encrypted_payload);
             return { ...tx, connection_id: row.connection_id, occurred_at: row.occurred_at };
           } catch (e) {
             console.warn("Failed to decrypt transaction", row.id, e);
@@ -352,11 +381,11 @@ function AppHome() {
     } finally {
       setLoading(false);
     }
-  }, [decryptTransaction, decryptText]);
+  }, [activeWorkspace, decryptTransaction, decryptText, getActiveCredentialsKey, getActiveTransactionsKey]);
 
   useEffect(() => {
     if (isUnlocked) void refresh();
-  }, [isUnlocked, refresh]);
+  }, [isUnlocked, refresh, activeWorkspace]);
 
   // ------------------------------------------------------------------
   // Actions
@@ -389,9 +418,22 @@ function AppHome() {
     setSyncingId(conn.id);
     setErr(null);
     try {
-      // Decrypt the stored credentials locally.
-      const creds = await decryptCredentials(conn.encrypted_credentials);
-      const apiKey = creds.api_key;
+      const isAdminView = !!activeWorkspace;
+
+      // Decrypt the stored credentials using the appropriate key.
+      let apiKey: string;
+      let txnsKey: CryptoKey | null = null;
+      if (isAdminView) {
+        const credsKey = await getActiveCredentialsKey();
+        txnsKey = await getActiveTransactionsKey();
+        if (!credsKey || !txnsKey) throw new Error("Could not load workspace keys.");
+        const credsJson = await decryptString(conn.encrypted_credentials, credsKey);
+        const creds = JSON.parse(credsJson) as Record<string, string>;
+        apiKey = creds.api_key;
+      } else {
+        const creds = await decryptCredentials(conn.encrypted_credentials);
+        apiKey = creds.api_key;
+      }
       if (!apiKey) throw new Error("Connection has no api_key field");
 
       // Call the edge function (which calls the provider).
@@ -424,11 +466,10 @@ function AppHome() {
           newTxs.map(async (tx) => ({
             connection_id: conn.id,
             external_id: tx.id,
-            encrypted_payload: await encryptTransaction(tx),
+            encrypted_payload: isAdminView
+              ? await encryptString(JSON.stringify(tx), txnsKey!)
+              : await encryptTransaction(tx),
             payload_key_version: 1,
-            // Defense in depth: coerce any adapter timestamp to ISO 8601
-            // before handing it to Postgres. Adapters *should* return ISO,
-            // but bugs happen (Blink returned Unix seconds in v0.1.0).
             occurred_at: toIsoTimestamp(tx.timestamp),
           })),
         );
@@ -462,7 +503,12 @@ function AppHome() {
       // upstream providers can contain identifying context.
       let encrypted_last_error: string | null = null;
       try {
-        encrypted_last_error = await encryptText(msg.slice(0, 500));
+        if (activeWorkspace) {
+          const txnsKey = await getActiveTransactionsKey();
+          if (txnsKey) encrypted_last_error = await encryptString(msg.slice(0, 500), txnsKey);
+        } else {
+          encrypted_last_error = await encryptText(msg.slice(0, 500));
+        }
       } catch {
         /* vault locked; leave null */
       }
@@ -524,6 +570,7 @@ function AppHome() {
                   const keyId = e.target.value;
                   if (!keyId) {
                     setActiveWorkspace(null);
+                    // useEffect[activeWorkspace] triggers refresh automatically.
                     return;
                   }
                   const ws = adminWorkspaces.find((w) => w.workspaceKeyId === keyId) ?? null;
@@ -534,7 +581,7 @@ function AppHome() {
                         "Your vault PQC keys are not set up yet. Lock and unlock your vault to generate them, then try again.",
                       );
                     }
-                    // Pre-load and cache subkeys on switch.
+                    // Pre-load and cache subkeys now so refresh() can use them immediately.
                     if (!adminSubkeysRef.current.has(ws.workspaceKeyId)) {
                       let subkeys;
                       try {
@@ -557,8 +604,8 @@ function AppHome() {
                       }
                       adminSubkeysRef.current.set(ws.workspaceKeyId, subkeys);
                     }
+                    // Setting state triggers useEffect[activeWorkspace] → refresh().
                     setActiveWorkspace(ws);
-                    await refresh();
                   } catch (switchErr) {
                     setErr(`Failed to load workspace: ${formatErrorVerbose(switchErr)}`);
                   }
@@ -598,13 +645,19 @@ function AppHome() {
 
         <section className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Your connections</h2>
-            <button
-              onClick={() => setAddOpen(true)}
-              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-            >
-              Add connection
-            </button>
+            <h2 className="text-lg font-semibold">
+              {activeWorkspace
+                ? `${activeWorkspace.ownerEmail}'s connections`
+                : "Your connections"}
+            </h2>
+            {!activeWorkspace && (
+              <button
+                onClick={() => setAddOpen(true)}
+                className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Add connection
+              </button>
+            )}
           </div>
 
           {loading && connections.length === 0 ? (
