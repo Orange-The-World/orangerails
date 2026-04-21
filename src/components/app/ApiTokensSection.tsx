@@ -14,6 +14,8 @@ interface TokenRow {
   granted_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
+  expires_at: string | null;
+  rotated_at: string | null;
 }
 
 interface FreshToken {
@@ -41,6 +43,34 @@ function formatRelative(iso: string | null): string {
   if (diffMo < 12) return `${diffMo} month${diffMo === 1 ? "" : "s"} ago`;
   const diffYr = Math.round(diffMo / 12);
   return `${diffYr} year${diffYr === 1 ? "" : "s"} ago`;
+}
+
+/**
+ * Classify token expiry state.
+ *   - expired: expires_at <= now
+ *   - soon:    expires_at within 7 days
+ *   - ok:      expires_at further out or null
+ */
+function expiryState(expires_at: string | null): "expired" | "soon" | "ok" {
+  if (!expires_at) return "ok";
+  const exp = new Date(expires_at).getTime();
+  if (Number.isNaN(exp)) return "ok";
+  const now = Date.now();
+  if (exp <= now) return "expired";
+  if (exp - now < 7 * 24 * 60 * 60 * 1000) return "soon";
+  return "ok";
+}
+
+function formatExpiry(expires_at: string | null): string {
+  if (!expires_at) return "no expiry";
+  const exp = new Date(expires_at).getTime();
+  if (Number.isNaN(exp)) return "—";
+  const diffMs = exp - Date.now();
+  if (diffMs <= 0) return "expired";
+  const diffDay = Math.round(diffMs / (24 * 60 * 60 * 1000));
+  if (diffDay === 0) return "expires today";
+  if (diffDay === 1) return "expires tomorrow";
+  return `expires in ${diffDay} days`;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -112,6 +142,30 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
       if (updErr) throw new Error(updErr.message ?? "Revoke failed");
       if (userId) void logSecurityEvent(supabase, userId, "token_rotated", { grant_id: id, action: "revoke" });
       await reload();
+    } catch (e) {
+      setError(formatError(e));
+    }
+  };
+
+  const handleRotate = async (id: string) => {
+    if (!confirm(
+      "Rotate this token? The current token will stop working immediately and apps " +
+      "using it will need the new one.",
+    )) return;
+    setError(null);
+    try {
+      const [tokenRes, saltRes] = await Promise.all([
+        (supabase.rpc as any)("rotate_or_access_token", { p_grant_id: id }),
+        supabase.rpc("get_or_vault_salt"),
+      ]);
+      if (tokenRes.error) throw new Error(tokenRes.error.message ?? "Rotate failed");
+      if (saltRes.error) throw new Error(saltRes.error.message ?? "Salt lookup failed");
+      const token = tokenRes.data as string | null;
+      const salt = saltRes.data as string | null;
+      if (!token || !salt) throw new Error("Empty token or salt returned");
+      setFresh({ token, salt });
+      setSavedAcked(false);
+      if (userId) void logSecurityEvent(supabase, userId, "token_rotated", { action: "rotate", grant_id: id });
     } catch (e) {
       setError(formatError(e));
     }
@@ -221,6 +275,7 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
                   <th className="py-2 pr-4 font-medium">App</th>
                   <th className="py-2 pr-4 font-medium">Generated</th>
                   <th className="py-2 pr-4 font-medium">Last used</th>
+                  <th className="py-2 pr-4 font-medium">Expires</th>
                   <th className="py-2 pr-4 font-medium">Status</th>
                   <th className="py-2 font-medium">Action</th>
                 </tr>
@@ -228,19 +283,20 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
               <tbody>
                 {loading && rows.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="py-3 text-xs text-muted-foreground">
+                    <td colSpan={6} className="py-3 text-xs text-muted-foreground">
                       Loading…
                     </td>
                   </tr>
                 ) : rows.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="py-3 text-xs text-muted-foreground">
+                    <td colSpan={6} className="py-3 text-xs text-muted-foreground">
                       No tokens yet.
                     </td>
                   </tr>
                 ) : (
                   rows.map((row) => {
                     const active = row.revoked_at === null;
+                    const exp = expiryState(row.expires_at);
                     return (
                       <tr key={row.id} className="border-b last:border-b-0">
                         <td className="py-2 pr-4">{row.app_name}</td>
@@ -251,25 +307,56 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
                           {formatRelative(row.last_used_at)}
                         </td>
                         <td className="py-2 pr-4">
-                          {active ? (
-                            <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
-                              Active
+                          <span className={
+                            exp === "expired" ? "text-destructive" :
+                            exp === "soon" ? "text-orange-600" :
+                            "text-muted-foreground"
+                          }>
+                            {formatExpiry(row.expires_at)}
+                          </span>
+                          {row.rotated_at && (
+                            <span className="block text-xs text-muted-foreground">
+                              rotated {formatRelative(row.rotated_at)}
                             </span>
-                          ) : (
+                          )}
+                        </td>
+                        <td className="py-2 pr-4">
+                          {!active ? (
                             <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
                               Revoked
+                            </span>
+                          ) : exp === "expired" ? (
+                            <span className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+                              Expired
+                            </span>
+                          ) : exp === "soon" ? (
+                            <span className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700">
+                              Expiring soon
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">
+                              Active
                             </span>
                           )}
                         </td>
                         <td className="py-2">
                           {active && (
-                            <button
-                              type="button"
-                              onClick={() => void handleRevoke(row.id)}
-                              className="rounded-md border px-2 py-1 text-xs hover:bg-muted"
-                            >
-                              Revoke
-                            </button>
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                onClick={() => void handleRotate(row.id)}
+                                className="rounded-md border px-2 py-1 text-xs hover:bg-muted"
+                              >
+                                Rotate
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleRevoke(row.id)}
+                                className="rounded-md border px-2 py-1 text-xs hover:bg-muted"
+                              >
+                                Revoke
+                              </button>
+                            </div>
                           )}
                         </td>
                       </tr>
