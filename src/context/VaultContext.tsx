@@ -240,6 +240,27 @@ interface VaultContextValue {
    * directly without a null-guard.
    */
   blindIndex(value: string | null | undefined): Promise<string | null>;
+
+  /**
+   * Change the vault password. Re-wraps the MEK under the new password (same
+   * salt — all HKDF subkeys remain valid) and generates a fresh recovery code.
+   * Only supported for v2+ vaults (random MEK architecture).
+   *
+   * Caller must persist newEncMekCiphertext + newRecoveryCiphertext to
+   * user_vault_meta and show newRecoveryCode to the user exactly once.
+   */
+  changeVaultPassword(params: {
+    currentPassword: string;
+    newPassword: string;
+    storedSaltB64: string;
+    storedEncMekCiphertext: string;
+    storedVerifierCiphertext: string;
+    keyVersion: number;
+  }): Promise<{
+    newEncMekCiphertext: string;
+    newRecoveryCode: string;
+    newRecoveryCiphertext: string;
+  }>;
 }
 
 /** Narrow Supabase surface needed for grant/revoke operations. */
@@ -434,6 +455,59 @@ export function VaultProvider({ children }: VaultProviderProps) {
       saltRef.current = storedSalt;
       setSaltB64(storedSalt);
       setIsUnlocked(true);
+
+      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext };
+    },
+    [],
+  );
+
+  // ------------------------------------------------------------------
+  // Change password: re-wrap MEK under a new KEK, rotate recovery code.
+  // ------------------------------------------------------------------
+  const changeVaultPassword = useCallback(
+    async ({
+      currentPassword,
+      newPassword,
+      storedSaltB64: storedSalt,
+      storedEncMekCiphertext,
+      storedVerifierCiphertext,
+      keyVersion,
+    }: {
+      currentPassword: string;
+      newPassword: string;
+      storedSaltB64: string;
+      storedEncMekCiphertext: string;
+      storedVerifierCiphertext: string;
+      keyVersion: number;
+    }) => {
+      const strength = isPasswordAcceptable(newPassword);
+      if (!strength.ok) throw new Error(strength.reason);
+
+      if (keyVersion < 2 || !storedEncMekCiphertext) {
+        throw new Error("Password change is not supported for legacy v1 vaults.");
+      }
+
+      // 1. Unwrap MEK with the current password's KEK.
+      const currentKek = await deriveKek(currentPassword, storedSalt);
+      const mekRaw = await unwrapMekBytes(storedEncMekCiphertext, currentKek);
+      const mek = await importMekAsHkdf(mekRaw);
+
+      // 2. Verify MEK is correct — guards against wrong current password.
+      const verifierKey = await deriveVerifierKey(mek, storedSalt);
+      const ok = await verifyVaultPassword(verifierKey, storedVerifierCiphertext);
+      if (!ok) throw new Error("Current password is incorrect.");
+
+      // 3. Re-wrap MEK with new KEK (same salt — all HKDF subkeys stay valid).
+      const newKek = await deriveKek(newPassword, storedSalt);
+      const newEncMekCiphertext = await wrapMekBytes(mekRaw, newKek);
+
+      // 4. Fresh recovery code — old one is invalidated.
+      const newRecoveryCode = generateRecoveryCode();
+      const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
+      const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
+
+      // 5. Keep vault unlocked with the same MEK in memory.
+      mekRef.current = mek;
 
       return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext };
     },
@@ -646,6 +720,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
     revokeCoAdmin,
     loadAdminSubkeys,
     blindIndex,
+    changeVaultPassword,
   };
 
   return <VaultContext.Provider value={value}>{children}</VaultContext.Provider>;

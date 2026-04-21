@@ -112,6 +112,7 @@ function AppHome() {
     grantCoAdmin,
     revokeCoAdmin,
     loadAdminSubkeys,
+    changeVaultPassword,
   } = useVault();
 
   const [userId, setUserId] = useState<string | null>(null);
@@ -138,6 +139,17 @@ function AppHome() {
   const [coAdminOpen, setCoAdminOpen] = useState(false);
   const [grantDialogOpen, setGrantDialogOpen] = useState(false);
 
+  // Security (change vault password) state
+  const [securityOpen, setSecurityOpen] = useState(false);
+  const [vaultEncMekCiphertext, setVaultEncMekCiphertext] = useState<string | null>(null);
+  const [vaultVerifierCiphertext, setVaultVerifierCiphertext] = useState<string | null>(null);
+  const [vaultKeyVersion, setVaultKeyVersion] = useState<number>(1);
+  const [changePwForm, setChangePwForm] = useState({ current: "", next: "", confirm: "" });
+  const [changePwLoading, setChangePwLoading] = useState(false);
+  const [changePwErr, setChangePwErr] = useState<string | null>(null);
+  const [changePwNewRecovery, setChangePwNewRecovery] = useState<string | null>(null);
+  const [changePwRecoveryAcked, setChangePwRecoveryAcked] = useState(false);
+
   // Gate: redirect if not authenticated or not unlocked. Also load co-admin metadata.
   useEffect(() => {
     (async () => {
@@ -156,9 +168,9 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
-      const { data: meta } = await supabase
+      const { data: meta } = await (supabase as any)
         .from("user_vault_meta")
-        .select("vault_salt, workspace_key_id, kem_secret_wrapped")
+        .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, key_version")
         .eq("user_id", session.user.id)
         .single();
       if (meta) {
@@ -166,6 +178,9 @@ function AppHome() {
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
         const kemWrapped = ((meta as Record<string, unknown>).kem_secret_wrapped as string) ?? null;
         setMyKemSecretWrapped(kemWrapped);
+        setVaultEncMekCiphertext(((meta as Record<string, unknown>).enc_mek_ciphertext as string) ?? null);
+        setVaultVerifierCiphertext(((meta as Record<string, unknown>).vault_verifier_ciphertext as string) ?? null);
+        setVaultKeyVersion(((meta as Record<string, unknown>).key_version as number) ?? 1);
 
         // If PQC keys are missing (signup pre-dated the PQC rollout or an earlier
         // ensurePqcKeypairs call failed), generate them now so co-admin works.
@@ -773,6 +788,148 @@ function AppHome() {
             )}
           </section>
         )}
+
+        {/* ── Security ─────────────────────────────────────────── */}
+        <section className="rounded-lg border p-4 space-y-3">
+          <button
+            onClick={() => setSecurityOpen(!securityOpen)}
+            className="flex w-full items-center justify-between text-left"
+          >
+            <h2 className="text-sm font-semibold">Security</h2>
+            <span className="text-xs text-muted-foreground">{securityOpen ? "▲" : "▼"}</span>
+          </button>
+
+          {securityOpen && (
+            <div className="space-y-4 pt-1">
+              <p className="text-xs text-muted-foreground">
+                Change your vault password. Your data will not be re-encrypted — only the key
+                wrapping changes. A new recovery code will be generated; save it immediately.
+              </p>
+
+              {changePwNewRecovery ? (
+                /* Step 2: show new recovery code */
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold text-orange-600 uppercase tracking-wide">
+                    New recovery code — save this now
+                  </p>
+                  <div className="rounded-md border border-orange-400/40 bg-orange-50/40 p-3 font-mono text-sm break-all">
+                    {changePwNewRecovery}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    This code will not be shown again. Store it in a password manager or print it.
+                  </p>
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={changePwRecoveryAcked}
+                      onChange={(e) => setChangePwRecoveryAcked(e.target.checked)}
+                    />
+                    I have saved my recovery code
+                  </label>
+                  <button
+                    disabled={!changePwRecoveryAcked}
+                    onClick={() => {
+                      setChangePwNewRecovery(null);
+                      setChangePwRecoveryAcked(false);
+                      setChangePwForm({ current: "", next: "", confirm: "" });
+                      setNotice("Vault password changed successfully.");
+                    }}
+                    className="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
+                  >
+                    Done
+                  </button>
+                </div>
+              ) : (
+                /* Step 1: change password form */
+                <form
+                  className="space-y-3"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    setChangePwErr(null);
+                    if (changePwForm.next !== changePwForm.confirm) {
+                      setChangePwErr("New passwords do not match.");
+                      return;
+                    }
+                    if (!vaultSalt || !vaultEncMekCiphertext || !vaultVerifierCiphertext) {
+                      setChangePwErr("Vault metadata not loaded. Try reloading the page.");
+                      return;
+                    }
+                    setChangePwLoading(true);
+                    try {
+                      const { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext } =
+                        await changeVaultPassword({
+                          currentPassword: changePwForm.current,
+                          newPassword: changePwForm.next,
+                          storedSaltB64: vaultSalt,
+                          storedEncMekCiphertext: vaultEncMekCiphertext,
+                          storedVerifierCiphertext: vaultVerifierCiphertext,
+                          keyVersion: vaultKeyVersion,
+                        });
+                      // Persist new wrapping to user_vault_meta.
+                      const { error: saveErr } = await (supabase as any)
+                        .from("user_vault_meta")
+                        .update({
+                          enc_mek_ciphertext: newEncMekCiphertext,
+                          recovery_ciphertext: newRecoveryCiphertext,
+                        })
+                        .eq("user_id", userId);
+                      if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
+                      setVaultEncMekCiphertext(newEncMekCiphertext);
+                      setChangePwNewRecovery(newRecoveryCode);
+                    } catch (ex) {
+                      setChangePwErr(formatErrorVerbose(ex));
+                    }
+                    setChangePwLoading(false);
+                  }}
+                >
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium">Current password</label>
+                    <input
+                      type="password"
+                      value={changePwForm.current}
+                      onChange={(e) => setChangePwForm((f) => ({ ...f, current: e.target.value }))}
+                      className="w-full rounded-md border px-3 py-1.5 text-sm bg-background"
+                      autoComplete="current-password"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium">New password</label>
+                    <input
+                      type="password"
+                      value={changePwForm.next}
+                      onChange={(e) => setChangePwForm((f) => ({ ...f, next: e.target.value }))}
+                      className="w-full rounded-md border px-3 py-1.5 text-sm bg-background"
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-medium">Confirm new password</label>
+                    <input
+                      type="password"
+                      value={changePwForm.confirm}
+                      onChange={(e) => setChangePwForm((f) => ({ ...f, confirm: e.target.value }))}
+                      className="w-full rounded-md border px-3 py-1.5 text-sm bg-background"
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  {changePwErr && <p className="text-xs text-destructive">{changePwErr}</p>}
+                  <button
+                    type="submit"
+                    disabled={
+                      changePwLoading ||
+                      !changePwForm.current ||
+                      !changePwForm.next ||
+                      !changePwForm.confirm
+                    }
+                    className="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
+                  >
+                    {changePwLoading ? "Changing…" : "Change password"}
+                  </button>
+                </form>
+              )}
+            </div>
+          )}
+        </section>
       </main>
 
       {addOpen && (
