@@ -85,8 +85,8 @@ describe("co-admin: grant → consume round-trip", () => {
     for (const key of [credentialsKey, transactionsKey]) {
       const iv = randomBytes(12);
       const plaintext = new TextEncoder().encode("test-value");
-      const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
-      const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+      const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv as BufferSource }, key, plaintext);
+      const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv as BufferSource }, key, ct);
       expect(new TextDecoder().decode(pt)).toBe("test-value");
     }
   });

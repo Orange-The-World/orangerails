@@ -670,18 +670,12 @@ function AppHome() {
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
           onSubmit={async ({ targetEmail, password }) => {
-            const {
-              data: { session },
-            } = await supabase.auth.getSession();
-            if (!session) throw new Error("Not authenticated");
             const result = await grantCoAdmin({
               ownerUserId: userId,
               ownerSaltB64: vaultSalt,
               ownerPassword: password,
               targetEmail,
               existingKeyId: workspaceKeyId,
-              supabaseUrl: import.meta.env.VITE_SUPABASE_URL as string,
-              accessToken: session.access_token,
               supabase: supabase as unknown as GrantSupabaseLike,
             });
             if (result.workspaceKeyId !== workspaceKeyId) {
