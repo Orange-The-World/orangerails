@@ -210,6 +210,7 @@ export type Database = {
           vault_key_version: number
           vault_salt: string
           vault_verifier_ciphertext: string
+          workspace_key_id: string | null
         }
         Insert: {
           created_at?: string
@@ -225,6 +226,7 @@ export type Database = {
           vault_key_version?: number
           vault_salt: string
           vault_verifier_ciphertext: string
+          workspace_key_id?: string | null
         }
         Update: {
           created_at?: string
@@ -240,6 +242,7 @@ export type Database = {
           vault_key_version?: number
           vault_salt?: string
           vault_verifier_ciphertext?: string
+          workspace_key_id?: string | null
         }
         Relationships: []
       }
@@ -267,6 +270,27 @@ export type Database = {
           source?: string | null
           use_case?: string | null
           utm_campaign?: string | null
+        }
+        Relationships: []
+      }
+      workspace_admins: {
+        Row: {
+          added_at: string
+          admin_user_id: string
+          id: string
+          owner_user_id: string
+        }
+        Insert: {
+          added_at?: string
+          admin_user_id: string
+          id?: string
+          owner_user_id: string
+        }
+        Update: {
+          added_at?: string
+          admin_user_id?: string
+          id?: string
+          owner_user_id?: string
         }
         Relationships: []
       }
@@ -302,7 +326,13 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      lookup_user_for_coadmin: {
+        Args: { target_email: string }
+        Returns: {
+          kem_public_key: string
+          user_id: string
+        }[]
+      }
     }
     Enums: {
       [_ in never]: never
