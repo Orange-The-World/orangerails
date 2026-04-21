@@ -7,6 +7,7 @@ import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
+import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 
 function formatErrorVerbose(err: unknown): string {
   const msg = formatError(err);
@@ -907,6 +908,9 @@ function AppHome() {
             </div>
           )}
         </section>
+
+        {/* ── API Tokens ───────────────────────────────────────── */}
+        <ApiTokensSection userId={userId} />
       </main>
 
       {addOpen && (
