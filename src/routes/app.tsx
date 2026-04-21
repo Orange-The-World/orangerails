@@ -55,7 +55,8 @@ interface WorkspaceOption {
   ownerEmail: string;
   workspaceKeyId: string;
   wrappedCiphertextB64: string;
-  kemSecretWrapped: string;
+  // No kemSecretWrapped here — the admin's own kem_secret_wrapped is used
+  // for all workspace unwraps, stored separately in myKemSecretWrapped state.
 }
 
 // Providers available in Phase 1. Grows as we add adapters.
@@ -114,6 +115,7 @@ function AppHome() {
   const [coAdmins, setCoAdmins] = useState<CoAdminRow[]>([]);
   const [workspaceKeyId, setWorkspaceKeyId] = useState<string | null>(null);
   const [vaultSalt, setVaultSalt] = useState<string | null>(null);
+  const [myKemSecretWrapped, setMyKemSecretWrapped] = useState<string | null>(null);
   const [adminWorkspaces, setAdminWorkspaces] = useState<WorkspaceOption[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceOption | null>(null);
   // Cached admin subkeys — persists until tab closes (MVP limitation).
@@ -143,12 +145,13 @@ function AppHome() {
       // Load vault salt + workspace_key_id + co-admin list.
       const { data: meta } = await supabase
         .from("user_vault_meta")
-        .select("vault_salt, workspace_key_id")
+        .select("vault_salt, workspace_key_id, kem_secret_wrapped")
         .eq("user_id", session.user.id)
         .single();
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
+        setMyKemSecretWrapped(((meta as Record<string, unknown>).kem_secret_wrapped as string) ?? null);
       }
 
       // Load list of users this person has granted co-admin to.
@@ -170,13 +173,12 @@ function AppHome() {
         for (const ownerId of ownerIds) {
           const { data: ownerMeta } = await supabase
             .from("user_vault_meta")
-            .select("workspace_key_id, kem_secret_wrapped")
+            .select("workspace_key_id")
             .eq("user_id", ownerId)
             .single();
           if (!ownerMeta) continue;
           const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
-          const kemSecretWrapped = (ownerMeta as Record<string, unknown>).kem_secret_wrapped as string | null;
-          if (!ownerKeyId || !kemSecretWrapped) continue;
+          if (!ownerKeyId) continue;
           const { data: wdk } = await supabase
             .from("wrapped_data_keys")
             .select("wrapped_ciphertext")
@@ -188,7 +190,6 @@ function AppHome() {
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
             wrappedCiphertextB64: (wdk as Record<string, unknown>).wrapped_ciphertext as string,
-            kemSecretWrapped,
           });
         }
       }
@@ -222,30 +223,30 @@ function AppHome() {
   // ------------------------------------------------------------------
 
   const getActiveCredentialsKey = useCallback(async (): Promise<CryptoKey | null> => {
-    if (!activeWorkspace) return null;
+    if (!activeWorkspace || !myKemSecretWrapped) return null;
     const cached = adminSubkeysRef.current.get(activeWorkspace.workspaceKeyId);
     if (cached) return cached.credentialsKey;
     const subkeys = await loadAdminSubkeys({
       ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
       wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
-      kemSecretWrapped: activeWorkspace.kemSecretWrapped,
+      kemSecretWrapped: myKemSecretWrapped,
     });
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.credentialsKey;
-  }, [activeWorkspace, loadAdminSubkeys]);
+  }, [activeWorkspace, myKemSecretWrapped, loadAdminSubkeys]);
 
   const getActiveTransactionsKey = useCallback(async (): Promise<CryptoKey | null> => {
-    if (!activeWorkspace) return null;
+    if (!activeWorkspace || !myKemSecretWrapped) return null;
     const cached = adminSubkeysRef.current.get(activeWorkspace.workspaceKeyId);
     if (cached) return cached.transactionsKey;
     const subkeys = await loadAdminSubkeys({
       ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
       wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
-      kemSecretWrapped: activeWorkspace.kemSecretWrapped,
+      kemSecretWrapped: myKemSecretWrapped,
     });
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.transactionsKey;
-  }, [activeWorkspace, loadAdminSubkeys]);
+  }, [activeWorkspace, myKemSecretWrapped, loadAdminSubkeys]);
 
   // Load connections + decrypt recent transactions.
   const refresh = useCallback(async () => {
@@ -486,12 +487,13 @@ function AppHome() {
                   const ws = adminWorkspaces.find((w) => w.workspaceKeyId === keyId) ?? null;
                   if (!ws) return;
                   try {
+                    if (!myKemSecretWrapped) throw new Error("Your vault PQC keys are not loaded. Try locking and unlocking.");
                     // Pre-load and cache subkeys on switch.
                     if (!adminSubkeysRef.current.has(ws.workspaceKeyId)) {
                       const subkeys = await loadAdminSubkeys({
                         ownerWorkspaceKeyId: ws.workspaceKeyId,
                         wrappedCiphertextB64: ws.wrappedCiphertextB64,
-                        kemSecretWrapped: ws.kemSecretWrapped,
+                        kemSecretWrapped: myKemSecretWrapped,
                       });
                       adminSubkeysRef.current.set(ws.workspaceKeyId, subkeys);
                     }
