@@ -45,12 +45,14 @@ import {
   deriveVerifierKey,
   deriveCredentialsKey,
   deriveTransactionsKey,
+  deriveBlindIndexKey,
 } from "@/lib/key-derivation";
 import {
   encryptCredentials as encryptCredentialsFields,
   decryptCredentials as decryptCredentialsFields,
   encryptTransaction as encryptTransactionField,
   decryptTransaction as decryptTransactionField,
+  computeBlindIndex,
   type CredentialsPayload,
   type NormalizedTransaction,
 } from "@/lib/crypto-fields";
@@ -225,6 +227,19 @@ interface VaultContextValue {
     wrappedCiphertextB64: string;
     kemSecretWrapped: string;
   }): Promise<AdminSubkeys>;
+
+  /**
+   * Compute a deterministic HMAC-SHA256 blind index for a plaintext value.
+   *
+   * Use this to populate hmac_* columns before inserting/updating rows, and
+   * to build the WHERE clause value when querying by an encrypted field.
+   * The value is normalized (trim + lowercase) before hashing so searches
+   * are case-insensitive.
+   *
+   * Returns null for absent/empty values so callers can pass optional fields
+   * directly without a null-guard.
+   */
+  blindIndex(value: string | null | undefined): Promise<string | null>;
 }
 
 /** Narrow Supabase surface needed for grant/revoke operations. */
@@ -597,6 +612,18 @@ export function VaultProvider({ children }: VaultProviderProps) {
   );
 
   // ------------------------------------------------------------------
+  // Blind index — deterministic HMAC for server-side filtering.
+  // ------------------------------------------------------------------
+  const blindIndex = useCallback(
+    async (value: string | null | undefined): Promise<string | null> => {
+      const { mek, saltB64: s } = requireUnlocked();
+      const hmacKey = await deriveBlindIndexKey(mek, s);
+      return computeBlindIndex(value, hmacKey);
+    },
+    [saltB64],
+  );
+
+  // ------------------------------------------------------------------
   // Assemble the context value.
   // ------------------------------------------------------------------
   const value: VaultContextValue = {
@@ -618,6 +645,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
     grantCoAdmin,
     revokeCoAdmin,
     loadAdminSubkeys,
+    blindIndex,
   };
 
   return <VaultContext.Provider value={value}>{children}</VaultContext.Provider>;

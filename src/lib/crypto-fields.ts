@@ -12,11 +12,25 @@
  */
 
 import { encryptString, decryptString } from './vault';
-import { deriveCredentialsKey, deriveTransactionsKey } from './key-derivation';
+import { deriveCredentialsKey, deriveTransactionsKey, deriveBlindIndexKey } from './key-derivation';
 
 // ------------------------------------------------------------------
 // Types — match the Phase 1 schema.
 // ------------------------------------------------------------------
+
+/**
+ * Shape of the encrypted_transactions DB row fields produced by
+ * encryptTransactionRow(). Caller inserts these directly.
+ */
+export interface TransactionRow {
+  encrypted_payload: string;
+  /** HMAC-SHA256 of tx.type, normalized. Null if field absent. */
+  hmac_type: string | null;
+  /** HMAC-SHA256 of tx.direction, normalized. */
+  hmac_direction: string | null;
+  /** HMAC-SHA256 of tx.counterparty, normalized. Null if field absent. */
+  hmac_counterparty: string | null;
+}
 
 /** Payload stored in connections.encrypted_credentials. */
 export interface CredentialsPayload {
@@ -145,6 +159,83 @@ export async function encryptTransactions(
   return Promise.all(
     transactions.map(async (t) => {
       return encryptString(JSON.stringify(t), key);
+    }),
+  );
+}
+
+// ------------------------------------------------------------------
+// Blind indexes — HMAC-SHA256 for server-side filtering of encrypted fields.
+// ------------------------------------------------------------------
+
+/**
+ * Compute a deterministic HMAC-SHA256 blind index for a plaintext value.
+ *
+ * The HMAC key is derived from the MEK via HKDF with a purpose-specific
+ * context so it is cryptographically independent from all encryption keys.
+ * Normalization (trim + lowercase) ensures that case/whitespace variants of
+ * the same value produce the same index.
+ *
+ * Returns null for absent/empty values — the DB column will be NULL and
+ * WHERE hmac_col = $1 queries simply won't match those rows.
+ */
+export async function computeBlindIndex(
+  value: string | null | undefined,
+  hmacKey: CryptoKey,
+): Promise<string | null> {
+  if (value == null || value === '') return null;
+  const normalized = value.trim().toLowerCase();
+  const sig = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(normalized));
+  return btoa(String.fromCharCode(...new Uint8Array(sig)));
+}
+
+/**
+ * Encrypt a transaction payload AND compute its blind indexes in one call.
+ *
+ * Prefer this over encryptTransaction() for any new write path — it returns
+ * the full DB row shape including hmac_* columns so filtering works server-side.
+ */
+export async function encryptTransactionRow(
+  tx: NormalizedTransaction,
+  mek: CryptoKey,
+  saltB64: string,
+): Promise<TransactionRow> {
+  const [encKey, hmacKey] = await Promise.all([
+    deriveTransactionsKey(mek, saltB64),
+    deriveBlindIndexKey(mek, saltB64),
+  ]);
+
+  const [encrypted_payload, hmac_type, hmac_direction, hmac_counterparty] = await Promise.all([
+    encryptString(JSON.stringify(tx), encKey),
+    computeBlindIndex(tx.type, hmacKey),
+    computeBlindIndex(tx.direction, hmacKey),
+    computeBlindIndex(tx.counterparty ?? null, hmacKey),
+  ]);
+
+  return { encrypted_payload, hmac_type, hmac_direction, hmac_counterparty };
+}
+
+/**
+ * Batch version of encryptTransactionRow — derives both keys once for the set.
+ */
+export async function encryptTransactionRows(
+  transactions: NormalizedTransaction[],
+  mek: CryptoKey,
+  saltB64: string,
+): Promise<TransactionRow[]> {
+  const [encKey, hmacKey] = await Promise.all([
+    deriveTransactionsKey(mek, saltB64),
+    deriveBlindIndexKey(mek, saltB64),
+  ]);
+
+  return Promise.all(
+    transactions.map(async (tx) => {
+      const [encrypted_payload, hmac_type, hmac_direction, hmac_counterparty] = await Promise.all([
+        encryptString(JSON.stringify(tx), encKey),
+        computeBlindIndex(tx.type, hmacKey),
+        computeBlindIndex(tx.direction, hmacKey),
+        computeBlindIndex(tx.counterparty ?? null, hmacKey),
+      ]);
+      return { encrypted_payload, hmac_type, hmac_direction, hmac_counterparty };
     }),
   );
 }

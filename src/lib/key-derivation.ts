@@ -32,6 +32,13 @@ export const HKDF_CONTEXTS = Object.freeze({
   ORANGERAILS_VERIFIER_V1: 'orangerails-verifier-v1',
   /** Encrypts the user's PQC secret keys (hybrid KEM + ML-DSA) at rest. */
   ORANGERAILS_PQC_SECRET_WRAP_V1: 'orangerails-pqc-secret-wrap-v1',
+  /**
+   * HMAC key for blind index computation. Never used for encryption — only for
+   * deterministic HMAC-SHA256 of plaintext field values before storage.
+   * Keeping this context separate means a leaked HMAC output cannot help an
+   * attacker derive any encryption key.
+   */
+  ORANGERAILS_BLIND_INDEX_V1: 'orangerails-blind-index-v1',
 } as const);
 
 export type HkdfContext = (typeof HKDF_CONTEXTS)[keyof typeof HKDF_CONTEXTS];
@@ -97,6 +104,36 @@ export async function deriveTransactionsKey(mek: CryptoKey, saltB64: string): Pr
  */
 export async function derivePqcSecretWrapKey(mek: CryptoKey, saltB64: string): Promise<CryptoKey> {
   return deriveSubkey(mek, HKDF_CONTEXTS.ORANGERAILS_PQC_SECRET_WRAP_V1, saltB64);
+}
+
+/**
+ * Derive an HMAC-SHA256 key for blind index computation.
+ *
+ * The returned key is sign-only (never encrypt/decrypt) so it is clearly
+ * separated from all data encryption keys in the same key hierarchy.
+ */
+export async function deriveBlindIndexKey(mek: CryptoKey, saltB64: string): Promise<CryptoKey> {
+  const saltBytes = base64ToBytes(saltB64);
+  const infoBytes = new TextEncoder().encode(HKDF_CONTEXTS.ORANGERAILS_BLIND_INDEX_V1);
+
+  const rawBits = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: saltBytes as BufferSource,
+      info: infoBytes as BufferSource,
+    },
+    mek,
+    256,
+  );
+
+  return crypto.subtle.importKey(
+    'raw',
+    rawBits,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
 }
 
 /**
