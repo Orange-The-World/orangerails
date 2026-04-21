@@ -119,6 +119,7 @@ function AppHome() {
   } = useVault();
 
   const [userId, setUserId] = useState<string | null>(null);
+  const [mySubaccountId, setMySubaccountId] = useState<string | null>(null);
   const [email, setEmail] = useState<string | null>(null);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [transactions, setTransactions] = useState<DecryptedTxRow[]>([]);
@@ -168,6 +169,15 @@ function AppHome() {
       if (!isUnlocked) {
         navigate({ to: "/unlock" });
         return;
+      }
+
+      // Resolve (or create) this user's direct-mode subaccount.
+      // All connections + transactions are now keyed by subaccount_id.
+      try {
+        const { data: subId } = await (supabase as any).rpc("get_or_create_direct_subaccount");
+        if (subId) setMySubaccountId(subId as string);
+      } catch (e) {
+        console.warn("Failed to resolve direct subaccount:", e);
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
@@ -324,16 +334,23 @@ function AppHome() {
         if (!txnsKey) throw new Error("Could not load workspace keys.");
       }
 
-      // Determine which user's connections to fetch.
-      const currentSession = await supabase.auth.getSession();
-      const myId = currentSession.data.session?.user.id;
-      if (!myId) throw new Error("Not authenticated");
-      const targetUserId = isAdminView ? activeWorkspace!.ownerUserId : myId;
+      // Determine which subaccount's connections to fetch.
+      // TODO(platform-redesign): admin view (isAdminView) of another user's
+      // workspace requires a co-admin RLS policy on subaccounts +
+      // connections. Until that follow-up migration lands, admin view
+      // falls back to the admin's own data — disabled at the UI level.
+      if (!mySubaccountId) {
+        // Subaccount not loaded yet (RPC racing useEffect). Bail; refresh()
+        // will be retriggered when mySubaccountId becomes available.
+        setLoading(false);
+        return;
+      }
+      const targetSubaccountId = mySubaccountId;
 
       const { data: conns, error: connErr } = await supabase
         .from("connections")
         .select("*")
-        .eq("user_id", targetUserId)
+        .eq("subaccount_id", targetSubaccountId)
         .order("created_at", { ascending: false });
       if (connErr) throw connErr;
 
@@ -399,11 +416,11 @@ function AppHome() {
     } finally {
       setLoading(false);
     }
-  }, [activeWorkspace, decryptTransaction, decryptText, getActiveCredentialsKey, getActiveTransactionsKey]);
+  }, [activeWorkspace, mySubaccountId, decryptTransaction, decryptText, getActiveCredentialsKey, getActiveTransactionsKey]);
 
   useEffect(() => {
     if (isUnlocked) void refresh();
-  }, [isUnlocked, refresh, activeWorkspace]);
+  }, [isUnlocked, refresh, activeWorkspace, mySubaccountId]);
 
   // ------------------------------------------------------------------
   // Actions
@@ -423,13 +440,14 @@ function AppHome() {
       data: { session },
     } = await supabase.auth.getSession();
     if (!session) throw new Error("Not authenticated");
+    if (!mySubaccountId) throw new Error("Subaccount not loaded — try reloading the page.");
 
     const encrypted = await encryptCredentials({ api_key: params.apiKey });
     const labelPlaintext = params.label || params.provider;
     const encrypted_label = await encryptText(labelPlaintext);
 
     const { error: insertErr } = await supabase.from("connections").insert({
-      user_id: session.user.id,
+      subaccount_id: mySubaccountId,
       provider_type: params.provider,
       encrypted_label,
       encrypted_credentials: encrypted,
@@ -468,14 +486,14 @@ function AppHome() {
       }
 
       // Call or-sync. The edge function handles decrypt → fetch → encrypt → upsert.
+      // Direct mode (this page) auto-resolves to the user's own subaccount;
+      // no subaccount_id needed in the body. Admin sync is temporarily
+      // disabled (see TODO above).
       const body: Record<string, unknown> = {
         connection_ids: [conn.id],
         credentials_key,
         transactions_key,
       };
-      if (isAdminView && activeWorkspace) {
-        body.target_user_id = activeWorkspace.ownerUserId;
-      }
 
       const fnRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/or-sync`, {
         method: "POST",
