@@ -33,6 +33,13 @@ import {
   isPasswordAcceptable,
   encryptString,
   decryptString,
+  generateMekBytes,
+  importMekAsHkdf,
+  deriveKek,
+  wrapMekBytes,
+  unwrapMekBytes,
+  generateRecoveryCode,
+  deriveRecoveryKek,
 } from "@/lib/vault";
 import {
   deriveVerifierKey,
@@ -64,12 +71,27 @@ import {
 // ------------------------------------------------------------------
 
 interface VaultSetupResult {
-  /** Random per-user salt, base64. Store on the server as user_vault_meta.vault_salt. */
+  /** Random per-user salt, base64. Store as user_vault_meta.vault_salt. */
   saltB64: string;
-  /** Verifier ciphertext. Store on the server as user_vault_meta.vault_verifier_ciphertext. */
+  /** Verifier ciphertext. Store as user_vault_meta.vault_verifier_ciphertext. */
   verifierCiphertext: string;
-  /** Key version in use. Store as user_vault_meta.vault_key_version. */
+  /** Random MEK wrapped with Argon2id KEK. Store as user_vault_meta.enc_mek_ciphertext. */
+  encMekCiphertext: string;
+  /** Random MEK wrapped with recovery KEK. Store as user_vault_meta.recovery_ciphertext. */
+  recoveryCiphertext: string;
+  /** The plaintext recovery code — show once to the user, never persist. */
+  recoveryCode: string;
+  /** Key version: 2 = random MEK + Argon2id KEK (replaces v1: Argon2id-as-MEK). */
   keyVersion: number;
+}
+
+interface RecoveryResult {
+  /** Updated MEK wrapper under the new password + existing salt. */
+  newEncMekCiphertext: string;
+  /** New recovery code (the old one is invalidated). */
+  newRecoveryCode: string;
+  /** Updated recovery ciphertext for the new code. */
+  newRecoveryCiphertext: string;
 }
 
 interface VaultContextValue {
@@ -86,7 +108,9 @@ interface VaultContextValue {
   setupVault(password: string): Promise<VaultSetupResult>;
 
   /**
-   * Unlock the vault using the entered password + server-stored salt + verifier.
+   * Unlock the vault. Supports both key versions:
+   *   v1 (legacy): MEK = Argon2id(password, salt) — pass encMekCiphertext=null.
+   *   v2: MEK = unwrap(encMekCiphertext, Argon2id(password, salt) as KEK).
    * Returns true on success (MEK now in memory), false on wrong password.
    */
   unlock(
@@ -94,7 +118,26 @@ interface VaultContextValue {
     saltB64: string,
     verifierCiphertext: string,
     keyVersion?: number,
+    encMekCiphertext?: string | null,
   ): Promise<boolean>;
+
+  /**
+   * Recover access to the vault using the 12-word recovery code.
+   * Unwraps the MEK, sets a new vault password (re-wraps with new password),
+   * and generates a new recovery code. The caller must persist the returned
+   * fields to user_vault_meta and show the new recovery code to the user.
+   *
+   * The vault salt is intentionally NOT changed — all HKDF subkeys (credentials,
+   * transactions, PQC) remain valid because they depend on MEK + salt, and
+   * neither changes.
+   */
+  recoverWithCode(params: {
+    recoveryCode: string;
+    recoveryCiphertext: string;
+    saltB64: string;
+    verifierCiphertext: string;
+    newPassword: string;
+  }): Promise<RecoveryResult>;
 
   /** Clear the MEK from memory. Subsequent encrypt/decrypt calls will throw. */
   lock(): void;
@@ -250,7 +293,8 @@ export function VaultProvider({ children }: VaultProviderProps) {
   const [saltB64, setSaltB64] = useState<string | null>(null);
 
   // ------------------------------------------------------------------
-  // Setup: first-time vault creation.
+  // Setup: first-time vault creation (v2 architecture).
+  // MEK is random; password + recovery code each independently wrap it.
   // ------------------------------------------------------------------
   const setupVault = useCallback(async (password: string): Promise<VaultSetupResult> => {
     const strength = isPasswordAcceptable(password);
@@ -258,10 +302,24 @@ export function VaultProvider({ children }: VaultProviderProps) {
       throw new Error(strength.reason);
     }
 
-    const salt = generateVaultSalt();
-    const mek = await deriveMEK(password, salt);
+    const salt = generateVaultSalt(); // 256-bit random salt
+
+    // Generate a random MEK — this is the stable key for all data.
+    const mekRaw = generateMekBytes();
+    const mek = await importMekAsHkdf(mekRaw);
+
+    // Wrap MEK with the Argon2id-derived KEK.
+    const kek = await deriveKek(password, salt);
+    const encMekCiphertext = await wrapMekBytes(mekRaw, kek);
+
+    // Verifier: proves the password is correct on future unlocks.
     const verifierKey = await deriveVerifierKey(mek, salt);
     const verifierCiphertext = await createVaultVerifier(verifierKey);
+
+    // Recovery code: independent second way to unwrap the same MEK.
+    const recoveryCode = generateRecoveryCode();
+    const recoveryKek = await deriveRecoveryKek(recoveryCode);
+    const recoveryCiphertext = await wrapMekBytes(mekRaw, recoveryKek);
 
     mekRef.current = mek;
     saltRef.current = salt;
@@ -271,22 +329,37 @@ export function VaultProvider({ children }: VaultProviderProps) {
     return {
       saltB64: salt,
       verifierCiphertext,
-      keyVersion: 1,
+      encMekCiphertext,
+      recoveryCiphertext,
+      recoveryCode,
+      keyVersion: 2,
     };
   }, []);
 
   // ------------------------------------------------------------------
-  // Unlock: returning user.
+  // Unlock: returning user. Handles v1 (legacy) and v2 (MEK wrapping).
   // ------------------------------------------------------------------
   const unlock = useCallback(
     async (
       password: string,
       storedSaltB64: string,
       verifierCiphertext: string,
-      _keyVersion: number = 1,
+      keyVersion: number = 1,
+      encMekCiphertext: string | null = null,
     ): Promise<boolean> => {
       try {
-        const mek = await deriveMEK(password, storedSaltB64);
+        let mek: CryptoKey;
+
+        if (keyVersion >= 2 && encMekCiphertext) {
+          // v2: unwrap the random MEK using the Argon2id-derived KEK.
+          const kek = await deriveKek(password, storedSaltB64);
+          const mekRaw = await unwrapMekBytes(encMekCiphertext, kek);
+          mek = await importMekAsHkdf(mekRaw);
+        } else {
+          // v1 legacy: MEK = Argon2id(password, salt) imported as HKDF.
+          mek = await deriveMEK(password, storedSaltB64);
+        }
+
         const verifierKey = await deriveVerifierKey(mek, storedSaltB64);
         const ok = await verifyVaultPassword(verifierKey, verifierCiphertext);
         if (!ok) return false;
@@ -300,6 +373,54 @@ export function VaultProvider({ children }: VaultProviderProps) {
         // Any error (including wrong-password decryption failure) means unlock failed.
         return false;
       }
+    },
+    [],
+  );
+
+  // ------------------------------------------------------------------
+  // Recovery: regain access via the 12-word recovery code.
+  // The vault salt is preserved so all existing HKDF subkeys stay valid.
+  // ------------------------------------------------------------------
+  const recoverWithCode = useCallback(
+    async ({
+      recoveryCode,
+      recoveryCiphertext,
+      saltB64: storedSalt,
+      verifierCiphertext,
+      newPassword,
+    }: {
+      recoveryCode: string;
+      recoveryCiphertext: string;
+      saltB64: string;
+      verifierCiphertext: string;
+      newPassword: string;
+    }): Promise<RecoveryResult> => {
+      // 1. Unwrap MEK with recovery code — throws if code is wrong.
+      const recoveryKek = await deriveRecoveryKek(recoveryCode);
+      const mekRaw = await unwrapMekBytes(recoveryCiphertext, recoveryKek);
+      const mek = await importMekAsHkdf(mekRaw);
+
+      // 2. Verify MEK matches the stored verifier (guards against swapped ciphertexts).
+      const verifierKey = await deriveVerifierKey(mek, storedSalt);
+      const ok = await verifyVaultPassword(verifierKey, verifierCiphertext);
+      if (!ok) throw new Error("Recovery code does not match this vault.");
+
+      // 3. Re-wrap MEK with the new password (same salt — subkeys stay valid).
+      const newKek = await deriveKek(newPassword, storedSalt);
+      const newEncMekCiphertext = await wrapMekBytes(mekRaw, newKek);
+
+      // 4. Generate a fresh recovery code (old one is consumed/invalidated).
+      const newRecoveryCode = generateRecoveryCode();
+      const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
+      const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
+
+      // 5. Load MEK into memory — vault is now unlocked.
+      mekRef.current = mek;
+      saltRef.current = storedSalt;
+      setSaltB64(storedSalt);
+      setIsUnlocked(true);
+
+      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext };
     },
     [],
   );
@@ -483,6 +604,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
     saltB64,
     setupVault,
     unlock,
+    recoverWithCode,
     lock,
     encryptCredentials,
     decryptCredentials,

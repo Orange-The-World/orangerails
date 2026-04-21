@@ -103,6 +103,9 @@ function SignupPage() {
   const [vaultPassword, setVaultPassword] = useState("");
   const [vaultPasswordConfirm, setVaultPasswordConfirm] = useState("");
   const [acknowledgedUnrecoverable, setAcknowledgedUnrecoverable] = useState(false);
+  const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
+  const [recoveryCodeSaved, setRecoveryCodeSaved] = useState(false);
+  const [recoveryCodeCopied, setRecoveryCodeCopied] = useState(false);
 
   const [generatedPhrase, setGeneratedPhrase] = useState<string | null>(null);
   const [phraseCopied, setPhraseCopied] = useState(false);
@@ -212,12 +215,15 @@ function SignupPage() {
       }
 
       // Set up the vault regardless of path.
-      const { saltB64, verifierCiphertext, keyVersion } = await setupVault(vaultPassword);
+      const { saltB64, verifierCiphertext, encMekCiphertext, recoveryCiphertext, recoveryCode: code, keyVersion } =
+        await setupVault(vaultPassword);
 
-      const { error: metaError } = await supabase.from("user_vault_meta").insert({
+      const { error: metaError } = await (supabase.from("user_vault_meta") as any).insert({
         user_id: userId,
         vault_salt: saltB64,
         vault_verifier_ciphertext: verifierCiphertext,
+        enc_mek_ciphertext: encMekCiphertext,
+        recovery_ciphertext: recoveryCiphertext,
         vault_key_version: keyVersion,
       });
       if (metaError) throw metaError;
@@ -231,7 +237,10 @@ function SignupPage() {
         userId,
       );
 
-      navigate({ to: "/app" });
+      // Show recovery code before navigating — user must acknowledge saving it.
+      setRecoveryCode(code);
+      setSubmitting(false);
+      return; // navigation happens after user saves the code
     } catch (err) {
       console.error("Signup submit error:", err);
       setError(formatError(err));
@@ -243,6 +252,83 @@ function SignupPage() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-sm text-muted-foreground">Loading...</div>
+      </div>
+    );
+  }
+
+  // Step 2: vault is created, show recovery code before entering the app.
+  if (recoveryCode) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background px-4">
+        <div className="w-full max-w-md space-y-5">
+          <div className="text-center space-y-2">
+            <h1 className="text-2xl font-semibold">Save your recovery code</h1>
+            <p className="text-sm text-muted-foreground">
+              This 12-word code is the <strong>only</strong> way to recover your vault if you
+              forget your vault password. We cannot generate it again — save it now.
+            </p>
+          </div>
+
+          {/* Recovery code display */}
+          <div className="rounded-md border-2 border-orange-500/40 bg-orange-500/5 p-4 space-y-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-orange-600">
+              Your recovery code
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              {recoveryCode.split(" ").map((word, i) => (
+                <div key={i} className="flex items-center gap-1.5 text-sm">
+                  <span className="w-5 text-right text-xs text-muted-foreground shrink-0">
+                    {i + 1}.
+                  </span>
+                  <span className="font-mono font-medium">{word}</span>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                navigator.clipboard.writeText(recoveryCode).then(() => {
+                  setRecoveryCodeCopied(true);
+                  setTimeout(() => setRecoveryCodeCopied(false), 2000);
+                });
+              }}
+              className="w-full rounded-md border border-orange-500/30 bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted"
+            >
+              {recoveryCodeCopied ? "Copied to clipboard ✓" : "Copy all 12 words"}
+            </button>
+          </div>
+
+          {/* Where to store it */}
+          <div className="rounded-md border bg-muted/30 px-3 py-2.5 space-y-1 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">Where to save it</p>
+            <p><span className="font-medium text-foreground">Best:</span> A password manager — 1Password, Bitwarden, or KeePass.</p>
+            <p><span className="font-medium text-foreground">Good:</span> Written on paper, stored somewhere safe offline.</p>
+            <p><span className="font-medium text-destructive">Never:</span> Screenshots, email, cloud notes, or text messages.</p>
+          </div>
+
+          <div className="flex items-start gap-2">
+            <input
+              id="recovery-saved"
+              type="checkbox"
+              checked={recoveryCodeSaved}
+              onChange={(e) => setRecoveryCodeSaved(e.target.checked)}
+              className="mt-1"
+            />
+            <label htmlFor="recovery-saved" className="text-xs text-muted-foreground">
+              I have saved my recovery code in a secure place. I understand it will not be
+              shown again.
+            </label>
+          </div>
+
+          <button
+            type="button"
+            disabled={!recoveryCodeSaved}
+            onClick={() => navigate({ to: "/app" })}
+            className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          >
+            I've saved it — enter the app
+          </button>
+        </div>
       </div>
     );
   }

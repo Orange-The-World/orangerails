@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as UnlockRouteImport } from './routes/unlock'
+import { Route as RecoverRouteImport } from './routes/recover'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as OpenSourceRouteImport } from './routes/open-source'
@@ -22,6 +23,11 @@ import { Route as IndexRouteImport } from './routes/index'
 const UnlockRoute = UnlockRouteImport.update({
   id: '/unlock',
   path: '/unlock',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RecoverRoute = RecoverRouteImport.update({
+  id: '/recover',
+  path: '/recover',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SignupRoute = SignupRouteImport.update({
@@ -73,6 +79,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/open-source': typeof OpenSourceRoute
   '/pricing': typeof PricingRoute
+  '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
 }
@@ -84,6 +91,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/open-source': typeof OpenSourceRoute
   '/pricing': typeof PricingRoute
+  '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
 }
@@ -96,6 +104,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/open-source': typeof OpenSourceRoute
   '/pricing': typeof PricingRoute
+  '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
 }
@@ -109,6 +118,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/open-source'
     | '/pricing'
+    | '/recover'
     | '/signup'
     | '/unlock'
   fileRoutesByTo: FileRoutesByTo
@@ -120,6 +130,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/open-source'
     | '/pricing'
+    | '/recover'
     | '/signup'
     | '/unlock'
   id:
@@ -131,6 +142,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/open-source'
     | '/pricing'
+    | '/recover'
     | '/signup'
     | '/unlock'
   fileRoutesById: FileRoutesById
@@ -143,6 +155,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   OpenSourceRoute: typeof OpenSourceRoute
   PricingRoute: typeof PricingRoute
+  RecoverRoute: typeof RecoverRoute
   SignupRoute: typeof SignupRoute
   UnlockRoute: typeof UnlockRoute
 }
@@ -168,6 +181,13 @@ declare module '@tanstack/react-router' {
       path: '/pricing'
       fullPath: '/pricing'
       preLoaderRoute: typeof PricingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/recover': {
+      id: '/recover'
+      path: '/recover'
+      fullPath: '/recover'
+      preLoaderRoute: typeof RecoverRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/open-source': {
@@ -223,6 +243,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   OpenSourceRoute: OpenSourceRoute,
   PricingRoute: PricingRoute,
+  RecoverRoute: RecoverRoute,
   SignupRoute: SignupRoute,
   UnlockRoute: UnlockRoute,
 }

@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
@@ -16,6 +16,7 @@ function UnlockPage() {
     vault_salt: string;
     vault_verifier_ciphertext: string;
     vault_key_version: number;
+    enc_mek_ciphertext: string | null;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [vaultPassword, setVaultPassword] = useState("");
@@ -34,9 +35,9 @@ function UnlockPage() {
         return;
       }
 
-      const { data, error: metaError } = await supabase
+      const { data, error: metaError } = await (supabase as any)
         .from("user_vault_meta")
-        .select("vault_salt, vault_verifier_ciphertext, vault_key_version")
+        .select("vault_salt, vault_verifier_ciphertext, vault_key_version, enc_mek_ciphertext")
         .eq("user_id", session.user.id)
         .single();
 
@@ -63,6 +64,7 @@ function UnlockPage() {
       vaultMeta.vault_salt,
       vaultMeta.vault_verifier_ciphertext,
       vaultMeta.vault_key_version,
+      vaultMeta.enc_mek_ciphertext,
     );
 
     if (!ok) {
@@ -144,6 +146,12 @@ function UnlockPage() {
           >
             {submitting ? "Unlocking..." : "Unlock vault"}
           </button>
+
+          <p className="text-center text-sm text-muted-foreground">
+            <Link to="/recover" className="text-primary hover:underline">
+              Forgot your vault password?
+            </Link>
+          </p>
 
           <button
             type="button"

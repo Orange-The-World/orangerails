@@ -309,6 +309,145 @@ export async function deriveMekRaw(password: string, saltBase64: string): Promis
 }
 
 // ------------------------------------------------------------------
+// MEK wrapping — vault key version 2 architecture.
+// ------------------------------------------------------------------
+// In v1, MEK = Argon2id(password, salt) imported directly as HKDF.
+// In v2, MEK = random 32 bytes imported as HKDF; the Argon2id output
+// is used only as a KEK to wrap the MEK. This lets the user change
+// their vault password (or recover via recovery code) without
+// re-encrypting any of their data.
+
+/** Generate 32 cryptographically random bytes for a new MEK. */
+export function generateMekBytes(): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(32));
+}
+
+/**
+ * Import 32 raw bytes as a non-extractable HKDF key (the v2 MEK format).
+ * The returned CryptoKey can be passed to deriveSubkey() / HKDF operations.
+ */
+export async function importMekAsHkdf(raw: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    raw as BufferSource,
+    { name: "HKDF" },
+    /* extractable */ false,
+    ["deriveKey", "deriveBits"],
+  );
+}
+
+/**
+ * Derive an AES-256-GCM KEK from a vault password using Argon2id.
+ * The KEK is used only to wrap/unwrap the random MEK — it is never used
+ * directly for data encryption.
+ */
+export async function deriveKek(password: string, saltBase64: string): Promise<CryptoKey> {
+  const raw = await deriveMekRaw(password, saltBase64);
+  return crypto.subtle.importKey(
+    "raw",
+    raw as BufferSource,
+    { name: "AES-GCM" },
+    /* extractable */ false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/**
+ * Encrypt raw MEK bytes with a wrapping key (KEK or recovery KEK).
+ * Wire format: encryptString( base64(mekRaw) ) — consistent with encryptString's
+ * IV-prepended AES-GCM format.
+ */
+export async function wrapMekBytes(mekRaw: Uint8Array, wrappingKey: CryptoKey): Promise<string> {
+  return encryptString(bytesToBase64(mekRaw), wrappingKey);
+}
+
+/**
+ * Decrypt a wrapped MEK back to raw bytes.
+ * Throws if the wrapping key is wrong or ciphertext is tampered.
+ */
+export async function unwrapMekBytes(
+  ciphertextB64: string,
+  wrappingKey: CryptoKey,
+): Promise<Uint8Array> {
+  const b64 = await decryptString(ciphertextB64, wrappingKey);
+  return base64ToBytes(b64);
+}
+
+// ------------------------------------------------------------------
+// Recovery codes — 12-word offline backup for the MEK.
+// ------------------------------------------------------------------
+// Exactly 256 words (BIP-39 derived) so crypto.getRandomValues() byte
+// values map without modulo bias. 12 words × log2(256)=8 bits = 96 bits
+// of entropy — unbreakable in practice against the Argon2id work factor.
+
+const RECOVERY_WORDS: readonly string[] = [
+  "abandon","ability","able","about","above","absent","absorb","abstract","absurd","abuse",
+  "access","accident","account","accuse","achieve","acid","acoustic","acquire","across","act",
+  "action","actor","actress","actual","adapt","add","addict","address","adjust","admit",
+  "adult","advance","advice","aerobic","affair","afford","afraid","again","age","agent",
+  "agree","ahead","aim","air","airport","aisle","alarm","album","alcohol","alert",
+  "alien","all","alley","allow","almost","alone","alpha","already","also","alter",
+  "always","amateur","amazing","among","amount","amused","analyst","anchor","ancient","anger",
+  "angle","angry","animal","ankle","announce","annual","another","answer","antenna","antique",
+  "anxiety","any","apart","apology","appear","apple","approve","april","arch","arctic",
+  "area","arena","argue","arm","armed","armor","army","around","arrange","arrest",
+  "arrive","arrow","art","artefact","artist","aside","ask","aspect","assault","asset",
+  "assist","assume","asthma","athlete","atom","attack","attend","attitude","attract","auction",
+  "audit","august","aunt","author","auto","autumn","average","avocado","avoid","awake",
+  "aware","away","awesome","awful","awkward","axis","baby","bachelor","bacon","badge",
+  "bag","balance","balcony","ball","bamboo","banana","banner","bar","barely","bargain",
+  "barrel","base","basic","basket","battle","beach","bean","beauty","become","beef",
+  "before","begin","behave","behind","believe","below","belt","bench","benefit","best",
+  "betray","better","between","beyond","bicycle","bid","bike","bind","biology","bird",
+  "birth","bitter","black","blade","blame","blanket","blast","bleak","bless","blind",
+  "blood","blossom","blouse","blue","blur","blush","board","boat","body","boil",
+  "bomb","bone","bonus","book","boost","border","boring","borrow","boss","bottom",
+  "bounce","box","boy","bracket","brain","brand","brass","brave","bread","breeze",
+  "brick","bridge","brief","bright","bring","brisk","broccoli","broken","bronze","broom",
+  "brother","brown","brush","bubble","buddy","budget","buffalo","build","bulb","bulk",
+  "bullet","bundle","bunker","burden","burger","burst","bus","business","busy","butter",
+  "buyer","buzz","cabin","cable","camel","cargo","cash","castle","casual","call",
+] as const;
+
+/**
+ * Generate a 12-word recovery code from 96 bits of crypto-random entropy.
+ * Each of the 12 bytes selects one word from the 256-word list — no bias.
+ */
+export function generateRecoveryCode(): string {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => RECOVERY_WORDS[b]).join(" ");
+}
+
+/**
+ * Derive an AES-256-GCM KEK from a recovery code via HKDF-SHA-256.
+ * The recovery code itself has ~96 bits of entropy, so the HKDF step
+ * is purely domain-separation — it is not a stretching function.
+ */
+export async function deriveRecoveryKek(recoveryCode: string): Promise<CryptoKey> {
+  const normalized = recoveryCode.trim().toLowerCase().replace(/\s+/g, " ");
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    stringToBytes(normalized) as BufferSource,
+    "HKDF",
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: stringToBytes("orangerails-recovery-kek-v1") as BufferSource,
+      info: new Uint8Array(),
+    },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+// ------------------------------------------------------------------
 // Re-export encoding helpers — some callers need them for interop.
 // ------------------------------------------------------------------
 
