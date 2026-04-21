@@ -39,7 +39,7 @@ export const ARGON2ID_V1 = Object.freeze({
 } as const);
 
 /** Minimum vault password length. Enforced on setup. */
-export const MIN_PASSWORD_LENGTH = 12;
+export const MIN_PASSWORD_LENGTH = 14;
 
 /** Public string a successful decryption will produce, proving the key is correct. */
 export const VAULT_VERIFIER_PLAINTEXT = "orangerails-vault-verifier-v1";
@@ -73,9 +73,9 @@ function bytesToString(bytes: Uint8Array): string {
 // Salt generation.
 // ------------------------------------------------------------------
 
-/** Generate a fresh 128-bit random salt, returned as base64. */
+/** Generate a fresh 256-bit random salt, returned as base64. */
 export function generateVaultSalt(): string {
-  const salt = new Uint8Array(16);
+  const salt = new Uint8Array(32);
   crypto.getRandomValues(salt);
   return bytesToBase64(salt);
 }
