@@ -83,8 +83,8 @@ export type Database = {
           last_sync_cursor: string | null
           provider_type: string
           status: string
+          subaccount_id: string
           updated_at: string
-          user_id: string
         }
         Insert: {
           created_at?: string
@@ -97,8 +97,8 @@ export type Database = {
           last_sync_cursor?: string | null
           provider_type: string
           status?: string
+          subaccount_id: string
           updated_at?: string
-          user_id: string
         }
         Update: {
           created_at?: string
@@ -111,10 +111,18 @@ export type Database = {
           last_sync_cursor?: string | null
           provider_type?: string
           status?: string
+          subaccount_id?: string
           updated_at?: string
-          user_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "connections_subaccount_id_fkey"
+            columns: ["subaccount_id"]
+            isOneToOne: false
+            referencedRelation: "subaccounts"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       encrypted_transactions: {
         Row: {
@@ -163,35 +171,103 @@ export type Database = {
           },
         ]
       }
+      platforms: {
+        Row: {
+          api_key_hash: string
+          created_at: string
+          id: string
+          is_internal: boolean
+          name: string
+          slug: string
+          tier: string
+          updated_at: string
+        }
+        Insert: {
+          api_key_hash: string
+          created_at?: string
+          id?: string
+          is_internal?: boolean
+          name: string
+          slug: string
+          tier?: string
+          updated_at?: string
+        }
+        Update: {
+          api_key_hash?: string
+          created_at?: string
+          id?: string
+          is_internal?: boolean
+          name?: string
+          slug?: string
+          tier?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      subaccounts: {
+        Row: {
+          created_at: string
+          external_user_id: string
+          id: string
+          platform_id: string
+        }
+        Insert: {
+          created_at?: string
+          external_user_id: string
+          id?: string
+          platform_id: string
+        }
+        Update: {
+          created_at?: string
+          external_user_id?: string
+          id?: string
+          platform_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "subaccounts_platform_id_fkey"
+            columns: ["platform_id"]
+            isOneToOne: false
+            referencedRelation: "platforms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       user_app_grants: {
         Row: {
           access_token_hash: string
           app_id: string
+          expires_at: string | null
           granted_at: string
           granted_scopes: string[]
           id: string
           last_used_at: string | null
           revoked_at: string | null
+          rotated_at: string | null
           user_id: string
         }
         Insert: {
           access_token_hash: string
           app_id: string
+          expires_at?: string | null
           granted_at?: string
           granted_scopes?: string[]
           id?: string
           last_used_at?: string | null
           revoked_at?: string | null
+          rotated_at?: string | null
           user_id: string
         }
         Update: {
           access_token_hash?: string
           app_id?: string
+          expires_at?: string | null
           granted_at?: string
           granted_scopes?: string[]
           id?: string
           last_used_at?: string | null
           revoked_at?: string | null
+          rotated_at?: string | null
           user_id?: string
         }
         Relationships: [
@@ -373,16 +449,19 @@ export type Database = {
           user_id: string
         }[]
       }
+      get_or_create_direct_subaccount: { Args: never; Returns: string }
       get_or_vault_salt: { Args: never; Returns: string }
       list_or_access_tokens: {
         Args: never
         Returns: {
           app_name: string
           app_slug: string
+          expires_at: string
           granted_at: string
           id: string
           last_used_at: string
           revoked_at: string
+          rotated_at: string
         }[]
       }
       lookup_user_for_coadmin: {
@@ -392,6 +471,7 @@ export type Database = {
           user_id: string
         }[]
       }
+      rotate_or_access_token: { Args: { p_grant_id: string }; Returns: string }
     }
     Enums: {
       [_ in never]: never
