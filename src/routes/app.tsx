@@ -6,6 +6,17 @@ import type { GrantSupabaseLike } from "@/context/VaultContext";
 import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 
+function formatErrorVerbose(err: unknown): string {
+  const msg = formatError(err);
+  if (msg) return msg;
+  // WebCrypto OperationError has an empty .message — include the name instead.
+  if (err && typeof err === "object" && "name" in err) {
+    const name = (err as { name: string }).name;
+    if (name && name !== "Error") return name;
+  }
+  return "Unknown error";
+}
+
 export const Route = createFileRoute("/app")({
   component: AppHome,
 });
@@ -96,6 +107,7 @@ function AppHome() {
     decryptText,
     encryptTransaction,
     decryptTransaction,
+    ensurePqcKeypairs,
     grantCoAdmin,
     revokeCoAdmin,
     loadAdminSubkeys,
@@ -151,7 +163,35 @@ function AppHome() {
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
-        setMyKemSecretWrapped(((meta as Record<string, unknown>).kem_secret_wrapped as string) ?? null);
+        const kemWrapped = ((meta as Record<string, unknown>).kem_secret_wrapped as string) ?? null;
+        setMyKemSecretWrapped(kemWrapped);
+
+        // If PQC keys are missing (signup pre-dated the PQC rollout or an earlier
+        // ensurePqcKeypairs call failed), generate them now so co-admin works.
+        if (!kemWrapped) {
+          ensurePqcKeypairs(
+            supabase as unknown as Parameters<typeof ensurePqcKeypairs>[0],
+            session.user.id,
+          )
+            .then((result) => {
+              if (result.generated) {
+                // Re-fetch so myKemSecretWrapped is populated.
+                return supabase
+                  .from("user_vault_meta")
+                  .select("kem_secret_wrapped")
+                  .eq("user_id", session.user.id)
+                  .single()
+                  .then(({ data }) => {
+                    if (data) {
+                      setMyKemSecretWrapped(
+                        ((data as Record<string, unknown>).kem_secret_wrapped as string) ?? null,
+                      );
+                    }
+                  });
+              }
+            })
+            .catch((err) => console.warn("PQC key backfill failed:", err));
+        }
       }
 
       // Load list of users this person has granted co-admin to.
@@ -269,14 +309,15 @@ function AppHome() {
             try {
               decrypted_label = await decryptText(c.encrypted_label);
             } catch {
-              /* ignore */
+              /* ignore — label is cosmetic */
             }
           }
           if (c.encrypted_last_error) {
             try {
-              decrypted_last_error = await decryptText(c.encrypted_last_error);
+              const raw = await decryptText(c.encrypted_last_error);
+              decrypted_last_error = raw || "(empty error — check browser console for details)";
             } catch {
-              /* ignore */
+              decrypted_last_error = "(could not decrypt error — check browser console)";
             }
           }
           return { ...c, decrypted_label, decrypted_last_error };
@@ -414,7 +455,8 @@ function AppHome() {
       );
       await refresh();
     } catch (e) {
-      const msg = formatError(e);
+      const msg = formatErrorVerbose(e);
+      console.error("[OrangeRails] Sync error:", e);
       setErr(msg);
       // Encrypt the error message before storing — error bodies from
       // upstream providers can contain identifying context.
@@ -487,20 +529,38 @@ function AppHome() {
                   const ws = adminWorkspaces.find((w) => w.workspaceKeyId === keyId) ?? null;
                   if (!ws) return;
                   try {
-                    if (!myKemSecretWrapped) throw new Error("Your vault PQC keys are not loaded. Try locking and unlocking.");
+                    if (!myKemSecretWrapped) {
+                      throw new Error(
+                        "Your vault PQC keys are not set up yet. Lock and unlock your vault to generate them, then try again.",
+                      );
+                    }
                     // Pre-load and cache subkeys on switch.
                     if (!adminSubkeysRef.current.has(ws.workspaceKeyId)) {
-                      const subkeys = await loadAdminSubkeys({
-                        ownerWorkspaceKeyId: ws.workspaceKeyId,
-                        wrappedCiphertextB64: ws.wrappedCiphertextB64,
-                        kemSecretWrapped: myKemSecretWrapped,
-                      });
+                      let subkeys;
+                      try {
+                        subkeys = await loadAdminSubkeys({
+                          ownerWorkspaceKeyId: ws.workspaceKeyId,
+                          wrappedCiphertextB64: ws.wrappedCiphertextB64,
+                          kemSecretWrapped: myKemSecretWrapped,
+                        });
+                      } catch (unwrapErr) {
+                        const name =
+                          unwrapErr && typeof unwrapErr === "object" && "name" in unwrapErr
+                            ? (unwrapErr as { name: string }).name
+                            : "";
+                        if (name === "OperationError") {
+                          throw new Error(
+                            "Could not decrypt workspace keys. The grant may need to be revoked and re-issued.",
+                          );
+                        }
+                        throw unwrapErr;
+                      }
                       adminSubkeysRef.current.set(ws.workspaceKeyId, subkeys);
                     }
                     setActiveWorkspace(ws);
                     await refresh();
                   } catch (switchErr) {
-                    setErr(`Failed to load workspace: ${formatError(switchErr)}`);
+                    setErr(`Failed to load workspace: ${formatErrorVerbose(switchErr)}`);
                   }
                 }}
                 className="rounded-md border border-input bg-background px-2 py-1.5 text-sm"
