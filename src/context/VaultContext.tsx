@@ -158,8 +158,6 @@ interface VaultContextValue {
     ownerPassword: string;
     targetEmail: string;
     existingKeyId: string | null;
-    supabaseUrl: string;
-    accessToken: string;
     supabase: GrantSupabaseLike;
   }): Promise<{ workspaceKeyId: string }>;
 
@@ -214,6 +212,7 @@ export interface GrantSupabaseLike {
       eq(col: string, val: string): Promise<{ error: unknown }>;
     };
   };
+  rpc(fn: string, params: Record<string, unknown>): Promise<{ data: unknown; error: unknown }>;
 }
 
 // ------------------------------------------------------------------
@@ -410,32 +409,22 @@ export function VaultProvider({ children }: VaultProviderProps) {
       ownerPassword: string;
       targetEmail: string;
       existingKeyId: string | null;
-      supabaseUrl: string;
-      accessToken: string;
       supabase: GrantSupabaseLike;
     }) => {
       requireUnlocked(); // gate: vault must be unlocked
-      const { supabaseUrl, accessToken, targetEmail, supabase, ...rest } = params;
+      const { targetEmail, supabase, ...rest } = params;
 
-      // Resolve email → userId + kemPublicKey via edge function.
-      const res = await fetch(`${supabaseUrl}/functions/v1/pqc-lookup-user`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email: targetEmail }),
+      // Resolve email → userId + kemPublicKey via SECURITY DEFINER RPC.
+      const { data: rows, error: rpcErr } = await supabase.rpc("lookup_user_for_coadmin", {
+        target_email: targetEmail,
       });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        throw new Error(
-          (detail as { error?: string }).error ?? `Lookup failed (HTTP ${res.status})`,
-        );
+      if (rpcErr) {
+        throw new Error((rpcErr as { message?: string }).message ?? "Lookup failed");
       }
-      const { userId: targetUserId, kemPublicKey: targetKemPubB64 } = (await res.json()) as {
-        userId: string;
-        kemPublicKey: string;
-      };
+      const row = (rows as { user_id: string; kem_public_key: string }[] | null)?.[0];
+      if (!row) throw new Error("User not found or has not set up their vault yet");
+      const targetUserId = row.user_id;
+      const targetKemPubB64 = row.kem_public_key;
 
       return grantCoAdminImpl({
         ...rest,
