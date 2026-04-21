@@ -242,6 +242,11 @@ export function VaultProvider({ children }: VaultProviderProps) {
   // We keep the MEK in a ref rather than state so changes don't cause re-renders
   // of the entire subtree every time we call encrypt/decrypt.
   const mekRef = useRef<CryptoKey | null>(null);
+  // saltRef mirrors saltB64 state but is synchronous — setSaltB64 is batched by
+  // React and won't be visible in the same call stack (e.g. ensurePqcKeypairs
+  // called immediately after setupVault would see stale null). The ref is the
+  // authoritative source for requireUnlocked(); state drives isUnlocked/UI only.
+  const saltRef = useRef<string | null>(null);
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [saltB64, setSaltB64] = useState<string | null>(null);
 
@@ -260,6 +265,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
     const verifierCiphertext = await createVaultVerifier(verifierKey);
 
     mekRef.current = mek;
+    saltRef.current = salt;
     setSaltB64(salt);
     setIsUnlocked(true);
 
@@ -287,6 +293,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
         if (!ok) return false;
 
         mekRef.current = mek;
+        saltRef.current = storedSaltB64;
         setSaltB64(storedSaltB64);
         setIsUnlocked(true);
         return true;
@@ -303,6 +310,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
   // ------------------------------------------------------------------
   const lock = useCallback(() => {
     mekRef.current = null;
+    saltRef.current = null;
     setSaltB64(null);
     setIsUnlocked(false);
   }, []);
@@ -311,10 +319,10 @@ export function VaultProvider({ children }: VaultProviderProps) {
   // Encrypt / decrypt — gated on unlocked state.
   // ------------------------------------------------------------------
   const requireUnlocked = (): { mek: CryptoKey; saltB64: string } => {
-    if (!mekRef.current || !saltB64) {
+    if (!mekRef.current || !saltRef.current) {
       throw new Error("Vault is locked. Call unlock() before encrypting or decrypting.");
     }
-    return { mek: mekRef.current, saltB64 };
+    return { mek: mekRef.current, saltB64: saltRef.current };
   };
 
   const encryptCredentials = useCallback(
