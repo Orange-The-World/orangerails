@@ -1,32 +1,29 @@
 /**
- * or-sync — server-side ZKA sync edge function.
+ * or-sync — server-side ZKA sync, subaccount-scoped.
  *
- * Accepts ORK (credentials key) and ORT (transactions key) in-transit
- * over TLS. Decrypts provider credentials in memory, fetches from
- * the provider API, encrypts results with ORT, upserts to
- * encrypted_transactions, then discards all key material.
+ * Replaces the previous user_app_grants token approach with the
+ * platform/subaccount model from OrangeRails-Platform-Design.md.
  *
- * Auth:
- *   - Standard Supabase JWT (OR app syncing its own connections, or
- *     admin syncing an owner's connections via co-admin grant).
- *   - X-OR-Access-Token header (cross-app token from user_app_grants,
- *     for V3 / BitBooks Personal calling OR on behalf of the user).
+ * Auth (one of):
+ *   - X-Platform-API-Key: <hex>   → platform mode (BitBooks V3 etc.)
+ *     Body MUST include subaccount_id (validated to belong to platform)
+ *   - Authorization: Bearer <jwt> → direct mode (orangerails.com/app)
+ *     Subaccount auto-resolved to the user's direct subaccount
  *
  * POST body:
- *   credentials_key:  string  base64-encoded ORK (32 bytes AES-256)
- *   transactions_key: string  base64-encoded ORT (32 bytes AES-256)
- *   connection_ids?:  string[]  sync only these; omit to sync all active
- *   target_user_id?:  string  admin sync — owner's user_id; caller must
- *                             be a co-admin of this user
+ *   subaccount_id?:    uuid    required in platform mode
+ *   connection_ids?:   uuid[]  sync only these (otherwise all non-disconnected)
+ *   credentials_key:   string  base64 ORK (in-transit only)
+ *   transactions_key:  string  base64 ORT (in-transit only)
  *
  * Response:
- *   { synced: number, connections: Array<{ connection_id, synced, next_cursor, error? }> }
+ *   { synced: number, connections: [{ connection_id, synced, next_cursor, error? }] }
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 
-// ─── AES-256-GCM helpers (Web Crypto — available in Deno) ───────────────────
+// ─── AES-256-GCM helpers ─────────────────────────────────────────────────────
 
 function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
@@ -43,11 +40,9 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 async function importAesKey(base64Key: string): Promise<CryptoKey> {
   const keyBytes = base64ToBytes(base64Key);
-  // Cast to BufferSource to satisfy strict TS (Uint8Array<ArrayBufferLike> vs ArrayBuffer)
   return crypto.subtle.importKey('raw', keyBytes as BufferSource, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
 
-/** Decrypt AES-256-GCM. Format: base64(IV[12] ++ ciphertext). Matches vault.ts. */
 async function decryptAes(ciphertextB64: string, key: CryptoKey): Promise<string> {
   const data = base64ToBytes(ciphertextB64);
   const iv = data.slice(0, 12);
@@ -56,7 +51,6 @@ async function decryptAes(ciphertextB64: string, key: CryptoKey): Promise<string
   return new TextDecoder().decode(plain);
 }
 
-/** Encrypt with AES-256-GCM. Format: base64(IV[12] ++ ciphertext). Matches vault.ts. */
 async function encryptAes(plaintext: string, key: CryptoKey): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encoded = new TextEncoder().encode(plaintext);
@@ -65,12 +59,6 @@ async function encryptAes(plaintext: string, key: CryptoKey): Promise<string> {
   combined.set(iv, 0);
   combined.set(new Uint8Array(cipher), 12);
   return bytesToBase64(combined);
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  const hash = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ─── Blink adapter ──────────────────────────────────────────────────────────
@@ -181,14 +169,12 @@ async function fetchBlinkTransactions(
     headers: { 'Content-Type': 'application/json', 'X-API-KEY': apiKey },
     body: JSON.stringify({ query: TX_QUERY, variables }),
   });
-
   if (!res.ok) throw new Error(`Blink API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
 
   const json = await res.json() as {
     data?: { me?: { defaultAccount?: { transactions?: { edges?: { cursor: string; node: BlinkTxNode }[]; pageInfo?: { hasNextPage: boolean; endCursor: string | null } } } } };
     errors?: { message: string }[];
   };
-
   if (json.errors?.length) throw new Error(`Blink GraphQL: ${json.errors[0].message}`);
 
   const txData = json.data?.me?.defaultAccount?.transactions;
@@ -199,8 +185,6 @@ async function fetchBlinkTransactions(
     next_cursor: txData.pageInfo?.hasNextPage ? (txData.pageInfo.endCursor ?? null) : null,
   };
 }
-
-// ─── Provider dispatch ──────────────────────────────────────────────────────
 
 type SyncFn = (key: string, cursor: string | null) => Promise<{ transactions: NormalizedTransaction[]; next_cursor: string | null }>;
 
@@ -216,87 +200,34 @@ Deno.serve(async (req: Request) => {
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
 
   try {
-    // ── Auth ──────────────────────────────────────────────────────────────
-    const authHeader = req.headers.get('Authorization');
-    const orAccessToken = req.headers.get('X-OR-Access-Token');
+    const ctx = await authenticateRequest(req);
+    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
-    if (!authHeader && !orAccessToken) {
-      return jsonResponse({ error: 'Missing auth — provide Authorization or X-OR-Access-Token' }, 401, cors);
-    }
-
-    const serviceSupabase = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
-    );
-
-    let callerUserId: string;
-
-    if (orAccessToken) {
-      const tokenHash = await sha256Hex(orAccessToken);
-      const { data: grant, error: grantErr } = await serviceSupabase
-        .from('user_app_grants')
-        .select('user_id, revoked_at')
-        .eq('access_token_hash', tokenHash)
-        .maybeSingle();
-      if (grantErr || !grant) return jsonResponse({ error: 'Invalid access token' }, 401, cors);
-      if (grant.revoked_at) return jsonResponse({ error: 'Access token revoked' }, 401, cors);
-      callerUserId = grant.user_id;
-      // Non-critical: update last_used_at.
-      serviceSupabase.from('user_app_grants').update({ last_used_at: new Date().toISOString() }).eq('access_token_hash', tokenHash).then(() => {});
-    } else {
-      const userSupabase = createClient(
-        Deno.env.get('SUPABASE_URL') ?? '',
-        Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-        { global: { headers: { Authorization: authHeader! } } },
-      );
-      const { data: { user }, error: authErr } = await userSupabase.auth.getUser();
-      if (authErr || !user) return jsonResponse({ error: 'Unauthorized' }, 401, cors);
-      callerUserId = user.id;
-    }
-
-    // ── Parse body ────────────────────────────────────────────────────────
     const raw = await readBoundedText(req);
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
 
     const body = JSON.parse(raw) as {
+      subaccount_id?: string;
+      connection_ids?: string[];
       credentials_key: string;
       transactions_key: string;
-      connection_ids?: string[];
-      target_user_id?: string;
     };
 
-    const { credentials_key, transactions_key, connection_ids, target_user_id } = body ?? {};
+    const { credentials_key, transactions_key, connection_ids } = body ?? {};
     if (!credentials_key || !transactions_key) {
       return jsonResponse({ error: 'credentials_key and transactions_key required' }, 400, cors);
     }
 
-    // ── Determine target user (own or admin-of) ───────────────────────────
-    let targetUserId = callerUserId;
+    const subaccountId = await resolveSubaccount(ctx, body.subaccount_id);
+    if (isAuthError(subaccountId)) return jsonResponse({ error: subaccountId.message }, subaccountId.status, cors);
 
-    if (target_user_id && target_user_id !== callerUserId) {
-      // Verify the caller is a co-admin of target_user_id.
-      const { data: adminRow } = await serviceSupabase
-        .from('workspace_admins')
-        .select('id')
-        .eq('owner_user_id', target_user_id)
-        .eq('admin_user_id', callerUserId)
-        .maybeSingle();
-      if (!adminRow) return jsonResponse({ error: 'Not authorized for this workspace' }, 403, cors);
-      targetUserId = target_user_id;
-    }
-
-    // ── Import AES keys (in-transit, never persisted) ─────────────────────
     const credsKey = await importAesKey(credentials_key);
     const txnsKey = await importAesKey(transactions_key);
 
-    // ── Fetch connections ─────────────────────────────────────────────────
-    // No status filter: a user clicking "Sync now" on an errored connection
-    // is explicitly asking us to retry. Only skip 'disconnected' once that
-    // state is meaningful (user-paused).
-    let connQuery = serviceSupabase
+    let connQuery = ctx.serviceClient
       .from('connections')
       .select('id, provider_type, encrypted_credentials, last_sync_cursor')
-      .eq('user_id', targetUserId)
+      .eq('subaccount_id', subaccountId)
       .neq('status', 'disconnected');
     if (connection_ids?.length) connQuery = connQuery.in('id', connection_ids);
 
@@ -304,7 +235,6 @@ Deno.serve(async (req: Request) => {
     if (connErr) throw connErr;
     if (!connections?.length) return jsonResponse({ synced: 0, connections: [] }, 200, cors);
 
-    // ── Sync each connection ──────────────────────────────────────────────
     const results: Array<{ connection_id: string; synced: number; next_cursor: string | null; error?: string }> = [];
 
     for (const conn of connections) {
@@ -328,13 +258,13 @@ Deno.serve(async (req: Request) => {
               occurred_at: tx.timestamp,
             })),
           );
-          const { error: upsertErr } = await serviceSupabase
+          const { error: upsertErr } = await ctx.serviceClient
             .from('encrypted_transactions')
             .upsert(rows, { onConflict: 'connection_id,external_id', ignoreDuplicates: true });
           if (upsertErr) throw upsertErr;
         }
 
-        await serviceSupabase
+        await ctx.serviceClient
           .from('connections')
           .update({ last_sync_at: new Date().toISOString(), last_sync_cursor: next_cursor, status: 'active', encrypted_last_error: null })
           .eq('id', conn.id);
@@ -344,8 +274,8 @@ Deno.serve(async (req: Request) => {
         const msg = e instanceof Error ? e.message : String(e);
         console.error(`[or-sync] connection ${conn.id}:`, msg);
         let encryptedErr: string | null = null;
-        try { encryptedErr = await encryptAes(msg.slice(0, 500), txnsKey); } catch { /* vault state issue */ }
-        await serviceSupabase.from('connections').update({ status: 'error', encrypted_last_error: encryptedErr }).eq('id', conn.id);
+        try { encryptedErr = await encryptAes(msg.slice(0, 500), txnsKey); } catch { /* ignore */ }
+        await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: encryptedErr }).eq('id', conn.id);
         results.push({ connection_id: conn.id, synced: 0, next_cursor: null, error: msg });
       }
     }

@@ -1,8 +1,11 @@
 // Shared HTTP helpers for Supabase Edge Functions
 
-// x-or-access-token allows cross-app callers (BitBooks V3, Personal) to
-// authenticate to or-sync without a Supabase JWT. Other functions ignore it.
-const ALLOWED_HEADERS = 'authorization, x-client-info, apikey, content-type, x-or-access-token';
+// Custom headers for OR's auth modes:
+//   x-platform-api-key — Plaid-style platform API key for SaaS integrators
+//                        (BitBooks V3, BitBooks Personal, future apps)
+//   x-or-access-token — DEPRECATED legacy cross-app token; kept temporarily
+//                        for backward compat during the platform redesign rollout
+const ALLOWED_HEADERS = 'authorization, x-client-info, apikey, content-type, x-platform-api-key, x-or-access-token';
 const ALLOWED_METHODS = 'GET, POST, OPTIONS';
 const MAX_BODY_BYTES = 1_000_000; // 1 MB
 
