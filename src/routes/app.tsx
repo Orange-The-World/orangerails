@@ -392,7 +392,7 @@ function AppHome() {
         );
         const { error: upsertErr } = await supabase
           .from("encrypted_transactions")
-          .upsert(rows, { onConflict: "connection_id,external_id" });
+          .upsert(rows, { onConflict: "connection_id,external_id", ignoreDuplicates: true });
         if (upsertErr) throw upsertErr;
       }
 
