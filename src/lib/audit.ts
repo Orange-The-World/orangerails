@@ -21,10 +21,15 @@ export async function logSecurityEvent(
   metadata?: Record<string, unknown>,
 ): Promise<void> {
   try {
-    await (supabase as SupabaseClient)
+    const { error } = await (supabase as SupabaseClient)
       .from("vault_security_events")
       .insert({ user_id: userId, event, metadata: metadata ?? null });
-  } catch {
-    // Intentionally swallowed — audit log failures must not break auth flows.
+    if (error) {
+      // Supabase returns HTTP errors in the response object, not as thrown
+      // exceptions, so a bare catch would miss RLS rejections.
+      console.warn("[VaultSecurityAudit] Insert rejected:", event, error);
+    }
+  } catch (err) {
+    console.warn("[VaultSecurityAudit] Failed to write event:", event, err);
   }
 }
