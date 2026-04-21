@@ -1,6 +1,8 @@
 // Shared HTTP helpers for Supabase Edge Functions
 
-const ALLOWED_HEADERS = 'authorization, x-client-info, apikey, content-type';
+// x-or-access-token allows cross-app callers (BitBooks V3, Personal) to
+// authenticate to or-sync without a Supabase JWT. Other functions ignore it.
+const ALLOWED_HEADERS = 'authorization, x-client-info, apikey, content-type, x-or-access-token';
 const ALLOWED_METHODS = 'GET, POST, OPTIONS';
 const MAX_BODY_BYTES = 1_000_000; // 1 MB
 
