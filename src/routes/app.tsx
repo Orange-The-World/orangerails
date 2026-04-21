@@ -5,7 +5,6 @@ import { useVault } from "@/context/VaultContext";
 import type { GrantSupabaseLike } from "@/context/VaultContext";
 import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
-import { PqcDebugPanel } from "@/components/PqcDebugPanel";
 
 export const Route = createFileRoute("/app")({
   component: AppHome,
@@ -157,7 +156,7 @@ function AppHome() {
         .from("workspace_admins")
         .select("id, admin_user_id, added_at")
         .eq("owner_user_id", session.user.id);
-      setCoAdmins((admins ?? []) as CoAdminRow[]);
+      const adminRows = (admins ?? []) as CoAdminRow[];
 
       // Load workspaces where this user is a co-admin.
       const { data: myAdminOf } = await supabase
@@ -165,10 +164,9 @@ function AppHome() {
         .select("owner_user_id")
         .eq("admin_user_id", session.user.id);
 
+      const workspaces: WorkspaceOption[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
         const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
-        // Fetch owner vault metas (workspace_key_id + kem_secret_wrapped for admin).
-        const workspaces: WorkspaceOption[] = [];
         for (const ownerId of ownerIds) {
           const { data: ownerMeta } = await supabase
             .from("user_vault_meta")
@@ -176,32 +174,44 @@ function AppHome() {
             .eq("user_id", ownerId)
             .single();
           if (!ownerMeta) continue;
-          const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as
-            | string
-            | null;
-          const kemSecretWrapped = (ownerMeta as Record<string, unknown>).kem_secret_wrapped as
-            | string
-            | null;
+          const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
+          const kemSecretWrapped = (ownerMeta as Record<string, unknown>).kem_secret_wrapped as string | null;
           if (!ownerKeyId || !kemSecretWrapped) continue;
-
-          // Fetch the wrapped blob for this admin.
           const { data: wdk } = await supabase
             .from("wrapped_data_keys")
             .select("wrapped_ciphertext")
             .eq("data_key_id", ownerKeyId)
             .maybeSingle();
           if (!wdk) continue;
-
           workspaces.push({
             ownerUserId: ownerId,
-            ownerEmail: ownerId, // best-effort — would need another lookup for email
+            ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
             wrappedCiphertextB64: (wdk as Record<string, unknown>).wrapped_ciphertext as string,
             kemSecretWrapped,
           });
         }
-        setAdminWorkspaces(workspaces);
       }
+
+      // Resolve emails for all connected users in one RPC call.
+      const allIds = [
+        ...adminRows.map((r) => r.admin_user_id),
+        ...workspaces.map((w) => w.ownerUserId),
+      ];
+      const emailMap = new Map<string, string>();
+      if (allIds.length > 0) {
+        const { data: emailRows } = await supabase.rpc("get_coadmin_emails", {
+          user_ids: allIds,
+        });
+        for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
+          emailMap.set(row.user_id, row.email);
+        }
+      }
+
+      setCoAdmins(adminRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
+      setAdminWorkspaces(
+        workspaces.map((w) => ({ ...w, ownerEmail: emailMap.get(w.ownerUserId) ?? w.ownerUserId })),
+      );
     })();
   }, [isUnlocked, navigate]);
 
@@ -517,8 +527,6 @@ function AppHome() {
           ✓ Session-based zero-knowledge active. Keys live only in this browser tab's memory.
         </div>
 
-        <PqcDebugPanel />
-
         {notice && <div className="rounded-md border p-3 text-sm bg-muted/30">{notice}</div>}
         {err && (
           <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
@@ -681,12 +689,21 @@ function AppHome() {
             if (result.workspaceKeyId !== workspaceKeyId) {
               setWorkspaceKeyId(result.workspaceKeyId);
             }
-            // Reload co-admin list.
+            // Reload co-admin list with resolved emails.
             const { data: admins } = await supabase
               .from("workspace_admins")
               .select("id, admin_user_id, added_at")
               .eq("owner_user_id", userId);
-            setCoAdmins((admins ?? []) as CoAdminRow[]);
+            const freshRows = (admins ?? []) as CoAdminRow[];
+            const freshIds = freshRows.map((r) => r.admin_user_id);
+            const emailMap = new Map<string, string>();
+            if (freshIds.length > 0) {
+              const { data: emailRows } = await supabase.rpc("get_coadmin_emails", { user_ids: freshIds });
+              for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
+                emailMap.set(row.user_id, row.email);
+              }
+            }
+            setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
             setNotice("Co-admin added. They'll see your data on their next unlock.");
           }}
         />
