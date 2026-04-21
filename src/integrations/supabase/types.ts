@@ -341,6 +341,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      create_or_access_token: { Args: { app_slug: string }; Returns: string }
       get_coadmin_emails: {
         Args: { user_ids: string[] }
         Returns: {
@@ -349,6 +350,17 @@ export type Database = {
         }[]
       }
       get_or_vault_salt: { Args: never; Returns: string }
+      list_or_access_tokens: {
+        Args: never
+        Returns: {
+          app_name: string
+          app_slug: string
+          granted_at: string
+          id: string
+          last_used_at: string
+          revoked_at: string
+        }[]
+      }
       lookup_user_for_coadmin: {
         Args: { target_email: string }
         Returns: {
