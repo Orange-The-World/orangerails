@@ -43,7 +43,8 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 async function importAesKey(base64Key: string): Promise<CryptoKey> {
   const keyBytes = base64ToBytes(base64Key);
-  return crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  // Cast to BufferSource to satisfy strict TS (Uint8Array<ArrayBufferLike> vs ArrayBuffer)
+  return crypto.subtle.importKey('raw', keyBytes as BufferSource, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
 
 /** Decrypt AES-256-GCM. Format: base64(IV[12] ++ ciphertext). Matches vault.ts. */
