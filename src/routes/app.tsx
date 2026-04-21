@@ -5,7 +5,7 @@ import { useVault } from "@/context/VaultContext";
 import type { GrantSupabaseLike } from "@/context/VaultContext";
 import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
-import { encryptString, decryptString } from "@/lib/vault";
+import { decryptString } from "@/lib/vault";
 
 function formatErrorVerbose(err: unknown): string {
   const msg = formatError(err);
@@ -103,11 +103,12 @@ function AppHome() {
     isUnlocked,
     lock,
     encryptCredentials,
-    decryptCredentials,
-    encryptText,
     decryptText,
-    encryptTransaction,
+    encryptText,
     decryptTransaction,
+    encryptTransaction,
+    exportCredentialsKeyForSync,
+    exportTransactionsKeyForSync,
     ensurePqcKeypairs,
     grantCoAdmin,
     revokeCoAdmin,
@@ -406,6 +407,15 @@ function AppHome() {
   // Actions
   // ------------------------------------------------------------------
 
+  // Export an arbitrary CryptoKey as base64 (for in-transit handoff to or-sync).
+  async function exportRawKeyAsBase64(key: CryptoKey): Promise<string> {
+    const raw = await crypto.subtle.exportKey("raw", key);
+    const bytes = new Uint8Array(raw);
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }
+
   async function handleAddConnection(params: { provider: string; label: string; apiKey: string }) {
     const {
       data: { session },
@@ -434,104 +444,68 @@ function AppHome() {
     setErr(null);
     try {
       const isAdminView = !!activeWorkspace;
-
-      // Decrypt the stored credentials using the appropriate key.
-      let apiKey: string;
-      let txnsKey: CryptoKey | null = null;
-      if (isAdminView) {
-        const credsKey = await getActiveCredentialsKey();
-        txnsKey = await getActiveTransactionsKey();
-        if (!credsKey || !txnsKey) throw new Error("Could not load workspace keys.");
-        const credsJson = await decryptString(conn.encrypted_credentials, credsKey);
-        const creds = JSON.parse(credsJson) as Record<string, string>;
-        apiKey = creds.api_key;
-      } else {
-        const creds = await decryptCredentials(conn.encrypted_credentials);
-        apiKey = creds.api_key;
-      }
-      if (!apiKey) throw new Error("Connection has no api_key field");
-
-      // Call the edge function (which calls the provider).
       const {
         data: { session },
       } = await supabase.auth.getSession();
       if (!session) throw new Error("Not authenticated");
 
-      const fnRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/sync-blink`, {
+      // Export the appropriate AES keys as base64 for in-transit handoff.
+      // The or-sync edge function uses them in memory only and never persists.
+      let credentials_key: string;
+      let transactions_key: string;
+
+      if (isAdminView) {
+        const credsKey = await getActiveCredentialsKey();
+        const txnsKey = await getActiveTransactionsKey();
+        if (!credsKey || !txnsKey) throw new Error("Could not load workspace keys.");
+        credentials_key = await exportRawKeyAsBase64(credsKey);
+        transactions_key = await exportRawKeyAsBase64(txnsKey);
+      } else {
+        credentials_key = await exportCredentialsKeyForSync();
+        transactions_key = await exportTransactionsKeyForSync();
+      }
+
+      // Call or-sync. The edge function handles decrypt → fetch → encrypt → upsert.
+      const body: Record<string, unknown> = {
+        connection_ids: [conn.id],
+        credentials_key,
+        transactions_key,
+      };
+      if (isAdminView && activeWorkspace) {
+        body.target_user_id = activeWorkspace.ownerUserId;
+      }
+
+      const fnRes = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/or-sync`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${session.access_token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ api_key: apiKey, cursor: conn.last_sync_cursor }),
+        body: JSON.stringify(body),
       });
+
       if (!fnRes.ok) {
         const detail = await fnRes.text().catch(() => "");
         throw new Error(`Sync failed (HTTP ${fnRes.status}): ${detail || "see console"}`);
       }
-      const { transactions: newTxs, next_cursor } = (await fnRes.json()) as {
-        transactions: NormalizedTransaction[];
-        next_cursor: string | null;
+
+      const result = (await fnRes.json()) as {
+        synced: number;
+        connections: Array<{ connection_id: string; synced: number; error?: string }>;
       };
 
-      // Encrypt each new transaction and upsert into encrypted_transactions.
-      // Dedup is handled by the (connection_id, external_id) unique index.
-      if (newTxs.length > 0) {
-        const rows = await Promise.all(
-          newTxs.map(async (tx) => ({
-            connection_id: conn.id,
-            external_id: tx.id,
-            encrypted_payload: isAdminView
-              ? await encryptString(JSON.stringify(tx), txnsKey!)
-              : await encryptTransaction(tx),
-            payload_key_version: 1,
-            occurred_at: toIsoTimestamp(tx.timestamp),
-          })),
-        );
-        const { error: upsertErr } = await supabase
-          .from("encrypted_transactions")
-          .upsert(rows, { onConflict: "connection_id,external_id", ignoreDuplicates: true });
-        if (upsertErr) throw upsertErr;
-      }
-
-      // Update connection last_sync_at and cursor.
-      const { error: updErr } = await supabase
-        .from("connections")
-        .update({
-          last_sync_at: new Date().toISOString(),
-          last_sync_cursor: next_cursor,
-          status: "active",
-          encrypted_last_error: null,
-        })
-        .eq("id", conn.id);
-      if (updErr) throw updErr;
+      // Surface any per-connection error from the edge function.
+      const connResult = result.connections.find((c) => c.connection_id === conn.id);
+      if (connResult?.error) throw new Error(connResult.error);
 
       setNotice(
-        `Synced ${newTxs.length} transaction${newTxs.length === 1 ? "" : "s"} from ${conn.decrypted_label || conn.provider_type}.`,
+        `Synced ${result.synced} transaction${result.synced === 1 ? "" : "s"} from ${conn.decrypted_label || conn.provider_type}.`,
       );
       await refresh();
     } catch (e) {
       const msg = formatErrorVerbose(e);
       console.error("[OrangeRails] Sync error:", e);
       setErr(msg);
-      // Encrypt the error message before storing — error bodies from
-      // upstream providers can contain identifying context.
-      let encrypted_last_error: string | null = null;
-      try {
-        if (activeWorkspace) {
-          const txnsKey = await getActiveTransactionsKey();
-          if (txnsKey) encrypted_last_error = await encryptString(msg.slice(0, 500), txnsKey);
-        } else {
-          encrypted_last_error = await encryptText(msg.slice(0, 500));
-        }
-      } catch {
-        /* vault locked; leave null */
-      }
-      await supabase
-        .from("connections")
-        .update({ status: "error", encrypted_last_error })
-        .eq("id", conn.id);
-      await refresh();
     } finally {
       setSyncingId(null);
     }
