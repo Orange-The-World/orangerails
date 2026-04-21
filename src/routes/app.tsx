@@ -6,6 +6,7 @@ import type { GrantSupabaseLike } from "@/context/VaultContext";
 import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
+import { logSecurityEvent } from "@/lib/audit";
 
 function formatErrorVerbose(err: unknown): string {
   const msg = formatError(err);
@@ -739,6 +740,7 @@ function AppHome() {
                                 ownerUserId: userId,
                                 supabase: supabase as unknown as GrantSupabaseLike,
                               });
+                              void logSecurityEvent(supabase, userId, "coadmin_revoked", { admin_user_id: a.admin_user_id });
                               setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
                               setNotice("Co-admin revoked.");
                             } catch (e) {
@@ -849,6 +851,7 @@ function AppHome() {
                         .eq("user_id", userId);
                       if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
                       setVaultEncMekCiphertext(newEncMekCiphertext);
+                      if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
                       setChangePwNewRecovery(newRecoveryCode);
                     } catch (ex) {
                       setChangePwErr(formatErrorVerbose(ex));
@@ -932,6 +935,7 @@ function AppHome() {
               existingKeyId: workspaceKeyId,
               supabase: supabase as unknown as GrantSupabaseLike,
             });
+            void logSecurityEvent(supabase, userId, "coadmin_granted", { target_email: targetEmail });
             if (result.workspaceKeyId !== workspaceKeyId) {
               setWorkspaceKeyId(result.workspaceKeyId);
             }

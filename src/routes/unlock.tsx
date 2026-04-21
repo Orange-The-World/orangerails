@@ -2,6 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
+import { logSecurityEvent } from "@/lib/audit";
 
 export const Route = createFileRoute("/unlock")({
   component: UnlockPage,
@@ -68,10 +69,13 @@ function UnlockPage() {
     );
 
     if (!ok) {
+      if (userId) void logSecurityEvent(supabase, userId, "vault_unlock_failed");
       setError("Wrong vault password. Try again.");
       setSubmitting(false);
       return;
     }
+
+    if (userId) void logSecurityEvent(supabase, userId, "vault_unlock", { key_version: vaultMeta.vault_key_version });
 
     // Fire-and-forget: if the user pre-dates the PQC rollout, backfill their
     // keys now. Failures here (network, RLS) are non-fatal for unlock — the

@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
 import { MIN_PASSWORD_LENGTH } from "@/lib/vault";
 import { formatError } from "@/lib/format-error";
+import { logSecurityEvent } from "@/lib/audit";
 
 export const Route = createFileRoute("/recover")({
   component: RecoverPage,
@@ -82,6 +83,8 @@ function RecoverPage() {
         })
         .eq("user_id", session.user.id);
       if (updateErr) throw updateErr;
+
+      void logSecurityEvent(supabase, session.user.id, "vault_recover");
 
       setNewRecoveryCode(freshCode);
       setStep("new-code");

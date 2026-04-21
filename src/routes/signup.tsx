@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
 import { MIN_PASSWORD_LENGTH } from "@/lib/vault";
 import { formatError } from "@/lib/format-error";
+import { logSecurityEvent } from "@/lib/audit";
 
 // ─── Inline password strength scorer ─────────────────────────────────────────
 // Entropy-based heuristic that scores passphrases fairly alongside
@@ -227,6 +228,8 @@ function SignupPage() {
         vault_key_version: keyVersion,
       });
       if (metaError) throw metaError;
+
+      void logSecurityEvent(supabase, userId, "vault_setup", { key_version: keyVersion });
 
       // Generate PQC keypairs (hybrid KEM + ML-DSA-65) on the fresh vault
       // meta row. Blocking here so every new user lands on /app with their
