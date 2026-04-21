@@ -93,79 +93,45 @@ CREATE POLICY "wrapped_data_keys: owner can delete their wrapped keys"
 -- The original policy ("owner_user_id = auth.uid()") stays in place;
 -- these policies ADD the co-admin path.
 
--- connections
+-- connections — ownership column is user_id (not owner_user_id).
 CREATE POLICY "connections: co-admins have full access"
   ON public.connections
   FOR ALL
   USING (
-    owner_user_id IN (
+    user_id IN (
       SELECT owner_user_id
       FROM public.workspace_admins
       WHERE admin_user_id = auth.uid()
     )
   )
   WITH CHECK (
-    owner_user_id IN (
+    user_id IN (
       SELECT owner_user_id
       FROM public.workspace_admins
       WHERE admin_user_id = auth.uid()
     )
   );
 
--- encrypted_transactions (if owner_user_id column exists; some schemas
--- derive ownership via connection_id — adjust policy accordingly)
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name   = 'encrypted_transactions'
-      AND column_name  = 'owner_user_id'
-  ) THEN
-    EXECUTE $q$
-      CREATE POLICY "encrypted_transactions: co-admins have full access"
-        ON public.encrypted_transactions
-        FOR ALL
-        USING (
-          owner_user_id IN (
-            SELECT owner_user_id
-            FROM public.workspace_admins
-            WHERE admin_user_id = auth.uid()
-          )
-        )
-        WITH CHECK (
-          owner_user_id IN (
-            SELECT owner_user_id
-            FROM public.workspace_admins
-            WHERE admin_user_id = auth.uid()
-          )
-        )
-    $q$;
-  ELSE
-    -- Fall back to connection-scoped ownership.
-    EXECUTE $q$
-      CREATE POLICY "encrypted_transactions: co-admins have full access"
-        ON public.encrypted_transactions
-        FOR ALL
-        USING (
-          connection_id IN (
-            SELECT c.id
-            FROM public.connections c
-            JOIN public.workspace_admins wa
-              ON wa.owner_user_id = c.owner_user_id
-            WHERE wa.admin_user_id = auth.uid()
-          )
-        )
-        WITH CHECK (
-          connection_id IN (
-            SELECT c.id
-            FROM public.connections c
-            JOIN public.workspace_admins wa
-              ON wa.owner_user_id = c.owner_user_id
-            WHERE wa.admin_user_id = auth.uid()
-          )
-        )
-    $q$;
-  END IF;
-END $$;
+-- encrypted_transactions — no direct user_id column; ownership flows through
+-- connection_id → connections.user_id.
+CREATE POLICY "encrypted_transactions: co-admins have full access"
+  ON public.encrypted_transactions
+  FOR ALL
+  USING (
+    connection_id IN (
+      SELECT c.id
+      FROM public.connections c
+      JOIN public.workspace_admins wa
+        ON wa.owner_user_id = c.user_id
+      WHERE wa.admin_user_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    connection_id IN (
+      SELECT c.id
+      FROM public.connections c
+      JOIN public.workspace_admins wa
+        ON wa.owner_user_id = c.user_id
+      WHERE wa.admin_user_id = auth.uid()
+    )
+  );
