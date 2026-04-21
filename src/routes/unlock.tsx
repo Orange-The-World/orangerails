@@ -100,8 +100,8 @@ function UnlockPage() {
         <div className="text-center space-y-2">
           <h1 className="text-2xl font-semibold">Unlock your vault</h1>
           <p className="text-sm text-muted-foreground">
-            Your vault password is not stored anywhere. If you've forgotten it, your data cannot be
-            recovered.
+            This is your <strong>vault password</strong> — separate from the account password you
+            used to sign in. It is not stored anywhere and cannot be reset.
           </p>
         </div>
 
@@ -120,11 +120,20 @@ function UnlockPage() {
               onChange={(e) => setVaultPassword(e.target.value)}
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
             />
+            <p className="text-xs text-muted-foreground">
+              Check your password manager (1Password, Bitwarden, KeePass) or wherever you saved
+              it during setup.
+            </p>
           </div>
 
           {error && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-              {error}
+            <div className="space-y-1">
+              <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                {error}
+              </div>
+              <p className="text-xs text-muted-foreground px-1">
+                Note: your vault password is not your account login password — they are different.
+              </p>
             </div>
           )}
 

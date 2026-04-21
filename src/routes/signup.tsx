@@ -311,6 +311,46 @@ function SignupPage() {
             <label htmlFor="vault-password" className="text-sm font-medium">
               Vault password <span className="text-orange-500">*</span>
             </label>
+            <p className="text-xs text-muted-foreground">
+              Separate from your account password. Encrypts all your data — we never see it and
+              cannot reset it.
+            </p>
+
+            {/* Passphrase generator — shown first as the recommended path */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const phrase = generatePassphrase();
+                  setGeneratedPhrase(phrase);
+                  setVaultPassword(phrase);
+                  setVaultPasswordConfirm(phrase);
+                  setPhraseCopied(false);
+                }}
+                className="text-xs font-medium text-primary hover:underline"
+              >
+                Generate a strong passphrase ↻
+              </button>
+              <span className="text-xs text-muted-foreground">— or type your own below</span>
+            </div>
+            {generatedPhrase && (
+              <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2">
+                <span className="flex-1 font-mono text-xs break-all">{generatedPhrase}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(generatedPhrase).then(() => {
+                      setPhraseCopied(true);
+                      setTimeout(() => setPhraseCopied(false), 2000);
+                    });
+                  }}
+                  className="shrink-0 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  {phraseCopied ? "Copied ✓" : "Copy"}
+                </button>
+              </div>
+            )}
+
             <input
               id="vault-password"
               type="password"
@@ -318,24 +358,16 @@ function SignupPage() {
               autoComplete="new-password"
               minLength={MIN_PASSWORD_LENGTH}
               value={vaultPassword}
-              onChange={(e) => setVaultPassword(e.target.value)}
+              onChange={(e) => {
+                setVaultPassword(e.target.value);
+                setGeneratedPhrase(null); // clear generated hint when user edits manually
+              }}
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
             />
-            <div className="rounded-md border border-orange-500/20 bg-orange-500/5 px-3 py-2 text-xs text-muted-foreground space-y-1">
-              <p className="font-medium text-foreground">What makes a good vault password?</p>
-              <ul className="list-disc list-inside space-y-0.5">
-                <li>At least {MIN_PASSWORD_LENGTH} characters — longer is much stronger</li>
-                <li>Mix of uppercase, lowercase, numbers, and symbols</li>
-                <li>Or use the passphrase generator below — it's the easiest path to "Very strong"</li>
-              </ul>
-              <p className="text-orange-600 font-medium">
-                We cannot recover this password — there is no reset.
-              </p>
-            </div>
 
             {/* Strength bar */}
             {vaultPassword.length > 0 && vaultScore !== null && (
-              <div className="space-y-1 pt-1">
+              <div className="space-y-1">
                 <div className="flex gap-1">
                   {[1, 2, 3, 4, 5].map((level) => (
                     <div
@@ -346,50 +378,22 @@ function SignupPage() {
                     />
                   ))}
                 </div>
-                <p
-                  className={`text-xs font-medium ${
-                    vaultScore < 4 ? "text-destructive" : "text-green-600"
-                  }`}
-                >
-                  {SCORE_LABELS[vaultScore]}
-                  {vaultScore < 4 && " — needs to reach Very strong"}
-                </p>
-              </div>
-            )}
-
-            {/* Passphrase generator */}
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => {
-                  const phrase = generatePassphrase();
-                  setGeneratedPhrase(phrase);
-                  setVaultPassword(phrase);
-                  setVaultPasswordConfirm(phrase);
-                  setPhraseCopied(false);
-                }}
-                className="text-xs text-primary hover:underline"
-              >
-                Generate strong passphrase
-              </button>
-              {generatedPhrase && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    navigator.clipboard.writeText(generatedPhrase).then(() => {
-                      setPhraseCopied(true);
-                      setTimeout(() => setPhraseCopied(false), 2000);
-                    });
-                  }}
-                  className="text-xs text-muted-foreground hover:text-foreground"
-                >
-                  {phraseCopied ? "Copied!" : "Copy"}
-                </button>
-              )}
-            </div>
-            {generatedPhrase && (
-              <div className="rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs break-all">
-                {generatedPhrase}
+                <div className="flex items-baseline justify-between">
+                  <p
+                    className={`text-xs font-medium ${
+                      vaultScore < 4 ? "text-destructive" : "text-green-600"
+                    }`}
+                  >
+                    {SCORE_LABELS[vaultScore]}
+                  </p>
+                  {vaultScore < 4 && (
+                    <p className="text-xs text-muted-foreground">
+                      {vaultScore < 2
+                        ? `Min ${MIN_PASSWORD_LENGTH} chars + mix of uppercase, numbers, symbols`
+                        : "Add length or more character variety"}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -425,6 +429,18 @@ function SignupPage() {
             )}
           </div>
 
+          {/* Storage guidance — shown once user has a password ready */}
+          {vaultPassword.length >= MIN_PASSWORD_LENGTH && vaultScore === 4 && (
+            <div className="rounded-md border border-blue-500/30 bg-blue-500/5 px-3 py-2.5 space-y-1.5">
+              <p className="text-xs font-semibold text-foreground">Save this password before continuing</p>
+              <div className="text-xs text-muted-foreground space-y-1">
+                <p><span className="font-medium text-foreground">Recommended:</span> Copy it into a password manager — 1Password, Bitwarden, or KeePass are all good options.</p>
+                <p><span className="font-medium text-foreground">Alternative:</span> Write it on paper and store it somewhere safe offline, separate from your computer.</p>
+                <p><span className="font-medium text-destructive">Never:</span> Save it in email, cloud notes, or a screenshot. Those can be compromised.</p>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-start gap-2 rounded-md border border-orange-500/40 bg-orange-500/5 p-3">
             <input
               id="ack"
@@ -434,9 +450,8 @@ function SignupPage() {
               className="mt-1"
             />
             <label htmlFor="ack" className="text-xs text-muted-foreground">
-              I understand that if I lose my vault password, my encrypted credentials and
-              transactions will be permanently unrecoverable. OrangeRails cannot reset a password it
-              never stored.
+              I have saved my vault password in a password manager or secure location. I understand
+              that OrangeRails stores only encrypted data and can never recover this password.
             </label>
           </div>
 

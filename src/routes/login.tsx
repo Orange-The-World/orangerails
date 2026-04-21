@@ -37,7 +37,8 @@ function LoginPage() {
         <div className="text-center space-y-2">
           <h1 className="text-2xl font-semibold">Sign in to OrangeRails</h1>
           <p className="text-sm text-muted-foreground">
-            After sign-in, you'll unlock your vault with your vault password.
+            OrangeRails uses two separate passwords: your <strong>account password</strong> here,
+            then your <strong>vault password</strong> on the next screen to decrypt your data.
           </p>
         </div>
 
