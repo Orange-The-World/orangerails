@@ -173,7 +173,7 @@ function AppHome() {
       // Load vault salt + workspace_key_id + co-admin list.
       const { data: meta } = await (supabase as any)
         .from("user_vault_meta")
-        .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, key_version")
+        .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
       if (meta) {
@@ -183,7 +183,7 @@ function AppHome() {
         setMyKemSecretWrapped(kemWrapped);
         setVaultEncMekCiphertext(((meta as Record<string, unknown>).enc_mek_ciphertext as string) ?? null);
         setVaultVerifierCiphertext(((meta as Record<string, unknown>).vault_verifier_ciphertext as string) ?? null);
-        setVaultKeyVersion(((meta as Record<string, unknown>).key_version as number) ?? 1);
+        setVaultKeyVersion(((meta as Record<string, unknown>).vault_key_version as number) ?? 1);
 
         // If PQC keys are missing (signup pre-dated the PQC rollout or an earlier
         // ensurePqcKeypairs call failed), generate them now so co-admin works.

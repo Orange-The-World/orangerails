@@ -289,11 +289,14 @@ Deno.serve(async (req: Request) => {
     const txnsKey = await importAesKey(transactions_key);
 
     // ── Fetch connections ─────────────────────────────────────────────────
+    // No status filter: a user clicking "Sync now" on an errored connection
+    // is explicitly asking us to retry. Only skip 'disconnected' once that
+    // state is meaningful (user-paused).
     let connQuery = serviceSupabase
       .from('connections')
       .select('id, provider_type, encrypted_credentials, last_sync_cursor')
       .eq('user_id', targetUserId)
-      .eq('status', 'active');
+      .neq('status', 'disconnected');
     if (connection_ids?.length) connQuery = connQuery.in('id', connection_ids);
 
     const { data: connections, error: connErr } = await connQuery;
