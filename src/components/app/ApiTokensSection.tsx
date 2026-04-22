@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { formatError } from "@/lib/format-error";
 import { logSecurityEvent } from "@/lib/audit";
+import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -113,6 +114,12 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
   const [fresh, setFresh] = useState<FreshToken | null>(null);
   const [savedAcked, setSavedAcked] = useState(false);
 
+  // Branded confirm state — replaces native window.confirm() prompts so the
+  // dialog renders with the OrangeRails theme. Holds the row id pending the
+  // corresponding action; null when no dialog is open.
+  const [pendingRevokeId, setPendingRevokeId] = useState<string | null>(null);
+  const [pendingRotateId, setPendingRotateId] = useState<string | null>(null);
+
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -131,8 +138,12 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
     void reload();
   }, [reload]);
 
-  const handleRevoke = async (id: string) => {
-    if (!confirm("Revoke this token? Apps using it will immediately lose access.")) return;
+  // Trigger the branded confirm dialog. The actual revoke/rotate work runs
+  // from confirmRevoke / confirmRotate below.
+  const handleRevoke = (id: string) => setPendingRevokeId(id);
+  const handleRotate = (id: string) => setPendingRotateId(id);
+
+  const confirmRevoke = async (id: string) => {
     setError(null);
     try {
       const { error: updErr } = await supabase
@@ -147,11 +158,7 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
     }
   };
 
-  const handleRotate = async (id: string) => {
-    if (!confirm(
-      "Rotate this token? The current token will stop working immediately and apps " +
-      "using it will need the new one.",
-    )) return;
+  const confirmRotate = async (id: string) => {
     setError(null);
     try {
       const [tokenRes, saltRes] = await Promise.all([
@@ -384,6 +391,34 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={pendingRevokeId !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingRevokeId(null);
+        }}
+        title="Revoke token?"
+        description="Apps using this token will immediately lose access. This cannot be undone, but you can generate a new token at any time."
+        confirmLabel="Revoke token"
+        destructive
+        onConfirm={async () => {
+          if (pendingRevokeId) await confirmRevoke(pendingRevokeId);
+        }}
+      />
+
+      <ConfirmDialog
+        open={pendingRotateId !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingRotateId(null);
+        }}
+        title="Rotate token?"
+        description="The current token will stop working immediately. Apps using it will need the new token before they can sync again."
+        confirmLabel="Rotate token"
+        destructive
+        onConfirm={async () => {
+          if (pendingRotateId) await confirmRotate(pendingRotateId);
+        }}
+      />
     </section>
   );
 }

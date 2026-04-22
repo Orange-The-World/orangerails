@@ -105,46 +105,50 @@ const TX_QUERY = `
 
 // Wallet-scoped query — used when source_wallets rows exist for a connection.
 //
-// ASSUMPTION about Blink's GraphQL schema (verify against introspection if it
-// breaks): the Galoy/Blink schema exposes `transactionsByWalletIds` directly
-// on the ConsumerAccount type (same level as the legacy `transactions` field
-// used above). This is the field name the Galoy mobile app uses to scope a
-// transactions feed to a subset of wallets. The argument is `walletIds:
-// [WalletId!]!` plus the standard `first` / `after` Relay paging arguments.
+// Blink's `me.defaultAccount` returns the abstract `Account` interface, which
+// does NOT expose `transactionsByWalletIds` (an earlier draft of this file
+// assumed it did and the live schema rejected the query at runtime).
 //
-// If Blink renames or deprecates this field we'll see a GraphQL error
-// surfaced via our existing error-handling path; fall back to the legacy
-// account-wide query and filter client-side as a last resort.
-const TX_QUERY_BY_WALLET_IDS = `
-  query TxnsByWallets($walletIds: [WalletId!]!, $first: Int!, $after: String) {
+// The schema instead exposes a `transactions(first, after)` connection on
+// each `Wallet` directly — which gives us natural per-tx wallet attribution
+// without server-side filtering. We fetch every wallet under the account in
+// a single round trip and filter client-side to the user's selected wallet
+// IDs. Each transaction is tagged with its source wallet from the response
+// shape itself, so no fan-out or post-hoc currency mapping is needed.
+const TX_QUERY_BY_WALLETS = `
+  query TxnsByWallets($first: Int!, $after: String) {
     me {
       defaultAccount {
-        transactionsByWalletIds(walletIds: $walletIds, first: $first, after: $after) {
-          edges {
-            cursor
-            node {
-              id
-              direction
-              status
-              memo
-              createdAt
-              settlementAmount
-              settlementCurrency
-              initiationVia {
-                __typename
-                ... on InitiationViaLn { paymentHash }
-                ... on InitiationViaOnChain { address }
-                ... on InitiationViaIntraLedger { counterPartyUsername }
-              }
-              settlementVia {
-                __typename
-                ... on SettlementViaLn { preImage }
-                ... on SettlementViaOnChain { transactionHash }
-                ... on SettlementViaIntraLedger { counterPartyUsername }
+        wallets {
+          id
+          walletCurrency
+          transactions(first: $first, after: $after) {
+            edges {
+              cursor
+              node {
+                id
+                direction
+                status
+                memo
+                createdAt
+                settlementAmount
+                settlementCurrency
+                initiationVia {
+                  __typename
+                  ... on InitiationViaLn { paymentHash }
+                  ... on InitiationViaOnChain { address }
+                  ... on InitiationViaIntraLedger { counterPartyUsername }
+                }
+                settlementVia {
+                  __typename
+                  ... on SettlementViaLn { preImage }
+                  ... on SettlementViaOnChain { transactionHash }
+                  ... on SettlementViaIntraLedger { counterPartyUsername }
+                }
               }
             }
+            pageInfo { hasNextPage endCursor }
           }
-          pageInfo { hasNextPage endCursor }
         }
       }
     }
@@ -261,11 +265,17 @@ async function fetchBlinkTransactionsAccountWide(
  * external wallet IDs. Each returned transaction is tagged with the
  * source wallet it belongs to so downstream consumers can route per-wallet.
  *
- * Blink's `transactionsByWalletIds` returns a flat feed across the requested
- * wallets without per-edge wallet attribution. To preserve source_wallet_id
- * we issue ONE request PER WALLET ID. This is the right tradeoff today: a
- * Blink account currently has 2 wallets (BTC + USD) so the fan-out is small,
- * and getting accurate routing matters more than saving one HTTP round trip.
+ * Implementation: ONE GraphQL request returns every wallet on the account
+ * with each wallet's `transactions` connection inlined. We then drop wallets
+ * the user didn't select and tag each kept transaction with its wallet's id.
+ *
+ * Pagination: each wallet has its own cursor. For the first iteration we
+ * request `first: 50` per wallet without an `after` cursor and let the next
+ * sync cycle pick up anything older — this is fine for small accounts (Blink
+ * accounts ship with 2 wallets) and avoids the complexity of carrying a
+ * per-wallet cursor map through `connections.last_sync_cursor`. We surface
+ * the largest endCursor so the connection still records progress, but the
+ * legacy cursor format doesn't actually drive per-wallet pagination yet.
  */
 async function fetchBlinkTransactionsByWalletIds(
   apiKey: string,
@@ -274,45 +284,64 @@ async function fetchBlinkTransactionsByWalletIds(
 ): Promise<{ transactions: NormalizedTransaction[]; next_cursor: string | null }> {
   if (walletIds.length === 0) return { transactions: [], next_cursor: null };
 
+  const variables: Record<string, unknown> = { first: 50 };
+  if (cursor) variables.after = cursor;
+
+  const res = await fetch(BLINK_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-KEY': apiKey },
+    body: JSON.stringify({ query: TX_QUERY_BY_WALLETS, variables }),
+  });
+  if (!res.ok) {
+    throw new Error(`Blink API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+  }
+
+  const json = (await res.json()) as {
+    data?: {
+      me?: {
+        defaultAccount?: {
+          wallets?: Array<{
+            id: string;
+            walletCurrency: string;
+            transactions?: BlinkTxConnection;
+          }>;
+        };
+      };
+    };
+    errors?: { message: string }[];
+  };
+  if (json.errors?.length) {
+    throw new Error(`Blink GraphQL (wallets.transactions): ${json.errors[0].message}`);
+  }
+
+  const wallets = json.data?.me?.defaultAccount?.wallets;
+  if (!wallets) throw new Error('Blink returned no wallets data');
+
+  // Filter to only the user-selected wallets, then flatten transactions
+  // tagged with their owning wallet id.
+  const selectedSet = new Set(walletIds);
   const allTxs: NormalizedTransaction[] = [];
   let combinedHasMore = false;
   let lastCursor: string | null = null;
 
-  for (const walletId of walletIds) {
-    const variables: Record<string, unknown> = { walletIds: [walletId], first: 50 };
-    if (cursor) variables.after = cursor;
-
-    const res = await fetch(BLINK_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-KEY': apiKey },
-      body: JSON.stringify({ query: TX_QUERY_BY_WALLET_IDS, variables }),
-    });
-    if (!res.ok) {
-      throw new Error(`Blink API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+  for (const wallet of wallets) {
+    if (!selectedSet.has(wallet.id)) continue;
+    const txConn = wallet.transactions;
+    if (!txConn) continue;
+    for (const edge of txConn.edges ?? []) {
+      allTxs.push(normalizeBlinkTx(edge.node, wallet.id));
     }
-
-    const json = (await res.json()) as {
-      data?: { me?: { defaultAccount?: { transactionsByWalletIds?: BlinkTxConnection } } };
-      errors?: { message: string }[];
-    };
-    if (json.errors?.length) {
-      throw new Error(`Blink GraphQL (transactionsByWalletIds): ${json.errors[0].message}`);
-    }
-
-    const txData = json.data?.me?.defaultAccount?.transactionsByWalletIds;
-    if (!txData) throw new Error('Blink returned no wallet transaction data');
-
-    for (const edge of txData.edges ?? []) {
-      allTxs.push(normalizeBlinkTx(edge.node, walletId));
-    }
-    if (txData.pageInfo?.hasNextPage) {
+    if (txConn.pageInfo?.hasNextPage) {
       combinedHasMore = true;
-      lastCursor = txData.pageInfo.endCursor ?? lastCursor;
+      // Track the most recent endCursor across selected wallets. See note
+      // above re: pagination — this is a placeholder until we move to a
+      // per-wallet cursor map.
+      if (txConn.pageInfo.endCursor) lastCursor = txConn.pageInfo.endCursor;
     }
   }
 
-  // Sort newest first to keep persisted order roughly consistent across
-  // the per-wallet fan-out. The DB upsert is idempotent on
+  // Sort newest first to keep persisted order roughly consistent across the
+  // per-wallet flatten. The DB upsert is idempotent on
   // (connection_id, external_id) so order only affects display ordering
   // before next_cursor advances.
   allTxs.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));

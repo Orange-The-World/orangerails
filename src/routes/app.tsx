@@ -8,6 +8,7 @@ import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
+import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
 import { WalletPickerStep, type DiscoveredWallet } from "@/components/app/WalletPickerStep";
 
@@ -177,6 +178,11 @@ function AppHome() {
   >(new Map());
   const [coAdminOpen, setCoAdminOpen] = useState(false);
   const [grantDialogOpen, setGrantDialogOpen] = useState(false);
+
+  // Confirmation dialog state — replaces native window.confirm() prompts
+  // so the dialog renders branded instead of "orangerails.com says…".
+  const [pendingDeleteConn, setPendingDeleteConn] = useState<Connection | null>(null);
+  const [pendingRevokeAdmin, setPendingRevokeAdmin] = useState<CoAdminRow | null>(null);
 
   // Security (change vault password) state
   const [securityOpen, setSecurityOpen] = useState(false);
@@ -726,13 +732,12 @@ function AppHome() {
     }
   }
 
-  async function handleDelete(conn: Connection) {
-    if (
-      !confirm(
-        `Delete the ${conn.decrypted_label || conn.provider_type} connection? Synced transactions for this connection will also be removed.`,
-      )
-    )
-      return;
+  /** Open the branded confirm dialog. The actual delete runs from confirmDeleteConnection. */
+  function handleDelete(conn: Connection) {
+    setPendingDeleteConn(conn);
+  }
+
+  async function confirmDeleteConnection(conn: Connection) {
     const { error: delErr } = await supabase.from("connections").delete().eq("id", conn.id);
     if (delErr) {
       setErr(formatError(delErr));
@@ -740,6 +745,26 @@ function AppHome() {
     }
     setNotice("Connection deleted.");
     await refresh();
+  }
+
+  async function confirmRevokeCoAdmin(a: CoAdminRow) {
+    if (!workspaceKeyId || !userId) {
+      setErr("Missing workspace key — try reloading.");
+      return;
+    }
+    try {
+      await revokeCoAdmin({
+        ownerWorkspaceKeyId: workspaceKeyId,
+        adminUserId: a.admin_user_id,
+        ownerUserId: userId,
+        supabase: supabase as unknown as GrantSupabaseLike,
+      });
+      void logSecurityEvent(supabase, userId, "coadmin_revoked", { admin_user_id: a.admin_user_id });
+      setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
+      setNotice("Co-admin revoked.");
+    } catch (e) {
+      setErr(formatError(e));
+    }
   }
 
   async function handleSignOut() {
@@ -936,31 +961,7 @@ function AppHome() {
                         </div>
                         <button
                           className="text-xs text-destructive hover:underline"
-                          onClick={async () => {
-                            if (
-                              !confirm(
-                                "Revoke this co-admin? They will lose access on their next unlock.",
-                              )
-                            )
-                              return;
-                            if (!workspaceKeyId || !userId) {
-                              setErr("Missing workspace key — try reloading.");
-                              return;
-                            }
-                            try {
-                              await revokeCoAdmin({
-                                ownerWorkspaceKeyId: workspaceKeyId,
-                                adminUserId: a.admin_user_id,
-                                ownerUserId: userId,
-                                supabase: supabase as unknown as GrantSupabaseLike,
-                              });
-                              void logSecurityEvent(supabase, userId, "coadmin_revoked", { admin_user_id: a.admin_user_id });
-                              setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
-                              setNotice("Co-admin revoked.");
-                            } catch (e) {
-                              setErr(formatError(e));
-                            }
-                          }}
+                          onClick={() => setPendingRevokeAdmin(a)}
                         >
                           Revoke
                         </button>
@@ -1154,6 +1155,38 @@ function AppHome() {
           }}
         />
       )}
+
+      <ConfirmDialog
+        open={pendingDeleteConn !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDeleteConn(null);
+        }}
+        title="Delete connection?"
+        description={
+          pendingDeleteConn
+            ? `Delete the ${pendingDeleteConn.decrypted_label || pendingDeleteConn.provider_type} connection? Synced transactions for this connection will also be removed. This cannot be undone.`
+            : ""
+        }
+        confirmLabel="Delete connection"
+        destructive
+        onConfirm={async () => {
+          if (pendingDeleteConn) await confirmDeleteConnection(pendingDeleteConn);
+        }}
+      />
+
+      <ConfirmDialog
+        open={pendingRevokeAdmin !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingRevokeAdmin(null);
+        }}
+        title="Revoke co-admin?"
+        description="They will lose access on their next unlock. This cannot be undone, but you can re-grant access at any time."
+        confirmLabel="Revoke access"
+        destructive
+        onConfirm={async () => {
+          if (pendingRevokeAdmin) await confirmRevokeCoAdmin(pendingRevokeAdmin);
+        }}
+      />
 
       {grantDialogOpen && userId && vaultSalt && (
         <GrantCoAdminDialog
