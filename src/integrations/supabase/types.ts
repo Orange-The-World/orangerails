@@ -204,6 +204,44 @@ export type Database = {
         }
         Relationships: []
       }
+      source_wallets: {
+        Row: {
+          connection_id: string
+          created_at: string
+          encrypted_metadata: string
+          encrypted_metadata_key_version: number
+          external_wallet_id: string
+          id: string
+          is_synced: boolean
+        }
+        Insert: {
+          connection_id: string
+          created_at?: string
+          encrypted_metadata: string
+          encrypted_metadata_key_version?: number
+          external_wallet_id: string
+          id?: string
+          is_synced?: boolean
+        }
+        Update: {
+          connection_id?: string
+          created_at?: string
+          encrypted_metadata?: string
+          encrypted_metadata_key_version?: number
+          external_wallet_id?: string
+          id?: string
+          is_synced?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "source_wallets_connection_id_fkey"
+            columns: ["connection_id"]
+            isOneToOne: false
+            referencedRelation: "connections"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       subaccounts: {
         Row: {
           created_at: string
