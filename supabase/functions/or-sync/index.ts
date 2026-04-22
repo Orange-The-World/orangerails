@@ -65,11 +65,61 @@ async function encryptAes(plaintext: string, key: CryptoKey): Promise<string> {
 
 const BLINK_API = 'https://api.blink.sv/graphql';
 
+// Legacy account-wide query — used when a connection has no source_wallets
+// rows (existing connections from before the per-wallet feature shipped).
 const TX_QUERY = `
   query Txns($first: Int!, $after: String) {
     me {
       defaultAccount {
         transactions(first: $first, after: $after) {
+          edges {
+            cursor
+            node {
+              id
+              direction
+              status
+              memo
+              createdAt
+              settlementAmount
+              settlementCurrency
+              initiationVia {
+                __typename
+                ... on InitiationViaLn { paymentHash }
+                ... on InitiationViaOnChain { address }
+                ... on InitiationViaIntraLedger { counterPartyUsername }
+              }
+              settlementVia {
+                __typename
+                ... on SettlementViaLn { preImage }
+                ... on SettlementViaOnChain { transactionHash }
+                ... on SettlementViaIntraLedger { counterPartyUsername }
+              }
+            }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+  }
+`;
+
+// Wallet-scoped query — used when source_wallets rows exist for a connection.
+//
+// ASSUMPTION about Blink's GraphQL schema (verify against introspection if it
+// breaks): the Galoy/Blink schema exposes `transactionsByWalletIds` directly
+// on the ConsumerAccount type (same level as the legacy `transactions` field
+// used above). This is the field name the Galoy mobile app uses to scope a
+// transactions feed to a subset of wallets. The argument is `walletIds:
+// [WalletId!]!` plus the standard `first` / `after` Relay paging arguments.
+//
+// If Blink renames or deprecates this field we'll see a GraphQL error
+// surfaced via our existing error-handling path; fall back to the legacy
+// account-wide query and filter client-side as a last resort.
+const TX_QUERY_BY_WALLET_IDS = `
+  query TxnsByWallets($walletIds: [WalletId!]!, $first: Int!, $after: String) {
+    me {
+      defaultAccount {
+        transactionsByWalletIds(walletIds: $walletIds, first: $first, after: $after) {
           edges {
             cursor
             node {
@@ -125,6 +175,12 @@ interface NormalizedTransaction {
   counterparty?: string | null;
   status?: string;
   timestamp: string;
+  /**
+   * Wallet this transaction came from. Set when sync was scoped via
+   * source_wallets; null for legacy/account-wide sync. Downstream consumers
+   * (V3, Personal) use this to route transactions per-wallet.
+   */
+  source_wallet_id: string | null;
 }
 
 function normalizeTimestamp(v: string | number): string {
@@ -133,7 +189,7 @@ function normalizeTimestamp(v: string | number): string {
   return new Date(String(v)).toISOString();
 }
 
-function normalizeBlinkTx(node: BlinkTxNode): NormalizedTransaction {
+function normalizeBlinkTx(node: BlinkTxNode, sourceWalletId: string | null): NormalizedTransaction {
   const direction: 'in' | 'out' = node.direction === 'RECEIVE' ? 'in' : 'out';
   const type: NormalizedTransaction['type'] =
     node.initiationVia.__typename === 'InitiationViaOnChain' ? 'onchain' : 'lightning';
@@ -154,10 +210,24 @@ function normalizeBlinkTx(node: BlinkTxNode): NormalizedTransaction {
     counterparty,
     status: node.status,
     timestamp: normalizeTimestamp(node.createdAt),
+    source_wallet_id: sourceWalletId,
   };
 }
 
-async function fetchBlinkTransactions(
+interface BlinkTxConnection {
+  edges?: { cursor: string; node: BlinkTxNode }[];
+  pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+}
+
+/**
+ * Legacy: fetch all transactions for the Blink account (no wallet filter).
+ * Used when a connection has no source_wallets rows.
+ *
+ * source_wallet_id will be null on every returned transaction since the legacy
+ * Blink response doesn't carry it back. Downstream consumers must treat null
+ * as "wallet membership unknown — pre-discovery connection."
+ */
+async function fetchBlinkTransactionsAccountWide(
   apiKey: string,
   cursor: string | null,
 ): Promise<{ transactions: NormalizedTransaction[]; next_cursor: string | null }> {
@@ -172,7 +242,7 @@ async function fetchBlinkTransactions(
   if (!res.ok) throw new Error(`Blink API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
 
   const json = await res.json() as {
-    data?: { me?: { defaultAccount?: { transactions?: { edges?: { cursor: string; node: BlinkTxNode }[]; pageInfo?: { hasNextPage: boolean; endCursor: string | null } } } } };
+    data?: { me?: { defaultAccount?: { transactions?: BlinkTxConnection } } };
     errors?: { message: string }[];
   };
   if (json.errors?.length) throw new Error(`Blink GraphQL: ${json.errors[0].message}`);
@@ -181,15 +251,97 @@ async function fetchBlinkTransactions(
   if (!txData) throw new Error('Blink returned no transaction data');
 
   return {
-    transactions: (txData.edges ?? []).map(e => normalizeBlinkTx(e.node)),
+    transactions: (txData.edges ?? []).map(e => normalizeBlinkTx(e.node, null)),
     next_cursor: txData.pageInfo?.hasNextPage ? (txData.pageInfo.endCursor ?? null) : null,
   };
 }
 
-type SyncFn = (key: string, cursor: string | null) => Promise<{ transactions: NormalizedTransaction[]; next_cursor: string | null }>;
+/**
+ * Wallet-scoped Blink fetch. Pulls transactions for ONLY the supplied
+ * external wallet IDs. Each returned transaction is tagged with the
+ * source wallet it belongs to so downstream consumers can route per-wallet.
+ *
+ * Blink's `transactionsByWalletIds` returns a flat feed across the requested
+ * wallets without per-edge wallet attribution. To preserve source_wallet_id
+ * we issue ONE request PER WALLET ID. This is the right tradeoff today: a
+ * Blink account currently has 2 wallets (BTC + USD) so the fan-out is small,
+ * and getting accurate routing matters more than saving one HTTP round trip.
+ */
+async function fetchBlinkTransactionsByWalletIds(
+  apiKey: string,
+  walletIds: string[],
+  cursor: string | null,
+): Promise<{ transactions: NormalizedTransaction[]; next_cursor: string | null }> {
+  if (walletIds.length === 0) return { transactions: [], next_cursor: null };
 
-const PROVIDERS: Record<string, SyncFn> = {
-  blink: fetchBlinkTransactions,
+  const allTxs: NormalizedTransaction[] = [];
+  let combinedHasMore = false;
+  let lastCursor: string | null = null;
+
+  for (const walletId of walletIds) {
+    const variables: Record<string, unknown> = { walletIds: [walletId], first: 50 };
+    if (cursor) variables.after = cursor;
+
+    const res = await fetch(BLINK_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-KEY': apiKey },
+      body: JSON.stringify({ query: TX_QUERY_BY_WALLET_IDS, variables }),
+    });
+    if (!res.ok) {
+      throw new Error(`Blink API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
+    }
+
+    const json = (await res.json()) as {
+      data?: { me?: { defaultAccount?: { transactionsByWalletIds?: BlinkTxConnection } } };
+      errors?: { message: string }[];
+    };
+    if (json.errors?.length) {
+      throw new Error(`Blink GraphQL (transactionsByWalletIds): ${json.errors[0].message}`);
+    }
+
+    const txData = json.data?.me?.defaultAccount?.transactionsByWalletIds;
+    if (!txData) throw new Error('Blink returned no wallet transaction data');
+
+    for (const edge of txData.edges ?? []) {
+      allTxs.push(normalizeBlinkTx(edge.node, walletId));
+    }
+    if (txData.pageInfo?.hasNextPage) {
+      combinedHasMore = true;
+      lastCursor = txData.pageInfo.endCursor ?? lastCursor;
+    }
+  }
+
+  // Sort newest first to keep persisted order roughly consistent across
+  // the per-wallet fan-out. The DB upsert is idempotent on
+  // (connection_id, external_id) so order only affects display ordering
+  // before next_cursor advances.
+  allTxs.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+
+  return {
+    transactions: allTxs,
+    next_cursor: combinedHasMore ? lastCursor : null,
+  };
+}
+
+interface ProviderAdapter {
+  /** Sync wallet-scoped (preferred when source_wallets rows exist). */
+  syncByWallets: (
+    key: string,
+    walletIds: string[],
+    cursor: string | null,
+  ) => Promise<{ transactions: NormalizedTransaction[]; next_cursor: string | null }>;
+  /** Sync account-wide (legacy fallback for pre-discovery connections). */
+  syncAccountWide: (
+    key: string,
+    cursor: string | null,
+  ) => Promise<{ transactions: NormalizedTransaction[]; next_cursor: string | null }>;
+}
+
+const PROVIDERS: Record<string, ProviderAdapter> = {
+  blink: {
+    syncByWallets: fetchBlinkTransactionsByWalletIds,
+    syncAccountWide: fetchBlinkTransactionsAccountWide,
+  },
 };
 
 // ─── Main handler ────────────────────────────────────────────────────────────
@@ -239,14 +391,39 @@ Deno.serve(async (req: Request) => {
 
     for (const conn of connections) {
       try {
-        const syncFn = PROVIDERS[conn.provider_type];
-        if (!syncFn) throw new Error(`Unknown provider: ${conn.provider_type}`);
+        const adapter = PROVIDERS[conn.provider_type];
+        if (!adapter) throw new Error(`Unknown provider: ${conn.provider_type}`);
 
         const credsJson = await decryptAes(conn.encrypted_credentials, credsKey);
         const { api_key } = JSON.parse(credsJson) as { api_key: string };
         if (!api_key) throw new Error('Connection has no api_key field');
 
-        const { transactions: newTxs, next_cursor } = await syncFn(api_key, conn.last_sync_cursor ?? null);
+        // Look up the user's source-wallet selection. If any rows exist with
+        // is_synced=true we go wallet-scoped; otherwise we fall back to the
+        // legacy account-wide path. We deliberately do NOT auto-backfill
+        // source_wallets here — legacy connections continue working untouched
+        // until the user opts in by re-running discovery from the UI.
+        const { data: sourceWallets, error: swErr } = await ctx.serviceClient
+          .from('source_wallets')
+          .select('external_wallet_id, is_synced')
+          .eq('connection_id', conn.id)
+          .eq('is_synced', true);
+
+        if (swErr) throw swErr;
+
+        let newTxs: NormalizedTransaction[];
+        let next_cursor: string | null;
+
+        if (sourceWallets && sourceWallets.length > 0) {
+          const walletIds = sourceWallets.map((w: { external_wallet_id: string }) => w.external_wallet_id);
+          const out = await adapter.syncByWallets(api_key, walletIds, conn.last_sync_cursor ?? null);
+          newTxs = out.transactions;
+          next_cursor = out.next_cursor;
+        } else {
+          const out = await adapter.syncAccountWide(api_key, conn.last_sync_cursor ?? null);
+          newTxs = out.transactions;
+          next_cursor = out.next_cursor;
+        }
 
         if (newTxs.length > 0) {
           const rows = await Promise.all(

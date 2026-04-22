@@ -8,6 +8,8 @@ import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
+import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
+import { WalletPickerStep, type DiscoveredWallet } from "@/components/app/WalletPickerStep";
 
 function formatErrorVerbose(err: unknown): string {
   const msg = formatError(err);
@@ -28,6 +30,19 @@ export const Route = createFileRoute("/app")({
 // Types — match the database schema.
 // ------------------------------------------------------------------
 
+/**
+ * One row of source_wallets, with metadata already decrypted client-side.
+ * The encrypted_metadata JSON is { currency, label? } — see migration
+ * 20260423000000_source_wallets.sql for the on-the-wire shape.
+ */
+interface DecryptedSourceWallet {
+  id: string;
+  external_wallet_id: string;
+  is_synced: boolean;
+  currency: string;
+  label?: string | null;
+}
+
 interface Connection {
   id: string;
   provider_type: string;
@@ -42,6 +57,16 @@ interface Connection {
   // Derived client-side after decryption. Never stored in the DB row.
   decrypted_label?: string | null;
   decrypted_last_error?: string | null;
+  /** Per-wallet sync selection. Empty array = legacy account-wide sync. */
+  source_wallets?: DecryptedSourceWallet[];
+}
+
+/** Raw source_wallets row as returned by the DB / edge function. */
+interface RawSourceWallet {
+  id: string;
+  external_wallet_id: string;
+  is_synced: boolean;
+  encrypted_metadata: string;
 }
 
 interface EncryptedTxRow {
@@ -128,6 +153,16 @@ function AppHome() {
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // Wallet picker state — second step of the add-connection flow.
+  // Set after a successful or-discover-wallets response, cleared when the
+  // user confirms a selection or skips. While non-null the picker is shown.
+  const [walletPicker, setWalletPicker] = useState<{
+    connectionId: string;
+    providerType: string;
+    providerName: string;
+    discovered: DiscoveredWallet[];
+  } | null>(null);
 
   // Co-admin state
   const [coAdmins, setCoAdmins] = useState<CoAdminRow[]>([]);
@@ -354,7 +389,28 @@ function AppHome() {
         .order("created_at", { ascending: false });
       if (connErr) throw connErr;
 
-      // Decrypt label + last_error using the appropriate key.
+      // Bulk-load source_wallets for all connections in one round trip
+      // (avoids N+1) and group them by connection_id for client-side join.
+      // RLS scopes these to connections owned by the current subaccount.
+      const connIdsForWallets = (conns ?? []).map((c) => (c as unknown as Connection).id);
+      let walletsByConn = new Map<string, RawSourceWallet[]>();
+      if (connIdsForWallets.length > 0) {
+        const { data: walletRows, error: walletErr } = await (supabase as any)
+          .from("source_wallets")
+          .select("id, connection_id, external_wallet_id, is_synced, encrypted_metadata")
+          .in("connection_id", connIdsForWallets);
+        if (walletErr) {
+          console.warn("Failed to load source_wallets — connections will show as legacy", walletErr);
+        } else {
+          for (const w of (walletRows ?? []) as Array<RawSourceWallet & { connection_id: string }>) {
+            const arr = walletsByConn.get(w.connection_id) ?? [];
+            arr.push(w);
+            walletsByConn.set(w.connection_id, arr);
+          }
+        }
+      }
+
+      // Decrypt label + last_error + source_wallets metadata using the appropriate key.
       const decryptedConns = await Promise.all(
         (conns ?? []).map(async (raw): Promise<Connection> => {
           const c = raw as unknown as Connection;
@@ -379,7 +435,28 @@ function AppHome() {
               decrypted_last_error = "(could not decrypt error — check browser console)";
             }
           }
-          return { ...c, decrypted_label, decrypted_last_error };
+          // Decrypt source-wallet metadata (currency + optional label).
+          const rawWallets = walletsByConn.get(c.id) ?? [];
+          const decryptedWallets: DecryptedSourceWallet[] = [];
+          for (const rw of rawWallets) {
+            try {
+              const plaintext = isAdminView
+                ? await decryptString(rw.encrypted_metadata, txnsKey!)
+                : await decryptText(rw.encrypted_metadata);
+              const meta = JSON.parse(plaintext) as { currency: string; label?: string };
+              decryptedWallets.push({
+                id: rw.id,
+                external_wallet_id: rw.external_wallet_id,
+                is_synced: rw.is_synced,
+                currency: meta.currency,
+                label: meta.label ?? null,
+              });
+            } catch (e) {
+              console.warn("Failed to decrypt source_wallet metadata", rw.id, e);
+              // Skip the badge rather than failing the whole row.
+            }
+          }
+          return { ...c, decrypted_label, decrypted_last_error, source_wallets: decryptedWallets };
         }),
       );
       setConnections(decryptedConns);
@@ -446,17 +523,135 @@ function AppHome() {
     const labelPlaintext = params.label || params.provider;
     const encrypted_label = await encryptText(labelPlaintext);
 
-    const { error: insertErr } = await supabase.from("connections").insert({
-      subaccount_id: mySubaccountId,
-      provider_type: params.provider,
-      encrypted_label,
-      encrypted_credentials: encrypted,
-      credentials_key_version: 1,
-      status: "active",
-    });
+    // 1. Create the connection row first so we have its UUID to pass to discovery.
+    const { data: created, error: insertErr } = await supabase
+      .from("connections")
+      .insert({
+        subaccount_id: mySubaccountId,
+        provider_type: params.provider,
+        encrypted_label,
+        encrypted_credentials: encrypted,
+        credentials_key_version: 1,
+        status: "active",
+      })
+      .select("id")
+      .single();
     if (insertErr) throw insertErr;
+    const newConnectionId = (created as { id: string } | null)?.id;
+    if (!newConnectionId) throw new Error("Connection insert returned no id.");
+
     setNotice("Connection added. Your API key is encrypted — we cannot read it.");
+
+    // 2. Refresh now so the row appears even if discovery fails or the user
+    // dismisses the picker. Then attempt discovery; failures here are
+    // non-fatal — the connection still works in legacy account-wide mode.
     await refresh();
+
+    try {
+      const credentials_key = await exportCredentialsKeyForSync();
+      const discRes = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/or-discover-wallets`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ connection_id: newConnectionId, credentials_key }),
+        },
+      );
+
+      if (!discRes.ok) {
+        const detail = await discRes.text().catch(() => "");
+        console.warn("[OrangeRails] Wallet discovery failed:", discRes.status, detail);
+        setNotice(
+          "Connection added. Wallet discovery failed — sync will pull all account transactions until you re-run discovery.",
+        );
+        return;
+      }
+
+      const { discovered_wallets } = (await discRes.json()) as {
+        discovered_wallets: DiscoveredWallet[];
+      };
+
+      const providerMeta = PROVIDERS.find((p) => p.type === params.provider);
+      setWalletPicker({
+        connectionId: newConnectionId,
+        providerType: params.provider,
+        providerName: providerMeta?.name ?? params.provider,
+        discovered: discovered_wallets ?? [],
+      });
+    } catch (e) {
+      console.warn("[OrangeRails] Discovery threw:", e);
+      setNotice(
+        "Connection added. Couldn't discover wallets right now — sync will pull all account transactions until you retry.",
+      );
+    }
+  }
+
+  /**
+   * Encrypt each picked wallet's metadata with ORK in the browser, then send
+   * the selection (plaintext IDs + ciphertext metadata) to or-source-wallets-set.
+   * On success the row's source_wallets become non-empty, switching or-sync
+   * to the wallet-scoped query path on its next call.
+   */
+  async function handleSaveWalletPicks(
+    selections: Array<DiscoveredWallet & { is_synced: boolean }>,
+  ) {
+    if (!walletPicker) return;
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (!session) throw new Error("Not authenticated");
+
+    const payloadWallets = await Promise.all(
+      selections.map(async (sel) => {
+        const metadataPlaintext = JSON.stringify({
+          currency: sel.currency,
+          ...(sel.label ? { label: sel.label } : {}),
+        });
+        const encrypted_metadata = await encryptText(metadataPlaintext);
+        return {
+          external_wallet_id: sel.external_wallet_id,
+          encrypted_metadata,
+          is_synced: sel.is_synced,
+        };
+      }),
+    );
+
+    const res = await fetch(
+      `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/or-source-wallets-set`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          connection_id: walletPicker.connectionId,
+          source_wallets: payloadWallets,
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`Failed to save wallet selection (HTTP ${res.status}): ${detail || "see console"}`);
+    }
+
+    const syncedCount = selections.filter((s) => s.is_synced).length;
+    setWalletPicker(null);
+    setNotice(
+      syncedCount === 0
+        ? "Wallet selection saved with no wallets active — sync is paused for this connection."
+        : `Wallet selection saved (${syncedCount} active). Click Sync now to pull transactions.`,
+    );
+    await refresh();
+  }
+
+  function handleSkipWalletPicks() {
+    setWalletPicker(null);
+    setNotice("No wallets selected — sync will pull all account transactions until you re-run discovery.");
   }
 
   async function handleSync(conn: Connection) {
@@ -945,6 +1140,21 @@ function AppHome() {
         />
       )}
 
+      {walletPicker && (
+        <WalletPickerStep
+          discoveredWallets={walletPicker.discovered}
+          providerName={walletPicker.providerName}
+          onCancel={handleSkipWalletPicks}
+          onConfirm={async (selections) => {
+            try {
+              await handleSaveWalletPicks(selections);
+            } catch (e) {
+              throw new Error(formatError(e));
+            }
+          }}
+        />
+      )}
+
       {grantDialogOpen && userId && vaultSalt && (
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
@@ -1008,17 +1218,18 @@ function ConnectionRow({
 
   return (
     <div className="rounded-md border p-4 flex items-center justify-between gap-4">
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 space-y-2">
         <div className="font-medium truncate">{conn.decrypted_label || conn.provider_type}</div>
-        <div className="text-xs text-muted-foreground flex items-center gap-2 mt-1">
+        <div className="text-xs text-muted-foreground flex items-center gap-2">
           <span className="uppercase">{conn.provider_type}</span>
           <span>·</span>
           <span className={statusColor}>{conn.status}</span>
           <span>·</span>
           <span>{conn.last_sync_at ? `Synced ${timeAgo(conn.last_sync_at)}` : "Never synced"}</span>
         </div>
+        <SourceWalletBadges wallets={conn.source_wallets ?? []} />
         {conn.decrypted_last_error && (
-          <div className="text-xs text-destructive mt-1 truncate">
+          <div className="text-xs text-destructive truncate">
             Last error: {conn.decrypted_last_error}
           </div>
         )}

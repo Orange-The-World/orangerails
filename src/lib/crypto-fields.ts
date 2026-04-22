@@ -52,6 +52,14 @@ export interface NormalizedTransaction {
   counterparty?: string | null;
   status?: string;
   timestamp: string;                // ISO 8601
+  /**
+   * Wallet this transaction came from (provider-opaque external_wallet_id).
+   * Set when the connection has a source_wallets selection and or-sync used
+   * the wallet-scoped query path; null/undefined for legacy connections that
+   * still use the account-wide sync path. Downstream consumers (V3, Personal)
+   * route per-wallet using this field.
+   */
+  source_wallet_id?: string | null;
   raw?: unknown;                    // original provider response for audit
 }
 
