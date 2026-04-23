@@ -464,9 +464,13 @@ Deno.serve(async (req: Request) => {
               occurred_at: tx.timestamp,
             })),
           );
+          // Update on conflict (don't skip): re-syncing a connection after a
+          // user adds source_wallets — or after any adapter improvement — must
+          // re-encrypt and overwrite the existing payload so newer fields
+          // (e.g. source_wallet_id) backfill onto pre-existing rows.
           const { error: upsertErr } = await ctx.serviceClient
             .from('encrypted_transactions')
-            .upsert(rows, { onConflict: 'connection_id,external_id', ignoreDuplicates: true });
+            .upsert(rows, { onConflict: 'connection_id,external_id', ignoreDuplicates: false });
           if (upsertErr) throw upsertErr;
         }
 
