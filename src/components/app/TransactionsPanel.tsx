@@ -93,7 +93,7 @@ function findWalletInfo(
   if (!tx.source_wallet_id) return null;
   for (const c of connections) {
     if (c.id !== tx.connection_id) continue;
-    const w = c.source_wallets?.find((sw) => sw.id === tx.source_wallet_id);
+    const w = c.source_wallets?.find((sw) => sw.external_wallet_id === tx.source_wallet_id);
     if (w) return { currency: w.currency, label: w.label };
   }
   return null;
