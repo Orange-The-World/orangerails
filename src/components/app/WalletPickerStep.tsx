@@ -68,8 +68,10 @@ export function WalletPickerStep({
 
   return (
     <div
+      // Backdrop click no longer closes the picker — protects the
+      // partially-configured connection from a stray click. The user must
+      // explicitly choose "Skip for now" or "Confirm selection".
       className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 px-4"
-      onClick={onCancel}
     >
       <div
         className="bg-background rounded-lg p-6 max-w-md w-full space-y-4"
