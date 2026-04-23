@@ -10,6 +10,7 @@ import { logSecurityEvent } from "@/lib/audit";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
+import { TransactionsPanel } from "@/components/app/TransactionsPanel";
 import { WalletPickerStep, type DiscoveredWallet } from "@/components/app/WalletPickerStep";
 
 function formatErrorVerbose(err: unknown): string {
@@ -469,11 +470,15 @@ function AppHome() {
 
       // Fetch only transactions belonging to the target user's connections.
       const connIds = (conns ?? []).map((c) => (c as unknown as Connection).id);
+      // Cap at 1000 client-side. The /app table now paginates + exports
+      // client-side, so we need enough rows for that to be useful, but we
+      // still bound the fetch so a runaway connection can't OOM the tab.
+      // When a user grows past 1k, we'll move to server-side pagination.
       const txQuery = supabase
         .from("encrypted_transactions")
         .select("id, connection_id, external_id, encrypted_payload, occurred_at")
         .order("occurred_at", { ascending: false })
-        .limit(50);
+        .limit(1000);
       const { data: txs, error: txErr } = connIds.length > 0
         ? await txQuery.in("connection_id", connIds)
         : await txQuery.in("connection_id", ["00000000-0000-0000-0000-000000000000"]);
@@ -921,7 +926,11 @@ function AppHome() {
               </p>
             </div>
           ) : (
-            <TransactionTable rows={transactions} />
+            <TransactionsPanel
+              rows={transactions}
+              connections={connections}
+              onNotice={setNotice}
+            />
           )}
         </section>
 
@@ -1282,41 +1291,6 @@ function ConnectionRow({
           Delete
         </button>
       </div>
-    </div>
-  );
-}
-
-function TransactionTable({ rows }: { rows: DecryptedTxRow[] }) {
-  return (
-    <div className="rounded-md border overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead className="bg-muted/50 text-xs uppercase">
-          <tr>
-            <th className="text-left px-3 py-2 font-medium">When</th>
-            <th className="text-left px-3 py-2 font-medium">Direction</th>
-            <th className="text-left px-3 py-2 font-medium">Type</th>
-            <th className="text-right px-3 py-2 font-medium">Amount (sats)</th>
-            <th className="text-left px-3 py-2 font-medium">Memo</th>
-            <th className="text-left px-3 py-2 font-medium">Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((tx) => (
-            <tr key={`${tx.connection_id}-${tx.id}`} className="border-t">
-              <td className="px-3 py-2 whitespace-nowrap">
-                {new Date(tx.occurred_at).toLocaleString()}
-              </td>
-              <td className="px-3 py-2">{tx.direction === "in" ? "↓ in" : "↑ out"}</td>
-              <td className="px-3 py-2">{tx.type}</td>
-              <td className="px-3 py-2 text-right font-mono">
-                {(tx.amount_sats ?? 0).toLocaleString()}
-              </td>
-              <td className="px-3 py-2 max-w-xs truncate">{tx.description ?? "—"}</td>
-              <td className="px-3 py-2">{tx.status ?? "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }
