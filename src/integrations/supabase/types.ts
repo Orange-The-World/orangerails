@@ -174,7 +174,10 @@ export type Database = {
       platforms: {
         Row: {
           api_key_hash: string
+          cors_origin: string | null
           created_at: string
+          display_brand_color: string | null
+          display_name: string | null
           id: string
           is_internal: boolean
           name: string
@@ -184,7 +187,10 @@ export type Database = {
         }
         Insert: {
           api_key_hash: string
+          cors_origin?: string | null
           created_at?: string
+          display_brand_color?: string | null
+          display_name?: string | null
           id?: string
           is_internal?: boolean
           name: string
@@ -194,7 +200,10 @@ export type Database = {
         }
         Update: {
           api_key_hash?: string
+          cors_origin?: string | null
           created_at?: string
+          display_brand_color?: string | null
+          display_name?: string | null
           id?: string
           is_internal?: boolean
           name?: string
