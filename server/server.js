@@ -22,6 +22,8 @@ app.post('/sync/blink', async (req, res) => {
 })
 
 const PORT = process.env.PORT || 3003
-app.listen(PORT, '127.0.0.1', () => {
+// Bind to all interfaces — when running in Docker, the compose port mapping
+// (127.0.0.1:3003:3003) keeps the host port localhost-only.
+app.listen(PORT, () => {
   console.log(`OrangeRails API listening on port ${PORT}`)
 })
