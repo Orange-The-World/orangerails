@@ -36,6 +36,45 @@ export const Route = createFileRoute("/pricing")({
       { name: "twitter:image", content: "/og-image.jpg" },
       { rel: "canonical", href: "https://orangerails.com/pricing" },
     ],
+    scripts: [
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "Product",
+          name: "OrangeRails",
+          description:
+            "Open-source, zero-knowledge, Bitcoin-first alternative to Plaid. Three pricing models with zero-knowledge mode included on every tier.",
+          brand: { "@type": "Brand", name: "OrangeRails" },
+          offers: {
+            "@type": "AggregateOffer",
+            priceCurrency: "USD",
+            lowPrice: "0",
+            highPrice: "199",
+            offerCount: 6,
+            offers: [
+              { "@type": "Offer", name: "Self-Host", price: "0", priceCurrency: "USD", description: "Free forever. Unlimited connections. You run the server." },
+              { "@type": "Offer", name: "Personal", price: "15", priceCurrency: "USD", description: "$15/year. Up to 5 connections. Hosted." },
+              { "@type": "Offer", name: "Prosumer", price: "99", priceCurrency: "USD", description: "$99/year. Unlimited connections, hourly sync, real-time webhooks." },
+              { "@type": "Offer", name: "Team", price: "49", priceCurrency: "USD", description: "$49/month. Up to 25 connections, 5 seats, audit log." },
+              { "@type": "Offer", name: "Business", price: "199", priceCurrency: "USD", description: "$199/month. Unlimited connections + seats, SSO, 99.9% SLA." },
+              { "@type": "Offer", name: "API", description: "Usage-based pricing for developers embedding the API." },
+            ],
+          },
+        }),
+      },
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          itemListElement: [
+            { "@type": "ListItem", position: 1, name: "Home", item: "https://orangerails.com/" },
+            { "@type": "ListItem", position: 2, name: "Pricing", item: "https://orangerails.com/pricing" },
+          ],
+        }),
+      },
+    ],
   }),
   component: PricingPage,
 });
