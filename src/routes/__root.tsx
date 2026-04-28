@@ -1,4 +1,7 @@
+import { useEffect } from "react";
 import { Outlet, Link, createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
+import posthog from "posthog-js";
+import { PostHogProvider } from "posthog-js/react";
 
 import appCss from "../styles.css?url";
 import { VaultProvider } from "@/context/VaultContext";
@@ -86,9 +89,21 @@ function RootShell({ children }: { children: React.ReactNode }) {
 }
 
 function RootComponent() {
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!import.meta.env.VITE_POSTHOG_KEY) return;
+    posthog.init(import.meta.env.VITE_POSTHOG_KEY, {
+      api_host: import.meta.env.VITE_POSTHOG_HOST || "https://eu.i.posthog.com",
+      person_profiles: "identified_only",
+      capture_pageview: true,
+    });
+  }, []);
+
   return (
-    <VaultProvider>
-      <Outlet />
-    </VaultProvider>
+    <PostHogProvider client={posthog}>
+      <VaultProvider>
+        <Outlet />
+      </VaultProvider>
+    </PostHogProvider>
   );
 }
