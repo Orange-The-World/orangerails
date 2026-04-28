@@ -91,9 +91,9 @@ function RootShell({ children }: { children: React.ReactNode }) {
 function RootComponent() {
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (!import.meta.env.VITE_POSTHOG_KEY) return;
-    posthog.init(import.meta.env.VITE_POSTHOG_KEY, {
-      api_host: import.meta.env.VITE_POSTHOG_HOST || "https://eu.i.posthog.com",
+    // phc_ keys are PostHog "Project API Keys" — write-only, public-safe
+    posthog.init("phc_ufrtHMjamZtq8ZhWA53ALx5KwSd3xKNbiDW9GH8UXNqn", {
+      api_host: "https://eu.i.posthog.com",
       person_profiles: "identified_only",
       capture_pageview: true,
     });
