@@ -50,6 +50,21 @@ export const Route = createRootRoute({
         href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap",
       },
     ],
+    scripts: [
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "Organization",
+          name: "OrangeRails",
+          url: "https://orangerails.com",
+          logo: "https://orangerails.com/favicon.svg",
+          description:
+            "Open-source, zero-knowledge, Bitcoin-first alternative to Plaid. Apache 2.0.",
+          sameAs: ["https://orangerails.com"],
+        }),
+      },
+    ],
   }),
   shellComponent: RootShell,
   component: RootComponent,
