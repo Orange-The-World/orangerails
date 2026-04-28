@@ -7,6 +7,7 @@ import { Features } from "@/components/landing/Features";
 import { Comparison } from "@/components/landing/Comparison";
 import { Integrations } from "@/components/landing/Integrations";
 import { WaitlistCta } from "@/components/landing/WaitlistCta";
+import { WhyOrangeRails } from "@/components/landing/WhyOrangeRails";
 import { Footer } from "@/components/landing/Footer";
 
 export const Route = createFileRoute("/")({
@@ -46,11 +47,88 @@ export const Route = createFileRoute("/")({
             "Open-source, zero-knowledge alternative to Plaid built for Bitcoin. Connect banks, exchanges, wallets, mining pools, and Lightning nodes through one normalized API.",
           url: "https://orangerails.com/",
           license: "https://www.apache.org/licenses/LICENSE-2.0",
+          featureList: [
+            "Open source (Apache 2.0)",
+            "Zero-knowledge architecture (AES-256-GCM, client-side key derivation)",
+            "Bitcoin-first: 22+ adapters",
+            "Self-hostable (Docker, Helm)",
+            "Normalized REST API across all adapters",
+            "Post-quantum ready (X25519 + ML-KEM-768, ML-DSA-65)",
+            "Published open spec",
+          ],
           offers: [
             { "@type": "Offer", name: "Self-host", price: "0", priceCurrency: "USD" },
             { "@type": "Offer", name: "Personal", price: "15", priceCurrency: "USD" },
+            { "@type": "Offer", name: "Prosumer", price: "99", priceCurrency: "USD" },
+            { "@type": "Offer", name: "Team", price: "49", priceCurrency: "USD" },
+            { "@type": "Offer", name: "Business", price: "199", priceCurrency: "USD" },
           ],
           publisher: { "@type": "Organization", name: "OrangeRails", url: "https://orangerails.com" },
+        }),
+      },
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          mainEntity: [
+            {
+              "@type": "Question",
+              name: "What is OrangeRails?",
+              acceptedAnswer: {
+                "@type": "Answer",
+                text: "OrangeRails is an open-source, zero-knowledge, Bitcoin-first alternative to Plaid. It connects bank accounts, exchanges, wallets, mining pools, and Lightning nodes through one normalized API, and is designed so the company itself cannot read user data.",
+              },
+            },
+            {
+              "@type": "Question",
+              name: "How is OrangeRails different from Plaid?",
+              acceptedAnswer: {
+                "@type": "Answer",
+                text: "Plaid stores credentials and reads transactions in plaintext on its own servers. OrangeRails encrypts credentials client-side with AES-256-GCM (key derived from the user via Argon2id) and uses a split-connector architecture so transaction details never leave the user's device unencrypted. It is also Apache 2.0 licensed and self-hostable.",
+              },
+            },
+            {
+              "@type": "Question",
+              name: "How does OrangeRails compare to Mesh Connect, Vezgo, and Koinly?",
+              acceptedAnswer: {
+                "@type": "Answer",
+                text: "OrangeRails is the only option in the category that is simultaneously open source, Bitcoin-first, zero-knowledge, self-hostable, and built around a published open spec. Mesh Connect and Vezgo are closed source aggregators. Koinly is tax-only and not accounting-grade.",
+              },
+            },
+            {
+              "@type": "Question",
+              name: "Is OrangeRails really zero-knowledge?",
+              acceptedAnswer: {
+                "@type": "Answer",
+                text: "Yes — and the guarantee is mechanical, not promissory. The code is public, encryption keys are derived from user-controlled secrets via Argon2id, and the server only ever sees ciphertext.",
+              },
+            },
+            {
+              "@type": "Question",
+              name: "What does OrangeRails cost?",
+              acceptedAnswer: {
+                "@type": "Answer",
+                text: "Free to self-host. $15/year for individuals (Personal), $99/year (Prosumer), $49/month for teams, $199/month for Business, and usage-based for developers embedding the API. Zero-knowledge mode is included on every tier.",
+              },
+            },
+            {
+              "@type": "Question",
+              name: "Which Bitcoin services does OrangeRails support?",
+              acceptedAnswer: {
+                "@type": "Answer",
+                text: "22+ adapters: Bitcoin Core, BTCPay Server, Blink/Galoy, bwt/xpub, mempool.space, Lightning (LND, CLN, LDK, Phoenix), exchanges (Kraken, Coinbase, River, Swan), banking (Strike, BitCredit), mining pools (Ocean, Braiins, ViaBTC), wallets (Sparrow, Fedi), and CSV/OFX/QIF file imports.",
+              },
+            },
+            {
+              "@type": "Question",
+              name: "Can I self-host OrangeRails?",
+              acceptedAnswer: {
+                "@type": "Answer",
+                text: "Yes. Docker and Helm. Self-hosted instances are fully supported and feature-equivalent to the hosted tier.",
+              },
+            },
+          ],
         }),
       },
     ],
@@ -67,6 +145,7 @@ function Index() {
         <PlaidProblem />
         <Features />
         <Comparison />
+        <WhyOrangeRails />
         <Integrations />
         <WaitlistCta />
       </main>
