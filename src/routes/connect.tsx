@@ -42,18 +42,79 @@
 
 import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
-import { deriveMEK, encryptString } from "@/lib/vault";
+import { deriveMEK, encryptString, importAesKey } from "@/lib/vault";
 import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
 
 // --------------------------------------------------------------------
-// Internal locking-password constant. NEVER displayed to users.
-// A future hardening pass will replace this with a real per-user secret.
+// Locking-key handoff.
+//
+// Preferred path: the integrating app derives the credentials_key and
+// transactions_key in the user's browser (Argon2id of their vault
+// password + per-org salt → HKDF) and hands the raw 32-byte keys to
+// this widget through the URL fragment as `#cred_key=B64&txn_key=B64`.
+// The fragment never reaches OR's server logs and we strip it from
+// history-state on first read. This is what BitBooks V2 sends.
+//
+// Fallback path: when no fragment is present (standalone demo, legacy
+// integrators), we fall back to a hardcoded test password + zero salt
+// so the widget remains demo-able without a host app. NEVER ship a
+// real integration that relies on the fallback — anyone running OR
+// would derive the same keys and could decrypt the credential.
 // --------------------------------------------------------------------
 const LINK_WIDGET_LOCK_PASSWORD = "orangerails-widget-default-lock-password-v1";
-// Fixed salt (base64 of 32 zero bytes) so the locking derivation is
-// deterministic across pop-ups for the same user. Future hardening will
-// swap in a per-user random salt minted at first setup.
 const LINK_WIDGET_LOCK_SALT_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+interface HandoffKeys {
+  credKey: CryptoKey;
+  txnKey: CryptoKey;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Read cred_key + txn_key from window.location.hash, import each as an
+ * AES-256-GCM CryptoKey, then wipe the fragment from URL state so the
+ * raw bytes are not visible to anything that walks history later.
+ *
+ * Returns null when either key is missing — caller falls back to the
+ * built-in test-password derivation.
+ */
+async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
+  const raw = window.location.hash.replace(/^#/, "");
+  if (!raw) return null;
+  const params = new URLSearchParams(raw);
+  const credB64 = params.get("cred_key");
+  const txnB64 = params.get("txn_key");
+  if (!credB64 || !txnB64) return null;
+
+  // Strip the fragment from the visible URL ASAP. We replace, not push,
+  // so the back stack is untouched.
+  try {
+    history.replaceState(
+      history.state,
+      "",
+      window.location.pathname + window.location.search,
+    );
+  } catch {
+    /* not fatal — the in-memory keys are what matter */
+  }
+
+  const credBytes = base64ToBytes(credB64);
+  const txnBytes = base64ToBytes(txnB64);
+  if (credBytes.length !== 32 || txnBytes.length !== 32) {
+    throw new Error("Handoff keys are the wrong size — expected 32 bytes each.");
+  }
+  const [credKey, txnKey] = await Promise.all([
+    importAesKey(credBytes.buffer as ArrayBuffer),
+    importAesKey(txnBytes.buffer as ArrayBuffer),
+  ]);
+  return { credKey, txnKey };
+}
 
 // --------------------------------------------------------------------
 // Search-param schema (validated below).
@@ -153,10 +214,16 @@ async function discoverBlinkWallets(apiKey: string): Promise<DiscoveredWallet[]>
   if (!Array.isArray(wallets)) {
     throw new Error("Blink returned no wallet data for that key.");
   }
-  return wallets.map((w) => ({
-    external_wallet_id: w.id,
-    currency: w.walletCurrency,
-  }));
+  const mapped: DiscoveredWallet[] = wallets
+    .filter((w): w is { id: string; walletCurrency: string } => !!w.id)
+    .map((w) => ({
+      external_wallet_id: w.id,
+      currency: w.walletCurrency,
+    }));
+  if (mapped.length === 0) {
+    throw new Error("Blink returned wallets without IDs. Please try a different API key.");
+  }
+  return mapped;
 }
 
 const DISCOVERERS: Record<string, (apiKey: string) => Promise<DiscoveredWallet[]>> = {
@@ -182,18 +249,26 @@ async function lockEverything(params: {
   apiKey: string;
   connectionLabel: string;
   picks: DiscoveredWallet[];
+  handoff: HandoffKeys | null;
 }): Promise<LockedConnection> {
-  const mek = await deriveMEK(LINK_WIDGET_LOCK_PASSWORD, LINK_WIDGET_LOCK_SALT_B64);
-  const credKey = await deriveSubkey(
-    mek,
-    HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1,
-    LINK_WIDGET_LOCK_SALT_B64,
-  );
-  const txnKey = await deriveSubkey(
-    mek,
-    HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1,
-    LINK_WIDGET_LOCK_SALT_B64,
-  );
+  let credKey: CryptoKey;
+  let txnKey: CryptoKey;
+  if (params.handoff) {
+    credKey = params.handoff.credKey;
+    txnKey = params.handoff.txnKey;
+  } else {
+    const mek = await deriveMEK(LINK_WIDGET_LOCK_PASSWORD, LINK_WIDGET_LOCK_SALT_B64);
+    credKey = await deriveSubkey(
+      mek,
+      HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1,
+      LINK_WIDGET_LOCK_SALT_B64,
+    );
+    txnKey = await deriveSubkey(
+      mek,
+      HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1,
+      LINK_WIDGET_LOCK_SALT_B64,
+    );
+  }
 
   const encrypted_label = await encryptString(params.connectionLabel, credKey);
   const encrypted_credentials = await encryptString(
@@ -288,6 +363,7 @@ function ConnectPage() {
   const [discovered, setDiscovered] = useState<DiscoveredWallet[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [handoffKeys, setHandoffKeys] = useState<HandoffKeys | null>(null);
 
   const providerLabel = useMemo(() => {
     if (search.provider === "blink") return "Blink";
@@ -310,6 +386,29 @@ function ConnectPage() {
       .then(setPlatform)
       .catch((err) => setLoadError(String(err.message ?? err)));
   }, [search.platform, search.app_user_id, search.provider, search.return_to]);
+
+  // ---- Read locking keys from URL fragment, once ------------------
+  // Fires on first mount only. The fragment is stripped from the URL
+  // immediately on read so the raw key bytes don't sit in window.location.
+  useEffect(() => {
+    let cancelled = false;
+    readHandoffKeysFromFragment()
+      .then((keys) => {
+        if (!cancelled) setHandoffKeys(keys);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setLoadError(
+            err instanceof Error
+              ? `Could not read the unlock keys from the page address: ${err.message}`
+              : "Could not read the unlock keys from the page address.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ---- Step 1 → 2: paste key, discover wallets --------------------
   async function handleContinueFromKey(e: React.FormEvent) {
@@ -358,6 +457,7 @@ function ConnectPage() {
         apiKey: apiKey.trim(),
         connectionLabel: platform.display_name,
         picks,
+        handoff: handoffKeys,
       });
 
       const result = await callLinkComplete({
