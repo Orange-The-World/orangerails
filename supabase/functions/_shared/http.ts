@@ -9,10 +9,32 @@ const ALLOWED_HEADERS = 'authorization, x-client-info, apikey, content-type, x-p
 const ALLOWED_METHODS = 'GET, POST, OPTIONS';
 const MAX_BODY_BYTES = 1_000_000; // 1 MB
 
+// Static CORS allow-list. Each registered platform that calls OR directly
+// from the browser (or-sync, or-transactions-list, etc.) needs its origin
+// listed here. The platforms.cors_origin column was added in the
+// 20260424120000 migration so this can move to a database-backed lookup
+// before the second external platform onboards (see V2-OR-INTEGRATION-PR-SPEC §10).
+//
+// Add entries by exact origin match (no trailing slash, no wildcards).
+const ALLOWED_ORIGINS: ReadonlySet<string> = new Set<string>([
+  // BitBooks V3 (existing)
+  'https://bitbooks-v3.lovable.app',
+  'https://app.bitbooks.com',
+  'http://localhost:5173',
+  // BitBooks V2 (added 2026-04-24 for thin-slice integration)
+  'http://localhost:3000',
+  // OrangeRails own /app + Lovable preview
+  'https://orangerails.com',
+  'https://orangerails-cloud.lovable.app',
+]);
+
 export function buildCorsHeaders(req: Request): Record<string, string> {
-  const origin = req.headers.get('Origin') ?? '*';
+  const origin = req.headers.get('Origin');
+  // If the request has a known Origin, echo it. Unknown / missing origins
+  // get '*' (callers without credentials still work, e.g. server-side fetch).
+  const allowedOrigin = origin && ALLOWED_ORIGINS.has(origin) ? origin : '*';
   return {
-    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Origin': allowedOrigin,
     'Access-Control-Allow-Headers': ALLOWED_HEADERS,
     'Access-Control-Allow-Methods': ALLOWED_METHODS,
     'Vary': 'Origin',
