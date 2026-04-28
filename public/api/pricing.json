@@ -1,0 +1,51 @@
+{
+  "$schema": "https://orangerails.com/schemas/pricing.json",
+  "product": "OrangeRails",
+  "currency": "USD",
+  "note": "Zero-knowledge mode is included on every tier — privacy is never paywalled.",
+  "tiers": [
+    {
+      "audience": "individuals",
+      "name": "Self-Host",
+      "price": 0,
+      "interval": "forever",
+      "features": ["Unlimited connections", "Zero-knowledge mode", "You run the server", "Daily sync", "Apache 2.0 licensed"]
+    },
+    {
+      "audience": "individuals",
+      "name": "Personal",
+      "price": 15,
+      "interval": "year",
+      "alt_price": { "amount": 2, "interval": "month" },
+      "features": ["Up to 5 connections", "Zero-knowledge mode", "Hosted", "Daily sync", "Community forum"]
+    },
+    {
+      "audience": "individuals",
+      "name": "Prosumer",
+      "price": 99,
+      "interval": "year",
+      "alt_price": { "amount": 10, "interval": "month" },
+      "features": ["Unlimited connections", "Zero-knowledge mode", "Hosted", "Hourly sync + real-time webhooks", "Email support (72hr)"]
+    },
+    {
+      "audience": "teams",
+      "name": "Team",
+      "price": 49,
+      "interval": "month",
+      "features": ["Up to 25 connections", "5 seats", "Zero-knowledge mode", "Audit log", "Daily backups", "Email support (24hr)"]
+    },
+    {
+      "audience": "teams",
+      "name": "Business",
+      "price": 199,
+      "interval": "month",
+      "features": ["Unlimited connections", "Unlimited seats", "Zero-knowledge mode", "SAML / OIDC SSO", "Audit log + retention", "Priority support (4hr)", "99.9% SLA", "Verified partner-signed adapters"]
+    },
+    {
+      "audience": "developers",
+      "name": "API",
+      "price_model": "usage-based",
+      "features": ["Pay per successful sync", "REST API + webhooks", "Embed inside another product"]
+    }
+  ]
+}
