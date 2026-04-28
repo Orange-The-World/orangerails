@@ -1,0 +1,23 @@
+# Caddy snippet for OrangeRails public API
+# Placed at /opt/orangerails/server/caddy/api.orangerails.com.caddy on the host
+# Auto-imported by /etc/caddy/Caddyfile via `import /opt/*/caddy/*.caddy`
+#
+# After editing: sudo systemctl reload caddy
+
+api.orangerails.com {
+    log {
+        output file /var/log/caddy/orangerails-api-access.json
+        format json
+    }
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        -Server
+        -X-Powered-By
+    }
+
+    reverse_proxy 127.0.0.1:3003
+}

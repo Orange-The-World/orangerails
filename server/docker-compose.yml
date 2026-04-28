@@ -1,0 +1,17 @@
+# OrangeRails API — self-hosted on bb-support
+# Runs the Express adapter server (Blink connector + future adapters)
+# Deploy: cd /opt/orangerails && ./deploy.sh
+#
+# Caddy on the host proxies api.orangerails.com → 127.0.0.1:3003
+
+services:
+  orangerails-api:
+    build: .
+    image: orangerails-api:latest
+    container_name: orangerails-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3003:3003"
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
