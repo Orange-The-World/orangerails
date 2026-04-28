@@ -28,6 +28,33 @@ export const Route = createFileRoute("/open-source")({
       { name: "twitter:image", content: "/og-image.jpg" },
       { rel: "canonical", href: "https://orangerails.com/open-source" },
     ],
+    scripts: [
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "SoftwareSourceCode",
+          name: "OrangeRails",
+          description:
+            "Open-source, zero-knowledge, Bitcoin-first alternative to Plaid. Apache 2.0 licensed.",
+          codeRepository: "https://github.com/orangerails",
+          programmingLanguage: ["TypeScript", "Rust"],
+          license: "https://www.apache.org/licenses/LICENSE-2.0",
+          author: { "@type": "Organization", name: "OrangeRails" },
+        }),
+      },
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          itemListElement: [
+            { "@type": "ListItem", position: 1, name: "Home", item: "https://orangerails.com/" },
+            { "@type": "ListItem", position: 2, name: "Open Source", item: "https://orangerails.com/open-source" },
+          ],
+        }),
+      },
+    ],
   }),
   component: OpenSourcePage,
 });

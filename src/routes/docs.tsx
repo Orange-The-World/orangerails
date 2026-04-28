@@ -29,6 +29,32 @@ export const Route = createFileRoute("/docs")({
       { name: "twitter:image", content: "/og-image.jpg" },
       { rel: "canonical", href: "https://orangerails.com/docs" },
     ],
+    scripts: [
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "TechArticle",
+          headline: "OrangeRails developer documentation",
+          description:
+            "Quickstart, REST API reference, self-hosting with Docker and Helm, adapter SDK, and zero-knowledge architecture.",
+          author: { "@type": "Organization", name: "OrangeRails" },
+          about: { "@type": "SoftwareApplication", name: "OrangeRails", applicationCategory: "FinanceApplication" },
+          url: "https://orangerails.com/docs",
+        }),
+      },
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          itemListElement: [
+            { "@type": "ListItem", position: 1, name: "Home", item: "https://orangerails.com/" },
+            { "@type": "ListItem", position: 2, name: "Docs", item: "https://orangerails.com/docs" },
+          ],
+        }),
+      },
+    ],
   }),
   component: DocsPage,
 });

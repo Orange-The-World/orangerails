@@ -33,6 +33,44 @@ export const Route = createFileRoute("/integrations")({
       { name: "twitter:image", content: "/og-image.jpg" },
       { rel: "canonical", href: "https://orangerails.com/integrations" },
     ],
+    scripts: [
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "ItemList",
+          name: "OrangeRails adapters",
+          description:
+            "22+ Bitcoin and financial adapters available through the OrangeRails normalized API.",
+          numberOfItems: ADAPTERS.length,
+          itemListElement: ADAPTERS.map((a, i) => ({
+            "@type": "ListItem",
+            position: i + 1,
+            item: {
+              "@type": "SoftwareApplication",
+              name: a.name,
+              applicationCategory: a.category,
+              description: a.description,
+              additionalProperty: [
+                { "@type": "PropertyValue", name: "status", value: a.status },
+                { "@type": "PropertyValue", name: "adapterId", value: a.id },
+              ],
+            },
+          })),
+        }),
+      },
+      {
+        type: "application/ld+json",
+        children: JSON.stringify({
+          "@context": "https://schema.org",
+          "@type": "BreadcrumbList",
+          itemListElement: [
+            { "@type": "ListItem", position: 1, name: "Home", item: "https://orangerails.com/" },
+            { "@type": "ListItem", position: 2, name: "Integrations", item: "https://orangerails.com/integrations" },
+          ],
+        }),
+      },
+    ],
   }),
   component: IntegrationsPage,
 });
