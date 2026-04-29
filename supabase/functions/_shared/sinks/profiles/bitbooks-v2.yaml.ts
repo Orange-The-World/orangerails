@@ -205,7 +205,9 @@ status_to_v2:
   COMPLETE:   COMPLETE
   COMPLETED:  COMPLETE
   SETTLED:    COMPLETE
+  CONFIRMED:  COMPLETE   # on-chain (xpub adapter) — block-confirmed
   PENDING:    PENDING
+  UNCONFIRMED: PENDING   # on-chain mempool tx
   FAILURE:    FAILED
   FAILED:     FAILED
   EXPIRED:    FAILED

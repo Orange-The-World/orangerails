@@ -40,8 +40,8 @@
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
+import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
 
-const ALLOWED_PROVIDERS = new Set(["blink"]);
 const MAX_WALLETS_PER_CALL = 50;
 const MAX_ENCRYPTED_METADATA_LEN = 8192;
 
@@ -91,9 +91,9 @@ Deno.serve(async (req: Request) => {
     ) {
       return jsonResponse({ error: "app_user_id required (string, ≤256 chars)" }, 400, cors);
     }
-    if (!body.provider_type || !ALLOWED_PROVIDERS.has(body.provider_type)) {
+    if (!body.provider_type || !getProvider(body.provider_type)) {
       return jsonResponse(
-        { error: `provider_type must be one of: ${[...ALLOWED_PROVIDERS].join(", ")}` },
+        { error: `provider_type must be one of: ${listProviderSlugs().join(", ")}` },
         400,
         cors,
       );

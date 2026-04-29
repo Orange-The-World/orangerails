@@ -1,10 +1,11 @@
 /**
  * or-discover-wallets — list a connection's available wallets from the upstream provider.
  *
- * Pure pass-through: decrypts the connection's stored API key in memory using
- * the caller-supplied ORK, queries the provider for the list of wallets, and
- * returns the plaintext discovery result. The server NEVER stores discovered
- * wallets — storage happens via or-source-wallets-set after the user picks.
+ * Pure pass-through: decrypts the connection's stored credentials in memory
+ * using the caller-supplied ORK, delegates to the registered ProviderAdapter
+ * for the connection's provider_type, and returns the plaintext discovery
+ * result. The server NEVER stores discovered wallets — storage happens via
+ * or-source-wallets-set after the user picks.
  *
  * Auth: same dual-mode as or-sync (X-Platform-API-Key OR Supabase JWT).
  *
@@ -19,8 +20,9 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
+import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 
-// ─── AES-256-GCM helpers (same as or-sync — kept inline for edge-fn isolation) ──
+// ─── AES-256-GCM helpers (kept inline for edge-fn isolation) ────────────────
 
 function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
@@ -41,69 +43,6 @@ async function decryptAes(ciphertextB64: string, key: CryptoKey): Promise<string
   const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipher);
   return new TextDecoder().decode(plain);
 }
-
-// ─── Provider-agnostic discovery shape ──────────────────────────────────────
-
-interface DiscoveredWallet {
-  external_wallet_id: string;
-  currency: string;
-  label?: string;
-}
-
-type DiscoverFn = (apiKey: string) => Promise<DiscoveredWallet[]>;
-
-// ─── Blink adapter ──────────────────────────────────────────────────────────
-
-const BLINK_API = 'https://api.blink.sv/graphql';
-
-const BLINK_DISCOVER_QUERY = `
-  query DiscoverWallets {
-    me {
-      defaultAccount {
-        wallets {
-          id
-          walletCurrency
-        }
-      }
-    }
-  }
-`;
-
-interface BlinkWalletNode {
-  id: string;
-  walletCurrency: string;
-}
-
-async function discoverBlinkWallets(apiKey: string): Promise<DiscoveredWallet[]> {
-  const res = await fetch(BLINK_API, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-API-KEY': apiKey },
-    body: JSON.stringify({ query: BLINK_DISCOVER_QUERY }),
-  });
-  if (!res.ok) {
-    throw new Error(`Blink API ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
-  }
-
-  const json = (await res.json()) as {
-    data?: { me?: { defaultAccount?: { wallets?: BlinkWalletNode[] } } };
-    errors?: { message: string }[];
-  };
-  if (json.errors?.length) throw new Error(`Blink GraphQL: ${json.errors[0].message}`);
-
-  const wallets = json.data?.me?.defaultAccount?.wallets;
-  if (!Array.isArray(wallets)) throw new Error('Blink returned no wallet data');
-
-  return wallets.map(w => ({
-    external_wallet_id: w.id,
-    currency: w.walletCurrency, // 'BTC' or 'USD'
-  }));
-}
-
-// ─── Provider dispatch (open/closed: add new providers here) ────────────────
-
-const DISCOVERERS: Record<string, DiscoverFn> = {
-  blink: discoverBlinkWallets,
-};
 
 // ─── Main handler ───────────────────────────────────────────────────────────
 
@@ -150,18 +89,17 @@ Deno.serve(async (req: Request) => {
     }
     if (!conn) return jsonResponse({ error: 'Connection not found' }, 404, cors);
 
-    const discoverFn = DISCOVERERS[conn.provider_type as string];
-    if (!discoverFn) {
+    const adapter = getProvider(conn.provider_type as string);
+    if (!adapter) {
       return jsonResponse({ error: `Unknown provider: ${conn.provider_type}` }, 400, cors);
     }
 
-    // Decrypt API key in memory only; never persisted.
+    // Decrypt credentials in memory only; never persisted.
     const credsKey = await importAesKey(body.credentials_key);
     const credsJson = await decryptAes(conn.encrypted_credentials as string, credsKey);
-    const { api_key } = JSON.parse(credsJson) as { api_key: string };
-    if (!api_key) return jsonResponse({ error: 'Connection has no api_key field' }, 500, cors);
+    const credentials = parseCredentials(adapter, credsJson);
 
-    const discovered = await discoverFn(api_key);
+    const discovered = await adapter.discoverWallets(credentials);
 
     return jsonResponse({ discovered_wallets: discovered }, 200, cors);
   } catch (err) {

@@ -17,43 +17,12 @@
  */
 
 /**
- * Internal canonical shape produced by or-sync's source adapters today.
- *
- * MIGRATION NOTE: this is OR's de-facto v0 canonical model. The protocol
- * doc's CanonicalTransaction (with `amount: { value: string; unit: string }`,
- * `fees[]`, `fiat_equivalent`, `trade` extension, `cost_basis`, etc.) is the
- * forward target. We migrate by extending NormalizedTransaction over time
- * while keeping the field names sink adapters depend on stable.
+ * Canonical transaction shape — single source of truth lives in
+ * `_shared/providers/types.ts` (sources produce, sinks consume). Re-exported
+ * here so sink modules can keep their existing import path.
  */
-export interface NormalizedTransaction {
-  /** Provider-side stable id, used as `external_id` for dedup. */
-  id: string;
-  /** Provider slug — 'blink' today, 'strike' / 'flash' / etc. later. */
-  adapter: string;
-  /** Direction relative to the connected account. */
-  direction: 'in' | 'out';
-  /** Transaction kind. Will expand as more sources land. */
-  type: 'lightning' | 'onchain' | 'trade' | 'deposit' | 'withdrawal' | 'fee';
-  /** BTC amount in satoshis when the source is denominated in BTC. */
-  amount_sats?: number;
-  /** Non-BTC amount when the source returns USD/EUR/etc. */
-  amount?: number;
-  /** ISO 4217 code or BTC unit when amount is set. */
-  currency?: string;
-  /** Free-text memo from the provider. */
-  description?: string | null;
-  /** Counterparty handle or address (Lightning username, on-chain address, etc.). */
-  counterparty?: string | null;
-  /** Provider-reported status (mapped per-provider). */
-  status?: string;
-  /** ISO 8601 timestamp the value moved at the provider. */
-  timestamp: string;
-  /**
-   * The connection-level wallet this transaction came from. Set when sync
-   * was scoped via source_wallets; null for legacy account-wide sync.
-   */
-  source_wallet_id: string | null;
-}
+import type { NormalizedTransaction } from '../providers/types.ts';
+export type { NormalizedTransaction };
 
 /**
  * Per-transaction context the sink needs to shape its rows correctly.

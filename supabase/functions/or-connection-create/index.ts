@@ -8,7 +8,8 @@
  *
  * POST body:
  *   subaccount_id?:        uuid    required in platform mode
- *   provider_type:         string  'blink' for now (others added later)
+ *   provider_type:         string  any registered provider slug — see
+ *                                   _shared/providers/dispatch.ts
  *   encrypted_label:       string  base64 AES-256-GCM (ORK-encrypted)
  *   encrypted_credentials: string  base64 AES-256-GCM (ORK-encrypted)
  *
@@ -18,8 +19,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
-
-const ALLOWED_PROVIDERS = new Set(['blink']);
+import { getProvider, listProviderSlugs } from '../_shared/providers/dispatch.ts';
 
 Deno.serve(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -40,9 +40,9 @@ Deno.serve(async (req: Request) => {
       encrypted_credentials?: string;
     };
 
-    if (!body.provider_type || !ALLOWED_PROVIDERS.has(body.provider_type)) {
+    if (!body.provider_type || !getProvider(body.provider_type)) {
       return jsonResponse(
-        { error: `provider_type must be one of: ${[...ALLOWED_PROVIDERS].join(', ')}` },
+        { error: `provider_type must be one of: ${listProviderSlugs().join(', ')}` },
         400, cors,
       );
     }
