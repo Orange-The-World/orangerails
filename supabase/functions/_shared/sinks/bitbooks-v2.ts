@@ -178,13 +178,22 @@ export const bitbooksV2Sink: SinkAdapter = {
     // JournalEntryLines — debit + credit pair. Account roles came from the
     // YAML-driven engine; we just embed them as __resolveCoa hints so V2's
     // sync handler does the find-or-create against its own Prisma client.
+    //
+    // V2 convention (matches its manual-wallet flow): amountNative is
+    // SIGNED — positive on the debit side, negative on the credit side.
+    // V2's wallet statement view derives the debit/credit display
+    // columns from the SIGN of amountNative (see V2's
+    // app/api/.../wallets/[walletId]/statement/route.ts), so emitting
+    // both lines with positive amountNative makes every transaction
+    // appear as a debit on the wallet's CoA — wrong balance.
+    const negatedAmount = `-${amount}`;
     const journalEntryLines: unknown[] = [
       {
         id: newId(),
         journalEntryId: jeId,
         __resolveCoa: hintToResolveShape(mapping.debit),
         nativeCurrency: asset,
-        amountNative: amount,
+        amountNative: amount, // positive on the debit side
         debit: amount,
         credit: null,
         ratePending: false,
@@ -196,7 +205,7 @@ export const bitbooksV2Sink: SinkAdapter = {
         journalEntryId: jeId,
         __resolveCoa: hintToResolveShape(mapping.credit),
         nativeCurrency: asset,
-        amountNative: amount,
+        amountNative: negatedAmount, // negative on the credit side
         debit: null,
         credit: amount,
         ratePending: false,
