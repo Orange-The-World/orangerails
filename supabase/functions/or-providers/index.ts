@@ -35,7 +35,7 @@
  */
 
 import { buildCorsHeaders, jsonResponse } from '../_shared/http.ts';
-import { listProviderManifests } from '../_shared/providers/dispatch.ts';
+import { listProviderManifests, listCategoryManifests } from '../_shared/providers/dispatch.ts';
 
 Deno.serve((req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -44,9 +44,16 @@ Deno.serve((req: Request) => {
     return jsonResponse({ error: 'Method not allowed' }, 405, cors);
   }
 
-  const providers = listProviderManifests();
+  // Both halves of the picker contract in one round trip:
+  //   providers[]  — the list a consumer renders inside a category, with
+  //                  search-friendly fields (description, tags, popularity)
+  //   categories[] — the top-level tiles for the picker, with a
+  //                  providerCount so empty categories can be greyed out
   return jsonResponse(
-    { providers },
+    {
+      providers: listProviderManifests(),
+      categories: listCategoryManifests(),
+    },
     200,
     {
       ...cors,

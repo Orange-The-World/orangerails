@@ -404,6 +404,9 @@ export const xpubAdapter: ProviderAdapter = {
   displayName: 'Bitcoin xpub',
   description: 'On-chain watch-only',
   status: 'live',
+  category: 'on_chain_wallet',
+  tags: ['on-chain', 'watch-only', 'self-custody', 'sparrow', 'specter', 'bluewallet'],
+  popularity: 80,
   multiWallet: false,
   credentialFields: [
     {
@@ -411,6 +414,8 @@ export const xpubAdapter: ProviderAdapter = {
       type: 'string',
       label: 'Extended public key',
       placeholder: 'xpub… / ypub… / zpub…',
+      multiline: true,
+      helpLabel: 'Watch-only — paste from Sparrow, Specter, BlueWallet, etc.',
     },
     {
       name: 'gap_limit',

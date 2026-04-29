@@ -268,6 +268,9 @@ export const btcpayAdapter: ProviderAdapter = {
   slug: 'btcpay',
   displayName: 'BTCPay Server',
   description: 'Self-hosted merchant',
+  category: 'payment_processor',
+  tags: ['merchant', 'self-hosted', 'lightning', 'on-chain'],
+  popularity: 85,
   multiWallet: true,
   credentialFields: [
     {

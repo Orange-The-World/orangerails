@@ -48,7 +48,7 @@
  */
 
 import { createFileRoute, useSearch } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { deriveMEK, encryptString, importAesKey } from "@/lib/vault";
 import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
 
@@ -179,42 +179,86 @@ interface DiscoveredWallet {
 }
 
 // --------------------------------------------------------------------
-// Per-provider form schema + client-side discovery.
+// Manifest-driven provider forms.
 //
 // The widget's UX is the same for every provider: enter credential
-// fields → discover wallets → pick → save. What differs per provider:
+// fields → discover wallets → pick → save. The fields themselves come
+// from the OR backend at /functions/v1/or-providers, so adding a new
+// provider on the OR side automatically surfaces here — no widget
+// redeploy needed.
 //
-//   - WHICH fields the user has to fill in (Blink: api_key only;
-//     BTCPay: server_url + api_key; xpub: just the xpub itself)
-//   - HOW discovery happens (Blink: GraphQL; BTCPay: REST; xpub: local
-//     parse + return one synthetic wallet)
-//
-// Adding a new provider:
-//   1. Add an entry to PROVIDER_FORMS with `fields` + `discover`
-//   2. Add the matching adapter on OR's edge-function side at
-//      _shared/providers/<slug>.ts so sync works
+// The only widget-side per-provider knowledge that remains lives in
+// CLIENT_DISCOVERY_OVERRIDES: a small map of providers whose discovery
+// step makes a live upstream call from the browser (Blink GraphQL,
+// BTCPay REST). Everyone else uses the synthetic-wallet fallback below
+// — one wallet entry per connection, sync enumerates assets server-side.
 //
 // The credential JSON we encrypt and ship to OR is just
 // `JSON.stringify(formValues)` — the edge-function adapter parses the
 // same field names back out (see _shared/providers/types.ts:parseCredentials).
 // --------------------------------------------------------------------
 
-interface FormField {
-  name: string;
-  label: string;
-  type: "string" | "secret" | "textarea";
-  placeholder?: string;
-  /** Optional inline help — either a hyperlink or a one-line note. */
-  helpHref?: string;
-  helpLabel?: string;
-  /** When false, the field can be blank. Defaults to true. */
-  required?: boolean;
+/**
+ * Manifest entry for one provider, returned by /or-providers.
+ *
+ * Mirror of `ProviderManifest` in the OR backend
+ * (_shared/providers/dispatch.ts). Kept in lock-step on field names; if
+ * the backend adds a field, surface it here.
+ */
+interface ProviderManifest {
+  slug: string;
+  displayName: string;
+  description?: string;
+  status: "live" | "beta" | "coming_soon";
+  category?: string;
+  tags?: string[];
+  popularity?: number;
+  multiWallet: boolean;
+  credentialFields: ManifestField[];
 }
 
-interface ProviderForm {
-  displayName: string;
-  fields: FormField[];
-  discover: (values: Record<string, string>) => Promise<DiscoveredWallet[]>;
+interface ManifestField {
+  name: string;
+  label: string;
+  type: "string" | "secret";
+  placeholder?: string;
+  optional?: boolean;
+  multiline?: boolean;
+  helpLabel?: string;
+  helpHref?: string;
+}
+
+async function fetchProviderManifest(slug: string): Promise<ProviderManifest> {
+  const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+  if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
+  const res = await fetch(`${base}/functions/v1/or-providers`, { method: "GET" });
+  if (!res.ok) throw new Error(`Could not load provider catalog (status ${res.status}).`);
+  const json = (await res.json()) as { providers?: ProviderManifest[] };
+  const found = json.providers?.find((p) => p.slug === slug);
+  if (!found) throw new Error(`Provider "${slug}" is not registered with Orange Rails.`);
+  if (found.status === "coming_soon") {
+    throw new Error(`Provider "${found.displayName}" is not available yet.`);
+  }
+  return found;
+}
+
+/**
+ * Synthetic-wallet fallback. Most providers don't need browser-side
+ * discovery (CORS blocks most exchange APIs anyway, and CCXT-backed
+ * adapters enumerate assets server-side during sync). The widget returns
+ * one wallet entry per connection so the existing pick-step UX still
+ * applies; OR's adapter handles per-asset discovery on first sync.
+ */
+function syntheticDiscovery(
+  manifest: ProviderManifest,
+): (values: Record<string, string>) => Promise<DiscoveredWallet[]> {
+  return async (_values) => [
+    {
+      external_wallet_id: manifest.slug,
+      currency: manifest.category === "exchange" ? "USD" : "BTC",
+      label: manifest.displayName,
+    },
+  ];
 }
 
 // ---- Blink ---------------------------------------------------------
@@ -346,88 +390,35 @@ async function discoverBtcpayStores(values: Record<string, string>): Promise<Dis
     }));
 }
 
-// ---- Strike --------------------------------------------------------
-// Strike's Bearer-token API (https://api.strike.me/v1) is server-to-
-// server only — its CORS policy blocks browser-origin callers. We
-// therefore skip the upstream-validation step at discovery time and
-// return one synthetic wallet immediately. The OR adapter validates
-// the key on first sync.
+// ---- Client-side discovery overrides -------------------------------
+//
+// Providers in this map use a custom browser-side discover function
+// (live API call to validate the credential and enumerate wallets/stores
+// before the user proceeds). Everyone else uses syntheticDiscovery() —
+// one wallet entry per connection, validation happens server-side at
+// first sync.
+//
+// What goes in here:
+//   blink   — GraphQL discovery returns the user's actual wallet IDs
+//             (BTC + USD), so the picker shows real wallets to choose from
+//   btcpay  — REST discovery returns the user's BTCPay stores (one wallet
+//             per store), so the picker shows real store names
+//   xpub    — local format validation (regex on prefix + length) so
+//             obvious typos fail fast before any encryption
+//
+// What does NOT go in here:
+//   strike + every CCXT exchange (coinbase, kraken, binance, ...) —
+//   their APIs block browser-origin CORS, so live discovery would fail
+//   from the widget anyway. Synthetic-wallet fallback used; OR's adapter
+//   validates the credential on first sync attempt.
 
-async function discoverStrikeWallet(values: Record<string, string>): Promise<DiscoveredWallet[]> {
-  const apiKey = (values.api_key ?? "").trim();
-  if (!apiKey) throw new Error("Enter your Strike API key.");
-  return [
-    {
-      external_wallet_id: "strike",
-      currency: "USD",
-      label: "Strike account",
-    },
-  ];
-}
-
-// ---- Provider form registry ---------------------------------------
-
-const PROVIDER_FORMS: Record<string, ProviderForm> = {
-  blink: {
-    displayName: "Blink",
-    fields: [
-      {
-        name: "api_key",
-        label: "Blink API key",
-        type: "secret",
-        placeholder: "Paste the key you just copied",
-        helpHref: "https://dashboard.blink.sv/api-keys",
-        helpLabel: "dashboard.blink.sv/api-keys",
-      },
-    ],
-    discover: discoverBlinkWallets,
-  },
-  xpub: {
-    displayName: "Bitcoin xpub",
-    fields: [
-      {
-        name: "xpub",
-        label: "Extended public key",
-        type: "textarea",
-        placeholder: "xpub… / ypub… / zpub…",
-        helpLabel: "Watch-only — paste from Sparrow, Specter, BlueWallet, etc.",
-      },
-    ],
-    discover: discoverXpubWallet,
-  },
-  btcpay: {
-    displayName: "BTCPay Server",
-    fields: [
-      {
-        name: "btcpay_url",
-        label: "BTCPay Server URL",
-        type: "string",
-        placeholder: "https://your-btcpay.example.com",
-      },
-      {
-        name: "api_key",
-        label: "API key",
-        type: "secret",
-        placeholder: "token-…",
-        helpLabel: "Account → Manage Account → API Keys",
-      },
-    ],
-    discover: discoverBtcpayStores,
-  },
-  strike: {
-    displayName: "Strike",
-    fields: [
-      {
-        name: "api_key",
-        label: "Strike API key",
-        type: "secret",
-        placeholder: "Generate at dashboard.strike.me/developer/api-keys",
-        helpHref: "https://dashboard.strike.me/developer/api-keys",
-        helpLabel: "dashboard.strike.me/developer/api-keys",
-      },
-    ],
-    discover: discoverStrikeWallet,
-  },
+const CLIENT_DISCOVERY_OVERRIDES: Record<
+  string,
+  (values: Record<string, string>) => Promise<DiscoveredWallet[]>
+> = {
+  blink: discoverBlinkWallets,
+  xpub: discoverXpubWallet,
+  btcpay: discoverBtcpayStores,
 };
 
 // --------------------------------------------------------------------
@@ -578,6 +569,7 @@ function ConnectPage() {
   const search = useSearch({ from: "/connect" }) as ConnectSearch;
 
   const [platform, setPlatform] = useState<PlatformDisplay | null>(null);
+  const [manifest, setManifest] = useState<ProviderManifest | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Flow state
@@ -588,14 +580,9 @@ function ConnectPage() {
   const [error, setError] = useState<string | null>(null);
   const [handoffKeys, setHandoffKeys] = useState<HandoffKeys | null>(null);
 
-  const providerForm = useMemo<ProviderForm | null>(() => {
-    if (!search.provider) return null;
-    return PROVIDER_FORMS[search.provider] ?? null;
-  }, [search.provider]);
+  const providerLabel = manifest?.displayName ?? search.provider ?? "your provider";
 
-  const providerLabel = providerForm?.displayName ?? search.provider ?? "your provider";
-
-  // ---- Validate query params + look up the integrating app ---------
+  // ---- Validate query params + look up the integrating app + manifest
   useEffect(() => {
     if (!search.platform || !search.app_user_id || !search.provider || !search.return_to) {
       setLoadError(
@@ -603,12 +590,16 @@ function ConnectPage() {
       );
       return;
     }
-    if (!PROVIDER_FORMS[search.provider]) {
-      setLoadError(`Provider "${search.provider}" is not supported yet.`);
-      return;
-    }
-    fetchPlatformDisplay(search.platform)
-      .then(setPlatform)
+    // Resolve the integrating app's display info AND the provider manifest
+    // in parallel. Both are required before the form renders.
+    Promise.all([
+      fetchPlatformDisplay(search.platform),
+      fetchProviderManifest(search.provider),
+    ])
+      .then(([platformRes, manifestRes]) => {
+        setPlatform(platformRes);
+        setManifest(manifestRes);
+      })
       .catch((err) => setLoadError(String(err.message ?? err)));
   }, [search.platform, search.app_user_id, search.provider, search.return_to]);
 
@@ -638,11 +629,12 @@ function ConnectPage() {
   // ---- Step 1 → 2: submit credential form, discover wallets -------
   async function handleContinueFromCredentials(e: React.FormEvent) {
     e.preventDefault();
-    if (!providerForm) return;
-    // Required-field gate. Field-level required defaults to true when omitted.
-    for (const field of providerForm.fields) {
-      const required = field.required !== false;
-      if (required && !(formValues[field.name] ?? "").trim()) {
+    if (!manifest) return;
+    // Required-field gate. CredentialField.optional=true means blank is OK;
+    // anything else (undefined or false) means the field is required.
+    for (const field of manifest.credentialFields) {
+      if (field.optional === true) continue;
+      if (!(formValues[field.name] ?? "").trim()) {
         setError(`${field.label} is required.`);
         return;
       }
@@ -650,7 +642,11 @@ function ConnectPage() {
     setError(null);
     setStep("discovering");
     try {
-      const result = await providerForm.discover(formValues);
+      // Use the provider-specific override when one exists; otherwise fall
+      // back to a synthetic single-wallet entry (the OR adapter does the
+      // real per-asset enumeration server-side at first sync).
+      const discover = CLIENT_DISCOVERY_OVERRIDES[manifest.slug] ?? syntheticDiscovery(manifest);
+      const result = await discover(formValues);
       if (result.length === 0) {
         throw new Error("That account has no wallets to track yet.");
       }
@@ -783,7 +779,7 @@ function ConnectPage() {
     );
   }
 
-  if (!platform || !providerForm) {
+  if (!platform || !manifest) {
     return (
       <Shell>
         <p className="text-sm text-muted-foreground">Loading…</p>
@@ -815,7 +811,7 @@ function ConnectPage() {
       {step === "enter-credentials" && (
         <EnterCredentialsStep
           providerLabel={providerLabel}
-          fields={providerForm.fields}
+          fields={manifest.credentialFields}
           values={formValues}
           onValueChange={(name, value) =>
             setFormValues((prev) => ({ ...prev, [name]: value }))
@@ -876,7 +872,7 @@ function EnterCredentialsStep({
   error,
 }: {
   providerLabel: string;
-  fields: FormField[];
+  fields: ManifestField[];
   values: Record<string, string>;
   onValueChange: (name: string, value: string) => void;
   onContinue: (e: React.FormEvent) => void;
@@ -884,7 +880,7 @@ function EnterCredentialsStep({
   error: string | null;
 }) {
   const allRequiredFilled = fields.every(
-    (f) => f.required === false || (values[f.name] ?? "").trim().length > 0,
+    (f) => f.optional === true || (values[f.name] ?? "").trim().length > 0,
   );
   return (
     <form onSubmit={onContinue} className="mt-4 space-y-4">
@@ -897,10 +893,10 @@ function EnterCredentialsStep({
           <label htmlFor={field.name} className="block text-sm font-medium">
             {field.label}
           </label>
-          {field.type === "textarea" ? (
+          {field.multiline ? (
             <textarea
               id={field.name}
-              required={field.required !== false}
+              required={field.optional !== true}
               autoComplete="off"
               value={values[field.name] ?? ""}
               onChange={(e) => onValueChange(field.name, e.target.value)}
@@ -912,7 +908,7 @@ function EnterCredentialsStep({
             <input
               id={field.name}
               type={field.type === "secret" ? "password" : "text"}
-              required={field.required !== false}
+              required={field.optional !== true}
               autoComplete="off"
               value={values[field.name] ?? ""}
               onChange={(e) => onValueChange(field.name, e.target.value)}

@@ -109,6 +109,17 @@ export interface CredentialField {
   placeholder?: string;
   /** When false, the platform UI must collect this. Defaults to true. */
   optional?: boolean;
+  /**
+   * Render as a multi-line textarea. Useful for long values (xpubs, PEM
+   * certificates, verbose JSON pastes). Defaults to single-line input.
+   */
+  multiline?: boolean;
+  /**
+   * Optional inline help shown below the field. When `helpHref` is set
+   * the widget renders the label as a link; otherwise plain text.
+   */
+  helpLabel?: string;
+  helpHref?: string;
 }
 
 export interface ProviderAdapter {
@@ -130,6 +141,46 @@ export interface ProviderAdapter {
    * (placeholder manifests in dispatch.ts). Defaults to `live`.
    */
   status?: 'live' | 'beta' | 'coming_soon';
+
+  /**
+   * High-level grouping for the picker UI. Lets consumers (V2, V3, OW)
+   * render category tiles + a searchable filtered list within each
+   * category instead of one flat tile-per-provider grid (which doesn't
+   * scale past ~10 providers, let alone the 100+ via CCXT).
+   *
+   * Categories:
+   *   - 'lightning_wallet'   custodial Lightning wallets (Blink, Strike)
+   *   - 'on_chain_wallet'    watch-only on-chain (xpub) and future native wallets
+   *   - 'payment_processor'  merchant Bitcoin payment processors (BTCPay, future Flash)
+   *   - 'exchange'           crypto exchanges (CCXT-backed: Coinbase, Kraken, Binance, etc.)
+   *   - 'card'               Bitcoin debit cards (future)
+   *   - 'mining'             mining pools (future Braiins, Ocean)
+   *   - 'bank'               traditional banking aggregators (future Quiltt, SimpleFIN)
+   *   - 'lender'             Bitcoin-backed lenders (future Unchained, Ledn)
+   */
+  category?:
+    | 'lightning_wallet'
+    | 'on_chain_wallet'
+    | 'payment_processor'
+    | 'exchange'
+    | 'card'
+    | 'mining'
+    | 'bank'
+    | 'lender';
+
+  /**
+   * Free-form tags the picker can use for filter chips ("Canada",
+   * "Lightning", "Self-hosted") and full-text search matching. Lower-case,
+   * hyphenated. Country codes are ISO 3166-1 alpha-2 lower-case ('us',
+   * 'ca', 'eu').
+   */
+  tags?: string[];
+
+  /**
+   * Default sort weight inside a category — higher first. Hand-picked so
+   * the most popular options surface first. Defaults to 50.
+   */
+  popularity?: number;
 
   /** Schema for the credential blob the adapter expects. */
   credentialFields: CredentialField[];

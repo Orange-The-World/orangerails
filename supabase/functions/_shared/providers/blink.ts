@@ -321,6 +321,9 @@ export const blinkAdapter: ProviderAdapter = {
   displayName: 'Blink',
   description: 'Lightning + on-chain',
   status: 'live',
+  category: 'lightning_wallet',
+  tags: ['lightning', 'on-chain', 'custodial', 'galoy'],
+  popularity: 90,
   multiWallet: true,
   credentialFields: [
     {
@@ -328,6 +331,8 @@ export const blinkAdapter: ProviderAdapter = {
       type: 'secret',
       label: 'Blink API key',
       placeholder: 'blink_…',
+      helpLabel: 'dashboard.blink.sv/api-keys',
+      helpHref: 'https://dashboard.blink.sv/api-keys',
     },
   ],
   discoverWallets: discover,
