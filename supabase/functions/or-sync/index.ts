@@ -159,7 +159,7 @@ Deno.serve(async (req: Request) => {
 
     let connQuery = ctx.serviceClient
       .from('connections')
-      .select('id, provider_type, encrypted_credentials, last_sync_cursor')
+      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at')
       .eq('subaccount_id', subaccountId)
       .neq('status', 'disconnected');
     if (connection_ids?.length) connQuery = connQuery.in('id', connection_ids);
@@ -195,7 +195,34 @@ Deno.serve(async (req: Request) => {
         const adapter = getProvider(conn.provider_type as string);
         if (!adapter) throw new Error(`Unknown provider: ${conn.provider_type}`);
 
-        const credsJson = await decryptAes(conn.encrypted_credentials, credsKey);
+        let credsJson: string;
+        try {
+          credsJson = await decryptAes(conn.encrypted_credentials, credsKey);
+        } catch (decErr) {
+          // Decryption failure here means the credentials_key the caller
+          // sent does not match the one used at or-link-complete time.
+          // Most common causes for integrators:
+          //   1. The widget locked with a fallback test password because
+          //      cred_key was missing or malformed in the URL hash.
+          //   2. The user's vault password changed between connect and sync.
+          //   3. A vault reset created a new salt; old connection still
+          //      has ciphertext locked to the old MEK.
+          // Surface enough info to disambiguate without leaking secrets.
+          const createdAt = (conn.created_at as string | null) ?? null;
+          const ageStr = createdAt
+            ? `${Math.round((Date.now() - new Date(createdAt).getTime()) / 1000)}s`
+            : 'unknown';
+          const baseMsg = decErr instanceof Error ? decErr.message : String(decErr);
+          throw new Error(
+            `credential decryption failed for connection ${conn.id} ` +
+              `(created ${ageStr} ago, provider=${conn.provider_type}). ` +
+              `The credentials_key sent does not match the key used to lock ` +
+              `this connection. Likely cause: vault password changed since ` +
+              `connect, or the widget locked with a test-password fallback. ` +
+              `See Consumer-Integration-Guide.md "Wire-format gotchas". ` +
+              `Inner: ${baseMsg}`,
+          );
+        }
         const credentials = parseCredentials(adapter, credsJson);
 
         // Look up the user's source-wallet selection. If any rows exist with

@@ -154,6 +154,7 @@ Deno.serve(async (req: Request) => {
 
     // 2. Provision (or look up) the subaccount.
     let subaccountId: string;
+    let subaccountWasNewlyCreated = false;
     const { data: existingSub } = await serviceClient
       .from("subaccounts")
       .select("id")
@@ -164,6 +165,31 @@ Deno.serve(async (req: Request) => {
     if (existingSub) {
       subaccountId = existingSub.id as string;
     } else {
+      // Common integrator footgun: passing OR's internal subaccount UUID
+      // here instead of the platform's external user id. We can't tell
+      // from this side whether app_user_id is "wrong" or just "first
+      // touch from this user" — but we can detect when the same platform
+      // already has a subaccount under a DIFFERENT external_user_id and
+      // log a structured warning so the integrator notices fast.
+      const { count: platformSubaccountCount } = await serviceClient
+        .from("subaccounts")
+        .select("id", { count: "exact", head: true })
+        .eq("platform_id", platform.id);
+
+      if ((platformSubaccountCount ?? 0) > 0) {
+        console.warn(
+          "[or-link-complete] minting new subaccount under platform_slug=%s with " +
+            "app_user_id=%s — this platform already has %d other subaccount(s). " +
+            "Common cause: the integrator passed OR's subaccount_id (UUID) as " +
+            "app_user_id instead of their own user-id. See Consumer-Integration-Guide.md " +
+            "section 'Wire-format gotchas: app_user_id is your platform's user-id, " +
+            "not OR's UUID.'",
+          body.platform_slug,
+          body.app_user_id,
+          platformSubaccountCount,
+        );
+      }
+
       const { data: createdSub, error: insSubErr } = await serviceClient
         .from("subaccounts")
         .insert({ platform_id: platform.id, external_user_id: body.app_user_id })
@@ -174,6 +200,7 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: "Failed to create subaccount" }, 500, cors);
       }
       subaccountId = createdSub.id as string;
+      subaccountWasNewlyCreated = true;
     }
 
     // 3. Insert the encrypted connection.
@@ -225,6 +252,12 @@ Deno.serve(async (req: Request) => {
         source_wallets: sourceWallets,
         // Backward-compat: keep a single id when only one wallet was created.
         source_wallet_id: sourceWallets.length === 1 ? sourceWallets[0].id : undefined,
+        // Diagnostic: integrators that wire app_user_id wrong end up
+        // creating a new subaccount on every connect. Surface the flag
+        // so the consumer can warn the user "this looks like a fresh
+        // setup — was this intentional?" instead of silently piling up
+        // orphan subaccounts.
+        subaccount_was_newly_created: subaccountWasNewlyCreated,
       },
       200,
       cors,
