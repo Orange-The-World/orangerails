@@ -205,6 +205,7 @@ status_to_v2:
   COMPLETE:   COMPLETE
   COMPLETED:  COMPLETE
   SETTLED:    COMPLETE
+  PAID:       COMPLETE   # Strike invoice — paid in full
   CONFIRMED:  COMPLETE   # on-chain (xpub adapter) — block-confirmed
   PENDING:    PENDING
   UNCONFIRMED: PENDING   # on-chain mempool tx
@@ -213,6 +214,7 @@ status_to_v2:
   FAILED:     FAILED
   EXPIRED:    FAILED
   INVALID:    FAILED     # BTCPay invoice — payment problem (timeout, double-spend, etc.)
+  CANCELLED:  FAILED     # Strike invoice — cancelled before payment
   REVERSED:   REVERSED
   REFUNDED:   REVERSED
   default:    INCOMPLETE

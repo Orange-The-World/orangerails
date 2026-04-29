@@ -20,11 +20,13 @@ import type { ProviderAdapter } from './types.ts';
 import { blinkAdapter } from './blink.ts';
 import { xpubAdapter } from './xpub.ts';
 import { btcpayAdapter } from './btcpay.ts';
+import { strikeAdapter } from './strike.ts';
 
 const PROVIDERS: ReadonlyArray<ProviderAdapter> = [
   blinkAdapter,
   xpubAdapter,
   btcpayAdapter,
+  strikeAdapter,
 ];
 
 const PROVIDER_MAP: ReadonlyMap<string, ProviderAdapter> = new Map(
@@ -68,14 +70,6 @@ export interface ProviderManifest {
  * point its `status` flips to 'live' from the adapter declaration.
  */
 const ROADMAP_MANIFESTS: ReadonlyArray<ProviderManifest> = [
-  {
-    slug: 'strike',
-    displayName: 'Strike',
-    description: 'Lightning + USD',
-    status: 'coming_soon',
-    multiWallet: true,
-    credentialFields: [],
-  },
   {
     slug: 'coinbase',
     displayName: 'Coinbase',

@@ -346,6 +346,25 @@ async function discoverBtcpayStores(values: Record<string, string>): Promise<Dis
     }));
 }
 
+// ---- Strike --------------------------------------------------------
+// Strike's Bearer-token API (https://api.strike.me/v1) is server-to-
+// server only — its CORS policy blocks browser-origin callers. We
+// therefore skip the upstream-validation step at discovery time and
+// return one synthetic wallet immediately. The OR adapter validates
+// the key on first sync.
+
+async function discoverStrikeWallet(values: Record<string, string>): Promise<DiscoveredWallet[]> {
+  const apiKey = (values.api_key ?? "").trim();
+  if (!apiKey) throw new Error("Enter your Strike API key.");
+  return [
+    {
+      external_wallet_id: "strike",
+      currency: "USD",
+      label: "Strike account",
+    },
+  ];
+}
+
 // ---- Provider form registry ---------------------------------------
 
 const PROVIDER_FORMS: Record<string, ProviderForm> = {
@@ -394,6 +413,20 @@ const PROVIDER_FORMS: Record<string, ProviderForm> = {
       },
     ],
     discover: discoverBtcpayStores,
+  },
+  strike: {
+    displayName: "Strike",
+    fields: [
+      {
+        name: "api_key",
+        label: "Strike API key",
+        type: "secret",
+        placeholder: "Generate at dashboard.strike.me/developer/api-keys",
+        helpHref: "https://dashboard.strike.me/developer/api-keys",
+        helpLabel: "dashboard.strike.me/developer/api-keys",
+      },
+    ],
+    discover: discoverStrikeWallet,
   },
 };
 
