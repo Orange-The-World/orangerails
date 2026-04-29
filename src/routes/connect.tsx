@@ -7,9 +7,16 @@
  * Rails" smaller below.
  *
  * Three-step flow (matches V3 Connections.tsx):
- *   1. Paste the provider API key.
- *   2. Discover the wallets that key can see.
- *   3. Tick which wallets to track and finish.
+ *   1. Enter the provider credentials (one or more fields per provider).
+ *   2. Discover the wallets / stores those credentials can see.
+ *   3. Tick which to track and finish.
+ *
+ * Provider model: PROVIDER_FORMS below maps each supported provider slug
+ * to its credential field schema and a client-side discover function.
+ * Adding a new provider is a one-entry change here. The credential JSON
+ * shape that ships to OR is `JSON.stringify(formValues)` — the per-
+ * provider edge-function adapter (_shared/providers/<slug>.ts) parses
+ * those same field names back out.
  *
  * After the user finishes, the credential is locked browser-side and an
  * array of source_wallet_ids is postMessage'd back to the parent window.
@@ -22,7 +29,7 @@
  * Query params:
  *   platform     — the integrating app's slug (e.g. 'bitbooks-v2'). Required.
  *   app_user_id  — opaque identifier for the end user, owned by the integrating app. Required.
- *   provider     — wallet provider slug ('blink' for now). Required.
+ *   provider     — wallet provider slug ('blink', 'xpub', 'btcpay', ...). Required.
  *   return_to    — origin the widget posts back to. Required.
  *
  * postMessage payload (fired into window.opener):
@@ -148,33 +155,45 @@ interface DiscoveredWallet {
 }
 
 // --------------------------------------------------------------------
-// Platform display lookup (co-branding).
+// Per-provider form schema + client-side discovery.
+//
+// The widget's UX is the same for every provider: enter credential
+// fields → discover wallets → pick → save. What differs per provider:
+//
+//   - WHICH fields the user has to fill in (Blink: api_key only;
+//     BTCPay: server_url + api_key; xpub: just the xpub itself)
+//   - HOW discovery happens (Blink: GraphQL; BTCPay: REST; xpub: local
+//     parse + return one synthetic wallet)
+//
+// Adding a new provider:
+//   1. Add an entry to PROVIDER_FORMS with `fields` + `discover`
+//   2. Add the matching adapter on OR's edge-function side at
+//      _shared/providers/<slug>.ts so sync works
+//
+// The credential JSON we encrypt and ship to OR is just
+// `JSON.stringify(formValues)` — the edge-function adapter parses the
+// same field names back out (see _shared/providers/types.ts:parseCredentials).
 // --------------------------------------------------------------------
 
-interface PlatformDisplay {
-  slug: string;
-  display_name: string;
-  display_brand_color: string | null;
+interface FormField {
+  name: string;
+  label: string;
+  type: "string" | "secret" | "textarea";
+  placeholder?: string;
+  /** Optional inline help — either a hyperlink or a one-line note. */
+  helpHref?: string;
+  helpLabel?: string;
+  /** When false, the field can be blank. Defaults to true. */
+  required?: boolean;
 }
 
-async function fetchPlatformDisplay(slug: string): Promise<PlatformDisplay> {
-  const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-  if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
-  const res = await fetch(`${base}/functions/v1/or-platform-display`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ slug }),
-  });
-  if (res.status === 404) throw new Error("Unknown integrating app.");
-  if (!res.ok) throw new Error(`Could not load app info (status ${res.status}).`);
-  return (await res.json()) as PlatformDisplay;
+interface ProviderForm {
+  displayName: string;
+  fields: FormField[];
+  discover: (values: Record<string, string>) => Promise<DiscoveredWallet[]>;
 }
 
-// --------------------------------------------------------------------
-// Per-provider wallet discovery. Runs entirely in the browser — the
-// pasted API key never touches our server in plaintext. Blink today;
-// new providers register here.
-// --------------------------------------------------------------------
+// ---- Blink ---------------------------------------------------------
 
 const BLINK_API = "https://api.blink.sv/graphql";
 
@@ -191,7 +210,9 @@ const BLINK_DISCOVER_QUERY = `
   }
 `;
 
-async function discoverBlinkWallets(apiKey: string): Promise<DiscoveredWallet[]> {
+async function discoverBlinkWallets(values: Record<string, string>): Promise<DiscoveredWallet[]> {
+  const apiKey = values.api_key;
+  if (!apiKey) throw new Error("Enter your Blink API key.");
   const res = await fetch(BLINK_API, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-API-KEY": apiKey },
@@ -226,9 +247,154 @@ async function discoverBlinkWallets(apiKey: string): Promise<DiscoveredWallet[]>
   return mapped;
 }
 
-const DISCOVERERS: Record<string, (apiKey: string) => Promise<DiscoveredWallet[]>> = {
-  blink: discoverBlinkWallets,
+// ---- xpub ----------------------------------------------------------
+// "Discovery" for an xpub is a local-only sanity check. The xpub IS the
+// wallet — there's no upstream account to enumerate. We validate the
+// prefix + minimum length here so an obviously-bad paste fails before
+// the user goes through the rest of the flow; the heavy lifting (BIP44
+// gap-limit address derivation + indexer scan) happens server-side
+// inside the OR adapter on first sync.
+
+async function discoverXpubWallet(values: Record<string, string>): Promise<DiscoveredWallet[]> {
+  const xpub = (values.xpub ?? "").trim();
+  if (!/^[xyz]pub[A-Za-z0-9]+$/.test(xpub)) {
+    throw new Error(
+      "That doesn't look like an extended public key. It should start with xpub, ypub, or zpub.",
+    );
+  }
+  if (xpub.length < 100) {
+    throw new Error("Extended public key looks too short — copy the full string.");
+  }
+  return [
+    {
+      external_wallet_id: "xpub",
+      currency: "BTC",
+      label: "Bitcoin (xpub)",
+    },
+  ];
+}
+
+// ---- BTCPay --------------------------------------------------------
+// BTCPay's Greenfield API uses `Authorization: token <api_key>` (custom
+// format, NOT Bearer). One request to /api/v1/stores returns every store
+// the API key can see — each becomes a wallet entry the user can pick.
+//
+// CORS: BTCPay instances enable CORS for their own merchant SPA, so this
+// browser-side fetch generally works. Self-hosted instances behind a
+// strict reverse-proxy may need to allowlist orangerails.com. If we hit
+// CORS issues in practice, fall back to OR's or-discover-wallets edge
+// function which makes the call server-side.
+
+async function discoverBtcpayStores(values: Record<string, string>): Promise<DiscoveredWallet[]> {
+  const url = (values.btcpay_url ?? "").trim().replace(/\/+$/, "");
+  const apiKey = values.api_key ?? "";
+  if (!/^https?:\/\//.test(url)) {
+    throw new Error("Enter the full BTCPay URL including https://");
+  }
+  if (!apiKey) throw new Error("Enter your BTCPay API key.");
+
+  const res = await fetch(`${url}/api/v1/stores`, {
+    headers: { Authorization: `token ${apiKey}`, Accept: "application/json" },
+  });
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 200);
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(
+        "BTCPay rejected that API key. Make sure the key has the btcpay.store.canviewinvoices and btcpay.store.canviewstoresettings permissions.",
+      );
+    }
+    throw new Error(`BTCPay returned ${res.status}. ${detail}`);
+  }
+  const stores = (await res.json()) as Array<{
+    id: string;
+    name: string;
+    defaultCurrency?: string;
+  }>;
+  if (!Array.isArray(stores) || stores.length === 0) {
+    throw new Error("No stores found on that BTCPay instance for this API key.");
+  }
+  return stores
+    .filter((s): s is { id: string; name: string; defaultCurrency?: string } => !!s.id)
+    .map((s) => ({
+      external_wallet_id: s.id,
+      currency: (s.defaultCurrency ?? "BTC").toUpperCase(),
+      label: s.name,
+    }));
+}
+
+// ---- Provider form registry ---------------------------------------
+
+const PROVIDER_FORMS: Record<string, ProviderForm> = {
+  blink: {
+    displayName: "Blink",
+    fields: [
+      {
+        name: "api_key",
+        label: "Blink API key",
+        type: "secret",
+        placeholder: "Paste the key you just copied",
+        helpHref: "https://dashboard.blink.sv/api-keys",
+        helpLabel: "dashboard.blink.sv/api-keys",
+      },
+    ],
+    discover: discoverBlinkWallets,
+  },
+  xpub: {
+    displayName: "Bitcoin xpub",
+    fields: [
+      {
+        name: "xpub",
+        label: "Extended public key",
+        type: "textarea",
+        placeholder: "xpub… / ypub… / zpub…",
+        helpLabel: "Watch-only — paste from Sparrow, Specter, BlueWallet, etc.",
+      },
+    ],
+    discover: discoverXpubWallet,
+  },
+  btcpay: {
+    displayName: "BTCPay Server",
+    fields: [
+      {
+        name: "btcpay_url",
+        label: "BTCPay Server URL",
+        type: "string",
+        placeholder: "https://your-btcpay.example.com",
+      },
+      {
+        name: "api_key",
+        label: "API key",
+        type: "secret",
+        placeholder: "token-…",
+        helpLabel: "Account → Manage Account → API Keys",
+      },
+    ],
+    discover: discoverBtcpayStores,
+  },
 };
+
+// --------------------------------------------------------------------
+// Platform display lookup (co-branding).
+// --------------------------------------------------------------------
+
+interface PlatformDisplay {
+  slug: string;
+  display_name: string;
+  display_brand_color: string | null;
+}
+
+async function fetchPlatformDisplay(slug: string): Promise<PlatformDisplay> {
+  const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+  if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
+  const res = await fetch(`${base}/functions/v1/or-platform-display`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slug }),
+  });
+  if (res.status === 404) throw new Error("Unknown integrating app.");
+  if (!res.ok) throw new Error(`Could not load app info (status ${res.status}).`);
+  return (await res.json()) as PlatformDisplay;
+}
 
 // --------------------------------------------------------------------
 // Locking helpers — every ciphertext sent to the server is produced here.
@@ -246,7 +412,7 @@ interface LockedConnection {
 }
 
 async function lockEverything(params: {
-  apiKey: string;
+  formValues: Record<string, string>;
   connectionLabel: string;
   picks: DiscoveredWallet[];
   handoff: HandoffKeys | null;
@@ -271,10 +437,10 @@ async function lockEverything(params: {
   }
 
   const encrypted_label = await encryptString(params.connectionLabel, credKey);
-  const encrypted_credentials = await encryptString(
-    JSON.stringify({ api_key: params.apiKey }),
-    credKey,
-  );
+  // Credential JSON is `JSON.stringify(formValues)` — the per-provider
+  // edge-function adapter parses the same field names back out. No
+  // provider-specific shaping happens here.
+  const encrypted_credentials = await encryptString(JSON.stringify(params.formValues), credKey);
 
   const walletCiphertexts = await Promise.all(
     params.picks.map(async (w) => {
@@ -349,7 +515,7 @@ async function callLinkComplete(payload: {
 // Component
 // --------------------------------------------------------------------
 
-type Step = "paste-key" | "discovering" | "pick-wallets" | "saving" | "done";
+type Step = "enter-credentials" | "discovering" | "pick-wallets" | "saving" | "done";
 
 function ConnectPage() {
   const search = useSearch({ from: "/connect" }) as ConnectSearch;
@@ -358,17 +524,19 @@ function ConnectPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Flow state
-  const [step, setStep] = useState<Step>("paste-key");
-  const [apiKey, setApiKey] = useState("");
+  const [step, setStep] = useState<Step>("enter-credentials");
+  const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [discovered, setDiscovered] = useState<DiscoveredWallet[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [handoffKeys, setHandoffKeys] = useState<HandoffKeys | null>(null);
 
-  const providerLabel = useMemo(() => {
-    if (search.provider === "blink") return "Blink";
-    return search.provider ?? "your provider";
+  const providerForm = useMemo<ProviderForm | null>(() => {
+    if (!search.provider) return null;
+    return PROVIDER_FORMS[search.provider] ?? null;
   }, [search.provider]);
+
+  const providerLabel = providerForm?.displayName ?? search.provider ?? "your provider";
 
   // ---- Validate query params + look up the integrating app ---------
   useEffect(() => {
@@ -378,7 +546,7 @@ function ConnectPage() {
       );
       return;
     }
-    if (!DISCOVERERS[search.provider]) {
+    if (!PROVIDER_FORMS[search.provider]) {
       setLoadError(`Provider "${search.provider}" is not supported yet.`);
       return;
     }
@@ -410,16 +578,22 @@ function ConnectPage() {
     };
   }, []);
 
-  // ---- Step 1 → 2: paste key, discover wallets --------------------
-  async function handleContinueFromKey(e: React.FormEvent) {
+  // ---- Step 1 → 2: submit credential form, discover wallets -------
+  async function handleContinueFromCredentials(e: React.FormEvent) {
     e.preventDefault();
-    if (!apiKey.trim() || !search.provider) return;
+    if (!providerForm) return;
+    // Required-field gate. Field-level required defaults to true when omitted.
+    for (const field of providerForm.fields) {
+      const required = field.required !== false;
+      if (required && !(formValues[field.name] ?? "").trim()) {
+        setError(`${field.label} is required.`);
+        return;
+      }
+    }
     setError(null);
     setStep("discovering");
     try {
-      const discoverFn = DISCOVERERS[search.provider];
-      if (!discoverFn) throw new Error(`Provider "${search.provider}" is not supported yet.`);
-      const result = await discoverFn(apiKey.trim());
+      const result = await providerForm.discover(formValues);
       if (result.length === 0) {
         throw new Error("That account has no wallets to track yet.");
       }
@@ -429,7 +603,7 @@ function ConnectPage() {
       setStep("pick-wallets");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setStep("paste-key");
+      setStep("enter-credentials");
     }
   }
 
@@ -454,7 +628,7 @@ function ConnectPage() {
     setStep("saving");
     try {
       const locked = await lockEverything({
-        apiKey: apiKey.trim(),
+        formValues,
         connectionLabel: platform.display_name,
         picks,
         handoff: handoffKeys,
@@ -552,7 +726,7 @@ function ConnectPage() {
     );
   }
 
-  if (!platform) {
+  if (!platform || !providerForm) {
     return (
       <Shell>
         <p className="text-sm text-muted-foreground">Loading…</p>
@@ -572,15 +746,24 @@ function ConnectPage() {
   return (
     <Shell platform={platform}>
       <StepDots
-        step={step === "paste-key" ? 1 : step === "discovering" || step === "pick-wallets" ? 2 : 3}
+        step={
+          step === "enter-credentials"
+            ? 1
+            : step === "discovering" || step === "pick-wallets"
+              ? 2
+              : 3
+        }
       />
 
-      {step === "paste-key" && (
-        <PasteKeyStep
+      {step === "enter-credentials" && (
+        <EnterCredentialsStep
           providerLabel={providerLabel}
-          apiKey={apiKey}
-          onApiKeyChange={setApiKey}
-          onContinue={handleContinueFromKey}
+          fields={providerForm.fields}
+          values={formValues}
+          onValueChange={(name, value) =>
+            setFormValues((prev) => ({ ...prev, [name]: value }))
+          }
+          onContinue={handleContinueFromCredentials}
           onCancel={handleCancel}
           error={error}
         />
@@ -597,7 +780,7 @@ function ConnectPage() {
           onToggle={toggleWallet}
           onBack={() => {
             setError(null);
-            setStep("paste-key");
+            setStep("enter-credentials");
           }}
           onConfirm={handleConfirmPicks}
           error={error}
@@ -623,61 +806,81 @@ function ConnectPage() {
 }
 
 // --------------------------------------------------------------------
-// Step 1 — paste API key
+// Step 1 — enter credential fields
 // --------------------------------------------------------------------
 
-function PasteKeyStep({
+function EnterCredentialsStep({
   providerLabel,
-  apiKey,
-  onApiKeyChange,
+  fields,
+  values,
+  onValueChange,
   onContinue,
   onCancel,
   error,
 }: {
   providerLabel: string;
-  apiKey: string;
-  onApiKeyChange: (v: string) => void;
+  fields: FormField[];
+  values: Record<string, string>;
+  onValueChange: (name: string, value: string) => void;
   onContinue: (e: React.FormEvent) => void;
   onCancel: () => void;
   error: string | null;
 }) {
+  const allRequiredFilled = fields.every(
+    (f) => f.required === false || (values[f.name] ?? "").trim().length > 0,
+  );
   return (
     <form onSubmit={onContinue} className="mt-4 space-y-4">
       <div>
-        <h2 className="text-sm font-semibold">Paste your {providerLabel} API key</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Get one at{" "}
-          <a
-            href="https://dashboard.blink.sv/api-keys"
-            target="_blank"
-            rel="noreferrer"
-            className="underline"
-          >
-            dashboard.blink.sv/api-keys
-          </a>
-          .
-        </p>
+        <h2 className="text-sm font-semibold">Connect your {providerLabel} account</h2>
       </div>
 
-      <div>
-        <label htmlFor="apiKey" className="block text-sm font-medium">
-          {providerLabel} API key
-        </label>
-        <input
-          id="apiKey"
-          type="password"
-          required
-          autoComplete="off"
-          value={apiKey}
-          onChange={(e) => onApiKeyChange(e.target.value)}
-          placeholder="Paste the key you just copied"
-          className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
-        />
-        <p className="mt-2 text-xs text-muted-foreground">
-          Your key is locked in this browser before it leaves. Orange Rails stores only the locked
-          version and cannot read it.
-        </p>
-      </div>
+      {fields.map((field) => (
+        <div key={field.name}>
+          <label htmlFor={field.name} className="block text-sm font-medium">
+            {field.label}
+          </label>
+          {field.type === "textarea" ? (
+            <textarea
+              id={field.name}
+              required={field.required !== false}
+              autoComplete="off"
+              value={values[field.name] ?? ""}
+              onChange={(e) => onValueChange(field.name, e.target.value)}
+              placeholder={field.placeholder}
+              rows={3}
+              className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono break-all"
+            />
+          ) : (
+            <input
+              id={field.name}
+              type={field.type === "secret" ? "password" : "text"}
+              required={field.required !== false}
+              autoComplete="off"
+              value={values[field.name] ?? ""}
+              onChange={(e) => onValueChange(field.name, e.target.value)}
+              placeholder={field.placeholder}
+              className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono"
+            />
+          )}
+          {(field.helpHref || field.helpLabel) && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {field.helpHref ? (
+                <a href={field.helpHref} target="_blank" rel="noreferrer" className="underline">
+                  {field.helpLabel ?? field.helpHref}
+                </a>
+              ) : (
+                field.helpLabel
+              )}
+            </p>
+          )}
+        </div>
+      ))}
+
+      <p className="text-xs text-muted-foreground">
+        Your credentials are locked in this browser before they leave. Orange Rails stores only the
+        locked version and cannot read them.
+      </p>
 
       {error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
@@ -695,7 +898,7 @@ function PasteKeyStep({
         </button>
         <button
           type="submit"
-          disabled={!apiKey.trim()}
+          disabled={!allRequiredFilled}
           className="flex-1 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
         >
           Continue
