@@ -319,6 +319,8 @@ async function syncByWallets(
 export const blinkAdapter: ProviderAdapter = {
   slug: 'blink',
   displayName: 'Blink',
+  description: 'Lightning + on-chain',
+  status: 'live',
   multiWallet: true,
   credentialFields: [
     {

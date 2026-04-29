@@ -50,17 +50,58 @@ export function listProviderSlugs(): string[] {
 export interface ProviderManifest {
   slug: string;
   displayName: string;
+  description?: string;
+  status: 'live' | 'beta' | 'coming_soon';
   multiWallet: boolean;
   credentialFields: ProviderAdapter['credentialFields'];
 }
 
+/**
+ * Roadmap entries — providers we want to surface as greyed-out tiles
+ * before their adapter ships. Keeping them here (not in PROVIDERS) means
+ * edge functions still 400 if a caller tries to use them, but the
+ * picker UI knows to render them as "Coming soon".
+ *
+ * Move an entry into PROVIDERS the moment its adapter lands — at that
+ * point its `status` flips to 'live' from the adapter declaration.
+ */
+const ROADMAP_MANIFESTS: ReadonlyArray<ProviderManifest> = [
+  {
+    slug: 'strike',
+    displayName: 'Strike',
+    description: 'Lightning + USD',
+    status: 'coming_soon',
+    multiWallet: true,
+    credentialFields: [],
+  },
+  {
+    slug: 'btcpay',
+    displayName: 'BTCPay',
+    description: 'Self-hosted merchant',
+    status: 'coming_soon',
+    multiWallet: false,
+    credentialFields: [],
+  },
+  {
+    slug: 'coinbase',
+    displayName: 'Coinbase',
+    description: 'Exchange + wallet',
+    status: 'coming_soon',
+    multiWallet: true,
+    credentialFields: [],
+  },
+];
+
 export function listProviderManifests(): ProviderManifest[] {
-  return PROVIDERS.map(p => ({
+  const live: ProviderManifest[] = PROVIDERS.map(p => ({
     slug: p.slug,
     displayName: p.displayName,
+    description: p.description,
+    status: p.status ?? 'live',
     multiWallet: p.multiWallet,
     credentialFields: p.credentialFields,
   }));
+  return [...live, ...ROADMAP_MANIFESTS];
 }
 
 // Re-export types so edge functions can import everything from one place.

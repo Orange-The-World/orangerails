@@ -118,6 +118,19 @@ export interface ProviderAdapter {
   /** Human label for this provider. UI catalog uses it. */
   displayName: string;
 
+  /**
+   * Subtitle line for the picker tile. Short — "Lightning + on-chain",
+   * "On-chain watch-only", etc. Optional; the slug is used if missing.
+   */
+  description?: string;
+
+  /**
+   * Lifecycle status surfaced in the UI catalog. `coming_soon` lets a
+   * platform render a greyed-out tile for an entry without an adapter
+   * (placeholder manifests in dispatch.ts). Defaults to `live`.
+   */
+  status?: 'live' | 'beta' | 'coming_soon';
+
   /** Schema for the credential blob the adapter expects. */
   credentialFields: CredentialField[];
 

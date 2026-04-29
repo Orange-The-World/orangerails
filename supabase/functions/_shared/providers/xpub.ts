@@ -401,7 +401,9 @@ async function runFullScan(credentials: Record<string, unknown>): Promise<SyncRe
 
 export const xpubAdapter: ProviderAdapter = {
   slug: 'xpub',
-  displayName: 'Bitcoin xpub (watch-only)',
+  displayName: 'Bitcoin xpub',
+  description: 'On-chain watch-only',
+  status: 'live',
   multiWallet: false,
   credentialFields: [
     {
