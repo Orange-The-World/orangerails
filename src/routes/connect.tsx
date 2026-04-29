@@ -84,12 +84,25 @@ function base64ToBytes(b64: string): Uint8Array {
 }
 
 /**
- * Read cred_key + txn_key from window.location.hash, import each as an
- * AES-256-GCM CryptoKey, then wipe the fragment from URL state so the
- * raw bytes are not visible to anything that walks history later.
+ * Read cred_key (required) and txn_key (optional) from
+ * window.location.hash. Each is imported as an AES-256-GCM CryptoKey,
+ * then the fragment is wiped from URL state so the raw bytes are never
+ * recoverable from history.
  *
- * Returns null when either key is missing — caller falls back to the
- * built-in test-password derivation.
+ * Contract:
+ *   - cred_key REQUIRED. Locks provider credentials (the API key the
+ *     end-user pastes). Sync uses this same key on the server to
+ *     decrypt and re-encrypt to the upstream API.
+ *   - txn_key OPTIONAL. Locks per-wallet metadata (label, currency).
+ *     Plaintext consumers (V2) don't need it; ZK consumers (V3, OW)
+ *     pass it and store ciphertext at rest. When absent, cred_key is
+ *     reused for metadata encryption.
+ *
+ * Returns null only when NEITHER key is present (= no handoff at all,
+ * widget falls back to dev test-password). When cred_key is present
+ * but invalid (wrong size, malformed base64), throws so the caller
+ * surfaces a visible error instead of silently producing
+ * unrecoverable ciphertext.
  */
 async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
   const raw = window.location.hash.replace(/^#/, "");
@@ -97,7 +110,7 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
   const params = new URLSearchParams(raw);
   const credB64 = params.get("cred_key");
   const txnB64 = params.get("txn_key");
-  if (!credB64 || !txnB64) return null;
+  if (!credB64) return null;
 
   // Strip the fragment from the visible URL ASAP. We replace, not push,
   // so the back stack is untouched.
@@ -112,14 +125,25 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
   }
 
   const credBytes = base64ToBytes(credB64);
-  const txnBytes = base64ToBytes(txnB64);
-  if (credBytes.length !== 32 || txnBytes.length !== 32) {
-    throw new Error("Handoff keys are the wrong size — expected 32 bytes each.");
+  if (credBytes.length !== 32) {
+    throw new Error("Handoff cred_key is the wrong size — expected 32 bytes.");
   }
-  const [credKey, txnKey] = await Promise.all([
-    importAesKey(credBytes.buffer as ArrayBuffer),
-    importAesKey(txnBytes.buffer as ArrayBuffer),
-  ]);
+  const credKey = await importAesKey(credBytes.buffer as ArrayBuffer);
+
+  // txn_key is optional. When absent, reuse cred_key for metadata
+  // encryption. Plaintext consumers (V2 sink mode) don't read this back
+  // anyway — the server decrypts metadata internally during sync and
+  // returns plaintext rows.
+  let txnKey: CryptoKey;
+  if (txnB64) {
+    const txnBytes = base64ToBytes(txnB64);
+    if (txnBytes.length !== 32) {
+      throw new Error("Handoff txn_key is the wrong size — expected 32 bytes.");
+    }
+    txnKey = await importAesKey(txnBytes.buffer as ArrayBuffer);
+  } else {
+    txnKey = credKey;
+  }
   return { credKey, txnKey };
 }
 
