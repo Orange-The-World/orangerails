@@ -106,11 +106,30 @@ function base64ToBytes(b64: string): Uint8Array {
  */
 async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
   const raw = window.location.hash.replace(/^#/, "");
-  if (!raw) return null;
+  // eslint-disable-next-line no-console
+  console.log("[widget diag] readHandoff: raw hash length =", raw.length);
+  if (!raw) {
+    // eslint-disable-next-line no-console
+    console.warn("[widget diag] readHandoff: NO HASH → returning null (will use test-password fallback)");
+    return null;
+  }
   const params = new URLSearchParams(raw);
   const credB64 = params.get("cred_key");
   const txnB64 = params.get("txn_key");
-  if (!credB64) return null;
+  // eslint-disable-next-line no-console
+  console.log(
+    "[widget diag] readHandoff: cred_key present?",
+    Boolean(credB64),
+    "txn_key present?",
+    Boolean(txnB64),
+    "cred_key length:",
+    credB64?.length ?? 0,
+  );
+  if (!credB64) {
+    // eslint-disable-next-line no-console
+    console.warn("[widget diag] readHandoff: cred_key MISSING → returning null (will use test-password fallback)");
+    return null;
+  }
 
   // Strip the fragment from the visible URL ASAP. We replace, not push,
   // so the back stack is untouched.
@@ -144,6 +163,11 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
   } else {
     txnKey = credKey;
   }
+  // eslint-disable-next-line no-console
+  console.log(
+    "[widget diag] readHandoff: SUCCESS, returning {credKey, txnKey}, fingerprint:",
+    `${credB64.slice(0, 8)}...${credB64.slice(-8)}`,
+  );
   return { credKey, txnKey };
 }
 
@@ -468,9 +492,15 @@ async function lockEverything(params: {
   let credKey: CryptoKey;
   let txnKey: CryptoKey;
   if (params.handoff) {
+    // eslint-disable-next-line no-console
+    console.log("[widget diag] lockEverything: USING HANDOFF KEYS (V2-derived cred_key)");
     credKey = params.handoff.credKey;
     txnKey = params.handoff.txnKey;
   } else {
+    // eslint-disable-next-line no-console
+    console.error(
+      "[widget diag] lockEverything: USING TEST-PASSWORD FALLBACK — credentials will be locked with the dev key, sync from a real consumer (V2/V3) will fail decryption.",
+    );
     const mek = await deriveMEK(LINK_WIDGET_LOCK_PASSWORD, LINK_WIDGET_LOCK_SALT_B64);
     credKey = await deriveSubkey(
       mek,
