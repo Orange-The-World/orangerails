@@ -1,0 +1,1580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OrangeRails Protocol in Practice: BitBooks V2 Case Study</title>
+<style>
+  :root {
+    --orange: #F7931A;
+    --orange-light: #FFF8EE;
+    --orange-mid: #FFE0B2;
+    --orange-dark: #C76F0E;
+    --dark: #0D1117;
+    --navy: #161B22;
+    --slate: #2D3748;
+    --gray: #64748B;
+    --mid: #94A3B8;
+    --light: #F8FAFC;
+    --border: #E2E8F0;
+    --white: #FFFFFF;
+    --green: #10B981;
+    --green-light: #ECFDF5;
+    --blue: #3B82F6;
+    --blue-light: #EFF6FF;
+    --purple: #8B5CF6;
+    --purple-light: #F3E8FF;
+    --red: #EF4444;
+    --red-light: #FEE2E2;
+    --yellow: #F59E0B;
+    --yellow-light: #FEF3C7;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    background: var(--light);
+    color: var(--slate);
+    line-height: 1.65;
+  }
+
+  .layout { display: flex; min-height: 100vh; }
+
+  nav {
+    width: 250px;
+    background: var(--dark);
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    flex-shrink: 0;
+    padding: 28px 0 40px;
+  }
+
+  .nav-logo {
+    padding: 0 20px 24px;
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+    margin-bottom: 16px;
+  }
+  .nav-logo .logo-pair {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 15px; font-weight: 800; color: var(--white);
+  }
+  .nav-logo .logo-pair .dot {
+    width: 12px; height: 12px; background: var(--orange); border-radius: 3px;
+  }
+  .nav-version {
+    display: inline-block; margin-top: 8px;
+    font-size: 9.5px; font-weight: 800; letter-spacing: 0.08em;
+    background: rgba(247,147,26,0.18); color: var(--orange);
+    padding: 3px 9px; border-radius: 4px;
+  }
+
+  nav a {
+    display: block;
+    padding: 7px 20px;
+    font-size: 12.5px;
+    color: rgba(255,255,255,0.45);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    transition: all 0.15s;
+  }
+  nav a:hover {
+    color: var(--white);
+    border-left-color: var(--orange);
+    background: rgba(247,147,26,0.06);
+  }
+
+  .nav-section {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+    color: rgba(255,255,255,0.22); text-transform: uppercase;
+    padding: 18px 20px 6px;
+  }
+
+  main { flex: 1; padding: 0 64px 80px; max-width: 960px; }
+
+  .hero {
+    padding: 56px 0 44px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 44px;
+  }
+  .hero-eyebrow {
+    display: inline-block;
+    font-size: 11px; font-weight: 800;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--orange);
+    background: var(--orange-light);
+    padding: 5px 11px; border-radius: 4px;
+    margin-bottom: 18px;
+  }
+  h1 {
+    font-size: 38px; font-weight: 900;
+    color: var(--dark); line-height: 1.15;
+    margin-bottom: 16px; letter-spacing: -0.02em;
+  }
+  .hero-sub {
+    font-size: 17px; color: var(--gray);
+    max-width: 700px; line-height: 1.6;
+  }
+  .hero-meta {
+    display: flex; gap: 10px; margin-top: 22px; flex-wrap: wrap;
+  }
+  .hero-badge {
+    font-size: 11.5px; font-weight: 600;
+    padding: 5px 12px; border-radius: 20px;
+    border: 1px solid var(--border);
+    color: var(--gray); background: var(--white);
+  }
+  .hero-badge.draft { background: var(--yellow-light); color: var(--orange-dark); border-color: rgba(245,158,11,0.4); }
+  .hero-badge.aligned { background: var(--green-light); color: var(--green); border-color: rgba(16,185,129,0.3); }
+  .hero-badge.open { background: var(--purple-light); color: var(--purple); border-color: rgba(139,92,246,0.3); }
+  .hero-badge.zk { background: var(--purple-light); color: var(--purple); border-color: rgba(139,92,246,0.3); }
+
+  section {
+    margin-bottom: 56px;
+    scroll-margin-top: 24px;
+  }
+
+  h2 {
+    font-size: 22px; font-weight: 800;
+    color: var(--dark); margin-bottom: 6px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .section-num {
+    width: 28px; height: 28px;
+    background: var(--orange-light); color: var(--orange-dark);
+    border-radius: 7px;
+    font-size: 12px; font-weight: 900;
+    display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .section-rule {
+    height: 2px;
+    background: linear-gradient(to right, var(--orange), transparent);
+    margin: 12px 0 22px;
+    border-radius: 2px;
+  }
+
+  h3 {
+    font-size: 17px; font-weight: 800; color: var(--dark);
+    margin: 24px 0 8px;
+  }
+  h4 { font-size: 14px; font-weight: 700; color: var(--dark); margin: 16px 0 6px; }
+
+  p { font-size: 14.5px; color: var(--slate); margin-bottom: 12px; line-height: 1.7; }
+  ul, ol { padding-left: 22px; margin-bottom: 12px; }
+  li { font-size: 14px; color: var(--slate); margin-bottom: 5px; line-height: 1.6; }
+
+  strong { color: var(--dark); font-weight: 700; }
+
+  /* Inline code */
+  code.inline, p code, li code, td code {
+    background: var(--light);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 12.5px;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    color: var(--orange-dark);
+  }
+
+  /* Code blocks */
+  pre {
+    background: var(--dark);
+    color: rgba(255,255,255,0.85);
+    border-radius: 10px;
+    padding: 18px 22px;
+    overflow-x: auto;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 12.5px;
+    line-height: 1.65;
+    margin: 16px 0;
+  }
+  pre .k { color: #FF7B72; }
+  pre .s { color: #A5D6FF; }
+  pre .c { color: #8B949E; font-style: italic; }
+  pre .t { color: #79C0FF; }
+  pre .v { color: #FFA657; }
+  pre .p { color: #D2A8FF; }
+  pre .n { color: #79C0FF; }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin: 16px 0;
+    background: var(--white);
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  th {
+    background: var(--light);
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 11.5px; font-weight: 700;
+    color: var(--gray); text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--slate);
+    vertical-align: top;
+    line-height: 1.55;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--light); }
+
+  /* Callouts */
+  .callout {
+    background: var(--orange-light);
+    border: 1px solid rgba(247,147,26,0.4);
+    border-left: 4px solid var(--orange);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 18px 0;
+    font-size: 14px;
+    color: var(--slate);
+  }
+  .callout strong { color: var(--orange-dark); }
+  .callout.info { background: var(--blue-light); border-color: rgba(59,130,246,0.3); border-left-color: var(--blue); }
+  .callout.info strong { color: var(--blue); }
+  .callout.success { background: var(--green-light); border-color: rgba(16,185,129,0.3); border-left-color: var(--green); }
+  .callout.success strong { color: var(--green); }
+  .callout.warning { background: var(--yellow-light); border-color: rgba(245,158,11,0.4); border-left-color: var(--yellow); }
+  .callout.warning strong { color: #B45309; }
+  .callout.privacy { background: var(--purple-light); border-color: rgba(139,92,246,0.3); border-left-color: var(--purple); }
+  .callout.privacy strong { color: var(--purple); }
+
+  /* Card grids */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 18px 0; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin: 18px 0; }
+
+  .card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .card .icon { font-size: 22px; margin-bottom: 8px; }
+  .card h4 { font-size: 14px; font-weight: 700; color: var(--dark); margin: 0 0 5px; }
+  .card p { font-size: 13px; color: var(--gray); margin: 0; line-height: 1.55; }
+
+  /* Tracks (parallel comparison cards) */
+  .tracks { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 20px 0; }
+  .track {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+    border-top: 4px solid var(--orange);
+  }
+  .track.alt { border-top-color: var(--blue); }
+  .track.privacy { border-top-color: var(--purple); }
+  .track.zk { border-top-color: var(--green); }
+  .track.rejected { border-top-color: var(--red); opacity: 0.92; }
+  .track-tag {
+    display: inline-block;
+    font-size: 10.5px; font-weight: 800;
+    letter-spacing: 0.07em; text-transform: uppercase;
+    padding: 3px 10px; border-radius: 4px;
+    margin-bottom: 12px;
+    background: var(--orange-light); color: var(--orange-dark);
+  }
+  .track.alt .track-tag { background: var(--blue-light); color: var(--blue); }
+  .track.privacy .track-tag { background: var(--purple-light); color: var(--purple); }
+  .track.zk .track-tag { background: var(--green-light); color: var(--green); }
+  .track.rejected .track-tag { background: var(--red-light); color: var(--red); }
+  .track h3 { font-size: 17px; font-weight: 800; color: var(--dark); margin-bottom: 8px; }
+  .track > p { font-size: 13.5px; color: var(--slate); margin-bottom: 12px; }
+  .track ul { list-style: none; padding: 0; margin: 12px 0 0; }
+  .track li {
+    font-size: 13px; color: var(--slate);
+    padding: 6px 0 6px 18px; position: relative;
+  }
+  .track li::before {
+    content: "→"; position: absolute; left: 0; color: var(--orange);
+  }
+  .track.alt li::before { color: var(--blue); }
+  .track.privacy li::before { color: var(--purple); }
+  .track.zk li::before { color: var(--green); }
+  .track.rejected li::before { color: var(--red); }
+
+  /* Diagram wrapper */
+  .diagram-wrap {
+    background: var(--dark);
+    border-radius: 14px;
+    padding: 24px;
+    margin: 20px 0;
+    overflow: hidden;
+  }
+  .diagram-caption {
+    font-size: 11.5px; color: var(--gray);
+    text-align: center; margin-top: 8px;
+    font-style: italic;
+  }
+
+  /* Phase / step list */
+  .steps { display: flex; flex-direction: column; gap: 0; margin: 18px 0; }
+  .step {
+    display: flex; gap: 16px;
+    padding: 18px 20px;
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    align-items: flex-start;
+  }
+  .step:first-child { border-radius: 12px 12px 0 0; }
+  .step:last-child { border-bottom: 1px solid var(--border); border-radius: 0 0 12px 12px; }
+  .step-num {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: var(--orange-light); color: var(--orange-dark);
+    font-size: 12px; font-weight: 800; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step-body h4 { font-size: 14px; font-weight: 700; color: var(--dark); margin-bottom: 4px; }
+  .step-body p { font-size: 13px; color: var(--gray); margin: 0; }
+  .step-body code { background: var(--light); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: 11.5px; font-family: 'SF Mono', monospace; color: var(--orange-dark); }
+
+  /* Owner pills */
+  .pill {
+    display: inline-block;
+    font-size: 10.5px; font-weight: 700;
+    padding: 3px 9px; border-radius: 4px;
+    margin-right: 4px;
+  }
+  .pill.live { background: var(--green-light); color: var(--green); }
+  .pill.coming { background: var(--yellow-light); color: #B45309; }
+  .pill.future { background: var(--blue-light); color: var(--blue); }
+  .pill.deferred { background: var(--light); color: var(--gray); }
+  .pill.keep { background: var(--green-light); color: var(--green); }
+  .pill.drop { background: var(--red-light); color: var(--red); }
+  .pill.modify { background: var(--yellow-light); color: #B45309; }
+  .pill.chosen { background: var(--green-light); color: var(--green); }
+  .pill.rejected { background: var(--red-light); color: var(--red); }
+
+  /* Resource cards */
+  .resources { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 18px 0; }
+  .resource {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px;
+    text-decoration: none;
+    color: var(--slate);
+    display: block;
+    transition: all 0.15s;
+  }
+  .resource:hover { border-color: var(--orange); transform: translateY(-1px); }
+  .resource .res-source {
+    display: inline-block;
+    font-size: 9.5px; font-weight: 800;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 4px;
+    margin-bottom: 6px;
+    background: var(--orange-light); color: var(--orange-dark);
+  }
+  .resource .res-title { font-size: 13.5px; font-weight: 700; color: var(--dark); margin-bottom: 4px; line-height: 1.3; }
+  .resource .res-desc { font-size: 12px; color: var(--gray); line-height: 1.5; }
+
+  /* Footer */
+  .doc-footer {
+    margin-top: 60px; padding: 24px 0;
+    border-top: 1px solid var(--border);
+    display: flex; justify-content: space-between;
+    align-items: center; font-size: 12px; color: var(--gray);
+    flex-wrap: wrap; gap: 12px;
+  }
+
+  .ascii-flow {
+    background: var(--dark);
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin: 16px 0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: rgba(255,255,255,0.78);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .ascii-flow .or-hl { color: var(--orange); font-weight: 700; }
+  .ascii-flow .grn { color: #34D399; font-weight: 700; }
+  .ascii-flow .blu { color: #60A5FA; font-weight: 700; }
+  .ascii-flow .pur { color: #C084FC; font-weight: 700; }
+  .ascii-flow .red { color: #F87171; font-weight: 700; }
+  .ascii-flow .dim { color: rgba(255,255,255,0.35); }
+
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav>
+  <div class="nav-logo">
+    <div class="logo-pair">
+      <span class="dot"></span>OR Protocol in Practice
+    </div>
+    <span class="nav-version">V2 CASE STUDY · DRAFT</span>
+  </div>
+  <div class="nav-section">Setup</div>
+  <a href="#why-v2">Why V2 First</a>
+  <a href="#starting">Starting State</a>
+
+  <div class="nav-section">The Decision</div>
+  <a href="#path-decision">Path A vs Path B</a>
+  <a href="#threat-model">Threat Model</a>
+
+  <div class="nav-section">Mirror From V3</div>
+  <a href="#mirrored">What V2 Keeps</a>
+  <a href="#vault">VaultContext</a>
+  <a href="#recovery">Recovery Code</a>
+  <a href="#subkeys">OR Subkeys</a>
+
+  <div class="nav-section">The Change</div>
+  <a href="#contract">Protocol Contract</a>
+  <a href="#yaml">YAML Is Load-Bearing</a>
+  <a href="#sink">V2 Sink Adapter</a>
+
+  <div class="nav-section">Flow</div>
+  <a href="#sequence">End-to-End Sequence</a>
+  <a href="#bulk">Multi-Connection Bulk Sync</a>
+  <a href="#discovery">Provider Discovery</a>
+
+  <div class="nav-section">Cleanup</div>
+  <a href="#schema-changes">Schema Simplifications</a>
+  <a href="#lessons">Lessons</a>
+
+  <div class="nav-section">Outlook</div>
+  <a href="#unlocks">What This Unlocks</a>
+  <a href="#resources">Resources</a>
+</nav>
+
+<main>
+
+  <div class="hero">
+    <span class="hero-eyebrow">⚡ ORANGERAILS PROTOCOL · WORKED EXAMPLE</span>
+    <h1>OrangeRails Protocol in Practice: BitBooks V2 Case Study</h1>
+    <p class="hero-sub">How a live customer-facing SaaS adopts the OrangeRails Protocol under true zero-knowledge. A worked example of Path B applied to BitBooks V2, the first protocol-driven consumer.</p>
+    <div class="hero-meta">
+      <span class="hero-badge draft">v1.0 · Draft for partner discussion</span>
+      <span class="hero-badge zk">Path B (true zero-knowledge for credentials)</span>
+      <span class="hero-badge aligned">YAML load-bearing</span>
+      <span class="hero-badge">Internal · shareable with partners</span>
+    </div>
+  </div>
+
+  <section id="why-v2">
+    <h2><span class="section-num">1</span> Why V2 First</h2>
+    <div class="section-rule"></div>
+    <p>The OrangeRails Protocol promises one thing for every consumer app: <strong>publish your App Profile, OR delivers ready-to-insert rows, your insert path stays thin.</strong> BitBooks V2 is the first proof. This case study walks the integration end to end so partners and future consumer authors can see the protocol applied to a live, customer-facing accounting product.</p>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="icon">⚡</div>
+        <h4>V2 is live</h4>
+        <p>Customers use it now. A working Blink to V2 sync ships real value to real merchants on day one, not a demo with no business owner.</p>
+      </div>
+      <div class="card">
+        <div class="icon">📐</div>
+        <h4>V2 is roughly 80% there</h4>
+        <p>Seven OR-related commits already shipped under the V3 vault pattern. The gap is the protocol contract on the sync call, not the privacy model.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🪶</div>
+        <h4>The rework is small</h4>
+        <p>Most of the work is OR-side (sink adapter, YAML profile, format dispatch). All of that is done. V2-side work is roughly thirteen hours, two days for one engineer.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🔁</div>
+        <h4>V2 becomes the template</h4>
+        <p>Once V2 lands, V3, OW, and Personal each follow the same recipe: one YAML, one sink adapter, browser-side encryption pass for ZK consumers. Build time per consumer drops below a day.</p>
+      </div>
+    </div>
+
+    <div class="callout info">
+      <strong>Audience.</strong> Partners (Galoy/Blink, Pay with Flash, Lunar Rails, Quiltt) and future consumer authors (every team that wants its app to receive Bitcoin financial data through OR). This case study assumes you have read <a href="OrangeRails-Protocol.html">the protocol design spec</a> first; this is the worked example that makes the spec concrete.
+    </div>
+
+    <div class="callout">
+      <strong>Repos referenced in this case study.</strong> OR core lives at <code>MorningRevolution/orangerails</code>. V2 lives at <code>DeeJanuz/bitbooks</code> (private, on Daenon Janis's GitHub profile). V3 lives at <code>MorningRevolution/bitbooks-v3</code>. The full build plan is at <code>orangerails/docs/V2-Integration-Build-Plan.md</code>.
+    </div>
+  </section>
+
+  <section id="starting">
+    <h2><span class="section-num">2</span> Starting State, What V2 Is Today</h2>
+    <div class="section-rule"></div>
+    <p>BitBooks V2 is a customer-facing SaaS accounting product. Live URL <code>app.bitbooks.com</code>. Daenon Janis owns the codebase. Stack:</p>
+
+    <div class="grid-3">
+      <div class="card">
+        <h4>Next.js 14 (App Router)</h4>
+        <p>Server components, route handlers under <code>app/api/.../</code>, React UI under <code>components/admin/</code>.</p>
+      </div>
+      <div class="card">
+        <h4>Postgres via Prisma</h4>
+        <p>Schema at <code>prisma/schema.prisma</code>. Real models: <code>Organization</code>, <code>Wallet</code>, <code>Transaction</code> (Decimal amount, IN/OUT direction), <code>JournalEntry</code>, <code>JournalEntryLine</code>, <code>ChartOfAccount</code>.</p>
+      </div>
+      <div class="card">
+        <h4>Better Auth</h4>
+        <p>Session-based auth, organization scoping, member roles. The OR vault password is layered on top of Better Auth, not a replacement.</p>
+      </div>
+      <div class="card">
+        <h4>Double-entry accounting</h4>
+        <p>Every transaction has a paired <code>JournalEntry</code> + balanced <code>JournalEntryLine</code> rows. Sum(debit) equals sum(credit) per JE, enforced in code today, server-side ledger Cala arrives later.</p>
+      </div>
+      <div class="card">
+        <h4>Plaintext at the data tier</h4>
+        <p>Transaction history is stored unencrypted at rest. V2's privacy model is "session-scoped, role-scoped access," not end-to-end encryption of the books.</p>
+      </div>
+      <div class="card">
+        <h4>OR thin slice already shipped</h4>
+        <p>Seven commits on <code>feat/orange-rails-integration</code> wired up provisioning, vault setup, recovery code, Blink connect, and a first sync flow.</p>
+      </div>
+    </div>
+
+    <h3>The seven OR commits in V2 today</h3>
+    <p>Under the corrected build plan (Path B, protocol-driven), most of this existing work is right. Only the sync call's protocol contract changes.</p>
+
+    <table>
+      <thead>
+        <tr><th style="width:120px;">Commit</th><th>Title</th><th style="width:140px;">Verdict under Path B</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>5b0f846</code></td>
+          <td>feat(orange-rails): schema for Bitcoin Connections thin slice</td>
+          <td><span class="pill keep">KEEP</span></td>
+        </tr>
+        <tr>
+          <td><code>536d2b5</code></td>
+          <td>feat(orange-rails): API routes for setup, connect, and sync</td>
+          <td><span class="pill keep">KEEP</span> <span class="pill modify">modify sync only</span></td>
+        </tr>
+        <tr>
+          <td><code>ae50071</code></td>
+          <td>feat(orange-rails): UI page for connecting and syncing Bitcoin wallets</td>
+          <td><span class="pill keep">KEEP</span> <span class="pill modify">simplify mode picker</span></td>
+        </tr>
+        <tr>
+          <td><code>2579b65</code></td>
+          <td>fix(or): plug Orange Rails into existing Connectors tab</td>
+          <td><span class="pill keep">KEEP</span></td>
+        </tr>
+        <tr>
+          <td><code>dcd19d9</code></td>
+          <td>fix(orange-rails): match OR's real edge-function contract</td>
+          <td><span class="pill keep">KEEP</span> <span class="pill modify">update for format= contract</span></td>
+        </tr>
+        <tr>
+          <td><code>c465b54</code></td>
+          <td>feat(orange-rails): real sync via or-sync endpoint, ported from V3</td>
+          <td><span class="pill keep">KEEP</span> <span class="pill modify">update for format= contract</span></td>
+        </tr>
+        <tr>
+          <td><code>49b2b4d</code></td>
+          <td>feat(orange-rails): vault password design, mode choice, recovery code, MEK derivation</td>
+          <td><span class="pill keep">KEEP</span> <span class="pill modify">simplify to single mode</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warning">
+      <strong>Honest acknowledgment.</strong> The earlier OR work in V2 was on the right track architecturally (V3 vault pattern, browser-derived keys, recovery code) but used the encrypted-payload-store flow rather than the new protocol contract. V2 sent <code>transactions_key</code> to <code>or-sync</code>, then later called <code>or-transactions-list</code>, then decrypted payloads in the browser. That fragmented the flow and is the part this case study replaces.
+    </div>
+  </section>
+
+  <section id="path-decision">
+    <h2><span class="section-num">3</span> Path A vs Path B, The Decision</h2>
+    <div class="section-rule"></div>
+    <p>At V2 setup time, OR offers consumer apps two privacy postures for source-provider credentials. Both are defined in the protocol spec; this section records V2's choice and why.</p>
+
+    <div class="tracks">
+      <div class="track rejected">
+        <span class="track-tag">REJECTED</span>
+        <h3>Path A, Server-Held Key</h3>
+        <p>OR holds the encryption key for source-provider credentials. V2's server initiates a sync without the customer's password being present in the request. Smooth UX: zero password prompts after sign-in.</p>
+        <ul>
+          <li>One-click "Sync Now" with no vault unlock</li>
+          <li>No 12-word recovery code needed</li>
+          <li>No browser-derived key plumbing</li>
+          <li>OR breach exposes credentials directly</li>
+          <li>V2 breach + OR breach exposes credentials</li>
+          <li>Trades real privacy for connect-flow ergonomics</li>
+        </ul>
+      </div>
+      <div class="track zk">
+        <span class="track-tag">CHOSEN</span>
+        <h3>Path B, Browser-Derived Key</h3>
+        <p>The customer's browser derives the key from a vault password. OR receives the key in transit per request, decrypts the source credential in memory, then wipes RAM. V2's server never sees the password or any derived key.</p>
+        <ul>
+          <li>Vault password prompt once per browser session</li>
+          <li>12-word recovery code generated at setup</li>
+          <li>Two-breach floor for credential exposure</li>
+          <li>OR ciphertext alone is useless to an attacker</li>
+          <li>V2 plaintext alone does not leak source credentials</li>
+          <li>Mirror of V3's vault context, applied to V2 verbatim</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout privacy">
+      <strong>Why Path B even though V2 stores transactions plaintext.</strong> The source-provider credential (Blink API key, Strike OAuth refresh token, Flash long-lived secret) is sensitive in its own right. An attacker who reads it can impersonate the customer at the source provider, drain a Lightning balance, post to a payment processor. That risk exists independently of how V2 stores the transaction history. Path B encrypts the credential at OR with a key the customer's browser holds, so a single breach (V2 or OR) is not enough to lift the credential. Path A would have V2's server hold the key, and any V2 breach would expose the source credential alongside the books.
+    </div>
+
+    <h3 id="threat-model">Threat-model comparison</h3>
+    <table>
+      <thead>
+        <tr><th>Threat</th><th>Path A <span class="pill rejected">REJECTED</span></th><th>Path B <span class="pill chosen">CHOSEN</span></th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>OR data breach (database dump)</td>
+          <td>Source credentials exposed in plaintext or with a key the attacker can also lift.</td>
+          <td>Source credentials are AES-GCM ciphertext. Useless without the customer's vault password.</td>
+        </tr>
+        <tr>
+          <td>V2 data breach (database dump)</td>
+          <td>Transaction history exposed. Source credentials may also live here.</td>
+          <td>Transaction history exposed. Source credentials live at OR, not at V2.</td>
+        </tr>
+        <tr>
+          <td>Combined V2 + OR breach</td>
+          <td>Source credentials and transaction history both exposed.</td>
+          <td>Source credentials still need the customer's vault password (or recovery code) to decrypt. Two-breach floor holds.</td>
+        </tr>
+        <tr>
+          <td>Compelled disclosure to OR operator</td>
+          <td>OR can read source credentials at rest.</td>
+          <td>OR cannot read source credentials at rest. Decryption keys exist for the milliseconds of one HTTP request, then are wiped.</td>
+        </tr>
+        <tr>
+          <td>Customer forgets password and loses recovery code</td>
+          <td>No issue; OR can re-issue access via support flow.</td>
+          <td>Bookkeeping for connected accounts is unrecoverable. Customer disconnects and reconnects from sources to start fresh. V2 surfaces a clear warning at setup.</td>
+        </tr>
+        <tr>
+          <td>Customer onboarding friction</td>
+          <td>None beyond the sign-in.</td>
+          <td>Vault password prompt at setup, again on first sync per browser session, plus recovery-code reveal. Small but non-zero.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout success">
+      <strong>The verdict.</strong> The privacy property matters and the UX cost is small enough to absorb. V2 chose Path B. Every BitBooks-family consumer (V3, OW, Personal) inherits the same posture for the same reason.
+    </div>
+  </section>
+
+  <section id="mirrored">
+    <h2><span class="section-num">4</span> What V2 Mirrors From V3 Verbatim</h2>
+    <div class="section-rule"></div>
+    <p>V3 has been running the Path B vault pattern in production. V2 takes it verbatim, simplified to a single password mode. The list below describes what V2 KEEPS from V3 in the protocol-driven build.</p>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="icon">🔐</div>
+        <h4>VaultContext shape</h4>
+        <p>Random 256-bit MEK. Argon2id-derived KEK wraps the MEK. Recovery code wraps the MEK independently. All key material lives in browser memory only, never in cookies, localStorage, or the network.</p>
+      </div>
+      <div class="card">
+        <div class="icon">📜</div>
+        <h4>12-word recovery code</h4>
+        <p>Same fixed 256-word list as V3. Generated once at setup, shown once with a "save this now" reveal screen, encrypted under the MEK and stored at <code>OrangeRailsRecoveryCode.encryptedCodeB64</code>. Customer can re-fetch by entering their password.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🔑</div>
+        <h4>OR subkey derivation</h4>
+        <p>From the MEK, V2 derives <code>orCredsKey</code> via HKDF. <code>orCredsKey</code> is exported as base64 (extractable) and sent to OR per sync request, in transit only. No key material persists on V2's server.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🪟</div>
+        <h4>AddConnectionDialog flow</h4>
+        <p>Five-step UX: provision OR subaccount, vault setup with recovery code reveal, pick provider (Blink), paste API key, browser encrypts and posts ciphertext to OR's <code>or-connection-create</code>. Identical to V3's dialog, simplified copy.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🔁</div>
+        <h4>bb-or-proxy edge function</h4>
+        <p>V2 keeps the same proxy pattern V3 uses: a server-side route adds the platform API key (<code>X-Platform-API-Key</code> header), forwards the body unchanged to OR. Customer never sees the platform key; OR never sees V2's user JWT.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🛟</div>
+        <h4>Recovery and reset routes</h4>
+        <p><code>app/api/.../orange-rails/recovery-code/</code> for re-fetch and acknowledge. <code>app/api/.../orange-rails/reset/</code> for vault password reset (re-wraps MEK with new password). Both KEEP from the existing thin slice.</p>
+      </div>
+    </div>
+
+    <h3 id="vault">VaultContext, the mirror in code</h3>
+    <p>V2's <code>VaultContext.tsx</code> is functionally identical to V3's. The shape:</p>
+
+    <pre><span class="c">// V2 mirrors V3 verbatim. Random MEK + Argon2id KEK + recovery-code wrap.</span>
+<span class="c">// Browser-only. Cleared on tab close.</span>
+
+<span class="k">type</span> <span class="t">VaultState</span> = {
+  <span class="p">status</span>: <span class="s">'locked'</span> | <span class="s">'unlocked'</span> | <span class="s">'unprovisioned'</span>;
+  <span class="p">mek</span>: <span class="t">CryptoKey</span> | <span class="k">null</span>;            <span class="c">// 32 random bytes, AES-GCM</span>
+  <span class="p">orCredsKey</span>: <span class="t">CryptoKey</span> | <span class="k">null</span>;     <span class="c">// HKDF-derived subkey, extractable</span>
+};
+
+<span class="k">async function</span> <span class="v">unlockVault</span>(<span class="p">password</span>: <span class="t">string</span>, <span class="p">saltB64</span>: <span class="t">string</span>) {
+  <span class="k">const</span> <span class="v">salt</span> = <span class="v">decodeB64</span>(<span class="p">saltB64</span>);
+  <span class="k">const</span> <span class="v">kek</span> = <span class="k">await</span> <span class="v">argon2idDeriveKey</span>({
+    <span class="p">password</span>, <span class="p">salt</span>,
+    <span class="p">memoryKiB</span>: <span class="n">65536</span>, <span class="p">iterations</span>: <span class="n">3</span>, <span class="p">parallelism</span>: <span class="n">1</span>,
+    <span class="p">hashLen</span>: <span class="n">32</span>,
+  });
+  <span class="k">const</span> <span class="v">mek</span> = <span class="k">await</span> <span class="v">unwrapMekWithKek</span>(<span class="v">kek</span>, <span class="p">wrappedMekB64</span>);
+  <span class="k">const</span> <span class="v">orCredsKey</span> = <span class="k">await</span> <span class="v">deriveOrCredsKey</span>(<span class="v">mek</span>);
+  <span class="k">return</span> { <span class="p">status</span>: <span class="s">'unlocked'</span>, <span class="v">mek</span>, <span class="v">orCredsKey</span> };
+}
+
+<span class="k">async function</span> <span class="v">deriveOrCredsKey</span>(<span class="v">mek</span>: <span class="t">CryptoKey</span>) {
+  <span class="c">// HKDF-SHA256 with info="or:credentials:v1"</span>
+  <span class="c">// extractable=true so we can export to base64 for in-transit handoff to OR</span>
+  <span class="k">return</span> <span class="v">crypto</span>.<span class="v">subtle</span>.<span class="v">deriveKey</span>(
+    { <span class="p">name</span>: <span class="s">'HKDF'</span>, <span class="p">hash</span>: <span class="s">'SHA-256'</span>, <span class="p">salt</span>: <span class="v">EMPTY</span>, <span class="p">info</span>: <span class="v">infoBytes</span>(<span class="s">'or:credentials:v1'</span>) },
+    <span class="v">mek</span>,
+    { <span class="p">name</span>: <span class="s">'AES-GCM'</span>, <span class="p">length</span>: <span class="n">256</span> },
+    <span class="k">true</span>,                                <span class="c">// extractable for export to base64</span>
+    [<span class="s">'encrypt'</span>, <span class="s">'decrypt'</span>],
+  );
+}</pre>
+
+    <div class="callout privacy">
+      <strong>What "browser-only" means here.</strong> Password, KEK, MEK, and <code>orCredsKey</code> never leave the browser as plaintext. The exported <code>orCredsKey</code> base64 only travels in TLS-encrypted requests to OR, where it lives in process memory for one request and is then wiped. V2's Postgres holds the salt (<code>vaultSaltB64</code>) and a verifier (<code>vaultVerifierB64</code>, SHA-256 of the MEK), enough to confirm the password is correct without ever holding the password or MEK.
+    </div>
+
+    <h3 id="recovery">12-word recovery code</h3>
+    <p>The recovery code is the customer's escape hatch when they forget their vault password. V3's pattern, taken verbatim:</p>
+
+    <ol>
+      <li>At vault setup, generate 12 words from a fixed 256-word list (smaller than BIP39 by design, easier to handwrite).</li>
+      <li>Encrypt the words under the MEK with AES-256-GCM. Store ciphertext at <code>OrangeRailsRecoveryCode.encryptedCodeB64</code>.</li>
+      <li>Show the words once on a "save these now" screen, with copy: "If you forget your vault password, this is the only way back into your data. Lose both, lose your bookkeeping for connected accounts."</li>
+      <li>Customer acknowledges. <code>acknowledged</code> flips true. Words clear from browser memory.</li>
+      <li>Re-fetch is gated by entering the current password. Reset uses the words to unwrap the MEK, then re-wraps with a new password-derived KEK.</li>
+    </ol>
+
+    <h3 id="subkeys">OR subkey derivation</h3>
+    <p>OR uses one subkey from the V2 MEK. The pattern is HKDF with a versioned info string:</p>
+
+    <table>
+      <thead>
+        <tr><th style="width:160px;">Subkey</th><th>HKDF info</th><th>Used for</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>orCredsKey</code></td>
+          <td><code>or:credentials:v1</code></td>
+          <td>Encrypts source-provider credentials (Blink API key, etc.) at <code>or-connection-create</code> time. Sent in transit per <code>or-sync</code> call so OR can decrypt the credential, fetch from the source, then wipe.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Future subkeys (transaction-list re-key, per-source isolation) sit on the same HKDF pattern with new info strings, so adding them is a one-line change in <code>VaultContext</code>.</p>
+  </section>
+
+  <section id="contract">
+    <h2><span class="section-num">5</span> What V2 Changes, The Protocol Contract</h2>
+    <div class="section-rule"></div>
+    <p>This is the only protocol-level change on the V2 side. Everything in section 4 stays. The sync call shape changes from "encrypted-payload store, two-roundtrip pull, browser decryption" to "format dispatch, one roundtrip, ready-to-insert rows."</p>
+
+    <div class="tracks">
+      <div class="track alt">
+        <span class="track-tag">BEFORE</span>
+        <h3>Encrypted-payload store flow</h3>
+        <p>V2 sent both <code>credentials_key</code> and <code>transactions_key</code> to <code>or-sync</code>. OR fetched from Blink, encrypted each transaction's payload under <code>transactions_key</code>, persisted ciphertext. V2 then called <code>or-transactions-list</code>, decrypted each row in the browser, mapped to V2 schema, inserted.</p>
+        <ul>
+          <li>Two OR roundtrips per sync (sync, then list)</li>
+          <li>OR persists encrypted transaction blobs</li>
+          <li>Browser does a decryption pass</li>
+          <li>V2 owns the canonical-to-V2 mapping locally</li>
+          <li>V3-style flow, but V2 stores plaintext anyway, so the encryption pass is wasted work</li>
+        </ul>
+      </div>
+      <div class="track zk">
+        <span class="track-tag">AFTER</span>
+        <h3>Format dispatch flow</h3>
+        <p>V2 sends only <code>credentials_key</code> and <code>format: 'bitbooks-v2'</code>. OR loads the V2 App Profile YAML, decrypts the source credential in memory, calls Blink, runs the V2 sink adapter via the engine, returns V2-shaped Prisma rows in the response. V2 inserts directly.</p>
+        <ul>
+          <li>One OR roundtrip per sync</li>
+          <li>OR persists no transaction data</li>
+          <li>No browser decryption pass</li>
+          <li>OR owns the canonical-to-V2 mapping (in YAML + sink TS)</li>
+          <li>Matches V2's plaintext storage choice without compromising credential ZK</li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>The new request</h3>
+    <pre><span class="c">// V2 to OR. credentials_key still travels in transit; transactions_key gone.</span>
+<span class="t">POST</span> /functions/v1/or-sync
+<span class="p">X-Platform-API-Key</span>: &lt;V2 platform key&gt;
+<span class="p">Content-Type</span>: application/json
+
+{
+  <span class="s">"subaccount_id"</span>: <span class="s">"&lt;V2 org's OR subaccount UUID&gt;"</span>,
+  <span class="s">"credentials_key"</span>: <span class="s">"&lt;base64 raw 32 bytes, the orCredsKey from VaultContext&gt;"</span>,
+  <span class="s">"format"</span>: <span class="s">"bitbooks-v2"</span>
+}</pre>
+
+    <h3>The new response</h3>
+    <pre>{
+  <span class="p">"synced"</span>: <span class="n">5</span>,
+  <span class="p">"connections"</span>: [
+    { <span class="p">"connection_id"</span>: <span class="s">"..."</span>, <span class="p">"synced"</span>: <span class="n">5</span>, <span class="p">"next_cursor"</span>: <span class="s">"..."</span> }
+  ],
+  <span class="p">"rows"</span>: {
+    <span class="p">"Wallet"</span>:           [{ <span class="p">"sourceWalletId"</span>: <span class="s">"..."</span>, <span class="p">"__resolveCoa"</span>: { <span class="c">/* hint */</span> }, ... }],
+    <span class="p">"Transaction"</span>:      [{ <span class="p">"id"</span>: <span class="s">"..."</span>, <span class="p">"__resolveWalletId"</span>: { ... }, <span class="p">"amount"</span>: <span class="s">"0.00045000"</span>, ... }],
+    <span class="p">"JournalEntry"</span>:     [{ <span class="p">"id"</span>: <span class="s">"..."</span>, <span class="p">"refNum"</span>: <span class="s">"JE-OR-..."</span>, ... }],
+    <span class="p">"JournalEntryLine"</span>: [{ <span class="p">"journalEntryId"</span>: <span class="s">"..."</span>, <span class="p">"__resolveCoa"</span>: { ... }, <span class="p">"debit"</span>: <span class="s">"0.00045000"</span>, ... }]
+  },
+  <span class="p">"metadata"</span>: {
+    <span class="p">"format"</span>: <span class="s">"bitbooks-v2"</span>,
+    <span class="p">"requires_encryption"</span>: []
+  }
+}</pre>
+
+    <div class="callout info">
+      <strong>Backward compatible.</strong> When <code>format</code> is absent on the request, OR runs the existing encrypted-payload path unchanged. V3 keeps using that path until it migrates to <code>format=bitbooks-v3</code>. Two consumer postures (V2 + V3) coexist on the same <code>or-sync</code> endpoint without flagging or branching at the call site.
+    </div>
+
+    <div class="callout privacy">
+      <strong>What still travels in transit.</strong> <code>credentials_key</code> (the <code>orCredsKey</code> base64) still flows in transit per request. OR needs it to decrypt the source-provider credential at fetch time. The key exists in OR memory for the duration of the request, then is wiped. No persistence, no logging, verifiable in the open-source code. Path B's privacy contract is unchanged by the format-dispatch flow; only the response shape changes.
+    </div>
+
+    <h3>V2's <code>client.ts</code>, the diff</h3>
+    <pre><span class="c">// Before</span>
+<span class="k">export async function</span> <span class="v">syncWalletFromOr</span>(<span class="p">args</span>: {
+  <span class="p">subaccountId</span>: <span class="t">string</span>;
+  <span class="p">credentialsKeyB64</span>: <span class="t">string</span>;
+  <span class="p">transactionsKeyB64</span>: <span class="t">string</span>;        <span class="c">// DROP under Path B + new contract</span>
+}): <span class="t">Promise</span>&lt;<span class="t">OrSyncResponse</span>&gt; {
+  <span class="c">// ...</span>
+  <span class="p">body</span>: <span class="v">JSON</span>.<span class="v">stringify</span>({
+    <span class="p">subaccount_id</span>: <span class="v">args</span>.<span class="v">subaccountId</span>,
+    <span class="p">credentials_key</span>: <span class="v">args</span>.<span class="v">credentialsKeyB64</span>,
+    <span class="p">transactions_key</span>: <span class="v">args</span>.<span class="v">transactionsKeyB64</span>,
+  })
+}
+
+<span class="c">// After</span>
+<span class="k">export async function</span> <span class="v">syncOrgFromOr</span>(<span class="p">args</span>: {
+  <span class="p">subaccountId</span>: <span class="t">string</span>;
+  <span class="p">credentialsKeyB64</span>: <span class="t">string</span>;
+}): <span class="t">Promise</span>&lt;<span class="t">OrSyncFormattedResponse</span>&gt; {
+  <span class="k">const</span> <span class="v">url</span> = <span class="s">`</span><span class="v">${OR_BASE_URL}</span><span class="s">/functions/v1/or-sync`</span>;
+  <span class="k">const</span> <span class="v">res</span> = <span class="k">await</span> <span class="v">fetch</span>(<span class="v">url</span>, {
+    <span class="p">method</span>: <span class="s">'POST'</span>,
+    <span class="p">headers</span>: <span class="v">buildHeaders</span>(),
+    <span class="p">body</span>: <span class="v">JSON</span>.<span class="v">stringify</span>({
+      <span class="p">subaccount_id</span>: <span class="v">args</span>.<span class="v">subaccountId</span>,
+      <span class="p">credentials_key</span>: <span class="v">args</span>.<span class="v">credentialsKeyB64</span>,
+      <span class="p">format</span>: <span class="s">'bitbooks-v2'</span>,                 <span class="c">// the protocol contract change</span>
+    }),
+  });
+  <span class="k">if</span> (!<span class="v">res</span>.<span class="v">ok</span>) <span class="k">throw new</span> <span class="v">OrangeRailsClientError</span>(<span class="v">res</span>.<span class="v">status</span>, <span class="k">await</span> <span class="v">res</span>.<span class="v">text</span>());
+  <span class="k">return</span> <span class="v">orSyncFormattedResponseSchema</span>.<span class="v">parse</span>(<span class="k">await</span> <span class="v">res</span>.<span class="v">json</span>());
+}
+
+<span class="c">// DELETE: listOrTransactions and the OrEncryptedTxRow type. Both unused now.</span></pre>
+  </section>
+
+  <section id="yaml">
+    <h2><span class="section-num">6</span> The YAML Is Load-Bearing</h2>
+    <div class="section-rule"></div>
+    <p>The V2 App Profile YAML lives at <code>supabase/functions/_shared/sinks/profiles/bitbooks-v2.yaml</code> in the OR repo. The runtime parses it on edge-function startup, validates structure, caches per format slug, and uses it on every sync to drive two decisions per transaction.</p>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="icon">📒</div>
+        <h4>account_mapping_rules</h4>
+        <p>First-match-wins. Each rule has either a <code>when</code> clause (matched against the canonical transaction's <code>type</code> + <code>direction</code>) or <code>default: true</code>. The first match returns its <code>debit</code> and <code>credit</code> CoA hints. The engine resolves <code>from: canonical.X</code>, <code>from: derived.X</code>, and <code>from: input.X</code> references at runtime.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🚦</div>
+        <h4>status_to_v2</h4>
+        <p>Provider status string to V2's <code>TransactionStatus</code> enum, with the <code>default</code> key as the fallback. Edit the mapping, redeploy, the next sync uses the new mapping. No TypeScript change.</p>
+      </div>
+    </div>
+
+    <h3>The YAML, abbreviated</h3>
+    <pre><span class="p">app</span>: <span class="s">bitbooks-v2</span>
+<span class="p">version</span>: <span class="s">2026.04.29</span>
+<span class="p">canonical_version</span>: <span class="s">v0</span>
+<span class="p">accepts_modules</span>: [<span class="s">bitcoin</span>]
+
+<span class="p">account_mapping_rules</span>:
+  - <span class="p">when</span>: { <span class="p">type</span>: <span class="s">lightning</span>, <span class="p">direction</span>: <span class="s">in</span> }
+    <span class="p">debit</span>:
+      <span class="p">accountType</span>: <span class="s">ASSET</span>
+      <span class="p">accountSubType</span>: <span class="s">WALLETS</span>
+      <span class="p">isWallet</span>: <span class="k">true</span>
+      <span class="p">targetSourceWalletId</span>: { <span class="p">from</span>: <span class="s">canonical.source_wallet_id</span> }
+      <span class="p">currency</span>: { <span class="p">from</span>: <span class="s">derived.asset</span> }
+    <span class="p">credit</span>:
+      <span class="p">accountType</span>: <span class="s">INCOME</span>
+      <span class="p">accountSubType</span>: <span class="s">SALES</span>
+      <span class="p">name</span>: <span class="s">"Sales"</span>
+
+  - <span class="p">when</span>: { <span class="p">type</span>: <span class="s">lightning</span>, <span class="p">direction</span>: <span class="s">out</span> }
+    <span class="p">debit</span>:
+      <span class="p">accountType</span>: <span class="s">EXPENSE</span>
+      <span class="p">accountSubType</span>: <span class="s">OTHER_EXPENSES</span>
+      <span class="p">name</span>: <span class="s">"Lightning Payments"</span>
+    <span class="p">credit</span>:
+      <span class="p">accountType</span>: <span class="s">ASSET</span>
+      <span class="p">accountSubType</span>: <span class="s">WALLETS</span>
+      <span class="p">isWallet</span>: <span class="k">true</span>
+      <span class="p">targetSourceWalletId</span>: { <span class="p">from</span>: <span class="s">canonical.source_wallet_id</span> }
+      <span class="p">currency</span>: { <span class="p">from</span>: <span class="s">derived.asset</span> }
+
+  <span class="c"># onchain in/out follow the same shape, then a default fallback to SUSPENSE</span>
+  - <span class="p">default</span>: <span class="k">true</span>
+    <span class="p">debit</span>:
+      <span class="p">accountType</span>: <span class="s">ASSET</span>
+      <span class="p">accountSubType</span>: <span class="s">SUSPENSE</span>
+      <span class="p">name</span>: <span class="s">"Suspense"</span>
+    <span class="p">credit</span>:
+      <span class="p">accountType</span>: <span class="s">ASSET</span>
+      <span class="p">accountSubType</span>: <span class="s">SUSPENSE</span>
+      <span class="p">name</span>: <span class="s">"Suspense"</span>
+
+<span class="p">status_to_v2</span>:
+  <span class="p">SUCCESS</span>: <span class="s">COMPLETE</span>
+  <span class="p">PENDING</span>: <span class="s">PENDING</span>
+  <span class="p">FAILED</span>: <span class="s">FAILED</span>
+  <span class="p">REVERSED</span>: <span class="s">REVERSED</span>
+  <span class="p">default</span>: <span class="s">INCOMPLETE</span></pre>
+
+    <h3>How the engine resolves <code>from:</code> references</h3>
+    <p>At sync time, OR builds a per-transaction context with three namespaces:</p>
+
+    <ul>
+      <li><code>canonical.*</code>: the canonical transaction itself (<code>id</code>, <code>type</code>, <code>direction</code>, <code>timestamp</code>, <code>amount</code>, <code>asset</code>, <code>source_wallet_id</code>, <code>description</code>, <code>fiat_equivalent.rate</code>, ...).</li>
+      <li><code>derived.*</code>: shapes the sink computes once per transaction (<code>asset</code>, <code>amount</code> as Decimal-shaped string, <code>now</code>, <code>parent_je_id</code>, <code>line.account_role</code>, <code>line.debit</code>, <code>line.credit</code>, <code>wallet_default_name</code>, <code>wallet_type</code>).</li>
+      <li><code>input.*</code>: passed in from the sync request (<code>org_id</code>, <code>or_connection_id</code>).</li>
+    </ul>
+
+    <p>The engine walks the rule list, finds the first match against the canonical context, returns the rule's <code>debit</code> and <code>credit</code> objects with all <code>from:</code> references resolved to literal values. The resolved objects feed directly into the <code>__resolveCoa</code> hints embedded in <code>JournalEntryLine</code> rows.</p>
+
+    <div class="callout success">
+      <strong>What "load-bearing" buys you.</strong> Daenon wants to remap "lightning in" from <code>SALES</code> to <code>OTHER_INCOME</code> for one of his customers? Edit four lines in the YAML, redeploy the edge function, the next sync uses the new mapping. Zero TypeScript change. Zero V2-side change. Zero customer downtime. The protocol's value compounds when the rules live in YAML and the engine reads them.
+    </div>
+
+    <div class="callout warning">
+      <strong>What stays in TypeScript for now.</strong> The Wallet, Transaction, JournalEntry, and JournalEntryLine row shapes still live in <code>_shared/sinks/bitbooks-v2.ts</code>. Lifting row construction itself to YAML is a candidate when the protocol picks up its third consumer (OW or Personal); two-consumer YAML lifting is premature.
+    </div>
+  </section>
+
+  <section id="sink">
+    <h2><span class="section-num">7</span> The V2 Sink Adapter</h2>
+    <div class="section-rule"></div>
+    <p>The sink adapter at <code>supabase/functions/_shared/sinks/bitbooks-v2.ts</code> is the TypeScript half of V2's App Profile. It receives a normalized canonical transaction and the engine's resolved rule context, builds Wallet / Transaction / JournalEntry / JournalEntryLine objects shaped exactly as V2's Prisma models expect, and embeds <code>__resolve*</code> hints for the bits that V2 must resolve at insert time against its local Prisma client.</p>
+
+    <h3>The SinkAdapter interface</h3>
+    <pre><span class="c">// supabase/functions/_shared/sinks/types.ts</span>
+
+<span class="k">export interface</span> <span class="t">SinkAdapter</span>&lt;<span class="t">TOut</span>&gt; {
+  <span class="p">slug</span>: <span class="t">string</span>;
+  <span class="p">canonicalVersion</span>: <span class="s">'v0'</span> | <span class="s">'v1'</span>;
+  <span class="p">acceptsModules</span>: <span class="t">CanonicalModule</span>[];
+  <span class="p">build</span>(<span class="p">tx</span>: <span class="t">NormalizedTransaction</span>, <span class="p">ctx</span>: <span class="t">SinkContext</span>): <span class="t">TOut</span> | <span class="k">null</span>;
+  <span class="p">flush</span>?(<span class="p">ctx</span>: <span class="t">SinkContext</span>): <span class="t">TOut</span>[];
+}
+
+<span class="k">export interface</span> <span class="t">SinkContext</span> {
+  <span class="p">orgId</span>: <span class="t">string</span>;
+  <span class="p">orConnectionId</span>: <span class="t">string</span>;
+  <span class="p">profile</span>: <span class="t">AppProfile</span>;          <span class="c">// loaded from YAML, validated</span>
+  <span class="p">engine</span>: <span class="t">RuleEngine</span>;            <span class="c">// findMatchingRule + mapStatus</span>
+  <span class="p">now</span>: <span class="t">Date</span>;
+}
+
+<span class="k">export type</span> <span class="t">SinkOutput</span> = {
+  <span class="p">Wallet</span>?: <span class="k">unknown</span>[];
+  <span class="p">Transaction</span>: <span class="k">unknown</span>[];
+  <span class="p">JournalEntry</span>: <span class="k">unknown</span>[];
+  <span class="p">JournalEntryLine</span>: <span class="k">unknown</span>[];
+};</pre>
+
+    <h3>The <code>__resolve*</code> hint pattern</h3>
+    <p>OR cannot reach into V2's Postgres to do a find-or-create on <code>ChartOfAccount</code> or <code>Wallet</code>. Instead, OR emits <strong>resolve hints</strong> embedded in the row, and V2's sync handler resolves them at insert time using V2's Prisma client.</p>
+
+    <table>
+      <thead>
+        <tr><th style="width:200px;">Hint key</th><th>What V2 does</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>__resolveWalletId</code></td>
+          <td>Find a <code>Wallet</code> by <code>sourceWalletId</code> (UNIQUE). Replace with the resolved primary key.</td>
+        </tr>
+        <tr>
+          <td><code>__resolveCoa</code></td>
+          <td>Find-or-create a <code>ChartOfAccount</code> by <code>(accountType, accountSubType, name?, isWallet?, currency?)</code>. Auto-create a "Suspense" CoA on first encounter for fallback rows.</td>
+        </tr>
+        <tr>
+          <td><code>__resolveContactId</code></td>
+          <td>Find-or-create a <code>Contact</code> by <code>(name, kind)</code>. Used when canonical transactions carry a counterparty.</td>
+        </tr>
+        <tr>
+          <td><code>__resolveSystemUser</code></td>
+          <td>Find-or-create the OrangeRails system user (the one assigned as <code>createdById</code> / <code>postedById</code> on JEs).</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Sink output, sketch</h3>
+    <pre><span class="k">export const</span> <span class="v">bitbooksV2Sink</span>: <span class="t">SinkAdapter</span>&lt;<span class="t">SinkOutput</span>&gt; = {
+  <span class="p">slug</span>: <span class="s">'bitbooks-v2'</span>,
+  <span class="p">canonicalVersion</span>: <span class="s">'v0'</span>,
+  <span class="p">acceptsModules</span>: [<span class="s">'bitcoin'</span>],
+
+  <span class="p">build</span>(<span class="p">tx</span>, <span class="p">ctx</span>) {
+    <span class="k">const</span> <span class="v">derived</span> = <span class="v">buildDerivedContext</span>(<span class="p">tx</span>, <span class="p">ctx</span>);
+    <span class="k">const</span> <span class="v">rule</span> = <span class="p">ctx</span>.<span class="v">engine</span>.<span class="v">findMatchingRule</span>(<span class="p">ctx</span>.<span class="v">profile</span>, <span class="p">tx</span>, <span class="v">derived</span>);
+    <span class="k">if</span> (!<span class="v">rule</span>) <span class="k">return null</span>;
+
+    <span class="k">const</span> <span class="v">jeId</span> = <span class="v">crypto</span>.<span class="v">randomUUID</span>();
+    <span class="k">const</span> <span class="v">v2Status</span> = <span class="p">ctx</span>.<span class="v">engine</span>.<span class="v">mapStatus</span>(<span class="p">ctx</span>.<span class="v">profile</span>, <span class="v">tx</span>.<span class="v">status</span>);
+
+    <span class="k">return</span> {
+      <span class="p">Wallet</span>: <span class="v">derived</span>.<span class="v">isFirstAppearance</span> ? [<span class="v">buildWalletRow</span>(<span class="v">tx</span>, <span class="v">derived</span>, <span class="p">ctx</span>)] : [],
+      <span class="p">JournalEntry</span>: [<span class="v">buildJeRow</span>(<span class="v">jeId</span>, <span class="v">tx</span>, <span class="v">derived</span>, <span class="p">ctx</span>)],
+      <span class="p">JournalEntryLine</span>: [
+        <span class="v">buildLineRow</span>(<span class="v">jeId</span>, <span class="s">'debit'</span>, <span class="v">rule</span>.<span class="v">debit</span>, <span class="v">tx</span>, <span class="v">derived</span>),
+        <span class="v">buildLineRow</span>(<span class="v">jeId</span>, <span class="s">'credit'</span>, <span class="v">rule</span>.<span class="v">credit</span>, <span class="v">tx</span>, <span class="v">derived</span>),
+      ],
+      <span class="p">Transaction</span>: [<span class="v">buildTransactionRow</span>(<span class="v">jeId</span>, <span class="v">v2Status</span>, <span class="v">tx</span>, <span class="v">derived</span>, <span class="p">ctx</span>)],
+    };
+  },
+};</pre>
+
+    <h3>One sample row, end to end</h3>
+    <p>For a 45,000-sat Lightning receive at Blink, the sink emits a <code>JournalEntryLine</code> row that looks like this in the response:</p>
+
+    <pre>{
+  <span class="p">"id"</span>: <span class="s">"01H..."</span>,
+  <span class="p">"journalEntryId"</span>: <span class="s">"01H..."</span>,
+  <span class="p">"__resolveCoa"</span>: {
+    <span class="p">"accountType"</span>: <span class="s">"ASSET"</span>,
+    <span class="p">"accountSubType"</span>: <span class="s">"WALLETS"</span>,
+    <span class="p">"isWallet"</span>: <span class="k">true</span>,
+    <span class="p">"targetSourceWalletId"</span>: <span class="s">"blink:wallet:abc123"</span>,
+    <span class="p">"currency"</span>: <span class="s">"BTC"</span>
+  },
+  <span class="p">"nativeCurrency"</span>: <span class="s">"BTC"</span>,
+  <span class="p">"amountNative"</span>: <span class="s">"0.00045000"</span>,
+  <span class="p">"debit"</span>: <span class="s">"0.00045000"</span>,
+  <span class="p">"credit"</span>: <span class="k">null</span>,
+  <span class="p">"pinnedRate"</span>: <span class="s">"63842.50"</span>,
+  <span class="p">"pinnedRateSource"</span>: <span class="s">"PROVIDER"</span>,
+  <span class="p">"ratePending"</span>: <span class="k">false</span>,
+  <span class="p">"rateTimestamp"</span>: <span class="s">"2026-04-29T14:22:33Z"</span>,
+  <span class="p">"memo"</span>: <span class="s">"Receipt from acme.example"</span>
+}</pre>
+
+    <p>V2's <code>sync-handler.ts</code> sees <code>__resolveCoa</code>, runs its find-or-create against <code>ChartOfAccount</code> with the embedded criteria, replaces the hint with the resolved <code>chartOfAccountId</code> primary key, then runs <code>prisma.journalEntryLine.create({ data })</code> inside a transaction.</p>
+
+    <h3>V2's <code>sync-handler.ts</code>, the new file</h3>
+    <pre><span class="k">import</span> { <span class="v">prisma</span> } <span class="k">from</span> <span class="s">'@/lib/prisma'</span>;
+
+<span class="k">export async function</span> <span class="v">applyOrSyncResponse</span>(
+  <span class="p">orgId</span>: <span class="t">string</span>,
+  <span class="p">orConnectionId</span>: <span class="t">string</span>,
+  <span class="p">response</span>: <span class="t">OrSyncFormattedResponse</span>,
+) {
+  <span class="c">// V2 stores plaintext at rest. requires_encryption should be empty.</span>
+  <span class="k">if</span> (<span class="v">response</span>.<span class="v">metadata</span>.<span class="v">requires_encryption</span>.<span class="v">length</span> &gt; <span class="n">0</span>) {
+    <span class="k">throw new</span> <span class="v">Error</span>(
+      <span class="s">`Unexpected encryption fields for V2 sink: </span><span class="v">${...}</span><span class="s">`</span>,
+    );
+  }
+
+  <span class="k">const</span> <span class="v">resolvers</span> = <span class="v">makeResolvers</span>(<span class="v">orgId</span>, <span class="v">orConnectionId</span>);
+
+  <span class="k">await</span> <span class="v">prisma</span>.<span class="v">$transaction</span>(<span class="k">async</span> (<span class="p">tx</span>) =&gt; {
+    <span class="c">// Order matters. Wallet must exist before Transaction references it.</span>
+    <span class="k">for</span> (<span class="k">const</span> <span class="v">w</span> <span class="k">of</span> <span class="v">response</span>.<span class="v">rows</span>.<span class="v">Wallet</span> ?? []) {
+      <span class="k">await</span> <span class="v">resolvers</span>.<span class="v">resolveAndUpsertWallet</span>(<span class="p">tx</span>, <span class="v">w</span>);
+    }
+    <span class="k">for</span> (<span class="k">const</span> <span class="v">je</span> <span class="k">of</span> <span class="v">response</span>.<span class="v">rows</span>.<span class="v">JournalEntry</span>) {
+      <span class="k">await</span> <span class="v">resolvers</span>.<span class="v">resolveAndCreateJE</span>(<span class="p">tx</span>, <span class="v">je</span>);
+    }
+    <span class="k">for</span> (<span class="k">const</span> <span class="v">line</span> <span class="k">of</span> <span class="v">response</span>.<span class="v">rows</span>.<span class="v">JournalEntryLine</span>) {
+      <span class="k">await</span> <span class="v">resolvers</span>.<span class="v">resolveAndCreateLine</span>(<span class="p">tx</span>, <span class="v">line</span>);
+    }
+    <span class="k">for</span> (<span class="k">const</span> <span class="v">t</span> <span class="k">of</span> <span class="v">response</span>.<span class="v">rows</span>.<span class="v">Transaction</span>) {
+      <span class="k">await</span> <span class="v">resolvers</span>.<span class="v">resolveAndCreateTransaction</span>(<span class="p">tx</span>, <span class="v">t</span>);
+    }
+  });
+
+  <span class="k">return</span> { <span class="p">synced</span>: <span class="v">response</span>.<span class="v">rows</span>.<span class="v">Transaction</span>.<span class="v">length</span> };
+}</pre>
+
+    <p>The route at <code>app/api/.../wallets/[walletId]/sync/route.ts</code> wires it together:</p>
+
+    <pre><span class="k">import</span> { <span class="v">syncOrgFromOr</span> } <span class="k">from</span> <span class="s">'@/lib/orange-rails/client'</span>;
+<span class="k">import</span> { <span class="v">applyOrSyncResponse</span> } <span class="k">from</span> <span class="s">'@/lib/orange-rails/sync-handler'</span>;
+
+<span class="k">export async function</span> <span class="v">POST</span>(<span class="p">req</span>: <span class="t">Request</span>, { <span class="p">params</span> }) {
+  <span class="k">const</span> { <span class="v">organizationId</span>, <span class="v">walletId</span> } = <span class="v">params</span>;
+  <span class="k">await</span> <span class="v">assertMember</span>(<span class="v">req</span>, <span class="v">organizationId</span>);
+
+  <span class="c">// Browser-derived credentials key arrives in the request body</span>
+  <span class="k">const</span> { <span class="v">credentials_key</span> } = <span class="k">await</span> <span class="v">req</span>.<span class="v">json</span>();
+  <span class="k">if</span> (!<span class="v">credentials_key</span>) <span class="k">return</span> <span class="v">badRequest</span>(<span class="s">'credentials_key required'</span>);
+
+  <span class="k">const</span> <span class="v">conn</span> = <span class="k">await</span> <span class="v">prisma</span>.<span class="v">orangeRailsConnection</span>.<span class="v">findUnique</span>({
+    <span class="p">where</span>: { <span class="v">organizationId</span> },
+  });
+  <span class="k">if</span> (!<span class="v">conn</span>) <span class="k">return</span> <span class="v">notFound</span>();
+
+  <span class="k">const</span> <span class="v">result</span> = <span class="k">await</span> <span class="v">syncOrgFromOr</span>({
+    <span class="p">subaccountId</span>: <span class="v">conn</span>.<span class="v">orPlatformUserId</span>,
+    <span class="p">credentialsKeyB64</span>: <span class="v">credentials_key</span>,
+  });
+
+  <span class="k">const</span> <span class="v">stats</span> = <span class="k">await</span> <span class="v">applyOrSyncResponse</span>(<span class="v">organizationId</span>, <span class="v">conn</span>.<span class="v">id</span>, <span class="v">result</span>);
+
+  <span class="k">return</span> <span class="v">Response</span>.<span class="v">json</span>({ <span class="p">ok</span>: <span class="k">true</span>, ...<span class="v">stats</span> });
+}</pre>
+  </section>
+
+  <section id="sequence">
+    <h2><span class="section-num">8</span> End-to-End Sequence</h2>
+    <div class="section-rule"></div>
+    <p>The full flow from "customer clicks Sync" to "books update," with what happens at each layer.</p>
+
+    <div class="ascii-flow"><span class="dim">┌──────────────────────────────────────────────────────────────────────────┐</span>
+<span class="dim">│</span>      <span class="or-hl">PATH B + PROTOCOL CONTRACT, ONE ROUNDTRIP, ZERO BROWSER DECRYPT</span>      <span class="dim">│</span>
+<span class="dim">└──────────────────────────────────────────────────────────────────────────┘</span>
+
+<span class="grn">[V2 browser]</span>            <span class="blu">[V2 server route]</span>           <span class="or-hl">[OR or-sync]</span>            <span class="pur">[Blink]</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span> unlock vault             <span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span> derive MEK + orCredsKey  <span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span> export orCredsKey b64    <span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span> POST sync                <span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span> { credentials_key }      <span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>━━━━━━━━━━━━━━━━━━━━━━━━━&gt;<span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span> bb-or-proxy:             <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span> + X-Platform-API-Key     <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span> + format=bitbooks-v2     <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>━━━━━━━━━━━━━━━━━━━━━━━━━&gt;<span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span> load YAML profile     <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span> decrypt creds w/ key  <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span> (in memory only)      <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span>━━━━━━━━━━━━━━━━━━━━━&gt;<span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span>    Blink transactions <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span>&lt;━━━━━━━━━━━━━━━━━━━━━<span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span> normalize to canonical<span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span> engine: rules + status<span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span> sink: build V2 rows   <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>                          <span class="dim">|</span> wipe credential RAM   <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>   { rows, metadata }     <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span>&lt;━━━━━━━━━━━━━━━━━━━━━━━━━<span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span> applyOrSyncResponse:     <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span> resolve __resolve* hints <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>                          <span class="dim">|</span> prisma upsert in tx      <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>   { ok: true, synced: 5 } <span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span>&lt;━━━━━━━━━━━━━━━━━━━━━━━━━<span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+     <span class="dim">|</span> refresh transactions list<span class="dim">|</span>                          <span class="dim">|</span>                       <span class="dim">|</span>
+</div>
+
+    <h3>The seven user-visible steps</h3>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h4>Customer signs into V2</h4>
+          <p>Standard Better Auth flow at <code>app.bitbooks.com</code>. Organization context loads. The customer has not yet provisioned an OR vault.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h4>Admin to Connectors to "+ Add Connection"</h4>
+          <p>V2 calls the <code>setup</code> route. First-time customer: a vault is provisioned (random MEK in the browser, password-derived KEK wraps it, 12-word recovery code generated and shown once). Customer saves the recovery code. OR subaccount provisioned via <code>or-platform-user-create</code>.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h4>Picks "Blink", pastes the API key</h4>
+          <p>Browser derives <code>orCredsKey</code> from the MEK. Browser AES-GCM encrypts the API key locally. Posts ciphertext to OR's <code>or-connection-create</code>. The plaintext key never leaves the browser.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <h4>Returns to Connectors list</h4>
+          <p>OR confirms storage. V2 displays the connection row (status, <code>last_sync_at</code>). Wallet rows exist on V2 only after the first successful sync; not pre-created.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-body">
+          <h4>Clicks "Sync now"</h4>
+          <p>Vault unlock prompt if locked; otherwise the in-memory keys are already there. Browser exports <code>orCredsKey</code> as base64. V2 server route forwards it (in transit only, no persistence) to OR's <code>or-sync</code> with <code>format=bitbooks-v2</code>.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">6</div>
+        <div class="step-body">
+          <h4>OR delivers V2-shaped rows</h4>
+          <p>OR loads the YAML profile, decrypts the credential in memory, calls Blink, runs the V2 sink adapter, returns rows. V2's <code>applyOrSyncResponse</code> resolves <code>__resolve*</code> hints, runs Prisma upserts in a transaction.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">7</div>
+        <div class="step-body">
+          <h4>Customer sees the transactions</h4>
+          <p>Transactions list refreshes. Wallet appears with current balance. JE pairs balance to zero. Customer's books are up to date with five Lightning receipts and one on-chain payout.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="bulk">
+    <h2><span class="section-num">9</span> Multi-Connection Bulk Sync</h2>
+    <div class="section-rule"></div>
+    <p>A typical V2 customer is a small accounting practice or a Bitcoin-native business. They might run twenty connections: Blink for their working balance, Strike for incoming wires, Flash for the merchant invoice product, plus one or two on-chain wallets per legal entity. Today (under the encrypted-payload-store flow) every connection's sync requires a fresh password entry.</p>
+
+    <div class="callout warning">
+      <strong>The friction problem.</strong> Twenty password prompts to update twenty connections is unacceptable. Customers will avoid syncing, books will go stale, the value of the connector evaporates.
+    </div>
+
+    <h3>The fix, one prompt per browser session</h3>
+    <p>Once the customer unlocks the vault, the MEK and <code>orCredsKey</code> live in browser memory until refresh or close. The "Sync All" button runs the per-connection sync sequentially using the in-memory keys, never re-prompting. Tab close = vault locks = keys gone, customer must re-enter on next sync.</p>
+
+    <pre><span class="c">// components/admin/admin-connectors.tsx, "Sync All" handler</span>
+<span class="k">async function</span> <span class="v">syncAll</span>() {
+  <span class="k">if</span> (<span class="v">vault</span>.<span class="v">status</span> !== <span class="s">'unlocked'</span>) {
+    <span class="k">await</span> <span class="v">unlockPrompt</span>();                  <span class="c">// shows password modal once</span>
+  }
+  <span class="k">const</span> <span class="v">credsKeyB64</span> = <span class="k">await</span> <span class="v">vault</span>.<span class="v">exportOrCredsKeyB64</span>();
+
+  <span class="k">const</span> <span class="v">results</span> = [];
+  <span class="k">for</span> (<span class="k">const</span> <span class="v">conn</span> <span class="k">of</span> <span class="v">connections</span>) {
+    <span class="k">try</span> {
+      <span class="k">const</span> <span class="v">r</span> = <span class="k">await</span> <span class="v">syncOneConnection</span>(<span class="v">conn</span>.<span class="v">id</span>, <span class="v">credsKeyB64</span>);
+      <span class="v">results</span>.<span class="v">push</span>({ <span class="p">ok</span>: <span class="k">true</span>, ...<span class="v">r</span> });
+    } <span class="k">catch</span> (<span class="v">err</span>) {
+      <span class="v">results</span>.<span class="v">push</span>({ <span class="p">ok</span>: <span class="k">false</span>, <span class="p">error</span>: <span class="v">String</span>(<span class="v">err</span>) });
+    }
+  }
+  <span class="v">surface</span>(<span class="v">results</span>);                          <span class="c">// per-connection success/failure badges</span>
+}</pre>
+
+    <div class="callout info">
+      <strong>V3 will pick up the same pattern.</strong> V3's vault context already supports multi-connection in memory; what V3 lacks today is the format-dispatch sync flow. After V2 lands, V3 migrates to <code>format=bitbooks-v3</code> and gets bulk sync as a side effect.
+    </div>
+  </section>
+
+  <section id="discovery">
+    <h2><span class="section-num">10</span> Provider Discovery, Search Beats Tile Grids</h2>
+    <div class="section-rule"></div>
+    <p>The current V2 add-connection modal renders a tile grid: one tile per provider, Blink active, the rest grayed out as "coming soon." That UI is fine for two providers, awkward for ten, unworkable for hundreds.</p>
+
+    <div class="tracks">
+      <div class="track alt">
+        <span class="track-tag">TODAY</span>
+        <h3>Tile grid</h3>
+        <p>One tile per provider, Blink active, others grayed out. Visual but it does not scale.</p>
+        <ul>
+          <li>Visually scannable at small N</li>
+          <li>Awkward at N = 10, unworkable at N = 100</li>
+          <li>Hard to filter by category (Lightning, custody, exchange)</li>
+          <li>Locks the UI to a specific provider count and shape</li>
+        </ul>
+      </div>
+      <div class="track zk">
+        <span class="track-tag">AFTER</span>
+        <h3>Search and typeahead</h3>
+        <p>Full-text search over the provider catalog. Results group by category. Each result shows status (live, beta, planned) and connection method (API key, OAuth, etc.).</p>
+        <ul>
+          <li>Scales to hundreds of providers without UI redesign</li>
+          <li>Lets V2 surface "planned" providers without making them seem broken</li>
+          <li>Category filter built in</li>
+          <li>Day-one Blink only is fine; the UI is structured to grow</li>
+        </ul>
+      </div>
+    </div>
+
+    <p>The provider catalog itself comes from OR. V2 fetches the list at modal open, caches per session. Each entry carries:</p>
+
+    <pre>{
+  <span class="p">"slug"</span>: <span class="s">"blink"</span>,
+  <span class="p">"name"</span>: <span class="s">"Blink"</span>,
+  <span class="p">"category"</span>: <span class="s">"lightning_wallet"</span>,
+  <span class="p">"status"</span>: <span class="s">"live"</span>,
+  <span class="p">"connection_method"</span>: <span class="s">"api_key"</span>,
+  <span class="p">"docs_url"</span>: <span class="s">"https://dev.blink.sv/"</span>,
+  <span class="p">"icon_url"</span>: <span class="s">"..."</span>
+}</pre>
+
+    <p>When the catalog grows to Strike, Flash, Lunar Rails, BTCPay, Quiltt, and CCXT-wrapped exchanges, V2 picks them up automatically. No V2 redeploy required for catalog updates; a tile grid would need a CSS rework every few new entries.</p>
+  </section>
+
+  <section id="schema-changes">
+    <h2><span class="section-num">11</span> Schema Simplifications Under Path B</h2>
+    <div class="section-rule"></div>
+    <p>Most of V2's existing OR schema stays. The simplifications below remove dead weight introduced by an earlier "two vault modes" idea that Path B retires.</p>
+
+    <table>
+      <thead>
+        <tr><th>Object</th><th>Action</th><th>Why</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>OrangeRailsVaultMode</code> enum</td>
+          <td><span class="pill drop">DROP</span></td>
+          <td>Single mode going forward, called "vault password." The SIGNIN_PASSWORD vs WALLET_PASSWORD picker is gone.</td>
+        </tr>
+        <tr>
+          <td><code>OrangeRailsConnection.vaultMode</code></td>
+          <td><span class="pill drop">DROP</span></td>
+          <td>Column dropped with the enum. Migration is safe; only thin-slice test data exists.</td>
+        </tr>
+        <tr>
+          <td><code>OrangeRailsConnection.orPlatformUserId</code></td>
+          <td><span class="pill modify">RENAME (optional)</span></td>
+          <td>Optional rename to <code>orSubaccountId</code> to match OR's terminology. Daenon's call on whether to bundle with this PR.</td>
+        </tr>
+        <tr>
+          <td><code>OrangeRailsConnection.vaultSaltB64</code></td>
+          <td><span class="pill keep">KEEP</span></td>
+          <td>Still needed for Argon2id KDF on every unlock.</td>
+        </tr>
+        <tr>
+          <td><code>OrangeRailsConnection.vaultVerifierB64</code></td>
+          <td><span class="pill keep">KEEP</span></td>
+          <td>Lets the server confirm the password is correct without ever holding it.</td>
+        </tr>
+        <tr>
+          <td><code>OrangeRailsRecoveryCode</code> model</td>
+          <td><span class="pill keep">KEEP</span></td>
+          <td>Recovery code is part of Path B's "you control the keys, here is your way back if you forget" model.</td>
+        </tr>
+        <tr>
+          <td><code>Wallet.sourceWalletId</code>, <code>Wallet.orConnectionId</code></td>
+          <td><span class="pill keep">KEEP</span></td>
+          <td>Already correct. Used for the <code>__resolveWalletId</code> hint at insert time.</td>
+        </tr>
+        <tr>
+          <td><code>lib/orange-rails/crypto-browser.ts</code></td>
+          <td><span class="pill modify">TRIM</span></td>
+          <td>Keep the KDF and credentials-key derivation. Drop the transaction-payload decryption helpers; no encrypted payloads come back any more.</td>
+        </tr>
+        <tr>
+          <td><code>listOrTransactions</code> in <code>client.ts</code></td>
+          <td><span class="pill drop">DROP</span></td>
+          <td>Encrypted-payload-store flow is gone. The function has no callers.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>The migration</h3>
+    <pre><span class="c">-- prisma/migrations/202604xx_or_path_b_cleanup.sql</span>
+
+<span class="c">-- Drop the vault-mode enum (single-mode now)</span>
+<span class="k">ALTER TABLE</span> <span class="s">"OrangeRailsConnection"</span> <span class="k">DROP COLUMN</span> <span class="s">"vaultMode"</span>;
+<span class="k">DROP TYPE</span> <span class="s">"OrangeRailsVaultMode"</span>;
+
+<span class="c">-- Optional rename for clarity (matches OR's `subaccount_id` terminology)</span>
+<span class="k">ALTER TABLE</span> <span class="s">"OrangeRailsConnection"</span>
+  <span class="k">RENAME COLUMN</span> <span class="s">"orPlatformUserId"</span> <span class="k">TO</span> <span class="s">"orSubaccountId"</span>;</pre>
+
+    <p>Both safe migrations: no production OR connections yet, only thin-slice test data which can be wiped.</p>
+  </section>
+
+  <section id="lessons">
+    <h2><span class="section-num">12</span> Lessons From The Rework</h2>
+    <div class="section-rule"></div>
+    <p>Three lessons earned the hard way during the V2 rework. Each one shaped the protocol's current shape.</p>
+
+    <div class="grid-3">
+      <div class="card">
+        <div class="icon">🔪</div>
+        <h4>Build the whole flow on day one</h4>
+        <p>The first V2 attempt sliced the work into thin layers (schema, then routes, then UI, then sync). Each slice was small and individually correct, but the slices had chicken-and-egg dependencies that fragmented the integration. The next consumer build will land the whole flow at once even if one or two layers are stub-quality on day one.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🎯</div>
+        <h4>Don't trade privacy for storage convenience</h4>
+        <p>An earlier draft of this plan asked: "V2 stores transactions plaintext anyway, why bother encrypting credentials?" The answer is that the source credential is a separate sensitive thing, in addition to the transaction history. Path B protects the credential whether or not the books are encrypted. Don't trade the credential's privacy property for an easier UX.</p>
+      </div>
+      <div class="card">
+        <div class="icon">📜</div>
+        <h4>YAML-as-runtime compounds</h4>
+        <p>The protocol's value compounds when the rules live in YAML and the engine reads them. Each consumer authors one YAML profile and one sink adapter; rule edits ship without TypeScript changes. The first consumer is the moment you find out which decisions belong in YAML and which stay in code; V2 is where that line got drawn.</p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>The third lesson, expanded.</strong> When you author a YAML profile in YAML alone, you can give the YAML to your accounting team or a domain expert, they can draft new rules without writing code, and the protocol's runtime will obey on the next deploy. That feedback loop is the protocol's accelerant. The longer you keep rules in code, the slower every consumer's onboarding gets.
+    </div>
+  </section>
+
+  <section id="unlocks">
+    <h2><span class="section-num">13</span> What This Unlocks For V3, OW, Personal</h2>
+    <div class="section-rule"></div>
+    <p>V2 is the proof of pattern. Each of the three remaining BitBooks-family consumers follows the same recipe with one delta.</p>
+
+    <table>
+      <thead>
+        <tr><th style="width:140px;">Consumer</th><th>YAML profile slug</th><th>Sink adapter</th><th>Encryption pass at insert</th><th>Estimate</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>BitBooks V2</td>
+          <td><code>bitbooks-v2</code></td>
+          <td><code>_shared/sinks/bitbooks-v2.ts</code></td>
+          <td>None (plaintext at rest)</td>
+          <td>Two days, this case study</td>
+        </tr>
+        <tr>
+          <td>BitBooks V3</td>
+          <td><code>bitbooks-v3</code></td>
+          <td><code>_shared/sinks/bitbooks-v3.ts</code></td>
+          <td>Browser-side AES-GCM with the org-scope DEK before insert</td>
+          <td>Three days, larger because V3 retires <code>orImportBridge.ts</code> and the local canonical-to-V3 mapping it owns today</td>
+        </tr>
+        <tr>
+          <td>OrangeWay (OW)</td>
+          <td><code>orangeway</code></td>
+          <td><code>_shared/sinks/orangeway.ts</code></td>
+          <td>Browser-side AES-GCM (OW is fully ZK like V3)</td>
+          <td>One day, fresh consumer with no migration debt</td>
+        </tr>
+        <tr>
+          <td>BitBooks Personal</td>
+          <td><code>bitbooks-personal</code></td>
+          <td><code>_shared/sinks/bitbooks-personal.ts</code></td>
+          <td>Browser-side AES-GCM (mirrors V3)</td>
+          <td>One day, fresh consumer, simpler schema than V3</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout success">
+      <strong>The compounding payoff.</strong> The first consumer (V2) costs a couple of days. The second consumer (V3) takes three days because of the migration cost from its existing local mapper, not the protocol cost. From the third consumer onward, build time is measured in hours, not days, because the protocol's hard parts (canonical model, engine, profile loader, format dispatch on <code>or-sync</code>) are reused and only the consumer-specific YAML + sink TS is new work.
+    </div>
+
+    <h3>What partners get</h3>
+    <ul>
+      <li><strong>Galoy / Blink:</strong> the live source adapter today, plus the BitBooks family as four downstream consumers without writing any V2/V3/OW/Personal mapping code. Blink ships once into OR, every consumer receives Blink data.</li>
+      <li><strong>Pay with Flash:</strong> when Flash ships its source adapter, every BitBooks consumer picks Flash up automatically. Same pattern for Strike, Lunar Rails, BTCPay.</li>
+      <li><strong>Future consumers (rotki, Maybe Finance, Firefly III, partner accounting products):</strong> author one YAML, one sink TS, one platform key registration. Days to integrate, not weeks. Day-one access to every source already in OR's catalog.</li>
+    </ul>
+  </section>
+
+  <section id="resources">
+    <h2><span class="section-num">14</span> Resources</h2>
+    <div class="section-rule"></div>
+
+    <h3>Companion docs</h3>
+    <div class="resources">
+      <a href="OrangeRails-Protocol.html" class="resource">
+        <span class="res-source">Spec</span>
+        <div class="res-title">The OrangeRails Protocol</div>
+        <div class="res-desc">Universal Bitcoin financial data layer, source/sink architecture, canonical model, app profile registry. Read this first.</div>
+      </a>
+      <a href="V2-Integration-Build-Plan.md" class="resource">
+        <span class="res-source">Plan</span>
+        <div class="res-title">V2 Integration Build Plan</div>
+        <div class="res-desc">Authoritative build plan for the V2 rework. Owner assignments, file inventory, test plan, schedule. The source for this case study.</div>
+      </a>
+      <a href="OrangeRails-Architecture.md" class="resource">
+        <span class="res-source">Doc</span>
+        <div class="res-title">OrangeRails Architecture</div>
+        <div class="res-desc">Long-form architecture doc, canonical-to-V2 mapping rationale, ZK posture across the stack.</div>
+      </a>
+      <a href="OrangeRails-Platform-Design.md" class="resource">
+        <span class="res-source">Doc</span>
+        <div class="res-title">OrangeRails Platform Design</div>
+        <div class="res-desc">Platform table, API key model, subaccount provisioning, format dispatch contract.</div>
+      </a>
+    </div>
+
+    <h3>Repositories</h3>
+    <div class="resources">
+      <a href="https://github.com/MorningRevolution/orangerails" class="resource">
+        <span class="res-source">Repo</span>
+        <div class="res-title">MorningRevolution/orangerails</div>
+        <div class="res-desc">OR core. Edge functions, sink adapters, profile loader, profile engine. Apache 2.0 (planned).</div>
+      </a>
+      <a href="#" class="resource">
+        <span class="res-source">Private</span>
+        <div class="res-title">DeeJanuz/bitbooks</div>
+        <div class="res-desc">BitBooks V2, the live customer-facing accounting product. Private repo on Daenon Janis's GitHub profile. Branch <code>feat/orange-rails-integration</code> for OR work.</div>
+      </a>
+      <a href="https://github.com/MorningRevolution/bitbooks-v3" class="resource">
+        <span class="res-source">Repo</span>
+        <div class="res-title">MorningRevolution/bitbooks-v3</div>
+        <div class="res-desc">BitBooks V3, the next-generation ZK accounting product. The vault context this case study mirrors lives at <code>src/context/VaultContext.tsx</code>.</div>
+      </a>
+      <a href="https://github.com/GaloyMoney/cala" class="resource">
+        <span class="res-source">Apache 2.0</span>
+        <div class="res-title">GaloyMoney/cala</div>
+        <div class="res-desc">Open-source double-entry ledger in Rust. The accounting backend that V2 and V3 both target as the canonical ledger of record.</div>
+      </a>
+    </div>
+
+    <h3>Live source adapter</h3>
+    <div class="resources">
+      <a href="https://galoy.io/" class="resource">
+        <span class="res-source">Galoy</span>
+        <div class="res-title">Galoy / Blink</div>
+        <div class="res-desc">Open-source Bitcoin banking stack. Blink is the live OR source adapter, the first provider V2 supports.</div>
+      </a>
+      <a href="https://dev.blink.sv/" class="resource">
+        <span class="res-source">Docs</span>
+        <div class="res-title">Blink developer docs</div>
+        <div class="res-desc">The Blink GraphQL API the OR source adapter consumes.</div>
+      </a>
+    </div>
+
+    <h3>Open-source siblings (the precedent)</h3>
+    <div class="resources">
+      <a href="https://github.com/rotki/rotki" class="resource">
+        <span class="res-source">AGPL-3.0</span>
+        <div class="res-title">rotki</div>
+        <div class="res-desc">Open-source local-first portfolio tracker. A potential future OR consumer once the protocol opens to non-BitBooks consumers.</div>
+      </a>
+      <a href="https://github.com/ccxt/ccxt" class="resource">
+        <span class="res-source">MIT</span>
+        <div class="res-title">CCXT</div>
+        <div class="res-desc">Unified API library for 100+ crypto exchanges. The basis for OR's future exchange source adapter.</div>
+      </a>
+      <a href="https://www.simplefin.org/protocol.html" class="resource">
+        <span class="res-source">Spec</span>
+        <div class="res-title">SimpleFIN Protocol</div>
+        <div class="res-desc">Open spec for read-only financial data. The pattern OR borrows for spec publication.</div>
+      </a>
+      <a href="https://github.com/firefly-iii/firefly-iii" class="resource">
+        <span class="res-source">AGPL-3.0</span>
+        <div class="res-title">Firefly III</div>
+        <div class="res-desc">Self-hosted personal finance manager. The architectural precedent for OR's modular adapter service.</div>
+      </a>
+    </div>
+
+  </section>
+
+  <div class="doc-footer">
+    <span>OrangeRails Protocol in Practice · BitBooks V2 Case Study · v1.0 Draft · 2026-04-29</span>
+    <span class="hero-badge zk">Path B · YAML load-bearing · Internal, shareable with partners</span>
+  </div>
+
+</main>
+</div>
+</body>
+</html>

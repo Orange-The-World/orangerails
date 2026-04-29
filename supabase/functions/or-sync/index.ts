@@ -10,18 +10,40 @@
  *   - Authorization: Bearer <jwt> → direct mode (orangerails.com/app)
  *     Subaccount auto-resolved to the user's direct subaccount
  *
- * POST body:
- *   subaccount_id?:    uuid    required in platform mode
- *   connection_ids?:   uuid[]  sync only these (otherwise all non-disconnected)
- *   credentials_key:   string  base64 ORK (in-transit only)
- *   transactions_key:  string  base64 ORT (in-transit only)
+ * POST body — TWO MODES:
  *
- * Response:
- *   { synced: number, connections: [{ connection_id, synced, next_cursor, error? }] }
+ *   1. Encrypted-payload mode (legacy, V3 today):
+ *        { subaccount_id?, connection_ids?, credentials_key, transactions_key }
+ *      OR fetches transactions, encrypts each with transactions_key, stores
+ *      ciphertext in encrypted_transactions. Caller fetches via
+ *      or-transactions-list and decrypts in-browser.
+ *      Response: { synced: number, connections: [{ connection_id, synced, next_cursor, error? }] }
+ *
+ *   2. Protocol-driven sink mode (V2 today, V3 future):
+ *        { subaccount_id?, connection_ids?, credentials_key, format }
+ *      OR fetches transactions, runs the registered SinkAdapter for `format`,
+ *      returns app-shaped rows in the response body. No encrypted_transactions
+ *      storage. transactions_key is NOT required.
+ *      Response: {
+ *        synced: number,
+ *        connections: [{ connection_id, synced, next_cursor, error? }],
+ *        rows: { <table-name>: [...rows] },
+ *        metadata: { format, requires_encryption: string[] }
+ *      }
+ *
+ * Mode is selected by presence of `format`. See OrangeRails-Protocol.html §8
+ * for the protocol contract; see _shared/sinks/dispatch.ts for the sink registry.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
+import {
+  getSinkAdapter,
+  listSinkFormats,
+  mergeSinkOutputs,
+  ensureProfileForFormat,
+} from '../_shared/sinks/dispatch.ts';
+import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 
 // ─── AES-256-GCM helpers ─────────────────────────────────────────────────────
 
@@ -391,19 +413,58 @@ Deno.serve(async (req: Request) => {
       subaccount_id?: string;
       connection_ids?: string[];
       credentials_key: string;
-      transactions_key: string;
+      /** Required in encrypted-payload mode, ignored in sink mode. */
+      transactions_key?: string;
+      /**
+       * When set, run the registered SinkAdapter and return app-shaped rows
+       * in the response body instead of storing encrypted_payload rows.
+       * See _shared/sinks/dispatch.ts for valid values.
+       */
+      format?: string;
     };
 
-    const { credentials_key, transactions_key, connection_ids } = body ?? {};
-    if (!credentials_key || !transactions_key) {
-      return jsonResponse({ error: 'credentials_key and transactions_key required' }, 400, cors);
+    const { credentials_key, transactions_key, connection_ids, format } = body ?? {};
+    if (!credentials_key) {
+      return jsonResponse({ error: 'credentials_key required' }, 400, cors);
+    }
+
+    // Mode selection — `format` flips into protocol-driven sink mode.
+    const sinkMode = typeof format === 'string' && format.length > 0;
+    let sinkAdapter: ReturnType<typeof getSinkAdapter> = null;
+    if (sinkMode) {
+      sinkAdapter = getSinkAdapter(format!);
+      if (!sinkAdapter) {
+        return jsonResponse(
+          {
+            error: `Unknown format: ${format}`,
+            valid_formats: listSinkFormats(),
+          },
+          400,
+          cors,
+        );
+      }
+      // Ensure the YAML profile (if any) is loaded + validated before we hit
+      // the per-transaction loop. Cached after first call. Profile load
+      // failures surface here as 500 with a clear message rather than mid-loop.
+      try {
+        await ensureProfileForFormat(format!);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return jsonResponse({ error: `Profile load failed for format=${format}: ${msg}` }, 500, cors);
+      }
+    } else {
+      // Legacy mode requires the encryption key for the encrypted_transactions store.
+      if (!transactions_key) {
+        return jsonResponse({ error: 'transactions_key required (or pass `format` for sink mode)' }, 400, cors);
+      }
     }
 
     const subaccountId = await resolveSubaccount(ctx, body.subaccount_id);
     if (isAuthError(subaccountId)) return jsonResponse({ error: subaccountId.message }, subaccountId.status, cors);
 
     const credsKey = await importAesKey(credentials_key);
-    const txnsKey = await importAesKey(transactions_key);
+    // Only imported in legacy mode — sink mode never encrypts payloads.
+    const txnsKey: CryptoKey | null = sinkMode ? null : await importAesKey(transactions_key!);
 
     let connQuery = ctx.serviceClient
       .from('connections')
@@ -417,6 +478,9 @@ Deno.serve(async (req: Request) => {
     if (!connections?.length) return jsonResponse({ synced: 0, connections: [] }, 200, cors);
 
     const results: Array<{ connection_id: string; synced: number; next_cursor: string | null; error?: string }> = [];
+    // Sink-mode-only: collect per-connection sink outputs to merge into
+    // a single `rows` map at the end. Empty in legacy mode.
+    const sinkOutputs: SinkOutput[] = [];
 
     for (const conn of connections) {
       try {
@@ -454,12 +518,29 @@ Deno.serve(async (req: Request) => {
           next_cursor = out.next_cursor;
         }
 
-        if (newTxs.length > 0) {
+        if (sinkMode) {
+          // Protocol-driven path: run the sink adapter per transaction,
+          // collect outputs for response merging. NO encrypted_transactions
+          // storage. Consumer inserts what we return.
+          for (const tx of newTxs) {
+            const out = sinkAdapter!.toAppShape({
+              transaction: tx,
+              or_connection_id: conn.id,
+              or_subaccount_id: subaccountId,
+              external_user_id:
+                ctx.mode === 'direct'
+                  ? ctx.userId
+                  : await resolveExternalUserId(ctx.serviceClient, subaccountId),
+            });
+            sinkOutputs.push(out);
+          }
+        } else if (newTxs.length > 0) {
+          // Legacy encrypted-payload path (V3 today).
           const rows = await Promise.all(
             newTxs.map(async tx => ({
               connection_id: conn.id,
               external_id: tx.id,
-              encrypted_payload: await encryptAes(JSON.stringify(tx), txnsKey),
+              encrypted_payload: await encryptAes(JSON.stringify(tx), txnsKey!),
               payload_key_version: 1,
               occurred_at: tx.timestamp,
             })),
@@ -483,11 +564,36 @@ Deno.serve(async (req: Request) => {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.error(`[or-sync] connection ${conn.id}:`, msg);
-        let encryptedErr: string | null = null;
-        try { encryptedErr = await encryptAes(msg.slice(0, 500), txnsKey); } catch { /* ignore */ }
-        await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: encryptedErr }).eq('id', conn.id);
+        // Best-effort error encryption — only possible in legacy mode where
+        // the caller passed transactions_key. In sink mode we log + persist
+        // the error message in plaintext on the connection row, which is
+        // acceptable because sink-mode consumers (V2) store everything
+        // plaintext at rest anyway. ZK consumers stay on the legacy path
+        // until they migrate.
+        let storedErr: string | null = msg.slice(0, 500);
+        if (!sinkMode) {
+          try { storedErr = await encryptAes(msg.slice(0, 500), txnsKey!); } catch { /* keep plaintext fallback */ }
+        }
+        await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: storedErr }).eq('id', conn.id);
         results.push({ connection_id: conn.id, synced: 0, next_cursor: null, error: msg });
       }
+    }
+
+    if (sinkMode) {
+      const merged = mergeSinkOutputs(sinkOutputs);
+      return jsonResponse(
+        {
+          synced: results.reduce((s, r) => s + r.synced, 0),
+          connections: results,
+          rows: merged.rows,
+          metadata: {
+            format,
+            requires_encryption: merged.metadata.requires_encryption,
+          },
+        },
+        200,
+        cors,
+      );
     }
 
     return jsonResponse({ synced: results.reduce((s, r) => s + r.synced, 0), connections: results }, 200, cors);
@@ -497,3 +603,26 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
 });
+
+/**
+ * Resolve a subaccount's `external_user_id` for sink-mode dispatch. In
+ * platform mode the subaccount row holds the platform's chosen identifier
+ * (typically the platform's organizationId). Sink adapters use this as
+ * their consumer-side row owner key.
+ */
+async function resolveExternalUserId(
+  serviceClient: ReturnType<typeof Object>,
+  subaccountId: string,
+): Promise<string> {
+  // deno-lint-ignore no-explicit-any
+  const sb = serviceClient as any;
+  const { data, error } = await sb
+    .from('subaccounts')
+    .select('external_user_id')
+    .eq('id', subaccountId)
+    .maybeSingle();
+  if (error || !data?.external_user_id) {
+    throw new Error(`Could not resolve external_user_id for subaccount ${subaccountId}`);
+  }
+  return data.external_user_id as string;
+}
