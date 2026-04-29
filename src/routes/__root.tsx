@@ -96,7 +96,12 @@ function RootComponent() {
       api_host: "https://eu.i.posthog.com",
       person_profiles: "identified_only",
       capture_pageview: true,
+      session_recording: {
+        maskAllInputs: true,
+        maskTextSelector: "[data-private]",
+      },
     });
+    posthog.register({ app: "orangerails" });
   }, []);
 
   return (
