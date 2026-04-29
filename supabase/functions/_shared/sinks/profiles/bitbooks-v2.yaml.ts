@@ -114,7 +114,7 @@ output_tables:
         kind: { from: canonical.direction, map: { in: CUSTOMER, out: VENDOR } }
       toFromAddress:     { from: canonical.counterparty, optional: true }
       exchangeRate:      { from: canonical.fiat_equivalent.rate, optional: true }
-      txFee:             { from: canonical.fees[0].amount, optional: true }
+      txFee:             { from: "canonical.fees[0].amount", optional: true }
       __resolveFeeExpAccountId:
         when: has_fee
         accountType:     EXPENSE
