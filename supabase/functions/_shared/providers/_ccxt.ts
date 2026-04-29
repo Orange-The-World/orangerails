@@ -40,16 +40,20 @@
  * Cursor: highest tx timestamp (unix ms) seen across all three streams.
  * Persisted as a string of the millisecond integer.
  *
- * Bundle-size note: this module imports the full ccxt package via esm.sh.
- * Compressed payload is ~3 MB which fits comfortably under Supabase's
- * Edge Function bundle limit. If bundle size becomes a constraint as
- * more exchanges land, switch to per-exchange dynamic imports
- * (`await import('https://esm.sh/ccxt@4.4.30/js/src/<id>.js')`).
+ * Bundle / load strategy: the CCXT module is imported DYNAMICALLY at
+ * sync time only. Importing it at module-init load time was crashing
+ * the /or-providers manifest endpoint (500) because some CCXT subpath
+ * fails under esm.sh's transform inside Deno's edge-function runtime.
+ * Lazy import keeps the manifest path totally insulated from CCXT
+ * load failures — only sync paths actually need the package.
+ *
+ * Credential field schemas are hardcoded per-exchange (see
+ * CCXT_CREDENTIAL_FIELDS below) instead of derived at runtime from
+ * `new ExchangeClass({}).requiredCredentials`. Same effect, but no
+ * CCXT instantiation needed at module-init.
  */
 
 // deno-lint-ignore-file no-explicit-any
-import * as ccxt from 'https://esm.sh/ccxt@4.4.30';
-
 import type {
   ProviderAdapter,
   DiscoveredWallet,
@@ -75,70 +79,88 @@ export interface CcxtAdapterConfig {
   popularity?: number;
 }
 
-// ─── Credential field auto-derivation ────────────────────────────────────
+// ─── Credential field schemas ────────────────────────────────────────────
+//
+// Hardcoded per-exchange instead of derived at runtime from
+// `new ExchangeClass({}).requiredCredentials`. Sourced from CCXT docs:
+// https://docs.ccxt.com/#/?id=authentication
+//
+// Why hardcoded: instantiating CCXT exchange classes at module-init
+// crashed /or-providers (500 from the manifest endpoint). Hardcoding
+// keeps the manifest path completely free of CCXT runtime concerns —
+// only the sync path needs CCXT loaded.
 
-/**
- * Build the CredentialField[] schema from CCXT's `requiredCredentials`
- * map. CCXT exposes which fields each exchange needs (apiKey, secret,
- * password, uid, walletAddress, privateKey, etc.) and which are optional.
- */
+const APIKEY_SECRET: CredentialField[] = [
+  { name: 'apiKey', type: 'secret', label: 'API key', placeholder: 'From the exchange API settings' },
+  { name: 'secret', type: 'secret', label: 'API secret', placeholder: 'From the exchange API settings' },
+];
+
+const APIKEY_SECRET_PASSPHRASE: CredentialField[] = [
+  ...APIKEY_SECRET,
+  {
+    name: 'password',
+    type: 'secret',
+    label: 'API passphrase',
+    placeholder: 'The passphrase you set when creating the API key',
+  },
+];
+
+const APIKEY_SECRET_UID: CredentialField[] = [
+  ...APIKEY_SECRET,
+  {
+    name: 'uid',
+    type: 'string',
+    label: 'User ID (UID)',
+    placeholder: 'Your exchange-side account UID',
+  },
+];
+
+const CCXT_CREDENTIAL_FIELDS: Record<string, CredentialField[]> = {
+  // apiKey + secret only
+  kraken: APIKEY_SECRET,
+  binance: APIKEY_SECRET,
+  bybit: APIKEY_SECRET,
+  gemini: APIKEY_SECRET,
+  bitfinex: APIKEY_SECRET,
+  cryptocom: APIKEY_SECRET,
+  ndax: APIKEY_SECRET,
+  bitbuy: APIKEY_SECRET,
+  // apiKey + secret + passphrase
+  coinbase: APIKEY_SECRET_PASSPHRASE,
+  okx: APIKEY_SECRET_PASSPHRASE,
+  kucoin: APIKEY_SECRET_PASSPHRASE,
+  // apiKey + secret + uid (Bitstamp's customer_id maps to CCXT uid)
+  bitstamp: APIKEY_SECRET_UID,
+};
+
 function buildCredentialFields(exchangeId: string): CredentialField[] {
-  const ExchangeClass = (ccxt as any)[exchangeId];
-  if (!ExchangeClass) {
-    throw new Error(`[ccxt] unknown exchange id: ${exchangeId}`);
-  }
-  // requiredCredentials is a static-ish map on the prototype; reading
-  // from a no-arg instance is the canonical way to access it without
-  // calling any I/O methods.
-  const required: Record<string, boolean> = new ExchangeClass({}).requiredCredentials ?? {};
-
-  const fields: CredentialField[] = [];
-  if (required.apiKey) {
-    fields.push({
-      name: 'apiKey',
-      type: 'secret',
-      label: 'API key',
-      placeholder: 'From the exchange API settings',
-    });
-  }
-  if (required.secret) {
-    fields.push({
-      name: 'secret',
-      type: 'secret',
-      label: 'API secret',
-      placeholder: 'From the exchange API settings',
-    });
-  }
-  if (required.password) {
-    // Coinbase, KuCoin, OKX call this a "passphrase" in their UI.
-    fields.push({
-      name: 'password',
-      type: 'secret',
-      label: 'API passphrase',
-      placeholder: 'The passphrase you set when creating the API key',
-    });
-  }
-  if (required.uid) {
-    fields.push({
-      name: 'uid',
-      type: 'string',
-      label: 'User ID (UID)',
-      placeholder: 'Your account UID',
-    });
-  }
-  // walletAddress and privateKey are DEX-only and not in our v1 scope.
-  return fields;
+  return CCXT_CREDENTIAL_FIELDS[exchangeId] ?? APIKEY_SECRET;
 }
 
-// ─── CCXT instance construction ──────────────────────────────────────────
+// ─── CCXT instance construction (lazy) ───────────────────────────────────
 
-function instantiateExchange(exchangeId: string, credentials: Record<string, unknown>): any {
-  const ExchangeClass = (ccxt as any)[exchangeId];
-  if (!ExchangeClass) {
-    throw new Error(`[ccxt:${exchangeId}] unknown CCXT exchange id`);
+/**
+ * Dynamic import of CCXT — runs only when sync actually fires. Failure
+ * here surfaces as a sync error on the affected connection rather than
+ * taking down /or-providers / the rest of the edge-function bundle.
+ */
+async function instantiateExchange(
+  exchangeId: string,
+  credentials: Record<string, unknown>,
+): Promise<any> {
+  let ccxtModule: any;
+  try {
+    ccxtModule = await import('https://esm.sh/ccxt@4.4.30');
+  } catch (err) {
+    throw new Error(
+      `[ccxt:${exchangeId}] failed to load ccxt package: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  // Pluck only the credential fields CCXT knows about — passing extras
-  // doesn't break anything but keeps the call site explicit.
+  // esm.sh sometimes exposes things under .default — try both.
+  const ExchangeClass = ccxtModule[exchangeId] ?? ccxtModule.default?.[exchangeId];
+  if (typeof ExchangeClass !== 'function') {
+    throw new Error(`[ccxt:${exchangeId}] unknown CCXT exchange id (not exposed on package)`);
+  }
   const config: Record<string, unknown> = {
     enableRateLimit: true, // let CCXT throttle requests automatically
   };
@@ -322,7 +344,7 @@ export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
     cursor: string | null,
   ): Promise<SyncResult> {
     if (walletIds.length === 0) return { transactions: [], next_cursor: null };
-    const exchange = instantiateExchange(exchangeId, credentials);
+    const exchange = await instantiateExchange(exchangeId, credentials);
     const since = cursor ? Number(cursor) : undefined;
 
     const transactions = await fetchAllSince(exchange, exchangeId, since);
