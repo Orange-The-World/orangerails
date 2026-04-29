@@ -19,10 +19,12 @@
 import type { ProviderAdapter } from './types.ts';
 import { blinkAdapter } from './blink.ts';
 import { xpubAdapter } from './xpub.ts';
+import { btcpayAdapter } from './btcpay.ts';
 
 const PROVIDERS: ReadonlyArray<ProviderAdapter> = [
   blinkAdapter,
   xpubAdapter,
+  btcpayAdapter,
 ];
 
 const PROVIDER_MAP: ReadonlyMap<string, ProviderAdapter> = new Map(
@@ -72,14 +74,6 @@ const ROADMAP_MANIFESTS: ReadonlyArray<ProviderManifest> = [
     description: 'Lightning + USD',
     status: 'coming_soon',
     multiWallet: true,
-    credentialFields: [],
-  },
-  {
-    slug: 'btcpay',
-    displayName: 'BTCPay',
-    description: 'Self-hosted merchant',
-    status: 'coming_soon',
-    multiWallet: false,
     credentialFields: [],
   },
   {

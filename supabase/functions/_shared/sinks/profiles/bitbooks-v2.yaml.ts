@@ -208,9 +208,11 @@ status_to_v2:
   CONFIRMED:  COMPLETE   # on-chain (xpub adapter) — block-confirmed
   PENDING:    PENDING
   UNCONFIRMED: PENDING   # on-chain mempool tx
+  PROCESSING: PENDING    # BTCPay invoice — paid but awaiting confirmations
   FAILURE:    FAILED
   FAILED:     FAILED
   EXPIRED:    FAILED
+  INVALID:    FAILED     # BTCPay invoice — payment problem (timeout, double-spend, etc.)
   REVERSED:   REVERSED
   REFUNDED:   REVERSED
   default:    INCOMPLETE
