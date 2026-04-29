@@ -1,1 +1,7 @@
 project_id = "tbjffcasjkhhlmsqnjim"
+
+[functions.or-providers]
+verify_jwt = false
+
+[functions.or-providers-list]
+verify_jwt = false
