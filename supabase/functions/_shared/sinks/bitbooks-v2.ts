@@ -276,5 +276,9 @@ let profileSync: any = null;
 
 export async function ensureProfileLoaded(): Promise<void> {
   if (profileSync) return;
-  profileSync = await loadProfile('bitbooks-v2');
+  // loadProfile is sync now (reads from a bundled TS string), but the
+  // outer ensure*Loaded API stays async so callers can keep awaiting
+  // without breaking. The async signature also leaves room for future
+  // remote-fetch profile sources (e.g. consumer-published HTTP endpoints).
+  profileSync = loadProfile('bitbooks-v2');
 }

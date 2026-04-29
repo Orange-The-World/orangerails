@@ -23,6 +23,18 @@
  */
 
 import { parse } from 'https://deno.land/std@0.208.0/yaml/parse.ts';
+import { BITBOOKS_V2_PROFILE_YAML } from './profiles/bitbooks-v2.yaml.ts';
+
+/**
+ * Registry of bundled profile sources. Each entry is the raw YAML body
+ * for one consumer's App Profile. Living next to the loader (instead of
+ * being read from a sibling .yaml file at runtime) is the only way
+ * Supabase Edge Function bundling guarantees the content reaches the
+ * deploy — esbuild only includes files reachable through TS imports.
+ */
+const PROFILE_SOURCES: Record<string, string> = {
+  'bitbooks-v2': BITBOOKS_V2_PROFILE_YAML,
+};
 
 // ─── Types — what a valid profile looks like ─────────────────────────────
 
@@ -198,23 +210,21 @@ const PROFILE_CACHE = new Map<string, AppProfile>();
 /**
  * Load a profile by format slug, returning the validated AppProfile.
  *
- * The YAML file lives at `_shared/sinks/profiles/<format>.yaml`, relative
- * to this loader. Resolved via `import.meta.url` so Supabase Edge Function
- * bundles work without hardcoded paths.
- *
- * Cached for the lifetime of the edge-function instance. Cold-start incurs
- * one parse + validate; subsequent requests hit the cache.
+ * Reads from PROFILE_SOURCES (bundled TS string registry), parses the
+ * YAML, validates structure. Cached for the lifetime of the edge-function
+ * instance. Cold-start incurs one parse + validate; subsequent requests
+ * hit the cache.
  */
-export async function loadProfile(format: string): Promise<AppProfile> {
+export function loadProfile(format: string): AppProfile {
   const cached = PROFILE_CACHE.get(format);
   if (cached) return cached;
 
-  const url = new URL(`./profiles/${format}.yaml`, import.meta.url);
-  let yamlContent: string;
-  try {
-    yamlContent = await Deno.readTextFile(url);
-  } catch (err) {
-    throw new ProfileLoadError(format, `Cannot read profile file ${url.pathname}: ${err instanceof Error ? err.message : String(err)}`);
+  const yamlContent = PROFILE_SOURCES[format];
+  if (!yamlContent) {
+    throw new ProfileLoadError(
+      format,
+      `No profile source registered for format=${format}. Add an entry to PROFILE_SOURCES in profile-loader.ts.`,
+    );
   }
 
   let parsed: unknown;

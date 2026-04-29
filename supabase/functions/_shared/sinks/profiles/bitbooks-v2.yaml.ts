@@ -1,13 +1,33 @@
-# BitBooks V2 — App Profile
+/**
+ * BitBooks V2 — App Profile, embedded as a TypeScript string export so it
+ * travels with the Supabase Edge Function bundle.
+ *
+ * Why this file exists alongside `bitbooks-v2.yaml`:
+ *
+ *   Supabase Edge Functions bundle through esbuild. Only files reachable
+ *   via TS/JS imports end up in the deploy. A `.yaml` sibling is NOT
+ *   bundled even when present in the source tree, so a runtime
+ *   `Deno.readTextFile('./profiles/bitbooks-v2.yaml')` fails at runtime
+ *   with "path not found".
+ *
+ *   This module re-exports the same YAML content as a string literal so
+ *   the profile-loader can `import` it. The bundler picks the file up
+ *   automatically and the YAML reaches production verbatim.
+ *
+ * Source of truth: this `.ts` file. The `.yaml` sibling is kept as a
+ * human-readable mirror for docs / diffs / readability. When you change
+ * one, change the other.
+ */
+export const BITBOOKS_V2_PROFILE_YAML = `# BitBooks V2 — App Profile
 #
-# RUNTIME SOURCE: this file's TS sibling `bitbooks-v2.yaml.ts` is what
-# the edge-function bundle ships and what `profile-loader.ts` reads.
-# This .yaml is kept as a human-readable mirror for diffs and review;
-# when you change one, change the other.
+# This YAML is the App Profile contract V2 expects when calling or-sync
+# with \`format=bitbooks-v2\`. It is load-bearing: editing
+# \`account_mapping_rules\` or \`status_to_v2\` changes runtime behavior
+# with no TypeScript redeploy needed.
 #
-# Why the TS mirror exists: Supabase Edge Function bundling only includes
-# files reachable through TS imports, so a runtime read of this .yaml
-# fails with "path not found".
+# Source of truth lives in profiles/bitbooks-v2.yaml.ts (this file's
+# TS sibling) so Supabase Edge Function bundling picks it up. The
+# .yaml file is the human-readable mirror; keep them in sync.
 #
 # References:
 #   - OrangeRails-Protocol.html §9 — App Profile Registry
@@ -23,41 +43,23 @@ accepts_modules: [bitcoin]  # bitcoin only on day one; banking + exchange when t
 # Identity — how OR maps consumer-side identity to its subaccount
 # ─────────────────────────────────────────────────────────────────────────
 identity:
-  # V2 passes its `Organization.id` as `external_user_id` when calling
-  # or-provision. The sink uses that value as `organizationId` on every
-  # row it emits. One V2 organization = one OR subaccount.
   external_user_id_source: organization_id
 
 # ─────────────────────────────────────────────────────────────────────────
-# Output tables — V2 Prisma model targets
+# Output tables — V2 Prisma model targets (advisory, TS sink owns row construction today)
 # ─────────────────────────────────────────────────────────────────────────
-#
-# Field rules:
-#   from:        copy from a NormalizedTransaction field
-#   const:       hardcoded literal value
-#   generated:   server-side generation (cuid / uuid / deterministic)
-#   __resolve*:  hint passed to V2's sync handler for FK resolution
-#                (find-or-create against V2's Prisma client at insert time)
-#
-# Reserved hint keys:
-#   __resolveWalletId      — find Wallet by sourceWalletId UNIQUE
-#   __resolveCoa           — find-or-create ChartOfAccount by (accountType, accountSubType, name?, isWallet?, currency?)
-#   __resolveContactId     — find-or-create Contact by (name, kind)
-#   __resolveSystemUser    — find-or-create the OrangeRails system user (createdById / postedById)
-
 output_tables:
 
-  # 1. Wallet upsert — only emitted on first appearance of a sourceWalletId
   Wallet:
     upsert_on: { sourceWalletId: canonical.source_wallet_id }
     fields:
       sourceWalletId:    { from: canonical.source_wallet_id }
       organizationId:    { from: input.org_id }
       orConnectionId:    { from: input.or_connection_id }
-      name:              { from: derived.wallet_default_name }    # "<adapter> <asset>" fallback
-      walletType:        { from: derived.wallet_type }            # SOFTWARE for Blink today
+      name:              { from: derived.wallet_default_name }
+      walletType:        { from: derived.wallet_type }
       currency:          { from: derived.asset }
-      __resolveCoa:      # V2 finds-or-creates the wallet's own CoA row
+      __resolveCoa:
         accountType:     ASSET
         accountSubType:  WALLETS
         isWallet:        true
@@ -65,20 +67,18 @@ output_tables:
       syncStatus:        { const: SYNCED }
       lastSyncAt:        { from: derived.now }
 
-  # 2. JournalEntry header (1 per Transaction)
   JournalEntry:
     fields:
       id:                { generated: uuid }
       organizationId:    { from: input.org_id }
       date:              { from: canonical.timestamp, as: date }
       currency:          { from: derived.asset }
-      refNum:            { generated: "JE-OR-${canonical.id:0:12}" }   # required + unique per org
+      refNum:            { generated: "JE-OR-\${canonical.id:0:12}" }
       memo:              { from: canonical.description, optional: true }
       status:            { const: POSTED }
       sourceType:        { const: ORANGE_RAILS }
-      __resolveSystemUser: orange_rails        # createdById / postedById
+      __resolveSystemUser: orange_rails
 
-  # 3. JournalEntryLine — debit + credit pair (more for fee splits when those land)
   JournalEntryLine:
     derive_from: account_mapping_rules
     fields_per_line:
@@ -95,7 +95,6 @@ output_tables:
       credit:            { from: derived.line.credit, optional: true }
       memo:              { from: canonical.description, optional: true }
 
-  # 4. Transaction (1:1 with JournalEntry via journalEntryId UNIQUE)
   Transaction:
     fields:
       id:                { generated: uuid }
@@ -109,28 +108,27 @@ output_tables:
       direction:         { from: canonical.direction, map: { in: IN, out: OUT } }
       status:            { from: canonical.status, map_via: status_to_v2 }
       clearedStatus:     { const: NOT_CLEARED }
-      __resolveContactId:                       # optional, only if counterparty is set
+      __resolveContactId:
         when: has_counterparty
         name: { from: canonical.counterparty }
         kind: { from: canonical.direction, map: { in: CUSTOMER, out: VENDOR } }
       toFromAddress:     { from: canonical.counterparty, optional: true }
       exchangeRate:      { from: canonical.fiat_equivalent.rate, optional: true }
       txFee:             { from: canonical.fees[0].amount, optional: true }
-      __resolveFeeExpAccountId:                 # only when txFee is set
+      __resolveFeeExpAccountId:
         when: has_fee
         accountType:     EXPENSE
         accountSubType:  OTHER_EXPENSES
         name:            "Network Fees"
-      refNum:            { generated: "OR-${canonical.id:0:12}" }
+      refNum:            { generated: "OR-\${canonical.id:0:12}" }
       memo:              { from: canonical.description, optional: true }
       journalEntryId:    { from: derived.parent_je_id }
 
 # ─────────────────────────────────────────────────────────────────────────
 # Account-mapping rules — canonical type → debit/credit CoA hints
-# ─────────────────────────────────────────────────────────────────────────
-#
 # Order matters; first match wins. Default fallback routes both legs to
 # accountSubType=SUSPENSE so unmapped types surface in V2's existing review UI.
+# ─────────────────────────────────────────────────────────────────────────
 
 account_mapping_rules:
 
@@ -218,18 +216,13 @@ status_to_v2:
 # ─────────────────────────────────────────────────────────────────────────
 # Per-org overrides
 # ─────────────────────────────────────────────────────────────────────────
-# Accountants in V2 can remap a specific canonical type to a different CoA
-# via V2's UI. Overrides are stored per-organization and consulted by the
-# V2 sync handler before falling back to the rules above.
 override_path: /api/organizations/{organizationId}/orange-rails/account-mapping
 
 # ─────────────────────────────────────────────────────────────────────────
 # Encryption profile
 # ─────────────────────────────────────────────────────────────────────────
-# V2 stores transactions in plaintext at rest. The sink emits no
-# `requires_encryption` paths. Source-provider credentials (Blink API key,
-# etc.) are encrypted at OR with a key derived in the V2 customer's browser
-# from their vault password — that ZK property stays intact across V2's
-# plaintext data tier, because the credential never sits at rest plaintext
-# on either OR or V2's server.
+# V2 stores transactions in plaintext at rest. Source credentials remain
+# end-to-end encrypted at OR with a key derived in the V2 customer's
+# browser from their vault password.
 encryption: null
+`;
