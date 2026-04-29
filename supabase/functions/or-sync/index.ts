@@ -166,7 +166,24 @@ Deno.serve(async (req: Request) => {
 
     const { data: connections, error: connErr } = await connQuery;
     if (connErr) throw connErr;
-    if (!connections?.length) return jsonResponse({ synced: 0, connections: [] }, 200, cors);
+    if (!connections?.length) {
+      // Empty-result early-exit must still match the response shape the
+      // caller's mode expects. Sink-mode consumers (V2) parse `rows` +
+      // `metadata` strictly, so skipping those fields blows up the client.
+      if (sinkMode) {
+        return jsonResponse(
+          {
+            synced: 0,
+            connections: [],
+            rows: {},
+            metadata: { format, requires_encryption: [] },
+          },
+          200,
+          cors,
+        );
+      }
+      return jsonResponse({ synced: 0, connections: [] }, 200, cors);
+    }
 
     const results: Array<{ connection_id: string; synced: number; next_cursor: string | null; error?: string }> = [];
     // Sink-mode-only: collect per-connection sink outputs to merge into
