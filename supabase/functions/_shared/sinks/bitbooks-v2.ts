@@ -214,6 +214,29 @@ export const bitbooksV2Sink: SinkAdapter = {
       },
     ];
 
+    // Transaction.chartOfAccountId hint — the categorisation account
+    // (income for IN, expense for OUT). The wallet-leg is wallet's
+    // own CoA (already covered by V2's wallet linkage); the
+    // OTHER leg of the JE is what V2's edit modal calls "Account."
+    //
+    // Picks: whichever of mapping.debit / mapping.credit is NOT the
+    // wallet itself. If both legs map to wallet (shouldn't happen in
+    // practice) or neither (the SUSPENSE default), falls back to the
+    // credit side for IN, debit side for OUT, which matches accounting
+    // convention.
+    const categorisationHint = (() => {
+      if (mapping.credit && mapping.credit.isWallet !== true) {
+        return hintToResolveShape(mapping.credit);
+      }
+      if (mapping.debit && mapping.debit.isWallet !== true) {
+        return hintToResolveShape(mapping.debit);
+      }
+      // Both legs are wallet-shaped (defensive — shouldn't happen).
+      return tx.direction === 'in'
+        ? hintToResolveShape(mapping.credit)
+        : hintToResolveShape(mapping.debit);
+    })();
+
     // Transaction row (1:1 with journalEntries[0] via journalEntryId @unique)
     const transactions: unknown[] = [{
       id: txId,
@@ -221,6 +244,7 @@ export const bitbooksV2Sink: SinkAdapter = {
       __resolveWalletId: tx.source_wallet_id
         ? { sourceWalletId: tx.source_wallet_id }
         : null,
+      __resolveChartOfAccountId: categorisationHint,
       mode: 'STANDARD' as const,
       date,
       time,
