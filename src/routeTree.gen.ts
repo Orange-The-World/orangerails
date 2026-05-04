@@ -20,6 +20,7 @@ import { Route as DocsRouteImport } from './routes/docs'
 import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ConnectStealthRouteImport } from './routes/connect/stealth'
 
 const UnlockRoute = UnlockRouteImport.update({
   id: '/unlock',
@@ -76,11 +77,16 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ConnectStealthRoute = ConnectStealthRouteImport.update({
+  id: '/stealth',
+  path: '/stealth',
+  getParentRoute: () => ConnectRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/app': typeof AppRoute
-  '/connect': typeof ConnectRoute
+  '/connect': typeof ConnectRouteWithChildren
   '/docs': typeof DocsRoute
   '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
@@ -89,11 +95,12 @@ export interface FileRoutesByFullPath {
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
+  '/connect/stealth': typeof ConnectStealthRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/app': typeof AppRoute
-  '/connect': typeof ConnectRoute
+  '/connect': typeof ConnectRouteWithChildren
   '/docs': typeof DocsRoute
   '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
@@ -102,12 +109,13 @@ export interface FileRoutesByTo {
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
+  '/connect/stealth': typeof ConnectStealthRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/app': typeof AppRoute
-  '/connect': typeof ConnectRoute
+  '/connect': typeof ConnectRouteWithChildren
   '/docs': typeof DocsRoute
   '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
@@ -116,6 +124,7 @@ export interface FileRoutesById {
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
+  '/connect/stealth': typeof ConnectStealthRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -131,6 +140,7 @@ export interface FileRouteTypes {
     | '/recover'
     | '/signup'
     | '/unlock'
+    | '/connect/stealth'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -144,6 +154,7 @@ export interface FileRouteTypes {
     | '/recover'
     | '/signup'
     | '/unlock'
+    | '/connect/stealth'
   id:
     | '__root__'
     | '/'
@@ -157,12 +168,13 @@ export interface FileRouteTypes {
     | '/recover'
     | '/signup'
     | '/unlock'
+    | '/connect/stealth'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AppRoute: typeof AppRoute
-  ConnectRoute: typeof ConnectRoute
+  ConnectRoute: typeof ConnectRouteWithChildren
   DocsRoute: typeof DocsRoute
   IntegrationsRoute: typeof IntegrationsRoute
   LoginRoute: typeof LoginRoute
@@ -252,13 +264,31 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/connect/stealth': {
+      id: '/connect/stealth'
+      path: '/stealth'
+      fullPath: '/connect/stealth'
+      preLoaderRoute: typeof ConnectStealthRouteImport
+      parentRoute: typeof ConnectRoute
+    }
   }
 }
+
+interface ConnectRouteChildren {
+  ConnectStealthRoute: typeof ConnectStealthRoute
+}
+
+const ConnectRouteChildren: ConnectRouteChildren = {
+  ConnectStealthRoute: ConnectStealthRoute,
+}
+
+const ConnectRouteWithChildren =
+  ConnectRoute._addFileChildren(ConnectRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AppRoute: AppRoute,
-  ConnectRoute: ConnectRoute,
+  ConnectRoute: ConnectRouteWithChildren,
   DocsRoute: DocsRoute,
   IntegrationsRoute: IntegrationsRoute,
   LoginRoute: LoginRoute,
