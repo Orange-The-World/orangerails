@@ -16,29 +16,28 @@ export function DirectLoadCard() {
         </h1>
         <p className="mt-3 text-sm text-muted-foreground">
           This page is the Stealth Sync widget. It is meant to be opened from
-          inside a connected app (like BitBooks Vault, Orange Way, or BitBooks
-          V2) when you connect a Bitcoin xpub. Opening it directly in your
-          browser is fine, it just means it has nothing to do until an app
-          talks to it.
+          inside an app when you connect a Bitcoin xpub. Opening it directly
+          in your browser is fine, it just means it has nothing to do until
+          an app talks to it.
         </p>
         <ul className="mt-4 space-y-2 text-left text-sm text-muted-foreground">
           <li>
-            If you got here by clicking a link from a BitBooks app: try the
-            connect button in that app again.
+            If you got here by clicking a link from an app: try the connect
+            button in that app again.
           </li>
           <li>
             If you are a developer testing the integration: send an
             OR_STEALTH_INIT postMessage to this window.
           </li>
           <li>
-            If you are exploring: visit{" "}
+            For more information, visit{" "}
             <a
               href="https://orangerails.com"
               className="text-orange-600 underline hover:text-orange-700"
             >
               orangerails.com
-            </a>{" "}
-            to see the full product.
+            </a>
+            .
           </li>
         </ul>
       </div>
