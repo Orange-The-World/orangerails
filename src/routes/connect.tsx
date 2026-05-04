@@ -47,7 +47,7 @@
  * The widget closes itself after a successful post.
  */
 
-import { createFileRoute, useSearch } from "@tanstack/react-router";
+import { createFileRoute, Outlet, useChildMatches, useSearch } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { deriveMEK, encryptString, importAesKey } from "@/lib/vault";
 import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
@@ -596,6 +596,17 @@ async function callLinkComplete(payload: {
 type Step = "enter-credentials" | "discovering" | "pick-wallets" | "saving" | "done";
 
 function ConnectPage() {
+  // If a child route under /connect is matched (e.g. /connect/stealth),
+  // render only its outlet so the child owns the page chrome. The /connect
+  // page itself is the credential form for the legacy connect flow.
+  const childMatches = useChildMatches();
+  if (childMatches.length > 0) {
+    return <Outlet />;
+  }
+  return <ConnectPageInner />;
+}
+
+function ConnectPageInner() {
   const search = useSearch({ from: "/connect" }) as ConnectSearch;
 
   const [platform, setPlatform] = useState<PlatformDisplay | null>(null);

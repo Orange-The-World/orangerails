@@ -29,9 +29,12 @@ import { AddRoute } from "./routes/add";
 import { SyncRoute } from "./routes/sync";
 import { ListRoute } from "./routes/list";
 import { DeleteRoute } from "./routes/delete";
+import { DirectLoadCard } from "./components/DirectLoadCard";
 
 const DEFAULT_ALLOWED_ORIGINS =
   "http://localhost:3000,http://localhost:5173,http://localhost:8080,https://app.bitbooks.com";
+
+const DIRECT_LOAD_GRACE_MS = 1500;
 
 function parseAllowedOrigins(): ReadonlySet<string> {
   const raw =
@@ -79,6 +82,15 @@ export function App() {
   const allowlist = useMemo(parseAllowedOrigins, []);
   const [init, setInit] = useState<StealthInitMessage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Initial value: if there is no opener AND no parent frame (or we are on the
+  // server where window is undefined), no postMessage INIT can ever arrive, so
+  // we are in a direct-load situation from the start. Otherwise wait for the
+  // grace window to give the real parent a chance to handshake.
+  const [awaitingInit, setAwaitingInit] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    if (window.opener === null && window.parent === window) return false;
+    return true;
+  });
 
   useEffect(() => {
     // Send READY once on mount.
@@ -121,11 +133,23 @@ export function App() {
       }
 
       setInit(data as StealthInitMessage);
+      setAwaitingInit(false);
       setError(null);
     };
 
     window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
+
+    // Direct-load fallback: if no INIT arrives within the grace window AND
+    // we have no opener and no parent frame, render the friendly direct-load
+    // card instead of the indefinite "Loading…" placeholder.
+    const graceTimer = window.setTimeout(() => {
+      setAwaitingInit(false);
+    }, DIRECT_LOAD_GRACE_MS);
+
+    return () => {
+      window.removeEventListener("message", handler);
+      window.clearTimeout(graceTimer);
+    };
   }, [allowlist]);
 
   if (error) {
@@ -142,6 +166,15 @@ export function App() {
   }
 
   if (!init) {
+    const isDirectLoad =
+      !awaitingInit &&
+      (typeof window === "undefined" ||
+        (window.opener === null && window.parent === window));
+
+    if (isDirectLoad) {
+      return <DirectLoadCard />;
+    }
+
     return (
       <div className="flex min-h-screen items-center justify-center bg-background p-6">
         <div className="max-w-md text-center">
