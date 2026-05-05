@@ -17,10 +17,18 @@
  * offline.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { gzipSync } from 'node:zlib';
 
 import { sealEnvelope, unsealEnvelope } from './seal';
-import { runSync, type WalletEnvelopePayload } from './sync';
+import {
+  liveFetchBlock,
+  liveFetchFilter,
+  liveFetchTip,
+  liveResolveBirthdayHeight,
+  runSync,
+  type WalletEnvelopePayload,
+} from './sync';
 import { deriveScriptPubkeyBytes } from './derive';
 import type { StealthStage } from './postmessage';
 
@@ -375,5 +383,129 @@ describe('runSync — orchestrator end-to-end with fixtures', () => {
     expect(result.sealedTransactions).toEqual([]);
     // Bytes downloaded still tracks both filter and block.
     expect(result.bytesDownloaded).toBeGreaterThan(0);
+  });
+});
+
+// ─── Live fetcher unit tests ────────────────────────────────────────────
+//
+// These cover the Milestone 4 wiring against the production filter
+// producer and block source. We mock globalThis.fetch so the tests run
+// fully offline. The interesting case is liveFetchFilter: the producer
+// serves <height>.gcs.gz with Content-Type application/gzip and NO
+// Content-Encoding, so the browser will not auto-decompress; the lib
+// runs the body through DecompressionStream('gzip') itself.
+
+describe('live fetchers', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+    return new Response(JSON.stringify(body), {
+      status: init.status ?? 200,
+      headers: { 'Content-Type': 'application/json', ...(init.headers as Record<string, string>) },
+    });
+  }
+
+  it('liveFetchTip parses the tip JSON', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toBe('https://blocks.example/tip');
+      return jsonResponse({ height: 950_000, hash: 'abcd', time: 1 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const tip = await liveFetchTip('https://blocks.example');
+    expect(tip).toBe(950_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('liveFetchFilter gunzips the .gcs.gz body and pulls block hash from the .json sidecar', async () => {
+    const filterPayload = new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03]);
+    const gz = gzipSync(filterPayload);
+    const sidecar = {
+      block_hash: '000000000000000000015c92fa872e387085585ac046e0935fdf9eed872f9297',
+      block_height: 948_026,
+      time: 1_777_986_476,
+      filter_size: filterPayload.length,
+    };
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/948026.gcs.gz')) {
+        return new Response(new Uint8Array(gz) as BodyInit, {
+          status: 200,
+          // Caddy sets application/gzip but NOT Content-Encoding, which is
+          // exactly the case our gunzip path is designed to handle.
+          headers: { 'Content-Type': 'application/gzip' },
+        });
+      }
+      if (url.endsWith('/948026.json')) {
+        return jsonResponse(sidecar);
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const rec = await liveFetchFilter(948_026, 'https://stealth.example');
+    expect(rec).not.toBeNull();
+    expect(rec!.height).toBe(948_026);
+    expect(rec!.blockHashHex).toBe(sidecar.block_hash);
+    expect(Array.from(rec!.filter)).toEqual(Array.from(filterPayload));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('liveFetchFilter returns null on 404 from either resource', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('.gcs.gz')) {
+        return new Response('', { status: 404 });
+      }
+      return jsonResponse({});
+    }));
+
+    const rec = await liveFetchFilter(1, 'https://stealth.example');
+    expect(rec).toBeNull();
+  });
+
+  it('liveFetchBlock reads the X-Block-Height header', async () => {
+    const raw = new Uint8Array([1, 2, 3, 4, 5]);
+    const hash = '000000000000000000015c92fa872e387085585ac046e0935fdf9eed872f9297';
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      expect(url).toBe(`https://blocks.example/block/${hash}`);
+      return new Response(raw as BodyInit, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Block-Hash': hash,
+          'X-Block-Height': '948026',
+        },
+      });
+    }));
+
+    const rec = await liveFetchBlock(hash, 'https://blocks.example');
+    expect(rec.height).toBe(948_026);
+    expect(rec.blockHashHex).toBe(hash);
+    expect(Array.from(rec.raw)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('liveResolveBirthdayHeight uses the live endpoint when it succeeds', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      expect(url).toBe('https://blocks.example/height?date=2024-01-01');
+      return jsonResponse({ height: 823_786, date: '2024-01-01' });
+    }));
+
+    const h = await liveResolveBirthdayHeight('2024-01-01', 'https://blocks.example');
+    expect(h).toBe(823_786);
+  });
+
+  it('liveResolveBirthdayHeight falls back to the date approximation on failure', async () => {
+    // Silence the warn we emit during fallback so the test output stays clean.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
+
+    const h = await liveResolveBirthdayHeight('2024-01-01', 'https://blocks.example');
+    // Genesis at 2009-01-03; 2024-01-01 is about 15 years later. The crude
+    // 600s-per-block approximation lands near 789k. We just sanity check
+    // it is a positive number above 700k and below 900k.
+    expect(h).toBeGreaterThan(700_000);
+    expect(h).toBeLessThan(900_000);
   });
 });
