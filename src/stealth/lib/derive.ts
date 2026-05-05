@@ -41,6 +41,48 @@ import { sha512 } from "@noble/hashes/sha2.js";
 
 export type ScriptType = "p2pkh" | "p2sh-p2wpkh" | "p2wpkh" | "p2tr";
 
+/**
+ * A parsed output descriptor or bare extended key. The widget consumes
+ * either shape uniformly.
+ *
+ * `single`     One xpub. The script type comes from the SLIP-132 prefix
+ *              or, for taproot, from a `tr(...)` wrapper in a descriptor.
+ * `multisig`   M-of-N descriptor. `keys[*]` carry the underlying xpubs and
+ *              the receive/change derivation suffix (e.g. `/0/*`).
+ */
+export interface ParsedDescriptor {
+  kind: "single" | "multisig";
+  /** Outermost script wrapper for a multisig (wsh, sh-wsh, sh). Single-key
+   *  inputs leave this undefined. */
+  scriptWrapper?: "wsh" | "sh-wsh" | "sh";
+  /** M and N for multisig. Undefined for single. */
+  m?: number;
+  n?: number;
+  /** Whether the multi() variant is sortedmulti (BIP67). Defaults to false. */
+  sorted?: boolean;
+  keys: ParsedKey[];
+}
+
+export interface ParsedKey {
+  /** Bare extended public key (xpub / ypub / zpub). */
+  xpub: string;
+  /** The script type to use when deriving leaves from this key alone.
+   *  For a single-key input this drives `deriveScriptPubkeyBytes`. For a
+   *  multisig it is informational. */
+  scriptType: ScriptType;
+  /**
+   * The derivation suffix attached to the key in the descriptor. We support
+   * the common `/0/*` / `/1/*` chain pattern and a bare `/*` (which means
+   * "the chain is supplied at derivation time"). Hardened steps (`'`) in
+   * the suffix are rejected because watch-only xpubs cannot do hardened.
+   */
+  derivationPath: string;
+  /** Optional master fingerprint + derivation prefix from `[xfp/path]`. We
+   *  parse and preserve it but do not use it for derivation; consumers may
+   *  display it for verification. */
+  origin?: string;
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────
 
 // SLIP-132 version-byte table. The 4-byte big-endian prefix at the start of
@@ -127,17 +169,17 @@ export function deriveScriptPubkeyBytes(
  * `gapLimit` consecutive empty addresses, then stop. This is the BIP44
  * gap-limit semantics that every reasonable wallet uses.
  *
+ * Accepts either a bare extended public key + script type (single-key
+ * wallets) OR a parsed descriptor (multisig). For multisig the script
+ * pubkey is the P2WSH / P2SH-P2WSH / P2SH wrap of the multi() redeem.
+ *
  * The caller passes `hasActivity(addr)` so this module stays free of any
  * particular indexer (mempool.space, Esplora, BIP158 filter scan, etc.).
- *
- * Returns the full set of addresses scanned plus their script-pubkey
- * bytes, in derivation order. Both the empty trailing tail and the
- * earlier used addresses are included; callers that want only used
- * addresses can filter with their own activity map.
  */
 export async function gapLimitWalk(
-  extendedKey: string,
-  scriptType: ScriptType,
+  source:
+    | { extendedKey: string; scriptType: ScriptType }
+    | { descriptor: ParsedDescriptor },
   chain: 0 | 1,
   gapLimit: number,
   hasActivity: (addr: string) => Promise<boolean>,
@@ -154,9 +196,16 @@ export async function gapLimitWalk(
   let i = 0;
 
   while (i - lastUsedIdx <= gapLimit && i < MAX_INDEX) {
-    const child = deriveChildPub(extendedKey, chain, i);
-    const addr = encodeAddress(child, scriptType);
-    const spk = scriptPubkey(child, scriptType);
+    let addr: string;
+    let spk: Uint8Array;
+    if ("descriptor" in source) {
+      addr = deriveMultisigAddress(source.descriptor, chain, i);
+      spk = deriveMultisigScriptPubkeyBytes(source.descriptor, chain, i);
+    } else {
+      const child = deriveChildPub(source.extendedKey, chain, i);
+      addr = encodeAddress(child, source.scriptType);
+      spk = scriptPubkey(child, source.scriptType);
+    }
     addresses.push(addr);
     scriptPubkeys.push(spk);
     if (await hasActivity(addr)) {
@@ -168,21 +217,372 @@ export async function gapLimitWalk(
   return { addresses, scriptPubkeys };
 }
 
+// ─── Output-descriptor parsing ───────────────────────────────────────────
+
 /**
- * Placeholder for output-descriptor parsing (multisig, mixed scripts,
- * miniscript). Full descriptor support lands in milestone 2B. This stub
- * exists today so the postmessage protocol's `multisig-descriptor`
- * script type has somewhere to land.
+ * Parse a Bitcoin output descriptor string OR a bare extended public key.
  *
- * KNOWN GAP: multisig wallets (Sparrow, Specter, Caravan, Unchained)
- * publish output descriptors instead of single xpubs. We accept them in
- * the postmessage protocol but cannot derive addresses from them yet.
+ * Supported shapes:
+ *   - bare 'xpub...' / 'ypub...' / 'zpub...' (legacy / segwit / native segwit)
+ *   - 'pkh(xpub...)'           (legacy single-key, BIP44)
+ *   - 'sh(wpkh(xpub...))'      (wrapped segwit single-key, BIP49)
+ *   - 'wpkh(xpub...)'          (native segwit single-key, BIP84)
+ *   - 'tr(xpub...)'            (taproot single-key, BIP86)
+ *   - 'wsh(multi(M,KEY,...))'  / 'wsh(sortedmulti(M,KEY,...))'
+ *   - 'sh(wsh(multi(M,KEY,...)))' / 'sh(wsh(sortedmulti(M,KEY,...)))'
+ *   - 'sh(multi(M,KEY,...))'   / 'sh(sortedmulti(M,KEY,...))' (legacy P2SH)
+ *
+ * Each KEY may carry an `[xfp/derivation]` origin prefix and a `/0/*` or
+ * `/<0;1>/*` chain suffix. We accept `/0/*` and `/<0;1>/*` and `/*`. The
+ * `<0;1>` form (BIP389 multipath) is normalized to a leaf-time chain pick.
+ *
+ * Optional `#checksum` suffixes are tolerated and ignored.
  */
-export function parseDescriptor(_descriptor: string): never {
+export function parseDescriptor(input: string): ParsedDescriptor {
+  if (typeof input !== "string") {
+    throw new Error("parseDescriptor: input must be a string");
+  }
+  let s = input.trim();
+  if (s.length === 0) throw new Error("parseDescriptor: empty input");
+  // Strip optional checksum.
+  const hashIdx = s.indexOf("#");
+  if (hashIdx >= 0) s = s.slice(0, hashIdx).trim();
+
+  // Bare extended key.
+  if (/^(x|y|z)pub[A-Za-z0-9]+$/.test(s)) {
+    return {
+      kind: "single",
+      keys: [
+        { xpub: s, scriptType: detectScriptType(s), derivationPath: "" },
+      ],
+    };
+  }
+
+  // pkh(...)
+  if (/^pkh\(/.test(s)) {
+    const inner = unwrap(s, "pkh");
+    const k = parseKeyExpr(inner);
+    return { kind: "single", keys: [{ ...k, scriptType: "p2pkh" }] };
+  }
+
+  // wpkh(...)
+  if (/^wpkh\(/.test(s)) {
+    const inner = unwrap(s, "wpkh");
+    const k = parseKeyExpr(inner);
+    return { kind: "single", keys: [{ ...k, scriptType: "p2wpkh" }] };
+  }
+
+  // tr(...)
+  if (/^tr\(/.test(s)) {
+    const inner = unwrap(s, "tr");
+    // Single-key taproot only at this milestone (no script trees).
+    const k = parseKeyExpr(inner);
+    return { kind: "single", keys: [{ ...k, scriptType: "p2tr" }] };
+  }
+
+  // sh(wpkh(...))
+  if (/^sh\(wpkh\(/.test(s)) {
+    const shInner = unwrap(s, "sh");
+    const inner = unwrap(shInner, "wpkh");
+    const k = parseKeyExpr(inner);
+    return { kind: "single", keys: [{ ...k, scriptType: "p2sh-p2wpkh" }] };
+  }
+
+  // sh(wsh(multi|sortedmulti(...)))
+  if (/^sh\(wsh\((sortedmulti|multi)\(/.test(s)) {
+    const shInner = unwrap(s, "sh");
+    const wshInner = unwrap(shInner, "wsh");
+    const ms = parseMultiExpr(wshInner);
+    return { ...ms, scriptWrapper: "sh-wsh" };
+  }
+
+  // wsh(multi|sortedmulti(...))
+  if (/^wsh\((sortedmulti|multi)\(/.test(s)) {
+    const inner = unwrap(s, "wsh");
+    const ms = parseMultiExpr(inner);
+    return { ...ms, scriptWrapper: "wsh" };
+  }
+
+  // sh(multi|sortedmulti(...)) — legacy P2SH multisig.
+  if (/^sh\((sortedmulti|multi)\(/.test(s)) {
+    const inner = unwrap(s, "sh");
+    const ms = parseMultiExpr(inner);
+    return { ...ms, scriptWrapper: "sh" };
+  }
+
   throw new Error(
-    "Output descriptor parsing is not implemented yet. " +
-      "Single-xpub wallets work today; multisig descriptors land in milestone 2B.",
+    `parseDescriptor: unsupported descriptor. Supported shapes: bare xpub/ypub/zpub; ` +
+      `pkh, wpkh, sh(wpkh), tr, wsh(multi|sortedmulti), sh(wsh(multi|sortedmulti)), sh(multi|sortedmulti).`,
   );
+}
+
+/** Strip a `name(...)` wrapper. Throws on malformed input. */
+function unwrap(s: string, name: string): string {
+  const prefix = name + "(";
+  if (!s.startsWith(prefix)) {
+    throw new Error(`Expected '${name}(' wrapper`);
+  }
+  if (!s.endsWith(")")) {
+    throw new Error(`Expected closing ')' for ${name}(`);
+  }
+  return s.slice(prefix.length, s.length - 1);
+}
+
+/**
+ * Parse a multi() / sortedmulti() body. Body looks like:
+ *   "M,KEY1,KEY2,KEY3"
+ * The first token is the threshold, the rest are key expressions.
+ */
+function parseMultiExpr(
+  body: string,
+): { kind: "multisig"; m: number; n: number; sorted: boolean; keys: ParsedKey[] } {
+  const sorted = body.startsWith("sortedmulti(");
+  const inner = sorted
+    ? unwrap(body, "sortedmulti")
+    : unwrap(body, "multi");
+  const parts = splitTopLevelCommas(inner);
+  if (parts.length < 2) {
+    throw new Error("multi() needs at least M and one key");
+  }
+  const m = Number.parseInt(parts[0], 10);
+  if (!Number.isInteger(m) || m < 1) {
+    throw new Error(`Invalid M in multi(): ${parts[0]}`);
+  }
+  const keyParts = parts.slice(1);
+  if (m > keyParts.length) {
+    throw new Error(`multi(): M=${m} > N=${keyParts.length}`);
+  }
+  const keys = keyParts.map(parseKeyExpr).map((k) => ({
+    ...k,
+    // For multisig the per-key scriptType is informational; the outermost
+    // wrapper drives the on-chain script. Use the SLIP-132 hint anyway so
+    // displays can show "this wallet was published as a zpub" etc.
+    scriptType: safeDetect(k.xpub),
+  }));
+  return { kind: "multisig", m, n: keys.length, sorted, keys };
+}
+
+function safeDetect(xpub: string): ScriptType {
+  try {
+    return detectScriptType(xpub);
+  } catch {
+    // Multisig wallets often publish all keys as plain `xpub` regardless
+    // of the script type. Fall back to p2pkh as a placeholder; it is
+    // informational only for multisig.
+    return "p2pkh";
+  }
+}
+
+/**
+ * Parse a single key expression like `[xfp/m/48h/0h/0h/2h]xpub.../0/*`.
+ *
+ * Returns the bare extended key, the optional origin annotation, and the
+ * derivation suffix (everything after the xpub).
+ */
+function parseKeyExpr(expr: string): ParsedKey {
+  let s = expr.trim();
+  let origin: string | undefined;
+  if (s.startsWith("[")) {
+    const close = s.indexOf("]");
+    if (close < 0) throw new Error("Unclosed origin '[...]'");
+    origin = s.slice(1, close);
+    s = s.slice(close + 1);
+  }
+  // Match an extended-key prefix at the start.
+  const m = s.match(/^([xyz]pub[A-Za-z0-9]+)(.*)$/);
+  if (!m) {
+    throw new Error(`Could not find extended public key in '${expr}'`);
+  }
+  const xpub = m[1];
+  const rest = m[2];
+  if (rest.includes("'") || rest.includes("h")) {
+    throw new Error(
+      "Hardened derivation steps are not allowed in the watch-only suffix",
+    );
+  }
+  return { xpub, derivationPath: rest, scriptType: safeDetect(xpub), origin };
+}
+
+/**
+ * Split a multi() body on top-level commas, ignoring commas inside
+ * brackets (BIP389 multipath like `<0;1>`) or parentheses.
+ */
+function splitTopLevelCommas(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let bracketDepth = 0;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (c === "<") bracketDepth++;
+    else if (c === ">") bracketDepth--;
+    else if (c === "," && depth === 0 && bracketDepth === 0) {
+      out.push(s.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  out.push(s.slice(start).trim());
+  return out;
+}
+
+/**
+ * Resolve the per-key derivation suffix into a concrete `(chain, index)`
+ * pair. Accepted suffix shapes:
+ *   ""               (the chain and index come from the caller)
+ *   "/*"             same as ""
+ *   "/0/*"           force receive chain
+ *   "/1/*"           force change chain
+ *   "/<0;1>/*"       BIP389 multipath; caller's chain picks the slot
+ */
+function resolveLeafDerivation(
+  suffix: string,
+  chain: 0 | 1,
+  index: number,
+): { chain: 0 | 1; index: number } {
+  const s = suffix.trim();
+  if (s.length === 0 || s === "/*") return { chain, index };
+  // /<0;1>/*
+  const multipath = s.match(/^\/<(\d+);(\d+)>\/\*$/);
+  if (multipath) {
+    const slot0 = Number.parseInt(multipath[1], 10);
+    const slot1 = Number.parseInt(multipath[2], 10);
+    const picked = chain === 0 ? slot0 : slot1;
+    if (picked !== 0 && picked !== 1) {
+      throw new Error(`Multipath chain must be 0 or 1, got ${picked}`);
+    }
+    return { chain: picked as 0 | 1, index };
+  }
+  // /N/*
+  const explicit = s.match(/^\/(\d+)\/\*$/);
+  if (explicit) {
+    const c = Number.parseInt(explicit[1], 10);
+    if (c !== 0 && c !== 1) {
+      throw new Error(`Descriptor chain step must be 0 or 1, got ${c}`);
+    }
+    return { chain: c as 0 | 1, index };
+  }
+  throw new Error(
+    `Unsupported key suffix '${s}'. Expected '', '/*', '/0/*', '/1/*', or '/<0;1>/*'.`,
+  );
+}
+
+/**
+ * Derive the script-pubkey bytes for a multisig descriptor at
+ * (chain, index). Wraps the multi() redeem script per the descriptor's
+ * outermost wrapper (wsh / sh-wsh / sh).
+ */
+export function deriveMultisigScriptPubkeyBytes(
+  desc: ParsedDescriptor,
+  chain: 0 | 1,
+  index: number,
+): Uint8Array {
+  if (desc.kind !== "multisig") {
+    throw new Error("deriveMultisigScriptPubkeyBytes: not a multisig descriptor");
+  }
+  if (!desc.scriptWrapper) {
+    throw new Error("deriveMultisigScriptPubkeyBytes: missing scriptWrapper");
+  }
+  // Derive each cosigner's leaf pubkey at (chain, index).
+  const childPubkeys: Uint8Array[] = desc.keys.map((k) => {
+    const { chain: c, index: i } = resolveLeafDerivation(k.derivationPath, chain, index);
+    return deriveChildPub(k.xpub, c, i);
+  });
+  const ordered = desc.sorted
+    ? sortPubkeysLexicographic(childPubkeys)
+    : childPubkeys;
+
+  const redeem = buildMultiRedeemScript(desc.m as number, ordered);
+
+  switch (desc.scriptWrapper) {
+    case "wsh": {
+      // OP_0 push32 sha256(redeem)
+      const h = sha256(redeem);
+      return concat(new Uint8Array([0x00, 0x20]), h);
+    }
+    case "sh-wsh": {
+      // p2sh wrapping the p2wsh program: OP_HASH160 push20 hash160(0x0020||sha256(redeem)) OP_EQUAL
+      const witnessProgram = concat(new Uint8Array([0x00, 0x20]), sha256(redeem));
+      const h = hash160(witnessProgram);
+      return concat(new Uint8Array([0xa9, 0x14]), h, new Uint8Array([0x87]));
+    }
+    case "sh": {
+      // OP_HASH160 push20 hash160(redeem) OP_EQUAL
+      const h = hash160(redeem);
+      return concat(new Uint8Array([0xa9, 0x14]), h, new Uint8Array([0x87]));
+    }
+  }
+}
+
+/**
+ * Encode the address corresponding to a multisig descriptor leaf.
+ */
+export function deriveMultisigAddress(
+  desc: ParsedDescriptor,
+  chain: 0 | 1,
+  index: number,
+): string {
+  if (desc.kind !== "multisig") {
+    throw new Error("deriveMultisigAddress: not a multisig descriptor");
+  }
+  const childPubkeys: Uint8Array[] = desc.keys.map((k) => {
+    const { chain: c, index: i } = resolveLeafDerivation(k.derivationPath, chain, index);
+    return deriveChildPub(k.xpub, c, i);
+  });
+  const ordered = desc.sorted
+    ? sortPubkeysLexicographic(childPubkeys)
+    : childPubkeys;
+  const redeem = buildMultiRedeemScript(desc.m as number, ordered);
+
+  switch (desc.scriptWrapper) {
+    case "wsh":
+      return segwitEncode("bc", 0, sha256(redeem));
+    case "sh-wsh": {
+      const witnessProgram = concat(new Uint8Array([0x00, 0x20]), sha256(redeem));
+      const payload = concat(new Uint8Array([0x05]), hash160(witnessProgram));
+      return base58checkEncode(payload);
+    }
+    case "sh": {
+      const payload = concat(new Uint8Array([0x05]), hash160(redeem));
+      return base58checkEncode(payload);
+    }
+    default:
+      throw new Error(
+        `deriveMultisigAddress: missing or unsupported wrapper ${desc.scriptWrapper}`,
+      );
+  }
+}
+
+/** Build the multi(M, p1, p2, ...) bitcoin script:
+ *    M  <p1> <p2> ... <pN>  N  OP_CHECKMULTISIG
+ *  OP_M = 0x50 + M (only valid for 1..16). N is encoded the same way. */
+function buildMultiRedeemScript(m: number, pubkeys: Uint8Array[]): Uint8Array {
+  if (m < 1 || m > 16) throw new Error(`multi M out of range: ${m}`);
+  const n = pubkeys.length;
+  if (n < 1 || n > 16) throw new Error(`multi N out of range: ${n}`);
+  const parts: Uint8Array[] = [];
+  parts.push(new Uint8Array([0x50 + m]));
+  for (const pk of pubkeys) {
+    if (pk.length !== 33) {
+      throw new Error(`Cosigner pubkey must be 33-byte compressed, got ${pk.length}`);
+    }
+    parts.push(new Uint8Array([pk.length]));
+    parts.push(pk);
+  }
+  parts.push(new Uint8Array([0x50 + n]));
+  parts.push(new Uint8Array([0xae])); // OP_CHECKMULTISIG
+  return concat(...parts);
+}
+
+function sortPubkeysLexicographic(pubs: Uint8Array[]): Uint8Array[] {
+  return [...pubs].sort((a, b) => {
+    const len = Math.min(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      if (a[i] !== b[i]) return a[i] - b[i];
+    }
+    return a.length - b.length;
+  });
 }
 
 // ─── BIP32 derivation internals ──────────────────────────────────────────
