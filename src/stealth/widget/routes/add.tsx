@@ -29,8 +29,9 @@ function pickerStateForInput(raw: string): {
 } {
   const s = raw.trim();
   if (/^xpub[A-Za-z0-9]+$/.test(s) || /^tpub[A-Za-z0-9]+$/.test(s)) {
-    // BIP84 is the most common modern Sparrow / hardware-wallet export
-    // when the prefix is plain `xpub`; default to it.
+    // Native segwit (bc1q...) is the most common modern Sparrow /
+    // hardware-wallet export when the prefix is plain `xpub`; default
+    // to it.
     return { show: true, defaultScriptType: "p2wpkh" };
   }
   return { show: false, defaultScriptType: "p2pkh" };
@@ -382,16 +383,14 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
               }}
               className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
             >
-              <option value="p2wpkh">BIP84 native segwit (bc1q...)</option>
-              <option value="p2sh-p2wpkh">BIP49 wrapped segwit (3...)</option>
-              <option value="p2pkh">BIP44 legacy (1...)</option>
-              <option value="p2tr">BIP86 taproot (bc1p...)</option>
+              <option value="p2wpkh">Modern, most common (bc1q...)</option>
+              <option value="p2tr">Newest, taproot (bc1p...)</option>
+              <option value="p2sh-p2wpkh">Older segwit (3...)</option>
+              <option value="p2pkh">Oldest, classic (1...)</option>
             </select>
             <p className="mt-1 text-[10px] text-muted-foreground">
               Most modern wallets exported from Sparrow with an xpub prefix
-              are BIP84 (bc1q... addresses). Pick the type that matches your
-              wallet. If you are not sure, open your wallet and look at the
-              first receive address.
+              use bc1q addresses. Pick the type that matches your wallet.
             </p>
           </>
         ) : null}
