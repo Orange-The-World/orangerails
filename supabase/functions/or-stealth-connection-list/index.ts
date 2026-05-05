@@ -1,21 +1,21 @@
 /**
  * or-stealth-connection-list — list a user's sealed connections.
  *
- * Milestone 1 stub. Full behavior in STEALTH-SYNC-MASTER-PLAN.md §6.1.
+ * Master plan: STEALTH-SYNC-MASTER-PLAN.md §6.1.
  *
- * Returns sealed envelopes as-is. The widget popup decrypts them in the
- * browser using the per-app stealth key it received over postMessage.
+ * Returns lightweight metadata for each connection. The widget popup
+ * decrypts envelope contents only when it actually needs them (e.g. for
+ * an active sync); the picker view uses the plaintext columns we already
+ * keep in the clear (created_at, last_sync_at, status, etc.).
  *
  * POST body:
- *   app_slug:     string
- *   app_user_id:  string (uuid)
+ *   app_user_id:  string (uuid, required)
+ *   app_slug:     string (optional defense-in-depth filter)
  *
  * Response:
  *   { connections: Array<{
- *       id, app_slug, connection_kind, sealed_envelope,
- *       wallet_birthday_plaintext, status, last_sync_at,
- *       last_block_scanned, created_at, updated_at,
- *       tx_count
+ *       connection_id, app_slug, connection_kind, last_sync_at,
+ *       last_block_scanned, status, created_at
  *     }> }
  */
 
@@ -23,27 +23,25 @@ import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
 
 interface ListRequestBody {
-  app_slug?: string;
   app_user_id?: string;
+  app_slug?: string;
 }
 
-interface StealthConnectionRow {
-  id: string;
+interface ListedConnection {
+  connection_id: string;
   app_slug: string;
   connection_kind: 'xpub_stealth' | 'descriptor_stealth';
-  sealed_envelope: unknown;
-  wallet_birthday_plaintext: string | null;
-  status: 'active' | 'error' | 'archived';
   last_sync_at: string | null;
   last_block_scanned: number | null;
+  status: 'active' | 'error' | 'archived';
   created_at: string;
-  updated_at: string;
-  tx_count: number;
 }
 
 interface ListResponseBody {
-  connections: StealthConnectionRow[];
+  connections: ListedConnection[];
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 Deno.serve(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -58,20 +56,51 @@ Deno.serve(async (req: Request) => {
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
     const body = JSON.parse(raw || '{}') as ListRequestBody;
 
-    // TODO(milestone-1): validate body, fetch rows scoped to (app_slug, app_user_id),
-    // join with stealth_transactions count, return ListResponseBody.
-    void body;
-    void ctx;
+    if (!body.app_user_id || typeof body.app_user_id !== 'string' || !UUID_RE.test(body.app_user_id)) {
+      return jsonResponse({ error: 'app_user_id (uuid) required' }, 400, cors);
+    }
+    if (body.app_slug !== undefined && typeof body.app_slug !== 'string') {
+      return jsonResponse({ error: 'app_slug must be a string when provided' }, 400, cors);
+    }
 
-    return jsonResponse(
-      { error: 'or-stealth-connection-list not yet implemented' },
-      501,
-      cors,
-    );
+    if (ctx.mode === 'direct' && body.app_user_id !== ctx.userId) {
+      return jsonResponse(
+        { error: 'app_user_id must match the authenticated user' },
+        403, cors,
+      );
+    }
+
+    let query = ctx.serviceClient
+      .from('stealth_connections')
+      .select('id, app_slug, connection_kind, last_sync_at, last_block_scanned, status, created_at')
+      .eq('app_user_id', body.app_user_id)
+      .order('created_at', { ascending: false });
+    if (body.app_slug) {
+      query = query.eq('app_slug', body.app_slug);
+    }
+
+    const { data: rows, error: selErr } = await query;
+    if (selErr) {
+      console.error('[or-stealth-connection-list] select failed:', selErr);
+      return jsonResponse({ error: 'Failed to list stealth connections' }, 500, cors);
+    }
+
+    const connections: ListedConnection[] = (rows ?? []).map((r) => ({
+      connection_id: r.id as string,
+      app_slug: r.app_slug as string,
+      connection_kind: r.connection_kind as 'xpub_stealth' | 'descriptor_stealth',
+      last_sync_at: (r.last_sync_at as string | null) ?? null,
+      last_block_scanned: (r.last_block_scanned as number | null) ?? null,
+      status: r.status as 'active' | 'error' | 'archived',
+      created_at: r.created_at as string,
+    }));
+
+    const resp: ListResponseBody = { connections };
+    return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-connection-list] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
 });
 
-export type { ListRequestBody, ListResponseBody, StealthConnectionRow };
+export type { ListRequestBody, ListResponseBody, ListedConnection };

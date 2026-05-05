@@ -1,11 +1,18 @@
 /**
- * or-stealth-connection-create — insert a sealed envelope.
+ * or-stealth-connection-create — insert a sealed envelope, or return the
+ * existing connection_id if the same xpub was already added.
  *
  * Master plan: STEALTH-SYNC-MASTER-PLAN.md §6.1.
  *
  * The widget popup calls this from the user's browser after producing a
  * SealedEnvelope (see src/stealth/lib/postmessage.ts). OR stores the
  * ciphertext as opaque bytes; OR cannot decrypt.
+ *
+ * Re-add dedup. The widget computes
+ *   blind_index_b64 = HMAC-SHA256(or_stealth_key, normalized_xpub_or_descriptor)
+ * and POSTs it alongside the sealed envelope. The unique partial index
+ * `stealth_connections_dedup_idx` on (app_user_id, app_slug, blind_index_b64)
+ * lets us return the pre-existing row rather than inserting a duplicate.
  *
  * Auth pattern reused from or-connection-create: platform-mode (X-Platform-API-Key)
  * or direct-mode (Supabase JWT). See _shared/platform-auth.ts.
@@ -19,7 +26,7 @@
  *   wallet_birthday_plaintext: string (ISO date)          OPTIONAL
  *
  * Response:
- *   { connection_id: uuid }
+ *   { connection_id: uuid, already_existed: boolean }
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
@@ -36,6 +43,7 @@ interface CreateRequestBody {
 
 interface CreateResponseBody {
   connection_id: string;
+  already_existed: boolean;
 }
 
 interface SealedEnvelopeShape {
@@ -120,6 +128,43 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    const blindIndex = typeof body.blind_index === 'string' && body.blind_index.length > 0
+      ? body.blind_index
+      : null;
+
+    // ── Dedup path: check for an existing row with the same blind index ──
+    // The unique partial index `stealth_connections_dedup_idx` on
+    // (app_user_id, app_slug, blind_index_b64) WHERE blind_index_b64 IS NOT NULL
+    // means a duplicate insert would fail. Rather than rely on the conflict
+    // raising, we look first; cheaper and simpler than RETURNING-based pattern
+    // through the supabase-js client which does not expose xmax.
+    if (blindIndex !== null) {
+      const { data: existing, error: lookupErr } = await ctx.serviceClient
+        .from('stealth_connections')
+        .select('id')
+        .eq('app_user_id', body.app_user_id)
+        .eq('app_slug', body.app_slug)
+        .eq('blind_index_b64', blindIndex)
+        .maybeSingle();
+
+      if (lookupErr) {
+        console.error('[or-stealth-connection-create] dedup lookup failed:', lookupErr);
+        return jsonResponse({ error: 'Failed to check for existing connection' }, 500, cors);
+      }
+      if (existing) {
+        // Touch updated_at so callers can tell the user re-added their xpub.
+        await ctx.serviceClient
+          .from('stealth_connections')
+          .update({ updated_at: new Date().toISOString() })
+          .eq('id', existing.id as string);
+        const resp: CreateResponseBody = {
+          connection_id: existing.id as string,
+          already_existed: true,
+        };
+        return jsonResponse(resp, 200, cors);
+      }
+    }
+
     const { data: created, error: insErr } = await ctx.serviceClient
       .from('stealth_connections')
       .insert({
@@ -128,17 +173,40 @@ Deno.serve(async (req: Request) => {
         connection_kind: body.connection_kind,
         sealed_envelope: body.sealed_envelope,
         wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
+        blind_index_b64: blindIndex,
         status: 'active',
       })
       .select('id')
       .single();
 
     if (insErr || !created) {
+      // A race between the dedup lookup above and the insert can still
+      // trip the unique partial index. In that case the row exists; look
+      // it up and return it as already_existed.
+      if (insErr && blindIndex !== null && /duplicate|unique|23505/i.test(insErr.message ?? '')) {
+        const { data: raceRow } = await ctx.serviceClient
+          .from('stealth_connections')
+          .select('id')
+          .eq('app_user_id', body.app_user_id)
+          .eq('app_slug', body.app_slug)
+          .eq('blind_index_b64', blindIndex)
+          .maybeSingle();
+        if (raceRow) {
+          const resp: CreateResponseBody = {
+            connection_id: raceRow.id as string,
+            already_existed: true,
+          };
+          return jsonResponse(resp, 200, cors);
+        }
+      }
       console.error('[or-stealth-connection-create] insert failed:', insErr);
       return jsonResponse({ error: 'Failed to create stealth connection' }, 500, cors);
     }
 
-    const resp: CreateResponseBody = { connection_id: created.id as string };
+    const resp: CreateResponseBody = {
+      connection_id: created.id as string,
+      already_existed: false,
+    };
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-connection-create] fatal:', err);
