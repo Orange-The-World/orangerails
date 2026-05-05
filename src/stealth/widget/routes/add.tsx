@@ -16,7 +16,7 @@
  *   5. On failure we postMessage OR_STEALTH_ERROR and surface the message.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 // Detect whether we should show the script-type picker for the pasted
 // input. The picker is only shown when the prefix is ambiguous: a bare
@@ -38,6 +38,7 @@ function pickerStateForInput(raw: string): {
 }
 
 import {
+  deriveAddress,
   parseDescriptor,
   type ParsedDescriptor,
   type ScriptType,
@@ -126,6 +127,15 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   // the input changes so a fresh paste re-applies the default.
   const [scriptType, setScriptType] = useState<ScriptType>("p2wpkh");
   const [scriptTypeTouched, setScriptTypeTouched] = useState(false);
+  // Visual-confirmation state. The user must explicitly confirm the
+  // first three derived addresses match their wallet, OR override after
+  // the "No, different addresses" warning, before the submit button is
+  // enabled. Reset whenever the input or chosen script type changes.
+  const [confirmState, setConfirmState] = useState<"none" | "yes" | "no">(
+    "none",
+  );
+  const [overrideConfirm, setOverrideConfirm] = useState(false);
+  const addressesConfirmed = confirmState === "yes";
 
   const picker = useMemo(() => pickerStateForInput(input), [input]);
   // Effective script type: if the user touched the dropdown, honour it;
@@ -135,6 +145,43 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
       ? scriptType
       : picker.defaultScriptType
     : scriptType;
+
+  // Parse the pasted input for the confirmation card. Errors here are
+  // swallowed; we only render the card when parsing succeeds. The real
+  // submit path re-parses and surfaces errors to the user.
+  const parsedForPreview = useMemo<ParsedDescriptor | null>(() => {
+    const trimmed = input.trim();
+    if (trimmed.length < 4) return null;
+    try {
+      return parseDescriptor(trimmed);
+    } catch {
+      return null;
+    }
+  }, [input]);
+
+  // Derive the first three receive addresses for the confirmation card.
+  // We only render for single-key wallets where deriveAddress applies;
+  // multisig descriptors are rare in the consumer flow and skip the card.
+  const previewAddresses = useMemo<string[] | null>(() => {
+    if (!parsedForPreview) return null;
+    if (parsedForPreview.kind !== "single") return null;
+    const xpub = parsedForPreview.keys[0].xpub;
+    const t: ScriptType = picker.show
+      ? effectiveScriptType
+      : parsedForPreview.keys[0].scriptType;
+    try {
+      return [0, 1, 2].map((i) => deriveAddress(xpub, 0, i, t));
+    } catch {
+      return null;
+    }
+  }, [parsedForPreview, picker.show, effectiveScriptType]);
+
+  // Reset confirmation whenever the inputs that feed the preview change.
+  // useMemo above re-runs on the same deps; mirror them here.
+  useEffect(() => {
+    setConfirmState("none");
+    setOverrideConfirm(false);
+  }, [input, effectiveScriptType, picker.show]);
 
   const today = useMemo(todayISO, []);
 
@@ -446,13 +493,89 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
           className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
         />
 
+        {previewAddresses ? (
+          <div className="mt-4 rounded-md border border-border bg-muted/20 p-3">
+            <p className="text-xs font-medium text-foreground">
+              Confirm this is the right wallet
+            </p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              We derived these from your key. Open your wallet's "Receive"
+              tab and check the first few addresses match.
+            </p>
+            <ol className="mt-2 space-y-1 font-mono text-[11px] text-foreground">
+              {previewAddresses.map((addr, i) => (
+                <li key={addr}>
+                  {i + 1}. {addr}
+                </li>
+              ))}
+            </ol>
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmState("yes");
+                  setOverrideConfirm(false);
+                }}
+                className={`inline-flex items-center justify-center rounded-md px-3 py-2 text-xs font-medium ${
+                  confirmState === "yes"
+                    ? "bg-primary text-primary-foreground"
+                    : "border border-border bg-background text-foreground hover:bg-muted"
+                }`}
+              >
+                Yes, these match my wallet
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmState("no");
+                  setOverrideConfirm(false);
+                }}
+                className={`inline-flex items-center justify-center rounded-md px-3 py-2 text-xs font-medium ${
+                  confirmState === "no"
+                    ? "bg-destructive text-destructive-foreground"
+                    : "border border-border bg-background text-foreground hover:bg-muted"
+                }`}
+              >
+                No, different addresses
+              </button>
+            </div>
+            {confirmState === "no" ? (
+              <div className="mt-2 text-[11px] text-muted-foreground">
+                <p>
+                  Then this key may not be from the wallet you intended.
+                  Double-check what you copied or, for xpub keys, try a
+                  different wallet type above.
+                </p>
+                {!overrideConfirm ? (
+                  <button
+                    type="button"
+                    onClick={() => setOverrideConfirm(true)}
+                    className="mt-1 underline hover:no-underline"
+                  >
+                    Submit anyway
+                  </button>
+                ) : (
+                  <p className="mt-1 italic">
+                    Override enabled. You can submit below.
+                  </p>
+                )}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         {error ? (
           <p className="mt-3 text-xs text-destructive">{error}</p>
         ) : null}
 
         <button
           type="submit"
-          disabled={submitting}
+          disabled={
+            submitting ||
+            (previewAddresses !== null &&
+              !addressesConfirmed &&
+              !overrideConfirm)
+          }
           className="mt-4 inline-flex w-full items-center justify-center rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
         >
           {submitting ? "Sealing and uploading…" : "Add wallet"}
