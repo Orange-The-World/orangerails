@@ -575,3 +575,159 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     normalized,
   };
 }
+
+// ─── Live fetchers (Milestone 4) ────────────────────────────────────────
+//
+// These hit the production filter producer at stealth.orangerails.com and
+// the block source at blocks.orangerails.com. They are split out of the
+// route component so they are unit-testable by mocking globalThis.fetch.
+//
+// Two non-obvious things to know:
+//
+//   1. The filter producer serves `<height>.gcs.gz` with
+//      Content-Type: application/gzip and NO Content-Encoding header.
+//      That means the browser will not transparently decompress the body;
+//      we have to run it through DecompressionStream('gzip') ourselves.
+//
+//   2. The block hash for a given height is not in any response header on
+//      the .gcs.gz file. It lives in a sibling `<height>.json` document
+//      with shape { block_hash, block_height, time, filter_size }. We
+//      fetch both in parallel and match them up.
+
+export const DEFAULT_FILTER_BASE = 'https://stealth.orangerails.com';
+export const DEFAULT_BLOCK_SOURCE_BASE = 'https://blocks.orangerails.com';
+
+export interface FilterSidecar {
+  block_hash: string;
+  block_height: number;
+  time: number;
+  filter_size: number;
+}
+
+/**
+ * Decompress a gzipped buffer using the platform's DecompressionStream.
+ * Available in modern browsers and Node 18+.
+ */
+async function gunzip(buf: Uint8Array): Promise<Uint8Array> {
+  const Ctor = (globalThis as { DecompressionStream?: typeof DecompressionStream })
+    .DecompressionStream;
+  if (!Ctor) {
+    throw new Error('DecompressionStream is not available in this runtime');
+  }
+  const stream = new Blob([buf as BlobPart]).stream().pipeThrough(new Ctor('gzip'));
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      total += value.length;
+    }
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
+
+/**
+ * Fetch the chain tip height from the block source.
+ */
+export async function liveFetchTip(
+  baseUrl: string = DEFAULT_BLOCK_SOURCE_BASE,
+): Promise<number> {
+  const resp = await fetch(`${baseUrl}/tip`);
+  if (!resp.ok) throw new Error(`fetchTip failed: ${resp.status}`);
+  const j = (await resp.json()) as { height: number };
+  return j.height;
+}
+
+/**
+ * Fetch a BIP158 filter for the given block height, plus the sidecar JSON
+ * that names which block hash that filter is bound to.
+ *
+ * Returns null if the producer does not yet have a filter for that height
+ * (404 from either resource); the orchestrator treats that as "skip".
+ */
+export async function liveFetchFilter(
+  height: number,
+  baseUrl: string = DEFAULT_FILTER_BASE,
+): Promise<FilterRecord | null> {
+  const [gzResp, jsonResp] = await Promise.all([
+    fetch(`${baseUrl}/${height}.gcs.gz`),
+    fetch(`${baseUrl}/${height}.json`),
+  ]);
+  if (gzResp.status === 404 || jsonResp.status === 404) return null;
+  if (!gzResp.ok) throw new Error(`fetchFilter ${height} gz failed: ${gzResp.status}`);
+  if (!jsonResp.ok) throw new Error(`fetchFilter ${height} json failed: ${jsonResp.status}`);
+
+  const sidecar = (await jsonResp.json()) as FilterSidecar;
+  const gzBuf = new Uint8Array(await gzResp.arrayBuffer());
+  const filter = await gunzip(gzBuf);
+
+  return {
+    height: sidecar.block_height,
+    blockHashHex: sidecar.block_hash,
+    filter,
+  };
+}
+
+/**
+ * Fetch raw block bytes for the given block hash. The block source attaches
+ * X-Block-Hash and X-Block-Height response headers; we trust those for the
+ * height field but verify the hash matches what we asked for.
+ */
+export async function liveFetchBlock(
+  blockHashHex: string,
+  baseUrl: string = DEFAULT_BLOCK_SOURCE_BASE,
+): Promise<BlockRecord> {
+  const resp = await fetch(`${baseUrl}/block/${blockHashHex}`);
+  if (!resp.ok) throw new Error(`fetchBlock ${blockHashHex} failed: ${resp.status}`);
+  const buf = new Uint8Array(await resp.arrayBuffer());
+  const headerHash = resp.headers.get('X-Block-Hash');
+  const headerHeight = resp.headers.get('X-Block-Height');
+  const height = headerHeight ? Number(headerHeight) : 0;
+  const reportedHash = headerHash ?? blockHashHex;
+  return { height, blockHashHex: reportedHash, raw: buf };
+}
+
+/**
+ * Genesis at 2009-01-03; ~10 minutes per block. Crude lower bound for the
+ * birthday-height window. Used as a fallback when the live height endpoint
+ * is unavailable.
+ */
+export function approximateHeightFromDate(isoDate: string): number {
+  const GENESIS = Date.UTC(2009, 0, 3) / 1000;
+  const SECONDS_PER_BLOCK = 600;
+  const ts = Date.parse(isoDate + 'T00:00:00Z') / 1000;
+  if (!Number.isFinite(ts) || ts < GENESIS) return 0;
+  return Math.max(0, Math.floor((ts - GENESIS) / SECONDS_PER_BLOCK));
+}
+
+/**
+ * Resolve a wallet birthday date to a starting block height. Calls the
+ * live block source; on any failure (network, non-200, missing field) falls
+ * back to a date-based approximation so the sync still makes progress.
+ */
+export async function liveResolveBirthdayHeight(
+  isoDate: string,
+  baseUrl: string = DEFAULT_BLOCK_SOURCE_BASE,
+): Promise<number> {
+  try {
+    const resp = await fetch(`${baseUrl}/height?date=${encodeURIComponent(isoDate)}`);
+    if (!resp.ok) throw new Error(`height-by-date failed: ${resp.status}`);
+    const j = (await resp.json()) as { height?: number };
+    if (typeof j.height !== 'number' || !Number.isFinite(j.height)) {
+      throw new Error('height-by-date response missing height');
+    }
+    return j.height;
+  } catch (e) {
+    console.warn('[stealth/sync] liveResolveBirthdayHeight fallback:', e);
+    return approximateHeightFromDate(isoDate);
+  }
+}

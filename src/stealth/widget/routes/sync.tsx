@@ -24,8 +24,11 @@ import {
 } from '@/stealth/lib/derive';
 import {
   runSync,
-  type BlockRecord,
-  type FilterRecord,
+  liveFetchBlock as libLiveFetchBlock,
+  liveFetchFilter as libLiveFetchFilter,
+  liveFetchTip as libLiveFetchTip,
+  liveResolveBirthdayHeight,
+  approximateHeightFromDate,
   type SyncProgressEvent,
   type WalletEnvelopePayload,
 } from '@/stealth/lib/sync';
@@ -74,36 +77,13 @@ function isMockMode(): boolean {
 }
 
 // ── Live fetchers ──────────────────────────────────────────────────────
+// Bound to the production base URLs (overridable via Vite env). The actual
+// HTTP work, gzip decompression of the .gcs.gz body, and sidecar JSON read
+// happen in @/stealth/lib/sync so they are unit-testable.
 
-async function liveFetchTip(): Promise<number> {
-  const resp = await fetch(`${BLOCK_SOURCE_BASE}/tip`);
-  if (!resp.ok) throw new Error(`fetchTip failed: ${resp.status}`);
-  const j = (await resp.json()) as { height: number };
-  return j.height;
-}
-
-async function liveFetchFilter(height: number): Promise<FilterRecord | null> {
-  const resp = await fetch(`${STEALTH_FILTER_BASE}/${height}.gcs.gz`);
-  if (resp.status === 404) return null;
-  if (!resp.ok) throw new Error(`fetchFilter ${height} failed: ${resp.status}`);
-  // The CDN serves gzipped GCS bytes. Browsers transparently un-gzip
-  // when Content-Encoding is set; otherwise we'd need DecompressionStream.
-  const buf = new Uint8Array(await resp.arrayBuffer());
-  // The block hash for this height is encoded in a sibling manifest entry.
-  // For Milestone 3 we read it from a header the producer attaches:
-  //   X-Block-Hash: <hex display order>
-  const blockHashHex = resp.headers.get('X-Block-Hash') ?? '';
-  return { height, blockHashHex, filter: buf };
-}
-
-async function liveFetchBlock(blockHashHex: string): Promise<BlockRecord> {
-  const resp = await fetch(`${BLOCK_SOURCE_BASE}/block/${blockHashHex}`);
-  if (!resp.ok) throw new Error(`fetchBlock ${blockHashHex} failed: ${resp.status}`);
-  const buf = new Uint8Array(await resp.arrayBuffer());
-  // Height is returned via a response header from the source service.
-  const height = Number(resp.headers.get('X-Block-Height') ?? '0');
-  return { height, blockHashHex, raw: buf };
-}
+const liveFetchTip = () => libLiveFetchTip(BLOCK_SOURCE_BASE);
+const liveFetchFilter = (height: number) => libLiveFetchFilter(height, STEALTH_FILTER_BASE);
+const liveFetchBlock = (hash: string) => libLiveFetchBlock(hash, BLOCK_SOURCE_BASE);
 
 // ── Component ──────────────────────────────────────────────────────────
 
@@ -188,21 +168,26 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           wallet_birthday_plaintext: string | null;
         };
 
-        // We need a birthday-height. Resolution from date → height belongs
-        // server-side in Milestone 4; for now we approximate from the date.
-        // ~144 blocks per day from genesis (2009-01-03).
+        // We need a birthday-height. In live mode we ask the block source
+        // for the first block at-or-after the birthday date; in mock mode
+        // we keep the date-based approximation so the test fixtures do not
+        // need to mock a network endpoint.
         const envelopePayload = await unsealEnvelope<WalletEnvelopePayload>(
           envJson.sealed_envelope,
           init.or_stealth_key_b64,
         );
-        const birthdayHeight = approximateHeightFromDate(envelopePayload.wallet_birthday);
+        const useMock = isMockMode();
+        const birthdayHeight = useMock
+          ? approximateHeightFromDate(envelopePayload.wallet_birthday)
+          : await liveResolveBirthdayHeight(
+              envelopePayload.wallet_birthday,
+              BLOCK_SOURCE_BASE,
+            );
 
         let descriptor: ParsedDescriptor | undefined;
         if (envelopePayload.kind === 'descriptor_stealth') {
           descriptor = parseDescriptor(envelopePayload.descriptor);
         }
-
-        const useMock = isMockMode();
 
         // 2. Run the orchestrator.
         const result = await runSync({
@@ -332,14 +317,3 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
 }
 
 export default SyncRoute;
-
-// Genesis at 2009-01-03; ~10 minutes per block. Crude lower bound for the
-// birthday-height window. The Milestone 4 filter producer service will
-// expose a date-to-height endpoint that replaces this approximation.
-function approximateHeightFromDate(isoDate: string): number {
-  const GENESIS = Date.UTC(2009, 0, 3) / 1000;
-  const SECONDS_PER_BLOCK = 600;
-  const ts = Date.parse(isoDate + 'T00:00:00Z') / 1000;
-  if (!Number.isFinite(ts) || ts < GENESIS) return 0;
-  return Math.max(0, Math.floor((ts - GENESIS) / SECONDS_PER_BLOCK));
-}
