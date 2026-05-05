@@ -30,6 +30,7 @@ import { SyncRoute } from "./routes/sync";
 import { ListRoute } from "./routes/list";
 import { DeleteRoute } from "./routes/delete";
 import { DirectLoadCard } from "./components/DirectLoadCard";
+import { StealthInitProvider } from "./StealthInitContext";
 
 const DEFAULT_ALLOWED_ORIGINS =
   "http://localhost:3000,http://localhost:5173,http://localhost:8080,https://app.bitbooks.com";
@@ -78,9 +79,19 @@ function postError(
   target.postMessage(msg, origin);
 }
 
+/** Pick the most likely parent: window.opener (popup case) or window.parent
+ *  (iframe case, when it differs from window itself). */
+function pickParentWindow(): Window | null {
+  if (typeof window === "undefined") return null;
+  if (window.opener) return window.opener as Window;
+  if (window.parent && window.parent !== window) return window.parent;
+  return null;
+}
+
 export function App() {
   const allowlist = useMemo(parseAllowedOrigins, []);
   const [init, setInit] = useState<StealthInitMessage | null>(null);
+  const [parent, setParent] = useState<Window | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Initial value: if there is no opener AND no parent frame (or we are on the
   // server where window is undefined), no postMessage INIT can ever arrive, so
@@ -93,8 +104,12 @@ export function App() {
   });
 
   useEffect(() => {
-    // Send READY once on mount.
-    postReady(window.opener as Window | null);
+    // Send READY once on mount, to whichever window opened us. In the
+    // popup case that is window.opener; in the iframe case it is
+    // window.parent. Origin '*' is acceptable here because READY carries
+    // no secrets; we learn the trusted origin from INIT.
+    const parentWin = pickParentWindow();
+    postReady(parentWin);
 
     const handler = (event: MessageEvent) => {
       const data = event.data as Partial<StealthInitMessage> | undefined;
@@ -132,7 +147,40 @@ export function App() {
         return;
       }
 
+      // Validate required fields per the postmessage contract.
+      if (
+        typeof data.app_slug !== "string" ||
+        typeof data.app_user_id !== "string" ||
+        typeof data.or_stealth_key_b64 !== "string" ||
+        (data.mode !== "add" &&
+          data.mode !== "sync" &&
+          data.mode !== "list" &&
+          data.mode !== "delete")
+      ) {
+        setError("INIT message is missing required fields");
+        postError(event.source as Window | null, event.origin, {
+          code: "INTERNAL",
+          message: "OR_STEALTH_INIT missing one of: app_slug, app_user_id, or_stealth_key_b64, mode.",
+          retryable: false,
+        });
+        return;
+      }
+      // sync / list / delete need an existing connection_id. Add does not.
+      if (data.mode !== "add" && typeof data.connection_id !== "string") {
+        setError("INIT mode requires a connection_id");
+        postError(event.source as Window | null, event.origin, {
+          code: "CONNECTION_NOT_FOUND",
+          message: `Mode '${data.mode}' requires connection_id in OR_STEALTH_INIT.`,
+          retryable: false,
+        });
+        return;
+      }
+
       setInit(data as StealthInitMessage);
+      // Prefer the actual sending window (event.source). Fall back to the
+      // pre-resolved opener/parent. This ensures replies always go to the
+      // window that posted INIT.
+      setParent((event.source as Window | null) ?? parentWin);
       setAwaitingInit(false);
       setError(null);
     };
@@ -187,29 +235,37 @@ export function App() {
     );
   }
 
-  switch (init.mode) {
-    case "add":
-      return <AddRoute init={init} />;
-    case "sync":
-      return <SyncRoute init={init} />;
-    case "list":
-      return <ListRoute init={init} />;
-    case "delete":
-      return <DeleteRoute init={init} />;
-    default:
-      return (
-        <div className="flex min-h-screen items-center justify-center bg-background p-6">
-          <div className="max-w-md text-center">
-            <h1 className="text-lg font-semibold text-foreground">
-              Unknown mode
-            </h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Mode "{String(init.mode)}" is not supported by this widget.
-            </p>
-          </div>
-        </div>
-      );
+  const route = (() => {
+    switch (init.mode) {
+      case "add":
+        return <AddRoute init={init} />;
+      case "sync":
+        return <SyncRoute init={init} />;
+      case "list":
+        return <ListRoute init={init} />;
+      case "delete":
+        return <DeleteRoute init={init} />;
+      default:
+        return null;
+    }
+  })();
+  if (route) {
+    return (
+      <StealthInitProvider value={{ init, parent }}>
+        {route}
+      </StealthInitProvider>
+    );
   }
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+      <div className="max-w-md text-center">
+        <h1 className="text-lg font-semibold text-foreground">Unknown mode</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Mode "{String(init.mode)}" is not supported by this widget.
+        </p>
+      </div>
+    </div>
+  );
 }
 
 export default App;
