@@ -100,7 +100,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   const [birthday, setBirthday] = useState<string>(defaultBirthdayISO);
   const [gapLimit, setGapLimit] = useState<number>(20);
   const [submitting, setSubmitting] = useState(false);
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState<{ alreadyExisted: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const today = useMemo(todayISO, []);
@@ -218,7 +218,10 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
         return;
       }
 
-      const json = (await resp.json()) as { connection_id?: string };
+      const json = (await resp.json()) as {
+        connection_id?: string;
+        already_existed?: boolean;
+      };
       if (!json.connection_id) {
         const msg = "Edge function did not return a connection_id.";
         setError(msg);
@@ -226,6 +229,10 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
         return;
       }
 
+      // Even when the connection already existed, we still post
+      // ADD_COMPLETE so the parent app gets the connection_id back. The
+      // parent can decide whether to display "added" vs "already linked"
+      // based on its own state; the message itself is the same shape.
       const complete: StealthAddCompleteMessage = {
         type: "OR_STEALTH_ADD_COMPLETE",
         connection_id: json.connection_id,
@@ -240,7 +247,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
           console.error("[stealth/add] failed to post complete:", e);
         }
       }
-      setDone(true);
+      setDone({ alreadyExisted: json.already_existed === true });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
@@ -255,10 +262,12 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
       <div className="flex min-h-screen items-center justify-center bg-background p-6">
         <div className="w-full max-w-md rounded-lg border border-border bg-card p-6 text-center shadow-sm">
           <h1 className="text-lg font-semibold text-foreground">
-            Wallet added
+            {done.alreadyExisted ? "Already connected" : "Wallet added"}
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            Your wallet is now sealed and stored. You can close this window.
+            {done.alreadyExisted
+              ? "This xpub is already connected to your account. We pointed your app at the existing connection so you do not have a duplicate."
+              : "Your wallet is now sealed and stored. You can close this window."}
           </p>
           <button
             type="button"
