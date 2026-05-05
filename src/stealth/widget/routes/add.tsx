@@ -18,6 +18,24 @@
 
 import { useMemo, useState } from "react";
 
+// Detect whether we should show the script-type picker for the pasted
+// input. The picker is only shown when the prefix is ambiguous: a bare
+// `xpub` or `tpub` extended key. SLIP-132 prefixes (`ypub`, `zpub`) and
+// output descriptors (`pkh(`, `wpkh(`, `sh(...)`, `wsh(...)`, `tr(`)
+// already encode the script type unambiguously, so we hide the picker.
+function pickerStateForInput(raw: string): {
+  show: boolean;
+  defaultScriptType: ScriptType;
+} {
+  const s = raw.trim();
+  if (/^xpub[A-Za-z0-9]+$/.test(s) || /^tpub[A-Za-z0-9]+$/.test(s)) {
+    // BIP84 is the most common modern Sparrow / hardware-wallet export
+    // when the prefix is plain `xpub`; default to it.
+    return { show: true, defaultScriptType: "p2wpkh" };
+  }
+  return { show: false, defaultScriptType: "p2pkh" };
+}
+
 import {
   parseDescriptor,
   type ParsedDescriptor,
@@ -102,6 +120,20 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<{ alreadyExisted: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The user-overridable script type for ambiguous `xpub` / `tpub`
+  // prefixes. We initialize from the prefix heuristic and reset whenever
+  // the input changes so a fresh paste re-applies the default.
+  const [scriptType, setScriptType] = useState<ScriptType>("p2wpkh");
+  const [scriptTypeTouched, setScriptTypeTouched] = useState(false);
+
+  const picker = useMemo(() => pickerStateForInput(input), [input]);
+  // Effective script type: if the user touched the dropdown, honour it;
+  // otherwise track the default for the current prefix.
+  const effectiveScriptType: ScriptType = picker.show
+    ? scriptTypeTouched
+      ? scriptType
+      : picker.defaultScriptType
+    : scriptType;
 
   const today = useMemo(todayISO, []);
 
@@ -160,6 +192,19 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
       setError(`Could not parse: ${msg}`);
       postWidgetError("INVALID_XPUB", msg, false);
       return;
+    }
+
+    // For ambiguous `xpub` / `tpub` single-key inputs, override the
+    // detected script type with the user's pick. The auto-detection for
+    // ypub / zpub / descriptors stays in charge.
+    if (
+      parsed.kind === "single" &&
+      pickerStateForInput(trimmed).show
+    ) {
+      parsed = {
+        ...parsed,
+        keys: [{ ...parsed.keys[0], scriptType: effectiveScriptType }],
+      };
     }
 
     const shape = shapeForCompletion(parsed);
@@ -319,6 +364,37 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
           placeholder="xpub… / ypub… / zpub… / wsh(sortedmulti(...))"
           className="mt-1 w-full rounded-md border border-border bg-background p-2 font-mono text-xs"
         />
+
+        {picker.show ? (
+          <>
+            <label
+              className="mt-3 block text-xs font-medium text-foreground"
+              htmlFor="script-type-input"
+            >
+              Wallet type
+            </label>
+            <select
+              id="script-type-input"
+              value={effectiveScriptType}
+              onChange={(e) => {
+                setScriptType(e.target.value as ScriptType);
+                setScriptTypeTouched(true);
+              }}
+              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
+            >
+              <option value="p2wpkh">BIP84 native segwit (bc1q...)</option>
+              <option value="p2sh-p2wpkh">BIP49 wrapped segwit (3...)</option>
+              <option value="p2pkh">BIP44 legacy (1...)</option>
+              <option value="p2tr">BIP86 taproot (bc1p...)</option>
+            </select>
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              Most modern wallets exported from Sparrow with an xpub prefix
+              are BIP84 (bc1q... addresses). Pick the type that matches your
+              wallet. If you are not sure, open your wallet and look at the
+              first receive address.
+            </p>
+          </>
+        ) : null}
 
         <label
           className="mt-3 block text-xs font-medium text-foreground"

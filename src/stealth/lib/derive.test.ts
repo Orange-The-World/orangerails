@@ -62,10 +62,31 @@ describe("detectScriptType", () => {
   });
 });
 
+// Same key bytes as BIP84_ZPUB above, but re-encoded with the standard
+// `xpub` SLIP-132 version prefix. This is the shape Sparrow Wallet
+// frequently exports for BIP84 wallets, and it is what motivated the
+// script-type picker in the add-wallet widget. The underlying BIP32
+// chain code and pubkey are identical to BIP84_ZPUB, so forcing
+// `p2wpkh` derivation must produce the same addresses as the canonical
+// vector. This locks in the explicit-script-type override path.
+const BIP84_AS_XPUB =
+  "xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V";
+
 describe("deriveAddress — single key", () => {
   it("matches the BIP84 (P2WPKH) test vector for receive 0 and 1", () => {
     expect(deriveAddress(BIP84_ZPUB, 0, 0, "p2wpkh")).toBe(BIP84_RECEIVE_0);
     expect(deriveAddress(BIP84_ZPUB, 0, 1, "p2wpkh")).toBe(BIP84_RECEIVE_1);
+  });
+
+  it("matches the BIP84 vector when the same key is given with an xpub prefix and forced to p2wpkh", () => {
+    // Sanity: the bare prefix would default to legacy.
+    expect(detectScriptType(BIP84_AS_XPUB)).toBe("p2pkh");
+    // But once the caller overrides the script type to p2wpkh (as the
+    // widget's wallet-type picker does), the addresses must match the
+    // canonical zpub-prefix BIP84 receive chain.
+    expect(deriveAddress(BIP84_AS_XPUB, 0, 0, "p2wpkh")).toBe(BIP84_RECEIVE_0);
+    expect(deriveAddress(BIP84_AS_XPUB, 0, 1, "p2wpkh")).toBe(BIP84_RECEIVE_1);
+    expect(deriveAddress(BIP84_AS_XPUB, 1, 0, "p2wpkh")).toBe(BIP84_CHANGE_0);
   });
 
   it("matches the BIP84 change-chain receive 0", () => {
