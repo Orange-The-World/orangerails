@@ -350,9 +350,6 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
               ? 'Nothing new on chain since the last sync.'
               : `Sealed and stored ${done.txCount} transaction${done.txCount === 1 ? '' : 's'}.`}
           </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Downloaded {(done.bytes / 1024).toFixed(1)} KB.
-          </p>
           <button
             type="button"
             onClick={() => window.close()}
