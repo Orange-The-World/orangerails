@@ -171,7 +171,9 @@ export interface StealthErrorMessage {
 // Discriminated unions for type-safe handlers
 // ─────────────────────────────────────────────────────────────────────
 
-export type StealthMessageFromApp = StealthInitMessage;
+export type StealthMessageFromApp =
+  | StealthInitMessage
+  | StealthProxyResponseMessage;
 
 export type StealthMessageFromWidget =
   | StealthReadyMessage
@@ -180,7 +182,33 @@ export type StealthMessageFromWidget =
   | StealthSyncCompleteMessage
   | StealthListResultMessage
   | StealthDeleteCompleteMessage
-  | StealthErrorMessage;
+  | StealthErrorMessage
+  | StealthProxyRequestMessage;
+
+// ─────────────────────────────────────────────────────────────────────
+// Parent-proxy round trip (used when the consuming app hosts a server-
+// side proxy and wants to keep the platform API key off the browser).
+// Widget posts OR_STEALTH_PROXY_REQUEST to the parent; parent makes the
+// same-origin call and posts OR_STEALTH_PROXY_RESPONSE back.
+// ─────────────────────────────────────────────────────────────────────
+
+export interface StealthProxyRequestMessage {
+  type: 'OR_STEALTH_PROXY_REQUEST';
+  /** Caller-generated UUID to correlate request/response. */
+  request_id: string;
+  /** Edge function slug (e.g. 'or-stealth-connection-create'). */
+  fn: string;
+  /** JSON-serializable request body forwarded as-is. */
+  body: unknown;
+}
+
+export interface StealthProxyResponseMessage {
+  type: 'OR_STEALTH_PROXY_RESPONSE';
+  request_id: string;
+  status: number;
+  /** OR's response body — usually JSON object, occasionally a string on error. */
+  body: unknown;
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Sealed envelope (the unit OR stores at rest)
