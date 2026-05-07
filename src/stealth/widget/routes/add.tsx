@@ -477,21 +477,36 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
           syncs fast. Older wallets can edit this later to scan further back.
         </p>
 
-        <label
-          className="mt-3 block text-xs font-medium text-foreground"
-          htmlFor="gap-input"
-        >
-          Gap limit
-        </label>
-        <input
-          id="gap-input"
-          type="number"
-          min={1}
-          max={1000}
-          value={gapLimit}
-          onChange={(e) => setGapLimit(Number.parseInt(e.target.value, 10) || 0)}
-          className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
-        />
+        <details className="mt-3 group">
+          <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground select-none">
+            Advanced settings
+          </summary>
+          <div className="mt-2">
+            <label
+              className="block text-xs font-medium text-foreground"
+              htmlFor="gap-input"
+            >
+              Gap limit
+            </label>
+            <input
+              id="gap-input"
+              type="number"
+              min={1}
+              max={1000}
+              value={gapLimit}
+              onChange={(e) =>
+                setGapLimit(Number.parseInt(e.target.value, 10) || 0)
+              }
+              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
+            />
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              How many empty addresses we scan before stopping. Default 20
+              works for almost every wallet (Sparrow, BlueWallet, Ledger,
+              Trezor). Only change this if your wallet generates addresses
+              with unusually large gaps.
+            </p>
+          </div>
+        </details>
 
         {previewAddresses ? (
           <div className="mt-4 rounded-md border border-border bg-muted/20 p-3">
