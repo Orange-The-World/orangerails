@@ -91,16 +91,27 @@ function shapeForCompletion(parsed: ParsedDescriptor): {
   return { kind: "xpub_stealth", scriptType: t };
 }
 
-/** Get the consuming app's URL endpoint for the stealth functions. We
- *  prefer same-origin if a relative URL is configured (the OR app proxies
- *  edge functions); otherwise we fall back to the full Supabase URL. */
-function resolveFunctionUrl(name: string): string {
+/** Get the URL endpoint for the stealth functions. Order of preference:
+ *    1. proxy_base_url from INIT — when the consuming app provides a
+ *       server-side proxy (V2 pattern). The proxy attaches the platform
+ *       API key, keeping that secret off the browser.
+ *    2. VITE_OR_FUNCTIONS_BASE_URL build-time env — direct Supabase
+ *       functions host (typically requires the consumer to also pass
+ *       access_token in INIT for Bearer auth).
+ *    3. Same-origin /functions/v1/* — relies on a reverse proxy at the
+ *       widget host.
+ */
+function resolveFunctionUrl(
+  name: string,
+  proxyBaseUrl: string | undefined,
+): string {
+  if (proxyBaseUrl) {
+    return `${proxyBaseUrl.replace(/\/$/, "")}/${name}`;
+  }
   const base = (
     (import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? ""
   ).replace(/\/$/, "");
   if (base) return `${base}/${name}`;
-  // Same-origin default; Caddy at connect.orangerails.com proxies
-  // /functions/v1/* to the Supabase edge function host.
   return `/functions/v1/${name}`;
 }
 
@@ -109,6 +120,11 @@ interface AccessTokenInit extends StealthInitMessage {
    *  Reading this off the message is a forward-compatible carve-out;
    *  master plan §4.4 leaves this optional. */
   access_token?: string;
+  /** Optional consumer-app proxy base URL. When present, the widget POSTs
+   *  edge-function calls through this URL instead of OR's Supabase host;
+   *  the proxy attaches the platform API key server-side so the secret
+   *  never reaches the browser. V2 pattern. */
+  proxy_base_url?: string;
 }
 
 export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
@@ -288,7 +304,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
         headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
       }
 
-      const resp = await fetch(resolveFunctionUrl("or-stealth-connection-create"), {
+      const resp = await fetch(resolveFunctionUrl("or-stealth-connection-create", initWithToken.proxy_base_url), {
         method: "POST",
         headers,
         body: JSON.stringify({

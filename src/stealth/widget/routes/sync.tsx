@@ -53,6 +53,8 @@ import { useStealthInit } from '../StealthInitContext';
 
 interface AccessTokenInit extends StealthInitMessage {
   access_token?: string;
+  /** Consumer-app server-side proxy. See add.tsx for the contract. */
+  proxy_base_url?: string;
 }
 
 const STEALTH_FILTER_BASE =
@@ -62,7 +64,13 @@ const BLOCK_SOURCE_BASE =
   (import.meta.env.VITE_OR_BLOCK_SOURCE_BASE_URL as string | undefined) ??
   'https://blocks.orangerails.com';
 
-function resolveFunctionUrl(name: string): string {
+function resolveFunctionUrl(
+  name: string,
+  proxyBaseUrl: string | undefined,
+): string {
+  if (proxyBaseUrl) {
+    return `${proxyBaseUrl.replace(/\/$/, '')}/${name}`;
+  }
   const base = (
     (import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? ''
   ).replace(/\/$/, '');
@@ -149,7 +157,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           headers['Authorization'] = `Bearer ${initWithToken.access_token}`;
         }
 
-        const envResp = await fetch(resolveFunctionUrl('or-stealth-envelope-fetch'), {
+        const envResp = await fetch(resolveFunctionUrl('or-stealth-envelope-fetch', initWithToken.proxy_base_url), {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -211,7 +219,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         // 3. Upload sealed transactions.
         if (result.sealedTransactions.length > 0) {
           const uploadResp = await fetch(
-            resolveFunctionUrl('or-stealth-transactions-store'),
+            resolveFunctionUrl('or-stealth-transactions-store', initWithToken.proxy_base_url),
             {
               method: 'POST',
               headers,
