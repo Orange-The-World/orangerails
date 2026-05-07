@@ -50,6 +50,7 @@ import type {
 } from '@/stealth/lib/postmessage';
 import { ProgressModal } from '../components/ProgressModal';
 import { useStealthInit } from '../StealthInitContext';
+import { proxyFetch } from '../lib/proxyFetch';
 
 interface AccessTokenInit extends StealthInitMessage {
   access_token?: string;
@@ -149,28 +150,53 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           throw new Error('connection_id is required for mode=sync');
         }
 
-        // 1. Fetch sealed envelope.
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
+        // 1. Fetch sealed envelope. Routes through parent postMessage proxy
+        //    when proxy_base_url is set in INIT (V2 pattern, keeps platform
+        //    key off the browser); falls back to direct fetch otherwise.
+        const envFetchBody = {
+          connection_id: init.connection_id,
+          app_user_id: init.app_user_id,
+          app_slug: init.app_slug,
         };
-        if (initWithToken.access_token) {
-          headers['Authorization'] = `Bearer ${initWithToken.access_token}`;
+        let envOk = false;
+        let envStatus = 0;
+        let envText = '';
+        let envBody: unknown = null;
+        if (initWithToken.proxy_base_url && parent) {
+          const r = await proxyFetch({
+            parent,
+            parentOrigin: init.return_callback_origin,
+            fn: 'or-stealth-envelope-fetch',
+            body: envFetchBody,
+          });
+          envOk = r.ok;
+          envStatus = r.status;
+          envText = r.bodyText;
+          envBody = r.parsed;
+        } else {
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+          };
+          if (initWithToken.access_token) {
+            headers['Authorization'] = `Bearer ${initWithToken.access_token}`;
+          }
+          const envResp = await fetch(
+            resolveFunctionUrl('or-stealth-envelope-fetch', initWithToken.proxy_base_url),
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(envFetchBody),
+            },
+          );
+          envOk = envResp.ok;
+          envStatus = envResp.status;
+          envText = await envResp.text().catch(() => '');
+          envBody = envText ? JSON.parse(envText) : null;
         }
-
-        const envResp = await fetch(resolveFunctionUrl('or-stealth-envelope-fetch', initWithToken.proxy_base_url), {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            connection_id: init.connection_id,
-            app_user_id: init.app_user_id,
-            app_slug: init.app_slug,
-          }),
-        });
-        if (!envResp.ok) {
-          const text = await envResp.text().catch(() => '');
-          throw new Error(`Envelope fetch failed: ${envResp.status} ${text}`);
+        if (!envOk) {
+          throw new Error(`Envelope fetch failed: ${envStatus} ${envText}`);
         }
-        const envJson = (await envResp.json()) as {
+        const envJson = envBody as {
           sealed_envelope: SealedEnvelope;
           last_block_scanned: number | null;
           wallet_birthday_plaintext: string | null;
@@ -216,24 +242,48 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         });
         if (cancelled) return;
 
-        // 3. Upload sealed transactions.
+        // 3. Upload sealed transactions. Same proxy switch as step 1.
         if (result.sealedTransactions.length > 0) {
-          const uploadResp = await fetch(
-            resolveFunctionUrl('or-stealth-transactions-store', initWithToken.proxy_base_url),
-            {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({
-                connection_id: init.connection_id,
-                app_user_id: init.app_user_id,
-                sealed_transactions: result.sealedTransactions,
-                last_block_scanned: result.lastBlockScanned,
-              }),
-            },
-          );
-          if (!uploadResp.ok) {
-            const text = await uploadResp.text().catch(() => '');
-            throw new Error(`Upload failed: ${uploadResp.status} ${text}`);
+          const uploadBody = {
+            connection_id: init.connection_id,
+            app_user_id: init.app_user_id,
+            sealed_transactions: result.sealedTransactions,
+            last_block_scanned: result.lastBlockScanned,
+          };
+          let uploadOk = false;
+          let uploadStatus = 0;
+          let uploadText = '';
+          if (initWithToken.proxy_base_url && parent) {
+            const r = await proxyFetch({
+              parent,
+              parentOrigin: init.return_callback_origin,
+              fn: 'or-stealth-transactions-store',
+              body: uploadBody,
+            });
+            uploadOk = r.ok;
+            uploadStatus = r.status;
+            uploadText = r.bodyText;
+          } else {
+            const headers: Record<string, string> = {
+              'Content-Type': 'application/json',
+            };
+            if (initWithToken.access_token) {
+              headers['Authorization'] = `Bearer ${initWithToken.access_token}`;
+            }
+            const uploadResp = await fetch(
+              resolveFunctionUrl('or-stealth-transactions-store', initWithToken.proxy_base_url),
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(uploadBody),
+              },
+            );
+            uploadOk = uploadResp.ok;
+            uploadStatus = uploadResp.status;
+            uploadText = await uploadResp.text().catch(() => '');
+          }
+          if (!uploadOk) {
+            throw new Error(`Upload failed: ${uploadStatus} ${uploadText}`);
           }
         }
 
