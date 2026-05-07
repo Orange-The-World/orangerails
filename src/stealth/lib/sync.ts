@@ -355,7 +355,11 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 const STAGE_COPY: Record<StealthStage, { message: string; detail: string }> = {
   unlocking: { message: 'Vault unlocked', detail: 'Your password never left this browser.' },
   deriving: { message: 'Computing your addresses', detail: 'Sparrow and Wasabi do this the same way.' },
-  fetching_filters: { message: 'Downloading public filter files', detail: 'These files are the same for everyone.' },
+  fetching_filters: {
+    message: 'Looking through Bitcoin history for your transactions',
+    detail:
+      'We download tiny summary files (a few KB each), one per block, and check them locally. The files are the same for every user — Orange Rails learns nothing about you from them.',
+  },
   matching: { message: 'Matching filters against your addresses', detail: 'The match runs locally; no addresses are sent anywhere.' },
   fetching_blocks: { message: 'Fetching blocks where your wallet appears', detail: 'Pulled directly from our Bitcoin node.' },
   building_txs: { message: 'Building your transaction history', detail: 'Your browser is parsing each block.' },
@@ -450,10 +454,16 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
 
   const totalFilters = tip - fromHeight + 1;
+  // Friendly initial estimate: each filter is ~3KB on average. Multiply
+  // and round to MB so the user has an honest number ('about 150 MB to
+  // read') instead of a meaningless block count. Reassures users that
+  // it is small + that nothing is being uploaded.
+  const estimatedBytes = totalFilters * 3072;
+  const estimatedMB = Math.max(1, Math.round(estimatedBytes / (1024 * 1024)));
   emit(opts, progress(
     'fetching_filters',
     0,
-    `Block range ${fromHeight}-${tip} (${totalFilters} blocks).`,
+    `About ${estimatedMB} MB across ${totalFilters.toLocaleString()} small files. We do not upload anything — these files are public.`,
   ));
 
   const matcher = opts.matcher ?? (await loadBip158Matcher());
@@ -464,29 +474,72 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
   const hits: MatchedHit[] = [];
 
-  for (let h = fromHeight; h <= tip; h++) {
-    const f = await opts.fetchFilter(h);
-    if (f === null) continue;
-    bytesDownloaded += f.filter.length;
+  // Parallel filter fetch with bounded concurrency. Sequential
+  // (one-at-a-time) was the right shape for the first proof-of-life
+  // milestone but is unworkable for real wallets — a 1-year-old
+  // wallet has ~52K filters; sequential at 100ms/req = 90 minutes.
+  // 32 concurrent reads is well below stealth.orangerails.com's
+  // capacity (Caddy + static files) and gives a ~30x speedup.
+  const FETCH_CONCURRENCY = 32;
+  const PROGRESS_INTERVAL_MS = 200;
+  let processedCount = 0;
+  let lastProgressEmit = 0;
+  let lastProgressCount = 0;
+  const fetchStartedAt = Date.now();
 
-    // BIP158 SipHash key uses the block hash in internal byte order
-    // (little-endian). RPC returns big-endian display hex; reverse for the
-    // matcher.
-    const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
-    const matched = matcher.matchAny(f.filter, blockHashLE, scripts);
-    if (matched) {
-      hits.push({ height: h, blockHashHex: f.blockHashHex });
+  function emitFetchProgress(force: boolean): void {
+    const now = Date.now();
+    if (!force && now - lastProgressEmit < PROGRESS_INTERVAL_MS) return;
+    const sliceMs = Math.max(1, now - lastProgressEmit);
+    const sliceCount = processedCount - lastProgressCount;
+    const filesPerSec = Math.round((sliceCount / sliceMs) * 1000);
+    lastProgressEmit = now;
+    lastProgressCount = processedCount;
+
+    const pct = (processedCount / totalFilters) * 100;
+    let detail =
+      `${processedCount.toLocaleString()} of ${totalFilters.toLocaleString()} read` +
+      (filesPerSec > 0 ? ` · ${filesPerSec.toLocaleString()} files/sec` : '');
+    const elapsedMs = now - fetchStartedAt;
+    if (elapsedMs > 1500 && processedCount > 0 && processedCount < totalFilters) {
+      const overallRate = processedCount / elapsedMs; // blocks/ms
+      const remaining = totalFilters - processedCount;
+      const etaSec = Math.round(remaining / overallRate / 1000);
+      const etaText =
+        etaSec < 60
+          ? `${etaSec}s`
+          : etaSec < 3600
+            ? `${Math.round(etaSec / 60)} min`
+            : `${(etaSec / 3600).toFixed(1)} hr`;
+      detail += ` · about ${etaText} left`;
     }
+    emit(opts, progress('fetching_filters', pct, detail));
+  }
 
-    if (h === tip || (h - fromHeight) % Math.max(1, Math.floor(totalFilters / 20)) === 0) {
-      const pct = ((h - fromHeight + 1) / totalFilters) * 100;
-      emit(opts, progress(
-        'fetching_filters',
-        pct,
-        `Block range ${fromHeight}-${tip} (${totalFilters} blocks).`,
-      ));
+  let nextHeight = fromHeight;
+  async function worker(): Promise<void> {
+    while (true) {
+      const h = nextHeight;
+      if (h > tip) return;
+      nextHeight = h + 1;
+      const f = await opts.fetchFilter(h);
+      processedCount += 1;
+      if (f !== null) {
+        bytesDownloaded += f.filter.length;
+        const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
+        const matched = matcher.matchAny(f.filter, blockHashLE, scripts);
+        if (matched) {
+          hits.push({ height: h, blockHashHex: f.blockHashHex });
+        }
+      }
+      emitFetchProgress(false);
     }
   }
+
+  await Promise.all(
+    Array.from({ length: FETCH_CONCURRENCY }, () => worker()),
+  );
+  emitFetchProgress(true);
   emit(opts, progress('fetching_filters', 100));
   emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
 
