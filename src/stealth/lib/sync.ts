@@ -463,7 +463,11 @@ const STAGE_COPY: Record<StealthStage, { message: string; detail: string }> = {
   fetching_blocks: { message: 'Fetching blocks where your wallet appears', detail: 'Pulled directly from our Bitcoin node.' },
   building_txs: { message: 'Building your transaction history', detail: 'Your browser is parsing each block.' },
   sealing: { message: 'Sealing your transactions', detail: 'Encrypted with your vault key, only you can open them.' },
-  uploading: { message: 'Saving sealed records', detail: 'Our server stores the sealed bytes only.' },
+  uploading: {
+    message: 'Saving encrypted records to Orange Rails',
+    detail:
+      'Orange Rails stores only the encrypted bytes as a backup. They cannot read your transactions — only your browser holds the key.',
+  },
 };
 
 function progress(stage: StealthStage, percent: number, detail?: string): SyncProgressEvent {

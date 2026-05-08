@@ -35,7 +35,12 @@ export async function proxyFetch(opts: {
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const timeoutMs = opts.timeoutMs ?? 30000;
+  // 2 min default — covers the slow path where the consumer app is
+  // forwarding to OR's edge function and OR is doing a database write
+  // with index dedup against potentially many existing rows.
+  // Sealed-transactions upload at the end of a big first sync can
+  // legitimately push past 30s. The widget caller can override.
+  const timeoutMs = opts.timeoutMs ?? 120000;
 
   return await new Promise<ProxyFetchResult>((resolve, reject) => {
     const handler = (event: MessageEvent) => {
