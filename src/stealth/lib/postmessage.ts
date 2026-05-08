@@ -58,6 +58,13 @@ export interface StealthInitMessage {
   return_callback_origin: string;
   /** Locale tag, e.g. 'en-US', 'fr-CA'. Drives the transparency modal copy. */
   locale?: string;
+  /** Optional: when true, the widget skips uploading sealed transactions
+   *  to OR's `or-stealth-transactions-store` endpoint. Used by consumer
+   *  apps that hold their own source-of-truth copy and do not need OR's
+   *  encrypted backup (V2 today). The wallet envelope is still stored
+   *  at OR (required for cross-device sync); only the per-tx records
+   *  are skipped. */
+  skip_transaction_upload?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -56,6 +56,13 @@ interface AccessTokenInit extends StealthInitMessage {
   access_token?: string;
   /** Consumer-app server-side proxy. See add.tsx for the contract. */
   proxy_base_url?: string;
+  /** When true, skip the `or-stealth-transactions-store` upload step.
+   *  Used by consumer apps that treat their own DB as the source of
+   *  truth and do not need OR's encrypted backup of transactions
+   *  (e.g. V2 today). The widget still posts OR_STEALTH_SYNC_COMPLETE
+   *  back to the parent so the consumer can persist transactions
+   *  locally; only the OR-side upload is skipped. */
+  skip_transaction_upload?: boolean;
 }
 
 const STEALTH_FILTER_BASE =
@@ -242,8 +249,16 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         });
         if (cancelled) return;
 
-        // 3. Upload sealed transactions. Same proxy switch as step 1.
-        if (result.sealedTransactions.length > 0) {
+        // 3. Upload sealed transactions to OR — UNLESS the consumer app
+        //    has set skip_transaction_upload (V2 does this; V2's own DB
+        //    is the source of truth and OR-side encrypted backup is
+        //    not needed). Cuts the slow upload step entirely for those
+        //    apps. SYNC_COMPLETE still fires below so the consumer
+        //    persists locally.
+        if (
+          !initWithToken.skip_transaction_upload &&
+          result.sealedTransactions.length > 0
+        ) {
           const uploadBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
