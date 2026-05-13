@@ -51,3 +51,6 @@ Thumbs.db
 # Coverage & cache
 coverage/
 .cache/
+.env.bak
+dist/
+.next/
