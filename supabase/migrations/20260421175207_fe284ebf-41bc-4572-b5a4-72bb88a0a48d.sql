@@ -1,3 +1,10 @@
+-- 2026-05-13 patch: forward-references to columns added in 20260421180000_access_token_rotation.sql
+-- Guard so this migration is order-safe on fresh databases. If the columns already
+-- exist (re-application), these ADD COLUMN IF NOT EXISTS calls are no-ops.
+ALTER TABLE public.user_app_grants
+  ADD COLUMN IF NOT EXISTS expires_at  TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS rotated_at  TIMESTAMPTZ;
+
 CREATE OR REPLACE FUNCTION public.list_or_access_tokens()
 RETURNS TABLE(
   id uuid,
