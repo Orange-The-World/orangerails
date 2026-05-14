@@ -1,4 +1,4 @@
-CREATE TABLE public.waitlist (
+CREATE TABLE IF NOT EXISTS public.waitlist (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email TEXT NOT NULL UNIQUE,
   source TEXT DEFAULT 'landing',

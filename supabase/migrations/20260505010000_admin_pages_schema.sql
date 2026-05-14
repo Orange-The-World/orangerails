@@ -21,7 +21,7 @@
 -- the auth schema directly. A row here means "this auth user can
 -- see /admin and act on every customer."
 
-CREATE TABLE public.staff_users (
+CREATE TABLE IF NOT EXISTS public.staff_users (
   user_id    UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   granted_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
@@ -66,7 +66,7 @@ GRANT EXECUTE ON FUNCTION public.is_staff() TO authenticated;
 -- customers may grant additional logins later via a customer_admins
 -- table (deferred to Phase 6).
 
-CREATE TABLE public.customers (
+CREATE TABLE IF NOT EXISTS public.customers (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   auth_user_id   UUID UNIQUE REFERENCES auth.users(id) ON DELETE SET NULL,
   name           TEXT NOT NULL,
@@ -101,7 +101,7 @@ CREATE POLICY "Staff update customers"
 -- 3. subscriptions — one active plan agreement per customer
 -- ============================================================
 
-CREATE TABLE public.subscriptions (
+CREATE TABLE IF NOT EXISTS public.subscriptions (
   id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   customer_id              UUID NOT NULL REFERENCES public.customers(id) ON DELETE CASCADE,
   plan                     TEXT NOT NULL,
@@ -132,7 +132,7 @@ CREATE POLICY "Customers read own subscriptions"
 -- 4. invoices — one row per bill
 -- ============================================================
 
-CREATE TABLE public.invoices (
+CREATE TABLE IF NOT EXISTS public.invoices (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   customer_id         UUID NOT NULL REFERENCES public.customers(id) ON DELETE CASCADE,
   subscription_id     UUID REFERENCES public.subscriptions(id) ON DELETE SET NULL,
@@ -167,7 +167,7 @@ CREATE POLICY "Customers read own invoices"
 -- 5. payments — one row per attempt to pay an invoice
 -- ============================================================
 
-CREATE TABLE public.payments (
+CREATE TABLE IF NOT EXISTS public.payments (
   id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   invoice_id            UUID NOT NULL REFERENCES public.invoices(id) ON DELETE CASCADE,
   customer_id           UUID NOT NULL REFERENCES public.customers(id) ON DELETE CASCADE,
@@ -201,7 +201,7 @@ CREATE POLICY "Customers read own payments"
 -- 6. audit_events — every meaningful action, who did it, when
 -- ============================================================
 
-CREATE TABLE public.audit_events (
+CREATE TABLE IF NOT EXISTS public.audit_events (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   actor_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
   customer_id   UUID REFERENCES public.customers(id) ON DELETE SET NULL,

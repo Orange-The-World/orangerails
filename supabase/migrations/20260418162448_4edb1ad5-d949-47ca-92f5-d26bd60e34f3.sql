@@ -1,4 +1,4 @@
-CREATE TABLE public.adapter_requests (
+CREATE TABLE IF NOT EXISTS public.adapter_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email TEXT NOT NULL,
   provider_name TEXT NOT NULL,

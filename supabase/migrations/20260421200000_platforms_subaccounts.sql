@@ -24,7 +24,7 @@
 -- 1. platforms — registered API consumers
 -- ============================================================
 
-CREATE TABLE public.platforms (
+CREATE TABLE IF NOT EXISTS public.platforms (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   slug          TEXT UNIQUE NOT NULL,
   name          TEXT NOT NULL,
@@ -48,7 +48,7 @@ CREATE POLICY "Platforms are visible to authenticated users (metadata only)"
 -- 2. subaccounts — per-end-user records owned by a platform
 -- ============================================================
 
-CREATE TABLE public.subaccounts (
+CREATE TABLE IF NOT EXISTS public.subaccounts (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   platform_id       UUID NOT NULL REFERENCES public.platforms(id) ON DELETE CASCADE,
   external_user_id  TEXT NOT NULL,

@@ -23,7 +23,7 @@
 -- platform-mode access flows through edge functions using the service role
 -- (subaccount ownership is enforced server-side in platform-auth.ts).
 
-CREATE TABLE public.source_wallets (
+CREATE TABLE IF NOT EXISTS public.source_wallets (
   id                              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   connection_id                   UUID NOT NULL REFERENCES public.connections(id) ON DELETE CASCADE,
   external_wallet_id              TEXT NOT NULL,

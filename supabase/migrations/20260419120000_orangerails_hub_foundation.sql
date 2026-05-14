@@ -19,7 +19,7 @@
 -- verifier ciphertext that proves the user entered the right
 -- password without ever storing the password itself.
 
-CREATE TABLE public.user_vault_meta (
+CREATE TABLE IF NOT EXISTS public.user_vault_meta (
   user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   vault_salt TEXT NOT NULL,                              -- base64-encoded 128-bit random salt for Argon2id
   vault_verifier_ciphertext TEXT NOT NULL,               -- AES-256-GCM ciphertext of a known constant
@@ -61,7 +61,7 @@ CREATE POLICY "Users can update own vault metadata"
 -- acceptable for MVP since this table is RLS-protected and not
 -- reachable by end users.
 
-CREATE TABLE public.apps (
+CREATE TABLE IF NOT EXISTS public.apps (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   slug TEXT UNIQUE NOT NULL,
   name TEXT NOT NULL,
@@ -107,7 +107,7 @@ VALUES (
 -- returned to the app once and hashed here — we never store the
 -- raw token (same pattern password-reset systems use).
 
-CREATE TABLE public.user_app_grants (
+CREATE TABLE IF NOT EXISTS public.user_app_grants (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   app_id UUID NOT NULL REFERENCES public.apps(id) ON DELETE CASCADE,
@@ -150,7 +150,7 @@ CREATE POLICY "Users can update own grants"
 -- The server cannot decrypt these without the user's active
 -- session providing the ORK in-transit.
 
-CREATE TABLE public.connections (
+CREATE TABLE IF NOT EXISTS public.connections (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   provider_type TEXT NOT NULL,                           -- 'blink', 'kraken', 'btcpay', 'xpub', ...
@@ -202,7 +202,7 @@ CREATE POLICY "Users can delete own connections"
 -- and stored here. Plaintext metadata is limited to what we need
 -- for efficient queries: connection_id, external_id, occurred_at.
 
-CREATE TABLE public.encrypted_transactions (
+CREATE TABLE IF NOT EXISTS public.encrypted_transactions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   connection_id UUID NOT NULL REFERENCES public.connections(id) ON DELETE CASCADE,
   external_id TEXT NOT NULL,                             -- provider's tx id (plaintext — unavoidable for dedup)
