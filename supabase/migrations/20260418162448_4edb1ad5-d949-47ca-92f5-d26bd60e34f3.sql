@@ -8,6 +8,7 @@ CREATE TABLE public.adapter_requests (
 
 ALTER TABLE public.adapter_requests ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Anyone can request an adapter" ON public.adapter_requests;
 CREATE POLICY "Anyone can request an adapter"
   ON public.adapter_requests
   FOR INSERT

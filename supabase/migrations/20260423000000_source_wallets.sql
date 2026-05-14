@@ -44,6 +44,7 @@ ALTER TABLE public.source_wallets ENABLE ROW LEVEL SECURITY;
 -- Mirrors the four-policy pattern used on connections in
 -- 20260421200000_platforms_subaccounts.sql lines 147-189.
 
+DROP POLICY IF EXISTS "Direct users can read source_wallets via their subaccount" ON public.source_wallets;
 CREATE POLICY "Direct users can read source_wallets via their subaccount"
   ON public.source_wallets FOR SELECT
   TO authenticated
@@ -56,6 +57,7 @@ CREATE POLICY "Direct users can read source_wallets via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can insert source_wallets via their subaccount" ON public.source_wallets;
 CREATE POLICY "Direct users can insert source_wallets via their subaccount"
   ON public.source_wallets FOR INSERT
   TO authenticated
@@ -68,6 +70,7 @@ CREATE POLICY "Direct users can insert source_wallets via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can update source_wallets via their subaccount" ON public.source_wallets;
 CREATE POLICY "Direct users can update source_wallets via their subaccount"
   ON public.source_wallets FOR UPDATE
   TO authenticated
@@ -80,6 +83,7 @@ CREATE POLICY "Direct users can update source_wallets via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can delete source_wallets via their subaccount" ON public.source_wallets;
 CREATE POLICY "Direct users can delete source_wallets via their subaccount"
   ON public.source_wallets FOR DELETE
   TO authenticated

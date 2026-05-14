@@ -32,16 +32,19 @@ CREATE TABLE public.user_vault_meta (
 
 ALTER TABLE public.user_vault_meta ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can read own vault metadata" ON public.user_vault_meta;
 CREATE POLICY "Users can read own vault metadata"
   ON public.user_vault_meta FOR SELECT
   TO authenticated
   USING (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can insert own vault metadata" ON public.user_vault_meta;
 CREATE POLICY "Users can insert own vault metadata"
   ON public.user_vault_meta FOR INSERT
   TO authenticated
   WITH CHECK (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can update own vault metadata" ON public.user_vault_meta;
 CREATE POLICY "Users can update own vault metadata"
   ON public.user_vault_meta FOR UPDATE
   TO authenticated
@@ -75,6 +78,7 @@ ALTER TABLE public.apps ENABLE ROW LEVEL SECURITY;
 -- can display "App X is requesting access"). They cannot see
 -- client_secret values — they appear in row data but RLS prevents
 -- reading them; see separate policies below.
+DROP POLICY IF EXISTS "Anyone can read app public metadata" ON public.apps;
 CREATE POLICY "Anyone can read app public metadata"
   ON public.apps FOR SELECT
   TO authenticated, anon
@@ -119,16 +123,19 @@ CREATE INDEX idx_user_app_grants_token_hash ON public.user_app_grants(access_tok
 
 ALTER TABLE public.user_app_grants ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can read own grants" ON public.user_app_grants;
 CREATE POLICY "Users can read own grants"
   ON public.user_app_grants FOR SELECT
   TO authenticated
   USING (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can insert own grants" ON public.user_app_grants;
 CREATE POLICY "Users can insert own grants"
   ON public.user_app_grants FOR INSERT
   TO authenticated
   WITH CHECK (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can update own grants" ON public.user_app_grants;
 CREATE POLICY "Users can update own grants"
   ON public.user_app_grants FOR UPDATE
   TO authenticated
@@ -163,21 +170,25 @@ CREATE INDEX idx_connections_user_provider ON public.connections(user_id, provid
 
 ALTER TABLE public.connections ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can read own connections" ON public.connections;
 CREATE POLICY "Users can read own connections"
   ON public.connections FOR SELECT
   TO authenticated
   USING (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can insert own connections" ON public.connections;
 CREATE POLICY "Users can insert own connections"
   ON public.connections FOR INSERT
   TO authenticated
   WITH CHECK (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can update own connections" ON public.connections;
 CREATE POLICY "Users can update own connections"
   ON public.connections FOR UPDATE
   TO authenticated
   USING (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can delete own connections" ON public.connections;
 CREATE POLICY "Users can delete own connections"
   ON public.connections FOR DELETE
   TO authenticated
@@ -212,6 +223,7 @@ ALTER TABLE public.encrypted_transactions ENABLE ROW LEVEL SECURITY;
 
 -- Row-level security joins through connections: a user can only
 -- see transactions for their own connections.
+DROP POLICY IF EXISTS "Users can read own transactions" ON public.encrypted_transactions;
 CREATE POLICY "Users can read own transactions"
   ON public.encrypted_transactions FOR SELECT
   TO authenticated
@@ -221,6 +233,7 @@ CREATE POLICY "Users can read own transactions"
     )
   );
 
+DROP POLICY IF EXISTS "Users can insert own transactions" ON public.encrypted_transactions;
 CREATE POLICY "Users can insert own transactions"
   ON public.encrypted_transactions FOR INSERT
   TO authenticated
@@ -230,6 +243,7 @@ CREATE POLICY "Users can insert own transactions"
     )
   );
 
+DROP POLICY IF EXISTS "Users can delete own transactions" ON public.encrypted_transactions;
 CREATE POLICY "Users can delete own transactions"
   ON public.encrypted_transactions FOR DELETE
   TO authenticated

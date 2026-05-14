@@ -113,11 +113,13 @@ CREATE TRIGGER stealth_connections_touch_updated_at
 ALTER TABLE public.stealth_connections   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stealth_transactions  ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Owners can read their stealth connections" ON public.stealth_connections;
 CREATE POLICY "Owners can read their stealth connections"
   ON public.stealth_connections
   FOR SELECT
   USING (auth.uid()::text = app_user_id::text);
 
+DROP POLICY IF EXISTS "Owners can read their stealth transactions" ON public.stealth_transactions;
 CREATE POLICY "Owners can read their stealth transactions"
   ON public.stealth_transactions
   FOR SELECT

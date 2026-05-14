@@ -39,6 +39,7 @@ CREATE INDEX IF NOT EXISTS workspace_admins_admin_user_id_idx
 ALTER TABLE public.workspace_admins ENABLE ROW LEVEL SECURITY;
 
 -- Owner sees their own grants; admin sees rows they appear in.
+DROP POLICY IF EXISTS "workspace_admins: owner and admin can read their rows" ON public.workspace_admins;
 CREATE POLICY "workspace_admins: owner and admin can read their rows"
   ON public.workspace_admins
   FOR SELECT
@@ -49,12 +50,14 @@ CREATE POLICY "workspace_admins: owner and admin can read their rows"
 
 -- Only the owner can grant (INSERT). We use a direct client policy so no
 -- edge function is needed for this write path.
+DROP POLICY IF EXISTS "workspace_admins: owner can insert" ON public.workspace_admins;
 CREATE POLICY "workspace_admins: owner can insert"
   ON public.workspace_admins
   FOR INSERT
   WITH CHECK (owner_user_id = auth.uid());
 
 -- Only the owner can revoke (DELETE).
+DROP POLICY IF EXISTS "workspace_admins: owner can delete" ON public.workspace_admins;
 CREATE POLICY "workspace_admins: owner can delete"
   ON public.workspace_admins
   FOR DELETE
@@ -63,6 +66,7 @@ CREATE POLICY "workspace_admins: owner can delete"
 -- Step 4 — allow wrapped_data_keys INSERT/DELETE by the authenticated owner
 -- (previously service-role only). The owner inserts when granting; they
 -- delete the corresponding row when revoking.
+DROP POLICY IF EXISTS "wrapped_data_keys: owner can insert for admins" ON public.wrapped_data_keys;
 CREATE POLICY "wrapped_data_keys: owner can insert for admins"
   ON public.wrapped_data_keys
   FOR INSERT
@@ -76,6 +80,7 @@ CREATE POLICY "wrapped_data_keys: owner can insert for admins"
     )
   );
 
+DROP POLICY IF EXISTS "wrapped_data_keys: owner can delete their wrapped keys" ON public.wrapped_data_keys;
 CREATE POLICY "wrapped_data_keys: owner can delete their wrapped keys"
   ON public.wrapped_data_keys
   FOR DELETE
@@ -94,6 +99,7 @@ CREATE POLICY "wrapped_data_keys: owner can delete their wrapped keys"
 -- these policies ADD the co-admin path.
 
 -- connections — ownership column is user_id (not owner_user_id).
+DROP POLICY IF EXISTS "connections: co-admins have full access" ON public.connections;
 CREATE POLICY "connections: co-admins have full access"
   ON public.connections
   FOR ALL
@@ -114,6 +120,7 @@ CREATE POLICY "connections: co-admins have full access"
 
 -- encrypted_transactions — no direct user_id column; ownership flows through
 -- connection_id → connections.user_id.
+DROP POLICY IF EXISTS "encrypted_transactions: co-admins have full access" ON public.encrypted_transactions;
 CREATE POLICY "encrypted_transactions: co-admins have full access"
   ON public.encrypted_transactions
   FOR ALL

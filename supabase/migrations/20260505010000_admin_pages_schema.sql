@@ -32,6 +32,7 @@ ALTER TABLE public.staff_users ENABLE ROW LEVEL SECURITY;
 
 -- Staff can see who else is staff. Nobody else sees this table from
 -- the browser; the service role bypasses RLS for backend tooling.
+DROP POLICY IF EXISTS "Staff read staff_users" ON public.staff_users;
 CREATE POLICY "Staff read staff_users"
   ON public.staff_users FOR SELECT
   TO authenticated
@@ -84,11 +85,13 @@ CREATE INDEX idx_customers_type       ON public.customers(customer_type);
 
 ALTER TABLE public.customers ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Customers read own row" ON public.customers;
 CREATE POLICY "Customers read own row"
   ON public.customers FOR SELECT
   TO authenticated
   USING (auth_user_id = auth.uid() OR public.is_staff());
 
+DROP POLICY IF EXISTS "Staff update customers" ON public.customers;
 CREATE POLICY "Staff update customers"
   ON public.customers FOR UPDATE
   TO authenticated
@@ -116,6 +119,7 @@ CREATE INDEX idx_subscriptions_customer ON public.subscriptions(customer_id);
 
 ALTER TABLE public.subscriptions ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Customers read own subscriptions" ON public.subscriptions;
 CREATE POLICY "Customers read own subscriptions"
   ON public.subscriptions FOR SELECT
   TO authenticated
@@ -150,6 +154,7 @@ CREATE INDEX idx_invoices_due_date ON public.invoices(due_date);
 
 ALTER TABLE public.invoices ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Customers read own invoices" ON public.invoices;
 CREATE POLICY "Customers read own invoices"
   ON public.invoices FOR SELECT
   TO authenticated
@@ -183,6 +188,7 @@ CREATE INDEX idx_payments_status   ON public.payments(status);
 
 ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Customers read own payments" ON public.payments;
 CREATE POLICY "Customers read own payments"
   ON public.payments FOR SELECT
   TO authenticated
@@ -211,6 +217,7 @@ CREATE INDEX idx_audit_events_created   ON public.audit_events(created_at DESC);
 
 ALTER TABLE public.audit_events ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Customers read own audit events" ON public.audit_events;
 CREATE POLICY "Customers read own audit events"
   ON public.audit_events FOR SELECT
   TO authenticated

@@ -13,6 +13,7 @@ CREATE INDEX idx_source_wallets_connection ON public.source_wallets(connection_i
 
 ALTER TABLE public.source_wallets ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Direct users can read source_wallets via their subaccount" ON public.source_wallets;
 CREATE POLICY "Direct users can read source_wallets via their subaccount"
   ON public.source_wallets FOR SELECT
   TO authenticated
@@ -25,6 +26,7 @@ CREATE POLICY "Direct users can read source_wallets via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can insert source_wallets via their subaccount" ON public.source_wallets;
 CREATE POLICY "Direct users can insert source_wallets via their subaccount"
   ON public.source_wallets FOR INSERT
   TO authenticated
@@ -37,6 +39,7 @@ CREATE POLICY "Direct users can insert source_wallets via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can update source_wallets via their subaccount" ON public.source_wallets;
 CREATE POLICY "Direct users can update source_wallets via their subaccount"
   ON public.source_wallets FOR UPDATE
   TO authenticated
@@ -49,6 +52,7 @@ CREATE POLICY "Direct users can update source_wallets via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can delete source_wallets via their subaccount" ON public.source_wallets;
 CREATE POLICY "Direct users can delete source_wallets via their subaccount"
   ON public.source_wallets FOR DELETE
   TO authenticated
