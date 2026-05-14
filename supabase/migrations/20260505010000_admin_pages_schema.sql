@@ -79,9 +79,9 @@ CREATE TABLE IF NOT EXISTS public.customers (
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_customers_auth_user ON public.customers(auth_user_id);
-CREATE INDEX idx_customers_status     ON public.customers(status);
-CREATE INDEX idx_customers_type       ON public.customers(customer_type);
+CREATE INDEX IF NOT EXISTS idx_customers_auth_user ON public.customers(auth_user_id);
+CREATE INDEX IF NOT EXISTS idx_customers_status     ON public.customers(status);
+CREATE INDEX IF NOT EXISTS idx_customers_type       ON public.customers(customer_type);
 
 ALTER TABLE public.customers ENABLE ROW LEVEL SECURITY;
 
@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS public.subscriptions (
   updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_subscriptions_customer ON public.subscriptions(customer_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_customer ON public.subscriptions(customer_id);
 
 ALTER TABLE public.subscriptions ENABLE ROW LEVEL SECURITY;
 
@@ -148,9 +148,9 @@ CREATE TABLE IF NOT EXISTS public.invoices (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_invoices_customer ON public.invoices(customer_id);
-CREATE INDEX idx_invoices_status   ON public.invoices(status);
-CREATE INDEX idx_invoices_due_date ON public.invoices(due_date);
+CREATE INDEX IF NOT EXISTS idx_invoices_customer ON public.invoices(customer_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_status   ON public.invoices(status);
+CREATE INDEX IF NOT EXISTS idx_invoices_due_date ON public.invoices(due_date);
 
 ALTER TABLE public.invoices ENABLE ROW LEVEL SECURITY;
 
@@ -182,9 +182,9 @@ CREATE TABLE IF NOT EXISTS public.payments (
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_payments_invoice  ON public.payments(invoice_id);
-CREATE INDEX idx_payments_customer ON public.payments(customer_id);
-CREATE INDEX idx_payments_status   ON public.payments(status);
+CREATE INDEX IF NOT EXISTS idx_payments_invoice  ON public.payments(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_payments_customer ON public.payments(customer_id);
+CREATE INDEX IF NOT EXISTS idx_payments_status   ON public.payments(status);
 
 ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
 
@@ -210,10 +210,10 @@ CREATE TABLE IF NOT EXISTS public.audit_events (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_audit_events_customer  ON public.audit_events(customer_id);
-CREATE INDEX idx_audit_events_actor     ON public.audit_events(actor_user_id);
-CREATE INDEX idx_audit_events_type      ON public.audit_events(event_type);
-CREATE INDEX idx_audit_events_created   ON public.audit_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_customer  ON public.audit_events(customer_id);
+CREATE INDEX IF NOT EXISTS idx_audit_events_actor     ON public.audit_events(actor_user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_events_type      ON public.audit_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_events_created   ON public.audit_events(created_at DESC);
 
 ALTER TABLE public.audit_events ENABLE ROW LEVEL SECURITY;
 
@@ -249,18 +249,22 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER IF EXISTS trg_customers_updated_at ON public.customers;
 CREATE TRIGGER trg_customers_updated_at
   BEFORE UPDATE ON public.customers
   FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();
 
+DROP TRIGGER IF EXISTS trg_subscriptions_updated_at ON public.subscriptions;
 CREATE TRIGGER trg_subscriptions_updated_at
   BEFORE UPDATE ON public.subscriptions
   FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();
 
+DROP TRIGGER IF EXISTS trg_invoices_updated_at ON public.invoices;
 CREATE TRIGGER trg_invoices_updated_at
   BEFORE UPDATE ON public.invoices
   FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();
 
+DROP TRIGGER IF EXISTS trg_payments_updated_at ON public.payments;
 CREATE TRIGGER trg_payments_updated_at
   BEFORE UPDATE ON public.payments
   FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();

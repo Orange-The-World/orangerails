@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS public.platforms (
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_platforms_api_key_hash ON public.platforms(api_key_hash);
+CREATE INDEX IF NOT EXISTS idx_platforms_api_key_hash ON public.platforms(api_key_hash);
 
 ALTER TABLE public.platforms ENABLE ROW LEVEL SECURITY;
 
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS public.subaccounts (
   UNIQUE (platform_id, external_user_id)
 );
 
-CREATE INDEX idx_subaccounts_platform_external ON public.subaccounts(platform_id, external_user_id);
+CREATE INDEX IF NOT EXISTS idx_subaccounts_platform_external ON public.subaccounts(platform_id, external_user_id);
 
 ALTER TABLE public.subaccounts ENABLE ROW LEVEL SECURITY;
 
@@ -109,7 +109,7 @@ WHERE c.user_id::text = s.external_user_id
 ALTER TABLE public.connections
   ALTER COLUMN subaccount_id SET NOT NULL;
 
-CREATE INDEX idx_connections_subaccount ON public.connections(subaccount_id);
+CREATE INDEX IF NOT EXISTS idx_connections_subaccount ON public.connections(subaccount_id);
 
 -- ============================================================
 -- 6. Drop ALL policies on connections + encrypted_transactions

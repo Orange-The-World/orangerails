@@ -118,8 +118,8 @@ CREATE TABLE IF NOT EXISTS public.user_app_grants (
   last_used_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_user_app_grants_user_id ON public.user_app_grants(user_id);
-CREATE INDEX idx_user_app_grants_token_hash ON public.user_app_grants(access_token_hash);
+CREATE INDEX IF NOT EXISTS idx_user_app_grants_user_id ON public.user_app_grants(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_app_grants_token_hash ON public.user_app_grants(access_token_hash);
 
 ALTER TABLE public.user_app_grants ENABLE ROW LEVEL SECURITY;
 
@@ -165,8 +165,8 @@ CREATE TABLE IF NOT EXISTS public.connections (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_connections_user_id ON public.connections(user_id);
-CREATE INDEX idx_connections_user_provider ON public.connections(user_id, provider_type);
+CREATE INDEX IF NOT EXISTS idx_connections_user_id ON public.connections(user_id);
+CREATE INDEX IF NOT EXISTS idx_connections_user_provider ON public.connections(user_id, provider_type);
 
 ALTER TABLE public.connections ENABLE ROW LEVEL SECURITY;
 
@@ -213,10 +213,10 @@ CREATE TABLE IF NOT EXISTS public.encrypted_transactions (
   UNIQUE (connection_id, external_id)
 );
 
-CREATE INDEX idx_encrypted_transactions_connection_id
+CREATE INDEX IF NOT EXISTS idx_encrypted_transactions_connection_id
   ON public.encrypted_transactions(connection_id);
 
-CREATE INDEX idx_encrypted_transactions_occurred_at
+CREATE INDEX IF NOT EXISTS idx_encrypted_transactions_occurred_at
   ON public.encrypted_transactions(connection_id, occurred_at DESC);
 
 ALTER TABLE public.encrypted_transactions ENABLE ROW LEVEL SECURITY;
@@ -265,14 +265,17 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_user_vault_meta_updated_at ON public.user_vault_meta;
 CREATE TRIGGER trg_user_vault_meta_updated_at
   BEFORE UPDATE ON public.user_vault_meta
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
+DROP TRIGGER IF EXISTS trg_apps_updated_at ON public.apps;
 CREATE TRIGGER trg_apps_updated_at
   BEFORE UPDATE ON public.apps
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
+DROP TRIGGER IF EXISTS trg_connections_updated_at ON public.connections;
 CREATE TRIGGER trg_connections_updated_at
   BEFORE UPDATE ON public.connections
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();

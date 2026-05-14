@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS public.source_wallets (
   UNIQUE (connection_id, external_wallet_id)
 );
 
-CREATE INDEX idx_source_wallets_connection ON public.source_wallets(connection_id);
+CREATE INDEX IF NOT EXISTS idx_source_wallets_connection ON public.source_wallets(connection_id);
 
 ALTER TABLE public.source_wallets ENABLE ROW LEVEL SECURITY;
 
