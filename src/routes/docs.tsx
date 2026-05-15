@@ -168,7 +168,7 @@ function DocsPage() {
                 <Link to="/integrations" className="font-medium text-primary">
                   Browse the integrations catalog
                 </Link>{" "}
-                or join the waitlist for hosted access.
+                or join the beta for hosted access.
               </p>
             </div>
           </div>
