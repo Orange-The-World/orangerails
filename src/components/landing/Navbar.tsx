@@ -64,7 +64,7 @@ export function Navbar() {
             </a>
           </Button>
           <Button size="sm" onClick={scrollToWaitlist}>
-            Join Waitlist
+            Join Beta
           </Button>
         </div>
       </div>

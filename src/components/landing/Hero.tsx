@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Terminal } from "./Terminal";
 
 export function Hero() {
-  const scrollToWaitlist = () => {
+  const scrollToBeta = () => {
     document.getElementById("waitlist")?.scrollIntoView({ behavior: "smooth" });
   };
 
@@ -19,21 +19,21 @@ export function Hero() {
           </div>
 
           <h1 className="mt-5 text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-[3.5rem] lg:leading-[1.05]">
-            The rails every Bitcoin business <span className="text-primary">runs on</span>.
+            The first zero-knowledge connector with an <span className="text-primary">MCP layer</span>.
           </h1>
 
           <p className="mt-5 max-w-xl text-balance text-base text-muted-foreground sm:text-lg">
-            Open source. Zero knowledge. Built for Bitcoin. The alternative to Plaid that
-            <span className="text-foreground"> can't read your data</span> — because it can't.
+            100+ live connections. Open source. Value for value. The aggregator that
+            <span className="text-foreground"> cannot read your data</span>, by design, and that any AI assistant can plug into through MCP.
           </p>
 
           <div className="mt-8 flex flex-wrap gap-3">
-            <Button size="lg" onClick={scrollToWaitlist} className="group">
-              Join the Waitlist
+            <Button size="lg" onClick={scrollToBeta} className="group">
+              Join the Beta
               <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
             </Button>
             <Button asChild size="lg" variant="outline">
-              <a href="#" target="_blank" rel="noreferrer">
+              <a href="https://github.com/MorningRevolution/orangerails" target="_blank" rel="noreferrer">
                 <Github className="h-4 w-4" />
                 View on GitHub
               </a>

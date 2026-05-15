@@ -1,8 +1,12 @@
 import { ArrowRight } from "lucide-react";
 
 const integrations = [
-  "Blink", "BTCPay Server", "Kraken", "Lunar Rails", "Ocean Pool",
-  "Bitcoin Core", "Sparrow", "River", "Fedi", "LND", "Braiins", "mempool.space",
+  "Bitcoin xpub", "Strike", "Blink", "BTCPay Server",
+  "Coinbase", "Kraken", "Binance", "Bybit",
+  "OKX", "KuCoin", "Gemini", "Bitstamp",
+  "Crypto.com", "NDAX", "Bitbuy", "Gate",
+  "MEXC", "Bitget", "HTX", "Bitfinex",
+  "Upbit", "Bithumb", "Bitflyer", "Coincheck",
 ];
 
 export function Integrations() {
@@ -12,7 +16,7 @@ export function Integrations() {
         <div className="text-center">
           <p className="text-xs font-medium uppercase tracking-widest text-primary">Integrations</p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl text-balance">
-            Plays nice with the Bitcoin stack you already use.
+            Plays nice with 100+ wallets, exchanges, and payment processors.
           </h2>
         </div>
 
@@ -34,7 +38,7 @@ export function Integrations() {
             href="#"
             className="group inline-flex items-center gap-1.5 text-sm font-medium text-primary"
           >
-            View all 20+ integrations
+            View all 100+ connections
             <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
           </a>
         </div>

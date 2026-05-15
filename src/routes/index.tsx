@@ -93,7 +93,7 @@ export const Route = createFileRoute("/")({
               name: "How does OrangeRails compare to Mesh Connect, Vezgo, and Koinly?",
               acceptedAnswer: {
                 "@type": "Answer",
-                text: "OrangeRails is the only option in the category that is simultaneously open source, Bitcoin-first, zero-knowledge, self-hostable, and built around a published open spec. Mesh Connect and Vezgo are closed source aggregators. Koinly is tax-only and not accounting-grade.",
+                text: "OrangeRails is the only option in the category that is simultaneously open source, Bitcoin-first, zero-knowledge, self-hostable, and built around a published open spec. Mesh Connect and Vezgo are closed source aggregators. Koinly is tax only and does not produce real bookkeeping output.",
               },
             },
             {
@@ -117,7 +117,7 @@ export const Route = createFileRoute("/")({
               name: "Which Bitcoin services does OrangeRails support?",
               acceptedAnswer: {
                 "@type": "Answer",
-                text: "22+ adapters: Bitcoin Core, BTCPay Server, Blink/Galoy, bwt/xpub, mempool.space, Lightning (LND, CLN, LDK, Phoenix), exchanges (Kraken, Coinbase, River, Swan), banking (Strike, BitCredit), mining pools (Ocean, Braiins, ViaBTC), wallets (Sparrow, Fedi), and CSV/OFX/QIF file imports.",
+                text: "100+ live connections: 4 native adapters (Bitcoin xpub via Stealth Sync, Strike, BTCPay Server, Blink) plus 98 exchanges through the CCXT bridge (Coinbase, Kraken, Binance, Bybit, OKX, KuCoin, Gemini, Bitstamp, Bitfinex, Crypto.com, NDAX, Bitbuy, Gate, MEXC, Bitget, HTX, BingX, Upbit, Bithumb, and 80 others). Lightning (LND, CLN, LDK, Phoenix), mining pools (Ocean, Braiins, ViaBTC), banks (via Quiltt / Plaid), and CSV/OFX/QIF file imports are on the public roadmap.",
               },
             },
             {

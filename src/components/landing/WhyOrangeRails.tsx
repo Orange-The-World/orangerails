@@ -45,10 +45,10 @@ export function WhyOrangeRails() {
             derived from the user via Argon2id. The server only ever sees ciphertext.
           </li>
           <li>
-            <span className="text-foreground">Bitcoin-native.</span> 22+ adapters
-            spanning Bitcoin Core, BTCPay, Blink, Lightning (LND/CLN/LDK),
-            mining pools (Ocean, Braiins, ViaBTC), and exchanges (Kraken, Coinbase,
-            River, Swan, Strike).
+            <span className="text-foreground">Bitcoin-native.</span> 100+ connections
+            spanning Bitcoin Core, BTCPay, Blink, Strike, Lightning nodes,
+            mining pools, and 98 exchanges including Coinbase, Kraken, Binance,
+            Bybit, OKX, KuCoin, Gemini, Bitstamp, Bitfinex, Crypto.com, NDAX, Bitbuy.
           </li>
           <li>
             <span className="text-foreground">Self-hostable.</span> Docker
@@ -71,7 +71,7 @@ export function WhyOrangeRails() {
           <span className="text-foreground">Vezgo</span>, it is open source,
           self-hostable, and Bitcoin-first. Unlike{" "}
           <span className="text-foreground">Koinly</span>, it produces
-          accounting-grade output, not just tax forms. It is the only option in
+          real bookkeeping output, not just a tax summary. It is the only option in
           the category that is simultaneously open source, Bitcoin-first,
           zero-knowledge, self-hostable, and built around a published open spec.
         </p>

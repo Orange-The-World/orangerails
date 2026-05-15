@@ -71,7 +71,7 @@ export function WaitlistCta() {
               Be first to connect.
             </h2>
             <p className="mx-auto mt-4 max-w-xl text-base text-primary-foreground/85">
-              Join the waitlist for hosted access. Self-host now from GitHub.
+              Join the open beta. Hosted access is value for value, the self-host build is free forever from GitHub.
             </p>
 
             <form onSubmit={handleSubmit} className="mx-auto mt-8 flex max-w-md flex-col gap-2">
@@ -93,7 +93,7 @@ export function WaitlistCta() {
                   disabled={loading}
                   className="h-11 bg-foreground text-background hover:bg-foreground/90"
                 >
-                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Join waitlist"}
+                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Join the Beta"}
                 </Button>
               </div>
 
