@@ -280,6 +280,339 @@ export type Database = {
           },
         ]
       }
+      audit_events: {
+        Row: {
+          actor_user_id: string | null
+          created_at: string
+          customer_id: string | null
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          event_type: string
+          id: string
+          payload: Json
+        }
+        Insert: {
+          actor_user_id?: string | null
+          created_at?: string
+          customer_id?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          event_type: string
+          id?: string
+          payload?: Json
+        }
+        Update: {
+          actor_user_id?: string | null
+          created_at?: string
+          customer_id?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          event_type?: string
+          id?: string
+          payload?: Json
+        }
+        Relationships: []
+      }
+      customer_recovery_shares: {
+        Row: {
+          created_at: string
+          customer_id: string
+          notes: string | null
+          shamir_threshold: number
+          shamir_total_shares: number
+          share_ciphertext: string
+          share_index: number
+          team_key_version: number
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          customer_id: string
+          notes?: string | null
+          shamir_threshold?: number
+          shamir_total_shares?: number
+          share_ciphertext: string
+          share_index?: number
+          team_key_version?: number
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          customer_id?: string
+          notes?: string | null
+          shamir_threshold?: number
+          shamir_total_shares?: number
+          share_ciphertext?: string
+          share_index?: number
+          team_key_version?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      customer_vault_meta: {
+        Row: {
+          created_at: string
+          customer_id: string
+          enc_mek_ciphertext: string | null
+          kdf_algorithm: string
+          kdf_params: Json
+          kem_public_key: string | null
+          kem_secret_wrapped: string | null
+          pqc_key_version: number
+          recovery_ciphertext: string | null
+          sig_public_key: string | null
+          sig_secret_wrapped: string | null
+          updated_at: string
+          vault_key_version: number
+          vault_salt: string
+          vault_verifier_ciphertext: string
+          workspace_key_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          customer_id: string
+          enc_mek_ciphertext?: string | null
+          kdf_algorithm?: string
+          kdf_params?: Json
+          kem_public_key?: string | null
+          kem_secret_wrapped?: string | null
+          pqc_key_version?: number
+          recovery_ciphertext?: string | null
+          sig_public_key?: string | null
+          sig_secret_wrapped?: string | null
+          updated_at?: string
+          vault_key_version?: number
+          vault_salt: string
+          vault_verifier_ciphertext: string
+          workspace_key_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          customer_id?: string
+          enc_mek_ciphertext?: string | null
+          kdf_algorithm?: string
+          kdf_params?: Json
+          kem_public_key?: string | null
+          kem_secret_wrapped?: string | null
+          pqc_key_version?: number
+          recovery_ciphertext?: string | null
+          sig_public_key?: string | null
+          sig_secret_wrapped?: string | null
+          updated_at?: string
+          vault_key_version?: number
+          vault_salt?: string
+          vault_verifier_ciphertext?: string
+          workspace_key_id?: string | null
+        }
+        Relationships: []
+      }
+      customers: {
+        Row: {
+          auth_user_id: string | null
+          created_at: string
+          customer_type: string
+          email: string
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          id: string
+          name: string
+          plan: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          auth_user_id?: string | null
+          created_at?: string
+          customer_type: string
+          email: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          id?: string
+          name: string
+          plan: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          auth_user_id?: string | null
+          created_at?: string
+          customer_type?: string
+          email?: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          id?: string
+          name?: string
+          plan?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      invoices: {
+        Row: {
+          amount_cents: number
+          created_at: string
+          currency: string
+          customer_id: string
+          due_date: string | null
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          hosted_invoice_url: string | null
+          id: string
+          paid_at: string | null
+          status: string
+          stripe_invoice_id: string | null
+          subscription_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          amount_cents: number
+          created_at?: string
+          currency?: string
+          customer_id: string
+          due_date?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          hosted_invoice_url?: string | null
+          id?: string
+          paid_at?: string | null
+          status?: string
+          stripe_invoice_id?: string | null
+          subscription_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          amount_cents?: number
+          created_at?: string
+          currency?: string
+          customer_id?: string
+          due_date?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          hosted_invoice_url?: string | null
+          id?: string
+          paid_at?: string | null
+          status?: string
+          stripe_invoice_id?: string | null
+          subscription_id?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      payments: {
+        Row: {
+          amount_cents: number
+          created_at: string
+          currency: string
+          customer_id: string
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          failure_reason: string | null
+          id: string
+          invoice_id: string
+          provider_payment_id: string | null
+          rail: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          amount_cents: number
+          created_at?: string
+          currency?: string
+          customer_id: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          failure_reason?: string | null
+          id?: string
+          invoice_id: string
+          provider_payment_id?: string | null
+          rail: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          amount_cents?: number
+          created_at?: string
+          currency?: string
+          customer_id?: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          failure_reason?: string | null
+          id?: string
+          invoice_id?: string
+          provider_payment_id?: string | null
+          rail?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      staff_users: {
+        Row: {
+          granted_at: string
+          granted_by: string | null
+          notes: string | null
+          user_id: string
+        }
+        Insert: {
+          granted_at?: string
+          granted_by?: string | null
+          notes?: string | null
+          user_id: string
+        }
+        Update: {
+          granted_at?: string
+          granted_by?: string | null
+          notes?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      subscriptions: {
+        Row: {
+          cancel_at_period_end: boolean
+          created_at: string
+          current_period_end: string | null
+          current_period_start: string | null
+          customer_id: string
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          id: string
+          plan: string
+          status: string
+          stripe_subscription_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          cancel_at_period_end?: boolean
+          created_at?: string
+          current_period_end?: string | null
+          current_period_start?: string | null
+          customer_id: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          id?: string
+          plan: string
+          status: string
+          stripe_subscription_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          cancel_at_period_end?: boolean
+          created_at?: string
+          current_period_end?: string | null
+          current_period_start?: string | null
+          customer_id?: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          id?: string
+          plan?: string
+          status?: string
+          stripe_subscription_id?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       user_app_grants: {
         Row: {
           access_token_hash: string

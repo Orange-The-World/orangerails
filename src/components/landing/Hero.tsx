@@ -1,11 +1,14 @@
 import { ArrowRight, Github } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Terminal } from "./Terminal";
+import { useLiveConnectionCount, formatConnectionCount } from "@/hooks/useLiveConnectionCount";
 
 export function Hero() {
   const scrollToBeta = () => {
     document.getElementById("waitlist")?.scrollIntoView({ behavior: "smooth" });
   };
+  const { count } = useLiveConnectionCount(100);
+  const connectionLabel = formatConnectionCount(count);
 
   return (
     <section className="relative overflow-hidden">
@@ -23,7 +26,7 @@ export function Hero() {
           </h1>
 
           <p className="mt-5 max-w-xl text-balance text-base text-muted-foreground sm:text-lg">
-            100+ live connections. Open source. Value for value. Connect a wallet, an
+            {connectionLabel} live connections. Open source. Value for value. Connect a wallet, an
             exchange, or a payment processor through a single API that ships with
             <span className="text-foreground"> zero-knowledge encryption by default</span>.
           </p>
