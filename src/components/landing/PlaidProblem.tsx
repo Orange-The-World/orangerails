@@ -2,16 +2,16 @@ import { Check, X } from "lucide-react";
 
 const problems = [
   {
-    title: "Plaid stores credentials",
+    title: "Aggregators store credentials",
     body: "Your bank logins live on their servers, indefinitely.",
   },
   {
-    title: "Plaid sees every transaction",
-    body: "Every line item, every counterparty — visible in plaintext.",
+    title: "Aggregators see every transaction",
+    body: "Every line item, every counterparty, visible in plaintext on their infrastructure.",
   },
   {
-    title: "Plaid monetizes your data",
-    body: "$58M class-action settlement (2020) for unauthorized data use.",
+    title: "Plaid: $58M settlement",
+    body: "In 2020 the largest consumer aggregator paid out for unauthorized data use. The business model is the industry default, not the exception.",
   },
 ];
 
@@ -41,7 +41,7 @@ export function PlaidProblem() {
         <div className="max-w-2xl">
           <p className="text-xs font-medium uppercase tracking-widest text-destructive">The problem</p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl text-balance">
-            Plaid was built on your data.
+            Traditional aggregators monetize your data.
           </h2>
         </div>
 
