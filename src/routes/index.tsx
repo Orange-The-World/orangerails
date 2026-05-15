@@ -6,8 +6,10 @@ import { PlaidProblem } from "@/components/landing/PlaidProblem";
 import { Features } from "@/components/landing/Features";
 import { Comparison } from "@/components/landing/Comparison";
 import { Integrations } from "@/components/landing/Integrations";
-import { WaitlistCta } from "@/components/landing/WaitlistCta";
 import { WhyOrangeRails } from "@/components/landing/WhyOrangeRails";
+import { BetaInvite } from "@/components/landing/BetaInvite";
+import { XpubExplainer } from "@/components/landing/XpubExplainer";
+import { McpTeaser } from "@/components/landing/McpTeaser";
 import { Footer } from "@/components/landing/Footer";
 
 export const Route = createFileRoute("/")({
@@ -19,11 +21,11 @@ export const Route = createFileRoute("/")({
         content:
           "Connect bank accounts, exchanges, wallets, mining pools, and Lightning nodes through one normalized API. Open source, zero-knowledge, self-hostable. Apache 2.0.",
       },
-      { property: "og:title", content: "OrangeRails — Bitcoin financial rails, without the surveillance" },
+      { property: "og:title", content: "OrangeRails, Bitcoin financial rails without the surveillance" },
       {
         property: "og:description",
         content:
-          "The alternative to Plaid that can't read your data — because it can't. 22+ adapters. Open source. Zero knowledge. Built for Bitcoin.",
+          "The alternative to Plaid that can't read your data, because it can't. 100+ connections. Open source. Zero knowledge. Built for Bitcoin.",
       },
       { property: "og:image", content: "/og-image.jpg" },
       { property: "og:image:width", content: "1200" },
@@ -50,7 +52,7 @@ export const Route = createFileRoute("/")({
           featureList: [
             "Open source (Apache 2.0)",
             "Zero-knowledge architecture (AES-256-GCM, client-side key derivation)",
-            "Bitcoin-first: 22+ adapters",
+            "Bitcoin-first: 100+ connections",
             "Self-hostable (Docker, Helm)",
             "Normalized REST API across all adapters",
             "Post-quantum ready (X25519 + ML-KEM-768, ML-DSA-65)",
@@ -117,7 +119,7 @@ export const Route = createFileRoute("/")({
               name: "Which Bitcoin services does OrangeRails support?",
               acceptedAnswer: {
                 "@type": "Answer",
-                text: "22+ adapters: Bitcoin Core, BTCPay Server, Blink/Galoy, bwt/xpub, mempool.space, Lightning (LND, CLN, LDK, Phoenix), exchanges (Kraken, Coinbase, River, Swan), banking (Strike, BitCredit), mining pools (Ocean, Braiins, ViaBTC), wallets (Sparrow, Fedi), and CSV/OFX/QIF file imports.",
+                text: "100+ connections, including native adapters for Bitcoin Core, BTCPay Server, Blink, xpub, Strike, plus 98 exchanges via the CCXT layer (Coinbase, Kraken, Binance, Bybit, OKX, KuCoin, Gemini, Bitstamp, Bitfinex, Crypto.com, NDAX, Bitbuy, and more). Lightning, mining pools, and banking aggregators are on the roadmap.",
               },
             },
             {
@@ -142,12 +144,14 @@ function Index() {
       <Navbar />
       <main>
         <Hero />
+        <BetaInvite />
         <PlaidProblem />
         <Features />
         <Comparison />
         <WhyOrangeRails />
         <Integrations />
-        <WaitlistCta />
+        <XpubExplainer />
+        <McpTeaser />
       </main>
       <Footer />
       <Toaster richColors position="top-center" />
