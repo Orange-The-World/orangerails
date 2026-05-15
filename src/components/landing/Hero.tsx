@@ -19,12 +19,13 @@ export function Hero() {
           </div>
 
           <h1 className="mt-5 text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-[3.5rem] lg:leading-[1.05]">
-            The first zero-knowledge connector with an <span className="text-primary">MCP layer</span>.
+            The aggregator that <span className="text-primary">cannot read your data</span>.
           </h1>
 
           <p className="mt-5 max-w-xl text-balance text-base text-muted-foreground sm:text-lg">
-            100+ live connections. Open source. Value for value. The aggregator that
-            <span className="text-foreground"> cannot read your data</span>, by design, and that any AI assistant can plug into through MCP.
+            100+ live connections. Open source. Value for value. Connect a wallet, an
+            exchange, or a payment processor through a single API that ships with
+            <span className="text-foreground"> zero-knowledge encryption by default</span>.
           </p>
 
           <div className="mt-8 flex flex-wrap gap-3">
