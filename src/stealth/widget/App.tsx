@@ -33,7 +33,7 @@ import { DirectLoadCard } from "./components/DirectLoadCard";
 import { StealthInitProvider } from "./StealthInitContext";
 
 const DEFAULT_ALLOWED_ORIGINS =
-  "http://localhost:3000,http://localhost:5173,http://localhost:8080,https://app.bitbooks.com";
+  "http://localhost:3000,http://localhost:5173,http://localhost:8080,https://app.bitbooks.com,https://v2dev.bitbooks.com,https://v2.bitbooks.com,https://bitbooks.com";
 
 const DIRECT_LOAD_GRACE_MS = 1500;
 

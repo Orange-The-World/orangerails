@@ -51,6 +51,7 @@ import type {
   StealthInitMessage,
 } from "@/stealth/lib/postmessage";
 import { useStealthInit } from "../StealthInitContext";
+import { proxyFetch } from "../lib/proxyFetch";
 
 // Default wallet-birthday: today minus one year. Master plan §14: most
 // active wallets are well under a year old. Older wallets get nudged to
@@ -91,16 +92,27 @@ function shapeForCompletion(parsed: ParsedDescriptor): {
   return { kind: "xpub_stealth", scriptType: t };
 }
 
-/** Get the consuming app's URL endpoint for the stealth functions. We
- *  prefer same-origin if a relative URL is configured (the OR app proxies
- *  edge functions); otherwise we fall back to the full Supabase URL. */
-function resolveFunctionUrl(name: string): string {
+/** Get the URL endpoint for the stealth functions. Order of preference:
+ *    1. proxy_base_url from INIT — when the consuming app provides a
+ *       server-side proxy (V2 pattern). The proxy attaches the platform
+ *       API key, keeping that secret off the browser.
+ *    2. VITE_OR_FUNCTIONS_BASE_URL build-time env — direct Supabase
+ *       functions host (typically requires the consumer to also pass
+ *       access_token in INIT for Bearer auth).
+ *    3. Same-origin /functions/v1/* — relies on a reverse proxy at the
+ *       widget host.
+ */
+function resolveFunctionUrl(
+  name: string,
+  proxyBaseUrl: string | undefined,
+): string {
+  if (proxyBaseUrl) {
+    return `${proxyBaseUrl.replace(/\/$/, "")}/${name}`;
+  }
   const base = (
     (import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? ""
   ).replace(/\/$/, "");
   if (base) return `${base}/${name}`;
-  // Same-origin default; Caddy at connect.orangerails.com proxies
-  // /functions/v1/* to the Supabase edge function host.
   return `/functions/v1/${name}`;
 }
 
@@ -109,6 +121,11 @@ interface AccessTokenInit extends StealthInitMessage {
    *  Reading this off the message is a forward-compatible carve-out;
    *  master plan §4.4 leaves this optional. */
   access_token?: string;
+  /** Optional consumer-app proxy base URL. When present, the widget POSTs
+   *  edge-function calls through this URL instead of OR's Supabase host;
+   *  the proxy attaches the platform API key server-side so the secret
+   *  never reaches the browser. V2 pattern. */
+  proxy_base_url?: string;
 }
 
 export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
@@ -281,40 +298,68 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
       const sealed = await sealEnvelope(envelopePayload, init.or_stealth_key_b64);
       const blind = await blindIndex(trimmed, init.or_stealth_key_b64);
 
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
+      const requestBody = {
+        app_user_id: init.app_user_id,
+        app_slug: init.app_slug,
+        connection_kind: shape.kind,
+        sealed_envelope: sealed,
+        blind_index: blind,
+        // ZKA: birthday stays inside the envelope. The plaintext column
+        // is reserved for V2 which already has the date in the clear.
+        wallet_birthday_plaintext: null,
       };
-      if (initWithToken.access_token) {
-        headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
+
+      // proxy_base_url present → route through the parent app's
+      // postMessage proxy (V2 pattern, keeps platform key off the
+      // browser). Otherwise direct cross-origin fetch.
+      let respStatus: number;
+      let respText: string;
+      if (initWithToken.proxy_base_url && parent) {
+        const result = await proxyFetch({
+          parent,
+          parentOrigin: init.return_callback_origin,
+          fn: "or-stealth-connection-create",
+          body: requestBody,
+        });
+        respStatus = result.status;
+        respText = result.bodyText;
+      } else {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (initWithToken.access_token) {
+          headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
+        }
+        const resp = await fetch(
+          resolveFunctionUrl(
+            "or-stealth-connection-create",
+            initWithToken.proxy_base_url,
+          ),
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(requestBody),
+          },
+        );
+        respStatus = resp.status;
+        respText = await resp.text().catch(() => "");
       }
 
-      const resp = await fetch(resolveFunctionUrl("or-stealth-connection-create"), {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          app_user_id: init.app_user_id,
-          app_slug: init.app_slug,
-          connection_kind: shape.kind,
-          sealed_envelope: sealed,
-          blind_index: blind,
-          // ZKA: birthday stays inside the envelope. The plaintext column
-          // is reserved for V2 which already has the date in the clear.
-          wallet_birthday_plaintext: null,
-        }),
-      });
+      const resp = {
+        ok: respStatus >= 200 && respStatus < 300,
+        status: respStatus,
+      };
 
       if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
+        const text = respText;
         const msg = `Edge function returned ${resp.status}${text ? `: ${text}` : ""}`;
         setError(msg);
         postWidgetError("INTERNAL", msg, true);
         return;
       }
 
-      const json = (await resp.json()) as {
-        connection_id?: string;
-        already_existed?: boolean;
-      };
+      const json: { connection_id?: string; already_existed?: boolean } =
+        respText ? JSON.parse(respText) : {};
       if (!json.connection_id) {
         const msg = "Edge function did not return a connection_id.";
         setError(msg);
@@ -477,21 +522,36 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
           syncs fast. Older wallets can edit this later to scan further back.
         </p>
 
-        <label
-          className="mt-3 block text-xs font-medium text-foreground"
-          htmlFor="gap-input"
-        >
-          Gap limit
-        </label>
-        <input
-          id="gap-input"
-          type="number"
-          min={1}
-          max={1000}
-          value={gapLimit}
-          onChange={(e) => setGapLimit(Number.parseInt(e.target.value, 10) || 0)}
-          className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
-        />
+        <details className="mt-3 group">
+          <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground select-none">
+            Advanced settings
+          </summary>
+          <div className="mt-2">
+            <label
+              className="block text-xs font-medium text-foreground"
+              htmlFor="gap-input"
+            >
+              Gap limit
+            </label>
+            <input
+              id="gap-input"
+              type="number"
+              min={1}
+              max={1000}
+              value={gapLimit}
+              onChange={(e) =>
+                setGapLimit(Number.parseInt(e.target.value, 10) || 0)
+              }
+              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
+            />
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              How many empty addresses we scan before stopping. Default 20
+              works for almost every wallet (Sparrow, BlueWallet, Ledger,
+              Trezor). Only change this if your wallet generates addresses
+              with unusually large gaps.
+            </p>
+          </div>
+        </details>
 
         {previewAddresses ? (
           <div className="mt-4 rounded-md border border-border bg-muted/20 p-3">

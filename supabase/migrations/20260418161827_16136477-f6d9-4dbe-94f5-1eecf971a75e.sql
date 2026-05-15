@@ -1,4 +1,4 @@
-CREATE TABLE public.waitlist (
+CREATE TABLE IF NOT EXISTS public.waitlist (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email TEXT NOT NULL UNIQUE,
   source TEXT DEFAULT 'landing',
@@ -8,6 +8,7 @@ CREATE TABLE public.waitlist (
 
 ALTER TABLE public.waitlist ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Anyone can join waitlist" ON public.waitlist;
 CREATE POLICY "Anyone can join waitlist"
   ON public.waitlist
   FOR INSERT

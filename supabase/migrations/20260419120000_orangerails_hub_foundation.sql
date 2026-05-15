@@ -19,7 +19,7 @@
 -- verifier ciphertext that proves the user entered the right
 -- password without ever storing the password itself.
 
-CREATE TABLE public.user_vault_meta (
+CREATE TABLE IF NOT EXISTS public.user_vault_meta (
   user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   vault_salt TEXT NOT NULL,                              -- base64-encoded 128-bit random salt for Argon2id
   vault_verifier_ciphertext TEXT NOT NULL,               -- AES-256-GCM ciphertext of a known constant
@@ -32,16 +32,19 @@ CREATE TABLE public.user_vault_meta (
 
 ALTER TABLE public.user_vault_meta ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can read own vault metadata" ON public.user_vault_meta;
 CREATE POLICY "Users can read own vault metadata"
   ON public.user_vault_meta FOR SELECT
   TO authenticated
   USING (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can insert own vault metadata" ON public.user_vault_meta;
 CREATE POLICY "Users can insert own vault metadata"
   ON public.user_vault_meta FOR INSERT
   TO authenticated
   WITH CHECK (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can update own vault metadata" ON public.user_vault_meta;
 CREATE POLICY "Users can update own vault metadata"
   ON public.user_vault_meta FOR UPDATE
   TO authenticated
@@ -58,7 +61,7 @@ CREATE POLICY "Users can update own vault metadata"
 -- acceptable for MVP since this table is RLS-protected and not
 -- reachable by end users.
 
-CREATE TABLE public.apps (
+CREATE TABLE IF NOT EXISTS public.apps (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   slug TEXT UNIQUE NOT NULL,
   name TEXT NOT NULL,
@@ -75,6 +78,7 @@ ALTER TABLE public.apps ENABLE ROW LEVEL SECURITY;
 -- can display "App X is requesting access"). They cannot see
 -- client_secret values — they appear in row data but RLS prevents
 -- reading them; see separate policies below.
+DROP POLICY IF EXISTS "Anyone can read app public metadata" ON public.apps;
 CREATE POLICY "Anyone can read app public metadata"
   ON public.apps FOR SELECT
   TO authenticated, anon
@@ -103,7 +107,7 @@ VALUES (
 -- returned to the app once and hashed here — we never store the
 -- raw token (same pattern password-reset systems use).
 
-CREATE TABLE public.user_app_grants (
+CREATE TABLE IF NOT EXISTS public.user_app_grants (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   app_id UUID NOT NULL REFERENCES public.apps(id) ON DELETE CASCADE,
@@ -114,21 +118,24 @@ CREATE TABLE public.user_app_grants (
   last_used_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_user_app_grants_user_id ON public.user_app_grants(user_id);
-CREATE INDEX idx_user_app_grants_token_hash ON public.user_app_grants(access_token_hash);
+CREATE INDEX IF NOT EXISTS idx_user_app_grants_user_id ON public.user_app_grants(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_app_grants_token_hash ON public.user_app_grants(access_token_hash);
 
 ALTER TABLE public.user_app_grants ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can read own grants" ON public.user_app_grants;
 CREATE POLICY "Users can read own grants"
   ON public.user_app_grants FOR SELECT
   TO authenticated
   USING (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can insert own grants" ON public.user_app_grants;
 CREATE POLICY "Users can insert own grants"
   ON public.user_app_grants FOR INSERT
   TO authenticated
   WITH CHECK (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can update own grants" ON public.user_app_grants;
 CREATE POLICY "Users can update own grants"
   ON public.user_app_grants FOR UPDATE
   TO authenticated
@@ -143,7 +150,7 @@ CREATE POLICY "Users can update own grants"
 -- The server cannot decrypt these without the user's active
 -- session providing the ORK in-transit.
 
-CREATE TABLE public.connections (
+CREATE TABLE IF NOT EXISTS public.connections (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   provider_type TEXT NOT NULL,                           -- 'blink', 'kraken', 'btcpay', 'xpub', ...
@@ -158,26 +165,30 @@ CREATE TABLE public.connections (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_connections_user_id ON public.connections(user_id);
-CREATE INDEX idx_connections_user_provider ON public.connections(user_id, provider_type);
+CREATE INDEX IF NOT EXISTS idx_connections_user_id ON public.connections(user_id);
+CREATE INDEX IF NOT EXISTS idx_connections_user_provider ON public.connections(user_id, provider_type);
 
 ALTER TABLE public.connections ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can read own connections" ON public.connections;
 CREATE POLICY "Users can read own connections"
   ON public.connections FOR SELECT
   TO authenticated
   USING (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can insert own connections" ON public.connections;
 CREATE POLICY "Users can insert own connections"
   ON public.connections FOR INSERT
   TO authenticated
   WITH CHECK (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can update own connections" ON public.connections;
 CREATE POLICY "Users can update own connections"
   ON public.connections FOR UPDATE
   TO authenticated
   USING (user_id = auth.uid());
 
+DROP POLICY IF EXISTS "Users can delete own connections" ON public.connections;
 CREATE POLICY "Users can delete own connections"
   ON public.connections FOR DELETE
   TO authenticated
@@ -191,7 +202,7 @@ CREATE POLICY "Users can delete own connections"
 -- and stored here. Plaintext metadata is limited to what we need
 -- for efficient queries: connection_id, external_id, occurred_at.
 
-CREATE TABLE public.encrypted_transactions (
+CREATE TABLE IF NOT EXISTS public.encrypted_transactions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   connection_id UUID NOT NULL REFERENCES public.connections(id) ON DELETE CASCADE,
   external_id TEXT NOT NULL,                             -- provider's tx id (plaintext — unavoidable for dedup)
@@ -202,16 +213,17 @@ CREATE TABLE public.encrypted_transactions (
   UNIQUE (connection_id, external_id)
 );
 
-CREATE INDEX idx_encrypted_transactions_connection_id
+CREATE INDEX IF NOT EXISTS idx_encrypted_transactions_connection_id
   ON public.encrypted_transactions(connection_id);
 
-CREATE INDEX idx_encrypted_transactions_occurred_at
+CREATE INDEX IF NOT EXISTS idx_encrypted_transactions_occurred_at
   ON public.encrypted_transactions(connection_id, occurred_at DESC);
 
 ALTER TABLE public.encrypted_transactions ENABLE ROW LEVEL SECURITY;
 
 -- Row-level security joins through connections: a user can only
 -- see transactions for their own connections.
+DROP POLICY IF EXISTS "Users can read own transactions" ON public.encrypted_transactions;
 CREATE POLICY "Users can read own transactions"
   ON public.encrypted_transactions FOR SELECT
   TO authenticated
@@ -221,6 +233,7 @@ CREATE POLICY "Users can read own transactions"
     )
   );
 
+DROP POLICY IF EXISTS "Users can insert own transactions" ON public.encrypted_transactions;
 CREATE POLICY "Users can insert own transactions"
   ON public.encrypted_transactions FOR INSERT
   TO authenticated
@@ -230,6 +243,7 @@ CREATE POLICY "Users can insert own transactions"
     )
   );
 
+DROP POLICY IF EXISTS "Users can delete own transactions" ON public.encrypted_transactions;
 CREATE POLICY "Users can delete own transactions"
   ON public.encrypted_transactions FOR DELETE
   TO authenticated
@@ -251,14 +265,17 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_user_vault_meta_updated_at ON public.user_vault_meta;
 CREATE TRIGGER trg_user_vault_meta_updated_at
   BEFORE UPDATE ON public.user_vault_meta
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
+DROP TRIGGER IF EXISTS trg_apps_updated_at ON public.apps;
 CREATE TRIGGER trg_apps_updated_at
   BEFORE UPDATE ON public.apps
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
+DROP TRIGGER IF EXISTS trg_connections_updated_at ON public.connections;
 CREATE TRIGGER trg_connections_updated_at
   BEFORE UPDATE ON public.connections
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();

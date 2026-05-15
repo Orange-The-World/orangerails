@@ -7,7 +7,8 @@ const cols: { title: string; links: FooterLink[] }[] = [
   {
     title: "Product",
     links: [
-      { label: "Integrations", to: "/integrations" },
+      { label: "Connections", to: "/providers" },
+      { label: "Connect a wallet", to: "/connect" },
       { label: "Pricing", to: "/pricing" },
       { label: "Docs", to: "/docs" },
     ],

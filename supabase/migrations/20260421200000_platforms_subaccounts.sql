@@ -24,7 +24,7 @@
 -- 1. platforms — registered API consumers
 -- ============================================================
 
-CREATE TABLE public.platforms (
+CREATE TABLE IF NOT EXISTS public.platforms (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   slug          TEXT UNIQUE NOT NULL,
   name          TEXT NOT NULL,
@@ -35,7 +35,7 @@ CREATE TABLE public.platforms (
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_platforms_api_key_hash ON public.platforms(api_key_hash);
+CREATE INDEX IF NOT EXISTS idx_platforms_api_key_hash ON public.platforms(api_key_hash);
 
 ALTER TABLE public.platforms ENABLE ROW LEVEL SECURITY;
 
@@ -48,7 +48,7 @@ CREATE POLICY "Platforms are visible to authenticated users (metadata only)"
 -- 2. subaccounts — per-end-user records owned by a platform
 -- ============================================================
 
-CREATE TABLE public.subaccounts (
+CREATE TABLE IF NOT EXISTS public.subaccounts (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   platform_id       UUID NOT NULL REFERENCES public.platforms(id) ON DELETE CASCADE,
   external_user_id  TEXT NOT NULL,
@@ -56,7 +56,7 @@ CREATE TABLE public.subaccounts (
   UNIQUE (platform_id, external_user_id)
 );
 
-CREATE INDEX idx_subaccounts_platform_external ON public.subaccounts(platform_id, external_user_id);
+CREATE INDEX IF NOT EXISTS idx_subaccounts_platform_external ON public.subaccounts(platform_id, external_user_id);
 
 ALTER TABLE public.subaccounts ENABLE ROW LEVEL SECURITY;
 
@@ -109,7 +109,7 @@ WHERE c.user_id::text = s.external_user_id
 ALTER TABLE public.connections
   ALTER COLUMN subaccount_id SET NOT NULL;
 
-CREATE INDEX idx_connections_subaccount ON public.connections(subaccount_id);
+CREATE INDEX IF NOT EXISTS idx_connections_subaccount ON public.connections(subaccount_id);
 
 -- ============================================================
 -- 6. Drop ALL policies on connections + encrypted_transactions

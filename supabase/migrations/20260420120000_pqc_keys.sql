@@ -68,6 +68,7 @@ CREATE INDEX IF NOT EXISTS wrapped_data_keys_recipient_user_id_idx
 -- tied to role membership.
 ALTER TABLE public.wrapped_data_keys ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Recipients can read their own wrapped data keys" ON public.wrapped_data_keys;
 CREATE POLICY "Recipients can read their own wrapped data keys"
   ON public.wrapped_data_keys
   FOR SELECT

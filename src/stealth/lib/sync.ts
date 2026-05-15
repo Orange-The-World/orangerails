@@ -185,6 +185,85 @@ function emit(opts: RunSyncOptions, ev: SyncProgressEvent) {
   opts.onProgress?.(ev);
 }
 
+/**
+ * Best-effort scriptPubKey → address decoder. Used for OUTGOING
+ * transactions to label the recipient. Returns empty string if the
+ * script isn't a recognized standard form (OP_RETURN, custom scripts).
+ *
+ * Stays best-effort by design — full address decoding for arbitrary
+ * scripts requires the full Bitcoin script engine. We cover the common
+ * cases (p2pkh / p2sh / p2wpkh / p2wsh / p2tr) and accept "" for the
+ * rest. Users can always read the txid to inspect manually.
+ */
+function scriptToAddressBestEffort(script: Uint8Array): string {
+  // P2WPKH: 00 14 <20-byte hash>
+  if (script.length === 22 && script[0] === 0x00 && script[1] === 0x14) {
+    return encodeBech32('bc', 0, script.subarray(2));
+  }
+  // P2WSH: 00 20 <32-byte hash>
+  if (script.length === 34 && script[0] === 0x00 && script[1] === 0x20) {
+    return encodeBech32('bc', 0, script.subarray(2));
+  }
+  // P2TR: 51 20 <32-byte x-only pubkey>
+  if (script.length === 34 && script[0] === 0x51 && script[1] === 0x20) {
+    return encodeBech32('bc', 1, script.subarray(2));
+  }
+  // P2PKH and P2SH need base58check; we omit them rather than pull a
+  // dependency in for the OUT-side label — empty string is acceptable.
+  return '';
+}
+
+/** Minimal bech32(m) encoder for OUT-side recipient labels. */
+function encodeBech32(hrp: string, witnessVersion: 0 | 1, program: Uint8Array): string {
+  const ALPHABET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  const data: number[] = [witnessVersion, ...convertBits(program, 8, 5, true)];
+  const checksumConst = witnessVersion === 0 ? 1 : 0x2bc830a3;
+  const checksum = bech32Checksum(hrp, data, checksumConst);
+  let s = hrp + '1';
+  for (const v of [...data, ...checksum]) s += ALPHABET[v];
+  return s;
+}
+
+function convertBits(input: Uint8Array, fromBits: number, toBits: number, pad: boolean): number[] {
+  let acc = 0;
+  let bits = 0;
+  const out: number[] = [];
+  const maxv = (1 << toBits) - 1;
+  for (const v of input) {
+    acc = (acc << fromBits) | v;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      out.push((acc >> bits) & maxv);
+    }
+  }
+  if (pad && bits > 0) out.push((acc << (toBits - bits)) & maxv);
+  return out;
+}
+
+function bech32Checksum(hrp: string, data: number[], constant: number): number[] {
+  const values: number[] = [];
+  for (let i = 0; i < hrp.length; i++) values.push(hrp.charCodeAt(i) >> 5);
+  values.push(0);
+  for (let i = 0; i < hrp.length; i++) values.push(hrp.charCodeAt(i) & 31);
+  values.push(...data, 0, 0, 0, 0, 0, 0);
+  const polymod = bech32Polymod(values) ^ constant;
+  const out: number[] = [];
+  for (let i = 0; i < 6; i++) out.push((polymod >> (5 * (5 - i))) & 31);
+  return out;
+}
+
+function bech32Polymod(values: number[]): number {
+  const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) {
+    const top = chk >>> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < 5; i++) if ((top >> i) & 1) chk ^= GEN[i];
+  }
+  return chk;
+}
+
 // ─── Block parser (minimal) ─────────────────────────────────────────────
 
 /**
@@ -236,6 +315,10 @@ interface ParsedTx {
   txid: string;
   vinCount: number;
   voutCount: number;
+  /** Each input's prev_txid (RPC display order, hex) + vout index.
+   *  Used by UTXO tracking to detect spends of our previously-received
+   *  outputs. Coinbase inputs (prev_txid all-zeros) are skipped. */
+  inputs: Array<{ prevTxid: string; voutIdx: number }>;
   /** [valueSats, scriptPubKey] per output, in order. */
   outputs: Array<{ value: bigint; script: Uint8Array }>;
 }
@@ -259,12 +342,28 @@ function parseTx(cur: Cursor): ParsedTx {
 
   const vinStart = cur.pos;
   const vinCount = cur.readVarInt();
+  const inputs: ParsedTx['inputs'] = [];
   for (let i = 0; i < vinCount; i++) {
-    cur.readBytes(32); // prev txid
-    cur.readBytes(4);  // vout index
+    const prevTxidLE = cur.readBytes(32); // prev txid in internal LE order
+    const voutBytes = cur.readBytes(4);    // vout index, LE
     const scriptLen = cur.readVarInt();
     cur.readBytes(scriptLen);
     cur.readBytes(4);  // sequence
+    // Skip coinbase inputs (prev_txid all-zeros). They cannot be spends
+    // of one of our UTXOs by definition.
+    let allZero = true;
+    for (let b = 0; b < 32; b++) {
+      if (prevTxidLE[b] !== 0) { allZero = false; break; }
+    }
+    if (!allZero) {
+      const prevTxid = bytesToHex(reverseBytes(prevTxidLE));
+      const voutIdx =
+        voutBytes[0] |
+        (voutBytes[1] << 8) |
+        (voutBytes[2] << 16) |
+        (voutBytes[3] << 24);
+      inputs.push({ prevTxid, voutIdx });
+    }
   }
   const vinEnd = cur.pos;
 
@@ -305,7 +404,7 @@ function parseTx(cur: Cursor): ParsedTx {
   // Reference unused vars to satisfy --noUnusedLocals when stripped.
   void txStart;
 
-  return { txid, vinCount, voutCount, outputs };
+  return { txid, vinCount, voutCount, inputs, outputs };
 }
 
 interface ParsedBlockHeader {
@@ -355,12 +454,20 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 const STAGE_COPY: Record<StealthStage, { message: string; detail: string }> = {
   unlocking: { message: 'Vault unlocked', detail: 'Your password never left this browser.' },
   deriving: { message: 'Computing your addresses', detail: 'Sparrow and Wasabi do this the same way.' },
-  fetching_filters: { message: 'Downloading public filter files', detail: 'These files are the same for everyone.' },
+  fetching_filters: {
+    message: 'Looking through Bitcoin history for your transactions',
+    detail:
+      'We download tiny summary files (a few KB each), one per block, and check them locally. The files are the same for every user — Orange Rails learns nothing about you from them.',
+  },
   matching: { message: 'Matching filters against your addresses', detail: 'The match runs locally; no addresses are sent anywhere.' },
   fetching_blocks: { message: 'Fetching blocks where your wallet appears', detail: 'Pulled directly from our Bitcoin node.' },
   building_txs: { message: 'Building your transaction history', detail: 'Your browser is parsing each block.' },
   sealing: { message: 'Sealing your transactions', detail: 'Encrypted with your vault key, only you can open them.' },
-  uploading: { message: 'Saving sealed records', detail: 'Our server stores the sealed bytes only.' },
+  uploading: {
+    message: 'Saving encrypted records to Orange Rails',
+    detail:
+      'Orange Rails stores only the encrypted bytes as a backup. They cannot read your transactions — only your browser holds the key.',
+  },
 };
 
 function progress(stage: StealthStage, percent: number, detail?: string): SyncProgressEvent {
@@ -450,10 +557,16 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
 
   const totalFilters = tip - fromHeight + 1;
+  // Friendly initial estimate: each filter is ~3KB on average. Multiply
+  // and round to MB so the user has an honest number ('about 150 MB to
+  // read') instead of a meaningless block count. Reassures users that
+  // it is small + that nothing is being uploaded.
+  const estimatedBytes = totalFilters * 3072;
+  const estimatedMB = Math.max(1, Math.round(estimatedBytes / (1024 * 1024)));
   emit(opts, progress(
     'fetching_filters',
     0,
-    `Block range ${fromHeight}-${tip} (${totalFilters} blocks).`,
+    `About ${estimatedMB} MB across ${totalFilters.toLocaleString()} small files. We do not upload anything — these files are public.`,
   ));
 
   const matcher = opts.matcher ?? (await loadBip158Matcher());
@@ -464,34 +577,95 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
   const hits: MatchedHit[] = [];
 
-  for (let h = fromHeight; h <= tip; h++) {
-    const f = await opts.fetchFilter(h);
-    if (f === null) continue;
-    bytesDownloaded += f.filter.length;
+  // Parallel filter fetch with bounded concurrency. Sequential
+  // (one-at-a-time) was the right shape for the first proof-of-life
+  // milestone but is unworkable for real wallets — a 1-year-old
+  // wallet has ~52K filters; sequential at 100ms/req = 90 minutes.
+  // 32 concurrent reads is well below stealth.orangerails.com's
+  // capacity (Caddy + static files) and gives a ~30x speedup.
+  const FETCH_CONCURRENCY = 32;
+  const PROGRESS_INTERVAL_MS = 200;
+  let processedCount = 0;
+  let lastProgressEmit = 0;
+  let lastProgressCount = 0;
+  const fetchStartedAt = Date.now();
 
-    // BIP158 SipHash key uses the block hash in internal byte order
-    // (little-endian). RPC returns big-endian display hex; reverse for the
-    // matcher.
-    const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
-    const matched = matcher.matchAny(f.filter, blockHashLE, scripts);
-    if (matched) {
-      hits.push({ height: h, blockHashHex: f.blockHashHex });
+  function emitFetchProgress(force: boolean): void {
+    const now = Date.now();
+    if (!force && now - lastProgressEmit < PROGRESS_INTERVAL_MS) return;
+    const sliceMs = Math.max(1, now - lastProgressEmit);
+    const sliceCount = processedCount - lastProgressCount;
+    const filesPerSec = Math.round((sliceCount / sliceMs) * 1000);
+    lastProgressEmit = now;
+    lastProgressCount = processedCount;
+
+    const pct = (processedCount / totalFilters) * 100;
+    let detail =
+      `${processedCount.toLocaleString()} of ${totalFilters.toLocaleString()} read` +
+      (filesPerSec > 0 ? ` · ${filesPerSec.toLocaleString()} files/sec` : '');
+    const elapsedMs = now - fetchStartedAt;
+    if (elapsedMs > 1500 && processedCount > 0 && processedCount < totalFilters) {
+      const overallRate = processedCount / elapsedMs; // blocks/ms
+      const remaining = totalFilters - processedCount;
+      const etaSec = Math.round(remaining / overallRate / 1000);
+      const etaText =
+        etaSec < 60
+          ? `${etaSec}s`
+          : etaSec < 3600
+            ? `${Math.round(etaSec / 60)} min`
+            : `${(etaSec / 3600).toFixed(1)} hr`;
+      detail += ` · about ${etaText} left`;
     }
+    emit(opts, progress('fetching_filters', pct, detail));
+  }
 
-    if (h === tip || (h - fromHeight) % Math.max(1, Math.floor(totalFilters / 20)) === 0) {
-      const pct = ((h - fromHeight + 1) / totalFilters) * 100;
-      emit(opts, progress(
-        'fetching_filters',
-        pct,
-        `Block range ${fromHeight}-${tip} (${totalFilters} blocks).`,
-      ));
+  let nextHeight = fromHeight;
+  async function worker(): Promise<void> {
+    while (true) {
+      const h = nextHeight;
+      if (h > tip) return;
+      nextHeight = h + 1;
+      const f = await opts.fetchFilter(h);
+      processedCount += 1;
+      if (f !== null) {
+        bytesDownloaded += f.filter.length;
+        const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
+        const matched = matcher.matchAny(f.filter, blockHashLE, scripts);
+        if (matched) {
+          hits.push({ height: h, blockHashHex: f.blockHashHex });
+        }
+      }
+      emitFetchProgress(false);
     }
   }
+
+  await Promise.all(
+    Array.from({ length: FETCH_CONCURRENCY }, () => worker()),
+  );
+  emitFetchProgress(true);
   emit(opts, progress('fetching_filters', 100));
   emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
 
   // ── fetching_blocks + building_txs ───────────────────────────────────
   emit(opts, progress('fetching_blocks', 0, `${hits.length} blocks to fetch.`));
+
+  // UTXO tracking — keyed by `${prev_txid}:${vout_idx}`. Populated as we
+  // encounter outputs to our addresses; consulted when scanning inputs
+  // to detect spends. Mirrors how Wasabi and Sparrow detect outgoing
+  // transactions over a BIP158 filter scan.
+  //
+  // NOTE: this map is in-memory for the duration of one sync run. UTXOs
+  // funded BEFORE the wallet birthday are not tracked, so a spend of
+  // such a pre-birthday UTXO will not be detected. For correct balance,
+  // the wallet birthday must be at-or-before the wallet's first ever
+  // receive — V2's UI defaults to one year ago and lets users override.
+  const utxoMap = new Map<
+    string,
+    { value: bigint; address: string }
+  >();
+  function utxoKey(txid: string, voutIdx: number): string {
+    return `${txid}:${voutIdx}`;
+  }
 
   const normalized: NormalizedTransaction[] = [];
   for (let i = 0; i < hits.length; i++) {
@@ -504,32 +678,96 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     cur.pos = header.txStart;
     for (let t = 0; t < header.txCount; t++) {
       const tx = parseTx(cur);
-      // Find matching outputs.
-      let matchedAmount = 0n;
-      let matchedAddress = '';
-      let anyMatch = false;
-      for (const out of tx.outputs) {
+
+      // ─── Spend detection (this tx spends one of our UTXOs?) ────────
+      let spentInputs = 0n;
+      for (const inp of tx.inputs) {
+        const key = utxoKey(inp.prevTxid, inp.voutIdx);
+        const utxo = utxoMap.get(key);
+        if (utxo) {
+          spentInputs += utxo.value;
+          utxoMap.delete(key);
+        }
+      }
+
+      // ─── Receive detection (this tx pays one of our addresses?) ────
+      let receivedAmount = 0n;
+      let receivedAddress = '';
+      let anyReceive = false;
+      const newUtxos: Array<{ idx: number; value: bigint; address: string }> = [];
+      for (let oi = 0; oi < tx.outputs.length; oi++) {
+        const out = tx.outputs[oi];
         for (const d of derived) {
           if (bytesEqual(out.script, d.script)) {
-            matchedAmount += out.value;
-            if (!matchedAddress) matchedAddress = d.address;
-            anyMatch = true;
+            receivedAmount += out.value;
+            if (!receivedAddress) receivedAddress = d.address;
+            anyReceive = true;
+            newUtxos.push({ idx: oi, value: out.value, address: d.address });
             break;
           }
         }
       }
-      if (anyMatch) {
+
+      // ─── Emit normalized records ───────────────────────────────────
+      if (spentInputs > 0n) {
+        // SPEND. amount_sats = what left our wallet net of change.
+        //   spentInputs    — total value of UTXOs we destroyed
+        //   receivedAmount — total value of new outputs paying us back (change)
+        // The difference is "what we paid out" (and includes the network fee).
+        // Pure self-transfer (consolidation) → amount = fee only.
+        const netOut = spentInputs - receivedAmount;
+        // Best-effort recipient address: first output that does NOT pay
+        // us. Empty if every output pays us (pure consolidation).
+        let recipientAddress = '';
+        for (const out of tx.outputs) {
+          let isOurs = false;
+          for (const d of derived) {
+            if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+          }
+          if (!isOurs) {
+            recipientAddress = scriptToAddressBestEffort(out.script);
+            if (recipientAddress) break;
+          }
+        }
+        normalized.push({
+          txid: tx.txid,
+          block_height: block.height,
+          occurred_at: occurredAt,
+          direction: 'out',
+          amount_sats: Number(netOut),
+          address: recipientAddress,
+          vin_count: tx.vinCount,
+          vout_count: tx.voutCount,
+          memo: null,
+        });
+        // Add change outputs to UTXO map so future spends can reference
+        // them. (A receive that is also a change-back from our own spend
+        // still counts as a UTXO we own.)
+        for (const u of newUtxos) {
+          utxoMap.set(utxoKey(tx.txid, u.idx), {
+            value: u.value,
+            address: u.address,
+          });
+        }
+      } else if (anyReceive) {
+        // RECEIVE only — pure incoming, no inputs of ours were spent.
         normalized.push({
           txid: tx.txid,
           block_height: block.height,
           occurred_at: occurredAt,
           direction: 'in',
-          amount_sats: Number(matchedAmount),
-          address: matchedAddress,
+          amount_sats: Number(receivedAmount),
+          address: receivedAddress,
           vin_count: tx.vinCount,
           vout_count: tx.voutCount,
           memo: null,
         });
+        for (const u of newUtxos) {
+          utxoMap.set(utxoKey(tx.txid, u.idx), {
+            value: u.value,
+            address: u.address,
+          });
+        }
       }
     }
 

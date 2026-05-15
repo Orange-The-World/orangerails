@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Defaults overridden per-route by TanStack Router's head() + HeadContent.
+         Pre-rendered marketing routes (scripts/prerender-plugin.ts) rewrite
+         <title>, <meta description>, and <link rel=canonical> per route at
+         build time so search engines and AI crawlers see route-specific
+         content even without executing JS. -->
+    <title>OrangeRails — The private finance app for people who own Bitcoin</title>
+    <meta name="description" content="Zero-knowledge personal finance for Bitcoin-first households. Your money, your keys, your books." />
+    <link rel="canonical" href="https://orangerails.com/" />
+
+    <meta name="author" content="OrangeRails" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="format-detection" content="telephone=no" />
+    <meta name="apple-mobile-web-app-title" content="OrangeRails" />
+    <meta name="application-name" content="OrangeRails" />
+
+    <!-- Open Graph defaults -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="OrangeRails" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:image" content="https://orangerails.com/og-image.jpg" />
+
+    <!-- Twitter / X defaults -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@orangerailsapp" />
+
+    <!-- Icons -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    />
+
+    <!-- AI / LLM crawler hints -->
+    <link rel="alternate" type="text/plain" href="/llms.txt" title="LLM-friendly site index" />
+    <link rel="alternate" type="text/plain" href="/llms-full.txt" title="LLM-friendly full content" />
+
+    <!-- Default JSON-LD structured data (per-route schema added by route head() functions) -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Organization",
+      "name": "OrangeRails",
+      "url": "https://orangerails.com",
+      "description": "Zero-knowledge personal finance for Bitcoin-first households."
+    }
+    </script>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      "name": "OrangeRails",
+      "url": "https://orangerails.com",
+      "potentialAction": {
+        "@type": "SearchAction",
+        "target": "https://orangerails.com/faq?q={search_term_string}",
+        "query-input": "required name=search_term_string"
+      }
+    }
+    </script>
+
+    <style>
+      /* Inline so it renders before any external resource is fetched. */
+      #or-splash {
+        position: fixed; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        background: #0a0a0a; color: #ededed;
+        font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+        z-index: 9999; transition: opacity 280ms ease;
+      }
+      #or-splash.or-splash-leaving { opacity: 0; pointer-events: none; }
+      .or-splash-inner { text-align: center; max-width: 22rem; padding: 0 1.5rem; }
+      .or-splash-glyph { display: inline-block; margin-bottom: 1.25rem; animation: or-splash-spin 1.6s linear infinite; }
+      @keyframes or-splash-spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+      .or-splash-title { font-size: 1.0625rem; font-weight: 600; margin: 0 0 0.5rem; letter-spacing: -0.01em; }
+      .or-splash-sub   { font-size: 0.875rem; color: #a1a1a1; margin: 0; line-height: 1.5; }
+      @media (prefers-reduced-motion: reduce) { .or-splash-glyph { animation: none; } }
+    </style>
+  </head>
+
+  <body>
+    <!-- Loading splash. Shown instantly while the JS bundle downloads + parses.
+         Removed by src/main.tsx as soon as React mounts. We treat the brief
+         wait as a brand moment: zero-knowledge encryption happens entirely
+         in the browser, which is why the first paint takes a beat. -->
+    <div id="or-splash" aria-hidden="true">
+      <div class="or-splash-inner">
+        <div class="or-splash-glyph" aria-hidden="true">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="24" cy="24" r="20" stroke="#f7931a" stroke-width="3" stroke-linecap="round" stroke-dasharray="40 80" />
+          </svg>
+        </div>
+        <div class="or-splash-text">
+          <p class="or-splash-title">Securing your session</p>
+          <p class="or-splash-sub">Your books are encrypted in this browser before anything leaves your device.</p>
+        </div>
+      </div>
+    </div>
+
+    <div id="root">
+      <noscript>
+        <h1>OrangeRails &mdash; Private finance for Bitcoin households</h1>
+        <p>OrangeRails is the zero-knowledge personal finance app for households that hold Bitcoin. Your books are encrypted on your device with a vault password before they leave; the server stores only ciphertext.</p>
+        <p>Please enable JavaScript to use the application, or visit the public pages: <a href="/features">Features</a>, <a href="/security">Security</a>, <a href="/pricing">Pricing</a>, <a href="/faq">FAQ</a>, <a href="/compare">Compare</a>, <a href="/about">About</a>.</p>
+      </noscript>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

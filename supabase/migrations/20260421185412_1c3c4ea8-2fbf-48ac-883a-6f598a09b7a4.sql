@@ -9,11 +9,13 @@ CREATE TABLE IF NOT EXISTS public.vault_security_events (
 
 ALTER TABLE public.vault_security_events ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can insert their own vault security events" ON public.vault_security_events;
 CREATE POLICY "Users can insert their own vault security events"
   ON public.vault_security_events FOR INSERT
   TO authenticated
   WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can read their own vault security events" ON public.vault_security_events;
 CREATE POLICY "Users can read their own vault security events"
   ON public.vault_security_events FOR SELECT
   TO authenticated

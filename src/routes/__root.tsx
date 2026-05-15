@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { Outlet, Link, createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { Outlet, Link, createRootRoute, HeadContent } from "@tanstack/react-router";
 import posthog from "posthog-js";
 import { PostHogProvider } from "posthog-js/react";
 
@@ -69,46 +69,113 @@ export const Route = createRootRoute({
       },
     ],
   }),
-  shellComponent: RootShell,
   component: RootComponent,
   notFoundComponent: NotFoundComponent,
 });
 
-function RootShell({ children }: { children: React.ReactNode }) {
-  return (
-    <html lang="en">
-      <head>
-        <HeadContent />
-      </head>
-      <body>
-        {children}
-        <Scripts />
-      </body>
-    </html>
-  );
-}
-
 function RootComponent() {
   useEffect(() => {
     if (typeof window === "undefined") return;
-    // phc_ keys are PostHog "Project API Keys" — write-only, public-safe
+    // Cookieless PostHog — privacy stance for the BitBooks family.
+    // Memory-only persistence, no cookies, no localStorage tracking,
+    // no session recording, no person profiles. Each page load is a
+    // fresh anonymous event stream. Pageview + explicit captures only.
+    // phc_ keys are PostHog "Project API Keys" — write-only, public-safe.
     posthog.init("phc_ufrtHMjamZtq8ZhWA53ALx5KwSd3xKNbiDW9GH8UXNqn", {
       api_host: "https://eu.i.posthog.com",
-      person_profiles: "identified_only",
+      persistence: "memory",
+      person_profiles: "never",
       capture_pageview: true,
-      session_recording: {
-        maskAllInputs: true,
-        maskTextSelector: "[data-private]",
-      },
+      autocapture: false,
+      disable_session_recording: true,
+      respect_dnt: true,
     });
-    posthog.register({ app: "orangerails" });
+    posthog.register({ app: "orangerails", brand: "orange-rails" });
   }, []);
 
   return (
     <PostHogProvider client={posthog}>
       <VaultProvider>
         <Outlet />
+        <AnalyticsNotice />
       </VaultProvider>
     </PostHogProvider>
+  );
+}
+
+
+// One-time analytics-notice banner shown once per browser, dismissed via
+// localStorage (UI state, not tracking — exempt from consent under
+// GDPR Article 6 because it's strictly necessary for the banner not to
+// nag). Same wording shipped across every BitBooks-family surface.
+function AnalyticsNotice() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // Suppress the banner on widget popup routes (/connect and
+    // /connect/stealth). These are not public marketing pages — they
+    // open from inside a consuming app and the user has already
+    // accepted (or not) the analytics notice on the public page they
+    // came from. Showing the banner again inside the popup is noisy
+    // UX and steals real estate from the actual widget.
+    const path = window.location.pathname;
+    if (path === "/connect" || path.startsWith("/connect/")) return;
+    setShow(localStorage.getItem("bb_notice_dismissed") !== "1");
+  }, []);
+  useEffect(() => {
+    if (!show) return;
+    const onScroll = () => {
+      if (window.scrollY > 600) {
+        localStorage.setItem("bb_notice_dismissed", "1");
+        setShow(false);
+      }
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [show]);
+  if (!show) return null;
+  const dismiss = () => { localStorage.setItem("bb_notice_dismissed", "1"); setShow(false); };
+  return (
+    <div
+      style={{
+        position: "fixed", left: 20, bottom: 20, zIndex: 9999,
+        maxWidth: 320, padding: "14px 16px",
+        background: "#0F172A", color: "#FAFAF9",
+        borderRadius: 14,
+        boxShadow: "0 12px 32px rgba(0,0,0,0.28), 0 2px 6px rgba(0,0,0,0.18)",
+        font: "12.5px/1.5 -apple-system, 'Plus Jakarta Sans', system-ui, sans-serif",
+        animation: "bbnotin 260ms cubic-bezier(0.16,1,0.3,1)",
+      }}
+      role="region"
+      aria-label="Analytics notice"
+    >
+      <style>{`@keyframes bbnotin{from{transform:translateY(16px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
+      <button
+        type="button"
+        onClick={dismiss}
+        aria-label="Close"
+        style={{
+          position: "absolute", top: 6, right: 8,
+          background: "transparent", color: "#94A3B8", border: 0,
+          fontSize: 18, lineHeight: 1, padding: "4px 6px",
+          cursor: "pointer", borderRadius: 6,
+        }}
+      >×</button>
+      <p style={{ margin: "0 0 10px 0", paddingRight: 18 }}>
+        Anonymous analytics —{" "}
+        <strong style={{ color: "#fff" }}>no tracking, no profiles, no cookies.</strong>{" "}
+        A session cookie is set only if you sign in, and is deleted when you sign out.
+      </p>
+      <button
+        type="button"
+        onClick={dismiss}
+        style={{
+          background: "#F7931A", color: "#fff", border: 0, borderRadius: 8,
+          padding: "6px 14px", font: "inherit", fontWeight: 600, fontSize: 12.5, cursor: "pointer",
+        }}
+      >
+        Got it
+      </button>
+    </div>
   );
 }

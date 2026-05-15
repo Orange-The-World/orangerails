@@ -12,15 +12,21 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as UnlockRouteImport } from './routes/unlock'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as RecoverRouteImport } from './routes/recover'
+import { Route as ProvidersRouteImport } from './routes/providers'
 import { Route as PricingRouteImport } from './routes/pricing'
+import { Route as PortalRouteImport } from './routes/portal'
 import { Route as OpenSourceRouteImport } from './routes/open-source'
+import { Route as McpRouteImport } from './routes/mcp'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IntegrationsRouteImport } from './routes/integrations'
 import { Route as DocsRouteImport } from './routes/docs'
 import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as AppRouteImport } from './routes/app'
+import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AdminIndexRouteImport } from './routes/admin/index'
 import { Route as ConnectStealthRouteImport } from './routes/connect/stealth'
+import { Route as AdminCustomerIdRouteImport } from './routes/admin/$customerId'
 
 const UnlockRoute = UnlockRouteImport.update({
   id: '/unlock',
@@ -37,14 +43,29 @@ const RecoverRoute = RecoverRouteImport.update({
   path: '/recover',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProvidersRoute = ProvidersRouteImport.update({
+  id: '/providers',
+  path: '/providers',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PricingRoute = PricingRouteImport.update({
   id: '/pricing',
   path: '/pricing',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PortalRoute = PortalRouteImport.update({
+  id: '/portal',
+  path: '/portal',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const OpenSourceRoute = OpenSourceRouteImport.update({
   id: '/open-source',
   path: '/open-source',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const McpRoute = McpRouteImport.update({
+  id: '/mcp',
+  path: '/mcp',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -72,30 +93,51 @@ const AppRoute = AppRouteImport.update({
   path: '/app',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AdminRoute = AdminRouteImport.update({
+  id: '/admin',
+  path: '/admin',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AdminIndexRoute = AdminIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AdminRoute,
 } as any)
 const ConnectStealthRoute = ConnectStealthRouteImport.update({
   id: '/stealth',
   path: '/stealth',
   getParentRoute: () => ConnectRoute,
 } as any)
+const AdminCustomerIdRoute = AdminCustomerIdRouteImport.update({
+  id: '/$customerId',
+  path: '/$customerId',
+  getParentRoute: () => AdminRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
   '/docs': typeof DocsRoute
   '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
+  '/mcp': typeof McpRoute
   '/open-source': typeof OpenSourceRoute
+  '/portal': typeof PortalRoute
   '/pricing': typeof PricingRoute
+  '/providers': typeof ProvidersRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
+  '/admin/$customerId': typeof AdminCustomerIdRoute
   '/connect/stealth': typeof ConnectStealthRoute
+  '/admin/': typeof AdminIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -104,43 +146,60 @@ export interface FileRoutesByTo {
   '/docs': typeof DocsRoute
   '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
+  '/mcp': typeof McpRoute
   '/open-source': typeof OpenSourceRoute
+  '/portal': typeof PortalRoute
   '/pricing': typeof PricingRoute
+  '/providers': typeof ProvidersRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
+  '/admin/$customerId': typeof AdminCustomerIdRoute
   '/connect/stealth': typeof ConnectStealthRoute
+  '/admin': typeof AdminIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
   '/docs': typeof DocsRoute
   '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
+  '/mcp': typeof McpRoute
   '/open-source': typeof OpenSourceRoute
+  '/portal': typeof PortalRoute
   '/pricing': typeof PricingRoute
+  '/providers': typeof ProvidersRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
+  '/admin/$customerId': typeof AdminCustomerIdRoute
   '/connect/stealth': typeof ConnectStealthRoute
+  '/admin/': typeof AdminIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/admin'
     | '/app'
     | '/connect'
     | '/docs'
     | '/integrations'
     | '/login'
+    | '/mcp'
     | '/open-source'
+    | '/portal'
     | '/pricing'
+    | '/providers'
     | '/recover'
     | '/signup'
     | '/unlock'
+    | '/admin/$customerId'
     | '/connect/stealth'
+    | '/admin/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -149,37 +208,52 @@ export interface FileRouteTypes {
     | '/docs'
     | '/integrations'
     | '/login'
+    | '/mcp'
     | '/open-source'
+    | '/portal'
     | '/pricing'
+    | '/providers'
     | '/recover'
     | '/signup'
     | '/unlock'
+    | '/admin/$customerId'
     | '/connect/stealth'
+    | '/admin'
   id:
     | '__root__'
     | '/'
+    | '/admin'
     | '/app'
     | '/connect'
     | '/docs'
     | '/integrations'
     | '/login'
+    | '/mcp'
     | '/open-source'
+    | '/portal'
     | '/pricing'
+    | '/providers'
     | '/recover'
     | '/signup'
     | '/unlock'
+    | '/admin/$customerId'
     | '/connect/stealth'
+    | '/admin/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AdminRoute: typeof AdminRouteWithChildren
   AppRoute: typeof AppRoute
   ConnectRoute: typeof ConnectRouteWithChildren
   DocsRoute: typeof DocsRoute
   IntegrationsRoute: typeof IntegrationsRoute
   LoginRoute: typeof LoginRoute
+  McpRoute: typeof McpRoute
   OpenSourceRoute: typeof OpenSourceRoute
+  PortalRoute: typeof PortalRoute
   PricingRoute: typeof PricingRoute
+  ProvidersRoute: typeof ProvidersRoute
   RecoverRoute: typeof RecoverRoute
   SignupRoute: typeof SignupRoute
   UnlockRoute: typeof UnlockRoute
@@ -208,6 +282,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RecoverRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/providers': {
+      id: '/providers'
+      path: '/providers'
+      fullPath: '/providers'
+      preLoaderRoute: typeof ProvidersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/pricing': {
       id: '/pricing'
       path: '/pricing'
@@ -215,11 +296,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PricingRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/portal': {
+      id: '/portal'
+      path: '/portal'
+      fullPath: '/portal'
+      preLoaderRoute: typeof PortalRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/open-source': {
       id: '/open-source'
       path: '/open-source'
       fullPath: '/open-source'
       preLoaderRoute: typeof OpenSourceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mcp': {
+      id: '/mcp'
+      path: '/mcp'
+      fullPath: '/mcp'
+      preLoaderRoute: typeof McpRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -257,12 +352,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/admin': {
+      id: '/admin'
+      path: '/admin'
+      fullPath: '/admin'
+      preLoaderRoute: typeof AdminRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/admin/': {
+      id: '/admin/'
+      path: '/'
+      fullPath: '/admin/'
+      preLoaderRoute: typeof AdminIndexRouteImport
+      parentRoute: typeof AdminRoute
     }
     '/connect/stealth': {
       id: '/connect/stealth'
@@ -271,8 +380,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConnectStealthRouteImport
       parentRoute: typeof ConnectRoute
     }
+    '/admin/$customerId': {
+      id: '/admin/$customerId'
+      path: '/$customerId'
+      fullPath: '/admin/$customerId'
+      preLoaderRoute: typeof AdminCustomerIdRouteImport
+      parentRoute: typeof AdminRoute
+    }
   }
 }
+
+interface AdminRouteChildren {
+  AdminCustomerIdRoute: typeof AdminCustomerIdRoute
+  AdminIndexRoute: typeof AdminIndexRoute
+}
+
+const AdminRouteChildren: AdminRouteChildren = {
+  AdminCustomerIdRoute: AdminCustomerIdRoute,
+  AdminIndexRoute: AdminIndexRoute,
+}
+
+const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)
 
 interface ConnectRouteChildren {
   ConnectStealthRoute: typeof ConnectStealthRoute
@@ -287,13 +415,17 @@ const ConnectRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AdminRoute: AdminRouteWithChildren,
   AppRoute: AppRoute,
   ConnectRoute: ConnectRouteWithChildren,
   DocsRoute: DocsRoute,
   IntegrationsRoute: IntegrationsRoute,
   LoginRoute: LoginRoute,
+  McpRoute: McpRoute,
   OpenSourceRoute: OpenSourceRoute,
+  PortalRoute: PortalRoute,
   PricingRoute: PricingRoute,
+  ProvidersRoute: ProvidersRoute,
   RecoverRoute: RecoverRoute,
   SignupRoute: SignupRoute,
   UnlockRoute: UnlockRoute,
@@ -301,12 +433,3 @@ const rootRouteChildren: RootRouteChildren = {
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
-
-import type { getRouter } from './router.tsx'
-import type { createStart } from '@tanstack/react-start'
-declare module '@tanstack/react-start' {
-  interface Register {
-    ssr: true
-    router: Awaited<ReturnType<typeof getRouter>>
-  }
-}

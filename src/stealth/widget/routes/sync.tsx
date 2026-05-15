@@ -50,9 +50,19 @@ import type {
 } from '@/stealth/lib/postmessage';
 import { ProgressModal } from '../components/ProgressModal';
 import { useStealthInit } from '../StealthInitContext';
+import { proxyFetch } from '../lib/proxyFetch';
 
 interface AccessTokenInit extends StealthInitMessage {
   access_token?: string;
+  /** Consumer-app server-side proxy. See add.tsx for the contract. */
+  proxy_base_url?: string;
+  /** When true, skip the `or-stealth-transactions-store` upload step.
+   *  Used by consumer apps that treat their own DB as the source of
+   *  truth and do not need OR's encrypted backup of transactions
+   *  (e.g. V2 today). The widget still posts OR_STEALTH_SYNC_COMPLETE
+   *  back to the parent so the consumer can persist transactions
+   *  locally; only the OR-side upload is skipped. */
+  skip_transaction_upload?: boolean;
 }
 
 const STEALTH_FILTER_BASE =
@@ -62,7 +72,13 @@ const BLOCK_SOURCE_BASE =
   (import.meta.env.VITE_OR_BLOCK_SOURCE_BASE_URL as string | undefined) ??
   'https://blocks.orangerails.com';
 
-function resolveFunctionUrl(name: string): string {
+function resolveFunctionUrl(
+  name: string,
+  proxyBaseUrl: string | undefined,
+): string {
+  if (proxyBaseUrl) {
+    return `${proxyBaseUrl.replace(/\/$/, '')}/${name}`;
+  }
   const base = (
     (import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? ''
   ).replace(/\/$/, '');
@@ -141,28 +157,53 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           throw new Error('connection_id is required for mode=sync');
         }
 
-        // 1. Fetch sealed envelope.
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
+        // 1. Fetch sealed envelope. Routes through parent postMessage proxy
+        //    when proxy_base_url is set in INIT (V2 pattern, keeps platform
+        //    key off the browser); falls back to direct fetch otherwise.
+        const envFetchBody = {
+          connection_id: init.connection_id,
+          app_user_id: init.app_user_id,
+          app_slug: init.app_slug,
         };
-        if (initWithToken.access_token) {
-          headers['Authorization'] = `Bearer ${initWithToken.access_token}`;
+        let envOk = false;
+        let envStatus = 0;
+        let envText = '';
+        let envBody: unknown = null;
+        if (initWithToken.proxy_base_url && parent) {
+          const r = await proxyFetch({
+            parent,
+            parentOrigin: init.return_callback_origin,
+            fn: 'or-stealth-envelope-fetch',
+            body: envFetchBody,
+          });
+          envOk = r.ok;
+          envStatus = r.status;
+          envText = r.bodyText;
+          envBody = r.parsed;
+        } else {
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+          };
+          if (initWithToken.access_token) {
+            headers['Authorization'] = `Bearer ${initWithToken.access_token}`;
+          }
+          const envResp = await fetch(
+            resolveFunctionUrl('or-stealth-envelope-fetch', initWithToken.proxy_base_url),
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(envFetchBody),
+            },
+          );
+          envOk = envResp.ok;
+          envStatus = envResp.status;
+          envText = await envResp.text().catch(() => '');
+          envBody = envText ? JSON.parse(envText) : null;
         }
-
-        const envResp = await fetch(resolveFunctionUrl('or-stealth-envelope-fetch'), {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            connection_id: init.connection_id,
-            app_user_id: init.app_user_id,
-            app_slug: init.app_slug,
-          }),
-        });
-        if (!envResp.ok) {
-          const text = await envResp.text().catch(() => '');
-          throw new Error(`Envelope fetch failed: ${envResp.status} ${text}`);
+        if (!envOk) {
+          throw new Error(`Envelope fetch failed: ${envStatus} ${envText}`);
         }
-        const envJson = (await envResp.json()) as {
+        const envJson = envBody as {
           sealed_envelope: SealedEnvelope;
           last_block_scanned: number | null;
           wallet_birthday_plaintext: string | null;
@@ -208,24 +249,56 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         });
         if (cancelled) return;
 
-        // 3. Upload sealed transactions.
-        if (result.sealedTransactions.length > 0) {
-          const uploadResp = await fetch(
-            resolveFunctionUrl('or-stealth-transactions-store'),
-            {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({
-                connection_id: init.connection_id,
-                app_user_id: init.app_user_id,
-                sealed_transactions: result.sealedTransactions,
-                last_block_scanned: result.lastBlockScanned,
-              }),
-            },
-          );
-          if (!uploadResp.ok) {
-            const text = await uploadResp.text().catch(() => '');
-            throw new Error(`Upload failed: ${uploadResp.status} ${text}`);
+        // 3. Upload sealed transactions to OR — UNLESS the consumer app
+        //    has set skip_transaction_upload (V2 does this; V2's own DB
+        //    is the source of truth and OR-side encrypted backup is
+        //    not needed). Cuts the slow upload step entirely for those
+        //    apps. SYNC_COMPLETE still fires below so the consumer
+        //    persists locally.
+        if (
+          !initWithToken.skip_transaction_upload &&
+          result.sealedTransactions.length > 0
+        ) {
+          const uploadBody = {
+            connection_id: init.connection_id,
+            app_user_id: init.app_user_id,
+            sealed_transactions: result.sealedTransactions,
+            last_block_scanned: result.lastBlockScanned,
+          };
+          let uploadOk = false;
+          let uploadStatus = 0;
+          let uploadText = '';
+          if (initWithToken.proxy_base_url && parent) {
+            const r = await proxyFetch({
+              parent,
+              parentOrigin: init.return_callback_origin,
+              fn: 'or-stealth-transactions-store',
+              body: uploadBody,
+            });
+            uploadOk = r.ok;
+            uploadStatus = r.status;
+            uploadText = r.bodyText;
+          } else {
+            const headers: Record<string, string> = {
+              'Content-Type': 'application/json',
+            };
+            if (initWithToken.access_token) {
+              headers['Authorization'] = `Bearer ${initWithToken.access_token}`;
+            }
+            const uploadResp = await fetch(
+              resolveFunctionUrl('or-stealth-transactions-store', initWithToken.proxy_base_url),
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(uploadBody),
+              },
+            );
+            uploadOk = uploadResp.ok;
+            uploadStatus = uploadResp.status;
+            uploadText = await uploadResp.text().catch(() => '');
+          }
+          if (!uploadOk) {
+            throw new Error(`Upload failed: ${uploadStatus} ${uploadText}`);
           }
         }
 
@@ -291,9 +364,6 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
             {done.txCount === 0
               ? 'Nothing new on chain since the last sync.'
               : `Sealed and stored ${done.txCount} transaction${done.txCount === 1 ? '' : 's'}.`}
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Downloaded {(done.bytes / 1024).toFixed(1)} KB.
           </p>
           <button
             type="button"
