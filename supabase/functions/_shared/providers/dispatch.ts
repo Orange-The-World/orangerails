@@ -4,15 +4,18 @@
  * or-connection-create / or-discover-wallets / or-sync look up the source
  * adapter for a connection's `provider_type` slug here.
  *
- * Adding a new provider:
+ * Adding a new native provider:
  *   1. Implement the ProviderAdapter in _shared/providers/<slug>.ts
  *   2. Import it here
  *   3. Add to the PROVIDERS array below
  *   4. Done — all three edge functions auto-discover it via the registry
  *
+ * Adding a new CCXT exchange: regenerate _ccxt-manifest.ts (see
+ * scripts/generate-ccxt-manifest.mjs). Don't hand-edit dispatch.
+ *
  * Provider roadmap (OrangeRails-Protocol.html §18):
- *   blink (live), xpub (this PR), strike, btcpay, flash, lunar-rails,
- *   ccxt-* (100 exchanges via the CCXT wrapper), quiltt-* (banking +
+ *   blink (live), xpub (live), strike, btcpay, flash, lunar-rails,
+ *   ccxt-* (98 exchanges via the CCXT manifest), quiltt-* (banking +
  *   investments), simplefin (US/CA banks).
  */
 
@@ -22,110 +25,21 @@ import { xpubAdapter } from './xpub.ts';
 import { btcpayAdapter } from './btcpay.ts';
 import { strikeAdapter } from './strike.ts';
 import { makeCcxtAdapter } from './_ccxt.ts';
+import { CCXT_MANIFEST } from './_ccxt-manifest.ts';
 
-// CCXT-backed exchanges. Each is a thin wrapper around the shared CCXT
-// base adapter. Top 10 by global volume + 2 Canadian-focused exchanges
-// for testing. Adding the next one is one line.
-//
-// Roadmap: once these 12 prove out the pattern, expand to all ~120
-// CCXT-supported exchanges (auto-loop over `Object.keys(ccxt.exchanges)`).
-const ccxtCoinbase = makeCcxtAdapter({
-  slug: 'coinbase',
-  exchangeId: 'coinbase',
-  displayName: 'Coinbase',
-  description: 'US exchange + wallet',
-  tags: ['us', 'fiat-on-ramp', 'exchange'],
-  popularity: 100,
-});
-const ccxtKraken = makeCcxtAdapter({
-  slug: 'kraken',
-  exchangeId: 'kraken',
-  displayName: 'Kraken',
-  description: 'US/EU/CA exchange',
-  tags: ['us', 'eu', 'ca', 'fiat-on-ramp', 'exchange'],
-  popularity: 95,
-});
-const ccxtBinance = makeCcxtAdapter({
-  slug: 'binance',
-  exchangeId: 'binance',
-  displayName: 'Binance',
-  description: 'Global exchange',
-  tags: ['global', 'exchange'],
-  popularity: 92,
-});
-const ccxtBybit = makeCcxtAdapter({
-  slug: 'bybit',
-  exchangeId: 'bybit',
-  displayName: 'Bybit',
-  description: 'Global exchange + derivatives',
-  tags: ['global', 'exchange', 'derivatives'],
-  popularity: 80,
-});
-const ccxtOkx = makeCcxtAdapter({
-  slug: 'okx',
-  exchangeId: 'okx',
-  displayName: 'OKX',
-  description: 'Global exchange',
-  tags: ['global', 'exchange'],
-  popularity: 78,
-});
-const ccxtKucoin = makeCcxtAdapter({
-  slug: 'kucoin',
-  exchangeId: 'kucoin',
-  displayName: 'KuCoin',
-  description: 'Global exchange',
-  tags: ['global', 'exchange'],
-  popularity: 70,
-});
-const ccxtGemini = makeCcxtAdapter({
-  slug: 'gemini',
-  exchangeId: 'gemini',
-  displayName: 'Gemini',
-  description: 'US/EU regulated exchange',
-  tags: ['us', 'eu', 'fiat-on-ramp', 'exchange'],
-  popularity: 75,
-});
-const ccxtBitstamp = makeCcxtAdapter({
-  slug: 'bitstamp',
-  exchangeId: 'bitstamp',
-  displayName: 'Bitstamp',
-  description: 'EU/US exchange',
-  tags: ['eu', 'us', 'fiat-on-ramp', 'exchange'],
-  popularity: 65,
-});
-const ccxtBitfinex = makeCcxtAdapter({
-  slug: 'bitfinex',
-  exchangeId: 'bitfinex',
-  displayName: 'Bitfinex',
-  description: 'Global exchange',
-  tags: ['global', 'exchange'],
-  popularity: 60,
-});
-const ccxtCryptocom = makeCcxtAdapter({
-  slug: 'cryptocom',
-  exchangeId: 'cryptocom',
-  displayName: 'Crypto.com',
-  description: 'Global exchange + card',
-  tags: ['global', 'exchange', 'card'],
-  popularity: 72,
-});
-// Canadian-focused exchanges for the maintainer's testing.
-const ccxtNdax = makeCcxtAdapter({
-  slug: 'ndax',
-  exchangeId: 'ndax',
-  displayName: 'NDAX',
-  description: 'Canadian exchange',
-  tags: ['ca', 'fiat-on-ramp', 'exchange'],
-  popularity: 50,
-});
-const ccxtBitbuy = makeCcxtAdapter({
-  slug: 'bitbuy',
-  exchangeId: 'bitbuy',
-  displayName: 'Bitbuy',
-  description: 'Canadian exchange',
-  tags: ['ca', 'fiat-on-ramp', 'exchange'],
-  popularity: 50,
-});
+// CCXT-backed exchanges. Generated from CCXT introspection so the picker
+// reflects whatever ccxt@<pinned> supports without per-exchange code.
+// Each manifest entry produces one ProviderAdapter via makeCcxtAdapter.
+const ccxtAdapters: ProviderAdapter[] = CCXT_MANIFEST.map((entry) =>
+  makeCcxtAdapter({
+    slug: entry.slug,
+    exchangeId: entry.exchangeId,
+    displayName: entry.displayName,
+    description: entry.description,
+    tags: entry.tags,
+    popularity: entry.popularity,
+  }),
+);
 
 const PROVIDERS: ReadonlyArray<ProviderAdapter> = [
   // Native (non-CCXT) adapters first
@@ -133,19 +47,8 @@ const PROVIDERS: ReadonlyArray<ProviderAdapter> = [
   xpubAdapter,
   btcpayAdapter,
   strikeAdapter,
-  // CCXT-backed exchanges
-  ccxtCoinbase,
-  ccxtKraken,
-  ccxtBinance,
-  ccxtBybit,
-  ccxtOkx,
-  ccxtKucoin,
-  ccxtGemini,
-  ccxtBitstamp,
-  ccxtBitfinex,
-  ccxtCryptocom,
-  ccxtNdax,
-  ccxtBitbuy,
+  // CCXT-backed exchanges (manifest-driven, 98 today)
+  ...ccxtAdapters,
 ];
 
 const PROVIDER_MAP: ReadonlyMap<string, ProviderAdapter> = new Map(
@@ -170,12 +73,11 @@ export function listProviderSlugs(): string[] {
  * Public adapter manifest — what platforms (V2, V3, OW) read to render the
  * "add connection" UI. No internal handler functions exposed.
  *
- * The `category` + `tags` + `popularity` fields are designed to drive a
- * picker that scales past ~10 providers: top-level category tiles (Wallets
- * / Exchanges / Payment processors), a search box that filters on
- * displayName + description + tags, and a default within-category sort
- * by popularity DESC. Tile-per-provider doesn't scale once CCXT lands the
- * 100+ exchanges.
+ * The `category` + `tags` + `popularity` fields drive a picker that scales
+ * past ~10 providers: top-level category tiles (Wallets / Exchanges /
+ * Payment processors), a search box that filters on displayName +
+ * description + tags, and a default within-category sort by popularity
+ * DESC. Tile-per-provider doesn't scale once CCXT lands 100+ exchanges.
  */
 export interface ProviderManifest {
   slug: string;
