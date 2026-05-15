@@ -12,6 +12,31 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "14.5"
   }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
+  }
   public: {
     Tables: {
       adapter_requests: {
@@ -71,6 +96,47 @@ export type Database = {
         }
         Relationships: []
       }
+      audit_events: {
+        Row: {
+          actor_user_id: string | null
+          created_at: string
+          customer_id: string | null
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          event_type: string
+          id: string
+          payload: Json
+        }
+        Insert: {
+          actor_user_id?: string | null
+          created_at?: string
+          customer_id?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          event_type: string
+          id?: string
+          payload?: Json
+        }
+        Update: {
+          actor_user_id?: string | null
+          created_at?: string
+          customer_id?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          event_type?: string
+          id?: string
+          payload?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "audit_events_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       connections: {
         Row: {
           created_at: string
@@ -124,195 +190,6 @@ export type Database = {
           },
         ]
       }
-      encrypted_transactions: {
-        Row: {
-          connection_id: string
-          encrypted_payload: string
-          external_id: string
-          fetched_at: string
-          hmac_counterparty: string | null
-          hmac_direction: string | null
-          hmac_type: string | null
-          id: string
-          occurred_at: string
-          payload_key_version: number
-        }
-        Insert: {
-          connection_id: string
-          encrypted_payload: string
-          external_id: string
-          fetched_at?: string
-          hmac_counterparty?: string | null
-          hmac_direction?: string | null
-          hmac_type?: string | null
-          id?: string
-          occurred_at: string
-          payload_key_version?: number
-        }
-        Update: {
-          connection_id?: string
-          encrypted_payload?: string
-          external_id?: string
-          fetched_at?: string
-          hmac_counterparty?: string | null
-          hmac_direction?: string | null
-          hmac_type?: string | null
-          id?: string
-          occurred_at?: string
-          payload_key_version?: number
-        }
-        Relationships: [
-          {
-            foreignKeyName: "encrypted_transactions_connection_id_fkey"
-            columns: ["connection_id"]
-            isOneToOne: false
-            referencedRelation: "connections"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      platforms: {
-        Row: {
-          api_key_hash: string
-          cors_origin: string | null
-          created_at: string
-          display_brand_color: string | null
-          display_name: string | null
-          id: string
-          is_internal: boolean
-          name: string
-          slug: string
-          tier: string
-          updated_at: string
-        }
-        Insert: {
-          api_key_hash: string
-          cors_origin?: string | null
-          created_at?: string
-          display_brand_color?: string | null
-          display_name?: string | null
-          id?: string
-          is_internal?: boolean
-          name: string
-          slug: string
-          tier?: string
-          updated_at?: string
-        }
-        Update: {
-          api_key_hash?: string
-          cors_origin?: string | null
-          created_at?: string
-          display_brand_color?: string | null
-          display_name?: string | null
-          id?: string
-          is_internal?: boolean
-          name?: string
-          slug?: string
-          tier?: string
-          updated_at?: string
-        }
-        Relationships: []
-      }
-      source_wallets: {
-        Row: {
-          connection_id: string
-          created_at: string
-          encrypted_metadata: string
-          encrypted_metadata_key_version: number
-          external_wallet_id: string
-          id: string
-          is_synced: boolean
-        }
-        Insert: {
-          connection_id: string
-          created_at?: string
-          encrypted_metadata: string
-          encrypted_metadata_key_version?: number
-          external_wallet_id: string
-          id?: string
-          is_synced?: boolean
-        }
-        Update: {
-          connection_id?: string
-          created_at?: string
-          encrypted_metadata?: string
-          encrypted_metadata_key_version?: number
-          external_wallet_id?: string
-          id?: string
-          is_synced?: boolean
-        }
-        Relationships: [
-          {
-            foreignKeyName: "source_wallets_connection_id_fkey"
-            columns: ["connection_id"]
-            isOneToOne: false
-            referencedRelation: "connections"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      subaccounts: {
-        Row: {
-          created_at: string
-          external_user_id: string
-          id: string
-          platform_id: string
-        }
-        Insert: {
-          created_at?: string
-          external_user_id: string
-          id?: string
-          platform_id: string
-        }
-        Update: {
-          created_at?: string
-          external_user_id?: string
-          id?: string
-          platform_id?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "subaccounts_platform_id_fkey"
-            columns: ["platform_id"]
-            isOneToOne: false
-            referencedRelation: "platforms"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      audit_events: {
-        Row: {
-          actor_user_id: string | null
-          created_at: string
-          customer_id: string | null
-          encrypted_payload: string | null
-          encrypted_payload_kv: number | null
-          event_type: string
-          id: string
-          payload: Json
-        }
-        Insert: {
-          actor_user_id?: string | null
-          created_at?: string
-          customer_id?: string | null
-          encrypted_payload?: string | null
-          encrypted_payload_kv?: number | null
-          event_type: string
-          id?: string
-          payload?: Json
-        }
-        Update: {
-          actor_user_id?: string | null
-          created_at?: string
-          customer_id?: string | null
-          encrypted_payload?: string | null
-          encrypted_payload_kv?: number | null
-          event_type?: string
-          id?: string
-          payload?: Json
-        }
-        Relationships: []
-      }
       customer_recovery_shares: {
         Row: {
           created_at: string
@@ -347,7 +224,15 @@ export type Database = {
           team_key_version?: number
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "customer_recovery_shares_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: true
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       customer_vault_meta: {
         Row: {
@@ -404,7 +289,15 @@ export type Database = {
           vault_verifier_ciphertext?: string
           workspace_key_id?: string | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "customer_vault_meta_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: true
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       customers: {
         Row: {
@@ -447,6 +340,53 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
+      }
+      encrypted_transactions: {
+        Row: {
+          connection_id: string
+          encrypted_payload: string
+          external_id: string
+          fetched_at: string
+          hmac_counterparty: string | null
+          hmac_direction: string | null
+          hmac_type: string | null
+          id: string
+          occurred_at: string
+          payload_key_version: number
+        }
+        Insert: {
+          connection_id: string
+          encrypted_payload: string
+          external_id: string
+          fetched_at?: string
+          hmac_counterparty?: string | null
+          hmac_direction?: string | null
+          hmac_type?: string | null
+          id?: string
+          occurred_at: string
+          payload_key_version?: number
+        }
+        Update: {
+          connection_id?: string
+          encrypted_payload?: string
+          external_id?: string
+          fetched_at?: string
+          hmac_counterparty?: string | null
+          hmac_direction?: string | null
+          hmac_type?: string | null
+          id?: string
+          occurred_at?: string
+          payload_key_version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "encrypted_transactions_connection_id_fkey"
+            columns: ["connection_id"]
+            isOneToOne: false
+            referencedRelation: "connections"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       invoices: {
         Row: {
@@ -497,7 +437,22 @@ export type Database = {
           subscription_id?: string | null
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "invoices_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "invoices_subscription_id_fkey"
+            columns: ["subscription_id"]
+            isOneToOne: false
+            referencedRelation: "subscriptions"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       payments: {
         Row: {
@@ -545,7 +500,113 @@ export type Database = {
           status?: string
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "payments_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "payments_invoice_id_fkey"
+            columns: ["invoice_id"]
+            isOneToOne: false
+            referencedRelation: "invoices"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      platforms: {
+        Row: {
+          api_key_hash: string
+          cors_origin: string | null
+          created_at: string
+          customer_id: string | null
+          display_brand_color: string | null
+          display_name: string | null
+          id: string
+          is_internal: boolean
+          name: string
+          slug: string
+          tier: string
+          updated_at: string
+        }
+        Insert: {
+          api_key_hash: string
+          cors_origin?: string | null
+          created_at?: string
+          customer_id?: string | null
+          display_brand_color?: string | null
+          display_name?: string | null
+          id?: string
+          is_internal?: boolean
+          name: string
+          slug: string
+          tier?: string
+          updated_at?: string
+        }
+        Update: {
+          api_key_hash?: string
+          cors_origin?: string | null
+          created_at?: string
+          customer_id?: string | null
+          display_brand_color?: string | null
+          display_name?: string | null
+          id?: string
+          is_internal?: boolean
+          name?: string
+          slug?: string
+          tier?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "platforms_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      source_wallets: {
+        Row: {
+          connection_id: string
+          created_at: string
+          encrypted_metadata: string
+          encrypted_metadata_key_version: number
+          external_wallet_id: string
+          id: string
+          is_synced: boolean
+        }
+        Insert: {
+          connection_id: string
+          created_at?: string
+          encrypted_metadata: string
+          encrypted_metadata_key_version?: number
+          external_wallet_id: string
+          id?: string
+          is_synced?: boolean
+        }
+        Update: {
+          connection_id?: string
+          created_at?: string
+          encrypted_metadata?: string
+          encrypted_metadata_key_version?: number
+          external_wallet_id?: string
+          id?: string
+          is_synced?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "source_wallets_connection_id_fkey"
+            columns: ["connection_id"]
+            isOneToOne: false
+            referencedRelation: "connections"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       staff_users: {
         Row: {
@@ -567,6 +628,118 @@ export type Database = {
           user_id?: string
         }
         Relationships: []
+      }
+      stealth_connections: {
+        Row: {
+          app_slug: string
+          app_user_id: string
+          blind_index_b64: string | null
+          connection_kind: string
+          created_at: string
+          id: string
+          last_block_scanned: number | null
+          last_sync_at: string | null
+          sealed_envelope: Json
+          status: string
+          updated_at: string
+          wallet_birthday_plaintext: string | null
+        }
+        Insert: {
+          app_slug: string
+          app_user_id: string
+          blind_index_b64?: string | null
+          connection_kind: string
+          created_at?: string
+          id?: string
+          last_block_scanned?: number | null
+          last_sync_at?: string | null
+          sealed_envelope: Json
+          status?: string
+          updated_at?: string
+          wallet_birthday_plaintext?: string | null
+        }
+        Update: {
+          app_slug?: string
+          app_user_id?: string
+          blind_index_b64?: string | null
+          connection_kind?: string
+          created_at?: string
+          id?: string
+          last_block_scanned?: number | null
+          last_sync_at?: string | null
+          sealed_envelope?: Json
+          status?: string
+          updated_at?: string
+          wallet_birthday_plaintext?: string | null
+        }
+        Relationships: []
+      }
+      stealth_transactions: {
+        Row: {
+          block_height: number
+          connection_id: string
+          created_at: string
+          id: string
+          occurred_at: string
+          sealed_record: Json
+          txid_blind_index_b64: string
+        }
+        Insert: {
+          block_height: number
+          connection_id: string
+          created_at?: string
+          id?: string
+          occurred_at: string
+          sealed_record: Json
+          txid_blind_index_b64: string
+        }
+        Update: {
+          block_height?: number
+          connection_id?: string
+          created_at?: string
+          id?: string
+          occurred_at?: string
+          sealed_record?: Json
+          txid_blind_index_b64?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "stealth_transactions_connection_id_fkey"
+            columns: ["connection_id"]
+            isOneToOne: false
+            referencedRelation: "stealth_connections"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      subaccounts: {
+        Row: {
+          created_at: string
+          external_user_id: string
+          id: string
+          platform_id: string
+        }
+        Insert: {
+          created_at?: string
+          external_user_id: string
+          id?: string
+          platform_id: string
+        }
+        Update: {
+          created_at?: string
+          external_user_id?: string
+          id?: string
+          platform_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "subaccounts_platform_id_fkey"
+            columns: ["platform_id"]
+            isOneToOne: false
+            referencedRelation: "platforms"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       subscriptions: {
         Row: {
@@ -611,7 +784,15 @@ export type Database = {
           stripe_subscription_id?: string | null
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "subscriptions_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       user_app_grants: {
         Row: {
@@ -830,6 +1011,7 @@ export type Database = {
         }[]
       }
       get_or_create_direct_subaccount: { Args: never; Returns: string }
+      is_staff: { Args: never; Returns: boolean }
       get_or_vault_salt: { Args: never; Returns: string }
       list_or_access_tokens: {
         Args: never
@@ -850,6 +1032,10 @@ export type Database = {
           kem_public_key: string
           user_id: string
         }[]
+      }
+      revoke_or_access_token: {
+        Args: { raw_token: string }
+        Returns: undefined
       }
       rotate_or_access_token: { Args: { p_grant_id: string }; Returns: string }
     }
@@ -980,6 +1166,9 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {},
   },
