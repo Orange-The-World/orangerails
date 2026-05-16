@@ -35,7 +35,6 @@ It connects:
 |---|---|---|---|---|---|
 | Open source | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Bitcoin-first | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Books ready | ❌ | ❌ | ❌ | Tax only | ✅ |
 | Zero-knowledge | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Self-hostable | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Published open spec | ❌ | ❌ | ❌ | ❌ | ✅ |

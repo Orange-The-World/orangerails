@@ -1,8 +1,8 @@
-import { Bitcoin, BarChart3, Landmark, Plug, Lock, Wrench } from "lucide-react";
+import { Bitcoin, ShieldCheck, Landmark, Plug, Lock, Wrench } from "lucide-react";
 
 const features = [
   { icon: Bitcoin, title: "Bitcoin-native", body: "Sats, UTXOs, on-chain & Lightning. Built around the asset, not bolted on." },
-  { icon: BarChart3, title: "Books ready", body: "Double-entry exports your accountant will accept. Not a tax summary." },
+  { icon: ShieldCheck, title: "Privacy tiers disclosed", body: "Every source labeled T0 to T3 at connect time. The customer sees the tradeoff before they pick." },
   { icon: Landmark, title: "Bank-connected", body: "Bridge fiat rails alongside Bitcoin without leaking either to a third party." },
   { icon: Plug, title: "Open API spec", body: "Published, versioned, and documented. No surprise breaking changes." },
   { icon: Lock, title: "Zero-knowledge mode", body: "Run end-to-end encrypted by default. We can't read what we don't have." },

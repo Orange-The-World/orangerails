@@ -7,7 +7,6 @@ const competitors = ["Plaid", "Mesh Connect", "Vezgo", "Koinly", "OrangeRails"] 
 const rows: { label: string; cells: Cell[] }[] = [
   { label: "Open source", cells: [false, false, false, false, true] },
   { label: "Bitcoin-first", cells: [false, false, false, false, true] },
-  { label: "Books ready", cells: [false, false, false, "Tax only", true] },
   { label: "Zero-knowledge", cells: [false, false, false, false, true] },
   { label: "Self-hostable", cells: [false, false, false, false, true] },
   { label: "Published open spec", cells: [false, false, false, false, true] },
