@@ -23,11 +23,19 @@ const cols: { title: string; links: FooterLink[] }[] = [
     ],
   },
   {
+    title: "Help",
+    links: [
+      { label: "Support", href: "https://support.bitbooks.com" },
+      { label: "Feedback", href: "https://feedback.bitbooks.com" },
+      { label: "Docs", to: "/docs" },
+    ],
+  },
+  {
     title: "Connect",
     links: [
-      { label: "GitHub", href: "#" },
-      { label: "Twitter", href: "#" },
-      { label: "Nostr", href: "#" },
+      { label: "GitHub", href: "https://github.com/MorningRevolution/orangerails" },
+      { label: "Twitter", href: "https://x.com/orangerails" },
+      { label: "Nostr", href: "https://primal.net/p/orangerails" },
     ],
   },
 ];
@@ -36,7 +44,7 @@ export function Footer() {
   return (
     <footer className="border-t border-border bg-background">
       <div className="mx-auto max-w-6xl px-6 py-16">
-        <div className="grid gap-10 md:grid-cols-4">
+        <div className="grid gap-10 md:grid-cols-5">
           <div>
             <Link to="/" className="flex items-center gap-2 font-semibold">
               <Zap className="h-5 w-5 fill-primary text-primary" strokeWidth={2.5} />

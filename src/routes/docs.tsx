@@ -65,28 +65,31 @@ const primary = [
     title: "Quickstart",
     description: "10 minutes to your first synced transaction.",
     eyebrow: "Get started",
+    href: "https://wiki.abascal.ca/s/3aac6fb6-64df-4421-839f-08fbfa63a300",
   },
   {
     icon: Code2,
     title: "API reference",
     description: "REST endpoints, webhook events, normalized data shapes.",
     eyebrow: "Reference",
+    href: "https://wiki.abascal.ca/s/35334178-f7d9-4f15-803b-a619e829b70a",
   },
   {
     icon: Server,
     title: "Self-hosting guide",
     description: "Docker Compose, Helm, Supabase-compatible schema.",
     eyebrow: "Operations",
+    href: "https://wiki.abascal.ca/s/04ded218-bff9-4977-9b37-9ebfe238784b",
   },
 ];
 
 const secondary = [
-  { icon: Wrench, title: "Adapter SDK guide", body: "Build a typed adapter in a day." },
-  { icon: Lock, title: "Zero-knowledge architecture", body: "How split-connector encryption works." },
-  { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1 — published & versioned." },
-  { icon: Shield, title: "Security & threat model", body: "What we trust, and what we don't." },
-  { icon: GitCompare, title: "Migration from Plaid/Mesh/Vezgo", body: "Endpoint-by-endpoint mapping." },
-  { icon: Users, title: "Contributing & community", body: "Discord, RFCs, code of conduct." },
+  { icon: Wrench, title: "Adapter SDK guide", body: "Build a typed adapter in a day.", href: "" },
+  { icon: Lock, title: "How authentication works", body: "Three-layer model (app, source, zero-knowledge wrapper).", href: "https://wiki.abascal.ca/doc/how-authentication-works-for-integrators-5UNmuB2f4U" },
+  { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "" },
+  { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "" },
+  { icon: GitCompare, title: "Stealth Sync architecture", body: "How xpub stays in the browser, BIP 158 filters.", href: "https://wiki.abascal.ca/doc/stealth-sync" },
+  { icon: Users, title: "Contributing", body: "Repo conventions, branch model, RFCs.", href: "" },
 ];
 
 function DocsPage() {
@@ -115,7 +118,9 @@ function DocsPage() {
               {primary.map((card) => (
                 <a
                   key={card.title}
-                  href="#"
+                  href={card.href || "#"}
+                  target={card.href ? "_blank" : undefined}
+                  rel={card.href ? "noreferrer" : undefined}
                   className="group flex h-full flex-col rounded-2xl border border-border bg-background p-7 transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-xl hover:shadow-primary/5"
                 >
                   <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary-soft text-primary ring-1 ring-primary/15">
@@ -146,7 +151,9 @@ function DocsPage() {
               {secondary.map((s) => (
                 <a
                   key={s.title}
-                  href="#"
+                  href={s.href || "#"}
+                  target={s.href ? "_blank" : undefined}
+                  rel={s.href ? "noreferrer" : undefined}
                   className="group flex flex-col gap-3 bg-background p-6 transition-colors hover:bg-card"
                 >
                   <s.icon className="h-5 w-5 text-primary/80" />
@@ -162,14 +169,19 @@ function DocsPage() {
               ))}
             </div>
 
-            <div className="mt-12 rounded-xl border border-border bg-background p-6 text-center">
-              <p className="text-sm text-muted-foreground">
-                Looking for the full API?{" "}
-                <Link to="/integrations" className="font-medium text-primary">
-                  Browse the integrations catalog
-                </Link>{" "}
-                or join the beta for hosted access.
-              </p>
+            <div className="mt-12 grid gap-4 md:grid-cols-3">
+              <a href="https://support.bitbooks.com" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
+                <h3 className="font-semibold">Need support?</h3>
+                <p className="mt-1 text-sm text-muted-foreground">Open a ticket at support.bitbooks.com.</p>
+              </a>
+              <a href="https://feedback.bitbooks.com" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
+                <h3 className="font-semibold">Request a feature</h3>
+                <p className="mt-1 text-sm text-muted-foreground">Vote and propose at feedback.bitbooks.com.</p>
+              </a>
+              <Link to="/providers" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
+                <h3 className="font-semibold">Browse 100+ connections</h3>
+                <p className="mt-1 text-sm text-muted-foreground">Every source supported today.</p>
+              </Link>
             </div>
           </div>
         </section>
