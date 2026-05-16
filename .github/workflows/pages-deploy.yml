@@ -31,8 +31,25 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Pick Supabase project for this branch
+        id: sb
+        run: |
+          if [ "${{ github.ref_name }}" = "prod" ]; then
+            echo "project_id=${{ vars.VITE_SUPABASE_PROJECT_ID_PROD }}" >> "$GITHUB_OUTPUT"
+            echo "url=${{ vars.VITE_SUPABASE_URL_PROD }}" >> "$GITHUB_OUTPUT"
+            echo "key=${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY_PROD }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "project_id=${{ vars.VITE_SUPABASE_PROJECT_ID_DEV }}" >> "$GITHUB_OUTPUT"
+            echo "url=${{ vars.VITE_SUPABASE_URL_DEV }}" >> "$GITHUB_OUTPUT"
+            echo "key=${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY_DEV }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build
         run: bun run build
+        env:
+          VITE_SUPABASE_PROJECT_ID: ${{ steps.sb.outputs.project_id }}
+          VITE_SUPABASE_URL: ${{ steps.sb.outputs.url }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ steps.sb.outputs.key }}
 
       - name: Pick Pages project for this branch
         id: target
