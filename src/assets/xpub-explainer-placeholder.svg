@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 540" role="img" aria-labelledby="title">
+  <title id="title">Diagram: your wallet's public key stays in your browser; only scrambled bytes reach OrangeRails.</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1f2937"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#F7931A"/>
+      <stop offset="100%" stop-color="#FFB055"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff10"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="540" fill="url(#bg)"/>
+  <rect width="1280" height="540" fill="url(#grid)"/>
+
+  <!-- Left: Browser -->
+  <g transform="translate(80,120)">
+    <rect width="380" height="300" rx="14" fill="#111827" stroke="#374151"/>
+    <rect width="380" height="38" rx="14" fill="#1f2937"/>
+    <circle cx="22" cy="19" r="5" fill="#ef4444"/>
+    <circle cx="42" cy="19" r="5" fill="#f59e0b"/>
+    <circle cx="62" cy="19" r="5" fill="#22c55e"/>
+    <text x="190" y="24" font-family="ui-monospace, SFMono-Regular, monospace" font-size="13" fill="#9ca3af" text-anchor="middle">Your browser</text>
+
+    <text x="24" y="80" font-family="Inter, system-ui, sans-serif" font-size="16" fill="#fafafa" font-weight="600">xpub6CUGRUo...</text>
+    <text x="24" y="104" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">stays here. never leaves.</text>
+
+    <g transform="translate(24,140)">
+      <rect width="332" height="40" rx="8" fill="#1f2937" stroke="#374151"/>
+      <text x="14" y="25" font-family="ui-monospace, monospace" font-size="12" fill="#a3a3a3">derive addresses (BIP44)</text>
+    </g>
+    <g transform="translate(24,190)">
+      <rect width="332" height="40" rx="8" fill="#1f2937" stroke="#374151"/>
+      <text x="14" y="25" font-family="ui-monospace, monospace" font-size="12" fill="#a3a3a3">match against block filters</text>
+    </g>
+    <g transform="translate(24,240)">
+      <rect width="332" height="40" rx="8" fill="url(#orange)"/>
+      <text x="166" y="25" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#0f172a" font-weight="700" text-anchor="middle">lock the box (AES-256-GCM)</text>
+    </g>
+  </g>
+
+  <!-- Arrow + label -->
+  <g transform="translate(485,260)">
+    <line x1="0" y1="10" x2="280" y2="10" stroke="#F7931A" stroke-width="3" stroke-dasharray="6 6"/>
+    <polygon points="280,0 300,10 280,20" fill="#F7931A"/>
+    <text x="150" y="-12" font-family="ui-monospace, monospace" font-size="13" fill="#F7931A" text-anchor="middle" font-weight="600">scrambled bytes only</text>
+    <text x="150" y="38" font-family="Inter, system-ui, sans-serif" font-size="11" fill="#6b7280" text-anchor="middle">no xpub. no addresses. no txids.</text>
+  </g>
+
+  <!-- Right: OR server -->
+  <g transform="translate(820,120)">
+    <rect width="380" height="300" rx="14" fill="#111827" stroke="#374151"/>
+    <rect width="380" height="38" rx="14" fill="#1f2937"/>
+    <text x="190" y="24" font-family="ui-monospace, monospace" font-size="13" fill="#9ca3af" text-anchor="middle">OrangeRails</text>
+
+    <g transform="translate(24,80)">
+      <rect width="332" height="48" rx="8" fill="#0b1220" stroke="#1f2937"/>
+      <text x="14" y="20" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">received_payload</text>
+      <text x="14" y="38" font-family="ui-monospace, monospace" font-size="12" fill="#fafafa">7Bf3...x2A1...9eC0... (opaque)</text>
+    </g>
+
+    <g transform="translate(24,144)">
+      <rect width="332" height="60" rx="8" fill="#0b1220" stroke="#1f2937"/>
+      <text x="14" y="22" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">what we can read</text>
+      <text x="14" y="42" font-family="Inter, system-ui, sans-serif" font-size="13" fill="#ef4444" font-weight="600">nothing. by design.</text>
+    </g>
+
+    <g transform="translate(24,220)">
+      <rect width="332" height="60" rx="8" fill="#0b1220" stroke="#1f2937"/>
+      <text x="14" y="22" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">what we store</text>
+      <text x="14" y="42" font-family="Inter, system-ui, sans-serif" font-size="13" fill="#fafafa" font-weight="600">scrambled bytes. that's it.</text>
+    </g>
+  </g>
+
+  <!-- Footer -->
+  <text x="640" y="490" font-family="Inter, system-ui, sans-serif" font-size="12" fill="#6b7280" text-anchor="middle">Open source. Apache 2.0. Verifiable in code.</text>
+</svg>

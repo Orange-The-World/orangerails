@@ -38,26 +38,15 @@ export function useRole(): RoleState {
         return;
       }
 
-      // The auto-generated Database type doesn't yet include staff_users
-      // and customers (added by 20260505010000_admin_pages_schema.sql).
-      // Narrow at the boundary instead of leaking 'any' through the hook.
-      const db = supabase as unknown as {
-        from: (table: string) => ReturnType<typeof supabase.from>;
-      };
-      const [staffResp, customerResp] = await Promise.all([
-        db.from('staff_users').select('user_id').eq('user_id', user.id).maybeSingle(),
-        db
+      const [{ data: staffRow }, { data: customer }] = await Promise.all([
+        supabase.from('staff_users').select('user_id').eq('user_id', user.id).maybeSingle(),
+        supabase
           .from('customers')
           .select('id, name, customer_type')
           .eq('auth_user_id', user.id)
           .maybeSingle(),
       ]);
       if (cancelled) return;
-
-      const staffRow = staffResp.data as { user_id: string } | null;
-      const customer = customerResp.data as
-        | { id: string; name: string; customer_type: RoleState['customerType'] }
-        | null;
 
       let role: Role = 'end-user';
       if (staffRow) role = 'staff';
@@ -70,7 +59,7 @@ export function useRole(): RoleState {
         email: user.email ?? null,
         customerId: customer?.id ?? null,
         customerName: customer?.name ?? null,
-        customerType: customer?.customer_type ?? null,
+        customerType: (customer?.customer_type ?? null) as RoleState['customerType'],
       });
     }
 

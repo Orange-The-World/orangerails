@@ -7,7 +7,8 @@ const cols: { title: string; links: FooterLink[] }[] = [
   {
     title: "Product",
     links: [
-      { label: "Integrations", to: "/integrations" },
+      { label: "Connections", to: "/providers" },
+      { label: "Connect a wallet", to: "/connect" },
       { label: "Pricing", to: "/pricing" },
       { label: "Docs", to: "/docs" },
     ],
@@ -73,9 +74,6 @@ export function Footer() {
 
         <div className="mt-12 flex flex-col items-start justify-between gap-2 border-t border-border pt-6 text-xs text-muted-foreground sm:flex-row sm:items-center">
           <p>© 2026 OrangeRails. Apache 2.0 licensed.</p>
-          <p>
-            Part of the <span className="text-foreground">BitBooks</span> family.
-          </p>
         </div>
       </div>
     </footer>

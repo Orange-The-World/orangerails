@@ -1,12 +1,10 @@
-import { ArrowRight, Github } from "lucide-react";
+import { ArrowRight, BookOpen, Github } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { Terminal } from "./Terminal";
+import { LiveConnectionCount } from "@/components/LiveConnectionCount";
 
 export function Hero() {
-  const scrollToWaitlist = () => {
-    document.getElementById("waitlist")?.scrollIntoView({ behavior: "smooth" });
-  };
-
   return (
     <section className="relative overflow-hidden">
       <div className="pointer-events-none absolute inset-0 grid-bg opacity-60 [mask-image:radial-gradient(ellipse_at_top,black,transparent_70%)]" />
@@ -19,31 +17,58 @@ export function Hero() {
           </div>
 
           <h1 className="mt-5 text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-[3.5rem] lg:leading-[1.05]">
-            The rails every Bitcoin business <span className="text-primary">runs on</span>.
+            The aggregator that <span className="text-primary">cannot read your data</span>.
           </h1>
 
           <p className="mt-5 max-w-xl text-balance text-base text-muted-foreground sm:text-lg">
-            Open source. Zero knowledge. Built for Bitcoin. The alternative to Plaid that
-            <span className="text-foreground"> can't read your data</span> — because it can't.
+            <LiveConnectionCount /> connections. Open source. Value for value. Connect a wallet, an
+            exchange, or a payment processor through a single API that ships with
+            <span className="text-foreground"> zero knowledge encryption by default</span>.
           </p>
 
-          <div className="mt-8 flex flex-wrap gap-3">
-            <Button size="lg" onClick={scrollToWaitlist} className="group">
-              Join the Waitlist
-              <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+          <div className="mt-8 flex flex-wrap items-center gap-3">
+            <Button asChild size="lg" className="group">
+              <Link to="/connect">
+                Connect a wallet
+                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+              </Link>
             </Button>
-            <Button asChild size="lg" variant="outline">
-              <a href="#" target="_blank" rel="noreferrer">
+            <Button asChild size="lg" variant="ghost">
+              <a
+                href="https://docs.orangerails.com"
+                target="_blank"
+                rel="noreferrer"
+              >
+                <BookOpen className="h-4 w-4" />
+                Read the docs
+              </a>
+            </Button>
+            <Button asChild size="lg" variant="ghost">
+              <a
+                href="https://github.com/MorningRevolution/orangerails#quickstart"
+                target="_blank"
+                rel="noreferrer"
+              >
                 <Github className="h-4 w-4" />
-                View on GitHub
+                Self host
               </a>
             </Button>
           </div>
 
+          <div className="mt-4 text-sm">
+            <Link
+              to="/providers"
+              className="inline-flex items-center gap-1.5 text-muted-foreground hover:text-primary transition-colors"
+            >
+              or browse every connection
+              <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
+          </div>
+
           <ul className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
             <Badge>Apache 2.0</Badge>
-            <Badge>Self-hostable</Badge>
-            <Badge>Zero-knowledge by design</Badge>
+            <Badge>Self hostable</Badge>
+            <Badge>Zero knowledge by design</Badge>
           </ul>
         </div>
 

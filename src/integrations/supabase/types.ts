@@ -12,6 +12,31 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "14.5"
   }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
+  }
   public: {
     Tables: {
       adapter_requests: {
@@ -71,6 +96,47 @@ export type Database = {
         }
         Relationships: []
       }
+      audit_events: {
+        Row: {
+          actor_user_id: string | null
+          created_at: string
+          customer_id: string | null
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          event_type: string
+          id: string
+          payload: Json
+        }
+        Insert: {
+          actor_user_id?: string | null
+          created_at?: string
+          customer_id?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          event_type: string
+          id?: string
+          payload?: Json
+        }
+        Update: {
+          actor_user_id?: string | null
+          created_at?: string
+          customer_id?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          event_type?: string
+          id?: string
+          payload?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "audit_events_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       connections: {
         Row: {
           created_at: string
@@ -124,6 +190,157 @@ export type Database = {
           },
         ]
       }
+      customer_recovery_shares: {
+        Row: {
+          created_at: string
+          customer_id: string
+          notes: string | null
+          shamir_threshold: number
+          shamir_total_shares: number
+          share_ciphertext: string
+          share_index: number
+          team_key_version: number
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          customer_id: string
+          notes?: string | null
+          shamir_threshold?: number
+          shamir_total_shares?: number
+          share_ciphertext: string
+          share_index?: number
+          team_key_version?: number
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          customer_id?: string
+          notes?: string | null
+          shamir_threshold?: number
+          shamir_total_shares?: number
+          share_ciphertext?: string
+          share_index?: number
+          team_key_version?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "customer_recovery_shares_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: true
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      customer_vault_meta: {
+        Row: {
+          created_at: string
+          customer_id: string
+          enc_mek_ciphertext: string | null
+          kdf_algorithm: string
+          kdf_params: Json
+          kem_public_key: string | null
+          kem_secret_wrapped: string | null
+          pqc_key_version: number
+          recovery_ciphertext: string | null
+          sig_public_key: string | null
+          sig_secret_wrapped: string | null
+          updated_at: string
+          vault_key_version: number
+          vault_salt: string
+          vault_verifier_ciphertext: string
+          workspace_key_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          customer_id: string
+          enc_mek_ciphertext?: string | null
+          kdf_algorithm?: string
+          kdf_params?: Json
+          kem_public_key?: string | null
+          kem_secret_wrapped?: string | null
+          pqc_key_version?: number
+          recovery_ciphertext?: string | null
+          sig_public_key?: string | null
+          sig_secret_wrapped?: string | null
+          updated_at?: string
+          vault_key_version?: number
+          vault_salt: string
+          vault_verifier_ciphertext: string
+          workspace_key_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          customer_id?: string
+          enc_mek_ciphertext?: string | null
+          kdf_algorithm?: string
+          kdf_params?: Json
+          kem_public_key?: string | null
+          kem_secret_wrapped?: string | null
+          pqc_key_version?: number
+          recovery_ciphertext?: string | null
+          sig_public_key?: string | null
+          sig_secret_wrapped?: string | null
+          updated_at?: string
+          vault_key_version?: number
+          vault_salt?: string
+          vault_verifier_ciphertext?: string
+          workspace_key_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "customer_vault_meta_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: true
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      customers: {
+        Row: {
+          auth_user_id: string | null
+          created_at: string
+          customer_type: string
+          email: string
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          id: string
+          name: string
+          plan: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          auth_user_id?: string | null
+          created_at?: string
+          customer_type: string
+          email: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          id?: string
+          name: string
+          plan: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          auth_user_id?: string | null
+          created_at?: string
+          customer_type?: string
+          email?: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          id?: string
+          name?: string
+          plan?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       encrypted_transactions: {
         Row: {
           connection_id: string
@@ -171,11 +388,141 @@ export type Database = {
           },
         ]
       }
+      invoices: {
+        Row: {
+          amount_cents: number
+          created_at: string
+          currency: string
+          customer_id: string
+          due_date: string | null
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          hosted_invoice_url: string | null
+          id: string
+          paid_at: string | null
+          status: string
+          stripe_invoice_id: string | null
+          subscription_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          amount_cents: number
+          created_at?: string
+          currency?: string
+          customer_id: string
+          due_date?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          hosted_invoice_url?: string | null
+          id?: string
+          paid_at?: string | null
+          status?: string
+          stripe_invoice_id?: string | null
+          subscription_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          amount_cents?: number
+          created_at?: string
+          currency?: string
+          customer_id?: string
+          due_date?: string | null
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          hosted_invoice_url?: string | null
+          id?: string
+          paid_at?: string | null
+          status?: string
+          stripe_invoice_id?: string | null
+          subscription_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "invoices_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "invoices_subscription_id_fkey"
+            columns: ["subscription_id"]
+            isOneToOne: false
+            referencedRelation: "subscriptions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      payments: {
+        Row: {
+          amount_cents: number
+          created_at: string
+          currency: string
+          customer_id: string
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          failure_reason: string | null
+          id: string
+          invoice_id: string
+          provider_payment_id: string | null
+          rail: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          amount_cents: number
+          created_at?: string
+          currency?: string
+          customer_id: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          failure_reason?: string | null
+          id?: string
+          invoice_id: string
+          provider_payment_id?: string | null
+          rail: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          amount_cents?: number
+          created_at?: string
+          currency?: string
+          customer_id?: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          failure_reason?: string | null
+          id?: string
+          invoice_id?: string
+          provider_payment_id?: string | null
+          rail?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "payments_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "payments_invoice_id_fkey"
+            columns: ["invoice_id"]
+            isOneToOne: false
+            referencedRelation: "invoices"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       platforms: {
         Row: {
           api_key_hash: string
           cors_origin: string | null
           created_at: string
+          customer_id: string | null
           display_brand_color: string | null
           display_name: string | null
           id: string
@@ -189,6 +536,7 @@ export type Database = {
           api_key_hash: string
           cors_origin?: string | null
           created_at?: string
+          customer_id?: string | null
           display_brand_color?: string | null
           display_name?: string | null
           id?: string
@@ -202,6 +550,7 @@ export type Database = {
           api_key_hash?: string
           cors_origin?: string | null
           created_at?: string
+          customer_id?: string | null
           display_brand_color?: string | null
           display_name?: string | null
           id?: string
@@ -211,7 +560,15 @@ export type Database = {
           tier?: string
           updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "platforms_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       source_wallets: {
         Row: {
@@ -251,6 +608,110 @@ export type Database = {
           },
         ]
       }
+      staff_users: {
+        Row: {
+          granted_at: string
+          granted_by: string | null
+          notes: string | null
+          user_id: string
+        }
+        Insert: {
+          granted_at?: string
+          granted_by?: string | null
+          notes?: string | null
+          user_id: string
+        }
+        Update: {
+          granted_at?: string
+          granted_by?: string | null
+          notes?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      stealth_connections: {
+        Row: {
+          app_slug: string
+          app_user_id: string
+          blind_index_b64: string | null
+          connection_kind: string
+          created_at: string
+          id: string
+          last_block_scanned: number | null
+          last_sync_at: string | null
+          sealed_envelope: Json
+          status: string
+          updated_at: string
+          wallet_birthday_plaintext: string | null
+        }
+        Insert: {
+          app_slug: string
+          app_user_id: string
+          blind_index_b64?: string | null
+          connection_kind: string
+          created_at?: string
+          id?: string
+          last_block_scanned?: number | null
+          last_sync_at?: string | null
+          sealed_envelope: Json
+          status?: string
+          updated_at?: string
+          wallet_birthday_plaintext?: string | null
+        }
+        Update: {
+          app_slug?: string
+          app_user_id?: string
+          blind_index_b64?: string | null
+          connection_kind?: string
+          created_at?: string
+          id?: string
+          last_block_scanned?: number | null
+          last_sync_at?: string | null
+          sealed_envelope?: Json
+          status?: string
+          updated_at?: string
+          wallet_birthday_plaintext?: string | null
+        }
+        Relationships: []
+      }
+      stealth_transactions: {
+        Row: {
+          block_height: number
+          connection_id: string
+          created_at: string
+          id: string
+          occurred_at: string
+          sealed_record: Json
+          txid_blind_index_b64: string
+        }
+        Insert: {
+          block_height: number
+          connection_id: string
+          created_at?: string
+          id?: string
+          occurred_at: string
+          sealed_record: Json
+          txid_blind_index_b64: string
+        }
+        Update: {
+          block_height?: number
+          connection_id?: string
+          created_at?: string
+          id?: string
+          occurred_at?: string
+          sealed_record?: Json
+          txid_blind_index_b64?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "stealth_transactions_connection_id_fkey"
+            columns: ["connection_id"]
+            isOneToOne: false
+            referencedRelation: "stealth_connections"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       subaccounts: {
         Row: {
           created_at: string
@@ -276,6 +737,59 @@ export type Database = {
             columns: ["platform_id"]
             isOneToOne: false
             referencedRelation: "platforms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      subscriptions: {
+        Row: {
+          cancel_at_period_end: boolean
+          created_at: string
+          current_period_end: string | null
+          current_period_start: string | null
+          customer_id: string
+          encrypted_payload: string | null
+          encrypted_payload_kv: number | null
+          id: string
+          plan: string
+          status: string
+          stripe_subscription_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          cancel_at_period_end?: boolean
+          created_at?: string
+          current_period_end?: string | null
+          current_period_start?: string | null
+          customer_id: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          id?: string
+          plan: string
+          status: string
+          stripe_subscription_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          cancel_at_period_end?: boolean
+          created_at?: string
+          current_period_end?: string | null
+          current_period_start?: string | null
+          customer_id?: string
+          encrypted_payload?: string | null
+          encrypted_payload_kv?: number | null
+          id?: string
+          plan?: string
+          status?: string
+          stripe_subscription_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "subscriptions_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
             referencedColumns: ["id"]
           },
         ]
@@ -497,6 +1011,7 @@ export type Database = {
         }[]
       }
       get_or_create_direct_subaccount: { Args: never; Returns: string }
+      is_staff: { Args: never; Returns: boolean }
       get_or_vault_salt: { Args: never; Returns: string }
       list_or_access_tokens: {
         Args: never
@@ -517,6 +1032,10 @@ export type Database = {
           kem_public_key: string
           user_id: string
         }[]
+      }
+      revoke_or_access_token: {
+        Args: { raw_token: string }
+        Returns: undefined
       }
       rotate_or_access_token: { Args: { p_grant_id: string }; Returns: string }
     }
@@ -647,6 +1166,9 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {},
   },

@@ -12,9 +12,11 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as UnlockRouteImport } from './routes/unlock'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as RecoverRouteImport } from './routes/recover'
+import { Route as ProvidersRouteImport } from './routes/providers'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as PortalRouteImport } from './routes/portal'
 import { Route as OpenSourceRouteImport } from './routes/open-source'
+import { Route as McpRouteImport } from './routes/mcp'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IntegrationsRouteImport } from './routes/integrations'
 import { Route as DocsRouteImport } from './routes/docs'
@@ -41,6 +43,11 @@ const RecoverRoute = RecoverRouteImport.update({
   path: '/recover',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ProvidersRoute = ProvidersRouteImport.update({
+  id: '/providers',
+  path: '/providers',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PricingRoute = PricingRouteImport.update({
   id: '/pricing',
   path: '/pricing',
@@ -54,6 +61,11 @@ const PortalRoute = PortalRouteImport.update({
 const OpenSourceRoute = OpenSourceRouteImport.update({
   id: '/open-source',
   path: '/open-source',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const McpRoute = McpRouteImport.update({
+  id: '/mcp',
+  path: '/mcp',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -115,9 +127,11 @@ export interface FileRoutesByFullPath {
   '/docs': typeof DocsRoute
   '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
+  '/mcp': typeof McpRoute
   '/open-source': typeof OpenSourceRoute
   '/portal': typeof PortalRoute
   '/pricing': typeof PricingRoute
+  '/providers': typeof ProvidersRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
@@ -132,9 +146,11 @@ export interface FileRoutesByTo {
   '/docs': typeof DocsRoute
   '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
+  '/mcp': typeof McpRoute
   '/open-source': typeof OpenSourceRoute
   '/portal': typeof PortalRoute
   '/pricing': typeof PricingRoute
+  '/providers': typeof ProvidersRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
@@ -151,9 +167,11 @@ export interface FileRoutesById {
   '/docs': typeof DocsRoute
   '/integrations': typeof IntegrationsRoute
   '/login': typeof LoginRoute
+  '/mcp': typeof McpRoute
   '/open-source': typeof OpenSourceRoute
   '/portal': typeof PortalRoute
   '/pricing': typeof PricingRoute
+  '/providers': typeof ProvidersRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
@@ -171,9 +189,11 @@ export interface FileRouteTypes {
     | '/docs'
     | '/integrations'
     | '/login'
+    | '/mcp'
     | '/open-source'
     | '/portal'
     | '/pricing'
+    | '/providers'
     | '/recover'
     | '/signup'
     | '/unlock'
@@ -188,9 +208,11 @@ export interface FileRouteTypes {
     | '/docs'
     | '/integrations'
     | '/login'
+    | '/mcp'
     | '/open-source'
     | '/portal'
     | '/pricing'
+    | '/providers'
     | '/recover'
     | '/signup'
     | '/unlock'
@@ -206,9 +228,11 @@ export interface FileRouteTypes {
     | '/docs'
     | '/integrations'
     | '/login'
+    | '/mcp'
     | '/open-source'
     | '/portal'
     | '/pricing'
+    | '/providers'
     | '/recover'
     | '/signup'
     | '/unlock'
@@ -225,9 +249,11 @@ export interface RootRouteChildren {
   DocsRoute: typeof DocsRoute
   IntegrationsRoute: typeof IntegrationsRoute
   LoginRoute: typeof LoginRoute
+  McpRoute: typeof McpRoute
   OpenSourceRoute: typeof OpenSourceRoute
   PortalRoute: typeof PortalRoute
   PricingRoute: typeof PricingRoute
+  ProvidersRoute: typeof ProvidersRoute
   RecoverRoute: typeof RecoverRoute
   SignupRoute: typeof SignupRoute
   UnlockRoute: typeof UnlockRoute
@@ -256,6 +282,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RecoverRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/providers': {
+      id: '/providers'
+      path: '/providers'
+      fullPath: '/providers'
+      preLoaderRoute: typeof ProvidersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/pricing': {
       id: '/pricing'
       path: '/pricing'
@@ -275,6 +308,13 @@ declare module '@tanstack/react-router' {
       path: '/open-source'
       fullPath: '/open-source'
       preLoaderRoute: typeof OpenSourceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mcp': {
+      id: '/mcp'
+      path: '/mcp'
+      fullPath: '/mcp'
+      preLoaderRoute: typeof McpRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -381,9 +421,11 @@ const rootRouteChildren: RootRouteChildren = {
   DocsRoute: DocsRoute,
   IntegrationsRoute: IntegrationsRoute,
   LoginRoute: LoginRoute,
+  McpRoute: McpRoute,
   OpenSourceRoute: OpenSourceRoute,
   PortalRoute: PortalRoute,
   PricingRoute: PricingRoute,
+  ProvidersRoute: ProvidersRoute,
   RecoverRoute: RecoverRoute,
   SignupRoute: SignupRoute,
   UnlockRoute: UnlockRoute,

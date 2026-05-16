@@ -35,7 +35,7 @@ It connects:
 |---|---|---|---|---|---|
 | Open source | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Bitcoin-first | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Accounting-grade | ❌ | ❌ | ❌ | Tax only | ✅ |
+| Books ready | ❌ | ❌ | ❌ | Tax only | ✅ |
 | Zero-knowledge | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Self-hostable | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Published open spec | ❌ | ❌ | ❌ | ❌ | ✅ |
@@ -50,7 +50,7 @@ OrangeRails is the only option in this category that is simultaneously open sour
 4. **Post-quantum readiness**: hybrid X25519 + ML-KEM-768 wrapping for workspace-shared keys; ML-DSA-65 signatures for co-admin operations.
 5. **Same code, every tier.** The hosted service runs the exact Apache 2.0 code in the public repository. There is no private "enterprise" fork with weaker privacy.
 
-## Integrations (22+)
+## Connections (100+)
 
 Available today:
 - Bitcoin Core (RPC) — full node sovereignty
@@ -121,7 +121,7 @@ Yes — and the guarantee is mechanical, not promissory. The code is public; the
 Free to self-host. $15/year for individuals. $49/month for teams. Usage-based for developers embedding the API. Zero-knowledge mode is included on every tier.
 
 **Which Bitcoin services does OrangeRails support?**
-22+ adapters across banking (Blink, Strike, BitCredit), exchanges (Kraken, Coinbase, River, Swan), wallets (Bitcoin Core, bwt/xpub, Sparrow, Fedi), mining (Ocean, Braiins, ViaBTC), Lightning (LND, CLN, LDK, Phoenix), explorers (mempool.space), payments (BTCPay), and file import (CSV/OFX/QIF).
+100+ live connections. 4 native adapters (Bitcoin xpub via Stealth Sync, Strike, BTCPay Server, Blink) plus 98 exchanges through the CCXT bridge. Lightning (LND, CLN, LDK, Phoenix), mining pools (Ocean, Braiins, ViaBTC), banks (via Quiltt or Plaid), and CSV/OFX/QIF file imports are on the public roadmap.
 
 **Is OrangeRails actually open source?**
 Yes. Apache 2.0. The hosted service runs the same code as the public repository. There is no closed enterprise fork.

@@ -78,6 +78,12 @@
 
   /* Subtle orange tint surface */
   --primary-soft: oklch(0.74 0.17 55 / 0.08);
+
+  /* Privacy tier accents — used by PrivacyTierBadge */
+  --tier-t0: oklch(0.7 0.18 145);   /* green — just you */
+  --tier-t1: oklch(0.62 0.18 245);  /* blue — you and the wallet */
+  --tier-t2: oklch(0.78 0.16 75);   /* amber — aggregator */
+  --tier-t3: oklch(0.6 0.02 260);   /* grey — manual upload */
 }
 
 .dark {
