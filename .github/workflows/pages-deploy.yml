@@ -2,7 +2,7 @@ name: Deploy to Cloudflare Pages
 
 on:
   push:
-    branches: [main, prod]
+    branches: [dev, prod]
 
 concurrency:
   group: pages-${{ github.ref }}
@@ -39,8 +39,11 @@ jobs:
         run: |
           if [ "${{ github.ref_name }}" = "prod" ]; then
             echo "project=orangerails-prod" >> "$GITHUB_OUTPUT"
-          else
+          elif [ "${{ github.ref_name }}" = "dev" ]; then
             echo "project=orangerails-dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unknown branch ${{ github.ref_name }} — skipping deploy"
+            exit 0
           fi
 
       - name: Deploy to Cloudflare Pages
