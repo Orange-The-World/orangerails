@@ -65,31 +65,31 @@ const primary = [
     title: "Quickstart",
     description: "10 minutes to your first synced transaction.",
     eyebrow: "Get started",
-    href: "https://wiki.abascal.ca/s/3aac6fb6-64df-4421-839f-08fbfa63a300",
+    href: "https://wiki.abascal.ca/s/or-quickstart",
   },
   {
     icon: Code2,
     title: "API reference",
     description: "REST endpoints, webhook events, normalized data shapes.",
     eyebrow: "Reference",
-    href: "https://wiki.abascal.ca/s/35334178-f7d9-4f15-803b-a619e829b70a",
+    href: "https://wiki.abascal.ca/s/or-api-reference",
   },
   {
     icon: Server,
     title: "Self-hosting guide",
     description: "Docker Compose, Helm, Supabase-compatible schema.",
     eyebrow: "Operations",
-    href: "https://wiki.abascal.ca/s/04ded218-bff9-4977-9b37-9ebfe238784b",
+    href: "https://wiki.abascal.ca/s/or-self-hosting",
   },
 ];
 
 const secondary = [
-  { icon: Wrench, title: "Adapter SDK guide", body: "Build a typed adapter in a day.", href: "" },
+  { icon: Wrench, title: "Adapter SDK guide", body: "Build a typed adapter in a day.", href: "https://wiki.abascal.ca/s/or-adapter-sdk" },
   { icon: Lock, title: "How authentication works", body: "Three-layer model (app, source, zero-knowledge wrapper).", href: "https://wiki.abascal.ca/doc/how-authentication-works-for-integrators-5UNmuB2f4U" },
-  { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "" },
-  { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "" },
+  { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "https://wiki.abascal.ca/s/or-openapi-spec" },
+  { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "https://wiki.abascal.ca/s/or-security-threat-model" },
   { icon: GitCompare, title: "Stealth Sync architecture", body: "How xpub stays in the browser, BIP 158 filters.", href: "https://wiki.abascal.ca/doc/stealth-sync" },
-  { icon: Users, title: "Contributing", body: "Repo conventions, branch model, RFCs.", href: "" },
+  { icon: Users, title: "Contributing", body: "Repo conventions, branch model, RFCs.", href: "https://wiki.abascal.ca/s/or-contributing" },
 ];
 
 function DocsPage() {
