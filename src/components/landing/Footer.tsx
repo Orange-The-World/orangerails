@@ -25,7 +25,7 @@ const cols: { title: string; links: FooterLink[] }[] = [
   {
     title: "Help",
     links: [
-      { label: "Support", href: "https://support.bitbooks.com" },
+      { label: "Support", href: "https://support.orangerails.com" },
       { label: "Feedback", href: "https://feedback.bitbooks.com" },
       { label: "Docs", to: "/docs" },
     ],

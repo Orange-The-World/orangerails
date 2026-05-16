@@ -65,31 +65,31 @@ const primary = [
     title: "Quickstart",
     description: "10 minutes to your first synced transaction.",
     eyebrow: "Get started",
-    href: "https://wiki.abascal.ca/s/or-quickstart",
+    href: "https://support.orangerails.com/hc/orangerails/articles/1778933748-quickstart",
   },
   {
     icon: Code2,
     title: "API reference",
     description: "REST endpoints, webhook events, normalized data shapes.",
     eyebrow: "Reference",
-    href: "https://wiki.abascal.ca/s/or-api-reference",
+    href: "https://support.orangerails.com/hc/orangerails/articles/1778933749-api-reference",
   },
   {
     icon: Server,
     title: "Self-hosting guide",
     description: "Docker Compose, Helm, Supabase-compatible schema.",
     eyebrow: "Operations",
-    href: "https://wiki.abascal.ca/s/or-self-hosting",
+    href: "https://support.orangerails.com/hc/orangerails/articles/1778933750-self-hosting-guide",
   },
 ];
 
 const secondary = [
-  { icon: Wrench, title: "Adapter SDK guide", body: "Build a typed adapter in a day.", href: "https://wiki.abascal.ca/s/or-adapter-sdk" },
+  { icon: Wrench, title: "Adapter SDK guide", body: "Build a typed adapter in a day.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933751-adapter-sdk-guide" },
   { icon: Lock, title: "How authentication works", body: "Three-layer model (app, source, zero-knowledge wrapper).", href: "https://wiki.abascal.ca/doc/how-authentication-works-for-integrators-5UNmuB2f4U" },
-  { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "https://wiki.abascal.ca/s/or-openapi-spec" },
-  { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "https://wiki.abascal.ca/s/or-security-threat-model" },
+  { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933754-openapi-spec-v0-draft" },
+  { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933752-security-and-threat-model" },
   { icon: GitCompare, title: "Stealth Sync architecture", body: "How xpub stays in the browser, BIP 158 filters.", href: "https://wiki.abascal.ca/doc/stealth-sync" },
-  { icon: Users, title: "Contributing", body: "Repo conventions, branch model, RFCs.", href: "https://wiki.abascal.ca/s/or-contributing" },
+  { icon: Users, title: "Contributing", body: "Repo conventions, branch model, RFCs.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933753-contributing" },
 ];
 
 function DocsPage() {
