@@ -81,4 +81,15 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          supabase functions deploy --project-ref ${{ steps.target.outputs.supabase_ref }}
+          # esm.sh occasionally 522s mid-bundle. Retry up to 3 times before
+          # giving up so the deploy is not at the mercy of a single CDN hiccup.
+          for attempt in 1 2 3; do
+            if supabase functions deploy --project-ref ${{ steps.target.outputs.supabase_ref }}; then
+              echo "edge functions deployed on attempt $attempt"
+              exit 0
+            fi
+            echo "attempt $attempt failed; sleeping 15s and retrying"
+            sleep 15
+          done
+          echo "edge functions deploy failed after 3 attempts"
+          exit 1
