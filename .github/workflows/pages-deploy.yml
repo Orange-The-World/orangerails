@@ -51,13 +51,15 @@ jobs:
           VITE_SUPABASE_URL: ${{ steps.sb.outputs.url }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ steps.sb.outputs.key }}
 
-      - name: Pick Pages project for this branch
+      - name: Pick Pages + Supabase targets for this branch
         id: target
         run: |
           if [ "${{ github.ref_name }}" = "prod" ]; then
             echo "project=orangerails-prod" >> "$GITHUB_OUTPUT"
+            echo "supabase_ref=lcdicqalreskibdfxkzb" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_name }}" = "dev" ]; then
             echo "project=orangerails-dev" >> "$GITHUB_OUTPUT"
+            echo "supabase_ref=gposxxmxenrdvewrprle" >> "$GITHUB_OUTPUT"
           else
             echo "Unknown branch ${{ github.ref_name }} — skipping deploy"
             exit 0
@@ -69,3 +71,14 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=${{ steps.target.outputs.project }} --branch=${{ github.ref_name }} --commit-dirty=true
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy Supabase edge functions
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          supabase functions deploy --project-ref ${{ steps.target.outputs.supabase_ref }}
