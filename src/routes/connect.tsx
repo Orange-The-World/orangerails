@@ -156,6 +156,10 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
 // --------------------------------------------------------------------
 
 interface ConnectSearch {
+  // Audit 2026-05-16 High #3: optional widget session token minted by the
+  // integrating app's backend via or-link-mint-token. Required once the
+  // env flag REQUIRE_WIDGET_TOKEN flips on; ignored when absent today.
+  widget_token?: string;
   platform?: string;
   app_user_id?: string;
   provider?: string;
@@ -168,6 +172,7 @@ export const Route = createFileRoute("/connect")({
     app_user_id: typeof search.app_user_id === "string" ? search.app_user_id : undefined,
     provider: typeof search.provider === "string" ? search.provider : undefined,
     return_to: typeof search.return_to === "string" ? search.return_to : undefined,
+    widget_token: typeof search.widget_token === "string" ? search.widget_token : undefined,
   }),
   component: ConnectPage,
 });
@@ -530,6 +535,7 @@ async function callLinkComplete(payload: {
   encrypted_label: string;
   encrypted_credentials: string;
   wallets: Array<{ external_wallet_id: string; encrypted_metadata: string }>;
+  widget_token?: string;
 }): Promise<{
   subaccount_id: string;
   connection_id: string;
@@ -712,6 +718,11 @@ function ConnectPageInner() {
           external_wallet_id: w.external_wallet_id,
           encrypted_metadata: w.encrypted_metadata,
         })),
+        // Audit 2026-05-16 High #3: forward the widget session token the
+        // integrating app's backend minted before opening this popup. The
+        // edge function ignores tokenless requests during the rollout
+        // window (warning only) and rejects them once the env flag flips.
+        widget_token: search.widget_token,
       });
 
       // Compose the postMessage payload, attaching the user-facing

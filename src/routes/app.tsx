@@ -1,4 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { toast } from "sonner";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
@@ -377,10 +378,20 @@ function AppHome() {
       }
 
       // Determine which subaccount's connections to fetch.
-      // TODO(platform-redesign): admin view (isAdminView) of another user's
-      // workspace requires a co-admin RLS policy on subaccounts +
-      // connections. Until that follow-up migration lands, admin view
-      // falls back to the admin's own data — disabled at the UI level.
+      //
+      // Audit 2026-05-16 Medium #13: admin view (isAdminView) of another
+      // user's workspace requires a co-admin RLS policy on subaccounts +
+      // connections + encrypted_transactions. Until that policy lands, we
+      // refuse rather than silently substitute the admin's own data — the
+      // old behavior was confusing and could mask data leaks.
+      if (isAdminView) {
+        toast.error(
+          "Cross-workspace admin view is not yet implemented. Showing your own data is not safe to fall back to silently; reverting.",
+        );
+        setActiveWorkspace(null);
+        setLoading(false);
+        return;
+      }
       if (!mySubaccountId) {
         // Subaccount not loaded yet (RPC racing useEffect). Bail; refresh()
         // will be retriggered when mySubaccountId becomes available.
