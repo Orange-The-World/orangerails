@@ -5,3 +5,9 @@ verify_jwt = false
 
 [functions.or-providers-list]
 verify_jwt = false
+
+[functions.or-platform-display]
+verify_jwt = false
+
+[functions.or-link-mint-token]
+verify_jwt = false
