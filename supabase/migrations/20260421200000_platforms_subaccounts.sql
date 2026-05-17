@@ -39,6 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_platforms_api_key_hash ON public.platforms(api_ke
 
 ALTER TABLE public.platforms ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Platforms are visible to authenticated users (metadata only)" ON public.platforms;
 CREATE POLICY "Platforms are visible to authenticated users (metadata only)"
   ON public.platforms FOR SELECT
   TO authenticated
@@ -60,6 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_subaccounts_platform_external ON public.subaccoun
 
 ALTER TABLE public.subaccounts ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Direct users can read their own subaccount" ON public.subaccounts;
 CREATE POLICY "Direct users can read their own subaccount"
   ON public.subaccounts FOR SELECT
   TO authenticated
@@ -144,6 +146,7 @@ ALTER TABLE public.connections DROP COLUMN IF EXISTS user_id;
 -- 8. Recreate RLS scoped by subaccount → direct platform
 -- ============================================================
 
+DROP POLICY IF EXISTS "Direct users can read connections via their subaccount" ON public.connections;
 CREATE POLICY "Direct users can read connections via their subaccount"
   ON public.connections FOR SELECT
   TO authenticated
@@ -155,6 +158,7 @@ CREATE POLICY "Direct users can read connections via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can insert connections via their subaccount" ON public.connections;
 CREATE POLICY "Direct users can insert connections via their subaccount"
   ON public.connections FOR INSERT
   TO authenticated
@@ -166,6 +170,7 @@ CREATE POLICY "Direct users can insert connections via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can update connections via their subaccount" ON public.connections;
 CREATE POLICY "Direct users can update connections via their subaccount"
   ON public.connections FOR UPDATE
   TO authenticated
@@ -177,6 +182,7 @@ CREATE POLICY "Direct users can update connections via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can delete connections via their subaccount" ON public.connections;
 CREATE POLICY "Direct users can delete connections via their subaccount"
   ON public.connections FOR DELETE
   TO authenticated
@@ -188,6 +194,7 @@ CREATE POLICY "Direct users can delete connections via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can read transactions via their subaccount" ON public.encrypted_transactions;
 CREATE POLICY "Direct users can read transactions via their subaccount"
   ON public.encrypted_transactions FOR SELECT
   TO authenticated
@@ -200,6 +207,7 @@ CREATE POLICY "Direct users can read transactions via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can insert transactions via their subaccount" ON public.encrypted_transactions;
 CREATE POLICY "Direct users can insert transactions via their subaccount"
   ON public.encrypted_transactions FOR INSERT
   TO authenticated
@@ -212,6 +220,7 @@ CREATE POLICY "Direct users can insert transactions via their subaccount"
     )
   );
 
+DROP POLICY IF EXISTS "Direct users can delete transactions via their subaccount" ON public.encrypted_transactions;
 CREATE POLICY "Direct users can delete transactions via their subaccount"
   ON public.encrypted_transactions FOR DELETE
   TO authenticated

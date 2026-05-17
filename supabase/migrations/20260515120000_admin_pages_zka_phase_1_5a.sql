@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS public.customer_vault_meta (
 
 ALTER TABLE public.customer_vault_meta ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Customers read own vault meta" ON public.customer_vault_meta;
 CREATE POLICY "Customers read own vault meta"
   ON public.customer_vault_meta FOR SELECT
   TO authenticated
@@ -54,6 +55,7 @@ CREATE POLICY "Customers read own vault meta"
     OR public.is_staff()
   );
 
+DROP POLICY IF EXISTS "Customers upsert own vault meta" ON public.customer_vault_meta;
 CREATE POLICY "Customers upsert own vault meta"
   ON public.customer_vault_meta FOR INSERT
   TO authenticated
@@ -61,6 +63,7 @@ CREATE POLICY "Customers upsert own vault meta"
     customer_id IN (SELECT id FROM public.customers WHERE auth_user_id = auth.uid())
   );
 
+DROP POLICY IF EXISTS "Customers update own vault meta" ON public.customer_vault_meta;
 CREATE POLICY "Customers update own vault meta"
   ON public.customer_vault_meta FOR UPDATE
   TO authenticated
@@ -104,6 +107,7 @@ ALTER TABLE public.customer_recovery_shares ENABLE ROW LEVEL SECURITY;
 
 -- Customers cannot read OR's recovery share (only staff can,
 -- through a recovery flow). They can insert their share at setup.
+DROP POLICY IF EXISTS "Customers insert own recovery share" ON public.customer_recovery_shares;
 CREATE POLICY "Customers insert own recovery share"
   ON public.customer_recovery_shares FOR INSERT
   TO authenticated
@@ -111,11 +115,13 @@ CREATE POLICY "Customers insert own recovery share"
     customer_id IN (SELECT id FROM public.customers WHERE auth_user_id = auth.uid())
   );
 
+DROP POLICY IF EXISTS "Staff read recovery shares" ON public.customer_recovery_shares;
 CREATE POLICY "Staff read recovery shares"
   ON public.customer_recovery_shares FOR SELECT
   TO authenticated
   USING (public.is_staff());
 
+DROP POLICY IF EXISTS "Staff update recovery shares" ON public.customer_recovery_shares;
 CREATE POLICY "Staff update recovery shares"
   ON public.customer_recovery_shares FOR UPDATE
   TO authenticated
