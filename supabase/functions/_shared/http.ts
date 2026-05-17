@@ -3,9 +3,7 @@
 // Custom headers for OR's auth modes:
 //   x-platform-api-key — Plaid-style platform API key for SaaS integrators
 //                        (BitBooks V3, BitBooks Personal, future apps)
-//   x-or-access-token — DEPRECATED legacy cross-app token; kept temporarily
-//                        for backward compat during the platform redesign rollout
-const ALLOWED_HEADERS = 'authorization, x-client-info, apikey, content-type, x-platform-api-key, x-or-access-token';
+const ALLOWED_HEADERS = 'authorization, x-client-info, apikey, content-type, x-platform-api-key';
 const ALLOWED_METHODS = 'GET, POST, OPTIONS';
 const MAX_BODY_BYTES = 1_000_000; // 1 MB
 
@@ -30,14 +28,33 @@ const ALLOWED_ORIGINS: ReadonlySet<string> = new Set<string>([
 
 export function buildCorsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get('Origin');
-  // If the request has a known Origin, echo it. Unknown / missing origins
-  // get '*' (callers without credentials still work, e.g. server-side fetch).
-  const allowedOrigin = origin && ALLOWED_ORIGINS.has(origin) ? origin : '*';
-  return {
-    'Access-Control-Allow-Origin': allowedOrigin,
+  // Audit 2026-05-16 finding #6: do not fall back to '*' for unknown
+  // origins. Browsers reject cross-origin responses without an explicit
+  // Allow-Origin match; server-to-server callers don't enforce CORS so
+  // they keep working. The only case where '*' is correct is a fully
+  // public endpoint with no auth (or-providers, or-platform-display) —
+  // those handlers should call buildPublicCorsHeaders explicitly.
+  const headers: Record<string, string> = {
     'Access-Control-Allow-Headers': ALLOWED_HEADERS,
     'Access-Control-Allow-Methods': ALLOWED_METHODS,
     'Vary': 'Origin',
+  };
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin;
+  }
+  return headers;
+}
+
+/**
+ * For endpoints that are intentionally public (no auth, anonymous fetch).
+ * Returns Access-Control-Allow-Origin: * regardless of the request origin.
+ * Use sparingly — only on or-providers and or-platform-display today.
+ */
+export function buildPublicCorsHeaders(): Record<string, string> {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': ALLOWED_HEADERS,
+    'Access-Control-Allow-Methods': ALLOWED_METHODS,
   };
 }
 

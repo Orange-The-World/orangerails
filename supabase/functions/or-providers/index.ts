@@ -34,11 +34,11 @@
  * for the lifetime of a session without staleness concerns.
  */
 
-import { buildCorsHeaders, jsonResponse } from '../_shared/http.ts';
+import { buildPublicCorsHeaders, jsonResponse } from '../_shared/http.ts';
 import { listProviderManifests, listCategoryManifests } from '../_shared/providers/dispatch.ts';
 
 Deno.serve((req: Request) => {
-  const cors = buildCorsHeaders(req);
+  const cors = buildPublicCorsHeaders();
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'GET') {
     return jsonResponse({ error: 'Method not allowed' }, 405, cors);
