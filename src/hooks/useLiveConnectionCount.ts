@@ -27,7 +27,10 @@ export function useLiveConnectionCount(fallback = 100): { count: number; isLive:
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (!data?.providers) return;
-        const live = data.providers.filter((p: { status?: string }) => p.status === "live").length;
+        // Audit 2026-05-16 follow-up: count both live and beta entries
+        // (the 98 CCXT exchanges land as beta by default but are usable).
+        // Only coming_soon stays excluded from the hero counter.
+        const live = data.providers.filter((p: { status?: string }) => p.status !== "coming_soon").length;
         if (live > 0) {
           setCount(live);
           setIsLive(true);
