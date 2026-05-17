@@ -161,3 +161,26 @@ export async function resolveSubaccount(
 export function isAuthError(x: AuthContext | AuthError | string): x is AuthError {
   return typeof x === 'object' && 'status' in x && 'message' in x;
 }
+
+/**
+ * Resolve the platform id that owns the calling context.
+ *
+ * - Platform mode: returns ctx.platformId directly.
+ * - Direct mode: returns the id of the 'direct' platform (looked up once).
+ *
+ * Used by the stealth edge functions (audit 2026-05-16 High #2) to bind
+ * every stealth_connections read/write to a real, verified platform id
+ * instead of the previously caller-supplied app_slug text field.
+ */
+export async function getCallerPlatformId(ctx: AuthContext): Promise<string | AuthError> {
+  if (ctx.mode === 'platform') return ctx.platformId;
+  const { data, error } = await ctx.serviceClient
+    .from('platforms')
+    .select('id')
+    .eq('slug', 'direct')
+    .maybeSingle();
+  if (error || !data) {
+    return { status: 500, message: 'Direct platform not configured' };
+  }
+  return data.id as string;
+}

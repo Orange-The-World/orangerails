@@ -20,7 +20,7 @@
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
+import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
 
 interface ListRequestBody {
   app_user_id?: string;
@@ -70,9 +70,18 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Audit 2026-05-16 High #2: every stealth_connections read/write must be
+    // bound to the calling platform. Resolve once here.
+    const platformIdOrErr = await getCallerPlatformId(ctx);
+    if (isAuthError(platformIdOrErr)) {
+      return jsonResponse({ error: platformIdOrErr.message }, platformIdOrErr.status, cors);
+    }
+    const callerPlatformId = platformIdOrErr;
+
     let query = ctx.serviceClient
       .from('stealth_connections')
       .select('id, app_slug, connection_kind, last_sync_at, last_block_scanned, status, created_at')
+      .eq('platform_id', callerPlatformId)
       .eq('app_user_id', body.app_user_id)
       .order('created_at', { ascending: false });
     if (body.app_slug) {

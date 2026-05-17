@@ -19,7 +19,7 @@
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
+import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
 
 interface SealedTransactionInput {
   version: 1;
@@ -135,12 +135,21 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    // Audit 2026-05-16 High #2: every stealth_connections read/write must be
+    // bound to the calling platform. Resolve once here.
+    const platformIdOrErr = await getCallerPlatformId(ctx);
+    if (isAuthError(platformIdOrErr)) {
+      return jsonResponse({ error: platformIdOrErr.message }, platformIdOrErr.status, cors);
+    }
+    const callerPlatformId = platformIdOrErr;
+
     // Verify the connection belongs to the caller. Defense in depth on top
     // of the UNIQUE constraint check; saves us from quietly inserting tx
     // rows under a connection_id the caller does not own.
     const { data: ownerRow, error: ownerErr } = await ctx.serviceClient
       .from('stealth_connections')
       .select('id, app_user_id')
+      .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
       .maybeSingle();
     if (ownerErr) {
@@ -215,6 +224,7 @@ Deno.serve(async (req: Request) => {
         last_block_scanned: body.last_block_scanned,
         last_sync_at: new Date().toISOString(),
       })
+      .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id);
     if (updErr) {
       console.error('[or-stealth-transactions-store] connection update failed:', updErr);
