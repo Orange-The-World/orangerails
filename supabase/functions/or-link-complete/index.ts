@@ -7,10 +7,14 @@
  * credential, and creates one source_wallet per picked entry. Returns
  * the array of source_wallet_ids so the integrating app can persist them.
  *
- * Auth: by-platform-slug. The widget runs in the end user's browser with
- * no platform secret. A future hardening pass can replace this with a
- * short-lived widget session token issued server-to-server when the
- * integrating app opens the widget URL.
+ * Auth: widget_token (the integrating app's backend calls or-link-mint-token
+ * server-to-server BEFORE opening the widget URL; the widget passes the
+ * token back here for verification). Audit 2026-05-16 High #3.
+ *
+ * If the env var REQUIRE_WIDGET_TOKEN is set to "true", tokenless requests
+ * are rejected. Default is "false" during the rollout window so the V2/V3/OW
+ * integrating apps have time to add the mint step. Flip to "true" once they
+ * all integrate.
  *
  * POST body (preferred, multi-wallet):
  *   platform_slug:          string  e.g. 'bitbooks-v2'
@@ -56,6 +60,8 @@ interface LinkCompleteBody {
   provider_type?: string;
   encrypted_label?: string;
   encrypted_credentials?: string;
+  // Audit 2026-05-16 High #3: short-lived session token from or-link-mint-token.
+  widget_token?: string;
   // New multi-wallet shape
   wallets?: InboundWallet[];
   // Legacy single-wallet shape
@@ -152,7 +158,66 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Unknown platform" }, 404, cors);
     }
 
-    // 2. Provision (or look up) the subaccount.
+    // Audit 2026-05-16 High #3: verify the widget session token.
+    //
+    // The integrating app's backend calls or-link-mint-token with its
+    // platform API key; the response includes a UUID we look up here.
+    //
+    // Rejection rules:
+    //   - missing token  -> 401 if REQUIRE_WIDGET_TOKEN=true, otherwise warn + proceed
+    //   - bad token      -> 401 always (don't leak whether the token existed)
+    //   - expired        -> 401
+    //   - already used   -> 401
+    //   - wrong platform -> 401 (token issued for a different platform_id)
+    //   - wrong user     -> 401 (token issued for a different app_user_id)
+    //
+    // On success we atomically mark the token used so a replay fails.
+    const requireToken = (Deno.env.get('REQUIRE_WIDGET_TOKEN') ?? 'false').toLowerCase() === 'true';
+    if (body.widget_token) {
+      const { data: session, error: tokErr } = await serviceClient
+        .from('pending_widget_sessions')
+        .select('id, platform_id, app_user_id, expires_at, used_at')
+        .eq('id', body.widget_token)
+        .maybeSingle();
+      if (tokErr || !session) {
+        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+      }
+      if (session.used_at) {
+        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+      }
+      if (new Date(session.expires_at as string) < new Date()) {
+        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+      }
+      if (session.platform_id !== platform.id) {
+        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+      }
+      if (session.app_user_id !== body.app_user_id) {
+        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+      }
+      const { error: markErr } = await serviceClient
+        .from('pending_widget_sessions')
+        .update({ used_at: new Date().toISOString() })
+        .eq('id', body.widget_token)
+        .is('used_at', null);
+      if (markErr) {
+        console.error('[or-link-complete] could not mark widget token used:', markErr.message);
+        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+      }
+    } else if (requireToken) {
+      return jsonResponse(
+        { error: 'widget_token required — call or-link-mint-token first' },
+        401,
+        cors,
+      );
+    } else {
+      // Tokenless call during the rollout window. Log so we can see who
+      // still needs to integrate the mint step.
+      console.warn(
+        `[or-link-complete] TOKENLESS CALL platform=${platform.slug} app_user_id_len=${body.app_user_id?.length ?? 0}`,
+      );
+    }
+
+        // 2. Provision (or look up) the subaccount.
     let subaccountId: string;
     let subaccountWasNewlyCreated = false;
     const { data: existingSub } = await serviceClient
