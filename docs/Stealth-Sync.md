@@ -123,6 +123,14 @@ Sealed transactions follow the same encryption scheme. Plaintext is the normaliz
 
 A blind index (HMAC-SHA256 of the txid under the per-app key) allows server-side dedup without revealing the txid.
 
+## Server-side platform binding (audit 2026-05-16)
+
+Every row in `stealth_connections` is bound to a single platform via the `platform_id` foreign key. The binding is set at create time from the calling platform's verified API key (platform mode) or the special `direct` platform (consumer users on orangerails.com). Every read, write, and delete also filters by `platform_id = ctx.platformId`.
+
+Why the binding exists: before this change, the table held `app_slug` (a caller-supplied text field) and `app_user_id`. Platform A's API key with a stolen `(connection_id, app_user_id)` pair could read, overwrite, or delete Platform B's connections. The sealed envelope itself stays recipient-encrypted so disclosure was mitigated, but the write/delete vector caused integrity loss and DoS. Binding to a real platform foreign key closes that hole.
+
+`app_slug` is kept as a UX field (which app group a connection belongs to, useful for the picker UI) but is no longer trusted for authentication.
+
 ## Threat model
 
 What each party can and cannot see during a typical sync:

@@ -639,6 +639,7 @@ export type Database = {
           id: string
           last_block_scanned: number | null
           last_sync_at: string | null
+          platform_id: string
           sealed_envelope: Json
           status: string
           updated_at: string
@@ -653,6 +654,7 @@ export type Database = {
           id?: string
           last_block_scanned?: number | null
           last_sync_at?: string | null
+          platform_id: string
           sealed_envelope: Json
           status?: string
           updated_at?: string
@@ -667,12 +669,21 @@ export type Database = {
           id?: string
           last_block_scanned?: number | null
           last_sync_at?: string | null
+          platform_id?: string
           sealed_envelope?: Json
           status?: string
           updated_at?: string
           wallet_birthday_plaintext?: string | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "stealth_connections_platform_id_fkey"
+            columns: ["platform_id"]
+            isOneToOne: false
+            referencedRelation: "platforms"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       stealth_transactions: {
         Row: {
