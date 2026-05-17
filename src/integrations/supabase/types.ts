@@ -517,6 +517,41 @@ export type Database = {
           },
         ]
       }
+      pending_widget_sessions: {
+        Row: {
+          app_user_id: string
+          created_at: string
+          expires_at: string
+          id: string
+          platform_id: string
+          used_at: string | null
+        }
+        Insert: {
+          app_user_id: string
+          created_at?: string
+          expires_at: string
+          id?: string
+          platform_id: string
+          used_at?: string | null
+        }
+        Update: {
+          app_user_id?: string
+          created_at?: string
+          expires_at?: string
+          id?: string
+          platform_id?: string
+          used_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pending_widget_sessions_platform_id_fkey"
+            columns: ["platform_id"]
+            isOneToOne: false
+            referencedRelation: "platforms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       platforms: {
         Row: {
           api_key_hash: string
@@ -1013,6 +1048,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      cleanup_expired_widget_sessions: { Args: never; Returns: number }
       create_or_access_token: { Args: { app_slug: string }; Returns: string }
       get_coadmin_emails: {
         Args: { user_ids: string[] }
