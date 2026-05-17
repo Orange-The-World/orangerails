@@ -22,9 +22,10 @@ test('C1: or-providers returns a healthy provider catalog', async () => {
   if (!res.ok()) throw new Error(`HTTP ${res.status()}`);
   const body = await res.json();
   if (!Array.isArray(body.providers)) throw new Error('no providers array');
-  const live = body.providers.filter((p) => p.status === 'live');
-  if (live.length < 20) {
-    throw new Error(`expected ≥20 live providers, got ${live.length}`);
+  // Count live + beta together as "usable" (CCXT entries land as beta).
+  const usable = body.providers.filter((p) => p.status === 'live' || p.status === 'beta');
+  if (usable.length < 100) {
+    throw new Error(`expected ≥100 usable providers, got ${usable.length}`);
   }
   await ctx.dispose();
 });
