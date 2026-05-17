@@ -230,10 +230,28 @@ export async function verifyVaultPassword(
 ): Promise<boolean> {
   try {
     const decrypted = await decryptString(storedVerifierCiphertext, verifierKey);
-    return decrypted === VAULT_VERIFIER_PLAINTEXT;
+    return timingSafeEqualStrings(decrypted, VAULT_VERIFIER_PLAINTEXT);
   } catch {
     return false;
   }
+}
+
+/**
+ * Constant-time string comparison. Audit 2026-05-16 finding #5.
+ *
+ * The verifier plaintext is fixed and high-entropy-resistant, but standard
+ * cryptographic hygiene says comparisons that gate on a secret-derived value
+ * must be constant-time. \`===\` short-circuits on the first mismatched byte;
+ * a timing observer with high enough resolution could in principle learn how
+ * many leading bytes match. The fix is one helper.
+ */
+function timingSafeEqualStrings(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 // ------------------------------------------------------------------

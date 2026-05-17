@@ -55,7 +55,7 @@ The customer's xpub never leaves the browser. The Orange Rails server holds a se
              │  Sealed envelopes + sealed transactions
              ▼                           ▼
 ┌────────────────────────────┐
-│  db.orangerails.com        │  ← Existing OR Supabase
+│  <your-supabase-project>.supabase.co        │  ← Existing OR Supabase
 │  Sealed bytes only         │     Cannot decrypt anything
 │  RLS policies enforce      │     Stealth Sync customer's
 │  per-app-user access       │     view
@@ -133,7 +133,7 @@ What each party can and cannot see during a typical sync:
 | stealth.orangerails.com | IP, requested filter URLs, block-range pattern, sync timing, browser fingerprint | Xpub, addresses, balances, whether any filter matched |
 | connect.orangerails.com | IP, popup load timing | Vault password, derived key, xpub, addresses, transactions (all live in popup browser memory only) |
 | blocks.orangerails.com | IP, requested block hash | Which xpub triggered the request |
-| db.orangerails.com | Sealed bytes, plaintext occurred_at, opaque uuids, sync timestamps | Xpub, addresses, balances, transaction details |
+| <your-supabase-project>.supabase.co | Sealed bytes, plaintext occurred_at, opaque uuids, sync timestamps | Xpub, addresses, balances, transaction details |
 | Consuming app server (V2/V3/OW) | Sealed transaction records, opaque connection_id | Xpub, addresses, balances, transaction details |
 | Network observer (ISP) | TLS-encrypted traffic to orangerails.com subdomains | Anything inside TLS |
 

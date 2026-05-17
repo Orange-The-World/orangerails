@@ -17,10 +17,10 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { buildPublicCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 
 Deno.serve(async (req: Request) => {
-  const cors = buildCorsHeaders(req);
+  const cors = buildPublicCorsHeaders();
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'GET' && req.method !== 'POST') {
     return jsonResponse({ error: 'Method not allowed' }, 405, cors);

@@ -48,6 +48,52 @@ import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 
+// ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
+//
+// Upstream provider error messages can contain credential fragments, API
+// response bodies, or other plaintext that must never leak to:
+//   - The HTTP response body (caller-side)
+//   - The edge function console (operator-side, persisted ~7 days)
+//   - The encrypted_last_error column when encryption fails
+//
+// All upstream errors are mapped to a small fixed taxonomy. The full message
+// is dropped on the floor. Callers get a code; operators get the code plus
+// an opaque correlation ID for support purposes.
+
+type UpstreamErrorCode =
+  | 'UPSTREAM_AUTH_FAILED'
+  | 'UPSTREAM_RATE_LIMITED'
+  | 'UPSTREAM_UNAVAILABLE'
+  | 'UPSTREAM_BAD_REQUEST'
+  | 'UPSTREAM_OTHER';
+
+function classifyUpstreamError(raw: string): UpstreamErrorCode {
+  const m = raw.toLowerCase();
+  if (/(\b401\b|\b403\b|unauthorized|forbidden|invalid.*(api.?key|token|credential)|signature.*(invalid|mismatch))/.test(m)) {
+    return 'UPSTREAM_AUTH_FAILED';
+  }
+  if (/(\b429\b|rate.?limit|too.?many.?requests|quota.*exceeded)/.test(m)) {
+    return 'UPSTREAM_RATE_LIMITED';
+  }
+  if (/(\b5\d\d\b|timeout|timed.?out|econn(refused|reset|aborted)|network|unreachable|service.*unavailable)/.test(m)) {
+    return 'UPSTREAM_UNAVAILABLE';
+  }
+  if (/(\b400\b|\b404\b|\b422\b|bad.?request|not.?found|unprocessable)/.test(m)) {
+    return 'UPSTREAM_BAD_REQUEST';
+  }
+  return 'UPSTREAM_OTHER';
+}
+
+function randomCorrelationId(): string {
+  // Opaque short ID for cross-referencing client error → ops investigation.
+  // Not security-sensitive; collision resistance just has to be high enough
+  // to grep edge logs.
+  const buf = new Uint8Array(8);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+
 // ─── AES-256-GCM helpers ─────────────────────────────────────────────────────
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -296,20 +342,32 @@ Deno.serve(async (req: Request) => {
 
         results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error(`[or-sync] connection ${conn.id}:`, msg);
-        // Best-effort error encryption — only possible in legacy mode where
-        // the caller passed transactions_key. In sink mode we log + persist
-        // the error message in plaintext on the connection row, which is
-        // acceptable because sink-mode consumers (V2) store everything
-        // plaintext at rest anyway. ZK consumers stay on the legacy path
-        // until they migrate.
-        let storedErr: string | null = msg.slice(0, 500);
+        // Audit 2026-05-16 findings #1 + #4: never let upstream provider
+        // error messages reach the client or the edge log in plaintext.
+        // Map to a fixed taxonomy; emit only the code + a correlation id.
+        const raw = e instanceof Error ? e.message : String(e);
+        const code = classifyUpstreamError(raw);
+        const correlationId = randomCorrelationId();
+        console.error(`[or-sync] connection ${conn.id} code=${code} cid=${correlationId}`);
+
+        // Persist the taxonomy code on the connection row. In legacy
+        // (non-sink) mode we still want it encrypted at rest so the column
+        // shape stays uniform across modes. In sink mode the column is
+        // plaintext per the V2 contract. We NEVER fall back to writing the
+        // raw upstream message — if encryption fails, store only the code.
+        const persistable = `${code}:${correlationId}`;
+        let storedErr: string | null = persistable;
         if (!sinkMode) {
-          try { storedErr = await encryptAes(msg.slice(0, 500), txnsKey!); } catch { /* keep plaintext fallback */ }
+          try {
+            storedErr = await encryptAes(persistable, txnsKey!);
+          } catch {
+            // Encryption failed — store the unencrypted taxonomy code, not the raw message.
+            // (Code + correlation ID contain no customer plaintext.)
+            storedErr = persistable;
+          }
         }
         await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: storedErr }).eq('id', conn.id);
-        results.push({ connection_id: conn.id, synced: 0, next_cursor: null, error: msg });
+        results.push({ connection_id: conn.id, synced: 0, next_cursor: null, error: code, correlation_id: correlationId });
       }
     }
 

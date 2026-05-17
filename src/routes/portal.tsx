@@ -341,7 +341,6 @@ function PayButton({
       title={reason}
       onClick={() => {
         // Phase 4 (stripe) / future (flash) wires this to payment-provider.charge(invoice).
-        console.log(`Pay button clicked: rail=${rail}`);
       }}
       className="rounded-md px-3 py-1.5 text-xs font-medium border bg-background text-foreground hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
     >
