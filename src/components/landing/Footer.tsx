@@ -19,7 +19,7 @@ const cols: { title: string; links: FooterLink[] }[] = [
       { label: "About", href: "#" },
       { label: "Blog", href: "#" },
       { label: "Security", href: "#" },
-      { label: "Open Source Philosophy", to: "/open-source" },
+      { label: "Open source philosophy", to: "/open-source" },
     ],
   },
   {
@@ -51,7 +51,7 @@ export function Footer() {
               <span>OrangeRails</span>
             </Link>
             <p className="mt-3 max-w-xs text-sm text-muted-foreground">
-              Open-source, zero-knowledge financial rails for Bitcoin businesses.
+              Open source, zero knowledge financial rails for Bitcoin businesses.
             </p>
           </div>
 
