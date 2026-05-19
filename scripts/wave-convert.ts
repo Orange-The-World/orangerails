@@ -15,6 +15,7 @@
  *   chart-of-accounts.csv
  *   contacts.csv         (when customers.json or vendors.json present)
  *   journal-entries.csv  (when accounting.csv present)
+ *   staged-import.json   (StagedImportPayload — Mode 2 single-file upload)
  *   _run-report.txt      (summary of row counts, warnings, errors)
  *
  * Designed for local use on the founder's machine. Do NOT run on a shared
@@ -28,6 +29,7 @@ import { buildCoaCsv, parseWaveAccountsJson } from '../src/connectors/wave/accou
 import { buildContactsCsv, parseWavePartiesJson } from '../src/connectors/wave/parties-to-contacts';
 import { buildJournalEntriesCsv } from '../src/connectors/wave/journal-csv-to-v3';
 import { buildAccountCodeMap } from '../src/connectors/wave/code-map';
+import { buildWaveStagedPayload } from '../src/connectors/wave/to-staged-payload';
 
 function readOptional(path: string): string | null {
   return existsSync(path) ? readFileSync(path, 'utf8') : null;
@@ -96,6 +98,30 @@ function main(): void {
       'Skipped journal-entries.csv (no accounting.csv in input dir — export from Wave UI and drop it in).',
     );
   }
+
+  // 4. Mode 2 staged payload (single JSON file for "Import from Orange Rails" wizard)
+  const customersForPayload = custRaw ? parseWavePartiesJson(custRaw) : undefined;
+  const vendorsForPayload = vendRaw ? parseWavePartiesJson(vendRaw) : undefined;
+  const files: Array<{ name: string; sizeBytes: number; bytes?: Uint8Array }> = [];
+  for (const fname of ['accounts.json', 'customers.json', 'vendors.json', 'accounting.csv']) {
+    const fpath = join(inputDir, fname);
+    if (existsSync(fpath)) {
+      const buf = readFileSync(fpath);
+      files.push({ name: fname, sizeBytes: buf.length, bytes: new Uint8Array(buf) });
+    }
+  }
+  const { payload } = buildWaveStagedPayload({
+    accounts,
+    customers: customersForPayload,
+    vendors: vendorsForPayload,
+    accountingCsvText: jeCsvRaw ?? undefined,
+    files,
+  });
+  writeFileSync(join(outputDir, 'staged-import.json'), JSON.stringify(payload, null, 2));
+  log(
+    `Wrote staged-import.json (Mode 2): ${payload.summary.accounts} accounts, ${payload.summary.contacts} contacts, ${payload.summary.journalEntries} JEs / ${payload.summary.journalLines} lines`,
+  );
+  for (const e of payload.summary.errors) log(`  ERROR: ${e}`);
 
   writeFileSync(join(outputDir, '_run-report.txt'), report.join('\n') + '\n');
   log(`Done. Report: ${join(outputDir, '_run-report.txt')}`);

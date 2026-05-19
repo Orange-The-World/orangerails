@@ -21,6 +21,8 @@ export { buildContactsCsv, parseWavePartiesJson, V3_CONTACT_HEADERS } from './pa
 export { buildJournalEntriesCsv, V3_JE_HEADERS } from './journal-csv-to-v3';
 export { buildAccountCodeMap } from './code-map';
 export { unwrapNodes } from './types';
+export { buildWaveStagedPayload } from './to-staged-payload';
+export type { WaveStagingInput } from './to-staged-payload';
 export type {
   WaveAccountNode,
   WavePartyNode,
