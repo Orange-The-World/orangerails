@@ -21,17 +21,23 @@ export function Hero() {
           </h1>
 
           <p className="mt-5 max-w-xl text-balance text-base text-muted-foreground sm:text-lg">
-            <LiveConnectionCount /> connections. Open source. Value for value. Connect a wallet, an
-            exchange, or a payment processor through a single API that ships with
-            <span className="text-foreground"> zero knowledge encryption by default</span>.
+            Bring all the financial data your app needs through one simple API.{" "}
+            <LiveConnectionCount /> connections to banks, exchanges, wallets, and Lightning
+            nodes. <span className="text-foreground">Zero knowledge architecture by default</span>.
           </p>
 
           <div className="mt-8 flex flex-wrap items-center gap-3">
-            <Button asChild size="lg" className="group">
-              <Link to="/connect">
-                Connect a wallet
-                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-              </Link>
+            <Button
+              size="lg"
+              className="group"
+              onClick={() =>
+                document
+                  .getElementById("waitlist")
+                  ?.scrollIntoView({ behavior: "smooth" })
+              }
+            >
+              Request beta access
+              <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
             </Button>
             <Button asChild size="lg" variant="ghost">
               <a
@@ -68,7 +74,7 @@ export function Hero() {
           <ul className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
             <Badge>Apache 2.0</Badge>
             <Badge>Self hostable</Badge>
-            <Badge>Zero knowledge by design</Badge>
+            <Badge>Zero knowledge architecture</Badge>
           </ul>
         </div>
 

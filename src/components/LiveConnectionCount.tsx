@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchProviderCatalog, countLive } from "@/lib/providers";
+import { fetchProviderCatalog, countUsable } from "@/lib/providers";
 
 const FALLBACK = "100+";
 const DEADLINE_MS = 200;
@@ -32,7 +32,7 @@ export function LiveConnectionCount() {
       .then((catalog) => {
         resolved = true;
         if (canceled) return;
-        const n = countLive(catalog.providers);
+        const n = countUsable(catalog.providers);
         if (n > 0) setLabel(format(n));
       })
       .catch(() => {

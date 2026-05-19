@@ -149,6 +149,14 @@ export function filterProviders(
   return out;
 }
 
-export function countLive(list: ProviderManifest[]): number {
-  return list.filter((p) => p.status === "live").length;
+/**
+ * Count providers that are usable end to end today: live + beta.
+ *
+ * Beta providers (the CCXT-backed exchanges) ship and connect; the "beta"
+ * tag tracks edge-case maturity, not whether the connection works. Treating
+ * them as not-counted makes the public landing report 4 connections when
+ * the real number is ~100.
+ */
+export function countUsable(list: ProviderManifest[]): number {
+  return list.filter((p) => p.status === "live" || p.status === "beta").length;
 }
