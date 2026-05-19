@@ -41,19 +41,45 @@ export const V3_JE_HEADERS = [
   'Credit',
 ] as const;
 
-// Header strings the converter recognizes in Wave's accounting.csv export.
-// Matching is case-insensitive and trims whitespace.
-const WAVE_HEADERS = {
-  txId: 'transaction id',
-  txDate: 'transaction date',
-  accountName: 'account name',
-  accountId: 'account id',
-  txDescription: 'transaction description',
-  lineDescription: 'transaction line description',
-  debit: 'debit amount',
-  credit: 'credit amount',
-  notes: 'notes / memo',
-} as const;
+/**
+ * Build a case-insensitive map: account name (lowercased+trimmed) → Wave ID.
+ * The accounting.csv export's "Account ID" column is unreliable (83% empty
+ * in real-world Wave data, and where populated it holds UI display codes
+ * like "4020" — NOT the GraphQL node ID). Account Name is the only stable
+ * join key between CSV and accounts.json.
+ */
+function buildNameLookup(accounts: WaveAccountNode[]): {
+  byName: Map<string, string>;
+  duplicates: string[];
+} {
+  const byName = new Map<string, string>();
+  const dups = new Set<string>();
+  for (const a of accounts) {
+    const k = a.name.trim().toLowerCase();
+    if (byName.has(k)) dups.add(a.name);
+    else byName.set(k, a.id);
+  }
+  return { byName, duplicates: [...dups] };
+}
+
+/**
+ * Wave's accounting.csv ships two slightly different header forms depending
+ * on which export option you pick in the UI:
+ *   - Plain:        "Debit Amount" / "Credit Amount"
+ *   - Two-column:   "Debit Amount (Two Column Approach)" / "Credit Amount (Two Column Approach)"
+ * Both are accepted. The matcher tries each candidate in order.
+ */
+const WAVE_HEADERS: Record<string, string[]> = {
+  txId: ['transaction id'],
+  txDate: ['transaction date'],
+  accountName: ['account name'],
+  accountId: ['account id'],
+  txDescription: ['transaction description'],
+  lineDescription: ['transaction line description'],
+  debit: ['debit amount (two column approach)', 'debit amount'],
+  credit: ['credit amount (two column approach)', 'credit amount'],
+  notes: ['notes / memo', 'notes/memo'],
+};
 
 type Header = keyof typeof WAVE_HEADERS;
 
@@ -61,14 +87,21 @@ function buildHeaderIndex(headerRow: string[]): Record<Header, number> {
   const norm = headerRow.map((h) => h.trim().toLowerCase());
   const idx = {} as Record<Header, number>;
   for (const key of Object.keys(WAVE_HEADERS) as Header[]) {
-    const wanted = WAVE_HEADERS[key];
-    const i = norm.indexOf(wanted);
-    if (i < 0) {
+    const candidates = WAVE_HEADERS[key];
+    let found = -1;
+    for (const c of candidates) {
+      const i = norm.indexOf(c);
+      if (i >= 0) {
+        found = i;
+        break;
+      }
+    }
+    if (found < 0) {
       throw new Error(
-        `Wave CSV is missing required column "${wanted}". Found: ${headerRow.join(', ')}`,
+        `Wave CSV is missing required column (tried: ${candidates.join(' / ')}). Found: ${headerRow.join(', ')}`,
       );
     }
-    idx[key] = i;
+    idx[key] = found;
   }
   return idx;
 }
@@ -128,6 +161,13 @@ export function buildJournalEntriesCsv(
     accountById.set(a.id, a);
   }
 
+  // Build name → Wave-ID lookup. CSV "Account ID" is unreliable; Account
+  // Name is the real join key.
+  const { byName: nameToId, duplicates: nameDuplicates } = buildNameLookup(accounts);
+  for (const dup of nameDuplicates) {
+    warnings.push(`Account name "${dup}" appears more than once in accounts.json — JE lookups for it will pick the first.`);
+  }
+
   const rows = parseCsv(waveCsvText);
   if (rows.length === 0) {
     return { csv: buildCsv([...V3_JE_HEADERS], []), groupCount: 0, lineCount: 0, warnings, errors };
@@ -138,14 +178,23 @@ export function buildJournalEntriesCsv(
   // Parse + group by Transaction ID (preserve first-seen order).
   const groupsOrder: string[] = [];
   const groups = new Map<string, WaveLine[]>();
+  const unknownNames = new Set<string>();
   for (let i = 0; i < dataRows.length; i++) {
     const r = dataRows[i];
     if (r.every((c) => c === '')) continue;
+    const accountName = (r[idx.accountName] ?? '').trim();
+    // Resolve account by NAME (CSV "Account ID" col is unreliable, see header
+    // doc above). If unknown, record once and proceed with empty accountId so
+    // downstream code-map lookup surfaces a clean error per row.
+    const resolvedId = nameToId.get(accountName.toLowerCase()) ?? '';
+    if (accountName && !resolvedId && !unknownNames.has(accountName)) {
+      unknownNames.add(accountName);
+    }
     const line: WaveLine = {
       txId: (r[idx.txId] ?? '').trim(),
       txDate: (r[idx.txDate] ?? '').trim(),
-      accountId: (r[idx.accountId] ?? '').trim(),
-      accountName: (r[idx.accountName] ?? '').trim(),
+      accountId: resolvedId,
+      accountName,
       txDescription: (r[idx.txDescription] ?? '').trim(),
       lineDescription: (r[idx.lineDescription] ?? '').trim(),
       debit: parseAmount(r[idx.debit] ?? ''),
@@ -161,6 +210,9 @@ export function buildJournalEntriesCsv(
       groupsOrder.push(line.txId);
     }
     groups.get(line.txId)!.push(line);
+  }
+  for (const name of unknownNames) {
+    errors.push(`Account name "${name}" appears in accounting.csv but not in accounts.json — re-run wave-backup.py to refresh accounts.json.`);
   }
 
   // Emit V3 rows.

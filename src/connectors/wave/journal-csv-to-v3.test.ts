@@ -92,10 +92,19 @@ describe('journal-csv-to-v3', () => {
     expect(out.csv).toContain('Top-level desc');
   });
 
-  it('errors when a Wave row references an unknown Account ID', () => {
-    const wave = `${HEADER}\nTX6,2024-06-01,Mystery,X,X,1.00,1.00,,,acct-missing\nTX6,2024-06-01,Cash on Hand,X,X,-1.00,,1.00,,acct-cash\n`;
+  it('errors when a Wave row references an unknown Account Name', () => {
+    const wave = `${HEADER}\nTX6,2024-06-01,Mystery Account That Does Not Exist,X,X,1.00,1.00,,,\nTX6,2024-06-01,Cash on Hand,X,X,-1.00,,1.00,,\n`;
     const out = buildJournalEntriesCsv(wave, CODES, ACCOUNTS);
-    expect(out.errors.some((e) => e.includes('no code for account'))).toBe(true);
+    expect(out.errors.some((e) => e.includes('not in accounts.json'))).toBe(true);
+  });
+
+  it('resolves accounts by name even when CSV Account ID column is blank', () => {
+    // 83% of real Wave rows have blank Account ID — Name is the join key.
+    const wave = `${HEADER}\nTX7,2024-07-01,Cash on Hand,X,X,1.00,1.00,,,\nTX7,2024-07-01,Rental Income,X,X,-1.00,,1.00,,\n`;
+    const out = buildJournalEntriesCsv(wave, CODES, ACCOUNTS);
+    expect(out.errors).toEqual([]);
+    expect(out.csv).toContain(',1010,');
+    expect(out.csv).toContain(',4000,');
   });
 
   it('rejects a Wave CSV missing required columns', () => {
