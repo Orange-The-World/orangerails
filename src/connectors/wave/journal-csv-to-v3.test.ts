@@ -70,12 +70,16 @@ describe('journal-csv-to-v3', () => {
     expect(out.errors[0]).toMatch(/unbalanced/i);
   });
 
-  it('splits mixed-currency transactions and suffixes the ref with currency', () => {
-    const wave = `${HEADER}\nTX3,2024-03-01,Cash on Hand,FX,CAD leg,100.00,100.00,,,acct-cash\nTX3,2024-03-01,USD Bank,FX,USD leg,-100.00,,100.00,,acct-usd\n`;
+  it('uses one currency per Wave tx, picked from the monetary account in the group', () => {
+    // Wave tx touching the USD bank and an Income (CAD) account: both lines
+    // should emit as USD because USD Bank is the monetary account.
+    const wave = `${HEADER}\nTX3,2024-03-01,USD Bank,Sale,Sale,100.00,100.00,,,acct-usd\nTX3,2024-03-01,Rental Income,Sale,Sale,-100.00,,100.00,,acct-rev\n`;
     const out = buildJournalEntriesCsv(wave, CODES, ACCOUNTS);
-    expect(out.warnings.some((w) => w.includes('mixed currencies'))).toBe(true);
-    expect(out.csv).toContain('TX3:CAD');
-    expect(out.csv).toContain('TX3:USD');
+    expect(out.errors).toEqual([]);
+    const lines = out.csv.trim().split('\n').slice(1);
+    for (const l of lines) {
+      expect(l).toContain(',USD,');
+    }
   });
 
   it('uses the Account ID to look up the V3 code (not Account Name)', () => {

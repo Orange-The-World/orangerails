@@ -13,11 +13,13 @@
  * Wave's two-column (Debit/Credit) layout is preferred over the one-column
  * Amount field — V3 wants explicit Dr/Cr columns.
  *
- * Currency is looked up per line from accounts.json (Wave's CSV does not
- * include the account currency directly). If a single Wave transaction
- * touches accounts in mixed currencies, the converter emits a warning and
- * splits the lines into one V3 group per currency, keeping the same ref
- * suffixed with the currency code.
+ * Currency is one per Wave transaction, picked from the first
+ * ASSET / LIABILITY / EQUITY account in the group (with first-line
+ * fallback). Wave records every transaction in one monetary currency;
+ * the per-account currency tag in accounts.json is metadata for the
+ * account itself, not for transactions touching it. Catch-all accounts
+ * (Uncategorized Expense, Suspense) carry their own currency tag that
+ * commonly disagrees with the actual transaction currency.
  *
  * The converter validates that each emitted group balances (sum(Debit) ===
  * sum(Credit)) per currency. Unbalanced groups are flagged as errors and
@@ -153,12 +155,32 @@ export function buildJournalEntriesCsv(
   const warnings: string[] = [];
   const errors: string[] = [];
 
-  // Build accountId → currency map (default USD when Wave has no currency).
+  // Build accountId → metadata map for currency + type resolution.
+  // Note: Wave's per-account currency is metadata for that account, not for
+  // the transactions touching it. Each Wave transaction settles in ONE
+  // currency — that of the primary monetary account in the group. Generic
+  // catch-all accounts (Uncategorized Expense / Income, Suspense) carry
+  // their own currency tag that may not match the actual tx currency.
+  // Tx currency is therefore picked from the first ASSET / LIABILITY /
+  // EQUITY account in each group (with first-line fallback).
   const accountCurrency = new Map<string, string>();
-  const accountById = new Map<string, WaveAccountNode>();
+  const accountType = new Map<string, string>();
   for (const a of accounts) {
     accountCurrency.set(a.id, a.currency?.code ?? 'USD');
-    accountById.set(a.id, a);
+    accountType.set(a.id, a.type.value);
+  }
+
+  const MONETARY_TYPES = new Set(['ASSET', 'LIABILITY', 'EQUITY']);
+  function pickTxCurrency(lines: WaveLine[]): string {
+    for (const l of lines) {
+      const t = accountType.get(l.accountId);
+      if (t && MONETARY_TYPES.has(t)) {
+        const c = accountCurrency.get(l.accountId);
+        if (c) return c;
+      }
+    }
+    // Fallback: first line's account currency, or USD.
+    return accountCurrency.get(lines[0]?.accountId ?? '') ?? 'USD';
   }
 
   // Build name → Wave-ID lookup. CSV "Account ID" is unreliable; Account
@@ -222,66 +244,44 @@ export function buildJournalEntriesCsv(
 
   for (const txId of groupsOrder) {
     const lines = groups.get(txId)!;
+    const currency = pickTxCurrency(lines);
+    const date = lines[0].txDate;
+    const ref = txId;
+    const memo = pickMemo(lines);
+    const status = 'POSTED';
 
-    // Partition by currency (each currency becomes its own V3 group).
-    const byCurrency = new Map<string, WaveLine[]>();
+    let dr = 0;
+    let cr = 0;
     for (const l of lines) {
-      const cur = accountCurrency.get(l.accountId);
-      if (!cur) {
-        warnings.push(
-          `Tx ${txId}: account ID "${l.accountId}" not in accounts.json — currency unknown, defaulted to USD.`,
-        );
+      const code = codeMap.get(l.accountId);
+      if (!code) {
+        errors.push(`Tx ${txId}: no code for account "${l.accountName}" (id ${l.accountId}).`);
       }
-      const key = cur ?? 'USD';
-      if (!byCurrency.has(key)) byCurrency.set(key, []);
-      byCurrency.get(key)!.push(l);
+      outRows.push([
+        date,
+        ref,
+        memo,
+        status,
+        code ?? '',
+        l.accountName,
+        l.lineDescription || l.txDescription,
+        currency,
+        l.debit ? l.debit.toFixed(2) : '',
+        l.credit ? l.credit.toFixed(2) : '',
+      ]);
+      dr += l.debit;
+      cr += l.credit;
+      lineCount += 1;
     }
-
-    if (byCurrency.size > 1) {
-      warnings.push(
-        `Tx ${txId}: mixed currencies (${[...byCurrency.keys()].join(', ')}). Split into one V3 group per currency.`,
+    // Round to 2dp before comparison so 0.1+0.2 doesn't false-positive.
+    const drR = Math.round(dr * 100);
+    const crR = Math.round(cr * 100);
+    if (drR !== crR) {
+      errors.push(
+        `Tx ${ref}: unbalanced — Debit ${(drR / 100).toFixed(2)} ${currency} vs Credit ${(crR / 100).toFixed(2)} ${currency}.`,
       );
     }
-
-    for (const [currency, subset] of byCurrency) {
-      const date = subset[0].txDate;
-      const ref = byCurrency.size > 1 ? `${txId}:${currency}` : txId;
-      const memo = pickMemo(subset);
-      const status = 'POSTED';
-
-      let dr = 0;
-      let cr = 0;
-      for (const l of subset) {
-        const code = codeMap.get(l.accountId);
-        if (!code) {
-          errors.push(`Tx ${txId}: no code for account "${l.accountName}" (id ${l.accountId}).`);
-        }
-        outRows.push([
-          date,
-          ref,
-          memo,
-          status,
-          code ?? '',
-          l.accountName,
-          l.lineDescription || l.txDescription,
-          currency,
-          l.debit ? l.debit.toFixed(2) : '',
-          l.credit ? l.credit.toFixed(2) : '',
-        ]);
-        dr += l.debit;
-        cr += l.credit;
-        lineCount += 1;
-      }
-      // Round to 2dp before comparison so 0.1+0.2 doesn't false-positive.
-      const drR = Math.round(dr * 100);
-      const crR = Math.round(cr * 100);
-      if (drR !== crR) {
-        errors.push(
-          `Tx ${ref}: unbalanced — Debit ${(drR / 100).toFixed(2)} ${currency} vs Credit ${(crR / 100).toFixed(2)} ${currency}.`,
-        );
-      }
-      groupCount += 1;
-    }
+    groupCount += 1;
   }
 
   return {
