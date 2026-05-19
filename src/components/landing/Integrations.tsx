@@ -31,10 +31,12 @@ export function Integrations() {
     fetchProviderCatalog()
       .then((c) => {
         if (!active) return;
-        const live = c.providers.filter((p: ProviderManifest) => p.status === "live");
-        const top = sortByPopularity(live).slice(0, 12).map((p) => p.displayName);
+        const usable = c.providers.filter(
+          (p: ProviderManifest) => p.status === "live" || p.status === "beta",
+        );
+        const top = sortByPopularity(usable).slice(0, 12).map((p) => p.displayName);
         setProviders(top);
-        setTotal(live.length);
+        setTotal(usable.length);
       })
       .catch(() => {
         if (active) {
