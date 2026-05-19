@@ -36,6 +36,8 @@ if (!inputDir || !outputDir) {
   process.exit(2);
 }
 
+import { existsSync } from 'node:fs';
+
 const accounts = unwrapNodes<WaveAccountNode>(
   JSON.parse(readFileSync(join(inputDir, 'accounts.json'), 'utf8')),
 );
@@ -43,20 +45,50 @@ const payload: StagedImportPayload = JSON.parse(
   readFileSync(join(outputDir, 'staged-import.json'), 'utf8'),
 );
 
+// Detect business currency the same way the converter does so the comparison
+// uses the right Wave-balance field (balance for single-currency businesses,
+// balanceInBusinessCurrency for multi-currency ones).
+let businessCurrency: string | undefined;
+const bizPath = join(inputDir, 'business.json');
+if (existsSync(bizPath)) {
+  try {
+    const biz = JSON.parse(readFileSync(bizPath, 'utf8'));
+    businessCurrency = biz?.business?.currency?.code;
+  } catch { /* ignore */ }
+}
+if (!businessCurrency) {
+  const tally: Record<string, number> = {};
+  for (const a of accounts) {
+    const c = a.currency?.code ?? 'USD';
+    tally[c] = (tally[c] ?? 0) + 1;
+  }
+  businessCurrency = Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'USD';
+}
+const isMultiCurrencyBiz = accounts.some(
+  (a) => (a.currency?.code ?? businessCurrency) !== businessCurrency,
+);
+
 // Sum Wave-reported balance per name (CASE-FOLD; many duplicates exist).
 const waveByName = new Map<string, { balance: number; normal: 'DEBIT' | 'CREDIT'; currency: string }>();
 for (const a of accounts) {
   const k = a.name.trim().toLowerCase();
-  const bal = Number.parseFloat(a.balance ?? '0') || 0;
+  // Pick the Wave-reported balance in the currency the CSV is denominated in.
+  // For multi-currency businesses (CAD biz with USD accounts), Wave's CSV
+  // converts every amount to business currency, so we compare against
+  // balanceInBusinessCurrency.
+  const rawBal = isMultiCurrencyBiz
+    ? Number.parseFloat(a.balanceInBusinessCurrency ?? a.balance ?? '0') || 0
+    : Number.parseFloat(a.balance ?? '0') || 0;
   const existing = waveByName.get(k);
-  if (existing) existing.balance += bal;
+  if (existing) existing.balance += rawBal;
   else
     waveByName.set(k, {
-      balance: bal,
+      balance: rawBal,
       normal: a.type.normalBalanceType,
-      currency: a.currency?.code ?? 'USD',
+      currency: isMultiCurrencyBiz ? businessCurrency : a.currency?.code ?? 'USD',
     });
 }
+console.log(`Business currency: ${businessCurrency} | multi-currency: ${isMultiCurrencyBiz}`);
 
 // Sum staged JE lines per account name.
 const stagedByName = new Map<string, { debit: number; credit: number }>();

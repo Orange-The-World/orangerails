@@ -46,6 +46,12 @@ export type WaveStagingInput = {
   vendors?: WavePartyNode[];
   /** Wave's UI-exported accounting.csv text, if available. */
   accountingCsvText?: string;
+  /**
+   * Business currency (e.g. 'CAD'). Wave exports CSV amounts in business
+   * currency even for foreign-currency accounts, so every JE line should
+   * carry this single tag. Source it from business.json's currency.code.
+   */
+  businessCurrency?: string;
   /** Manifest entries describing the raw files this payload came from. */
   files: Array<{ name: string; sizeBytes: number; bytes?: Uint8Array }>;
   orgHint?: { name?: string; currency?: string };
@@ -74,7 +80,9 @@ export function buildWaveStagedPayload(input: WaveStagingInput): {
   let jeRows: V3StagedRow[] = [];
   let journalLines = 0;
   if (input.accountingCsvText) {
-    const je = buildJournalEntriesCsv(input.accountingCsvText, codeMap, input.accounts);
+    const je = buildJournalEntriesCsv(input.accountingCsvText, codeMap, input.accounts, {
+      businessCurrency: input.businessCurrency,
+    });
     warnings.push(...je.warnings);
     errors.push(...je.errors);
     jeRows = rowsToObjects(je.csv);

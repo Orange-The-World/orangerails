@@ -7,6 +7,7 @@
  *
  * Expects in <input-dir>:
  *   accounts.json        (required — Wave GraphQL accounts dump)
+ *   business.json        (recommended — needed for correct multi-currency JE tagging)
  *   customers.json       (optional)
  *   vendors.json         (optional)
  *   accounting.csv       (optional — Wave UI CSV export; without it no JEs are produced)
@@ -55,6 +56,28 @@ function main(): void {
   const accounts = parseWaveAccountsJson(readFileSync(accountsPath, 'utf8'));
   const codeMap = buildAccountCodeMap(accounts);
 
+  // Business currency from business.json (Wave dumps amounts in this even
+  // for foreign-currency accounts). Falls back to most common account
+  // currency in accounts.json, then USD.
+  let businessCurrency: string | undefined;
+  const bizPath = join(inputDir, 'business.json');
+  if (existsSync(bizPath)) {
+    try {
+      const biz = JSON.parse(readFileSync(bizPath, 'utf8'));
+      businessCurrency = biz?.business?.currency?.code;
+    } catch {
+      /* ignore parse errors; fall through to derivation */
+    }
+  }
+  if (!businessCurrency) {
+    const tally: Record<string, number> = {};
+    for (const a of accounts) {
+      const c = a.currency?.code ?? 'USD';
+      tally[c] = (tally[c] ?? 0) + 1;
+    }
+    businessCurrency = Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'USD';
+  }
+
   const report: string[] = [];
   const log = (s: string): void => {
     console.log(s);
@@ -62,6 +85,7 @@ function main(): void {
   };
 
   log(`Loaded ${accounts.length} Wave accounts from ${accountsPath}`);
+  log(`Business currency: ${businessCurrency}${existsSync(bizPath) ? ' (from business.json)' : ' (derived from accounts.json majority)'}`);
 
   // 1. Chart of Accounts
   const coa = buildCoaCsv(accounts, codeMap);
@@ -88,7 +112,7 @@ function main(): void {
   // 3. Journal Entries
   const jeCsvRaw = readOptional(join(inputDir, 'accounting.csv'));
   if (jeCsvRaw) {
-    const je = buildJournalEntriesCsv(jeCsvRaw, codeMap, accounts);
+    const je = buildJournalEntriesCsv(jeCsvRaw, codeMap, accounts, { businessCurrency });
     writeFileSync(join(outputDir, 'journal-entries.csv'), je.csv);
     log(`Wrote journal-entries.csv (${je.groupCount} entries, ${je.lineCount} lines)`);
     for (const w of je.warnings) log(`  warning: ${w}`);
@@ -115,6 +139,7 @@ function main(): void {
     customers: customersForPayload,
     vendors: vendorsForPayload,
     accountingCsvText: jeCsvRaw ?? undefined,
+    businessCurrency,
     files,
   });
   writeFileSync(join(outputDir, 'staged-import.json'), JSON.stringify(payload, null, 2));

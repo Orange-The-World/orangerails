@@ -147,10 +147,22 @@ export type JeResult = {
   errors: string[];
 };
 
+export type BuildJournalEntriesOptions = {
+  /**
+   * Currency to tag every JE line with. Required when the source CSV uses
+   * business currency for all amounts (Wave's default for multi-currency
+   * businesses — even USD account rows are pre-converted to CAD). If
+   * omitted, the converter falls back to per-tx currency inference (only
+   * correct for single-currency businesses).
+   */
+  businessCurrency?: string;
+};
+
 export function buildJournalEntriesCsv(
   waveCsvText: string,
   codeMap: CodeMap,
   accounts: WaveAccountNode[],
+  options: BuildJournalEntriesOptions = {},
 ): JeResult {
   const warnings: string[] = [];
   const errors: string[] = [];
@@ -244,7 +256,7 @@ export function buildJournalEntriesCsv(
 
   for (const txId of groupsOrder) {
     const lines = groups.get(txId)!;
-    const currency = pickTxCurrency(lines);
+    const currency = options.businessCurrency ?? pickTxCurrency(lines);
     const date = lines[0].txDate;
     const ref = txId;
     const memo = pickMemo(lines);
