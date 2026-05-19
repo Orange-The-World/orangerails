@@ -59,7 +59,7 @@ export function Integrations() {
             Connections
           </p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl text-balance">
-            Plays nice with the Bitcoin stack you already use.
+            Where OrangeRails connects.
           </h2>
         </div>
 
