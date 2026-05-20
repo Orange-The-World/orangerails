@@ -44,7 +44,7 @@
  */
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { create as createJwt, getNumericDate } from 'jsr:@cmd-johnson/djwt@3';
+import { create as createJwt, getNumericDate } from 'https://deno.land/x/djwt@v3.0.2/mod.ts';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 
 const ACCESS_TOKEN_TTL_SECONDS = 3600; // 1 hour, per Decision 2
