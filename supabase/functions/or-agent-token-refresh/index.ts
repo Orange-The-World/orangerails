@@ -7,7 +7,7 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { create as createJwt, getNumericDate } from 'https://deno.land/x/djwt@v3.0.2/mod.ts';
-import { ed25519 } from 'jsr:@noble/curves@1.6.0/ed25519';
+import { ed25519 } from 'jsr:@noble/curves@1.9.0/ed25519';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 
 const ACCESS_TOKEN_TTL_SECONDS = 3600;
