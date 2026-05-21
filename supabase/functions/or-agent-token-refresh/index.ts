@@ -119,6 +119,34 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Signature verification failed' }, 401, cors);
     }
 
+    // Replay protection (Audit H2, 2026-05-21).
+    // Each signed_payload may be consumed exactly once per agent_member_id.
+    // The UNIQUE(agent_member_id, payload_hash) constraint on
+    // consumed_refresh_nonces catches replay attempts within the
+    // NONCE_WINDOW_SECONDS clock window.
+    const payloadHashBuf = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(body.signed_payload),
+    );
+    const payloadHash = new Uint8Array(payloadHashBuf);
+    const payloadHashHex = Array.from(payloadHash, (b) => b.toString(16).padStart(2, '0')).join('');
+
+    const { error: nonceErr } = await admin
+      .from('consumed_refresh_nonces')
+      .insert({
+        agent_member_id: body.agent_member_id,
+        payload_hash: `\\x${payloadHashHex}`,
+      });
+
+    if (nonceErr) {
+      if (nonceErr.code === '23505') {
+        // Unique violation — payload already consumed.
+        return jsonResponse({ error: 'Signature already consumed' }, 401, cors);
+      }
+      console.error('[or-agent-token-refresh] nonce insert failed:', nonceErr.message);
+      return jsonResponse({ error: 'Internal error' }, 500, cors);
+    }
+
     const now = Math.floor(Date.now() / 1000);
     const expiresUnix = now + ACCESS_TOKEN_TTL_SECONDS;
     const keyBuf = new TextEncoder().encode(jwtSecret);

@@ -44,8 +44,28 @@ BEGIN
     RAISE EXCEPTION 'Unauthorized: no auth context';
   END IF;
 
+  IF p_old_data_key_id IS NULL THEN
+    RAISE EXCEPTION 'p_old_data_key_id is required';
+  END IF;
+
   IF p_new_data_key_id IS NULL THEN
     RAISE EXCEPTION 'p_new_data_key_id is required';
+  END IF;
+
+  -- Ownership check (Audit H1, 2026-05-21).
+  -- Without this, any signed-in user could call rotate_data_key with
+  -- any old/new key UUIDs and insert wrapped envelopes for arbitrary
+  -- recipient_user_ids. We anchor authorisation on the OLD data key:
+  -- the caller must currently hold a wrapped envelope for it (i.e.,
+  -- they are a legitimate recipient of the key being rotated out).
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.wrapped_data_keys
+    WHERE data_key_id = p_old_data_key_id
+      AND recipient_user_id = v_caller
+  ) THEN
+    RAISE EXCEPTION 'data_key not found or caller is not a recipient of p_old_data_key_id'
+      USING ERRCODE = '42501';
   END IF;
 
   IF p_envelopes IS NULL OR jsonb_array_length(p_envelopes) = 0 THEN
