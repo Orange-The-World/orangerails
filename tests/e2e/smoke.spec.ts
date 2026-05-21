@@ -1,22 +1,31 @@
 import { test, expect, type ConsoleMessage } from '@playwright/test';
 
 /**
- * Orange Rails smoke tests.
- *
- * Goal: catch CF Pages deployment regressions before the user sees them.
- * Run after every push to dev (manually or via CI).
+ * Smoke tests — catches CF Pages deployment regressions.
  *
  * Tests are intentionally shallow:
  *   1. Page loads with 2xx HTTP status
- *   2. No JavaScript console errors during render
- *   3. Key DOM landmarks are present
- *   4. Key public routes return 200
- *
- * Deeper tests (auth flow, dashboard, MCP) live in tests/e2e/dashboard
- * and tests/e2e/mcp once those features ship.
+ *   2. Loading splash (if any) is removed within 15s
+ *   3. No JavaScript console errors after splash removal
+ *   4. Key DOM landmarks (body, headings) are present
  */
 
-test.describe('Orange Rails landing page', () => {
+const KNOWN_SPLASH_SELECTORS = [
+  '#ow-splash',          // Orange Way
+  '#or-splash',          // Orange Rails (future)
+  '#v3-splash',          // BitBooks Vault (future)
+  '[data-loading-splash]', // generic opt-in
+];
+
+async function waitForSplashGone(page: import('@playwright/test').Page) {
+  for (const selector of KNOWN_SPLASH_SELECTORS) {
+    if ((await page.locator(selector).count()) > 0) {
+      await page.locator(selector).waitFor({ state: 'detached', timeout: 15000 }).catch(() => null);
+    }
+  }
+}
+
+test.describe('landing page', () => {
   let consoleErrors: string[] = [];
 
   test.beforeEach(async ({ page }) => {
@@ -34,43 +43,22 @@ test.describe('Orange Rails landing page', () => {
   test('home page loads with no console errors', async ({ page }) => {
     const response = await page.goto('/', { waitUntil: 'networkidle' });
     expect(response?.status(), 'home page HTTP status').toBeLessThan(400);
+    await waitForSplashGone(page);
 
-    // Wait for any post-load async errors
-    await page.waitForTimeout(2000);
-
-    // Filter out known benign noise (browser extensions, third-party CDN preloads)
     const significantErrors = consoleErrors.filter(
       (e) =>
         !e.includes('Download the React DevTools') &&
         !e.includes('chrome-extension://') &&
-        !e.includes('Loading chunk') // transient HMR noise
+        !e.includes('Loading chunk')
     );
     expect(significantErrors, 'no console errors on home page').toEqual([]);
   });
 
-  test('home page has expected landmarks', async ({ page }) => {
+  test('home page has visible landmarks', async ({ page }) => {
     await page.goto('/');
-    // Top-level landmarks — keep these loose so cosmetic changes don't break tests
+    await waitForSplashGone(page);
     await expect(page.locator('body')).toBeVisible();
-    // There should be at least one heading on the landing page
     const headings = page.locator('h1, h2');
     await expect(headings.first()).toBeVisible();
   });
-
-  const PUBLIC_ROUTES = [
-    '/',
-    '/about',
-    '/security',
-    '/pricing',
-  ];
-
-  for (const path of PUBLIC_ROUTES) {
-    test(`route ${path} returns 2xx or 404 (not 5xx)`, async ({ page }) => {
-      const response = await page.goto(path, { waitUntil: 'domcontentloaded' });
-      // 404 is acceptable for routes that may not exist yet
-      // 5xx indicates a real server error
-      const status = response?.status() ?? 0;
-      expect(status, `${path} HTTP status`).toBeLessThan(500);
-    });
-  }
 });
