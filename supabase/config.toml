@@ -8,3 +8,6 @@ verify_jwt = false
 
 [functions.or-link-mint-token]
 verify_jwt = false
+
+[functions.or-link-complete]
+verify_jwt = false
