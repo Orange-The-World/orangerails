@@ -2,36 +2,7 @@
  * or-agent-token-refresh — issue a fresh JWT to an agent that proves it still
  * holds its Ed25519 private key via a signed-payload challenge.
  *
- * Session: 2026-05-21-BIRCH
- *
- * Anti-replay design: the agent constructs the signed payload itself, including
- * a current ISO timestamp. The server checks the timestamp is within 60s of
- * server time and that no replay window has been observed. Combined with Ed25519
- * signature verification, this gives us:
- *   - Stateless refresh (no challenge round-trip needed)
- *   - No long-term refresh token to leak
- *   - Proof of private-key possession on every refresh
- *
- * POST body:
- *   {
- *     agent_member_id: string
- *     signed_payload: string   // exactly "or-agent-refresh|<agent_member_id>|<iso_timestamp>"
- *     signature: string        // base64 Ed25519 signature of signed_payload bytes
- *   }
- *
- * Response 200:
- *   {
- *     access_token: string
- *     expires_at: string       // ISO 8601, 1 hour from now
- *     token_type: 'bearer'
- *   }
- *
- * Failures:
- *   400 — malformed input
- *   401 — bad signature
- *   403 — agent revoked or not activated
- *   408 — payload timestamp outside 60s window
- *   404 — agent_member_id not found
+ * Session: 2026-05-21-BIRCH (v2: appends audit entry on success)
  */
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
@@ -39,7 +10,7 @@ import { create as createJwt, getNumericDate } from 'jsr:@cmd-johnson/djwt@3';
 import { ed25519 } from 'jsr:@noble/curves@1.6.0/ed25519';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 
-const ACCESS_TOKEN_TTL_SECONDS = 3600; // 1 hour, per Decision 2
+const ACCESS_TOKEN_TTL_SECONDS = 3600;
 const NONCE_WINDOW_SECONDS = 60;
 const EXPECTED_PREFIX = 'or-agent-refresh';
 
@@ -60,7 +31,9 @@ function isUuid(s: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 }
 
-function parseAndValidatePayload(payload: string, agentMemberId: string): { ok: true; tsMs: number } | { ok: false; reason: string } {
+function parseAndValidatePayload(payload: string, agentMemberId: string):
+  | { ok: true; tsMs: number }
+  | { ok: false; reason: string } {
   const parts = payload.split('|');
   if (parts.length !== 3) return { ok: false, reason: 'signed_payload must be exactly 3 pipe-separated parts' };
   const [prefix, mid, ts] = parts;
@@ -86,7 +59,6 @@ Deno.serve(async (req: Request) => {
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
   const jwtSecret = Deno.env.get('SUPABASE_JWT_SECRET');
   if (!supabaseUrl || !serviceKey || !jwtSecret) {
-    console.error('[or-agent-token-refresh] missing required env vars');
     return jsonResponse({ error: 'Server misconfigured' }, 500, cors);
   }
 
@@ -126,7 +98,6 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Agent not found, not activated, or revoked' }, 403, cors);
     }
 
-    // Verify Ed25519 signature
     let signatureBytes: Uint8Array;
     let pubkeyBytes: Uint8Array;
     try {
@@ -139,7 +110,6 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'signature must be a 64-byte Ed25519 signature' }, 400, cors);
     }
     if (pubkeyBytes.length !== 32) {
-      console.error('[or-agent-token-refresh] stored identity_pubkey is not 32 bytes; corrupt state for agent', body.agent_member_id);
       return jsonResponse({ error: 'Stored pubkey invalid' }, 500, cors);
     }
 
@@ -149,16 +119,11 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Signature verification failed' }, 401, cors);
     }
 
-    // Mint a fresh Supabase JWT for the shadow user
     const now = Math.floor(Date.now() / 1000);
     const expiresUnix = now + ACCESS_TOKEN_TTL_SECONDS;
     const keyBuf = new TextEncoder().encode(jwtSecret);
     const cryptoKey = await crypto.subtle.importKey(
-      'raw',
-      keyBuf,
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign', 'verify'],
+      'raw', keyBuf, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'],
     );
     const jwt = await createJwt(
       { alg: 'HS256', typ: 'JWT' },
@@ -180,9 +145,22 @@ Deno.serve(async (req: Request) => {
       cryptoKey,
     );
 
-    // Best-effort bump of last_activity_at; never fail the request on this.
-    await admin.rpc('touch_agent_activity', { p_agent_member_id: body.agent_member_id })
+    // Best-effort: bump activity + write audit entry. Neither failure
+    // should fail the request (the JWT is already minted).
+    await admin
+      .rpc('touch_agent_activity', { p_agent_member_id: body.agent_member_id })
       .catch((e: unknown) => console.warn('[or-agent-token-refresh] touch failed:', String(e)));
+
+    const fwdIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+    const ua = req.headers.get('user-agent') ?? null;
+    await admin
+      .rpc('log_agent_token_refresh', {
+        p_agent_member_id: body.agent_member_id,
+        p_shadow_user_id: row.shadow_user_id,
+        p_client_ip: fwdIp,
+        p_client_user_agent: ua,
+      })
+      .catch((e: unknown) => console.warn('[or-agent-token-refresh] audit log failed:', String(e)));
 
     return jsonResponse(
       {
