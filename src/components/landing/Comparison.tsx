@@ -4,6 +4,11 @@ type Cell = boolean | string;
 
 const competitors = ["Plaid", "Mesh Connect", "Vezgo", "Quilt", "OrangeRails"] as const;
 
+// Cell semantics:
+//   true | false           -> check / cross (used for competitor columns)
+//   string starting with a -> count cell rendered plainly (Connections row,
+//   digit                       all columns, e.g. "12,000+", "100 and growing")
+//   any other string + isUs-> check + small detail label (OR's wins)
 const rows: { label: string; cells: Cell[] }[] = [
   { label: "Connections", cells: ["12,000+", "300+", "30+", "12,000+", "100 and growing"] },
   { label: "Open source", cells: [false, false, false, false, "Apache 2.0"] },
@@ -12,6 +17,10 @@ const rows: { label: string; cells: Cell[] }[] = [
   { label: "Bitcoin native", cells: [false, "partial", "partial", false, "BIP 158, Lightning, UTXOs"] },
   { label: "Post quantum ready", cells: [false, false, false, false, "ML-KEM-768, ML-DSA-65"] },
 ];
+
+function isCountString(s: string): boolean {
+  return /^[\d]/.test(s);
+}
 
 function CellRender({ value, isUs }: { value: Cell; isUs: boolean }) {
   if (value === true) {
@@ -28,6 +37,21 @@ function CellRender({ value, isUs }: { value: Cell; isUs: boolean }) {
       </span>
     );
   }
+  // String cell. Two flavors:
+  if (isUs && !isCountString(value)) {
+    // OR's win row: green check + small detail label underneath.
+    return (
+      <div className="flex flex-col items-center gap-1.5">
+        <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-success/10 text-success">
+          <Check className="h-3.5 w-3.5" strokeWidth={3} />
+        </span>
+        <span className="font-mono text-[10px] leading-tight text-primary">
+          {value}
+        </span>
+      </div>
+    );
+  }
+  // Plain text cell (counts row, "partial", etc.)
   return (
     <span
       className={`font-mono text-xs ${
@@ -43,7 +67,7 @@ export function Comparison() {
   return (
     <section className="border-y border-border/60 bg-card/40 py-24">
       <div className="mx-auto max-w-6xl px-6">
-        <div className="max-w-2xl">
+        <div className="mx-auto max-w-3xl text-center">
           <p className="text-xs font-medium uppercase tracking-widest text-primary">Compared</p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl text-balance">
             How OrangeRails stacks up.
