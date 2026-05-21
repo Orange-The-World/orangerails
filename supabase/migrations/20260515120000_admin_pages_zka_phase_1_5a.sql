@@ -71,6 +71,7 @@ CREATE POLICY "Customers update own vault meta"
     customer_id IN (SELECT id FROM public.customers WHERE auth_user_id = auth.uid())
   );
 
+DROP TRIGGER IF EXISTS trg_customer_vault_meta_updated_at ON public.customer_vault_meta;
 CREATE TRIGGER trg_customer_vault_meta_updated_at
   BEFORE UPDATE ON public.customer_vault_meta
   FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();
@@ -127,6 +128,7 @@ CREATE POLICY "Staff update recovery shares"
   TO authenticated
   USING (public.is_staff());
 
+DROP TRIGGER IF EXISTS trg_customer_recovery_shares_updated_at ON public.customer_recovery_shares;
 CREATE TRIGGER trg_customer_recovery_shares_updated_at
   BEFORE UPDATE ON public.customer_recovery_shares
   FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();
