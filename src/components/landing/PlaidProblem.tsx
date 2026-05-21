@@ -18,13 +18,13 @@ const problems = [
 const solutions = [
   {
     title: "Credentials encrypted",
-    body: "AES-256-GCM, derived from your key — never ours.",
+    body: "AES-256-GCM, derived from your key. Never ours.",
     code: "AES-256-GCM",
   },
   {
     title: "Transactions stay encrypted",
-    body: "Split-connector architecture: descriptions never leave your device unencrypted.",
-    code: "split-connector",
+    body: "Split connector architecture: descriptions never leave your device unencrypted.",
+    code: "split connector",
   },
   {
     title: "No data moat",

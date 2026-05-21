@@ -31,10 +31,12 @@ export function Integrations() {
     fetchProviderCatalog()
       .then((c) => {
         if (!active) return;
-        const live = c.providers.filter((p: ProviderManifest) => p.status === "live");
-        const top = sortByPopularity(live).slice(0, 12).map((p) => p.displayName);
+        const usable = c.providers.filter(
+          (p: ProviderManifest) => p.status === "live" || p.status === "beta",
+        );
+        const top = sortByPopularity(usable).slice(0, 12).map((p) => p.displayName);
         setProviders(top);
-        setTotal(live.length);
+        setTotal(usable.length);
       })
       .catch(() => {
         if (active) {
@@ -57,7 +59,7 @@ export function Integrations() {
             Connections
           </p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl text-balance">
-            Plays nice with the Bitcoin stack you already use.
+            Where OrangeRails connects.
           </h2>
         </div>
 
