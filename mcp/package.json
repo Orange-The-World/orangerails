@@ -1,7 +1,7 @@
 {
   "name": "@orangerails/mcp",
-  "version": "0.1.0",
-  "description": "Orange Rails MCP server — connects AI agents to your private data with zero knowledge encryption.",
+  "version": "0.2.0",
+  "description": "Orange Rails MCP server \u2014 connects AI agents to your private data with zero knowledge encryption.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -26,7 +26,8 @@
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",
-    "@noble/post-quantum": "^0.6.1"
+    "@noble/post-quantum": "^0.6.1",
+    "@modelcontextprotocol/sdk": "^1.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",

@@ -4,20 +4,15 @@
  *
  * Usage:
  *   orangerails-mcp connect <invitation-token>
- *     Generate keypair, redeem the invitation, persist identity locally.
- *
  *   orangerails-mcp status
- *     Show current identity + token status. Read-only.
- *
  *   orangerails-mcp start
- *     (Not yet implemented; comes in PR #7.) Run the MCP server over stdio.
  *
  * Identity is stored at $HOME/.orange-rails/identity.json (mode 0600).
- * See: https://wiki.abascal.ca/doc/02-proposed-architecture-agent-as-employee-Ga7ngrjhkO
  */
 
 import { connect } from './connect.js';
 import { readIdentity } from './identity.js';
+import { startStdioServer } from './server.js';
 
 const SUBCOMMANDS = ['connect', 'status', 'start'] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
@@ -30,16 +25,15 @@ function printHelp(): void {
       'Usage:',
       '  orangerails-mcp connect <invitation-token> [--api-url <url>] [--client <name>]',
       '  orangerails-mcp status',
-      '  orangerails-mcp start    (not yet implemented in v0.1)',
+      '  orangerails-mcp start',
       '',
       'Options for connect:',
       '  --api-url <url>     Override Orange Rails API base URL.',
       '                      Defaults to https://api.orangerails.com',
-      '  --client <name>     Which local MCP client to configure: claude_code,',
-      '                      claude_desktop, cursor, continue, cline, custom.',
+      '  --client <name>     Which local MCP client to configure (claude_code,',
+      '                      claude_desktop, cursor, continue, cline, custom).',
       '                      Defaults to claude_code.',
-      '  --name <text>       Display name for this agent. Defaults to',
-      '                      "<client> on <hostname>".',
+      '  --name <text>       Display name for this agent.',
       '',
       'Identity is stored at $HOME/.orange-rails/identity.json (mode 0600).',
     ].join('\n'),
@@ -99,8 +93,7 @@ async function main(): Promise<number> {
         console.log('  Access token expires at:', result.expiresAt);
         console.log('  Identity saved to:', result.identityPath);
         console.log('');
-        console.log('Next step: integrate with your MCP client.');
-        console.log('  Run "orangerails-mcp start" (coming in v0.2) to expose tools.');
+        console.log('Next step: run "orangerails-mcp start" to expose tools to your MCP client.');
         return 0;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -127,8 +120,14 @@ async function main(): Promise<number> {
       }
     }
     case 'start': {
-      console.error('start is not yet implemented in v0.1. Coming in PR #7.');
-      return 2;
+      try {
+        await startStdioServer();
+        return 0;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        process.stderr.write(`start failed: ${msg}\n`);
+        return 1;
+      }
     }
   }
 }
