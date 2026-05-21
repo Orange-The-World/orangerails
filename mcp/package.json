@@ -1,6 +1,6 @@
 {
   "name": "@orangerails/mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Orange Rails MCP server \u2014 connects AI agents to your private data with zero knowledge encryption.",
   "license": "Apache-2.0",
   "repository": {

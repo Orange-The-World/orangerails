@@ -1,5 +1,9 @@
 /**
  * Orange Rails MCP — stdio server.
+ *
+ * Implements the MCP protocol over standard input/output. Calls
+ * ensureFreshIdentity() before each tool invocation so the access token
+ * is always within its valid window.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -9,23 +13,26 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { readIdentity, type IdentityFile } from './identity.js';
+import { ensureFreshToken } from './refresh.js';
 import { booksPing } from './tools/books-ping.js';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 export async function startStdioServer(): Promise<void> {
-  const identity = await readIdentity();
+  let identity = await readIdentity();
   if (!identity) {
     throw new Error(
       'Not connected. Run "orangerails-mcp connect <invitation-token>" first.',
     );
   }
 
-  if (isTokenExpired(identity)) {
+  // Refresh once up front so the server starts with a fresh token.
+  identity = await ensureFreshToken(identity).catch((e) => {
     throw new Error(
-      `Access token expired at ${identity.accessTokenExpiresAt}. Token refresh (via signed nonce challenge) is not yet implemented in v0.2 — for now, re-run connect with a fresh invitation token.`,
+      `Initial token refresh failed: ${e instanceof Error ? e.message : String(e)}. ` +
+        `If the agent has been revoked or the invitation TTL elapsed, re-run connect.`,
     );
-  }
+  });
 
   const server = new Server(
     { name: '@orangerails/mcp', version: VERSION },
@@ -44,6 +51,9 @@ export async function startStdioServer(): Promise<void> {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    // Refresh the token if it is near expiry before invoking the tool.
+    identity = await ensureFreshToken(identity);
+
     const { name } = request.params;
     if (name === 'books.ping') {
       const result = await booksPing(identity);
@@ -58,12 +68,6 @@ export async function startStdioServer(): Promise<void> {
   await server.connect(transport);
 
   process.stderr.write(
-    `[orangerails-mcp ${VERSION}] connected as agent_member ${identity.agentMemberId}\n`,
+    `[orangerails-mcp ${VERSION}] connected as agent_member ${identity.agentMemberId} (token expires ${identity.accessTokenExpiresAt})\n`,
   );
-}
-
-function isTokenExpired(identity: IdentityFile): boolean {
-  const expires = Date.parse(identity.accessTokenExpiresAt);
-  if (Number.isNaN(expires)) return true;
-  return Date.now() > expires - 60_000;
 }
