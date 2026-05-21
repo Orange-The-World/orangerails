@@ -42,9 +42,7 @@ export function PricingCard({ plan }: { plan: Plan }) {
             }`}
           >
             <Check
-              className={`mt-0.5 h-4 w-4 shrink-0 ${
-                f.emphasize ? "text-primary" : "text-success"
-              }`}
+              className="mt-0.5 h-4 w-4 shrink-0 text-success"
               strokeWidth={3}
             />
             <span className={f.emphasize ? "font-medium text-foreground" : "text-foreground/85"}>
