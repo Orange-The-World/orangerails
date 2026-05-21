@@ -1,12 +1,36 @@
-import { Bitcoin, ShieldCheck, Landmark, Plug, Lock, Wrench } from "lucide-react";
+import { Plug, Activity, Webhook, Lock, Eye, Server } from "lucide-react";
 
 const features = [
-  { icon: Bitcoin, title: "Bitcoin-native", body: "Sats, UTXOs, on-chain & Lightning. Built around the asset, not bolted on." },
-  { icon: ShieldCheck, title: "Privacy tiers disclosed", body: "Every source labeled T0 to T3 at connect time. The customer sees the tradeoff before they pick." },
-  { icon: Landmark, title: "Bank-connected", body: "Bridge fiat rails alongside Bitcoin without leaking either to a third party." },
-  { icon: Plug, title: "Open API spec", body: "Published, versioned, and documented. No surprise breaking changes." },
-  { icon: Lock, title: "Zero-knowledge mode", body: "Run end-to-end encrypted by default. We can't read what we don't have." },
-  { icon: Wrench, title: "Trojan horse for legacy", body: "QuickBooks & Xero plugins ship Bitcoin into stacks that ignore it." },
+  {
+    icon: Plug,
+    title: "Unified API",
+    body: "One normalized API for banks, exchanges, wallets, and Lightning nodes. The aggregator primitives every fintech already expects.",
+  },
+  {
+    icon: Activity,
+    title: "Real time accounts",
+    body: "Balances, transactions, identity, all current. Same data shapes as the incumbents you already evaluated.",
+  },
+  {
+    icon: Webhook,
+    title: "Webhooks",
+    body: "Event driven. Connections, transactions, provider failures, all pushed in real time. No polling, no missed updates.",
+  },
+  {
+    icon: Lock,
+    title: "Sealed envelopes",
+    body: "Customer credentials encrypted in their browser. Your operator holds ciphertext it cannot open. A breach of our infrastructure surfaces noise, not customer data.",
+  },
+  {
+    icon: Eye,
+    title: "Stealth Sync",
+    body: "A BIP 158 widget runs in the customer's browser. The xpub never leaves the page. You see balances, not addresses.",
+  },
+  {
+    icon: Server,
+    title: "Open source by default",
+    body: "Apache 2.0. Self hostable. Same code we run, you run. The aggregator that does not own you.",
+  },
 ];
 
 export function Features() {
@@ -16,7 +40,7 @@ export function Features() {
         <div className="max-w-2xl">
           <p className="text-xs font-medium uppercase tracking-widest text-primary">Features</p>
           <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl text-balance">
-            Everything a Bitcoin business needs. Nothing it doesn't.
+            Everything a Bitcoin business needs. Nothing it doesn&apos;t.
           </h2>
         </div>
 
