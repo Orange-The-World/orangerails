@@ -1,0 +1,8 @@
+Date;Direction;Currency;Amount (Currency);Description;Destination;Fee;Reference
+Sep 24 2024 13:21:51;Receive;BTC;0.00150000;Invoice payment;lnbc1500u1p3xyz...sample-ln-invoice-receive-1;0;ref-001
+Sep 24 2024 14:05:12;Receive;BTC;0.00075000;Tip from supporter;lnbc750u1p3abc...sample-ln-invoice-receive-2;0;ref-002
+Sep 25 2024 09:18:33;Send;BTC;-0.00009896;Coffee;lnbc9890n1p3def...sample-ln-invoice-send-small-1;0;ref-003
+Sep 25 2024 09:45:01;Send;BTC;-0.00000500;Routing fee top-up;lnbc500p1p3ghi...sample-ln-invoice-send-tiny-1;0;ref-004
+Sep 26 2024 11:30:00;Send;BTC;-0.00250000;Vendor invoice;bc1qexamplemainnetbtcaddress0001;0.00000050;ref-005
+Sep 26 2024 16:42:55;Send;BTC;-0.00500000;Hardware purchase;bc1qexamplemainnetbtcaddress0002;0.00000080;ref-006
+Sep 27 2024 08:12:07;Send;BTC;-0.00000750;Lightning probe;lnbc750p1p3jkl...sample-ln-invoice-send-tiny-2;0;ref-007
