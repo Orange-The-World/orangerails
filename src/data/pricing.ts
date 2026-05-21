@@ -1,6 +1,6 @@
 import type { Plan } from "@/components/pricing/PricingCard";
 
-const ZK = "Zero-knowledge mode";
+const ZK = "Zero knowledge architecture by design";
 
 export const INDIVIDUALS: Plan[] = [
   {
@@ -145,8 +145,8 @@ export const FAQ = [
     a: "One size never fits all. Individuals, teams, and developers each get the pricing shape that matches how they actually use the product — not the shape that's easiest for us to bill.",
   },
   {
-    q: "Why is zero-knowledge on every tier including free?",
-    a: "Gating privacy contradicts why we built this. The OSS audience is the same audience that values zero-knowledge — splitting them would alienate both.",
+    q: "Why is zero knowledge architecture on every tier including free?",
+    a: "Gating privacy contradicts why we built this. The open source audience is the same audience that values zero knowledge architecture. Splitting them would alienate both.",
   },
   {
     q: "Can I move between tiers or segments?",
@@ -158,11 +158,11 @@ export const FAQ = [
   },
   {
     q: "Do you resell my data?",
-    a: "We can't. Zero-knowledge mode means we literally cannot read transaction details — the math doesn't allow it. See the threat model on /open-source.",
+    a: "We can't. Zero knowledge architecture means we literally cannot read transaction details. The math does not allow it. See the threat model on /open-source.",
   },
   {
-    q: "Is the OSS self-host crippled?",
-    a: "No. Same adapters, same zero-knowledge guarantees, same API. Paid tiers add operational features (SSO, audit log retention, SLA, SOC 2 attestation) — not core capability.",
+    q: "Is the open source self host crippled?",
+    a: "No. Same adapters, same zero knowledge guarantees, same API. Paid tiers add operational features (SSO, audit log retention, SLA, SOC 2 attestation), not core capability.",
   },
   {
     q: "Why not charge everyone usage-based like Plaid?",
