@@ -277,8 +277,13 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.append_audit_entry(TEXT, UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INET, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.append_audit_entry(TEXT, UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INET, TEXT, TEXT) FROM authenticated, anon;
 GRANT EXECUTE ON FUNCTION public.append_audit_entry(TEXT, UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INET, TEXT, TEXT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.append_audit_entry(TEXT, UUID, UUID, TEXT, TEXT, TEXT, TEXT, TEXT, INET, TEXT, TEXT) TO authenticated;
+-- DO NOT GRANT to authenticated. Audit C1 (2026-05-21): any signed-in
+-- customer would otherwise be able to forge entries claiming to be any
+-- other actor doing any action. Edge functions that need to append
+-- (or-agent-*) already run with service_role context. SECURITY DEFINER
+-- on RPCs callable by authenticated may also wrap this safely.
 
 COMMENT ON FUNCTION public.append_audit_entry IS
   'Appends a tamper evident audit entry. Locks the tail of the chain to serialize writes. Called by every state mutating edge function or trigger.';
