@@ -29,7 +29,7 @@
  * Query params:
  *   platform     — the integrating app's slug (e.g. 'bitbooks-v2'). Required.
  *   app_user_id  — opaque identifier for the end user, owned by the integrating app. Required.
- *   provider     — wallet provider slug ('blink', 'xpub', 'btcpay', ...). Required.
+ *   provider     — wallet provider slug. **Optional**. If omitted, the widget shows a provider picker step.
  *   return_to    — origin the widget posts back to. Required.
  *
  * postMessage payload (fired into window.opener):
@@ -237,13 +237,18 @@ interface ManifestField {
   helpHref?: string;
 }
 
-async function fetchProviderManifest(slug: string): Promise<ProviderManifest> {
+async function fetchAllProviders(): Promise<ProviderManifest[]> {
   const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
   if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
   const res = await fetch(`${base}/functions/v1/or-providers`, { method: "GET" });
   if (!res.ok) throw new Error(`Could not load provider catalog (status ${res.status}).`);
   const json = (await res.json()) as { providers?: ProviderManifest[] };
-  const found = json.providers?.find((p) => p.slug === slug);
+  return json.providers ?? [];
+}
+
+async function fetchProviderManifest(slug: string): Promise<ProviderManifest> {
+  const providers = await fetchAllProviders();
+  const found = providers.find((p) => p.slug === slug);
   if (!found) throw new Error(`Provider "${slug}" is not registered with Orange Rails.`);
   if (found.status === "coming_soon") {
     throw new Error(`Provider "${found.displayName}" is not available yet.`);
@@ -585,7 +590,13 @@ async function callLinkComplete(payload: {
 // Component
 // --------------------------------------------------------------------
 
-type Step = "enter-credentials" | "discovering" | "pick-wallets" | "saving" | "done";
+type Step =
+  | "pick-provider"
+  | "enter-credentials"
+  | "discovering"
+  | "pick-wallets"
+  | "saving"
+  | "done";
 
 function ConnectPage() {
   // If a child route under /connect is matched (e.g. /connect/stealth),
@@ -605,36 +616,75 @@ function ConnectPageInner() {
   const [manifest, setManifest] = useState<ProviderManifest | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Flow state
-  const [step, setStep] = useState<Step>("enter-credentials");
+  // Flow state. When the integrating app deep-links with ?provider=... we
+  // start at the credential form; otherwise we open with the in-widget
+  // provider picker so the host app never has to maintain its own list.
+  const [step, setStep] = useState<Step>(
+    search.provider ? "enter-credentials" : "pick-provider",
+  );
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [discovered, setDiscovered] = useState<DiscoveredWallet[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [handoffKeys, setHandoffKeys] = useState<HandoffKeys | null>(null);
+  // Catalog for the in-widget picker. Loaded lazily when no provider slug
+  // arrived in the URL.
+  const [providerCatalog, setProviderCatalog] = useState<ProviderManifest[] | null>(null);
+  const [pickingProvider, setPickingProvider] = useState(false);
 
   const providerLabel = manifest?.displayName ?? search.provider ?? "your provider";
 
   // ---- Validate query params + look up the integrating app + manifest
   useEffect(() => {
-    if (!search.platform || !search.app_user_id || !search.provider || !search.return_to) {
+    // `provider` is optional — when absent we show the picker step and
+    // defer the manifest fetch until the user chooses. Everything else
+    // (platform / app_user_id / return_to) is still required.
+    if (!search.platform || !search.app_user_id || !search.return_to) {
       setLoadError(
         "This page is missing some details from the app that opened it. Please go back and try again.",
       );
       return;
     }
-    // Resolve the integrating app's display info AND the provider manifest
-    // in parallel. Both are required before the form renders.
-    Promise.all([
-      fetchPlatformDisplay(search.platform),
-      fetchProviderManifest(search.provider),
-    ])
-      .then(([platformRes, manifestRes]) => {
-        setPlatform(platformRes);
-        setManifest(manifestRes);
-      })
-      .catch((err) => setLoadError(String(err.message ?? err)));
+    if (search.provider) {
+      // Deep-linked: resolve platform AND provider manifest in parallel
+      // (existing fast path — keeps backward compat with V2 + integrators
+      // that already pass ?provider=...).
+      Promise.all([
+        fetchPlatformDisplay(search.platform),
+        fetchProviderManifest(search.provider),
+      ])
+        .then(([platformRes, manifestRes]) => {
+          setPlatform(platformRes);
+          setManifest(manifestRes);
+        })
+        .catch((err) => setLoadError(String(err.message ?? err)));
+    } else {
+      // No provider in URL — fetch platform display and the full provider
+      // catalog so the picker can render.
+      Promise.all([fetchPlatformDisplay(search.platform), fetchAllProviders()])
+        .then(([platformRes, providers]) => {
+          setPlatform(platformRes);
+          setProviderCatalog(providers.filter((p) => p.status !== "coming_soon"));
+        })
+        .catch((err) => setLoadError(String(err.message ?? err)));
+    }
   }, [search.platform, search.app_user_id, search.provider, search.return_to]);
+
+  // ---- Picker step: user clicks a provider tile -------------------------
+  async function handlePickProvider(slug: string) {
+    if (pickingProvider) return;
+    setError(null);
+    setPickingProvider(true);
+    try {
+      const m = await fetchProviderManifest(slug);
+      setManifest(m);
+      setStep("enter-credentials");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPickingProvider(false);
+    }
+  }
 
   // ---- Read locking keys from URL fragment, once ------------------
   // Fires on first mount only. The fragment is stripped from the URL
@@ -704,7 +754,7 @@ function ConnectPageInner() {
 
   // ---- Step 2 → 3: lock + save ------------------------------------
   async function handleConfirmPicks() {
-    if (!platform || !search.platform || !search.app_user_id || !search.provider) return;
+    if (!platform || !manifest || !search.platform || !search.app_user_id) return;
     const picks = discovered.filter((w) => selectedIds.has(w.external_wallet_id));
     if (picks.length === 0) {
       setError("Pick at least one wallet to continue.");
@@ -723,7 +773,7 @@ function ConnectPageInner() {
       const result = await callLinkComplete({
         platform_slug: search.platform,
         app_user_id: search.app_user_id,
-        provider_type: search.provider,
+        provider_type: manifest.slug,
         encrypted_label: locked.encrypted_label,
         encrypted_credentials: locked.encrypted_credentials,
         wallets: locked.walletCiphertexts.map((w) => ({
@@ -817,7 +867,9 @@ function ConnectPageInner() {
     );
   }
 
-  if (!platform || !manifest) {
+  // Platform display must always resolve before we render the body. The
+  // manifest is only required once we leave the picker step.
+  if (!platform || (step !== "pick-provider" && !manifest)) {
     return (
       <Shell>
         <p className="text-sm text-muted-foreground">Loading…</p>
@@ -838,7 +890,7 @@ function ConnectPageInner() {
     <Shell platform={platform}>
       <StepDots
         step={
-          step === "enter-credentials"
+          step === "pick-provider" || step === "enter-credentials"
             ? 1
             : step === "discovering" || step === "pick-wallets"
               ? 2
@@ -846,7 +898,18 @@ function ConnectPageInner() {
         }
       />
 
-      {step === "enter-credentials" && (
+      {step === "pick-provider" && (
+        <PickProviderStep
+          platformName={platform.display_name}
+          providers={providerCatalog}
+          onPick={handlePickProvider}
+          onCancel={handleCancel}
+          submitting={pickingProvider}
+          error={error}
+        />
+      )}
+
+      {step === "enter-credentials" && manifest && (
         <EnterCredentialsStep
           providerLabel={providerLabel}
           fields={manifest.credentialFields}
@@ -996,6 +1059,93 @@ function EnterCredentialsStep({
         </button>
       </div>
     </form>
+  );
+}
+
+// --------------------------------------------------------------------
+// Step 0 — provider picker (shown only when the integrating app did not
+// pin a provider in the URL). Lets the end user choose which wallet
+// provider to connect, removing the need for the host app to maintain
+// its own provider list.
+// --------------------------------------------------------------------
+
+function PickProviderStep({
+  platformName,
+  providers,
+  onPick,
+  onCancel,
+  submitting,
+  error,
+}: {
+  platformName: string;
+  providers: ProviderManifest[] | null;
+  onPick: (slug: string) => void;
+  onCancel: () => void;
+  submitting: boolean;
+  error: string | null;
+}) {
+  if (providers === null) {
+    return (
+      <div className="mt-6 flex flex-col items-center gap-3 py-6 text-center">
+        <Spinner />
+        <p className="text-sm text-muted-foreground">Loading providers…</p>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-4 space-y-4">
+      <div>
+        <h2 className="text-sm font-semibold">Choose your wallet provider</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Pick which provider you want {platformName} to connect to.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {providers.map((p) => (
+          <button
+            key={p.slug}
+            type="button"
+            onClick={() => onPick(p.slug)}
+            disabled={submitting}
+            className="flex w-full items-center gap-3 rounded-md border border-input p-3 text-left transition-colors hover:bg-muted/30 disabled:opacity-50"
+          >
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium">{p.displayName}</div>
+              {p.description && (
+                <div className="mt-0.5 text-xs text-muted-foreground">{p.description}</div>
+              )}
+            </div>
+            {p.category && (
+              <span className="rounded-full border border-input bg-muted/30 px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                {p.category}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {providers.length === 0 && (
+        <p className="text-sm text-muted-foreground">No providers are available right now.</p>
+      )}
+
+      {error && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      <div className="flex gap-2 pt-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={submitting}
+          className="flex-1 rounded-md border border-input bg-background px-4 py-2 text-sm font-medium disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }
 
