@@ -228,6 +228,33 @@ Deno.serve(async (req: Request) => {
     const subaccountId = await resolveSubaccount(ctx, body.subaccount_id);
     if (isAuthError(subaccountId)) return jsonResponse({ error: subaccountId.message }, subaccountId.status, cors);
 
+    // Resolve the owning platform once. Used to enqueue sync.completed
+    // webhook deliveries at the bottom of each successful per-connection
+    // loop iteration. Looked up via subaccounts.platform_id so platform
+    // mode and direct mode share the same code path. If the platform has
+    // no webhook_url configured we skip the insert entirely (see below).
+    let webhookPlatformId: string | null = null;
+    let webhookEnabled = false;
+    try {
+      const { data: subRow } = await ctx.serviceClient
+        .from('subaccounts')
+        .select('platform_id, platforms:platform_id(webhook_url)')
+        .eq('id', subaccountId)
+        .maybeSingle();
+      // deno-lint-ignore no-explicit-any
+      const subAny = subRow as any;
+      if (subAny?.platform_id) {
+        webhookPlatformId = subAny.platform_id as string;
+        const platRel = subAny.platforms;
+        const url = Array.isArray(platRel) ? platRel[0]?.webhook_url : platRel?.webhook_url;
+        webhookEnabled = typeof url === 'string' && url.length > 0;
+      }
+    } catch (e) {
+      // Webhook enqueue is best-effort. Failure to resolve the platform
+      // must not block the sync response.
+      console.error('[or-sync] webhook platform lookup failed:', e);
+    }
+
     const credsKey = await importAesKey(credentials_key);
     // Only imported in legacy mode — sink mode never encrypts payloads.
     const txnsKey: CryptoKey | null = sinkMode ? null : await importAesKey(transactions_key!);
@@ -370,6 +397,32 @@ Deno.serve(async (req: Request) => {
           .eq('id', conn.id);
 
         results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
+
+        // ─── sync.completed webhook enqueue ──────────────────────────
+        // Out-of-band: insert a webhook_delivery row that or-webhook-dispatch
+        // drains on its own schedule. We do NOT fire synchronously here;
+        // a slow consumer endpoint must never delay a sync response. The
+        // insert is skipped entirely when the owning platform has no
+        // webhook_url configured (most direct-mode users today).
+        if (webhookEnabled && webhookPlatformId) {
+          try {
+            await ctx.serviceClient.from('webhook_delivery').insert({
+              platform_id: webhookPlatformId,
+              subaccount_id: subaccountId,
+              event_type: 'sync.completed',
+              payload: {
+                event: 'sync.completed',
+                subaccount_id: subaccountId,
+                connection_id: conn.id,
+                synced_count: newTxs.length,
+                ts: new Date().toISOString(),
+              },
+            });
+          } catch (whErr) {
+            // Best-effort: log and move on. The sync itself already succeeded.
+            console.error(`[or-sync] webhook enqueue failed for connection ${conn.id}:`, whErr);
+          }
+        }
       } catch (e) {
         // Audit 2026-05-16 findings #1 + #4: never let upstream provider
         // error messages reach the client or the edge log in plaintext.
