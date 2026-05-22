@@ -102,10 +102,16 @@ function parseStrikeCredentials(c: Record<string, unknown>): StrikeCredentials {
 }
 
 async function strikeGet<T>(creds: StrikeCredentials, path: string): Promise<T> {
+  // Strike's api.strike.me is fronted by Cloudflare. CF flags Deno's default
+  // (headerless) fetch as bot traffic and returns a "Just a moment..." JS
+  // challenge page with HTTP 403. Identifying as a real client via User-Agent
+  // + Accept-Language passes CF's heuristic check. Diagnosed 2026-05-22.
   const res = await fetch(`${STRIKE_API}${path}`, {
     headers: {
       Authorization: `Bearer ${creds.api_key}`,
       Accept: 'application/json',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'User-Agent': 'OrangeRails/1.0 (+https://orangerails.com; sync-agent)',
     },
   });
   if (!res.ok) {
