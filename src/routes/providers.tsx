@@ -95,6 +95,66 @@ function ProvidersPage() {
           </div>
         </section>
 
+        {/* Privacy tier legend */}
+        <section className="border-b border-border/60 bg-card/30 py-10">
+          <div className="mx-auto max-w-6xl px-6">
+            <div className="mb-6 max-w-3xl">
+              <p className="text-xs font-medium uppercase tracking-widest text-primary">
+                How to read the privacy tiers
+              </p>
+              <h2 className="mt-2 text-xl font-semibold tracking-tight text-balance">
+                Every connection shows how much we can see.
+              </h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                The four tiers below describe who sees what when your customer connects. Look
+                for the tier badge on each card. Lower number, less middleman.
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                {
+                  tier: "T0",
+                  label: "Just you",
+                  dot: "bg-tier-t0",
+                  body: "Your customer's secrets stay on their device. Nothing in the middle. Example: xpub, Bitcoin Core, Sparrow.",
+                },
+                {
+                  tier: "T1",
+                  label: "You and the wallet",
+                  dot: "bg-tier-t1",
+                  body: "Your customer and the wallet provider, nobody else. Example: Blink, BTCPay Server, Strike.",
+                },
+                {
+                  tier: "T2",
+                  label: "Powered by an aggregator",
+                  dot: "bg-tier-t2",
+                  body: "A third party helps connect. They see what you connect, not your money. Example: most exchanges via CCXT.",
+                },
+                {
+                  tier: "T3",
+                  label: "Manual upload",
+                  dot: "bg-tier-t3",
+                  body: "Your customer drops in a file. Nothing connects automatically. Example: CSV, OFX, QIF imports.",
+                },
+              ].map((t) => (
+                <div
+                  key={t.tier}
+                  className="flex flex-col gap-1.5 rounded-xl border border-border bg-background p-4"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-block h-1.5 w-1.5 rounded-full ${t.dot}`} />
+                    <span className="font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
+                      {t.tier}
+                    </span>
+                    <span className="text-sm font-semibold">{t.label}</span>
+                  </div>
+                  <p className="text-xs leading-relaxed text-muted-foreground">{t.body}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
         <section className="py-12">
           <div className="mx-auto max-w-6xl px-6">
             {error && (

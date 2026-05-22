@@ -480,6 +480,18 @@ async function lockEverything(params: {
     credKey = params.handoff.credKey;
     txnKey = params.handoff.txnKey;
   } else {
+    // Audit H4 (2026-05-21): the hardcoded fallback password/salt below
+    // must NEVER run in production. Any prod build that hits this path
+    // would derive the same keys every other OR deployment derives,
+    // making the credential trivially decryptable. Guard at runtime so
+    // a missing fragment in prod fails loudly instead of silently
+    // sealing with the demo key.
+    if (!import.meta.env.DEV) {
+      throw new Error(
+        "connect: cred_key missing from URL fragment — refusing demo-fallback in production build. " +
+          "The host app must pass #cred_key=...&txn_key=... when launching the widget.",
+      );
+    }
     const mek = await deriveMEK(LINK_WIDGET_LOCK_PASSWORD, LINK_WIDGET_LOCK_SALT_B64);
     credKey = await deriveSubkey(
       mek,
