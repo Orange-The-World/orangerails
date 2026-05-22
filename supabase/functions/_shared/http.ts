@@ -18,11 +18,14 @@ const ALLOWED_ORIGINS: ReadonlySet<string> = new Set<string>([
   // BitBooks V3 (existing)
   'https://bitbooks-v3.lovable.app',
   'https://app.bitbooks.com',
+  'https://v3dev.bitbooks.com',
   'http://localhost:5173',
   // BitBooks V2 (added 2026-04-24 for thin-slice integration)
   'http://localhost:3000',
-  // OrangeRails own /app + Lovable preview
+  'https://v2dev.bitbooks.com',
+  // OrangeRails own /app + Lovable preview + dev domain (added 2026-05-22)
   'https://orangerails.com',
+  'https://dev.orangerails.com',
   'https://orangerails-cloud.lovable.app',
 ]);
 
