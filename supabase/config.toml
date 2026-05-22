@@ -1,13 +1,76 @@
 project_id = "gposxxmxenrdvewrprle"
 
+# Functions deployed with verify_jwt = false do their OWN auth at the
+# function-code level (X-Platform-API-Key via _shared/platform-auth.ts,
+# widget_token validation against pending_widget_sessions, or Ed25519
+# signature verification). The Supabase Gateway must pass requests
+# through to them; otherwise the gateway returns 401 with
+# UNAUTHORIZED_NO_AUTH_HEADER before the function code can run and apply
+# its own auth check. See full audit at
+# /tmp/audit-or-2026-05-22/edge-function-auth-audit.md (2026-05-22).
+#
+# Functions NOT listed here (e.g. or-agent-invite-mint, or-agent-revoke,
+# or-mcp, sync-blink) intentionally require a real Supabase / shadow-user
+# JWT and benefit from the gateway pre-check (verify_jwt = true default).
+
+# --- Public, no auth --------------------------------------------------
 [functions.or-providers]
 verify_jwt = false
 
 [functions.or-platform-display]
 verify_jwt = false
 
+# --- Platform API key auth via X-Platform-API-Key header --------------
 [functions.or-link-mint-token]
 verify_jwt = false
 
+[functions.or-connection-create]
+verify_jwt = false
+
+[functions.or-connection-delete]
+verify_jwt = false
+
+[functions.or-connection-list]
+verify_jwt = false
+
+[functions.or-discover-wallets]
+verify_jwt = false
+
+[functions.or-provision]
+verify_jwt = false
+
+[functions.or-source-wallets-set]
+verify_jwt = false
+
+[functions.or-stealth-connection-create]
+verify_jwt = false
+
+[functions.or-stealth-connection-delete]
+verify_jwt = false
+
+[functions.or-stealth-connection-list]
+verify_jwt = false
+
+[functions.or-stealth-envelope-fetch]
+verify_jwt = false
+
+[functions.or-stealth-transactions-store]
+verify_jwt = false
+
+[functions.or-sync]
+verify_jwt = false
+
+[functions.or-transactions-list]
+verify_jwt = false
+
+# --- Widget-session token auth via body.widget_token ------------------
 [functions.or-link-complete]
+verify_jwt = false
+
+# --- Ed25519 signed-payload auth via body.signed_payload + signature --
+[functions.or-agent-token-refresh]
+verify_jwt = false
+
+# --- Single-use invitation token via body --------------------------------
+[functions.or-agent-invite-redeem]
 verify_jwt = false
