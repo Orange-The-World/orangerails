@@ -65,6 +65,8 @@ type UpstreamErrorCode =
   | 'UPSTREAM_RATE_LIMITED'
   | 'UPSTREAM_UNAVAILABLE'
   | 'UPSTREAM_BAD_REQUEST'
+  | 'UPSTREAM_PARSE_FAILED'
+  | 'ADAPTER_CONFIG_ERROR'
   | 'UPSTREAM_OTHER';
 
 function classifyUpstreamError(raw: string): UpstreamErrorCode {
@@ -75,11 +77,21 @@ function classifyUpstreamError(raw: string): UpstreamErrorCode {
   if (/(\b429\b|rate.?limit|too.?many.?requests|quota.*exceeded)/.test(m)) {
     return 'UPSTREAM_RATE_LIMITED';
   }
-  if (/(\b5\d\d\b|timeout|timed.?out|econn(refused|reset|aborted)|network|unreachable|service.*unavailable)/.test(m)) {
+  // Network / connectivity errors (expanded for Deno fetch + Node-style messages)
+  if (/(\b5\d\d\b|timeout|timed.?out|econn(refused|reset|aborted)|network|unreachable|service.*unavailable|error sending request|fetch failed|connection (closed|reset|refused)|dns error|tls handshake|tls error)/.test(m)) {
     return 'UPSTREAM_UNAVAILABLE';
   }
   if (/(\b400\b|\b404\b|\b422\b|bad.?request|not.?found|unprocessable)/.test(m)) {
     return 'UPSTREAM_BAD_REQUEST';
+  }
+  // Response body parse failures (upstream returned non-JSON when JSON expected)
+  if (/(syntaxerror|unexpected (token|end of json)|json[. ]*parse|invalid json)/.test(m)) {
+    return 'UPSTREAM_PARSE_FAILED';
+  }
+  // OR's own bug — adapter received malformed credentials/config (NOT upstream's fault).
+  // Pattern matches "[provider] credentials.field required|missing|invalid".
+  if (/(\[\w+\] )?credentials\.\w+ (required|missing|invalid)|credentials must be|credentials json/.test(m)) {
+    return 'ADAPTER_CONFIG_ERROR';
   }
   return 'UPSTREAM_OTHER';
 }
@@ -91,6 +103,23 @@ function randomCorrelationId(): string {
   const buf = new Uint8Array(8);
   crypto.getRandomValues(buf);
   return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Safe error fingerprint: SHA-256 of redacted first line.
+// UUIDs, long hex strings, base64 blobs replaced before hashing so that the
+// fingerprint is stable across different requests with the same root cause
+// (e.g. same Strike error returns the same fp regardless of correlation IDs
+// in the upstream body). Audit 2026-05-16 finding #1: no plaintext content
+// in logs — only a deterministic hash. Operator greps to correlate.
+async function errorFingerprint(raw: string, errorClass: string): Promise<string> {
+  const firstLine = raw.split('\n')[0] ?? raw;
+  const redacted = firstLine
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
+    .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
+    .replace(/\b\d{10,}\b/g, '<num>');
+  const bytes = new TextEncoder().encode(`${errorClass}|${redacted}`);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 
@@ -346,9 +375,32 @@ Deno.serve(async (req: Request) => {
         // error messages reach the client or the edge log in plaintext.
         // Map to a fixed taxonomy; emit only the code + a correlation id.
         const raw = e instanceof Error ? e.message : String(e);
+        const errorClass = e instanceof Error ? e.constructor.name : typeof e;
         const code = classifyUpstreamError(raw);
         const correlationId = randomCorrelationId();
-        console.error(`[or-sync] connection ${conn.id} code=${code} cid=${correlationId}`);
+        const fp = await errorFingerprint(raw, errorClass);
+        console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
+
+        // Temporary debug gate (DEV ONLY). When OR_SYNC_DEBUG_CONNECTIONS env
+        // var is set on the OR DEV project to a comma-separated list of
+        // connection IDs, those connections also log the raw error message
+        // first line (truncated). Strict opt-in per-connection so customer
+        // data on other connections stays under the audit boundary.
+        //
+        // TODO 2026-05-22: REMOVE this block before promoting to prod. It is
+        // gated to dev project (gposxxmxenrdvewrprle) by the requirement to
+        // explicitly set OR_SYNC_DEBUG_CONNECTIONS — prod's edge function
+        // env should never have this var set. But the safer move is to
+        // delete this block entirely once the Strike UPSTREAM_OTHER root
+        // cause is identified.
+        const debugList = (Deno.env.get('OR_SYNC_DEBUG_CONNECTIONS') ?? '')
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean);
+        if (debugList.includes(conn.id)) {
+          const firstLine = raw.split('\n')[0]?.slice(0, 300) ?? '';
+          console.error(`[or-sync] DEBUG cid=${correlationId} raw_first_line=${firstLine}`);
+        }
 
         // Persist the taxonomy code on the connection row. In legacy
         // (non-sink) mode we still want it encrypted at rest so the column
