@@ -118,7 +118,7 @@ Deno.test('isBackoffElapsed: caps at 1h regardless of attempts', () => {
 
 // ── Happy path: 2xx → succeeded ───────────────────────────────────────
 
-Deno.test('dispatchBatch: 2xx response marks row succeeded and signs payload', async () => {
+Deno.test('dispatchBatch: 2xx response marks row succeeded and signs payload (v1 + v2 headers)', async () => {
   const payload = {
     event: 'sync.completed',
     subaccount_id: '11111111-1111-1111-1111-111111111111',
@@ -127,6 +127,7 @@ Deno.test('dispatchBatch: 2xx response marks row succeeded and signs payload', a
     ts: '2026-05-22T12:00:00Z',
   };
   const updates: UpdateCall[] = [];
+  const eventId = '99999999-9999-9999-9999-999999999999';
   const mockClient = makeMockClient({
     deliveryRows: [{
       id: 'row-1',
@@ -136,6 +137,7 @@ Deno.test('dispatchBatch: 2xx response marks row succeeded and signs payload', a
       payload,
       attempts: 0,
       last_attempt_at: null,
+      event_id: eventId,
     }],
     platformRows: [{
       id: 'plat-1',
@@ -146,21 +148,28 @@ Deno.test('dispatchBatch: 2xx response marks row succeeded and signs payload', a
   });
 
   let capturedBody = '';
-  let capturedSig = '';
+  let capturedV1 = '';
+  let capturedV2 = '';
+  let capturedEventId = '';
   let capturedUrl = '';
   const mockFetch: typeof fetch = (input, init) => {
     capturedUrl = typeof input === 'string' ? input : (input as Request).url;
     capturedBody = String((init as RequestInit).body);
     const headers = new Headers((init as RequestInit).headers);
-    capturedSig = headers.get('X-OR-Signature') ?? '';
+    capturedV1 = headers.get('X-OR-Signature') ?? '';
+    capturedV2 = headers.get('X-OR-Signature-V2') ?? '';
+    capturedEventId = headers.get('X-OR-Event-Id') ?? '';
     return Promise.resolve(new Response('ok', { status: 200 }));
   };
+
+  const fixedNow = new Date('2026-05-22T12:00:00Z');
+  const expectedTs = Math.floor(fixedNow.getTime() / 1000);
 
   const result = await dispatchBatch({
     // deno-lint-ignore no-explicit-any
     serviceClient: mockClient as any,
     fetchImpl: mockFetch,
-    now: () => new Date('2026-05-22T12:00:00Z'),
+    now: () => fixedNow,
   });
 
   assertEquals(result.attempted, 1);
@@ -173,9 +182,16 @@ Deno.test('dispatchBatch: 2xx response marks row succeeded and signs payload', a
   assertEquals(parsed.event, 'sync.completed');
   assertEquals(parsed.synced_count, 3);
 
-  // Signature matches re-computed HMAC
-  const expectedSig = await computeSignature('a'.repeat(64), capturedBody);
-  assertEquals(capturedSig, expectedSig);
+  // v1 signature: HMAC over body only
+  const expectedV1 = await computeSignature('a'.repeat(64), capturedBody);
+  assertEquals(capturedV1, expectedV1);
+
+  // v2 signature: HMAC over "<ts>.<body>", in t=,v1= format
+  const expectedV2Hex = await computeSignature('a'.repeat(64), `${expectedTs}.${capturedBody}`);
+  assertEquals(capturedV2, `t=${expectedTs},v1=${expectedV2Hex}`);
+
+  // event_id pass-through
+  assertEquals(capturedEventId, eventId);
 
   // succeeded_at was set on the row
   const succUpdate = updates.find((u) => u.patch.succeeded_at);
@@ -196,6 +212,7 @@ Deno.test('dispatchBatch: 500 response bumps attempts and records last_error', a
       payload: { event: 'sync.completed' },
       attempts: 2,
       last_attempt_at: '2026-05-22T10:00:00Z', // well outside backoff
+      event_id: '00000000-0000-0000-0000-000000000002',
     }],
     platformRows: [{
       id: 'plat-1',
@@ -235,6 +252,7 @@ Deno.test('dispatchBatch: fetch rejection is captured in last_error', async () =
       payload: { event: 'sync.completed' },
       attempts: 0,
       last_attempt_at: null,
+      event_id: '00000000-0000-0000-0000-000000000001',
     }],
     platformRows: [{
       id: 'plat-1',
@@ -326,6 +344,7 @@ Deno.test('dispatchBatch: attempts increments past failures honor 5-attempt cap 
       payload: { event: 'sync.completed' },
       attempts: 4, // one below cap
       last_attempt_at: '2026-05-22T00:00:00Z', // old enough for any backoff
+      event_id: '00000000-0000-0000-0000-000000000003',
     }],
     platformRows: [{
       id: 'plat-1',
@@ -364,6 +383,7 @@ Deno.test('dispatchBatch: platform with NULL webhook_url marks row abandoned', a
       payload: { event: 'sync.completed' },
       attempts: 0,
       last_attempt_at: null,
+      event_id: '00000000-0000-0000-0000-000000000001',
     }],
     platformRows: [{
       id: 'plat-1',

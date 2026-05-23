@@ -25,13 +25,27 @@
  *        - On any other outcome → attempts += 1, last_attempt_at = now(),
  *          last_error = short string ("HTTP 500" / "fetch failed" / etc.)
  *
- * Signature contract (documented for consumers):
- *   X-OR-Signature: hex(HMAC-SHA256(webhook_secret_utf8, raw_body_utf8))
+ * Signature contract (documented for consumers — v1 + v2 in parallel):
+ *
+ *   v1 (legacy, retained for back-compat during the transition window):
+ *     X-OR-Signature: hex(HMAC-SHA256(webhook_secret_utf8, raw_body_utf8))
+ *
+ *   v2 (preferred, ship after 2026-05-23):
+ *     X-OR-Signature-V2: t=<unix_ts>,v1=<hex_sig>
+ *       where hex_sig = HMAC-SHA256(webhook_secret_utf8,
+ *                                   "<unix_ts>.<raw_body_utf8>")
+ *     X-OR-Event-Id:    <uuid>   (stable across retries; consumers dedupe on this)
+ *
+ *   v2 defends against naive replay attacks (the timestamp is inside
+ *   the signed material) and gives consumers a free idempotency key.
+ *   The @orangerails/webhooks npm package prefers v2 and falls back
+ *   to v1 — once all consumers are on the SDK, v1 will be removed.
  *
  *   Consumers verify by recomputing the HMAC over the raw request body
- *   with their copy of the secret and comparing in constant time. The
- *   secret is a 32-byte random hex string (64 chars) provisioned per
- *   platform; rotate by issuing a new secret and updating the row.
+ *   (v1) or "<ts>.<body>" (v2) with their copy of the secret and
+ *   comparing in constant time. The secret is a 32-byte random hex
+ *   string (64 chars) provisioned per platform; rotate by issuing a
+ *   new secret and updating the platforms row.
  *
  * Event payload (event_type = "sync.completed"):
  *   {
@@ -69,6 +83,8 @@ interface DeliveryRow {
   payload: Record<string, unknown>;
   attempts: number;
   last_attempt_at: string | null;
+  /** v2 wire format: stable UUID surfaced as X-OR-Event-Id for consumer dedupe. */
+  event_id: string;
 }
 
 interface PlatformRow {
@@ -161,7 +177,7 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
   const sb = serviceClient as any;
   const { data: rows, error: rowsErr } = await sb
     .from('webhook_delivery')
-    .select('id, platform_id, subaccount_id, event_type, payload, attempts, last_attempt_at')
+    .select('id, platform_id, subaccount_id, event_type, payload, attempts, last_attempt_at, event_id')
     .is('succeeded_at', null)
     .lt('attempts', MAX_ATTEMPTS)
     .order('created_at', { ascending: true })
@@ -208,9 +224,21 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
 
     result.attempted += 1;
     const bodyStr = JSON.stringify(row.payload);
-    let signature: string;
+
+    // v1 + v2 wire formats are emitted in parallel during the
+    // transition window. Consumers MAY verify v2 (preferred) or
+    // fall back to v1; the SDK at @orangerails/webhooks prefers v2.
+    // v2 signs "<unix_ts>.<body>" which defeats naive replay of a
+    // captured request, matching Stripe's wire format.
+    const tsSeconds = Math.floor(now().getTime() / 1000);
+    let signatureV1: string;
+    let signatureV2Hex: string;
     try {
-      signature = await computeSignature(plat.webhook_secret, bodyStr);
+      signatureV1 = await computeSignature(plat.webhook_secret, bodyStr);
+      signatureV2Hex = await computeSignature(
+        plat.webhook_secret,
+        `${tsSeconds}.${bodyStr}`,
+      );
     } catch (e) {
       // Signing failure means we have a malformed secret — bump
       // attempts so we eventually give up rather than spinning.
@@ -234,7 +262,11 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-OR-Signature': signature,
+          // v1 (legacy): consumers still verifying with the old scheme.
+          'X-OR-Signature': signatureV1,
+          // v2 (preferred): timestamped signature + delivery id.
+          'X-OR-Signature-V2': `t=${tsSeconds},v1=${signatureV2Hex}`,
+          'X-OR-Event-Id': row.event_id,
         },
         body: bodyStr,
       });

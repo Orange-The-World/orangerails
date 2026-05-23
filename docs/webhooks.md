@@ -52,23 +52,56 @@ Example payload:
 
 ## Signature scheme
 
-Every webhook POST carries:
+OR ships **two signature wire formats in parallel** during a transition
+window. Consumers should prefer **v2** (more secure, easier to dedupe)
+and may keep v1 verification as a fallback during the rollout.
+
+The **`@orangerails/webhooks` npm package** wraps both — most consumers
+should import it instead of hand-rolling verification.
+
+### Wire-format v2 (preferred — added 2026-05-23)
+
+Every webhook POST carries three headers in v2:
+
+```
+X-OR-Signature-V2: t=<unix_ts>,v1=<hex>
+X-OR-Event-Id:     <uuid>
+Content-Type:      application/json
+```
+
+where `<hex>` is the lowercase hex encoding of
+`HMAC-SHA-256(webhook_secret_utf8, "<unix_ts>.<raw_body_utf8>")`.
+
+The timestamp `<unix_ts>` is the dispatcher's UTC unix time (seconds)
+at the moment the request was signed. Consumers SHOULD reject if
+`abs(now - ts) > 300` (5-minute tolerance — same default as Stripe).
+Putting the timestamp inside the signed material defeats naive replay
+of a captured request.
+
+`X-OR-Event-Id` is a UUID stable across retries of the same delivery.
+Consumers MUST treat a second event with the same `X-OR-Event-Id` as a
+duplicate (idempotent processing).
+
+### Wire-format v1 (legacy — retained for back-compat)
 
 ```
 X-OR-Signature: <hex>
 Content-Type:   application/json
 ```
 
-where `<hex>` is the lowercase hex encoding of
-`HMAC-SHA-256(webhook_secret_utf8, raw_body_utf8)`. Consumers verify
-by recomputing the HMAC over the raw request body (NOT a re-serialized
-JSON — byte-for-byte the bytes that arrived) with their stored secret
-and comparing in constant time.
+where `<hex>` is `HMAC-SHA-256(webhook_secret_utf8, raw_body_utf8)`.
+No timestamp, no event id. Will be removed once all known consumers
+have migrated to v2 (target: end Q3 2026).
 
-Rejecting unsigned or invalid-signature requests is the consumer's
-responsibility. OR does not retry differently based on signature
-validation outcome — a non-2xx response from your endpoint is a
-non-2xx response regardless of reason.
+### Verification rules (both versions)
+
+- Recompute the HMAC over the raw request body (NOT a re-serialized
+  JSON — byte-for-byte the bytes that arrived) with the stored secret.
+- Compare in constant time.
+- Rejecting unsigned or invalid-signature requests is the consumer's
+  responsibility. OR does not retry differently based on signature
+  validation outcome — a non-2xx response from your endpoint is a
+  non-2xx response regardless of reason.
 
 ## Retry policy
 
