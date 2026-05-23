@@ -162,9 +162,17 @@ function getApiKey(credentials: Record<string, unknown>): string {
 }
 
 async function blinkPost<T>(apiKey: string, query: string, variables?: Record<string, unknown>): Promise<T> {
+  // Identify as a real client to bypass Cloudflare bot heuristics (same
+  // class of issue as Strike — diagnosed 2026-05-22).
   const res = await fetch(BLINK_API, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-API-KEY': apiKey },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-KEY': apiKey,
+      'Accept': 'application/json',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'User-Agent': 'OrangeRails/1.0 (+https://orangerails.com; sync-agent)',
+    },
     body: JSON.stringify({ query, variables: variables ?? {} }),
   });
   if (!res.ok) {

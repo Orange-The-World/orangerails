@@ -65,6 +65,8 @@ type UpstreamErrorCode =
   | 'UPSTREAM_RATE_LIMITED'
   | 'UPSTREAM_UNAVAILABLE'
   | 'UPSTREAM_BAD_REQUEST'
+  | 'UPSTREAM_PARSE_FAILED'
+  | 'ADAPTER_CONFIG_ERROR'
   | 'UPSTREAM_OTHER';
 
 function classifyUpstreamError(raw: string): UpstreamErrorCode {
@@ -75,11 +77,21 @@ function classifyUpstreamError(raw: string): UpstreamErrorCode {
   if (/(\b429\b|rate.?limit|too.?many.?requests|quota.*exceeded)/.test(m)) {
     return 'UPSTREAM_RATE_LIMITED';
   }
-  if (/(\b5\d\d\b|timeout|timed.?out|econn(refused|reset|aborted)|network|unreachable|service.*unavailable)/.test(m)) {
+  // Network / connectivity errors (expanded for Deno fetch + Node-style messages)
+  if (/(\b5\d\d\b|timeout|timed.?out|econn(refused|reset|aborted)|network|unreachable|service.*unavailable|error sending request|fetch failed|connection (closed|reset|refused)|dns error|tls handshake|tls error)/.test(m)) {
     return 'UPSTREAM_UNAVAILABLE';
   }
   if (/(\b400\b|\b404\b|\b422\b|bad.?request|not.?found|unprocessable)/.test(m)) {
     return 'UPSTREAM_BAD_REQUEST';
+  }
+  // Response body parse failures (upstream returned non-JSON when JSON expected)
+  if (/(syntaxerror|unexpected (token|end of json)|json[. ]*parse|invalid json)/.test(m)) {
+    return 'UPSTREAM_PARSE_FAILED';
+  }
+  // OR's own bug — adapter received malformed credentials/config (NOT upstream's fault).
+  // Pattern matches "[provider] credentials.field required|missing|invalid".
+  if (/(\[\w+\] )?credentials\.\w+ (required|missing|invalid)|credentials must be|credentials json/.test(m)) {
+    return 'ADAPTER_CONFIG_ERROR';
   }
   return 'UPSTREAM_OTHER';
 }
@@ -91,6 +103,23 @@ function randomCorrelationId(): string {
   const buf = new Uint8Array(8);
   crypto.getRandomValues(buf);
   return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Safe error fingerprint: SHA-256 of redacted first line.
+// UUIDs, long hex strings, base64 blobs replaced before hashing so that the
+// fingerprint is stable across different requests with the same root cause
+// (e.g. same Strike error returns the same fp regardless of correlation IDs
+// in the upstream body). Audit 2026-05-16 finding #1: no plaintext content
+// in logs — only a deterministic hash. Operator greps to correlate.
+async function errorFingerprint(raw: string, errorClass: string): Promise<string> {
+  const firstLine = raw.split('\n')[0] ?? raw;
+  const redacted = firstLine
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
+    .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
+    .replace(/\b\d{10,}\b/g, '<num>');
+  const bytes = new TextEncoder().encode(`${errorClass}|${redacted}`);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 
@@ -198,6 +227,33 @@ Deno.serve(async (req: Request) => {
 
     const subaccountId = await resolveSubaccount(ctx, body.subaccount_id);
     if (isAuthError(subaccountId)) return jsonResponse({ error: subaccountId.message }, subaccountId.status, cors);
+
+    // Resolve the owning platform once. Used to enqueue sync.completed
+    // webhook deliveries at the bottom of each successful per-connection
+    // loop iteration. Looked up via subaccounts.platform_id so platform
+    // mode and direct mode share the same code path. If the platform has
+    // no webhook_url configured we skip the insert entirely (see below).
+    let webhookPlatformId: string | null = null;
+    let webhookEnabled = false;
+    try {
+      const { data: subRow } = await ctx.serviceClient
+        .from('subaccounts')
+        .select('platform_id, platforms:platform_id(webhook_url)')
+        .eq('id', subaccountId)
+        .maybeSingle();
+      // deno-lint-ignore no-explicit-any
+      const subAny = subRow as any;
+      if (subAny?.platform_id) {
+        webhookPlatformId = subAny.platform_id as string;
+        const platRel = subAny.platforms;
+        const url = Array.isArray(platRel) ? platRel[0]?.webhook_url : platRel?.webhook_url;
+        webhookEnabled = typeof url === 'string' && url.length > 0;
+      }
+    } catch (e) {
+      // Webhook enqueue is best-effort. Failure to resolve the platform
+      // must not block the sync response.
+      console.error('[or-sync] webhook platform lookup failed:', e);
+    }
 
     const credsKey = await importAesKey(credentials_key);
     // Only imported in legacy mode — sink mode never encrypts payloads.
@@ -341,14 +397,74 @@ Deno.serve(async (req: Request) => {
           .eq('id', conn.id);
 
         results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
+
+        // ─── sync.completed webhook enqueue ──────────────────────────
+        // Out-of-band: insert a webhook_delivery row that or-webhook-dispatch
+        // drains on its own schedule. We do NOT fire synchronously here;
+        // a slow consumer endpoint must never delay a sync response. The
+        // insert is skipped entirely when the owning platform has no
+        // webhook_url configured (most direct-mode users today).
+        if (webhookEnabled && webhookPlatformId) {
+          try {
+            await ctx.serviceClient.from('webhook_delivery').insert({
+              platform_id: webhookPlatformId,
+              subaccount_id: subaccountId,
+              event_type: 'sync.completed',
+              payload: {
+                event: 'sync.completed',
+                subaccount_id: subaccountId,
+                connection_id: conn.id,
+                synced_count: newTxs.length,
+                ts: new Date().toISOString(),
+              },
+            });
+          } catch (whErr) {
+            // Best-effort: log and move on. The sync itself already succeeded.
+            console.error(`[or-sync] webhook enqueue failed for connection ${conn.id}:`, whErr);
+          }
+        }
       } catch (e) {
         // Audit 2026-05-16 findings #1 + #4: never let upstream provider
         // error messages reach the client or the edge log in plaintext.
         // Map to a fixed taxonomy; emit only the code + a correlation id.
         const raw = e instanceof Error ? e.message : String(e);
+        const errorClass = e instanceof Error ? e.constructor.name : typeof e;
         const code = classifyUpstreamError(raw);
         const correlationId = randomCorrelationId();
-        console.error(`[or-sync] connection ${conn.id} code=${code} cid=${correlationId}`);
+        const fp = await errorFingerprint(raw, errorClass);
+        console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
+
+        // Temporary debug gate (DEV ONLY). Triple-gated:
+        //   1. OR_SYNC_DEBUG_CONNECTIONS env var must include this conn.id
+        //   2. Runtime SUPABASE_URL must match the OR DEV project ref
+        //      (hardcoded, so accidentally setting the env var on prod is
+        //      not enough to bypass this guard — the project ref check fails)
+        //   3. The plaintext path NEVER runs in any environment whose
+        //      SUPABASE_URL contains the OR PROD ref (extra-explicit deny)
+        //
+        // Per Codex review on PR #98: env-var-only gates are too weak; if
+        // the secret is accidentally copied to prod (env-file copy, dashboard
+        // misconfiguration), upstream errors would leak and break audit
+        // 2026-05-16 finding #1. Project-ref hardcoded guard fixes that.
+        //
+        // TODO 2026-05-22: REMOVE this entire block before promoting to prod.
+        // Keep the classifier expansions + errorFingerprint above; delete
+        // only this gated block.
+        const DEV_PROJECT_REF = 'gposxxmxenrdvewrprle';
+        const PROD_PROJECT_REF = 'lcdicqalreskibdfxkzb';
+        const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+        const isDevProject = supabaseUrl.includes(DEV_PROJECT_REF);
+        const isProdProject = supabaseUrl.includes(PROD_PROJECT_REF);
+        if (isDevProject && !isProdProject) {
+          const debugList = (Deno.env.get('OR_SYNC_DEBUG_CONNECTIONS') ?? '')
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean);
+          if (debugList.includes(conn.id)) {
+            const firstLine = raw.split('\n')[0]?.slice(0, 300) ?? '';
+            console.error(`[or-sync] DEBUG cid=${correlationId} raw_first_line=${firstLine}`);
+          }
+        }
 
         // Persist the taxonomy code on the connection row. In legacy
         // (non-sink) mode we still want it encrypted at rest so the column

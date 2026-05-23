@@ -108,10 +108,15 @@ function parseBtcPayCredentials(c: Record<string, unknown>): BtcPayCredentials {
 }
 
 async function btcpayGet<T>(creds: BtcPayCredentials, path: string): Promise<T> {
+  // Identify as a real client to bypass any Cloudflare / WAF bot heuristics
+  // on self-hosted BTCPay instances. Same fix shape as Strike / Blink — see
+  // diagnosis 2026-05-22 (Strike's CF was rejecting Deno's default fetch UA).
   const res = await fetch(`${creds.btcpay_url}${path}`, {
     headers: {
       'Authorization': `token ${creds.api_key}`,
       'Accept': 'application/json',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'User-Agent': 'OrangeRails/1.0 (+https://orangerails.com; sync-agent)',
     },
   });
   if (!res.ok) {
