@@ -207,14 +207,14 @@ function readDottedPath(
  *   2. Upper-case match (most providers UPPERCASE their statuses, but
  *      profiles can be authored either way)
  *   3. The `default` key in status_to_v2
- *   4. Hard fallback to 'INCOMPLETE' so unmapped statuses surface in V2's
- *      review UI instead of silently coercing to COMPLETE
+ *   4. Hard fallback to 'DRAFT' so unmapped statuses land in V2's review
+ *      queue instead of silently auto-posting
  *
- * Returns the V2 TransactionStatus enum string.
+ * Returns the V2 TransactionStatus enum string (DRAFT | POSTED | RECONCILED | VOID | HIDDEN).
  */
 export function mapStatus(profile: AppProfile, providerStatus: string | undefined): string {
   const map = profile.status_to_v2 ?? {};
-  const fallback = map.default ?? 'INCOMPLETE';
+  const fallback = map.default ?? 'DRAFT';
   if (!providerStatus) return fallback;
 
   if (map[providerStatus]) return map[providerStatus];
