@@ -269,6 +269,17 @@ Deno.serve(async (req: Request) => {
     }
 
     // 3. Insert the encrypted connection.
+    //
+    // Atomic connect flow (audit 2026-05-21 finding N6): when
+    // ATOMIC_CONFIRM_REQUIRED=true the consumer must call
+    // or-connection-confirm after its own local persist succeeds;
+    // until then the row sits as 'pending' and is janitored after
+    // 10 minutes if never confirmed. Default false preserves backward
+    // compatibility with V3/OW which haven't migrated yet.
+    const atomicConfirmRequired =
+      (Deno.env.get("ATOMIC_CONFIRM_REQUIRED") ?? "false").toLowerCase() === "true";
+    const initialStatus = atomicConfirmRequired ? "pending" : "active";
+
     const { data: createdConn, error: insConnErr } = await serviceClient
       .from("connections")
       .insert({
@@ -277,7 +288,7 @@ Deno.serve(async (req: Request) => {
         encrypted_label: body.encrypted_label ?? null,
         encrypted_credentials: body.encrypted_credentials,
         credentials_key_version: 1,
-        status: "active",
+        status: initialStatus,
       })
       .select("id")
       .single();
