@@ -201,23 +201,30 @@ account_mapping_rules:
 # Status mapping (Blink + future providers → V2's TransactionStatus enum)
 # ─────────────────────────────────────────────────────────────────────────
 status_to_v2:
-  SUCCESS:    COMPLETE
-  COMPLETE:   COMPLETE
-  COMPLETED:  COMPLETE
-  SETTLED:    COMPLETE
-  PAID:       COMPLETE   # Strike invoice — paid in full
-  CONFIRMED:  COMPLETE   # on-chain (xpub adapter) — block-confirmed
-  PENDING:    PENDING
-  UNCONFIRMED: PENDING   # on-chain mempool tx
-  PROCESSING: PENDING    # BTCPay invoice — paid but awaiting confirmations
-  FAILURE:    FAILED
-  FAILED:     FAILED
-  EXPIRED:    FAILED
-  INVALID:    FAILED     # BTCPay invoice — payment problem (timeout, double-spend, etc.)
-  CANCELLED:  FAILED     # Strike invoice — cancelled before payment
-  REVERSED:   REVERSED
-  REFUNDED:   REVERSED
-  default:    INCOMPLETE
+  # All upstream "this happened" statuses land as DRAFT — V2's TransactionStatus
+  # tracks bookkeeping state (DRAFT = needs review/categorization, POSTED =
+  # bookkeeper has accepted), not bitcoin-side settlement. OR cannot make the
+  # POSTED call on the user's behalf because the categorization CoA is a hint,
+  # not a decision: the user reviews and posts in V2.
+  SUCCESS:    DRAFT
+  COMPLETE:   DRAFT
+  COMPLETED:  DRAFT
+  SETTLED:    DRAFT
+  PAID:       DRAFT      # Strike invoice — paid in full, still needs categorization
+  CONFIRMED:  DRAFT      # on-chain (xpub adapter) — block-confirmed
+  PENDING:    DRAFT
+  UNCONFIRMED: DRAFT     # on-chain mempool tx
+  PROCESSING: DRAFT      # BTCPay invoice — paid but awaiting confirmations
+  # Genuinely failed upstream → VOID so they don't clutter the review queue
+  # as actionable items. User can unvoid if a refund/reversal arrives.
+  FAILURE:    VOID
+  FAILED:     VOID
+  EXPIRED:    VOID
+  INVALID:    VOID       # BTCPay invoice — payment problem (timeout, double-spend, etc.)
+  CANCELLED:  VOID       # Strike invoice — cancelled before payment
+  REVERSED:   VOID       # V2 has no separate REVERSED; void and let user enter the offsetting tx
+  REFUNDED:   VOID
+  default:    DRAFT
 
 # ─────────────────────────────────────────────────────────────────────────
 # Per-org overrides

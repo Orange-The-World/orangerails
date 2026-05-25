@@ -30,6 +30,12 @@ verify_jwt = false
 [functions.or-connection-delete]
 verify_jwt = false
 
+[functions.or-connection-confirm]
+verify_jwt = false
+
+[functions.or-connection-cancel]
+verify_jwt = false
+
 [functions.or-connection-list]
 verify_jwt = false
 
