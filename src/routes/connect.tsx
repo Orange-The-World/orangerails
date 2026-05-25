@@ -48,7 +48,7 @@
  */
 
 import { createFileRoute, Outlet, useChildMatches, useSearch } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { deriveMEK, encryptString, importAesKey } from "@/lib/vault";
 import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
 
@@ -1069,6 +1069,62 @@ function EnterCredentialsStep({
 // its own provider list.
 // --------------------------------------------------------------------
 
+// ────────────────────────────────────────────────────────────────────
+// PickProviderStep — searchable, category-chip-filtered, grouped picker.
+//
+// Direct port of V2's `ProviderPicker`
+// (DeeJanuz/bitbooks:components/admin/add-connection-modal.tsx:1004-1170).
+// Renders the same /or-providers catalog V2 already consumes; V2's
+// own header comment explains why this layout beats a flat tile grid:
+//
+//   "Replaces the flat tile grid that didn't scale past ~10 providers
+//    (with CCXT bringing 12 exchanges and ~120 more on the roadmap,
+//    tile-per-provider was unmanageable)."
+//
+// Layout:
+//   ┌ Search box ─────────────────────────────────┐
+//   ├ [All N] [Wallets n] [Exchanges n] [...]    ┤  ← category chips with counts
+//   ├ Lightning wallets ──────────────────────────┤
+//   │ • Blink              Lightning + on-chain   │
+//   │ • Strike    BETA     Lightning + USD        │
+//   ├ Exchanges ─────────────────────────────────┤
+//   │ • Coinbase  BETA     US exchange + wallet  │
+//   └─────────────────────────────────────────────┘
+//
+// Search filters across displayName + description + slug + tags,
+// case-insensitive. While searching, category headers are hidden and
+// results are flat. While a category chip is active, only that
+// category's providers show. Sort inside each group: popularity DESC,
+// displayName ASC.
+//
+// Visual design (light theme, borders, spacing) intentionally matches
+// OR's existing widget primitives — alignment with V2's white-theme
+// styling is a Phase 2 cross-product design pass.
+// ────────────────────────────────────────────────────────────────────
+
+const CATEGORY_DISPLAY_NAMES: Record<string, string> = {
+  lightning_wallet: "Lightning wallets",
+  on_chain_wallet: "On-chain wallets",
+  payment_processor: "Payment processors",
+  exchange: "Exchanges",
+  mining_pool: "Mining pools",
+  other: "Other",
+};
+
+const CATEGORY_ORDER = [
+  "lightning_wallet",
+  "on_chain_wallet",
+  "payment_processor",
+  "exchange",
+  "mining_pool",
+];
+
+function categoryLabel(slug: string): string {
+  if (CATEGORY_DISPLAY_NAMES[slug]) return CATEGORY_DISPLAY_NAMES[slug];
+  // Fallback: humanize "some_slug" → "Some slug"
+  return slug.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
 function PickProviderStep({
   platformName,
   providers,
@@ -1084,6 +1140,10 @@ function PickProviderStep({
   submitting: boolean;
   error: string | null;
 }) {
+  const [search, setSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+
+  // Loading + empty states.
   if (providers === null) {
     return (
       <div className="mt-6 flex flex-col items-center gap-3 py-6 text-center">
@@ -1092,8 +1152,82 @@ function PickProviderStep({
       </div>
     );
   }
+  if (providers.length === 0) {
+    return (
+      <div className="mt-6 py-6 text-center">
+        <p className="text-sm text-muted-foreground">
+          No providers are available right now.
+        </p>
+      </div>
+    );
+  }
+
+  // Chip categories — only categories that have at least one provider
+  // in the unfiltered list. Ordered by CATEGORY_ORDER, then anything
+  // unknown appended.
+  const chipCategories = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const p of providers) {
+      if (!p.category) continue;
+      counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
+    }
+    const known = CATEGORY_ORDER.filter((c) => counts.has(c));
+    const unknown = [...counts.keys()].filter((c) => !CATEGORY_ORDER.includes(c)).sort();
+    return [...known, ...unknown].map((slug) => ({
+      slug,
+      displayName: categoryLabel(slug),
+      providerCount: counts.get(slug) ?? 0,
+    }));
+  }, [providers]);
+
+  // Apply search + active-category filter.
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return providers.filter((p) => {
+      if (activeCategory && p.category !== activeCategory) return false;
+      if (!q) return true;
+      const haystack = [
+        p.displayName,
+        p.description ?? "",
+        p.slug,
+        ...(p.tags ?? []),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [providers, search, activeCategory]);
+
+  // Sort: popularity DESC, displayName ASC.
+  const sortFn = (a: ProviderManifest, b: ProviderManifest): number => {
+    const popDiff = (b.popularity ?? 0) - (a.popularity ?? 0);
+    if (popDiff !== 0) return popDiff;
+    return a.displayName.localeCompare(b.displayName);
+  };
+
+  // While searching: flat. Otherwise group by category in chip order
+  // + an "Other" bucket for category-less providers.
+  const isSearching = search.trim().length > 0;
+  const groups = useMemo<Array<{ label: string | null; entries: ProviderManifest[] }>>(() => {
+    if (isSearching || activeCategory) {
+      // Flat result list (no headers) when narrowing.
+      return [{ label: null, entries: [...filtered].sort(sortFn) }];
+    }
+    const out: Array<{ label: string | null; entries: ProviderManifest[] }> = [];
+    for (const c of chipCategories) {
+      const entries = filtered
+        .filter((p) => p.category === c.slug)
+        .sort(sortFn);
+      if (entries.length === 0) continue;
+      out.push({ label: c.displayName.toUpperCase(), entries });
+    }
+    const orphans = filtered.filter((p) => !p.category).sort(sortFn);
+    if (orphans.length > 0) out.push({ label: "OTHER", entries: orphans });
+    return out;
+  }, [isSearching, activeCategory, filtered, chipCategories]);
+
   return (
-    <div className="mt-4 space-y-4">
+    <div className="mt-4 space-y-3">
       <div>
         <h2 className="text-sm font-semibold">Choose your wallet provider</h2>
         <p className="mt-1 text-xs text-muted-foreground">
@@ -1101,32 +1235,61 @@ function PickProviderStep({
         </p>
       </div>
 
-      <div className="space-y-2">
-        {providers.map((p) => (
-          <button
-            key={p.slug}
-            type="button"
-            onClick={() => onPick(p.slug)}
-            disabled={submitting}
-            className="flex w-full items-center gap-3 rounded-md border border-input p-3 text-left transition-colors hover:bg-muted/30 disabled:opacity-50"
-          >
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium">{p.displayName}</div>
-              {p.description && (
-                <div className="mt-0.5 text-xs text-muted-foreground">{p.description}</div>
-              )}
-            </div>
-            {p.category && (
-              <span className="rounded-full border border-input bg-muted/30 px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                {p.category}
-              </span>
-            )}
-          </button>
+      {/* Search */}
+      <input
+        type="text"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Search providers (Blink, Coinbase, Bitcoin, Canada…)"
+        autoFocus
+        aria-label="Search providers"
+        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        data-testid="provider-search"
+      />
+
+      {/* Category chips */}
+      <div className="flex flex-wrap gap-1.5">
+        <CategoryChip
+          label={`All (${providers.length})`}
+          active={activeCategory === null}
+          onClick={() => setActiveCategory(null)}
+        />
+        {chipCategories.map((c) => (
+          <CategoryChip
+            key={c.slug}
+            label={`${c.displayName} (${c.providerCount})`}
+            active={activeCategory === c.slug}
+            onClick={() => setActiveCategory(c.slug)}
+            data-testid={`provider-chip-${c.slug}`}
+          />
         ))}
       </div>
 
-      {providers.length === 0 && (
-        <p className="text-sm text-muted-foreground">No providers are available right now.</p>
+      {/* Results */}
+      {filtered.length === 0 ? (
+        <div className="rounded-md border border-input bg-muted/10 px-3 py-4 text-center text-xs text-muted-foreground">
+          No providers match {search ? `"${search}"` : "this filter"}.
+        </div>
+      ) : (
+        <div className="space-y-3" data-testid="provider-results">
+          {groups.map((g, gi) => (
+            <div key={g.label ?? `group-${gi}`} className="space-y-1.5">
+              {g.label && (
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {g.label}
+                </div>
+              )}
+              {g.entries.map((p) => (
+                <ProviderRow
+                  key={p.slug}
+                  provider={p}
+                  busy={submitting}
+                  onPick={onPick}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
       )}
 
       {error && (
@@ -1146,6 +1309,71 @@ function PickProviderStep({
         </button>
       </div>
     </div>
+  );
+}
+
+function CategoryChip({
+  label,
+  active,
+  onClick,
+  ...rest
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  "data-testid"?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={
+        "rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors " +
+        (active
+          ? "border-primary bg-primary/10 text-primary"
+          : "border-input bg-background text-muted-foreground hover:bg-muted/30")
+      }
+      {...rest}
+    >
+      {label}
+    </button>
+  );
+}
+
+function ProviderRow({
+  provider,
+  busy,
+  onPick,
+}: {
+  provider: ProviderManifest;
+  busy: boolean;
+  onPick: (slug: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onPick(provider.slug)}
+      disabled={busy}
+      data-testid={`provider-row-${provider.slug}`}
+      className="flex w-full items-center gap-2 rounded-md border border-input px-3 py-2 text-left transition-colors hover:bg-muted/30 disabled:opacity-50"
+    >
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5">
+          <span className="text-sm font-medium">{provider.displayName}</span>
+          {provider.status === "beta" && (
+            <span className="rounded-sm bg-primary/20 px-1 py-px text-[9px] font-bold uppercase tracking-wide text-primary">
+              BETA
+            </span>
+          )}
+        </div>
+        {provider.description && (
+          <div className="mt-0.5 truncate text-xs text-muted-foreground">
+            {provider.description}
+          </div>
+        )}
+      </div>
+    </button>
   );
 }
 
