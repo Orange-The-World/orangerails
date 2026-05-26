@@ -113,7 +113,7 @@ async function main() {
       'CONFIRMED',
       NOW(), NOW()
     )
-    ON CONFLICT (source_currency, target_currency, bucket_ts, granularity, product)
+    ON CONFLICT (source_currency, target_currency, bucket_ts, granularity, product, source_authority)
     DO UPDATE SET
       rate = EXCLUDED.rate,
       provider_count = EXCLUDED.provider_count,

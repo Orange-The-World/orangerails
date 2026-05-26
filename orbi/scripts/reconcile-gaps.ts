@@ -227,7 +227,7 @@ async function upsertUpgrade(
       'CONFIRMED',
       NOW(), NOW()
     )
-    ON CONFLICT (source_currency, target_currency, bucket_ts, granularity, product)
+    ON CONFLICT (source_currency, target_currency, bucket_ts, granularity, product, source_authority)
     DO UPDATE SET
       rate = EXCLUDED.rate,
       tier = EXCLUDED.tier,
