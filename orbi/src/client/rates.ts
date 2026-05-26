@@ -282,3 +282,76 @@ function mapRow(row: {
     compositeVia: row.composite_via,
   };
 }
+// (Appended) — on-demand resolve fallback
+// --------------------------------------------------------------------------
+// Adds a function that first tries the direct DB query (same as fetchORBIM)
+// and, on cache miss, calls the on-demand-resolve Edge Function which will
+// compute + cache the rate and return it. Use this in flows where minute
+// precision matters and forward-fill may not have covered the minute yet.
+
+/**
+ * Shape mirroring V3's existing rate-resolver. The Edge Function returns
+ * exactly this; we wrap fetchORBIM's ORBIRate into the same shape for parity.
+ */
+export interface PinnedRateResult {
+  rate: number;
+  rateId: string;
+  bucketTs: string;
+  bucketGranularity: "M" | "D";
+  provider: string;
+  sourceKind: "CRYPTO_FIAT";
+  pending: false;
+  stale: boolean;
+  computedOnDemand: boolean;
+}
+
+/**
+ * Get a rate for a specific minute. If the rate exists in PROD, return it
+ * immediately (computedOnDemand=false). If not, call the on-demand-resolve
+ * Edge Function to fetch it from upstream sources, store it, and return
+ * (computedOnDemand=true). Either path returns the same shape.
+ *
+ * Use this for historical transactions where you need minute precision
+ * and forward-fill may not have covered that minute.
+ */
+export async function getOrResolveRate(
+  sourceCurrency: string,
+  targetCurrency: string,
+  effectiveAt: Date,
+): Promise<PinnedRateResult | null> {
+  // 1) Try direct DB query first — same path as fetchORBIM.
+  const cached = await fetchORBIM(sourceCurrency, targetCurrency, effectiveAt);
+  if (cached) {
+    return {
+      rate: cached.rate,
+      rateId: cached.id,
+      bucketTs: cached.bucketTs,
+      bucketGranularity: "M",
+      provider: cached.composite
+        ? `orbi (tier C-composite)`
+        : `orbi (tier ${cached.tier}, ${cached.providerCount} source${cached.providerCount === 1 ? "" : "s"})`,
+      sourceKind: "CRYPTO_FIAT",
+      pending: false,
+      stale: false,
+      computedOnDemand: false,
+    };
+  }
+
+  // 2) Cache miss — invoke the Edge Function. supabase-js's functions.invoke
+  // handles URL + headers (anon key auth, JSON body) for us.
+  const client = initORBIClient();
+  const { data, error } = await client.functions.invoke("on-demand-resolve", {
+    body: {
+      source: sourceCurrency,
+      target: targetCurrency,
+      effectiveAt: effectiveAt.toISOString(),
+    },
+  });
+  if (error) {
+    throw new Error(`on-demand-resolve invocation failed: ${error.message}`);
+  }
+  if (!data) return null;
+
+  // The Edge Function returns the PinnedRateResult shape verbatim.
+  return data as PinnedRateResult;
+}
