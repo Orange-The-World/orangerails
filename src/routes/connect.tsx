@@ -49,6 +49,13 @@
 
 import { createFileRoute, Outlet, useChildMatches, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
+import { Info } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { deriveMEK, encryptString, importAesKey } from "@/lib/vault";
 import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
 
@@ -912,6 +919,7 @@ function ConnectPageInner() {
       {step === "enter-credentials" && manifest && (
         <EnterCredentialsStep
           providerLabel={providerLabel}
+          providerSlug={manifest.slug}
           fields={manifest.credentialFields}
           values={formValues}
           onValueChange={(name, value) =>
@@ -965,6 +973,7 @@ function ConnectPageInner() {
 
 function EnterCredentialsStep({
   providerLabel,
+  providerSlug,
   fields,
   values,
   onValueChange,
@@ -973,6 +982,7 @@ function EnterCredentialsStep({
   error,
 }: {
   providerLabel: string;
+  providerSlug?: string;
   fields: ManifestField[];
   values: Record<string, string>;
   onValueChange: (name: string, value: string) => void;
@@ -985,8 +995,43 @@ function EnterCredentialsStep({
   );
   return (
     <form onSubmit={onContinue} className="mt-4 space-y-4">
-      <div>
+      <div className="flex items-center gap-1.5">
         <h2 className="text-sm font-semibold">Connect your {providerLabel} account</h2>
+        {providerSlug === "strike" && (
+          <TooltipProvider delayDuration={150}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="About Strike's API"
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <Info className="h-3.5 w-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right" className="max-w-xs text-xs leading-snug">
+                <p className="font-medium">A note on Strike's API</p>
+                <p className="mt-1">
+                  Strike's public API does not expose a full transaction history endpoint. It does
+                  not list Lightning Address tips, and there is no replay window for activity that
+                  landed before you connected. This is a well known Strike limitation. Every
+                  accounting tool we know of (Koinly, CoinLedger, CoinTracker) hits the same wall.
+                </p>
+                <p className="mt-2">
+                  <span className="font-medium">Going forward:</span> everything syncs. Once
+                  connected, Strike sends a real time webhook for every invoice, receive, deposit,
+                  payout, payment, and exchange. Fully automatic, no polling.
+                </p>
+                <p className="mt-2">
+                  <span className="font-medium">The past:</span> the only way to recover historical
+                  activity is the CSV export from Strike's dashboard. CSV upload from this screen
+                  is shipping next. Rows match on Strike's Reference column so anything that also
+                  arrives via webhook never double counts.
+                </p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
       </div>
 
       {fields.map((field) => (
@@ -1035,6 +1080,7 @@ function EnterCredentialsStep({
         Your credentials are locked in this browser before they leave. Orange Rails stores only the
         locked version and cannot read them.
       </p>
+
 
       {error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
