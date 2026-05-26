@@ -26,7 +26,7 @@ import { CoincheckSource } from "../src/sources/coincheck";
 import { BitbankSource } from "../src/sources/bitbank";
 import { IndependentReserveSource } from "../src/sources/independent-reserve";
 import { BtcMarketsSource } from "../src/sources/btc-markets";
-import { BtcturkSource } from "../src/sources/btcturk";
+import { BtcTurkSource } from "../src/sources/btcturk";
 import { ParibuSource } from "../src/sources/paribu";
 import { LunoSource } from "../src/sources/luno";
 import { ValrSource } from "../src/sources/valr";
@@ -74,6 +74,8 @@ const DIRECT_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "MXN" },
   { source: "BTC", target: "BRL" },
   { source: "BTC", target: "ARS" },
+  { source: "BTC", target: "TRY" },
+  { source: "BTC", target: "ZAR" },
   { source: "BTC", target: "KRW" },
 ];
 
@@ -97,7 +99,7 @@ const allBtcSources: Source[] = [
   new BitbankSource(),
   new IndependentReserveSource(),
   new BtcMarketsSource(),
-  new BtcturkSource(),
+  new BtcTurkSource(),
   new ParibuSource(),
   new LunoSource(),
   new ValrSource(),
