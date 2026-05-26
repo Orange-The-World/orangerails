@@ -1,0 +1,18 @@
+[
+  { "source_key": "kraken",             "tos_url": "https://www.kraken.com/legal",                                "category": "exchange",       "fetch_note": null },
+  { "source_key": "bitstamp",           "tos_url": "https://www.bitstamp.net/terms-of-use/",                      "category": "exchange",       "fetch_note": null },
+  { "source_key": "bitfinex",           "tos_url": "https://www.bitfinex.com/legal/exchange/terms",               "category": "exchange",       "fetch_note": "Updated from /legal/terms (404) to /legal/exchange/terms (200)." },
+  { "source_key": "bitso",              "tos_url": "https://bitso.com/legal/terms",                               "category": "exchange",       "fetch_note": null },
+  { "source_key": "mercado_bitcoin",    "tos_url": "https://www.mercadobitcoin.com.br/termos-uso/",               "category": "exchange",       "fetch_note": "Server-side fetch returns 403 (Cloudflare bot block). Founder runs fetch from a browser context." },
+  { "source_key": "coinbase_exchange",  "tos_url": "https://www.coinbase.com/legal/user_agreement/united_states", "category": "exchange",       "fetch_note": "Server-side fetch returns 403 (anti-bot). Founder runs fetch from a browser context." },
+  { "source_key": "mempool.space",      "tos_url": "https://mempool.space/about",                                 "category": "aggregator",     "fetch_note": "mempool.space publishes terms via its About page; canonical legal page not present." },
+  { "source_key": "frankfurter",        "tos_url": "https://www.frankfurter.app/docs",                            "category": "fx-aggregator",  "fetch_note": null },
+  { "source_key": "blockchain.com_charts", "tos_url": "https://www.blockchain.com/legal/terms",                   "category": "aggregator",     "fetch_note": null },
+  { "source_key": "banxico",            "tos_url": null,                                                          "category": "central-bank",   "fetch_note": "Banxico SIE API legal page is JavaScript-rendered and the documented /SieAPIRest/service/v1/terminos URL 404s. Founder to locate canonical ToS." },
+  { "source_key": "bcb",                "tos_url": "https://www.bcb.gov.br/en/aviso-legal",                       "category": "central-bank",   "fetch_note": null },
+  { "source_key": "bank-of-canada",     "tos_url": "https://www.bankofcanada.ca/terms/",                          "category": "central-bank",   "fetch_note": null },
+  { "source_key": "boe",                "tos_url": "https://www.bankofengland.co.uk/legal",                       "category": "central-bank",   "fetch_note": null },
+  { "source_key": "rba",                "tos_url": "https://www.rba.gov.au/copyright-and-disclaimer.html",        "category": "central-bank",   "fetch_note": "URL is correct (verified via browser). Server-side curl returns 403 (Akamai bot block). Founder runs fetch from a browser context." },
+  { "source_key": "snb",                "tos_url": "https://data.snb.ch/en/legal-information",                    "category": "central-bank",   "fetch_note": "Updated from www.snb.ch/en/iabout/legal/conditions (404) to data.snb.ch/en/legal-information (200) which is the legal notice that governs the SNB data portal we'd ingest from." },
+  { "source_key": "boj",                "tos_url": "https://www.boj.or.jp/en/about/abouthp.htm",                  "category": "central-bank",   "fetch_note": "Updated from /en/about/site/disclaim.htm (404) to /en/about/abouthp.htm (200, 'About the Site' page covering copyright + use)." }
+]
