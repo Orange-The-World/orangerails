@@ -89,6 +89,14 @@ export interface ProviderManifest {
   popularity?: number;
   multiWallet: boolean;
   credentialFields: ProviderAdapter['credentialFields'];
+  /**
+   * Optional in-app route for providers whose connect flow lives outside
+   * the generic credential-entry dialog. When set, pickers should route
+   * the tile's "Connect" action to this URL instead of opening the
+   * credential form. Used today by Sparrow (Stealth Sync widget popup);
+   * future client-side providers can adopt the same pattern.
+   */
+  connectUrl?: string;
 }
 
 /**
@@ -102,6 +110,33 @@ export interface ProviderManifest {
  */
 const ROADMAP_MANIFESTS: ReadonlyArray<ProviderManifest> = [];
 
+/**
+ * Client-side manifest entries — providers whose connect flow lives in
+ * the browser (e.g. Stealth Sync) rather than as a server adapter under
+ * `dispatch.ts`'s PROVIDERS. These appear in the picker with `status:
+ * 'live'` and a `connectUrl` that the picker routes to on tile click.
+ *
+ * Edge functions still 400 if a caller tries to create a server-side
+ * connection for these slugs, because no server adapter exists. That is
+ * intentional — these providers do not flow through the server adapter
+ * dispatch at all.
+ */
+const CLIENT_SIDE_MANIFESTS: ReadonlyArray<ProviderManifest> = [
+  {
+    slug: 'sparrow',
+    displayName: 'Sparrow Wallet',
+    description:
+      'Descriptor watch only via Stealth Sync. Your browser scans BIP 158 filters; the server never sees your addresses.',
+    status: 'live',
+    category: 'on_chain_wallet',
+    tags: ['on-chain', 'watch-only', 'self-custody', 't0', 'sparrow', 'descriptor', 'stealth-sync'],
+    popularity: 85,
+    multiWallet: false,
+    credentialFields: [],
+    connectUrl: '/connect/sparrow',
+  },
+];
+
 export function listProviderManifests(): ProviderManifest[] {
   const live: ProviderManifest[] = PROVIDERS.map(p => ({
     slug: p.slug,
@@ -114,7 +149,7 @@ export function listProviderManifests(): ProviderManifest[] {
     multiWallet: p.multiWallet,
     credentialFields: p.credentialFields,
   }));
-  return [...live, ...ROADMAP_MANIFESTS];
+  return [...live, ...CLIENT_SIDE_MANIFESTS, ...ROADMAP_MANIFESTS];
 }
 
 /**
@@ -148,6 +183,12 @@ export function listCategoryManifests(): CategoryManifest[] {
   for (const p of PROVIDERS) {
     if (!p.category) continue;
     counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
+  }
+  // Include client-side manifests (Sparrow, future Stealth Sync providers)
+  // in category counts so the sidebar reflects the full visible catalog.
+  for (const m of CLIENT_SIDE_MANIFESTS) {
+    if (!m.category) continue;
+    counts.set(m.category, (counts.get(m.category) ?? 0) + 1);
   }
   return CATEGORY_DEFS.map(c => ({ ...c, providerCount: counts.get(c.slug) ?? 0 }));
 }

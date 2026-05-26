@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { Link } from "@tanstack/react-router";
 import { Search, Check, X } from "lucide-react";
 import {
   type CategoryManifest,
@@ -374,17 +375,28 @@ function PreviewPanel({
         </ul>
       </div>
 
-      {mode === "connect" && (
-        <Button
-          type="button"
-          className="w-full"
-          disabled={manifest.status === "coming_soon"}
-          onClick={onConnect}
-        >
-          {manifest.status === "coming_soon"
-            ? "Not available yet"
-            : `Connect ${manifest.displayName}`}
+      {manifest.connectUrl ? (
+        // Provider with a dedicated landing page (e.g. Sparrow via Stealth
+        // Sync). Surface the link in both browse and connect modes — the
+        // landing page handles its own flow.
+        <Button asChild className="w-full">
+          <Link to={manifest.connectUrl}>
+            Open {manifest.displayName} setup
+          </Link>
         </Button>
+      ) : (
+        mode === "connect" && (
+          <Button
+            type="button"
+            className="w-full"
+            disabled={manifest.status === "coming_soon"}
+            onClick={onConnect}
+          >
+            {manifest.status === "coming_soon"
+              ? "Not available yet"
+              : `Connect ${manifest.displayName}`}
+          </Button>
+        )
       )}
     </div>
   );
