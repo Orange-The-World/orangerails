@@ -5,6 +5,8 @@
  *   bun run scripts/historical-backfill/orchestrator.ts bitstamp BTC/USD 2018-01-01 2026-05-25
  *   bun run scripts/historical-backfill/orchestrator.ts bitstamp BTC/USD 2018-01-01 2026-05-25 --resume
  *   bun run scripts/historical-backfill/orchestrator.ts bitstamp BTC/USD 2018-01-01 2026-05-25 --dry-run
+ *   bun run scripts/historical-backfill/orchestrator.ts kraken   BTC/USD 2023-01-01 2026-05-25
+ *   bun run scripts/historical-backfill/orchestrator.ts kraken   BTC/CAD 2024-01-01 2024-04-01 --dry-run
  *
  * Pipeline:
  *   1. Load env, resolve PROD Supabase ref (Phase B.1 is dev / dry-run only;
@@ -26,6 +28,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { BitstampCsvSource, type BitstampCsvPair } from "./sources/bitstamp-csv";
+import { KrakenCsvSource, type KrakenSupportedPair } from "./sources/kraken-csv";
 import {
   BatchWriter,
   type ExchangeRateInsert,
@@ -90,7 +93,7 @@ async function mgmtApiQuery(ctx: DbContext, sql: string): Promise<unknown> {
 // ----------------------------------------------------------------------------
 // Source registry
 // ----------------------------------------------------------------------------
-type SupportedSource = "bitstamp";
+type SupportedSource = "bitstamp" | "kraken";
 
 interface SourceAdapter {
   fetchCandles(pair: string, from: Date, to: Date, opts: { reuseExisting: boolean }): AsyncIterable<Candle>;
@@ -122,9 +125,39 @@ class BitstampAdapter implements SourceAdapter {
   }
 }
 
+class KrakenAdapter implements SourceAdapter {
+  constructor(private readonly src: KrakenCsvSource = new KrakenCsvSource()) {}
+
+  async *fetchCandles(
+    pair: string,
+    from: Date,
+    to: Date,
+    opts: { reuseExisting: boolean },
+  ): AsyncIterable<Candle> {
+    if (!this.src.isSupported(pair)) {
+      throw new Error(`kraken-csv: unsupported pair ${pair}. Supported: ${KrakenCsvSource.supportedPairs.join(", ")}`);
+    }
+    const pairTyped = pair as KrakenSupportedPair;
+    const krakenSym = this.src.krakenSymbol(pairTyped);
+    const downloadPath = `/tmp/orbi-backfill/Kraken_${krakenSym}_1.csv`;
+
+    if (opts.reuseExisting && existsSync(downloadPath)) {
+      console.log(`  [kraken-csv] reusing existing concatenated CSV: ${downloadPath}`);
+    } else {
+      const quarters = this.src.quartersInRange(from, to);
+      console.log(`  [kraken-csv] downloading ${quarters.length} quarter ZIP(s) for ${pair} (${krakenSym})`);
+      for (const q of quarters) console.log(`    - ${q.zipName}`);
+      const dl = await this.src.download(pairTyped, from, to);
+      console.log(`  [kraken-csv] concatenated ${dl.bytes} bytes → ${dl.path}`);
+    }
+    yield* this.src.parse(downloadPath, from, to);
+  }
+}
+
 function getAdapter(source: SupportedSource): SourceAdapter {
   switch (source) {
     case "bitstamp": return new BitstampAdapter();
+    case "kraken":   return new KrakenAdapter();
     default: throw new Error(`Unknown source: ${source}`);
   }
 }
@@ -281,11 +314,11 @@ async function main(): Promise<void> {
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  const source = sourceArg as SupportedSource;
-  if (source !== "bitstamp") {
-    console.error(`Only 'bitstamp' is supported in Phase B.1; got '${source}'`);
+  if (sourceArg !== "bitstamp" && sourceArg !== "kraken") {
+    console.error(`Unknown source '${sourceArg}'. Supported: bitstamp, kraken`);
     process.exit(2);
   }
+  const source: SupportedSource = sourceArg;
   const from = new Date(`${fromArg}T00:00:00Z`);
   const to = new Date(`${toArg}T00:00:00Z`);
   if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to) {

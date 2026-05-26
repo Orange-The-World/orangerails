@@ -7,12 +7,15 @@
  *   - Tolerate banner lines (cryptodatadownload.com prefixes their CSVs
  *     with a single URL line before the real header).
  *   - Tolerate trailing blank lines and Windows CRLF.
+ *   - Support header-less CSVs (e.g. Kraken's bulk OHLCVT files) via an
+ *     optional caller-supplied `header` array.
  *
  * Each yielded row is a Record<columnName, string>. Numeric coercion
- * happens in the source-specific mapper (e.g. bitstamp-csv.ts).
+ * happens in the source-specific mapper (e.g. bitstamp-csv.ts, kraken-csv.ts).
  *
  * Usage:
  *   for await (const row of parseCsv(stream, { skipLines: 1 })) { ... }
+ *   for await (const row of parseCsv(stream, { header: ["unix","open",...] })) { ... }
  */
 
 import { createReadStream } from "node:fs";
@@ -24,6 +27,12 @@ export interface CsvParseOptions {
   skipLines?: number;
   /** Custom delimiter (default ","). */
   delimiter?: string;
+  /**
+   * Explicit column names. When provided, the parser treats the file as
+   * header-less — every line (after `skipLines`) is data and is mapped
+   * positionally against this array.
+   */
+  header?: ReadonlyArray<string>;
 }
 
 export interface CsvRow {
@@ -45,7 +54,8 @@ export async function* parseCsv(
 
   const rl = createInterface({ input: stream, crlfDelay: Infinity });
   let lineNo = 0;
-  let header: string[] | null = null;
+  let header: string[] | null = opts.header ? [...opts.header] : null;
+  const headerProvided = header !== null;
 
   for await (const raw of rl) {
     lineNo++;
@@ -53,15 +63,15 @@ export async function* parseCsv(
     const line = raw.trim();
     if (!line) continue;
 
-    if (!header) {
+    if (!headerProvided && !header) {
       header = splitCsvLine(line, delim);
       continue;
     }
 
     const fields = splitCsvLine(line, delim);
     const row: CsvRow = {};
-    for (let i = 0; i < header.length; i++) {
-      row[header[i]!] = fields[i] ?? "";
+    for (let i = 0; i < header!.length; i++) {
+      row[header![i]!] = fields[i] ?? "";
     }
     yield row;
   }
