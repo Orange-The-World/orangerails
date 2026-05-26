@@ -149,6 +149,13 @@ function SparrowConnectPage() {
                       confirms (~10 minutes).
                     </li>
                     <li>
+                      <span className="text-foreground">✓ Sends.</span>{" "}
+                      Outgoing transactions are detected by tracking the UTXOs
+                      your wallet receives and watching for inputs that spend
+                      them. Works for any UTXO created at or after your wallet
+                      birthday (default: one year ago, editable).
+                    </li>
+                    <li>
                       <span className="text-foreground">✓ Single key + multisig descriptors.</span>{" "}
                       <span className="font-mono text-xs">wpkh(...)</span>,{" "}
                       <span className="font-mono text-xs">tr(...)</span>,{" "}
@@ -157,8 +164,10 @@ function SparrowConnectPage() {
                       xpub / ypub / zpub.
                     </li>
                     <li>
-                      <span className="text-foreground">✗ Sends.</span>{" "}
-                      Outgoing transactions arrive in v0.2 (UTXO tracking loop in Stealth Sync).
+                      <span className="text-foreground">⚠ Pre-birthday UTXO spends.</span>{" "}
+                      A spend of a UTXO older than your wallet birthday will
+                      not be detected. Push the birthday back to capture older
+                      history.
                     </li>
                     <li>
                       <span className="text-foreground">✗ Pending transactions.</span>{" "}
