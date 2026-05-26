@@ -16,6 +16,10 @@ export type Adapter = {
   category: AdapterCategory;
   status: AdapterStatus;
   description: string;
+  /** When set, the adapter card links to this in-app route. Used for
+   *  adapters with a dedicated landing page (e.g. Sparrow's Stealth Sync
+   *  flow). Adapters without a connectUrl render the generic "Docs" text. */
+  connectUrl?: string;
 };
 
 export const ADAPTERS: Adapter[] = [
@@ -32,7 +36,7 @@ export const ADAPTERS: Adapter[] = [
   { id: "lnd", name: "LND", category: "Lightning", status: "Planned", description: "gRPC + Faraday accounting." },
   { id: "cln", name: "Core Lightning (CLN)", category: "Lightning", status: "Planned", description: "Self-hosted Lightning node." },
   { id: "ldk", name: "LDK", category: "Lightning", status: "Planned", description: "Library adapter. WASM-capable." },
-  { id: "sparrow", name: "Sparrow Wallet", category: "Wallet", status: "Planned", description: "PSBT import, xpub descriptor." },
+  { id: "sparrow", name: "Sparrow Wallet", category: "Wallet", status: "Available", description: "Descriptor watch only via Stealth Sync. Browser scans BIP 158 filters; the server never sees your addresses.", connectUrl: "/connect/sparrow" },
   { id: "phoenix", name: "Phoenix", category: "Lightning", status: "Planned", description: "LDK-based mobile Lightning." },
   { id: "mempool", name: "Mempool.space / Esplora", category: "Explorer", status: "Available", description: "Blockchain query adapter." },
   { id: "coinbase", name: "Coinbase", category: "Exchange", status: "Planned", description: "OAuth read-only." },
