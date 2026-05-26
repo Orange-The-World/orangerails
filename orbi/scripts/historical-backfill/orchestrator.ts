@@ -29,6 +29,10 @@
 import { readFileSync, existsSync } from "node:fs";
 import { BitstampCsvSource, type BitstampCsvPair } from "./sources/bitstamp-csv";
 import { KrakenCsvSource, type KrakenSupportedPair } from "./sources/kraken-csv";
+import { BitstampPagedApiSource, type BitstampPagedPair } from "./sources/bitstamp-paged-api";
+import { BitfinexPagedApiSource, type BitfinexPagedPair } from "./sources/bitfinex-paged-api";
+import { BitsoPagedApiSource, type BitsoPagedPair } from "./sources/bitso-paged-api";
+import { MercadoBitcoinPagedApiSource, type MercadoPagedPair } from "./sources/mercado-bitcoin-paged-api";
 import {
   BatchWriter,
   type ExchangeRateInsert,
@@ -93,7 +97,13 @@ async function mgmtApiQuery(ctx: DbContext, sql: string): Promise<unknown> {
 // ----------------------------------------------------------------------------
 // Source registry
 // ----------------------------------------------------------------------------
-type SupportedSource = "bitstamp" | "kraken";
+type SupportedSource =
+  | "bitstamp"
+  | "kraken"
+  | "bitstamp-paged"
+  | "bitfinex-paged"
+  | "bitso-paged"
+  | "mercado-bitcoin-paged";
 
 interface SourceAdapter {
   fetchCandles(pair: string, from: Date, to: Date, opts: { reuseExisting: boolean }): AsyncIterable<Candle>;
@@ -154,10 +164,58 @@ class KrakenAdapter implements SourceAdapter {
   }
 }
 
+class BitstampPagedAdapter implements SourceAdapter {
+  constructor(private readonly src: BitstampPagedApiSource = new BitstampPagedApiSource()) {}
+  async *fetchCandles(pair: string, from: Date, to: Date): AsyncIterable<Candle> {
+    if (!this.src.isSupported(pair)) {
+      throw new Error(`bitstamp-paged: unsupported pair ${pair}. Supported: ${BitstampPagedApiSource.supportedPairs.join(", ")}`);
+    }
+    console.log(`  [bitstamp-paged] paging /api/v2/ohlc for ${pair} from ${from.toISOString()} to ${to.toISOString()}`);
+    yield* this.src.fetch(pair as BitstampPagedPair, from, to);
+  }
+}
+
+class BitfinexPagedAdapter implements SourceAdapter {
+  constructor(private readonly src: BitfinexPagedApiSource = new BitfinexPagedApiSource()) {}
+  async *fetchCandles(pair: string, from: Date, to: Date): AsyncIterable<Candle> {
+    if (!this.src.isSupported(pair)) {
+      throw new Error(`bitfinex-paged: unsupported pair ${pair}. Supported: ${BitfinexPagedApiSource.supportedPairs.join(", ")}`);
+    }
+    console.log(`  [bitfinex-paged] paging /v2/candles for ${pair} from ${from.toISOString()} to ${to.toISOString()}`);
+    yield* this.src.fetch(pair as BitfinexPagedPair, from, to);
+  }
+}
+
+class BitsoPagedAdapter implements SourceAdapter {
+  constructor(private readonly src: BitsoPagedApiSource = new BitsoPagedApiSource()) {}
+  async *fetchCandles(pair: string, from: Date, to: Date): AsyncIterable<Candle> {
+    if (!this.src.isSupported(pair)) {
+      throw new Error(`bitso-paged: unsupported pair ${pair}. Supported: ${BitsoPagedApiSource.supportedPairs.join(", ")}`);
+    }
+    console.log(`  [bitso-paged] paging /v3/ohlc for ${pair} from ${from.toISOString()} to ${to.toISOString()}`);
+    yield* this.src.fetch(pair as BitsoPagedPair, from, to);
+  }
+}
+
+class MercadoBitcoinPagedAdapter implements SourceAdapter {
+  constructor(private readonly src: MercadoBitcoinPagedApiSource = new MercadoBitcoinPagedApiSource()) {}
+  async *fetchCandles(pair: string, from: Date, to: Date): AsyncIterable<Candle> {
+    if (!this.src.isSupported(pair)) {
+      throw new Error(`mercado-bitcoin-paged: unsupported pair ${pair}. Supported: ${MercadoBitcoinPagedApiSource.supportedPairs.join(", ")}`);
+    }
+    console.log(`  [mercado-bitcoin-paged] paging /api/v4/candles for ${pair} from ${from.toISOString()} to ${to.toISOString()}`);
+    yield* this.src.fetch(pair as MercadoPagedPair, from, to);
+  }
+}
+
 function getAdapter(source: SupportedSource): SourceAdapter {
   switch (source) {
     case "bitstamp": return new BitstampAdapter();
     case "kraken":   return new KrakenAdapter();
+    case "bitstamp-paged": return new BitstampPagedAdapter();
+    case "bitfinex-paged": return new BitfinexPagedAdapter();
+    case "bitso-paged":    return new BitsoPagedAdapter();
+    case "mercado-bitcoin-paged": return new MercadoBitcoinPagedAdapter();
     default: throw new Error(`Unknown source: ${source}`);
   }
 }
@@ -314,11 +372,19 @@ async function main(): Promise<void> {
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (sourceArg !== "bitstamp" && sourceArg !== "kraken") {
-    console.error(`Unknown source '${sourceArg}'. Supported: bitstamp, kraken`);
+  const KNOWN_SOURCES: SupportedSource[] = [
+    "bitstamp",
+    "kraken",
+    "bitstamp-paged",
+    "bitfinex-paged",
+    "bitso-paged",
+    "mercado-bitcoin-paged",
+  ];
+  if (!(KNOWN_SOURCES as string[]).includes(sourceArg)) {
+    console.error(`Unknown source '${sourceArg}'. Supported: ${KNOWN_SOURCES.join(", ")}`);
     process.exit(2);
   }
-  const source: SupportedSource = sourceArg;
+  const source: SupportedSource = sourceArg as SupportedSource;
   const from = new Date(`${fromArg}T00:00:00Z`);
   const to = new Date(`${toArg}T00:00:00Z`);
   if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to) {

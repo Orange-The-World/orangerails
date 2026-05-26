@@ -309,3 +309,123 @@ Before launching the first real (non-dry-run) backfill:
 4. Forward-fill and reconciler crons keep running during the backfill.
    UPSERT conflicts are fine; the live cron's row wins (newer
    `computed_at`) for any overlap window.
+
+---
+
+## Phase B.3 + B.4 — paged-API sources (added 2026-05-26)
+
+Four new source plug-ins extend ORBI's historical backfill ladder beyond
+the B.1 mirror + B.2 quarterly archives. Each one walks the exchange's own
+public OHLC endpoint page-by-page, requires NO authentication, and feeds
+the same orchestrator pipeline.
+
+| Source                  | Pairs                           | Endpoint                                                | Depth          |
+|-------------------------|---------------------------------|---------------------------------------------------------|----------------|
+| `bitstamp-paged`        | BTC/USD, BTC/EUR, BTC/GBP       | `/api/v2/ohlc/{pair}/?step=60&start=&limit=1000`        | back to 2011-08 (BTC/USD), 2017-12 (BTC/EUR), 2022-05 (BTC/GBP) |
+| `bitfinex-paged`        | BTC/USD, BTC/EUR, BTC/GBP       | `/v2/candles/trade:1m:t{PAIR}/hist?start=&end=&limit=10000&sort=1` | back to 2013-04 (BTC/USD), 2018-11 (BTC/GBP), 2019-06 (BTC/EUR) |
+| `bitso-paged`           | BTC/MXN, BTC/ARS, BTC/USD, BTC/BRL (winding down) | `/v3/ohlc?book=&time_bucket=60&start=&end=` (ms!)   | back to ~2014 (BTC/MXN), ~2021 (BTC/ARS) |
+| `mercado-bitcoin-paged` | BTC/BRL, BTC/USDT, BTC/USDC     | `/api/v4/candles?symbol=BASE-QUOTE&resolution=1m&from=&to=` | back to v4 launch (~2020) for 1m granularity |
+
+Bitso has BTC/BRL listed but is winding down the BRL desk per their
+announcement. Dry-run before any production run; if zero rows, drop from
+`supportedPairs`.
+
+### Pagination behavior
+
+- **bitstamp-paged**: 1000 candles per page (~16.6 h). Advance by
+  `last_timestamp + 60s`. Terminates on empty `data.ohlc`.
+- **bitfinex-paged**: 10000 candles per page (~166 h). `sort=1` for
+  ascending. Advance by `last_mts + 60_000`. Terminates on empty array.
+- **bitso-paged**: ~1 day per call empirically (no documented page-size
+  cap). Walks in 24h windows; advances by `last_bucket_start_time + 60_000`.
+  Terminates on empty payload.
+- **mercado-bitcoin-paged**: returns up to ~1440 buckets per call (1 day
+  of 1-minute data). Walks in 24h windows; advances by `last_t + 60`.
+  Terminates on empty `t`.
+
+### Rate limits and cadence
+
+| Source                  | Documented cap        | Plug-in default   |
+|-------------------------|-----------------------|-------------------|
+| `bitstamp-paged`        | 8000 req / 10 min (~13 rps) | 6 rps, burst 6 |
+| `bitfinex-paged`        | 10-90 req/min varies; 60s IP block on breach | 0.4 rps, burst 2 |
+| `bitso-paged`           | 60 req/min public (1 rps); HTTP 420 + 60s lockout on breach | 0.8 rps, burst 2 |
+| `mercado-bitcoin-paged` | Not formally documented; CF 429 if aggressive | 1 rps, burst 2 |
+
+### Dry-run smoke (2026-05-20 to 2026-05-25, captured 2026-05-26)
+
+| Source                  | Pair    | Rows parsed | Duration |
+|-------------------------|---------|-------------|----------|
+| `bitstamp-paged`        | BTC/USD | 7,200       | ~2.2 s   |
+| `bitfinex-paged`        | BTC/USD | 7,198       | ~0.5 s   |
+| `bitso-paged`           | BTC/MXN | 7,200       | ~3.9 s   |
+| `mercado-bitcoin-paged` | BTC/BRL | 5,060       | ~3.1 s   |
+
+5 days x 1440 minutes/day = 7200 minutes. bitstamp / bitso hit that exactly
+because they carry-the-last-quote for zero-volume buckets; bitfinex and
+mercado only emit buckets when trades occurred (gaps in low-liquidity
+minutes).
+
+### Runtime estimates for real (DB-write) backfills
+
+Live timing is dominated by the Supabase Management API throughput
+(~50 ms/round-trip per 500-row batch). API-side fetch time for these
+paged sources is the much smaller term.
+
+| Source                  | Window     | Pages | Est. fetch | Est. UPSERT |
+|-------------------------|------------|-------|------------|-------------|
+| `bitstamp-paged` BTC/USD | 1 year    | ~525  | ~90 s      | ~50-90 min  |
+| `bitstamp-paged` BTC/USD | 10 years (deep history) | ~5260 | ~15 min | ~9-15 h |
+| `bitfinex-paged` BTC/USD | 1 year    | ~53   | ~2 min     | ~50-90 min  |
+| `bitfinex-paged` BTC/USD | 10 years  | ~530  | ~22 min    | ~9-15 h     |
+| `bitso-paged` BTC/MXN    | 1 year    | ~365  | ~8 min     | ~25-45 min  |
+| `bitso-paged` BTC/MXN    | 5 years   | ~1825 | ~38 min    | ~2-4 h      |
+| `mercado-bitcoin-paged` BTC/BRL | 1 year | ~365 | ~6 min  | ~15-25 min  |
+
+### Run a paged-API backfill
+
+```sh
+cd /home/ubuntu/AIHUB/REPOS/orangerails/orbi
+
+# Dry-run a recent 5-day window for each source
+bun run scripts/historical-backfill/orchestrator.ts bitstamp-paged BTC/USD 2026-05-20 2026-05-25 --dry-run
+bun run scripts/historical-backfill/orchestrator.ts bitfinex-paged BTC/USD 2026-05-20 2026-05-25 --dry-run
+bun run scripts/historical-backfill/orchestrator.ts bitso-paged BTC/MXN 2026-05-20 2026-05-25 --dry-run
+bun run scripts/historical-backfill/orchestrator.ts mercado-bitcoin-paged BTC/BRL 2026-05-20 2026-05-25 --dry-run
+
+# Real run (founder triggers; phase B.3/B.4 ships plug-in code only)
+bun run scripts/historical-backfill/orchestrator.ts bitstamp-paged BTC/USD 2018-01-01 2026-05-25 \
+  2>&1 | tee /tmp/orbi-backfill-bitstamp-paged-btcusd.log
+```
+
+`--resume` is supported via the standard checkpoint file
+(`/tmp/orbi-backfill-<source>-<paircode>.checkpoint.json`).
+
+### Per-source ToS audit trail
+
+Each paged-API plug-in has a companion `*.tos-notes.md` file under
+`scripts/historical-backfill/sources/`:
+
+- `bitstamp-paged-api.tos-notes.md`
+- `bitfinex-paged-api.tos-notes.md`
+- `bitso-paged-api.tos-notes.md`
+- `mercado-bitcoin-paged-api.tos-notes.md`
+
+These files document URL, fetch date, sha256 of the fetched ToS body,
+relevant clauses, assessment, and any required attribution. They are the
+audit trail Agent A's `orbi/scripts/tos-compliance/` system consumes.
+
+### Roll back any paged-API backfill
+
+Same provenance-scoped delete as the B.1/B.2 sources:
+
+```sql
+DELETE FROM exchange_rates
+WHERE provenance     = 'historical-backfill'
+  AND source_currency = 'BTC'
+  AND target_currency = 'USD'
+  AND granularity     = '1m'
+  AND product         = 'ORBI-M'
+  AND bucket_ts >= '<from>'
+  AND bucket_ts <  '<to>';
+```
