@@ -12,6 +12,8 @@
 import { readFileSync } from "node:fs";
 import { KrakenSource } from "../src/sources/kraken";
 import { BitstampSource } from "../src/sources/bitstamp";
+import { BitfinexSource } from "../src/sources/bitfinex";
+import { MempoolSpaceSource } from "../src/sources/mempool-space";
 import { resolve } from "../src/calculate/resolve";
 
 // --- Load env creds ---
@@ -60,7 +62,7 @@ function sqlEscape(s: string): string {
 
 async function main() {
   console.log("=== Step 1: resolve a recent BTC/USD bucket from Kraken ===");
-  const sources = [new KrakenSource(), new BitstampSource()];
+  const sources = [new KrakenSource(), new BitstampSource(), new BitfinexSource(), new MempoolSpaceSource()];
   const effectiveAt = new Date(Date.now() - 3 * 60_000); // 3 minutes ago (ensure candle has closed)
   const result = await resolve({ pair: { source: "BTC", target: "USD" }, effectiveAt }, sources);
   console.log(`  Effective at: ${effectiveAt.toISOString()}`);
