@@ -10,11 +10,11 @@ Type=simple
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/AIHUB/REPOS/orangerails/orbi
-ExecStart=/home/ubuntu/.bun/bin/bun run scripts/forward-fill.ts
+ExecStart=/usr/local/bin/bun run scripts/forward-fill.ts
 Restart=on-failure
 RestartSec=15
-StandardOutput=append:/tmp/orbi-forward-fill.log
-StandardError=append:/tmp/orbi-forward-fill.log
+StandardOutput=journal
+StandardError=journal
 
 # Resource guards — match what forward-fill actually uses
 MemoryMax=512M
