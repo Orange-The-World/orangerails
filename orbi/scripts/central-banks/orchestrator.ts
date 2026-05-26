@@ -29,6 +29,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { BanxicoSource } from "./sources/banxico";
 import { BcbSource } from "./sources/bcb";
 import { BankOfCanadaSource } from "./sources/bank-of-canada";
+import { BankOfEnglandSource } from "./sources/bank-of-england";
 import {
   AuthorityBatchWriter,
   type AuthorityRateInsert,
@@ -91,7 +92,7 @@ async function mgmtApiQuery(ctx: DbContext, sql: string): Promise<unknown> {
 // ----------------------------------------------------------------------------
 // Authority pipelines
 // ----------------------------------------------------------------------------
-type AuthorityKey = "banxico" | "bcb" | "boc";
+type AuthorityKey = "banxico" | "bcb" | "boc" | "boe";
 
 async function fetchRowsForAuthority(
   authority: AuthorityKey,
@@ -116,6 +117,11 @@ async function fetchRowsForAuthority(
       const raw = await src.fetch({ from, to });
       return src.toInserts(raw, fetchedAtIso);
     }
+    case "boe": {
+      const src = new BankOfEnglandSource();
+      const body = await src.fetch({ from, to });
+      return src.toInserts(body, fetchedAtIso);
+    }
   }
 }
 
@@ -124,6 +130,7 @@ function pairLabel(authority: AuthorityKey): string {
     case "banxico": return "USD/MXN";
     case "bcb":     return "USD/BRL";
     case "boc":     return "USD/CAD";
+    case "boe":     return "USD/GBP";
   }
 }
 
@@ -230,15 +237,15 @@ export async function runCbBackfill(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error("usage: cb-backfill <authority: banxico|bcb|boc> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
+    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
     process.exit(2);
   }
   const [authorityArg, fromArg, toArg] = args as [string, string, string];
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (!["banxico", "bcb", "boc"].includes(authorityArg)) {
-    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc.`);
+  if (!["banxico", "bcb", "boc", "boe"].includes(authorityArg)) {
+    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe.`);
     process.exit(2);
   }
   const authority = authorityArg as AuthorityKey;

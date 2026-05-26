@@ -12,13 +12,20 @@ ORBI VW-median for tax reporting and IFRS use. Storing the central-bank
 authority rate alongside ORBI lets us serve both queries from the same
 table.
 
-Phase D.1 ships three sources:
+Phase D.1 ships three sources, Phase D.2 adds one more:
 
-| Source         | Pair    | Authority code | Date range available |
-|----------------|---------|----------------|----------------------|
-| Banxico        | USD/MXN | `BANXICO`      | ~1993-01-04 onward   |
-| BCB (PTAX)     | USD/BRL | `BCB`          | 1984-11-28 onward    |
-| Bank of Canada | USD/CAD | `BOC`          | 2017-01-03 onward    |
+| Source            | Pair    | Authority code | Date range available | Phase |
+|-------------------|---------|----------------|----------------------|-------|
+| Banxico           | USD/MXN | `BANXICO`      | ~1993-01-04 onward   | D.1   |
+| BCB (PTAX)        | USD/BRL | `BCB`          | 1984-11-28 onward    | D.1   |
+| Bank of Canada    | USD/CAD | `BOC`          | 2017-01-03 onward    | D.1   |
+| Bank of England   | USD/GBP | `BOE`          | ~1975 onward (XUDLGBD) | D.2 |
+
+Phase D.2 sources NOT yet shipped (see `DEFERRED_SOURCES.md`):
+
+- Reserve Bank of Australia (`RBA`) - blocked by Akamai bot protection from server IPs.
+- Swiss National Bank (`SNB`) - no no-auth daily JSON cube; only annual + monthly.
+- Bank of Japan (`BOJ`) - form-based scraping w/ Shift_JIS encoding; founder action required.
 
 ---
 
@@ -68,6 +75,11 @@ bun run scripts/central-banks/orchestrator.ts bcb 1999-01-01 2026-05-26 \
 
 bun run scripts/central-banks/orchestrator.ts boc 2017-01-01 2026-05-26 \
   2>&1 | tee /tmp/orbi-cb-boc.log
+
+# Bank of England (Phase D.2 — USD/GBP, XUDLGBD series back to ~1975).
+bun run scripts/central-banks/orchestrator.ts boe 2026-05-19 2026-05-26 --dry-run
+bun run scripts/central-banks/orchestrator.ts boe 1975-01-01 2026-05-26 \
+  2>&1 | tee /tmp/orbi-cb-boe.log
 ```
 
 `--resume` picks up from the last completed bucket recorded at
