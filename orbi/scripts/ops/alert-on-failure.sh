@@ -18,7 +18,7 @@ SIGNAL_URL="http://127.0.0.1:8090/v2/send"
 DRY_RUN="${DRY_RUN:-0}"
 
 cd "$REPO"
-if /home/ubuntu/.bun/bin/bun run scripts/reconcile-gaps.ts >> "$LOG" 2>&1; then
+if /usr/local/bin/bun run scripts/reconcile-gaps.ts >> "$LOG" 2>&1; then
   exit 0
 fi
 RC=$?
