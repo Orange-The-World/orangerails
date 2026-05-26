@@ -16,18 +16,23 @@
  *
  * Block parsing scope. We parse block headers (for timestamp + tx count)
  * and walk transactions enough to: (1) compute each txid as the
- * double-SHA256 of the non-witness tx serialization, and (2) identify
- * outputs whose scriptPubKey matches one of the user's derived scripts.
- * For each matching tx we emit a NormalizedTransaction with txid,
- * block_height, occurred_at, direction='in', amount_sats summed across
- * matched outputs, and the first matched address (best-effort label).
+ * double-SHA256 of the non-witness tx serialization, (2) identify outputs
+ * whose scriptPubKey matches one of the user's derived scripts (receives),
+ * and (3) track each receive as a UTXO so we can detect a subsequent
+ * transaction that spends one of those UTXOs (sends).
  *
- * Detecting 'out' transactions (where the user spent a prior UTXO) requires
- * a UTXO tracking loop across the whole scan window. That is deferred to
- * Milestone 3.5; until then we emit 'in' transactions only and document
- * the limitation in the sealed-record memo. The sync still satisfies the
- * end-to-end widget flow against fixtures and is correct for receive-only
- * watching wallets, which is the primary T0 customer pattern.
+ * Both directions emit NormalizedTransaction records:
+ *   - direction='in':  txid, block_height, occurred_at, amount_sats =
+ *                      sum of matched outputs, address = first matched.
+ *   - direction='out': txid, block_height, occurred_at, amount_sats =
+ *                      spent_utxos - change_back (what left the wallet
+ *                      net of change), address = first non-ours output.
+ *
+ * Known limitation: the UTXO map is built in-memory during a single sync
+ * run. UTXOs funded BEFORE the wallet birthday are not tracked, so a
+ * spend of a pre-birthday UTXO will not be detected. Mitigation: V2's UI
+ * defaults wallet birthday to one year ago and lets users override; users
+ * with older wallets are nudged to push the birthday back.
  */
 
 import {
