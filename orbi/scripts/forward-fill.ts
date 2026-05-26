@@ -22,6 +22,17 @@ import { MempoolSpaceSource } from "../src/sources/mempool-space";
 import { BitsoSource } from "../src/sources/bitso";
 import { MercadoBitcoinSource } from "../src/sources/mercado-bitcoin";
 import { CoinbaseExchangeSource } from "../src/sources/coinbase-exchange";
+import { CoincheckSource } from "../src/sources/coincheck";
+import { BitbankSource } from "../src/sources/bitbank";
+import { IndependentReserveSource } from "../src/sources/independent-reserve";
+import { BtcMarketsSource } from "../src/sources/btc-markets";
+import { BtcturkSource } from "../src/sources/btcturk";
+import { ParibuSource } from "../src/sources/paribu";
+import { LunoSource } from "../src/sources/luno";
+import { ValrSource } from "../src/sources/valr";
+import { UpbitSource } from "../src/sources/upbit";
+import { BithumbSource } from "../src/sources/bithumb";
+import { RipioSource } from "../src/sources/ripio";
 import { FrankfurterSource } from "../src/sources/frankfurter";
 import { resolve, type ResolveResult } from "../src/calculate/resolve";
 import { resolveComposite, type CompositeResolveResult } from "../src/calculate/resolve-composite";
@@ -63,6 +74,7 @@ const DIRECT_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "MXN" },
   { source: "BTC", target: "BRL" },
   { source: "BTC", target: "ARS" },
+  { source: "BTC", target: "KRW" },
 ];
 
 // Composite pairs (Tier C via BTC/USD ORBI × USD/X Frankfurter)
@@ -81,6 +93,17 @@ const allBtcSources: Source[] = [
   new BitsoSource(),
   new CoinbaseExchangeSource(),
   new MercadoBitcoinSource(),
+  new CoincheckSource(),
+  new BitbankSource(),
+  new IndependentReserveSource(),
+  new BtcMarketsSource(),
+  new BtcturkSource(),
+  new ParibuSource(),
+  new LunoSource(),
+  new ValrSource(),
+  new UpbitSource(),
+  new BithumbSource(),
+  new RipioSource(),
 ];
 const frankfurter = new FrankfurterSource();
 
