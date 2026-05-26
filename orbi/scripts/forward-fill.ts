@@ -21,6 +21,7 @@ import { BitfinexSource } from "../src/sources/bitfinex";
 import { MempoolSpaceSource } from "../src/sources/mempool-space";
 import { BitsoSource } from "../src/sources/bitso";
 import { MercadoBitcoinSource } from "../src/sources/mercado-bitcoin";
+import { CoinbaseExchangeSource } from "../src/sources/coinbase-exchange";
 import { FrankfurterSource } from "../src/sources/frankfurter";
 import { resolve, type ResolveResult } from "../src/calculate/resolve";
 import { resolveComposite, type CompositeResolveResult } from "../src/calculate/resolve-composite";
@@ -78,6 +79,7 @@ const allBtcSources: Source[] = [
   new BitfinexSource(),
   new MempoolSpaceSource(),
   new BitsoSource(),
+  new CoinbaseExchangeSource(),
   new MercadoBitcoinSource(),
 ];
 const frankfurter = new FrankfurterSource();
@@ -125,7 +127,7 @@ async function publishComposite(target: string, effectiveAt: Date): Promise<stri
     const result = await resolveComposite({
       pair: { source: "BTC", target },
       effectiveAt,
-      btcSources: allBtcSources.slice(0, 5), // exclude Mercado Bitcoin (no USD)
+      btcSources: allBtcSources.slice(0, 6), // exclude Mercado Bitcoin (no USD)
       crossRateSource: frankfurter,
     });
     await writeCompositeRate(target, result);
