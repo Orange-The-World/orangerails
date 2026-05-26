@@ -1,4 +1,5 @@
 import { ArrowRight } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import type { Adapter } from "@/data/integrations";
 
 const statusStyles: Record<Adapter["status"], string> = {
@@ -39,13 +40,19 @@ export function AdapterCard({ adapter }: { adapter: Adapter }) {
 
       <p className="mt-3 text-sm text-muted-foreground">{adapter.description}</p>
 
-      <a
-        href="#"
-        className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-primary opacity-80 transition-opacity hover:opacity-100"
-      >
-        Docs
-        <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
-      </a>
+      {adapter.connectUrl ? (
+        <Link
+          to={adapter.connectUrl}
+          className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-primary transition-opacity hover:opacity-90"
+        >
+          Connect
+          <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+        </Link>
+      ) : (
+        <span className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-muted-foreground">
+          {adapter.status === "Planned" ? "Coming soon" : "Docs"}
+        </span>
+      )}
     </div>
   );
 }

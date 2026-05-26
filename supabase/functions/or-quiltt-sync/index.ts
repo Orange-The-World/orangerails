@@ -1,0 +1,305 @@
+/**
+ * or-quiltt-sync — drain quiltt_webhook_inbox, pull data from Quiltt
+ * GraphQL, seal under each user's OPK, persist as encrypted_transactions.
+ *
+ * Trigger: HTTP POST (callable manually for testing; wire to supabase_cron
+ * on a schedule later). One call processes a bounded batch of pending
+ * events and returns metrics.
+ *
+ * Phase 1 scope:
+ *   - Only events for subaccounts with opk_public set are processed
+ *     here. Non-opted-in users get their Quiltt data on next active
+ *     sync via the user-session path (separate change in or-sync).
+ *   - Only connection.synced.successful.* events drive data pulls.
+ *     Other events (profile.*, account.verified, errors) are marked
+ *     processed without action; or wired into the dispatcher later.
+ *
+ * Auth: requires X-Internal-Worker-Token (constant-time compared to
+ * OR_INTERNAL_WORKER_TOKEN env). This endpoint is for OR ops + cron
+ * only; never callable from integrators or browsers.
+ *
+ * Env vars:
+ *   QUILTT_API_KEY              — Model A master key
+ *   OR_INTERNAL_WORKER_TOKEN    — caller auth for this endpoint
+ *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY — standard
+ */
+
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import sodium from 'https://esm.sh/libsodium-wrappers-sumo@0.7.13';
+
+const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
+const BATCH_SIZE = 20;        // events drained per invocation
+const TX_PAGE_SIZE = 100;
+const MAX_PAGES = 5;          // safety cap per connection per invocation
+
+interface PendingEvent {
+  event_id:      string;
+  event_type:    string;
+  payload:       any;
+  platform_id:   string | null;
+  subaccount_id: string | null;
+  attempts:      number;
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+
+  const callerToken = req.headers.get('X-Internal-Worker-Token');
+  const expected = Deno.env.get('OR_INTERNAL_WORKER_TOKEN');
+  if (!expected) return new Response('worker token not configured', { status: 503 });
+  if (!callerToken || !timingSafeEqual(callerToken, expected)) {
+    return new Response('unauthorized', { status: 401 });
+  }
+
+  const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
+  if (!quilttApiKey) return new Response('QUILTT_API_KEY missing', { status: 503 });
+
+  const client = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+  );
+
+  await sodium.ready;
+
+  let processed = 0;
+  let failed    = 0;
+  let skipped   = 0;
+
+  // Pull a batch of pending events
+  const { data: pending, error: pendErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts')
+    .is('processed_at', null)
+    .order('received_at', { ascending: true })
+    .limit(BATCH_SIZE);
+
+  if (pendErr) {
+    console.error('[or-quiltt-sync] inbox query failed:', pendErr.message);
+    return jsonResponse({ error: 'inbox query failed' }, 500);
+  }
+  if (!pending || pending.length === 0) {
+    return jsonResponse({ processed: 0, failed: 0, skipped: 0, message: 'inbox empty' }, 200);
+  }
+
+  for (const ev of pending as PendingEvent[]) {
+    try {
+      // Re-resolve mapping if missing (link-race tolerance)
+      let { platform_id, subaccount_id } = ev;
+      if (!subaccount_id) {
+        const profileId = ev.payload?.profile?.id;
+        if (typeof profileId === 'string') {
+          const m = await client
+            .from('quiltt_profile_map')
+            .select('platform_id, subaccount_id')
+            .eq('quiltt_profile_id', profileId)
+            .maybeSingle();
+          if (m.data) {
+            platform_id   = m.data.platform_id;
+            subaccount_id = m.data.subaccount_id;
+            await client
+              .from('quiltt_webhook_inbox')
+              .update({ platform_id, subaccount_id })
+              .eq('event_id', ev.event_id);
+          }
+        }
+      }
+      if (!subaccount_id || !platform_id) {
+        // Still no mapping; mark attempted but not processed (try next cycle)
+        await bumpAttempts(client, ev.event_id, 'mapping-missing');
+        skipped++;
+        continue;
+      }
+
+      const handled = await handleEvent(client, ev, platform_id, subaccount_id, quilttApiKey);
+      if (handled === 'processed') {
+        await markProcessed(client, ev.event_id);
+        processed++;
+      } else if (handled === 'skipped') {
+        await markProcessed(client, ev.event_id);  // no-op events still mark done
+        skipped++;
+      } else {
+        await bumpAttempts(client, ev.event_id, handled);
+        failed++;
+      }
+    } catch (e) {
+      console.error(`[or-quiltt-sync] event ${ev.event_id} threw:`, e instanceof Error ? e.message : String(e));
+      await bumpAttempts(client, ev.event_id, e instanceof Error ? e.message : String(e));
+      failed++;
+    }
+  }
+
+  return jsonResponse({ processed, failed, skipped, batch: pending.length }, 200);
+});
+
+// ─── event dispatch ──────────────────────────────────────────────────
+
+async function handleEvent(
+  client: SupabaseClient,
+  ev: PendingEvent,
+  platformId: string,
+  subaccountId: string,
+  apiKey: string,
+): Promise<'processed' | 'skipped' | string> {
+  // Only act on sync.successful.* for now
+  if (!ev.event_type.startsWith('connection.synced.successful')) {
+    return 'skipped';
+  }
+
+  // Look up subaccount's OPK
+  const { data: sub, error: subErr } = await client
+    .from('subaccounts')
+    .select('id, opk_public, opk_alg')
+    .eq('id', subaccountId)
+    .single();
+  if (subErr || !sub) return `subaccount lookup failed: ${subErr?.message}`;
+  if (!sub.opk_public) {
+    // No opt-in. Defer until user opens app (or-sync will drain).
+    return 'skipped';
+  }
+  if (sub.opk_alg !== 'libsodium-crypto_box_seal-v1') {
+    return `unsupported opk_alg: ${sub.opk_alg}`;
+  }
+
+  // Profile id for Basic auth
+  const { data: map, error: mapErr } = await client
+    .from('quiltt_profile_map')
+    .select('quiltt_profile_id')
+    .eq('subaccount_id', subaccountId)
+    .single();
+  if (mapErr || !map) return `profile map missing: ${mapErr?.message}`;
+
+  const basic = btoa(`${map.quiltt_profile_id}:${apiKey}`);
+  const recipientPub = sodium.from_base64(sub.opk_public, sodium.base64_variants.ORIGINAL);
+
+  // Pull transactions paginated. We need the connection id from the
+  // event payload to scope the pull.
+  const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
+  if (!connectionId) return 'event missing record.id';
+
+  // Find or create the OR-side connection row tied to this Quiltt
+  // connection. For Phase 1, we expect or-link-complete to have created
+  // it; if not, skip (or-sync user path will create on next open).
+  const { data: conn, error: connErr } = await client
+    .from('connections')
+    .select('id')
+    .eq('user_id', subaccountId)               // NOTE: connections.user_id stores subaccount_id for platform mode (verify with or-connection-create)
+    .eq('provider_type', 'quiltt')
+    .maybeSingle();
+  if (connErr) return `connection lookup failed: ${connErr.message}`;
+  if (!conn) return 'or-connection row not yet created';
+
+  let after: string | null = null;
+  let pages = 0;
+  let newRows = 0;
+
+  while (pages < MAX_PAGES) {
+    const query = `
+      query Q($connId: ID!, $first: Int!, $after: String) {
+        connection(id: $connId) { id }
+        transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id amount currencyCode date description entryType status
+            account { id }
+          }
+        }
+      }
+    `;
+    const resp = await fetch(QUILTT_GRAPHQL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${basic}`,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        variables: { connId: connectionId, first: TX_PAGE_SIZE, after },
+      }),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      return `Quiltt GraphQL ${resp.status}: ${errBody.slice(0, 300)}`;
+    }
+    const json = await resp.json();
+    const txs = json?.data?.transactions?.nodes ?? [];
+    const pageInfo = json?.data?.transactions?.pageInfo;
+
+    for (const tx of txs) {
+      const cleartext = JSON.stringify({
+        amount:        tx.amount,
+        currency:      tx.currencyCode,
+        description:   tx.description,
+        entry_type:    tx.entryType,
+        upstream_status: tx.status,
+        account_id:    tx.account?.id,
+      });
+      const sealed = sodium.crypto_box_seal(
+        sodium.from_string(cleartext),
+        recipientPub,
+      );
+      const sealedB64 = sodium.to_base64(sealed, sodium.base64_variants.ORIGINAL);
+
+      const insert = await client
+        .from('encrypted_transactions')
+        .upsert(
+          {
+            connection_id:       conn.id,
+            external_id:         tx.id,
+            encrypted_payload:   sealedB64,
+            payload_key_version: 1,
+            occurred_at:         tx.date,
+            sealed_under:        'opk',
+            sealed_alg:          'libsodium-crypto_box_seal-v1',
+          },
+          { onConflict: 'connection_id,external_id', ignoreDuplicates: true },
+        );
+      if (insert.error) {
+        console.error(`[or-quiltt-sync] tx insert failed (${tx.id}):`, insert.error.message);
+      } else {
+        newRows++;
+      }
+    }
+
+    if (!pageInfo?.hasNextPage) break;
+    after = pageInfo.endCursor ?? null;
+    pages++;
+  }
+
+  console.log(`[or-quiltt-sync] event ${ev.event_id}: ${newRows} new tx rows across ${pages + 1} pages`);
+  return 'processed';
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────
+
+async function markProcessed(client: SupabaseClient, eventId: string) {
+  await client
+    .from('quiltt_webhook_inbox')
+    .update({ processed_at: new Date().toISOString() })
+    .eq('event_id', eventId);
+}
+
+async function bumpAttempts(client: SupabaseClient, eventId: string, errMsg: string) {
+  const { data: cur } = await client
+    .from('quiltt_webhook_inbox')
+    .select('attempts')
+    .eq('event_id', eventId)
+    .single();
+  await client
+    .from('quiltt_webhook_inbox')
+    .update({ attempts: (cur?.attempts ?? 0) + 1, last_error: errMsg.slice(0, 500) })
+    .eq('event_id', eventId);
+}
+
+function jsonResponse(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}

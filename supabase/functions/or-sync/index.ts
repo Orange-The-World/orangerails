@@ -47,6 +47,7 @@ import {
 import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
+import { drainStrikeQueue } from '../_shared/providers/strike-queue.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //
@@ -261,7 +262,7 @@ Deno.serve(async (req: Request) => {
 
     let connQuery = ctx.serviceClient
       .from('connections')
-      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at')
+      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at, strike_subscription_id')
       .eq('subaccount_id', subaccountId)
       .neq('status', 'disconnected');
     if (connection_ids?.length) connQuery = connQuery.in('id', connection_ids);
@@ -343,7 +344,43 @@ Deno.serve(async (req: Request) => {
         let newTxs: NormalizedTransaction[];
         let next_cursor: string | null;
 
-        if (sourceWallets && sourceWallets.length > 0) {
+        if (conn.provider_type === 'strike') {
+          // Strike uses BOTH paths now (V3 ADR 2026-05-25):
+          //   1. Per-state polling via GET /v1/invoices?$filter=(state eq 'X')
+          //      — historical backfill + catchup. Compound `or` filters trip
+          //      Cloudflare so we iterate states; simple `eq` is fine.
+          //   2. Webhook queue drain (drainStrikeQueue) — near-real-time
+          //      updates for events received since last sync.
+          // Both paths merge into newTxs. Idempotent on the consumer side
+          // via UNIQUE (connection_id, external_id) so duplicates are no-ops.
+          const supabaseUrl = Deno.env.get('SUPABASE_URL');
+          if (!supabaseUrl) throw new Error('SUPABASE_URL not set');
+
+          // 1) Polling: historical + ongoing per-state list scan
+          const poll = await adapter.syncByWallets(
+            credentials,
+            ['strike'],
+            conn.last_sync_cursor ?? null,
+          );
+
+          // 2) Real-time: drain any webhook-queued events. Side effect:
+          //    registers a Strike webhook subscription on first call.
+          const drain = await drainStrikeQueue({
+            serviceClient: ctx.serviceClient,
+            connection: {
+              id: conn.id as string,
+              strike_subscription_id: (conn as { strike_subscription_id?: string | null }).strike_subscription_id ?? null,
+              last_sync_cursor: conn.last_sync_cursor ?? null,
+            },
+            credentials,
+            webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
+          });
+
+          newTxs = [...poll.transactions, ...drain.transactions];
+          // Polling cursor takes precedence (it's a real timestamp);
+          // drain.next_cursor is unused under the webhook model.
+          next_cursor = poll.next_cursor ?? drain.next_cursor;
+        } else if (sourceWallets && sourceWallets.length > 0) {
           const walletIds = sourceWallets.map((w: { external_wallet_id: string }) => w.external_wallet_id);
           const out = await adapter.syncByWallets(credentials, walletIds, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
