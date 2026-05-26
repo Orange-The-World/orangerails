@@ -1,12 +1,13 @@
 /**
- * Full end-to-end live test: real Kraken → resolve → INSERT to Supabase.
+ * Full end-to-end live test: real exchange APIs → resolve → INSERT to PROD.
  *
  * Reads ORANGERAILS_PROD_* creds from /opt/bb-support/.env.
- * Fetches a recent BTC/USD bucket from Kraken, runs resolve() with Kraken
- * as the single active source, then INSERTs the rate + audit row to PROD.
- * Finally SELECTs the row back to confirm.
+ * Takes optional CLI arg for target currency (default: USD).
  *
- * Run: bun run scripts/live-resolve-and-store.ts
+ * Usage:
+ *   bun run scripts/live-resolve-and-store.ts          → BTC/USD all-sources
+ *   bun run scripts/live-resolve-and-store.ts BRL      → BTC/BRL via LatAm panel
+ *   bun run scripts/live-resolve-and-store.ts MXN      → BTC/MXN via Bitso single
  */
 
 import { readFileSync } from "node:fs";
@@ -14,9 +15,11 @@ import { KrakenSource } from "../src/sources/kraken";
 import { BitstampSource } from "../src/sources/bitstamp";
 import { BitfinexSource } from "../src/sources/bitfinex";
 import { MempoolSpaceSource } from "../src/sources/mempool-space";
+import { BitsoSource } from "../src/sources/bitso";
+import { MercadoBitcoinSource } from "../src/sources/mercado-bitcoin";
 import { resolve } from "../src/calculate/resolve";
+import type { Source } from "../src/sources/interface";
 
-// --- Load env creds ---
 const env: Record<string, string> = {};
 for (const line of readFileSync("/opt/bb-support/.env", "utf8").split("\n")) {
   const s = line.trim();
@@ -50,8 +53,7 @@ async function mgmtApiQuery(sql: string): Promise<unknown> {
     body: JSON.stringify({ query: sql }),
   });
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Management API ${res.status}: ${body.slice(0, 300)}`);
+    throw new Error(`Management API ${res.status}: ${(await res.text()).slice(0, 300)}`);
   }
   return res.json();
 }
@@ -60,24 +62,48 @@ function sqlEscape(s: string): string {
   return s.replace(/'/g, "''");
 }
 
-async function main() {
-  console.log("=== Step 1: resolve a recent BTC/USD bucket from Kraken ===");
-  const sources = [new KrakenSource(), new BitstampSource(), new BitfinexSource(), new MempoolSpaceSource()];
-  const effectiveAt = new Date(Date.now() - 3 * 60_000); // 3 minutes ago (ensure candle has closed)
-  const result = await resolve({ pair: { source: "BTC", target: "USD" }, effectiveAt }, sources);
-  console.log(`  Effective at: ${effectiveAt.toISOString()}`);
-  console.log(`  Bucket TS:    ${result.bucketTs.toISOString()}`);
-  console.log(`  Rate:         ${result.rate.toFixed(2)}`);
-  console.log(`  Tier:         ${result.tier}`);
-  console.log(`  Sources:      ${result.audit.providersSucceeded.join(", ")}`);
+/** Pick the set of sources that natively quote BTC↔target. */
+function sourcesForTarget(target: string): Source[] {
+  const allSources: Source[] = [
+    new KrakenSource(),
+    new BitstampSource(),
+    new BitfinexSource(),
+    new MempoolSpaceSource(),
+    new BitsoSource(),
+    new MercadoBitcoinSource(),
+  ];
+  return allSources.filter((s) => s.pairsSupported.includes(`BTC-${target}`));
+}
 
-  console.log("\n=== Step 2: INSERT to exchange_rates on PROD ===");
+async function main() {
+  const target = (process.argv[2] ?? "USD").toUpperCase();
+  const sources = sourcesForTarget(target);
+
+  console.log(`\n=== Live resolve: BTC/${target} (${sources.length} sources) ===`);
+  if (sources.length === 0) {
+    console.error(`No active sources quote BTC/${target} natively. Composite via Frankfurter not yet implemented.`);
+    process.exit(1);
+  }
+  console.log(`  Sources: ${sources.map((s) => s.name).join(", ")}`);
+
+  const effectiveAt = new Date(Date.now() - 3 * 60_000);
+  const result = await resolve({ pair: { source: "BTC", target }, effectiveAt }, sources);
+
+  console.log(`\n  Bucket TS:   ${result.bucketTs.toISOString()}`);
+  console.log(`  Rate:        ${result.rate.toFixed(2)} ${target}/BTC`);
+  console.log(`  Tier:        ${result.tier}`);
+  console.log(`  Contributed: ${result.audit.providersSucceeded.join(", ")}`);
+  if (result.audit.providersFailed.length > 0) {
+    console.log(`  Failed:      ${result.audit.providersFailed.map((p) => `${p.name}(${p.reason})`).join(", ")}`);
+  }
+
+  console.log("\n=== INSERT to PROD ===");
   const insertRateSql = `
     INSERT INTO exchange_rates (
       source_currency, target_currency, bucket_ts, granularity, product,
       rate, tier, composite, provider_count, status, fetched_at, computed_at
     ) VALUES (
-      'BTC', 'USD',
+      'BTC', '${target}',
       '${result.bucketTs.toISOString()}',
       '1m', 'ORBI-M',
       ${result.rate},
@@ -95,13 +121,9 @@ async function main() {
     RETURNING id;
   `;
   const insertResult = (await mgmtApiQuery(insertRateSql)) as Array<{ id: string }>;
-  if (!Array.isArray(insertResult) || insertResult.length === 0) {
-    throw new Error(`unexpected INSERT response: ${JSON.stringify(insertResult)}`);
-  }
   const rateId = insertResult[0]!.id;
-  console.log(`  Inserted rate id: ${rateId}`);
+  console.log(`  Rate id: ${rateId}`);
 
-  console.log("\n=== Step 3: INSERT audit row to exchange_rate_resolutions ===");
   const responsesJson = JSON.stringify(result.audit.providerResponses);
   const failedJson = JSON.stringify(result.audit.providersFailed);
   const zeroVolJson = JSON.stringify(result.audit.providersZeroVolume);
@@ -123,22 +145,10 @@ async function main() {
     RETURNING id;
   `;
   const auditResult = (await mgmtApiQuery(insertResolutionSql)) as Array<{ id: string }>;
-  console.log(`  Inserted resolution id: ${auditResult[0]!.id}`);
+  console.log(`  Audit id: ${auditResult[0]!.id}`);
 
-  console.log("\n=== Step 4: SELECT back to confirm ===");
-  const verifySql = `
-    SELECT r.id, r.source_currency, r.target_currency, r.bucket_ts,
-           r.rate, r.tier, r.provider_count, r.status,
-           res.providers_succeeded
-    FROM exchange_rates r
-    LEFT JOIN exchange_rate_resolutions res ON res.rate_id = r.id
-    WHERE r.id = '${rateId}';
-  `;
-  const verify = (await mgmtApiQuery(verifySql)) as Array<Record<string, unknown>>;
-  console.log(`  Row from PROD: ${JSON.stringify(verify[0], null, 2)}`);
-
-  console.log("\n✓ End-to-end PROD write confirmed.");
-  console.log(`  ORBI just published its first rate to PROD: BTC/USD = ${result.rate.toFixed(2)} at ${result.bucketTs.toISOString()}`);
+  console.log("\n✓ Published to PROD.");
+  console.log(`  ORBI BTC/${target} = ${result.rate.toFixed(2)} (Tier ${result.tier}, ${result.providerCount} sources)`);
 }
 
 main().catch((err) => {

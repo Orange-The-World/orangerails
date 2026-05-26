@@ -154,15 +154,22 @@ describe("resolve — end-to-end pipeline with mocked sources", () => {
     expect(result.audit.providersZeroVolume).toEqual(["mempool.space"]);
   });
 
-  it("source returning wrong-bucket candle is flagged as no-candle failure", async () => {
+  it("source returning candle within staleness window contributes (thin-pair handling)", async () => {
+    // The "wrong-bucket" MockSource puts its candle 5 minutes off from the
+    // expected bucket. Per the thin-pair handling in resolve.ts, this is
+    // within MAX_STALENESS_MS so the candle DOES contribute.
+    // This documents the thin-volume LatAm pair behavior — for currencies
+    // like BTC/MXN that may not have a trade in every minute, the most
+    // recent candle within 5 minutes is accepted.
     const sources: Source[] = [
       new MockSource("kraken", 67200, 18),
       new MockSource("bitstamp", 67220, 5, "wrong-bucket"),
     ];
 
     const result = await resolve(req, sources);
-    expect(result.providerCount).toBe(1);
-    expect(result.audit.providersFailed.some((f) => f.name === "bitstamp")).toBe(true);
+    expect(result.providerCount).toBe(2);
+    expect(result.audit.providersSucceeded).toContain("bitstamp");
+    expect(result.audit.providersFailed).toEqual([]);
   });
 
   it("throws when all sources fail (no usable candles at all)", async () => {

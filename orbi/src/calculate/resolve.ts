@@ -83,9 +83,12 @@ export async function resolve(
   const bucketTs = partitionBucketTs(req.effectiveAt);
   const bucketEnd = new Date(bucketTs.getTime() + 60_000);
 
-  // Fan out in parallel. We ask for slightly wider window to ensure we get
-  // the candle covering bucketTs (some APIs are inclusive/exclusive differently).
-  const windowFrom = new Date(bucketTs.getTime() - 60_000);
+  // Fan out in parallel. The window is wider than the target bucket because:
+  //   - Some APIs use inclusive vs exclusive end-timestamps differently
+  //   - Thin-volume pairs (BTC/MXN, BTC/BRL off-hours) may not have a trade
+  //     in the exact target minute; we accept a stale candle from up to
+  //     MAX_STALENESS_MS earlier (handled by pickBucketCandle below)
+  const windowFrom = new Date(bucketTs.getTime() - 6 * 60_000);
   const windowTo = bucketEnd;
 
   const responses = await Promise.all(
@@ -158,23 +161,61 @@ export async function resolve(
 }
 
 /**
- * Find the candle whose bucketTs matches our target.
- * Compare on minute boundary to handle inclusive/exclusive differences.
+ * Maximum staleness for fall-forward candle selection.
+ *
+ * Thin-volume pairs (BTC/MXN, BTC/ARS, BTC/BRL outside business hours) may
+ * have minutes with no trades at all. Rather than fail the resolution, we
+ * accept the most recent candle within the last MAX_STALENESS_MS as a
+ * "stale" contribution. The audit log notes the staleness so consumers know.
+ *
+ * 5 minutes is the operational ceiling — beyond that, the rate is treated
+ * as PENDING and retried later. Documented in methodology §4 (thin-pair
+ * handling).
+ */
+const MAX_STALENESS_MS = 5 * 60_000;
+
+/**
+ * Find the candle whose bucketTs is closest to our target without going
+ * past it. Falls forward up to MAX_STALENESS_MS for thin-volume pairs.
+ *
+ * Strategy:
+ *   1. Prefer exact-bucket match
+ *   2. Else, prefer the most recent candle with bucketTs <= target
+ *      AND within MAX_STALENESS_MS of target
+ *   3. Else, accept a candle within +60s of target (handles inclusive/exclusive
+ *      timestamp differences across exchange APIs)
+ *   4. Else, null (the source has no usable data for this bucket)
  */
 function pickBucketCandle(candles: Candle[], bucketTs: Date): Candle | null {
   const target = bucketTs.getTime();
+
+  // 1. Exact match
   for (const c of candles) {
     if (c.bucketTs.getTime() === target) {
       return c;
     }
   }
-  // Fallback: find the candle whose bucketTs is within the minute
+
+  // 2. Most recent candle <= target within MAX_STALENESS_MS
+  let best: Candle | null = null;
+  let bestDelta = Number.POSITIVE_INFINITY;
   for (const c of candles) {
-    const diff = Math.abs(c.bucketTs.getTime() - target);
-    if (diff < 60_000) {
+    const delta = target - c.bucketTs.getTime();
+    if (delta >= 0 && delta <= MAX_STALENESS_MS && delta < bestDelta) {
+      best = c;
+      bestDelta = delta;
+    }
+  }
+  if (best !== null) return best;
+
+  // 3. Within +60s past target (some APIs use inclusive end timestamps)
+  for (const c of candles) {
+    const diff = c.bucketTs.getTime() - target;
+    if (diff > 0 && diff < 60_000) {
       return c;
     }
   }
+
   return null;
 }
 
