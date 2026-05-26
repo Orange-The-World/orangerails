@@ -38,6 +38,9 @@ export interface ProviderManifest {
   category?: string;
   tags?: string[];
   popularity?: number;
+  /** Optional in-app route for providers whose connect flow lives outside
+   *  the generic credential dialog (e.g. Sparrow's Stealth Sync popup). */
+  connectUrl?: string;
 }
 
 export interface CategoryManifest {
