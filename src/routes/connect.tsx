@@ -231,6 +231,13 @@ interface ProviderManifest {
   popularity?: number;
   multiWallet: boolean;
   credentialFields: ManifestField[];
+  /**
+   * Optional. Present for CLIENT_SIDE_MANIFESTS providers (Quiltt, Sparrow)
+   * whose link flow lives in a dedicated route rather than the generic
+   * credential form. When set, the picker routes the click here instead
+   * of going to enter-credentials.
+   */
+  connectUrl?: string;
 }
 
 interface ManifestField {
@@ -594,6 +601,47 @@ async function callLinkComplete(payload: {
 }
 
 // --------------------------------------------------------------------
+// Client-side-manifest routing
+// --------------------------------------------------------------------
+
+/**
+ * Route the user to a client-side-manifest provider's dedicated page.
+ *
+ * - Sparrow: navigate to /connect/sparrow with the existing query params
+ *   so the page can wire up its own Stealth-Sync flow.
+ * - Quiltt: NOT routed from here yet — the picker click would land on a
+ *   page that needs a server-minted Quiltt session, and trading the
+ *   widget_token for a session is a separate edge function (tracked as
+ *   PR #2 in the unified-picker design). Until then, integrating apps
+ *   open /connect/quiltt directly with session params they minted
+ *   server-side.
+ */
+async function navigateToClientSideManifest(
+  manifest: ProviderManifest,
+  search: ConnectSearch,
+): Promise<void> {
+  if (!manifest.connectUrl) {
+    throw new Error(`Provider "${manifest.displayName}" has no connectUrl.`);
+  }
+
+  if (manifest.slug === "quiltt") {
+    throw new Error(
+      "Bank linking is not yet available from this picker. Your app should " +
+        "open the bank link page directly. (Tracking: unified-picker PR #2.)",
+    );
+  }
+
+  // Sparrow + future client-side-manifest providers: navigate with the
+  // existing query params so the page can wire up its own flow.
+  const params = new URLSearchParams();
+  if (search.platform) params.set("platform", search.platform);
+  if (search.app_user_id) params.set("app_user_id", search.app_user_id);
+  if (search.return_to) params.set("return_to", search.return_to);
+  const qs = params.toString();
+  window.location.assign(qs ? `${manifest.connectUrl}?${qs}` : manifest.connectUrl);
+}
+
+// --------------------------------------------------------------------
 // Component
 // --------------------------------------------------------------------
 
@@ -689,6 +737,15 @@ function ConnectPageInner() {
     setPickingProvider(true);
     try {
       const m = await fetchProviderManifest(slug);
+
+      // Client-side-manifest providers (Quiltt, Sparrow) have a dedicated
+      // connect route rather than the generic credential form. Route there
+      // instead of going to enter-credentials.
+      if (m.connectUrl) {
+        await navigateToClientSideManifest(m, search);
+        return;
+      }
+
       setManifest(m);
       setStep("enter-credentials");
     } catch (err) {
