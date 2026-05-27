@@ -1454,40 +1454,52 @@ function PickProviderStep({
 
   return (
     <div className="mt-4 space-y-4">
-      <div>
-        <h2 className="text-base font-semibold text-slate-900">Choose how to connect</h2>
+      <div className="text-center">
+        <h2 className="text-lg font-semibold text-slate-900">
+          {isSearching ? "Search results" : "Securely connect your account"}
+        </h2>
         <p className="mt-1 text-xs text-slate-500">
-          Search for a Bitcoin source or a bank.
+          {isSearching
+            ? `${filtered.length} match${filtered.length === 1 ? "" : "es"} for "${search.trim()}"`
+            : "Search for your bank or pick a popular option below."}
         </p>
       </div>
 
       {/* Search */}
-      <input
-        type="text"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search Bitcoin sources or banks…"
-        autoFocus
-        aria-label="Search Bitcoin sources or banks"
-        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-        data-testid="provider-search"
-      />
+      <div className="relative">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search for your bank or Bitcoin source"
+          autoFocus
+          aria-label="Search for your bank or Bitcoin source"
+          className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 pr-10 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+          data-testid="provider-search"
+        />
+        <svg
+          className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          aria-hidden
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M11 17a6 6 0 100-12 6 6 0 000 12z" />
+        </svg>
+      </div>
 
-      {/* Bitcoin / exchange tile grid */}
+      {/* Tile grid — 4 columns at sm+, 2 on narrow viewports.
+          Wave's UX uses 4-up bank tiles in 2 rows = 8 quick-picks.
+          When searching, sections collapse into a flat grid. */}
       {filtered.length === 0 ? (
-        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-4 text-center text-xs text-slate-500">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-6 text-center text-xs text-slate-500">
           No matches for {search ? `"${search}"` : "the current filter"}.
         </div>
       ) : (
-        <div className="space-y-3" data-testid="provider-results">
+        <div data-testid="provider-results">
           {groups.map((g, gi) => (
-            <div key={g.label ?? `group-${gi}`} className="space-y-2">
-              {g.label && (
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                  {g.label}
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-2">
+            <div key={g.label ?? `group-${gi}`}>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {g.entries.map((p) => (
                   <ProviderTile
                     key={p.slug}
@@ -1533,6 +1545,32 @@ function PickProviderStep({
   );
 }
 
+// Deterministic brand color per provider slug. Hash → palette index.
+// Placeholder until per-provider logos ship; gives every tile a visually
+// distinct colored square so the grid pops (matches the Wave UX where
+// each bank has its own brand color).
+const TILE_PALETTE = [
+  "bg-orange-500",  // OrangeRails primary
+  "bg-blue-600",    // RBC-ish
+  "bg-emerald-600", // TD-ish
+  "bg-rose-600",    // Scotiabank-ish
+  "bg-red-700",     // CIBC-ish
+  "bg-indigo-600",
+  "bg-amber-500",   // Tangerine-ish
+  "bg-slate-800",   // dark fallback
+  "bg-teal-600",    // Desjardins-ish
+  "bg-purple-600",
+  "bg-cyan-600",
+  "bg-yellow-500",
+];
+
+function tileColor(slug: string): string {
+  // Cheap djb2-style hash for stable per-slug color.
+  let h = 5381;
+  for (let i = 0; i < slug.length; i += 1) h = ((h << 5) + h + slug.charCodeAt(i)) | 0;
+  return TILE_PALETTE[Math.abs(h) % TILE_PALETTE.length];
+}
+
 function ProviderTile({
   provider,
   busy,
@@ -1542,9 +1580,9 @@ function ProviderTile({
   busy: boolean;
   onPick: (slug: string) => void;
 }) {
-  // Visual initial — first letter of the provider name in a colored
-  // circle. Cheap placeholder until per-provider logos ship in a
-  // follow-up PR. Keeps Plaid/Quiltt's "tile with a glyph" feel.
+  // First letter of the provider name in a brand-colored square — Wave-style
+  // visual punch. Per-provider logos replace these in a future PR; the
+  // <ProviderTile> shape stays the same so the rollout is logo-by-logo.
   const initial = provider.displayName.slice(0, 1).toUpperCase();
   return (
     <button
@@ -1552,29 +1590,23 @@ function ProviderTile({
       onClick={() => onPick(provider.slug)}
       disabled={busy}
       data-testid={`provider-tile-${provider.slug}`}
-      className="flex h-20 w-full items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50"
+      title={provider.description ?? provider.displayName}
+      className="group flex h-24 w-full flex-col items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white p-2 text-center transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-sm disabled:opacity-50"
     >
       <span
-        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-600"
+        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-base font-bold text-white shadow-sm ${tileColor(provider.slug)}`}
         aria-hidden
       >
         {initial}
       </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate text-sm font-medium text-slate-900">
-            {provider.displayName}
+      <div className="flex w-full items-center justify-center gap-1">
+        <span className="truncate text-xs font-medium text-slate-900">
+          {provider.displayName}
+        </span>
+        {provider.status === "beta" && (
+          <span className="shrink-0 rounded-sm bg-amber-100 px-1 py-px text-[8px] font-bold uppercase tracking-wide text-amber-700">
+            β
           </span>
-          {provider.status === "beta" && (
-            <span className="shrink-0 rounded-sm bg-amber-100 px-1 py-px text-[9px] font-bold uppercase tracking-wide text-amber-700">
-              BETA
-            </span>
-          )}
-        </div>
-        {provider.description && (
-          <div className="mt-0.5 truncate text-[11px] text-slate-500">
-            {provider.description}
-          </div>
         )}
       </div>
     </button>
@@ -1870,11 +1902,11 @@ function BankSearchResults({
   }
 
   return (
-    <div className="mt-3 space-y-2" data-testid="bank-search-results">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+    <div className="mt-4 space-y-2" data-testid="bank-search-results">
+      <div className="text-center text-[10px] font-semibold uppercase tracking-wider text-slate-400">
         Banks
       </div>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {institutions.slice(0, 12).map((inst, i) => {
           const id = inst.id ?? "";
           const name = inst.name ?? "Unknown bank";
@@ -1886,24 +1918,25 @@ function BankSearchResults({
               onClick={() => openBank(id)}
               disabled={!id}
               data-testid={`bank-tile-${id}`}
-              className="flex h-20 w-full items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50"
+              title={name}
+              className="group flex h-24 w-full flex-col items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white p-2 text-center transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-sm disabled:opacity-50"
             >
               {logoUrl ? (
                 <img
                   src={logoUrl}
                   alt=""
                   aria-hidden
-                  className="h-10 w-10 shrink-0 rounded-full object-contain"
+                  className="h-10 w-10 shrink-0 rounded-lg object-contain shadow-sm"
                 />
               ) : (
                 <span
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-600"
+                  className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-base font-bold text-white shadow-sm ${tileColor(id || name)}`}
                   aria-hidden
                 >
                   {name.slice(0, 1).toUpperCase()}
                 </span>
               )}
-              <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-900">
+              <span className="w-full truncate text-xs font-medium text-slate-900">
                 {name}
               </span>
             </button>
