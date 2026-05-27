@@ -37,15 +37,25 @@ Phase D.3 operational notes:
   `/home/kiwi/bin/run-rba-backfill.sh`. The plug-in itself is plain TypeScript;
   only the network call needs the residential IP.
 - **SNB** tries SDMX CSV cubes first (`devkud` daily — currently 404,
-  `devkutag` placeholder), then falls back to a Playwright path that renders
-  `https://data.snb.ch/en/topics/ziredev/cube/devkua` and extracts the table.
-  The Playwright runner is invoked separately by the caller; the plug-in's
-  `parseTable(headers, rows)` consumes whatever the browser returns.
-- **BoJ** decodes the legacy Shift_JIS CSV with `TextDecoder('shift_jis')`
-  (Node 20+ / Bun). The famecgi2 endpoint requires a session-cookie POST
-  flow in some configurations — direct GETs return an HTML "page cannot be
-  displayed". If the keyless GET fails, a Playwright path is the documented
-  fallback (same shape as SNB).
+  `devkutag` placeholder), then falls back to the Playwright runner at
+  `scripts/central-banks/snb-playwright-runner.ts` which renders
+  `https://data.snb.ch/en/topics/ziredev/cube/devkua`, scrolls to flush
+  lazy-loaded rows, and extracts the daily-rates table via DOM queries.
+  The orchestrator invokes the runner automatically when the SDMX path
+  fails; the runner reuses `SnbSource.parseTable(headers, rows)` so row
+  mapping logic stays unit-tested in one place.
+- **BoJ** is now driven exclusively via Playwright. Direct GETs to
+  `famecgi2` return an HTML "page cannot be displayed" stub because the
+  site requires session cookies + a matching Referer. The runner at
+  `scripts/central-banks/boj-playwright-runner.ts` opens the English
+  landing page to seed the session, then issues `context.request.get`
+  calls (one per pair) which inherit the cookies + UA. The Shift_JIS
+  bytes go through `BojSource.decodeShiftJis()` and the existing
+  `parseCsv()` pipeline.
+- Both runners use the polite UA
+  `ORBI-Archiver/1.0 (noreply@orangerails.com)` and sleep 600ms between
+  page actions / per-pair fetches. Headless by default; `--headed`
+  CLI flag launches a visible browser for ad-hoc debugging.
 
 ---
 
