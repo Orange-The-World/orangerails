@@ -28,9 +28,11 @@
  *
  * Currency-code mapping:
  *   - BTC → "Xbt"
- *   - AUD → "Aud"
- *   - other secondaries (USD, NZD, SGD) supported by the venue but
- *     not enabled in this plug-in — add to PAIR_MAP as needed.
+ *   - AUD → "Aud" (home market, deepest liquidity)
+ *   - SGD → "Sgd" (Singapore — enabled 2026-05-27, verified live trades)
+ *   - NZD → "Nzd" (New Zealand — enabled 2026-05-27, verified live trades)
+ *   - USD → "Usd" (supported by the venue but not enabled here; the BTC/USD
+ *     basket already has Tier A coverage from Kraken/Bitstamp/Coinbase/Bitfinex).
  *
  * Per-source posture:
  *   - rate limit: Independent Reserve documents "do not exceed 1 request per
@@ -50,6 +52,8 @@ import type { Candle, HealthStatus, Pair } from "./types";
 
 const PAIR_MAP: Record<string, { primary: string; secondary: string }> = {
   "BTC-AUD": { primary: "Xbt", secondary: "Aud" },
+  "BTC-SGD": { primary: "Xbt", secondary: "Sgd" },
+  "BTC-NZD": { primary: "Xbt", secondary: "Nzd" },
 };
 
 export class IndependentReserveSource extends BaseSource {

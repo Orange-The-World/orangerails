@@ -33,6 +33,8 @@ import { ValrSource } from "../src/sources/valr";
 import { UpbitSource } from "../src/sources/upbit";
 import { BithumbSource } from "../src/sources/bithumb";
 import { RipioSource } from "../src/sources/ripio";
+import { BtseSource } from "../src/sources/btse";
+import { FiriSource } from "../src/sources/firi";
 import { FrankfurterSource } from "../src/sources/frankfurter";
 import { resolve, type ResolveResult } from "../src/calculate/resolve";
 import { resolveComposite, type CompositeResolveResult } from "../src/calculate/resolve-composite";
@@ -77,13 +79,30 @@ const DIRECT_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "TRY" },
   { source: "BTC", target: "ZAR" },
   { source: "BTC", target: "KRW" },
+  // Extension batch 2026-05-27 — geographic gap-fill (Asia, Nordics, Pacific).
+  // Each pair has at least one verified direct source plus a composite fallback
+  // entry below (BTC/SEK is composite-only — no keyless venue lists it).
+  { source: "BTC", target: "HKD" }, // BTSE
+  { source: "BTC", target: "SGD" }, // Independent Reserve
+  { source: "BTC", target: "NOK" }, // Firi
+  { source: "BTC", target: "DKK" }, // Firi
+  { source: "BTC", target: "NZD" }, // Independent Reserve
 ];
 
-// Composite pairs (Tier C via BTC/USD ORBI × USD/X Frankfurter)
+// Composite pairs (Tier C via BTC/USD ORBI × USD/X Frankfurter).
+// Acts as the fallback when a thin-liquidity direct source returns no candles
+// for the minute window. BTC/SEK is COMPOSITE-ONLY (no keyless venue lists it).
 const COMPOSITE_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "INR" },
   { source: "BTC", target: "TRY" },
   { source: "BTC", target: "ZAR" },
+  // 2026-05-27 extension batch.
+  { source: "BTC", target: "HKD" },
+  { source: "BTC", target: "SGD" },
+  { source: "BTC", target: "NOK" },
+  { source: "BTC", target: "SEK" }, // composite-only — no direct source available
+  { source: "BTC", target: "DKK" },
+  { source: "BTC", target: "NZD" },
 ];
 
 // Stablecoin / fiat-peg spot pairs.
@@ -131,6 +150,8 @@ const allBtcSources: Source[] = [
   new UpbitSource(),
   new BithumbSource(),
   new RipioSource(),
+  new BtseSource(),
+  new FiriSource(),
 ];
 const frankfurter = new FrankfurterSource();
 
