@@ -98,10 +98,85 @@ jobs:
           for attempt in 1 2 3; do
             if supabase functions deploy --project-ref ${{ steps.target.outputs.supabase_ref }}; then
               echo "edge functions deployed on attempt $attempt"
-              exit 0
+              break
+            fi
+            if [ $attempt -eq 3 ]; then
+              echo "edge functions deploy failed after 3 attempts"
+              exit 1
             fi
             echo "attempt $attempt failed; sleeping 15s and retrying"
             sleep 15
           done
-          echo "edge functions deploy failed after 3 attempts"
-          exit 1
+
+      - name: Apply pending DB migrations via Management API
+        # The Supabase CLI's `db push` requires a linked project + DB
+        # password we don't have in CI. The Management API SQL endpoint
+        # (POST /v1/projects/{ref}/database/query) does NOT need the DB
+        # password — it auths with SUPABASE_ACCESS_TOKEN — so we use it
+        # directly. We track applied versions in
+        # supabase_migrations.schema_migrations the same way `supabase db
+        # push` would, so manual recovery via the CLI later stays clean.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ steps.target.outputs.supabase_ref }}
+        run: |
+          set -euo pipefail
+          MIG_DIR="supabase/migrations"
+          if [ ! -d "$MIG_DIR" ]; then
+            echo "no migrations directory; skipping"
+            exit 0
+          fi
+
+          # Fetch already-applied versions
+          PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
+          trap 'rm -f "$PAYLOAD"' EXIT
+          jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
+          APPLIED=$(curl -sS -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary "@$PAYLOAD" | jq -r '.[].version' | sort -u)
+          echo "── already applied versions on ${SUPABASE_REF} ──"
+          echo "$APPLIED" | tail -10
+          echo
+
+          # For each migration file, apply if not in the applied set
+          APPLIED_COUNT=0
+          for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
+            BASENAME=$(basename "$FILE")
+            VERSION="${BASENAME%%_*}"
+            if echo "$APPLIED" | grep -qx "$VERSION"; then
+              continue
+            fi
+            echo "── applying ${BASENAME} ──"
+
+            SQL_PAYLOAD=$(mktemp); chmod 600 "$SQL_PAYLOAD"
+            jq -Rs --arg q "$(cat "$FILE")" '{query:$q}' < /dev/null > "$SQL_PAYLOAD"
+            CODE=$(curl -sS -o /tmp/mig.resp -w "%{http_code}" \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$SQL_PAYLOAD")
+            rm -f "$SQL_PAYLOAD"
+
+            if [[ ! "$CODE" =~ ^2 ]]; then
+              echo "  ✗ FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
+              rm -f /tmp/mig.resp
+              exit 1
+            fi
+            echo "  ✓ SQL applied (HTTP $CODE)"
+
+            # Record in schema_migrations
+            REC=$(mktemp); chmod 600 "$REC"
+            jq -n --arg v "$VERSION" \
+              '{query:"INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('"'"'\($v)'"'"') ON CONFLICT DO NOTHING;"}' > "$REC"
+            curl -sS -o /tmp/mig.resp -w "%{http_code}" \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$REC" >/dev/null
+            rm -f "$REC" /tmp/mig.resp
+            APPLIED_COUNT=$((APPLIED_COUNT + 1))
+          done
+
+          echo
+          echo "── ${APPLIED_COUNT} migration(s) applied this run ──"
