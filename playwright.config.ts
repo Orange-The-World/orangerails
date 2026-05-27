@@ -12,6 +12,11 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './tests/e2e',
+  // Only pick up real Playwright spec files. The audit-*.audit.mjs files
+  // under tests/e2e/ are standalone Node runners (they call process.exit())
+  // and would kill the Playwright runner mid-discovery if matched here.
+  // Run them via tests/e2e/run-audit-suite.mjs instead.
+  testMatch: '**/*.spec.ts',
   timeout: 30 * 1000,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

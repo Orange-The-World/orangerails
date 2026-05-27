@@ -54,3 +54,4 @@ coverage/
 .env.bak
 dist/
 .next/
+test-results/
