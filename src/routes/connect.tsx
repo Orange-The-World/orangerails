@@ -1754,9 +1754,36 @@ function Shell({ platform, children }: { platform?: PlatformDisplay; children: R
 
           {children}
 
-          <div className="mt-6 flex items-center justify-center gap-1.5 border-t border-slate-100 pt-4 text-[11px] text-slate-400">
-            <span>Powered by</span>
-            <span className="font-semibold text-slate-500">OrangeRails</span>
+          {/* Plaid/Quiltt pattern: small Terms + Privacy line near the
+              card footer so the user sees them at every step. URLs are
+              placeholders — swap to real T&C / Privacy pages when they
+              ship. */}
+          <div className="mt-6 border-t border-slate-100 pt-4 text-center text-[11px] text-slate-400">
+            <p>
+              By continuing you agree to OrangeRails's{" "}
+              <a
+                href="/terms"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-slate-600"
+              >
+                Terms
+              </a>
+              {" "}and{" "}
+              <a
+                href="/privacy"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-slate-600"
+              >
+                Privacy Policy
+              </a>
+              .
+            </p>
+            <p className="mt-2 flex items-center justify-center gap-1.5">
+              <span>Powered by</span>
+              <span className="font-semibold text-slate-500">OrangeRails</span>
+            </p>
           </div>
         </div>
       </div>
