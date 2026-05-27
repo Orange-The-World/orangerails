@@ -176,13 +176,18 @@ async function handleEvent(
   const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
   if (!connectionId) return 'event missing record.id';
 
-  // Find or create the OR-side connection row tied to this Quiltt
-  // connection. For Phase 1, we expect or-link-complete to have created
-  // it; if not, skip (or-sync user path will create on next open).
+  // Find the OR-side connection row tied to this Quiltt link. For Phase
+  // 1 we expect or-link-complete (Quiltt branch) to have created it; if
+  // not, we skip and let the user-session sync path create it on next
+  // open.
+  //
+  // Schema note: connections.user_id was dropped in
+  // 20260421200000_platforms_subaccounts.sql; the current owning column
+  // is subaccount_id.
   const { data: conn, error: connErr } = await client
     .from('connections')
     .select('id')
-    .eq('user_id', subaccountId)               // NOTE: connections.user_id stores subaccount_id for platform mode (verify with or-connection-create)
+    .eq('subaccount_id', subaccountId)
     .eq('provider_type', 'quiltt')
     .maybeSingle();
   if (connErr) return `connection lookup failed: ${connErr.message}`;
