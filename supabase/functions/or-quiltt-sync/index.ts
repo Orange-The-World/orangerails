@@ -271,6 +271,42 @@ async function handleEvent(
   }
 
   console.log(`[or-quiltt-sync] event ${ev.event_id}: ${newRows} new tx rows across ${pages + 1} pages`);
+
+  // Outbound webhook fan-out. Mirrors or-sync's enqueue pattern: insert a
+  // webhook_delivery row when newRows > 0, let or-webhook-dispatch pick it
+  // up on its own schedule. Best-effort — failure here must not mark the
+  // inbox event as failed; the user data is already landed.
+  if (newRows > 0) {
+    try {
+      const platRow = await client
+        .from('platforms')
+        .select('webhook_url')
+        .eq('id', platformId)
+        .maybeSingle();
+      const url = platRow.data?.webhook_url;
+      if (typeof url === 'string' && url.length > 0) {
+        await client.from('webhook_delivery').insert({
+          platform_id:   platformId,
+          subaccount_id: subaccountId,
+          event_type:    'sync.completed',
+          payload: {
+            event:         'sync.completed',
+            provider:      'quiltt',
+            subaccount_id: subaccountId,
+            connection_id: conn.id,
+            synced_count:  newRows,
+            ts:            new Date().toISOString(),
+          },
+        });
+      }
+    } catch (whErr) {
+      console.error(
+        `[or-quiltt-sync] webhook enqueue failed for subaccount ${subaccountId}:`,
+        whErr instanceof Error ? whErr.message : String(whErr),
+      );
+    }
+  }
+
   return 'processed';
 }
 
