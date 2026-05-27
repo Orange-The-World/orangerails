@@ -26,13 +26,17 @@ test('Strike step renders the API-note tooltip + sends users to dashboard root',
     fullPage: true,
   });
 
-  // Help link below the API key field — must point at dashboard ROOT,
-  // never the broken /developer/api-keys path.
-  const helpLink = page.getByRole('link', { name: /dashboard\.strike\.me/i });
-  await expect(helpLink).toBeVisible();
-  const href = await helpLink.getAttribute('href');
-  expect(href).toBe('https://dashboard.strike.me/');
-  expect(href).not.toContain('/developer/api-keys');
+  // Help link points at dashboard ROOT, never the broken
+  // /developer/api-keys path. The "How to get your credentials" banner
+  // and the inline field help both link to the same URL — assert every
+  // visible link with this name resolves to the root.
+  const helpLinks = page.getByRole('link', { name: /dashboard\.strike\.me/i });
+  await expect(helpLinks.first()).toBeVisible();
+  for (const link of await helpLinks.all()) {
+    const href = await link.getAttribute('href');
+    expect(href).toBe('https://dashboard.strike.me/');
+    expect(href).not.toContain('/developer/api-keys');
+  }
 
   // Info icon next to the heading opens the tooltip on hover.
   const infoIcon = page.getByRole('button', { name: /About Strike's API/i });

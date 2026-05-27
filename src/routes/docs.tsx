@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet, useChildMatches } from "@tanstack/react-router";
 import { Toaster } from "@/components/ui/sonner";
 import { Navbar } from "@/components/landing/Navbar";
 import { Footer } from "@/components/landing/Footer";
@@ -89,10 +89,22 @@ const secondary = [
   { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933754-openapi-spec-v0-draft" },
   { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933752-security-and-threat-model" },
   { icon: GitCompare, title: "Stealth Sync architecture", body: "How xpub stays in the browser, BIP 158 filters.", href: "https://wiki.abascal.ca/doc/stealth-sync" },
+  { icon: FileText, title: "How to export your xpub", body: "Find your extended public key in Sparrow, Specter, BlueWallet, Electrum, Wasabi.", href: "/docs/xpub-export" },
   { icon: Users, title: "Contributing", body: "Repo conventions, branch model, RFCs.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933753-contributing" },
 ];
 
 function DocsPage() {
+  // If a child route under /docs is matched (e.g. /docs/xpub-export),
+  // render only its outlet so the child owns the page chrome. The /docs
+  // page itself is the index of developer docs.
+  const childMatches = useChildMatches();
+  if (childMatches.length > 0) {
+    return <Outlet />;
+  }
+  return <DocsIndexPage />;
+}
+
+function DocsIndexPage() {
   return (
     <div className="min-h-screen bg-background text-foreground antialiased">
       <Navbar />
