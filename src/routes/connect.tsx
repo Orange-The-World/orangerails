@@ -50,6 +50,8 @@
 import { createFileRoute, Outlet, useChildMatches, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { Info } from "lucide-react";
+import { QuilttProvider } from "@quiltt/react/providers";
+import { useQuilttInstitutions } from "@quiltt/react/hooks";
 import {
   Tooltip,
   TooltipContent,
@@ -601,6 +603,54 @@ async function callLinkComplete(payload: {
 }
 
 // --------------------------------------------------------------------
+// Inline bank search — Quiltt bundle fetcher
+// --------------------------------------------------------------------
+
+/**
+ * Bundle shape returned by or-quiltt-session-via-widget. Carries
+ * everything the /connect/quiltt route needs in its URL fragment when
+ * the user clicks a bank tile.
+ */
+interface QuilttBundle {
+  subaccount_id:  string;
+  platform_slug:  string;
+  app_user_id:    string;
+  session_token:  string;
+  connector_id:   string;
+  profile_id:     string;
+  environment_id: string;
+  expires_at:     string;
+}
+
+/**
+ * Trade the widget_token (UUID minted by or-link-mint-token, carried in
+ * the /connect URL by the integrating app's backend) for a fresh Quiltt
+ * session bundle. Used by the inline bank search the moment the user
+ * starts typing.
+ *
+ * The widget_token is NOT consumed by this call — only verified.
+ * Downstream or-quiltt-link-complete still burns it on successful link.
+ */
+async function fetchQuilttBundleViaWidget(widgetToken: string): Promise<QuilttBundle> {
+  const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+  if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
+  const res = await fetch(`${base}/functions/v1/or-quiltt-session-via-widget`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ widget_token: widgetToken }),
+  });
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  try { data = JSON.parse(text) as Record<string, unknown>; } catch { /* ignore */ }
+  if (!res.ok) {
+    throw new Error(
+      typeof data.error === "string" ? data.error : `Bank search unavailable (${res.status}).`,
+    );
+  }
+  return data as unknown as QuilttBundle;
+}
+
+// --------------------------------------------------------------------
 // Client-side-manifest routing
 // --------------------------------------------------------------------
 
@@ -625,10 +675,21 @@ async function navigateToClientSideManifest(
   }
 
   if (manifest.slug === "quiltt") {
-    throw new Error(
-      "Bank linking is not yet available from this picker. Your app should " +
-        "open the bank link page directly. (Tracking: unified-picker PR #2.)",
-    );
+    if (!search.widget_token) {
+      throw new Error(
+        "Bank link requires a widget_token in the /connect URL. Your app's " +
+          "backend must mint one via or-link-mint-token before opening this widget.",
+      );
+    }
+    const bundle = await fetchQuilttBundleViaWidget(search.widget_token);
+    const fragment = new URLSearchParams({
+      session_token: bundle.session_token,
+      connector_id:  bundle.connector_id,
+      platform_slug: bundle.platform_slug,
+      app_user_id:   bundle.app_user_id,
+    }).toString();
+    window.location.assign(`${manifest.connectUrl}#${fragment}`);
+    return;
   }
 
   // Sparrow + future client-side-manifest providers: navigate with the
@@ -981,6 +1042,7 @@ function ConnectPageInner() {
           onCancel={handleCancel}
           submitting={pickingProvider}
           error={error}
+          widgetToken={search.widget_token}
         />
       )}
 
@@ -1293,6 +1355,7 @@ function PickProviderStep({
   onCancel,
   submitting,
   error,
+  widgetToken,
 }: {
   platformName: string;
   providers: ProviderManifest[] | null;
@@ -1300,9 +1363,55 @@ function PickProviderStep({
   onCancel: () => void;
   submitting: boolean;
   error: string | null;
+  /**
+   * When present, the picker lazily trades it for a Quiltt session as
+   * soon as the user types ≥2 characters in the search box, then renders
+   * matching bank institutions inline alongside Bitcoin providers.
+   * Without a widget_token, the inline bank search is disabled (the
+   * Bitcoin search keeps working).
+   */
+  widgetToken?: string;
 }) {
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
+
+  // ── Inline bank search via Quiltt ───────────────────────────────────
+  //
+  // Lazy-fetches a Quiltt session bundle the first time the user types
+  // 2+ characters. The bundle is cached for the life of this component
+  // (no refetch on subsequent searches). Without a widget_token, inline
+  // bank search is disabled and only Bitcoin providers render.
+  const [quilttBundle, setQuilttBundle] = useState<QuilttBundle | null>(null);
+  const [bundleFetchState, setBundleFetchState] = useState<
+    "idle" | "fetching" | "error"
+  >("idle");
+  const [bundleError, setBundleError] = useState<string | null>(null);
+
+  const shouldFetchBundle =
+    !!widgetToken &&
+    bundleFetchState === "idle" &&
+    !quilttBundle &&
+    search.trim().length >= 2;
+
+  useEffect(() => {
+    if (!shouldFetchBundle || !widgetToken) return;
+    let cancelled = false;
+    setBundleFetchState("fetching");
+    fetchQuilttBundleViaWidget(widgetToken)
+      .then((b) => {
+        if (cancelled) return;
+        setQuilttBundle(b);
+        setBundleFetchState("idle");
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBundleError(err instanceof Error ? err.message : String(err));
+        setBundleFetchState("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shouldFetchBundle, widgetToken]);
 
   // Loading + empty states.
   if (providers === null) {
@@ -1451,6 +1560,17 @@ function PickProviderStep({
             </div>
           ))}
         </div>
+      )}
+
+      {/* Inline bank search — appears once the user starts typing AND we have a Quiltt bundle. */}
+      {search.trim().length >= 2 && (
+        <BankSearchPanel
+          searchTerm={search.trim()}
+          bundle={quilttBundle}
+          fetchState={bundleFetchState}
+          fetchError={bundleError}
+          widgetToken={widgetToken}
+        />
       )}
 
       {error && (
@@ -1711,5 +1831,149 @@ function Spinner({ small }: { small?: boolean }) {
       className={`inline-block ${size} animate-spin rounded-full border-2 border-muted border-t-primary`}
       aria-hidden
     />
+  );
+}
+
+// --------------------------------------------------------------------
+// BankSearchPanel — renders Quiltt institution search results inline.
+//
+// Conditional: only renders content when bundle is fetched. While the
+// bundle is fetching, shows a small loading hint. On error, shows the
+// error inline (the rest of the picker keeps working).
+// --------------------------------------------------------------------
+
+function BankSearchPanel({
+  searchTerm,
+  bundle,
+  fetchState,
+  fetchError,
+  widgetToken,
+}: {
+  searchTerm: string;
+  bundle: QuilttBundle | null;
+  fetchState: "idle" | "fetching" | "error";
+  fetchError: string | null;
+  widgetToken?: string;
+}) {
+  if (fetchState === "fetching" && !bundle) {
+    return (
+      <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+        <Spinner small />
+        <span>Looking up banks…</span>
+      </div>
+    );
+  }
+  if (fetchState === "error") {
+    return (
+      <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-50/40 px-3 py-2 text-xs text-amber-700">
+        Bank search unavailable: {fetchError ?? "unknown error"}
+      </div>
+    );
+  }
+  if (!bundle) {
+    // No widget_token + 2+ char search: bank search disabled silently.
+    return null;
+  }
+
+  return (
+    <QuilttProvider token={bundle.session_token}>
+      <BankSearchResults
+        searchTerm={searchTerm}
+        bundle={bundle}
+        widgetToken={widgetToken}
+      />
+    </QuilttProvider>
+  );
+}
+
+interface QuilttInstitutionRow {
+  id?: string;
+  name?: string;
+  logo?: { url?: string };
+  providers?: string[];
+}
+
+function BankSearchResults({
+  searchTerm,
+  bundle,
+  widgetToken,
+}: {
+  searchTerm: string;
+  bundle: QuilttBundle;
+  widgetToken?: string;
+}) {
+  const { searchResults, isSearching, setSearchTerm } = useQuilttInstitutions(
+    bundle.connector_id,
+  );
+
+  // Push the parent's search term into the hook's internal state.
+  useEffect(() => {
+    setSearchTerm(searchTerm);
+  }, [searchTerm, setSearchTerm]);
+
+  // Quiltt's InstitutionsData is loosely typed in @quiltt/core. We
+  // narrow to what we actually use.
+  const institutions = (Array.isArray(searchResults) ? searchResults : []) as QuilttInstitutionRow[];
+
+  if (isSearching && institutions.length === 0) {
+    return (
+      <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+        <Spinner small />
+        <span>Searching banks…</span>
+      </div>
+    );
+  }
+  if (institutions.length === 0) {
+    return null;
+  }
+
+  function openBank(institutionId: string) {
+    const fragment = new URLSearchParams({
+      session_token: bundle.session_token,
+      connector_id:  bundle.connector_id,
+      platform_slug: bundle.platform_slug,
+      app_user_id:   bundle.app_user_id,
+      institution:   institutionId,
+    });
+    // /connect/quiltt's completeLinkOnOR call needs widget_token to hit
+    // or-quiltt-link-complete. Pipe it through the fragment.
+    if (widgetToken) fragment.set("widget_token", widgetToken);
+    window.location.assign(`/connect/quiltt#${fragment.toString()}`);
+  }
+
+  return (
+    <div className="mt-3 space-y-1.5" data-testid="bank-search-results">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Banks
+      </div>
+      {institutions.slice(0, 12).map((inst, i) => {
+        const id = inst.id ?? "";
+        const name = inst.name ?? "Unknown bank";
+        const logoUrl = inst.logo?.url;
+        return (
+          <button
+            key={id || `inst-${i}`}
+            type="button"
+            onClick={() => openBank(id)}
+            disabled={!id}
+            className="flex w-full items-center gap-3 rounded-md border border-input bg-card px-3 py-2 text-left text-sm hover:bg-muted/50 disabled:opacity-50"
+            data-testid={`bank-row-${id}`}
+          >
+            {logoUrl ? (
+              <img
+                src={logoUrl}
+                alt=""
+                aria-hidden
+                className="h-7 w-7 rounded object-contain"
+              />
+            ) : (
+              <span className="inline-block h-7 w-7 rounded bg-muted" aria-hidden />
+            )}
+            <span className="flex-1 font-medium">{name}</span>
+            <span className="text-[10px] text-muted-foreground">via Quiltt</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }

@@ -60,6 +60,14 @@ interface FragmentParams {
   platform_slug: string | null;
   app_user_id: string | null;
   widget_token: string | null;
+  /**
+   * Optional. When set (by the upstream picker's bank-tile click), the
+   * Quiltt Connector opens pre-selected to this institution — the user
+   * skips Quiltt's own picker and lands on the bank's login screen.
+   * Accepts either a Quiltt institution ID or a free-text search term
+   * per @quiltt/core's ConnectorSDKConnectOptions.institution contract.
+   */
+  institution: string | null;
 }
 
 function readFragmentParams(): FragmentParams {
@@ -70,6 +78,7 @@ function readFragmentParams(): FragmentParams {
       platform_slug: null,
       app_user_id: null,
       widget_token: null,
+      institution: null,
     };
   }
   const hash = window.location.hash.startsWith("#")
@@ -82,6 +91,7 @@ function readFragmentParams(): FragmentParams {
     platform_slug: sp.get("platform_slug"),
     app_user_id:   sp.get("app_user_id"),
     widget_token:  sp.get("widget_token"),
+    institution:   sp.get("institution"),
   };
 }
 
@@ -277,6 +287,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
       </p>
       <QuilttButton
         connectorId={params.connector_id!}
+        institution={params.institution ?? undefined}
         onExitSuccess={(metadata) => {
           void completeLinkOnOR(metadata.connectionId);
         }}

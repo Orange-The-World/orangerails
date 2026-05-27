@@ -104,3 +104,6 @@ verify_jwt = false
 
 [functions.or-quiltt-disconnect]
 verify_jwt = false
+
+[functions.or-quiltt-session-via-widget]
+verify_jwt = false
