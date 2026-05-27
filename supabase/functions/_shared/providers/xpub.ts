@@ -415,6 +415,9 @@ export const xpubAdapter: ProviderAdapter = {
       label: 'Extended public key',
       placeholder: 'xpub… / ypub… / zpub…',
       multiline: true,
+      // helpLabel renders inline under the textarea. A future PR can add
+      // a helpHref pointing at /docs/xpub-export (page not yet written)
+      // to surface the orange "How to get your credentials" banner.
       helpLabel: 'Watch-only — paste from Sparrow, Specter, BlueWallet, etc.',
     },
     {
