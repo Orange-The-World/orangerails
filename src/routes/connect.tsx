@@ -1147,11 +1147,6 @@ function EnterCredentialsStep({
   const allRequiredFilled = fields.every(
     (f) => f.optional === true || (values[f.name] ?? "").trim().length > 0,
   );
-  // "How to get your credentials" banner: surface the first field that
-  // carries a clickable help link (helpHref). Per-field helpLabel text
-  // still renders inline under each input — the banner just makes the
-  // most important help link more discoverable.
-  const primaryHelp = fields.find((f) => f.helpHref);
   return (
     <form onSubmit={onContinue} className="mt-4 space-y-4">
       <div className="flex items-center gap-1.5">
@@ -1192,24 +1187,6 @@ function EnterCredentialsStep({
           </TooltipProvider>
         )}
       </div>
-
-      {primaryHelp && (
-        <div className="rounded-md border border-orange-500/30 bg-orange-500/5 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-medium uppercase tracking-wide text-orange-600 dark:text-orange-400">
-              How to get your {providerLabel} credentials
-            </span>
-            <a
-              href={primaryHelp.helpHref}
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs font-medium text-primary hover:underline"
-            >
-              {primaryHelp.helpLabel ?? "Open"} ↗
-            </a>
-          </div>
-        </div>
-      )}
 
       <div>
         <label htmlFor="connection-label" className="block text-sm font-medium">
@@ -1271,9 +1248,9 @@ function EnterCredentialsStep({
         </div>
       ))}
 
-      <p className="text-xs text-muted-foreground">
-        Your credentials are locked in this browser before they leave. Orange Rails stores only the
-        locked version and cannot read them.
+      <p className="text-xs text-slate-500">
+        Your information is encrypted with your vault password before it leaves your browser.
+        OrangeRails stores only ciphertext — you and only you can decrypt it.
       </p>
 
 
@@ -1724,28 +1701,31 @@ function PickWalletsStep({
 // --------------------------------------------------------------------
 
 function Shell({ platform, children }: { platform?: PlatformDisplay; children: React.ReactNode }) {
-  const accent = platform?.display_brand_color ?? "#F7931A";
-  // Plaid / Quiltt-style chrome: light, friendly, low-contrast. We hardcode
-  // the light tokens (not bg-background / bg-card) so the popup stays light
-  // regardless of the embedding page's theme.
+  // Plaid / Quiltt chrome pattern:
+  //   - Top: subtle "{App} uses OrangeRails to connect securely" line — not
+  //     a huge accent-color H1. Establishes the co-branding relationship
+  //     without overwhelming the actual step content.
+  //   - Middle: the step content (picker, credentials form, etc.)
+  //   - Bottom: small "Powered by OrangeRails" + privacy note.
+  // Hardcoded light tokens so the popup stays light regardless of the
+  // embedding page's theme.
   return (
     <div className="min-h-screen bg-slate-50 px-4 py-6 antialiased text-slate-900" style={{ colorScheme: "light" }}>
       <div className="mx-auto w-full max-w-md">
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="mb-4 border-b border-slate-200 pb-4">
-            {platform ? (
-              <h1 className="text-xl font-semibold tracking-tight" style={{ color: accent }}>
-                Connect to {platform.display_name}
-              </h1>
-            ) : (
-              <h1 className="text-xl font-semibold tracking-tight">Connect</h1>
-            )}
-            <p className="mt-1 text-xs text-slate-500">
-              Powered by OrangeRails. Your credentials never leave this connection.
-            </p>
-          </div>
+          {platform && (
+            <div className="mb-4 text-xs text-slate-500">
+              <span className="font-medium text-slate-700">{platform.display_name}</span>
+              {" uses OrangeRails to connect securely."}
+            </div>
+          )}
 
           {children}
+
+          <div className="mt-6 flex items-center justify-center gap-1.5 border-t border-slate-100 pt-4 text-[11px] text-slate-400">
+            <span>Powered by</span>
+            <span className="font-semibold text-slate-500">OrangeRails</span>
+          </div>
         </div>
       </div>
     </div>
