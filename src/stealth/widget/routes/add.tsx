@@ -176,6 +176,20 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
     }
   }, [input]);
 
+  // Pull the master fingerprint (xfp) out of the descriptor's origin
+  // annotation when present. Format from BIP 380: `[xfp/derivation]`, so
+  // the first 8 hex chars of `origin` are the fingerprint. Bare xpubs
+  // carry no origin — we render "no fingerprint" so the user knows we
+  // can't cross-check it, and they should rely on the address preview.
+  const masterFingerprint = useMemo<string | null>(() => {
+    if (!parsedForPreview) return null;
+    const origin = parsedForPreview.keys[0]?.origin;
+    if (!origin) return null;
+    const xfp = origin.split("/")[0]?.toLowerCase();
+    if (!xfp || !/^[0-9a-f]{8}$/.test(xfp)) return null;
+    return xfp;
+  }, [parsedForPreview]);
+
   // Derive the first three receive addresses for the confirmation card.
   // We only render for single-key wallets where deriveAddress applies;
   // multisig descriptors are rare in the consumer flow and skip the card.
@@ -562,6 +576,24 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
               We derived these from your key. Open your wallet's "Receive"
               tab and check the first few addresses match.
             </p>
+            {masterFingerprint ? (
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                Master fingerprint:{" "}
+                <span className="font-mono text-foreground">
+                  {masterFingerprint}
+                </span>
+                <span className="ml-1">
+                  — should match the fingerprint shown in your wallet's
+                  account or device-info screen.
+                </span>
+              </p>
+            ) : (
+              <p className="mt-2 text-[11px] text-muted-foreground italic">
+                No master fingerprint in this key (bare extended public
+                keys don't include one). Rely on the address preview to
+                confirm.
+              </p>
+            )}
             <ol className="mt-2 space-y-1 font-mono text-[11px] text-foreground">
               {previewAddresses.map((addr, i) => (
                 <li key={addr}>
