@@ -31,6 +31,10 @@ import { BcbSource } from "./sources/bcb";
 import { BankOfCanadaSource } from "./sources/bank-of-canada";
 import { BankOfEnglandSource } from "./sources/bank-of-england";
 import { FredSource } from "./sources/fred";
+import { EcbSource, ECB_PAIRS } from "./sources/ecb";
+import { RbaSource } from "./sources/rba";
+import { SnbSource } from "./sources/snb";
+import { BojSource, type BojPair } from "./sources/boj";
 import {
   AuthorityBatchWriter,
   type AuthorityRateInsert,
@@ -51,16 +55,27 @@ const BATCH_SIZE = 500;
 function loadEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   const path = "/opt/bb-support/.env";
-  if (!existsSync(path)) return env;
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const s = line.trim();
-    if (!s || s.startsWith("#") || !s.includes("=")) continue;
-    const [k, ...rest] = s.split("=");
-    let v = rest.join("=").trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-      v = v.slice(1, -1);
+  if (existsSync(path)) {
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      const s = line.trim();
+      if (!s || s.startsWith("#") || !s.includes("=")) continue;
+      const [k, ...rest] = s.split("=");
+      let v = rest.join("=").trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
+      }
+      env[k!.trim()] = v;
     }
-    env[k!.trim()] = v;
+  }
+  // Fall back to process.env so the jarvis wrapper (which exports its
+  // SOPS-decrypted values into the shell) can run the orchestrator without
+  // a local .env file present.
+  for (const k of [
+    "BANXICO_API_TOKEN",
+    "ORANGERAILS_PROD_ACCESS_TOKEN",
+    "ORANGERAILS_PROD_SUPABASE_URL",
+  ]) {
+    if (!env[k] && process.env[k]) env[k] = process.env[k]!;
   }
   return env;
 }
@@ -93,7 +108,16 @@ async function mgmtApiQuery(ctx: DbContext, sql: string): Promise<unknown> {
 // ----------------------------------------------------------------------------
 // Authority pipelines
 // ----------------------------------------------------------------------------
-type AuthorityKey = "banxico" | "bcb" | "boc" | "boe" | "fred";
+type AuthorityKey =
+  | "banxico"
+  | "bcb"
+  | "boc"
+  | "boe"
+  | "fred"
+  | "ecb"
+  | "rba"
+  | "snb"
+  | "boj";
 
 async function fetchRowsForAuthority(
   authority: AuthorityKey,
@@ -131,6 +155,40 @@ async function fetchRowsForAuthority(
         { from, to, apiKey, log: (m) => console.log(m) },
         fetchedAtIso,
       );
+    case "ecb": {
+      const src = new EcbSource();
+      const all: AuthorityRateInsert[] = [];
+      for (const pair of Object.keys(ECB_PAIRS)) {
+        const body = await src.fetch({ pair, from, to });
+        all.push(...src.toInserts(body, fetchedAtIso, { pair }));
+      }
+      return all;
+    }
+    case "rba": {
+      const src = new RbaSource();
+      // Default to the "current" dataset; runner on jarvis can manually
+      // invoke historical-1969-2009 / historical-2010-2022 separately.
+      const body = await src.fetch({ dataset: "current" });
+      return src.toInserts(body, fetchedAtIso);
+    }
+    case "snb": {
+      const src = new SnbSource();
+      const body = await src.fetchCsv();
+      const parsed = src.parseCsv(body);
+      return src.toInserts(parsed, fetchedAtIso);
+    }
+    case "boj": {
+      const src = new BojSource();
+      const yearFrom = Number(from.slice(0, 4));
+      const yearTo = Number(to.slice(0, 4));
+      const all: AuthorityRateInsert[] = [];
+      const pairs: BojPair[] = ["USD/JPY", "EUR/JPY", "GBP/JPY"];
+      for (const pair of pairs) {
+        const body = await src.fetch({ pair, yearFrom, yearTo });
+        const parsed = src.parseCsv(body, pair);
+        all.push(...src.toInserts(parsed, fetchedAtIso));
+      }
+      return all;
     }
   }
 }
@@ -142,6 +200,10 @@ function pairLabel(authority: AuthorityKey): string {
     case "boc":     return "USD/CAD";
     case "boe":     return "USD/GBP";
     case "fred":    return "USD/multi(EUR,GBP,JPY,CAD,CHF,AUD,MXN,BRL,INR)";
+    case "ecb":     return "USD/EUR+EUR-crosses";
+    case "rba":     return "USD/AUD";
+    case "snb":     return "USD/CHF+CHF-crosses";
+    case "boj":     return "USD/JPY+JPY-crosses";
   }
 }
 
@@ -248,15 +310,15 @@ export async function runCbBackfill(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
+    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
     process.exit(2);
   }
   const [authorityArg, fromArg, toArg] = args as [string, string, string];
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (!["banxico", "bcb", "boc", "boe", "fred"].includes(authorityArg)) {
-    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred.`);
+  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj"].includes(authorityArg)) {
+    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj.`);
     process.exit(2);
   }
   const authority = authorityArg as AuthorityKey;
