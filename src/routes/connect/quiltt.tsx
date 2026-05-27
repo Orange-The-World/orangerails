@@ -25,7 +25,7 @@
  * 1 design). The Quiltt connection_id arrives separately via webhook events.
  */
 
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { QuilttButton } from "@quiltt/react/components";
@@ -110,13 +110,23 @@ function QuilttConnectPage() {
     <div className="min-h-screen bg-background text-foreground antialiased">
       <Navbar />
       <main className="mx-auto max-w-2xl px-6 py-16">
-        <Link
-          to="/providers"
+        <button
+          type="button"
+          onClick={() => {
+            // If the user got here from the inline picker (typical), history.back()
+            // returns them with their search term intact. Fallback to /providers
+            // when there's no history (direct link from an integrator).
+            if (window.history.length > 1) {
+              window.history.back();
+            } else {
+              window.location.assign("/providers");
+            }
+          }}
           className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to providers
-        </Link>
+          Back
+        </button>
 
         <header className="mt-6 space-y-3">
           <div className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-card px-3 py-1 text-xs text-muted-foreground">

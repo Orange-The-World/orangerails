@@ -127,7 +127,7 @@ const CLIENT_SIDE_MANIFESTS: ReadonlyArray<ProviderManifest> = [
     displayName: 'Bank account',
     description:
       'Link any US bank via Quiltt (Finicity, MX, Akoya, Plaid). Background sync supported when you opt in.',
-    status: 'beta',
+    status: 'live',
     category: 'bank',
     tags: ['bank', 'fiat', 'aggregator', 'us', 'quiltt'],
     popularity: 90,
