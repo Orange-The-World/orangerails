@@ -33,6 +33,8 @@ import { ValrSource } from "../src/sources/valr";
 import { UpbitSource } from "../src/sources/upbit";
 import { BithumbSource } from "../src/sources/bithumb";
 import { RipioSource } from "../src/sources/ripio";
+import { BtseSource } from "../src/sources/btse";
+import { FiriSource } from "../src/sources/firi";
 import { FrankfurterSource } from "../src/sources/frankfurter";
 import { resolve, type ResolveResult } from "../src/calculate/resolve";
 import { resolveComposite, type CompositeResolveResult } from "../src/calculate/resolve-composite";
@@ -77,13 +79,55 @@ const DIRECT_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "TRY" },
   { source: "BTC", target: "ZAR" },
   { source: "BTC", target: "KRW" },
+  // Extension batch 2026-05-27 — geographic gap-fill (Asia, Nordics, Pacific).
+  // Each pair has at least one verified direct source plus a composite fallback
+  // entry below (BTC/SEK is composite-only — no keyless venue lists it).
+  { source: "BTC", target: "HKD" }, // BTSE
+  { source: "BTC", target: "SGD" }, // Independent Reserve
+  { source: "BTC", target: "NOK" }, // Firi
+  { source: "BTC", target: "DKK" }, // Firi
+  { source: "BTC", target: "NZD" }, // Independent Reserve
 ];
 
-// Composite pairs (Tier C via BTC/USD ORBI × USD/X Frankfurter)
+// Composite pairs (Tier C via BTC/USD ORBI × USD/X Frankfurter).
+// Acts as the fallback when a thin-liquidity direct source returns no candles
+// for the minute window. BTC/SEK is COMPOSITE-ONLY (no keyless venue lists it).
 const COMPOSITE_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "INR" },
   { source: "BTC", target: "TRY" },
   { source: "BTC", target: "ZAR" },
+  // 2026-05-27 extension batch.
+  { source: "BTC", target: "HKD" },
+  { source: "BTC", target: "SGD" },
+  { source: "BTC", target: "NOK" },
+  { source: "BTC", target: "SEK" }, // composite-only — no direct source available
+  { source: "BTC", target: "DKK" },
+  { source: "BTC", target: "NZD" },
+];
+
+// Stablecoin / fiat-peg spot pairs.
+// Resolved as DIRECT pairs (VW-median across whichever sources quote each
+// pair natively). DO NOT add composite fallback — the entire point of
+// tracking stablecoins is to surface peg deviation, which a BTC-cross
+// composite would launder away. If no source returns a candle for a
+// stablecoin pair, the iteration FAILS for that pair and the loop continues.
+//
+// Coverage as of 2026-05-27:
+//   USDT/USD: Kraken + Bitfinex + Coinbase Exchange (Tier A)
+//   USDC/USD: Kraken + Bitfinex (Tier B; Coinbase has no USDC-USD self-pair)
+//   DAI/USD:  Bitfinex + Coinbase Exchange register the pair but trading is
+//             extremely thin (most recent live trade was 2026-04 as of
+//             2026-05-27). Forward-fill is EXPECTED to FAIL most minutes;
+//             historical backfill into stress periods (March 2023 SVB,
+//             March 2024 DAI float) is where this pair earns its keep.
+//   PYUSD/USD: Kraken (intermittent volume) + Coinbase Exchange (B-single most minutes)
+//   EURC/EUR:  Kraken (intermittent volume; B-single most minutes)
+const STABLECOIN_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
+  { source: "USDT", target: "USD" },
+  { source: "USDC", target: "USD" },
+  { source: "DAI", target: "USD" },
+  { source: "PYUSD", target: "USD" },
+  { source: "EURC", target: "EUR" },
 ];
 
 // --- Source instances (shared across iterations for connection reuse) ---
@@ -106,6 +150,8 @@ const allBtcSources: Source[] = [
   new UpbitSource(),
   new BithumbSource(),
   new RipioSource(),
+  new BtseSource(),
+  new FiriSource(),
 ];
 const frankfurter = new FrankfurterSource();
 
@@ -131,6 +177,36 @@ function sqlEscape(s: string): string {
 
 function sourcesForTarget(target: string): Source[] {
   return allBtcSources.filter((s) => s.pairsSupported.includes(`BTC-${target}`));
+}
+
+/**
+ * Find every configured source that natively quotes the given stablecoin / fiat
+ * spot pair (e.g. USDT-USD, EURC-EUR). Reuses the same source instances as
+ * the BTC pairs so we share rate-limit cadence per source.
+ */
+function sourcesForStablecoinPair(source: string, target: string): Source[] {
+  const code = `${source}-${target}`;
+  return allBtcSources.filter((s) => s.pairsSupported.includes(code));
+}
+
+async function publishStablecoin(
+  source: string,
+  target: string,
+  effectiveAt: Date,
+): Promise<string> {
+  const sources = sourcesForStablecoinPair(source, target);
+  if (sources.length === 0) {
+    return `${source}/${target}: FAIL — no sources configured`;
+  }
+  try {
+    const result = await resolve({ pair: { source, target }, effectiveAt }, sources);
+    // Stablecoin pairs are NEVER composite — the whole point is direct peg
+    // observation. writeRate writes source_currency=USDT etc. directly.
+    await writeRate(target, result, false, null, source);
+    return `${source}/${target}: ${result.rate.toFixed(4)} (Tier ${result.tier}, ${result.providerCount}src)`;
+  } catch (err) {
+    return `${source}/${target}: FAIL — ${(err as Error).message.slice(0, 80)}`;
+  }
 }
 
 async function publishDirect(target: string, effectiveAt: Date): Promise<string> {
@@ -167,13 +243,14 @@ async function writeRate(
   result: ResolveResult,
   composite: boolean,
   compositeVia: string | null,
+  sourceCurrency: string = "BTC",
 ): Promise<void> {
   const insertSql = `
     INSERT INTO exchange_rates (
       source_currency, target_currency, bucket_ts, granularity, product,
       rate, tier, composite, composite_via, provider_count, status, fetched_at, computed_at
     ) VALUES (
-      'BTC', '${target}',
+      '${sqlEscape(sourceCurrency)}', '${target}',
       '${result.bucketTs.toISOString()}',
       '1m', 'ORBI-M',
       ${result.rate},
@@ -276,6 +353,12 @@ async function runIteration(label: string): Promise<void> {
   );
   summaries.push(...directResults);
 
+  // Stablecoin / fiat-peg pairs: run in parallel; never composite.
+  const stableResults = await Promise.all(
+    STABLECOIN_PAIRS.map((p) => publishStablecoin(p.source, p.target, effectiveAt)),
+  );
+  summaries.push(...stableResults);
+
   // Composite pairs: sequential to share BTC/USD cache (which is re-resolved per call, but minimal overhead)
   for (const p of COMPOSITE_PAIRS) {
     const s = await publishComposite(p.target, effectiveAt);
@@ -297,7 +380,7 @@ async function main() {
   }
 
   console.log("Starting ORBI forward-fill loop. Ctrl+C to stop.");
-  console.log(`Publishing ${DIRECT_PAIRS.length} direct + ${COMPOSITE_PAIRS.length} composite pairs every minute.`);
+  console.log(`Publishing ${DIRECT_PAIRS.length} direct + ${STABLECOIN_PAIRS.length} stablecoin + ${COMPOSITE_PAIRS.length} composite pairs every minute.`);
 
   let iteration = 0;
   while (true) {

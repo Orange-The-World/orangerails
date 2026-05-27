@@ -24,7 +24,10 @@ describe("BitfinexSource — unit tests with mocked HTTP", () => {
     expect(src.name).toBe("bitfinex");
     expect(src.role).toBe("primary");
     expect(src.rateLimitRps).toBe(0.33);
-    expect(src.pairsSupported).toEqual(["BTC-USD"]);
+    expect(src.pairsSupported).toContain("BTC-USD");
+    expect(src.pairsSupported).toContain("USDT-USD");
+    expect(src.pairsSupported).toContain("USDC-USD");
+    expect(src.pairsSupported).toContain("DAI-USD");
   });
 
   it("fetch: parses tuple with close BEFORE high/low correctly", async () => {

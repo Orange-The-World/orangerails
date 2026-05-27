@@ -37,9 +37,16 @@ const PAIR_MAP: Record<string, string> = {
   "BTC-AUD": "XBTAUD",
   "BTC-JPY": "XBTJPY",
   "BTC-CHF": "XBTCHF",
+  // Stablecoin / fiat-peg spot pairs. The base IS the stablecoin (we are
+  // measuring the peg, NOT the BTC price denominated in the stablecoin).
   "USDT-USD": "USDTUSD",
   "USDC-USD": "USDCUSD",
   "DAI-USD": "DAIUSD",
+  "PYUSD-USD": "PYUSDUSD",
+  // Circle EURC: Kraken's canonical pair code is EURCEUR (verified live
+  // 2026-05-27 via /AssetPairs). The altname EUROCEUR appears in some
+  // older docs but /OHLC rejects it with "Invalid asset pair".
+  "EURC-EUR": "EURCEUR",
 };
 
 /** Kraken returns some pairs with X-prefixed legacy codes in the result keys. */
@@ -51,6 +58,10 @@ const RESULT_KEY_ALIASES: Record<string, string[]> = {
   XBTAUD: ["XBTAUD"],
   XBTJPY: ["XXBTZJPY", "XBTJPY"],
   XBTCHF: ["XBTCHF"],
+  // Kraken returns USDT/USD under the legacy Z-prefixed result key.
+  USDTUSD: ["USDTZUSD", "USDTUSD"],
+  // EURCEUR is both the request and result key.
+  EURCEUR: ["EURCEUR"],
 };
 
 export class KrakenSource extends BaseSource {

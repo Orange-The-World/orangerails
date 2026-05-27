@@ -48,8 +48,10 @@
  */
 
 import { createFileRoute, Outlet, useChildMatches, useSearch } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Info } from "lucide-react";
+import { QuilttProvider } from "@quiltt/react/providers";
+import { useQuilttInstitutions } from "@quiltt/react/hooks";
 import {
   Tooltip,
   TooltipContent,
@@ -231,6 +233,13 @@ interface ProviderManifest {
   popularity?: number;
   multiWallet: boolean;
   credentialFields: ManifestField[];
+  /**
+   * Optional. Present for CLIENT_SIDE_MANIFESTS providers (Quiltt, Sparrow)
+   * whose link flow lives in a dedicated route rather than the generic
+   * credential form. When set, the picker routes the click here instead
+   * of going to enter-credentials.
+   */
+  connectUrl?: string;
 }
 
 interface ManifestField {
@@ -594,6 +603,106 @@ async function callLinkComplete(payload: {
 }
 
 // --------------------------------------------------------------------
+// Inline bank search — Quiltt bundle fetcher
+// --------------------------------------------------------------------
+
+/**
+ * Bundle shape returned by or-quiltt-session-via-widget. Carries
+ * everything the /connect/quiltt route needs in its URL fragment when
+ * the user clicks a bank tile.
+ */
+interface QuilttBundle {
+  subaccount_id:  string;
+  platform_slug:  string;
+  app_user_id:    string;
+  session_token:  string;
+  connector_id:   string;
+  profile_id:     string;
+  environment_id: string;
+  expires_at:     string;
+}
+
+/**
+ * Trade the widget_token (UUID minted by or-link-mint-token, carried in
+ * the /connect URL by the integrating app's backend) for a fresh Quiltt
+ * session bundle. Used by the inline bank search the moment the user
+ * starts typing.
+ *
+ * The widget_token is NOT consumed by this call — only verified.
+ * Downstream or-quiltt-link-complete still burns it on successful link.
+ */
+async function fetchQuilttBundleViaWidget(widgetToken: string): Promise<QuilttBundle> {
+  const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+  if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
+  const res = await fetch(`${base}/functions/v1/or-quiltt-session-via-widget`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ widget_token: widgetToken }),
+  });
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  try { data = JSON.parse(text) as Record<string, unknown>; } catch { /* ignore */ }
+  if (!res.ok) {
+    throw new Error(
+      typeof data.error === "string" ? data.error : `Bank search unavailable (${res.status}).`,
+    );
+  }
+  return data as unknown as QuilttBundle;
+}
+
+// --------------------------------------------------------------------
+// Client-side-manifest routing
+// --------------------------------------------------------------------
+
+/**
+ * Route the user to a client-side-manifest provider's dedicated page.
+ *
+ * - Sparrow: navigate to /connect/sparrow with the existing query params
+ *   so the page can wire up its own Stealth-Sync flow.
+ * - Quiltt: NOT routed from here yet — the picker click would land on a
+ *   page that needs a server-minted Quiltt session, and trading the
+ *   widget_token for a session is a separate edge function (tracked as
+ *   PR #2 in the unified-picker design). Until then, integrating apps
+ *   open /connect/quiltt directly with session params they minted
+ *   server-side.
+ */
+async function navigateToClientSideManifest(
+  manifest: ProviderManifest,
+  search: ConnectSearch,
+): Promise<void> {
+  if (!manifest.connectUrl) {
+    throw new Error(`Provider "${manifest.displayName}" has no connectUrl.`);
+  }
+
+  if (manifest.slug === "quiltt") {
+    if (!search.widget_token) {
+      throw new Error(
+        "Bank link requires a widget_token in the /connect URL. Your app's " +
+          "backend must mint one via or-link-mint-token before opening this widget.",
+      );
+    }
+    const bundle = await fetchQuilttBundleViaWidget(search.widget_token);
+    const fragment = new URLSearchParams({
+      session_token: bundle.session_token,
+      connector_id:  bundle.connector_id,
+      platform_slug: bundle.platform_slug,
+      app_user_id:   bundle.app_user_id,
+    }).toString();
+    window.location.assign(`${manifest.connectUrl}#${fragment}`);
+    return;
+  }
+
+  // Sparrow + future client-side-manifest providers: navigate with the
+  // existing query params so the page can wire up its own flow.
+  const params = new URLSearchParams();
+  if (search.platform) params.set("platform", search.platform);
+  if (search.app_user_id) params.set("app_user_id", search.app_user_id);
+  if (search.return_to) params.set("return_to", search.return_to);
+  const qs = params.toString();
+  window.location.assign(qs ? `${manifest.connectUrl}?${qs}` : manifest.connectUrl);
+}
+
+// --------------------------------------------------------------------
 // Component
 // --------------------------------------------------------------------
 
@@ -689,6 +798,15 @@ function ConnectPageInner() {
     setPickingProvider(true);
     try {
       const m = await fetchProviderManifest(slug);
+
+      // Client-side-manifest providers (Quiltt, Sparrow) have a dedicated
+      // connect route rather than the generic credential form. Route there
+      // instead of going to enter-credentials.
+      if (m.connectUrl) {
+        await navigateToClientSideManifest(m, search);
+        return;
+      }
+
       setManifest(m);
       setStep("enter-credentials");
     } catch (err) {
@@ -924,6 +1042,7 @@ function ConnectPageInner() {
           onCancel={handleCancel}
           submitting={pickingProvider}
           error={error}
+          widgetToken={search.widget_token}
         />
       )}
 
@@ -1206,29 +1325,6 @@ function EnterCredentialsStep({
 // styling is a Phase 2 cross-product design pass.
 // ────────────────────────────────────────────────────────────────────
 
-const CATEGORY_DISPLAY_NAMES: Record<string, string> = {
-  lightning_wallet: "Lightning wallets",
-  on_chain_wallet: "On-chain wallets",
-  payment_processor: "Payment processors",
-  exchange: "Exchanges",
-  mining_pool: "Mining pools",
-  other: "Other",
-};
-
-const CATEGORY_ORDER = [
-  "lightning_wallet",
-  "on_chain_wallet",
-  "payment_processor",
-  "exchange",
-  "mining_pool",
-];
-
-function categoryLabel(slug: string): string {
-  if (CATEGORY_DISPLAY_NAMES[slug]) return CATEGORY_DISPLAY_NAMES[slug];
-  // Fallback: humanize "some_slug" → "Some slug"
-  return slug.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
-}
-
 function PickProviderStep({
   platformName,
   providers,
@@ -1236,6 +1332,7 @@ function PickProviderStep({
   onCancel,
   submitting,
   error,
+  widgetToken,
 }: {
   platformName: string;
   providers: ProviderManifest[] | null;
@@ -1243,9 +1340,62 @@ function PickProviderStep({
   onCancel: () => void;
   submitting: boolean;
   error: string | null;
+  /**
+   * When present, the picker lazily trades it for a Quiltt session as
+   * soon as the user types ≥2 characters in the search box, then renders
+   * matching bank institutions inline alongside Bitcoin providers.
+   * Without a widget_token, the inline bank search is disabled (the
+   * Bitcoin search keeps working).
+   */
+  widgetToken?: string;
 }) {
   const [search, setSearch] = useState("");
-  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+
+  // ── Inline bank search via Quiltt ───────────────────────────────────
+  //
+  // Lazy-fetches a Quiltt session bundle the first time the user types
+  // 2+ characters. The bundle is cached for the life of this component
+  // (no refetch on subsequent searches). Without a widget_token, inline
+  // bank search is disabled and only Bitcoin providers render.
+  //
+  // In-flight tracking lives on a ref (NOT in state) so that updating
+  // bundleFetchState mid-fetch doesn't re-trigger the effect, cancel the
+  // cleanup, and orphan the promise. Earlier versions of this hook had
+  // exactly that bug — the spinner stuck at "Looking up banks…" forever
+  // because the .then/.catch saw `cancelled=true` after the rerender.
+  const [quilttBundle, setQuilttBundle] = useState<QuilttBundle | null>(null);
+  const [bundleFetchState, setBundleFetchState] = useState<
+    "idle" | "fetching" | "error"
+  >("idle");
+  const [bundleError, setBundleError] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
+
+  useEffect(() => {
+    if (!widgetToken) return;
+    if (quilttBundle) return;
+    if (inFlightRef.current) return;
+    if (bundleFetchState === "error") return; // wait for user to retry by clearing + retyping
+    if (search.trim().length < 2) return;
+
+    inFlightRef.current = true;
+    setBundleFetchState("fetching");
+    fetchQuilttBundleViaWidget(widgetToken)
+      .then((b) => {
+        setQuilttBundle(b);
+        setBundleFetchState("idle");
+      })
+      .catch((err) => {
+        setBundleError(err instanceof Error ? err.message : String(err));
+        setBundleFetchState("error");
+      })
+      .finally(() => {
+        inFlightRef.current = false;
+      });
+    // Intentionally exclude bundleFetchState from deps: the inFlightRef
+    // already gates re-entry, and depending on the state we're about to
+    // set would cause the cancellation race the comment above describes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [widgetToken, quilttBundle, search]);
 
   // Loading + empty states.
   if (providers === null) {
@@ -1266,42 +1416,6 @@ function PickProviderStep({
     );
   }
 
-  // Chip categories — only categories that have at least one provider
-  // in the unfiltered list. Ordered by CATEGORY_ORDER, then anything
-  // unknown appended.
-  const chipCategories = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const p of providers) {
-      if (!p.category) continue;
-      counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
-    }
-    const known = CATEGORY_ORDER.filter((c) => counts.has(c));
-    const unknown = [...counts.keys()].filter((c) => !CATEGORY_ORDER.includes(c)).sort();
-    return [...known, ...unknown].map((slug) => ({
-      slug,
-      displayName: categoryLabel(slug),
-      providerCount: counts.get(slug) ?? 0,
-    }));
-  }, [providers]);
-
-  // Apply search + active-category filter.
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return providers.filter((p) => {
-      if (activeCategory && p.category !== activeCategory) return false;
-      if (!q) return true;
-      const haystack = [
-        p.displayName,
-        p.description ?? "",
-        p.slug,
-        ...(p.tags ?? []),
-      ]
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(q);
-    });
-  }, [providers, search, activeCategory]);
-
   // Sort: popularity DESC, displayName ASC.
   const sortFn = (a: ProviderManifest, b: ProviderManifest): number => {
     const popDiff = (b.popularity ?? 0) - (a.popularity ?? 0);
@@ -1309,33 +1423,37 @@ function PickProviderStep({
     return a.displayName.localeCompare(b.displayName);
   };
 
-  // While searching: flat. Otherwise group by category in chip order
-  // + an "Other" bucket for category-less providers.
+  // Filter by search across name + description + tags + slug.
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return providers.filter((p) => {
+      if (!q) return true;
+      const haystack = [p.displayName, p.description ?? "", p.slug, ...(p.tags ?? [])]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [providers, search]);
+
+  // Empty search → show top 8 most popular as quick-pick tiles. Plaid /
+  // Quiltt-style: an overwhelming flat list is not friendlier than a
+  // curated set the user can scan in under a second. When searching,
+  // show all matching results (still sorted by popularity).
   const isSearching = search.trim().length > 0;
   const groups = useMemo<Array<{ label: string | null; entries: ProviderManifest[] }>>(() => {
-    if (isSearching || activeCategory) {
-      // Flat result list (no headers) when narrowing.
-      return [{ label: null, entries: [...filtered].sort(sortFn) }];
+    const sorted = [...filtered].sort(sortFn);
+    if (isSearching) {
+      return [{ label: null, entries: sorted }];
     }
-    const out: Array<{ label: string | null; entries: ProviderManifest[] }> = [];
-    for (const c of chipCategories) {
-      const entries = filtered
-        .filter((p) => p.category === c.slug)
-        .sort(sortFn);
-      if (entries.length === 0) continue;
-      out.push({ label: c.displayName.toUpperCase(), entries });
-    }
-    const orphans = filtered.filter((p) => !p.category).sort(sortFn);
-    if (orphans.length > 0) out.push({ label: "OTHER", entries: orphans });
-    return out;
-  }, [isSearching, activeCategory, filtered, chipCategories]);
+    return [{ label: "POPULAR", entries: sorted.slice(0, 8) }];
+  }, [isSearching, filtered]);
 
   return (
-    <div className="mt-4 space-y-3">
+    <div className="mt-4 space-y-4">
       <div>
-        <h2 className="text-sm font-semibold">Choose your wallet provider</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Pick which provider you want {platformName} to connect to.
+        <h2 className="text-base font-semibold text-slate-900">Choose how to connect</h2>
+        <p className="mt-1 text-xs text-slate-500">
+          Search for a Bitcoin source or a bank.
         </p>
       </div>
 
@@ -1344,60 +1462,55 @@ function PickProviderStep({
         type="text"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search providers (Blink, Coinbase, Bitcoin, Canada…)"
+        placeholder="Search Bitcoin sources or banks…"
         autoFocus
-        aria-label="Search providers"
-        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        aria-label="Search Bitcoin sources or banks"
+        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
         data-testid="provider-search"
       />
 
-      {/* Category chips */}
-      <div className="flex flex-wrap gap-1.5">
-        <CategoryChip
-          label={`All (${providers.length})`}
-          active={activeCategory === null}
-          onClick={() => setActiveCategory(null)}
-        />
-        {chipCategories.map((c) => (
-          <CategoryChip
-            key={c.slug}
-            label={`${c.displayName} (${c.providerCount})`}
-            active={activeCategory === c.slug}
-            onClick={() => setActiveCategory(c.slug)}
-            data-testid={`provider-chip-${c.slug}`}
-          />
-        ))}
-      </div>
-
-      {/* Results */}
+      {/* Bitcoin / exchange tile grid */}
       {filtered.length === 0 ? (
-        <div className="rounded-md border border-input bg-muted/10 px-3 py-4 text-center text-xs text-muted-foreground">
-          No providers match {search ? `"${search}"` : "this filter"}.
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-4 text-center text-xs text-slate-500">
+          No matches for {search ? `"${search}"` : "the current filter"}.
         </div>
       ) : (
         <div className="space-y-3" data-testid="provider-results">
           {groups.map((g, gi) => (
-            <div key={g.label ?? `group-${gi}`} className="space-y-1.5">
+            <div key={g.label ?? `group-${gi}`} className="space-y-2">
               {g.label && (
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
                   {g.label}
                 </div>
               )}
-              {g.entries.map((p) => (
-                <ProviderRow
-                  key={p.slug}
-                  provider={p}
-                  busy={submitting}
-                  onPick={onPick}
-                />
-              ))}
+              <div className="grid grid-cols-2 gap-2">
+                {g.entries.map((p) => (
+                  <ProviderTile
+                    key={p.slug}
+                    provider={p}
+                    busy={submitting}
+                    onPick={onPick}
+                  />
+                ))}
+              </div>
             </div>
           ))}
         </div>
       )}
 
+      {/* Inline bank search — appears once the user starts typing AND we have a Quiltt bundle. */}
+      {search.trim().length >= 2 && (
+        <BankSearchPanel
+          searchTerm={search.trim()}
+          bundle={quilttBundle}
+          fetchState={bundleFetchState}
+          fetchError={bundleError}
+          widgetToken={widgetToken}
+        />
+      )}
+
       {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+        <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
           {error}
         </div>
       )}
@@ -1407,7 +1520,7 @@ function PickProviderStep({
           type="button"
           onClick={onCancel}
           disabled={submitting}
-          className="flex-1 rounded-md border border-input bg-background px-4 py-2 text-sm font-medium disabled:opacity-50"
+          className="flex-1 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
         >
           Cancel
         </button>
@@ -1416,36 +1529,7 @@ function PickProviderStep({
   );
 }
 
-function CategoryChip({
-  label,
-  active,
-  onClick,
-  ...rest
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-  "data-testid"?: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={
-        "rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors " +
-        (active
-          ? "border-primary bg-primary/10 text-primary"
-          : "border-input bg-background text-muted-foreground hover:bg-muted/30")
-      }
-      {...rest}
-    >
-      {label}
-    </button>
-  );
-}
-
-function ProviderRow({
+function ProviderTile({
   provider,
   busy,
   onPick,
@@ -1454,25 +1538,37 @@ function ProviderRow({
   busy: boolean;
   onPick: (slug: string) => void;
 }) {
+  // Visual initial — first letter of the provider name in a colored
+  // circle. Cheap placeholder until per-provider logos ship in a
+  // follow-up PR. Keeps Plaid/Quiltt's "tile with a glyph" feel.
+  const initial = provider.displayName.slice(0, 1).toUpperCase();
   return (
     <button
       type="button"
       onClick={() => onPick(provider.slug)}
       disabled={busy}
-      data-testid={`provider-row-${provider.slug}`}
-      className="flex w-full items-center gap-2 rounded-md border border-input px-3 py-2 text-left transition-colors hover:bg-muted/30 disabled:opacity-50"
+      data-testid={`provider-tile-${provider.slug}`}
+      className="flex h-20 w-full items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50"
     >
-      <div className="flex-1 min-w-0">
+      <span
+        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-600"
+        aria-hidden
+      >
+        {initial}
+      </span>
+      <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="text-sm font-medium">{provider.displayName}</span>
+          <span className="truncate text-sm font-medium text-slate-900">
+            {provider.displayName}
+          </span>
           {provider.status === "beta" && (
-            <span className="rounded-sm bg-primary/20 px-1 py-px text-[9px] font-bold uppercase tracking-wide text-primary">
+            <span className="shrink-0 rounded-sm bg-amber-100 px-1 py-px text-[9px] font-bold uppercase tracking-wide text-amber-700">
               BETA
             </span>
           )}
         </div>
         {provider.description && (
-          <div className="mt-0.5 truncate text-xs text-muted-foreground">
+          <div className="mt-0.5 truncate text-[11px] text-slate-500">
             {provider.description}
           </div>
         )}
@@ -1602,21 +1698,23 @@ function PickWalletsStep({
 
 function Shell({ platform, children }: { platform?: PlatformDisplay; children: React.ReactNode }) {
   const accent = platform?.display_brand_color ?? "#F7931A";
+  // Plaid / Quiltt-style chrome: light, friendly, low-contrast. We hardcode
+  // the light tokens (not bg-background / bg-card) so the popup stays light
+  // regardless of the embedding page's theme.
   return (
-    <div className="min-h-screen bg-background px-4 py-6 antialiased">
+    <div className="min-h-screen bg-slate-50 px-4 py-6 antialiased text-slate-900" style={{ colorScheme: "light" }}>
       <div className="mx-auto w-full max-w-md">
-        <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
-          {/* Plaid-hybrid co-branding: integrating app name on top, OR below */}
-          <div className="mb-4 border-b border-border pb-4">
+        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="mb-4 border-b border-slate-200 pb-4">
             {platform ? (
               <h1 className="text-xl font-semibold tracking-tight" style={{ color: accent }}>
-                Connect your wallet to {platform.display_name}
+                Connect to {platform.display_name}
               </h1>
             ) : (
-              <h1 className="text-xl font-semibold tracking-tight">Connect your wallet</h1>
+              <h1 className="text-xl font-semibold tracking-tight">Connect</h1>
             )}
-            <p className="mt-1 text-xs text-muted-foreground">
-              Powered by Orange Rails — your wallet credentials never leave this connection.
+            <p className="mt-1 text-xs text-slate-500">
+              Powered by OrangeRails. Your credentials never leave this connection.
             </p>
           </div>
 
@@ -1654,5 +1752,157 @@ function Spinner({ small }: { small?: boolean }) {
       className={`inline-block ${size} animate-spin rounded-full border-2 border-muted border-t-primary`}
       aria-hidden
     />
+  );
+}
+
+// --------------------------------------------------------------------
+// BankSearchPanel — renders Quiltt institution search results inline.
+//
+// Conditional: only renders content when bundle is fetched. While the
+// bundle is fetching, shows a small loading hint. On error, shows the
+// error inline (the rest of the picker keeps working).
+// --------------------------------------------------------------------
+
+function BankSearchPanel({
+  searchTerm,
+  bundle,
+  fetchState,
+  fetchError,
+  widgetToken,
+}: {
+  searchTerm: string;
+  bundle: QuilttBundle | null;
+  fetchState: "idle" | "fetching" | "error";
+  fetchError: string | null;
+  widgetToken?: string;
+}) {
+  if (fetchState === "fetching" && !bundle) {
+    return (
+      <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+        <Spinner small />
+        <span>Looking up banks…</span>
+      </div>
+    );
+  }
+  if (fetchState === "error") {
+    return (
+      <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-50/40 px-3 py-2 text-xs text-amber-700">
+        Bank search unavailable: {fetchError ?? "unknown error"}
+      </div>
+    );
+  }
+  if (!bundle) {
+    // No widget_token + 2+ char search: bank search disabled silently.
+    return null;
+  }
+
+  return (
+    <QuilttProvider token={bundle.session_token}>
+      <BankSearchResults
+        searchTerm={searchTerm}
+        bundle={bundle}
+        widgetToken={widgetToken}
+      />
+    </QuilttProvider>
+  );
+}
+
+interface QuilttInstitutionRow {
+  id?: string;
+  name?: string;
+  logo?: { url?: string };
+  providers?: string[];
+}
+
+function BankSearchResults({
+  searchTerm,
+  bundle,
+  widgetToken,
+}: {
+  searchTerm: string;
+  bundle: QuilttBundle;
+  widgetToken?: string;
+}) {
+  const { searchResults, isSearching, setSearchTerm } = useQuilttInstitutions(
+    bundle.connector_id,
+  );
+
+  // Push the parent's search term into the hook's internal state.
+  useEffect(() => {
+    setSearchTerm(searchTerm);
+  }, [searchTerm, setSearchTerm]);
+
+  // Quiltt's InstitutionsData is loosely typed in @quiltt/core. We
+  // narrow to what we actually use.
+  const institutions = (Array.isArray(searchResults) ? searchResults : []) as QuilttInstitutionRow[];
+
+  if (isSearching && institutions.length === 0) {
+    return (
+      <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+        <Spinner small />
+        <span>Searching banks…</span>
+      </div>
+    );
+  }
+  if (institutions.length === 0) {
+    return null;
+  }
+
+  function openBank(institutionId: string) {
+    const fragment = new URLSearchParams({
+      session_token: bundle.session_token,
+      connector_id:  bundle.connector_id,
+      platform_slug: bundle.platform_slug,
+      app_user_id:   bundle.app_user_id,
+      institution:   institutionId,
+    });
+    // /connect/quiltt's completeLinkOnOR call needs widget_token to hit
+    // or-quiltt-link-complete. Pipe it through the fragment.
+    if (widgetToken) fragment.set("widget_token", widgetToken);
+    window.location.assign(`/connect/quiltt#${fragment.toString()}`);
+  }
+
+  return (
+    <div className="mt-3 space-y-2" data-testid="bank-search-results">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+        Banks
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {institutions.slice(0, 12).map((inst, i) => {
+          const id = inst.id ?? "";
+          const name = inst.name ?? "Unknown bank";
+          const logoUrl = inst.logo?.url;
+          return (
+            <button
+              key={id || `inst-${i}`}
+              type="button"
+              onClick={() => openBank(id)}
+              disabled={!id}
+              data-testid={`bank-tile-${id}`}
+              className="flex h-20 w-full items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {logoUrl ? (
+                <img
+                  src={logoUrl}
+                  alt=""
+                  aria-hidden
+                  className="h-10 w-10 shrink-0 rounded-full object-contain"
+                />
+              ) : (
+                <span
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-600"
+                  aria-hidden
+                >
+                  {name.slice(0, 1).toUpperCase()}
+                </span>
+              )}
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-900">
+                {name}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }

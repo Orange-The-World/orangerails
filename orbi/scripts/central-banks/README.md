@@ -12,20 +12,40 @@ ORBI VW-median for tax reporting and IFRS use. Storing the central-bank
 authority rate alongside ORBI lets us serve both queries from the same
 table.
 
-Phase D.1 ships three sources, Phase D.2 adds one more:
+Phase D.1 ships three sources, Phase D.2 adds one, Phase D.3 adds four:
 
-| Source            | Pair    | Authority code | Date range available | Phase |
-|-------------------|---------|----------------|----------------------|-------|
-| Banxico           | USD/MXN | `BANXICO`      | ~1993-01-04 onward   | D.1   |
-| BCB (PTAX)        | USD/BRL | `BCB`          | 1984-11-28 onward    | D.1   |
-| Bank of Canada    | USD/CAD | `BOC`          | 2017-01-03 onward    | D.1   |
-| Bank of England   | USD/GBP | `BOE`          | ~1975 onward (XUDLGBD) | D.2 |
+| Source            | Pair             | Authority code | Date range available     | Phase |
+|-------------------|------------------|----------------|--------------------------|-------|
+| Banxico           | USD/MXN          | `BANXICO`      | ~1993-01-04 onward       | D.1   |
+| BCB (PTAX)        | USD/BRL          | `BCB`          | 1984-11-28 onward        | D.1   |
+| Bank of Canada    | USD/CAD          | `BOC`          | 2017-01-03 onward        | D.1   |
+| Bank of England   | USD/GBP          | `BOE`          | ~1975 onward (XUDLGBD)   | D.2   |
+| ECB SDW           | USD/EUR + crosses| `ECB`          | 1999-01-04 onward        | D.3   |
+| RBA (jarvis)      | USD/AUD          | `RBA`          | 1969 onward (F11 hist)   | D.3   |
+| SNB               | USD/CHF + crosses| `SNB`          | 1980 onward              | D.3   |
+| BoJ (Shift_JIS)   | USD/JPY + crosses| `BOJ`          | ~1973 onward             | D.3   |
 
-Phase D.2 sources NOT yet shipped (see `DEFERRED_SOURCES.md`):
+Phase D.3 operational notes:
 
-- Reserve Bank of Australia (`RBA`) - blocked by Akamai bot protection from server IPs.
-- Swiss National Bank (`SNB`) - no no-auth daily JSON cube; only annual + monthly.
-- Bank of Japan (`BOJ`) - form-based scraping w/ Shift_JIS encoding; founder action required.
+- **ECB** is reached directly via the SDW Data API (`data-api.ecb.europa.eu`)
+  in CSV form; replaces the Frankfurter proxy as the authority chain for
+  USD/EUR. Migration 011 retags existing Frankfurter rows to
+  `source_authority='ECB'` in-place (idempotent, scoped to USD/EUR /
+  product=ORBI-D / tier=B-single).
+- **RBA** is Akamai-blocked from bb-support's cloud IP class. The orchestrator
+  invocation must run from jarvis via the wrapper at
+  `/home/kiwi/bin/run-rba-backfill.sh`. The plug-in itself is plain TypeScript;
+  only the network call needs the residential IP.
+- **SNB** tries SDMX CSV cubes first (`devkud` daily — currently 404,
+  `devkutag` placeholder), then falls back to a Playwright path that renders
+  `https://data.snb.ch/en/topics/ziredev/cube/devkua` and extracts the table.
+  The Playwright runner is invoked separately by the caller; the plug-in's
+  `parseTable(headers, rows)` consumes whatever the browser returns.
+- **BoJ** decodes the legacy Shift_JIS CSV with `TextDecoder('shift_jis')`
+  (Node 20+ / Bun). The famecgi2 endpoint requires a session-cookie POST
+  flow in some configurations — direct GETs return an HTML "page cannot be
+  displayed". If the keyless GET fails, a Playwright path is the documented
+  fallback (same shape as SNB).
 
 ---
 

@@ -375,7 +375,10 @@ export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
     slug,
     displayName,
     description,
-    status: 'beta', // CCXT-backed adapters start as beta — many exchange APIs have edge cases
+    // CCXT exchanges go straight to 'live' — the library is widely used
+    // and battle-tested. Per-exchange edge cases get filed as bugs, not
+    // gated behind a beta badge that pollutes the picker UI.
+    status: 'live',
     category: 'exchange',
     tags,
     popularity,
