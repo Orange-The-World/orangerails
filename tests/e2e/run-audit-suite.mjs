@@ -9,9 +9,9 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const specs = [
-  'audit-2026-05-16-landing.spec.mjs',
-  'audit-2026-05-16-support.spec.mjs',
-  'audit-2026-05-16-api.spec.mjs',
+  'audit-2026-05-16-landing.audit.mjs',
+  'audit-2026-05-16-support.audit.mjs',
+  'audit-2026-05-16-api.audit.mjs',
 ];
 
 let totalPass = 0;

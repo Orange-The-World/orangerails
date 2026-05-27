@@ -30,6 +30,7 @@ import { BanxicoSource } from "./sources/banxico";
 import { BcbSource } from "./sources/bcb";
 import { BankOfCanadaSource } from "./sources/bank-of-canada";
 import { BankOfEnglandSource } from "./sources/bank-of-england";
+import { FredSource } from "./sources/fred";
 import {
   AuthorityBatchWriter,
   type AuthorityRateInsert,
@@ -92,7 +93,7 @@ async function mgmtApiQuery(ctx: DbContext, sql: string): Promise<unknown> {
 // ----------------------------------------------------------------------------
 // Authority pipelines
 // ----------------------------------------------------------------------------
-type AuthorityKey = "banxico" | "bcb" | "boc" | "boe";
+type AuthorityKey = "banxico" | "bcb" | "boc" | "boe" | "fred";
 
 async function fetchRowsForAuthority(
   authority: AuthorityKey,
@@ -122,6 +123,15 @@ async function fetchRowsForAuthority(
       const body = await src.fetch({ from, to });
       return src.toInserts(body, fetchedAtIso);
     }
+    case "fred": {
+      const apiKey = env.FRED_API_KEY ?? "";
+      if (!apiKey) throw new Error("FRED_API_KEY is required for fred backfill");
+      const src = new FredSource();
+      return src.fetchAll(
+        { from, to, apiKey, log: (m) => console.log(m) },
+        fetchedAtIso,
+      );
+    }
   }
 }
 
@@ -131,6 +141,7 @@ function pairLabel(authority: AuthorityKey): string {
     case "bcb":     return "USD/BRL";
     case "boc":     return "USD/CAD";
     case "boe":     return "USD/GBP";
+    case "fred":    return "USD/multi(EUR,GBP,JPY,CAD,CHF,AUD,MXN,BRL,INR)";
   }
 }
 
@@ -237,15 +248,15 @@ export async function runCbBackfill(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
+    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
     process.exit(2);
   }
   const [authorityArg, fromArg, toArg] = args as [string, string, string];
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (!["banxico", "bcb", "boc", "boe"].includes(authorityArg)) {
-    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe.`);
+  if (!["banxico", "bcb", "boc", "boe", "fred"].includes(authorityArg)) {
+    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred.`);
     process.exit(2);
   }
   const authority = authorityArg as AuthorityKey;

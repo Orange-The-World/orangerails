@@ -415,7 +415,10 @@ export const xpubAdapter: ProviderAdapter = {
       label: 'Extended public key',
       placeholder: 'xpub… / ypub… / zpub…',
       multiline: true,
-      helpLabel: 'Watch-only — paste from Sparrow, Specter, BlueWallet, etc.',
+      // helpLabel renders inline under the textarea; helpHref activates
+      // the orange "How to get your credentials" banner above the form.
+      helpLabel: 'How to export your xpub',
+      helpHref: 'https://orangerails.com/docs/xpub-export',
     },
     {
       name: 'gap_limit',

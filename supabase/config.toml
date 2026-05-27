@@ -80,3 +80,27 @@ verify_jwt = false
 # --- Single-use invitation token via body --------------------------------
 [functions.or-agent-invite-redeem]
 verify_jwt = false
+
+# --- Quiltt Phase 1: HMAC, platform API key, widget token, internal token ---
+# or-quiltt-webhook verifies a Quiltt HMAC signature header.
+# or-quiltt-session uses platform-mode auth (X-Platform-API-Key).
+# or-quiltt-link-complete uses widget_token (same pattern as or-link-complete).
+# or-sync-key-register uses platform-mode auth.
+# or-quiltt-sync uses an internal worker token (never exposed to integrators).
+[functions.or-quiltt-webhook]
+verify_jwt = false
+
+[functions.or-quiltt-session]
+verify_jwt = false
+
+[functions.or-quiltt-link-complete]
+verify_jwt = false
+
+[functions.or-sync-key-register]
+verify_jwt = false
+
+[functions.or-quiltt-sync]
+verify_jwt = false
+
+[functions.or-quiltt-disconnect]
+verify_jwt = false

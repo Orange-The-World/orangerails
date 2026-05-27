@@ -4,23 +4,28 @@
  * Quiltt posts events here per its webhook spec
  * (https://www.quiltt.dev/webhooks). Payload shape:
  *   {
- *     eventTypes: ["connection.synced.successful.initial", ...],
+ *     environment: { id, mode, name, metadata },
+ *     eventTypes:  ["profile.created", "connection.synced.successful.initial", ...],
  *     events: [
  *       {
  *         id:        "evt_...",
  *         type:      "connection.synced.successful.initial",
- *         timestamp: "2026-06-01T12:34:56Z",
- *         profile:   { id: "p_..." },
- *         record:    { id: "conn_..." },
- *         metadata:  { ... }
+ *         at:        "2026-06-01T12:34:56Z",      // event time
+ *         profile:   { id: "p_...", uuid, metadata },
+ *         record:    { id: "conn_..." | "p_..." | ... },
  *       },
  *       ...
  *     ]
  *   }
  *
- * Verification: per the docs, Quiltt signs each request as
- *   Quiltt-Signature = base64(HMAC-SHA-256(secret, "v1" + ts + raw_body))
- *   Quiltt-Timestamp = ISO 8601 (must be within 5 minutes of now)
+ * Verification: per Quiltt docs
+ *   Quiltt-Signature = base64(HMAC-SHA256(secret, "1" + timestamp + raw_body))
+ *   Quiltt-Timestamp = Unix epoch seconds (must be within 5 minutes of now)
+ *
+ * The version prefix is literal "1" (one digit), not "v1". The timestamp
+ * is a unix-seconds integer in a string, not ISO 8601. Both differ from
+ * the original implementation written for #124 — see PR fix-quiltt-webhook-
+ * signature-scheme.
  *
  * We're not allowed to follow up with a GraphQL pull right here — the
  * 20-second response budget would blow up on a historical sync. So we
@@ -51,12 +56,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const MAX_BODY = 256 * 1024;             // 256KB — generous for batched events
 const MAX_TS_SKEW_MS = 5 * 60 * 1000;    // ±5 minutes
-const SIG_VERSION = 'v1';
+const SIG_VERSION = '1';                  // literal "1", NOT "v1" — see https://www.quiltt.dev/webhooks
 
 interface QuilttEvent {
   id?: unknown;
   type?: unknown;
-  timestamp?: unknown;
+  at?: unknown;            // Quiltt event time (ISO 8601), per spec
+  timestamp?: unknown;     // legacy alias accepted in payload (some events use this name)
   profile?: { id?: unknown };
   record?: { id?: unknown };
   metadata?: unknown;
@@ -78,11 +84,12 @@ Deno.serve(async (req: Request) => {
       return new Response('missing signature headers', { status: 401 });
     }
 
-    const tsMs = Date.parse(tsHeader);
-    if (!Number.isFinite(tsMs)) {
+    // Quiltt-Timestamp is unix epoch SECONDS (integer string), not ISO 8601.
+    const tsSeconds = Number.parseInt(tsHeader, 10);
+    if (!Number.isFinite(tsSeconds) || tsSeconds <= 0) {
       return new Response('bad timestamp', { status: 401 });
     }
-    if (Math.abs(Date.now() - tsMs) > MAX_TS_SKEW_MS) {
+    if (Math.abs(Date.now() - tsSeconds * 1000) > MAX_TS_SKEW_MS) {
       return new Response('timestamp skew', { status: 401 });
     }
 
@@ -97,6 +104,7 @@ Deno.serve(async (req: Request) => {
       return new Response('webhook not configured', { status: 503 });
     }
 
+    // Quiltt's signing payload is the literal version "1" + timestamp + raw body.
     const expected = await computeHmacB64(secret, `${SIG_VERSION}${tsHeader}${body}`);
     if (!timingSafeEqual(expected, sigHeader)) {
       return new Response('bad signature', { status: 401 });

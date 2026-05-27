@@ -295,6 +295,176 @@ Deno.serve(async (req: Request) => {
 
     for (const conn of connections) {
       try {
+        // ─── Quiltt: user-session inbox drain ─────────────────────────
+        // Quiltt connections don't go through the server adapter dispatch
+        // (Quiltt is a client-side manifest, not in getProvider). The
+        // background worker or-quiltt-sync handles OPK-opted-in users;
+        // here we handle the non-opted-in path so an active user gets
+        // their Quiltt webhook data on next sync without OPK setup.
+        if (conn.provider_type === 'quiltt') {
+          if (sinkMode) {
+            // Sink mode (V2) doesn't yet support Quiltt — skip cleanly.
+            results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+            continue;
+          }
+          const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
+          if (!quilttApiKey) {
+            throw new Error('QUILTT_API_KEY not set on this Supabase project');
+          }
+
+          const { data: mapRow, error: mapErr } = await ctx.serviceClient
+            .from('quiltt_profile_map')
+            .select('quiltt_profile_id')
+            .eq('subaccount_id', subaccountId)
+            .maybeSingle();
+          if (mapErr) throw mapErr;
+          if (!mapRow) {
+            // Link was never completed for this subaccount. Surface a
+            // structured no-op result; integrator's UI explains.
+            results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+            continue;
+          }
+
+          // Drain pending inbox events for this subaccount. Limit so a
+          // single user-session sync stays under the function deadline.
+          const QUILTT_INBOX_BATCH = 10;
+          const QUILTT_TX_PAGE_SIZE = 100;
+          const QUILTT_MAX_PAGES = 3;
+          const { data: pending, error: pendErr } = await ctx.serviceClient
+            .from('quiltt_webhook_inbox')
+            .select('event_id, event_type, payload, attempts')
+            .eq('subaccount_id', subaccountId)
+            .is('processed_at', null)
+            .order('received_at', { ascending: true })
+            .limit(QUILTT_INBOX_BATCH);
+          if (pendErr) throw pendErr;
+
+          const basic = btoa(`${mapRow.quiltt_profile_id}:${quilttApiKey}`);
+          let synced = 0;
+
+          for (const ev of (pending ?? []) as Array<{
+            event_id: string; event_type: string; payload: { record?: { id?: string } };
+          }>) {
+            if (!ev.event_type.startsWith('connection.synced.successful')) {
+              await ctx.serviceClient
+                .from('quiltt_webhook_inbox')
+                .update({ processed_at: new Date().toISOString() })
+                .eq('event_id', ev.event_id);
+              continue;
+            }
+            const quilttConnId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
+            if (!quilttConnId) {
+              await ctx.serviceClient
+                .from('quiltt_webhook_inbox')
+                .update({ processed_at: new Date().toISOString(), last_error: 'event missing record.id' })
+                .eq('event_id', ev.event_id);
+              continue;
+            }
+
+            let after: string | null = null;
+            let pages = 0;
+            const rowsToInsert: Array<{ connection_id: string; external_id: string; encrypted_payload: string; payload_key_version: number; occurred_at: string | null }> = [];
+
+            while (pages < QUILTT_MAX_PAGES) {
+              const query = `
+                query Q($connId: ID!, $first: Int!, $after: String) {
+                  transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      id amount currencyCode date description entryType status
+                      account { id }
+                    }
+                  }
+                }
+              `;
+              const resp = await fetch('https://api.quiltt.io/v1/graphql', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Basic ${basic}`,
+                  'Content-Type':  'application/json',
+                },
+                body: JSON.stringify({
+                  query,
+                  variables: { connId: quilttConnId, first: QUILTT_TX_PAGE_SIZE, after },
+                }),
+              });
+              if (!resp.ok) {
+                throw new Error(`Quiltt GraphQL ${resp.status}`);
+              }
+              const json = await resp.json();
+              const txs = (json?.data?.transactions?.nodes ?? []) as Array<{
+                id: string; amount: number; currencyCode: string; date: string;
+                description: string; entryType: string; status: string;
+                account?: { id?: string };
+              }>;
+              const pageInfo = json?.data?.transactions?.pageInfo;
+
+              for (const tx of txs) {
+                const cleartext = JSON.stringify({
+                  amount:          tx.amount,
+                  currency:        tx.currencyCode,
+                  description:     tx.description,
+                  entry_type:      tx.entryType,
+                  upstream_status: tx.status,
+                  account_id:      tx.account?.id,
+                });
+                rowsToInsert.push({
+                  connection_id:       conn.id,
+                  external_id:         tx.id,
+                  encrypted_payload:   await encryptAes(cleartext, txnsKey!),
+                  payload_key_version: 1,
+                  occurred_at:         tx.date,
+                });
+              }
+              if (!pageInfo?.hasNextPage) break;
+              after = pageInfo.endCursor ?? null;
+              pages++;
+            }
+
+            if (rowsToInsert.length > 0) {
+              const { error: upsertErr } = await ctx.serviceClient
+                .from('encrypted_transactions')
+                .upsert(rowsToInsert, { onConflict: 'connection_id,external_id', ignoreDuplicates: true });
+              if (upsertErr) throw upsertErr;
+              synced += rowsToInsert.length;
+            }
+
+            await ctx.serviceClient
+              .from('quiltt_webhook_inbox')
+              .update({ processed_at: new Date().toISOString() })
+              .eq('event_id', ev.event_id);
+          }
+
+          await ctx.serviceClient
+            .from('connections')
+            .update({ last_sync_at: new Date().toISOString(), status: 'active' })
+            .eq('id', conn.id);
+
+          results.push({ connection_id: conn.id, synced, next_cursor: null });
+
+          if (webhookEnabled && webhookPlatformId && synced > 0) {
+            try {
+              await ctx.serviceClient.from('webhook_delivery').insert({
+                platform_id:   webhookPlatformId,
+                subaccount_id: subaccountId,
+                event_type:    'sync.completed',
+                payload: {
+                  event:         'sync.completed',
+                  provider:      'quiltt',
+                  subaccount_id: subaccountId,
+                  connection_id: conn.id,
+                  synced_count:  synced,
+                  ts:            new Date().toISOString(),
+                },
+              });
+            } catch (whErr) {
+              console.error(`[or-sync] webhook enqueue failed for quiltt conn ${conn.id}:`, whErr);
+            }
+          }
+
+          continue;
+        }
+
         const adapter = getProvider(conn.provider_type as string);
         if (!adapter) throw new Error(`Unknown provider: ${conn.provider_type}`);
 

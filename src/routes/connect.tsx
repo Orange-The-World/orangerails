@@ -630,6 +630,11 @@ function ConnectPageInner() {
     search.provider ? "enter-credentials" : "pick-provider",
   );
   const [formValues, setFormValues] = useState<Record<string, string>>({});
+  // User-supplied connection label. Defaults to the platform's display
+  // name (mirrors prior behavior); the user can override before clicking
+  // Continue. The value is encrypted client-side just like credentials —
+  // OR never sees plaintext.
+  const [connectionLabel, setConnectionLabel] = useState<string>("");
   const [discovered, setDiscovered] = useState<DiscoveredWallet[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
@@ -772,7 +777,13 @@ function ConnectPageInner() {
     try {
       const locked = await lockEverything({
         formValues,
-        connectionLabel: platform.display_name,
+        // User-supplied label (defaulted to the platform display name on
+        // mount). Trim and fall back to platform name so an empty input
+        // never produces an empty label.
+        connectionLabel:
+          connectionLabel.trim().length > 0
+            ? connectionLabel.trim()
+            : platform.display_name,
         picks,
         handoff: handoffKeys,
       });
@@ -925,6 +936,8 @@ function ConnectPageInner() {
           onValueChange={(name, value) =>
             setFormValues((prev) => ({ ...prev, [name]: value }))
           }
+          connectionLabel={connectionLabel}
+          onConnectionLabelChange={setConnectionLabel}
           onContinue={handleContinueFromCredentials}
           onCancel={handleCancel}
           error={error}
@@ -977,6 +990,8 @@ function EnterCredentialsStep({
   fields,
   values,
   onValueChange,
+  connectionLabel,
+  onConnectionLabelChange,
   onContinue,
   onCancel,
   error,
@@ -986,6 +1001,8 @@ function EnterCredentialsStep({
   fields: ManifestField[];
   values: Record<string, string>;
   onValueChange: (name: string, value: string) => void;
+  connectionLabel: string;
+  onConnectionLabelChange: (value: string) => void;
   onContinue: (e: React.FormEvent) => void;
   onCancel: () => void;
   error: string | null;
@@ -993,6 +1010,11 @@ function EnterCredentialsStep({
   const allRequiredFilled = fields.every(
     (f) => f.optional === true || (values[f.name] ?? "").trim().length > 0,
   );
+  // "How to get your credentials" banner: surface the first field that
+  // carries a clickable help link (helpHref). Per-field helpLabel text
+  // still renders inline under each input — the banner just makes the
+  // most important help link more discoverable.
+  const primaryHelp = fields.find((f) => f.helpHref);
   return (
     <form onSubmit={onContinue} className="mt-4 space-y-4">
       <div className="flex items-center gap-1.5">
@@ -1032,6 +1054,42 @@ function EnterCredentialsStep({
             </Tooltip>
           </TooltipProvider>
         )}
+      </div>
+
+      {primaryHelp && (
+        <div className="rounded-md border border-orange-500/30 bg-orange-500/5 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-orange-600 dark:text-orange-400">
+              How to get your {providerLabel} credentials
+            </span>
+            <a
+              href={primaryHelp.helpHref}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs font-medium text-primary hover:underline"
+            >
+              {primaryHelp.helpLabel ?? "Open"} ↗
+            </a>
+          </div>
+        </div>
+      )}
+
+      <div>
+        <label htmlFor="connection-label" className="block text-sm font-medium">
+          Label <span className="text-muted-foreground">(optional)</span>
+        </label>
+        <input
+          id="connection-label"
+          type="text"
+          autoComplete="off"
+          value={connectionLabel}
+          onChange={(e) => onConnectionLabelChange(e.target.value)}
+          placeholder={`My ${providerLabel} account`}
+          className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+        />
+        <p className="mt-1 text-xs text-muted-foreground">
+          A name only you see. Encrypted in this browser before it leaves.
+        </p>
       </div>
 
       {fields.map((field) => (
