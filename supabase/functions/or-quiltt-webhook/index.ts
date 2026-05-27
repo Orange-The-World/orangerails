@@ -72,8 +72,50 @@ Deno.serve(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
   try {
-    const sigHeader = req.headers.get('Quiltt-Signature') ?? req.headers.get('quiltt-signature');
-    const tsHeader  = req.headers.get('Quiltt-Timestamp') ?? req.headers.get('quiltt-timestamp');
+    // ── TEMP DEBUG CAPTURE (remove after Quiltt signature spec is verified, 2026-05-27) ──
+    // Captures every request to public._quiltt_webhook_debug BEFORE any
+    // validation, so we can see exactly what Quiltt is sending. Removed
+    // along with the table in a follow-up PR.
+    const debugHeaders: Record<string, string> = {};
+    req.headers.forEach((v, k) => { debugHeaders[k] = v; });
+    const debugBody = await req.text();
+    // ── end capture; rebuild a faux req.text() return below ──
+
+    const sigHeader = req.headers.get('Quiltt-Signature')
+      ?? req.headers.get('quiltt-signature')
+      ?? req.headers.get('Quiltt-Signature-V1')
+      ?? req.headers.get('X-Quiltt-Signature');
+    const tsHeader  = req.headers.get('Quiltt-Timestamp')
+      ?? req.headers.get('quiltt-timestamp')
+      ?? req.headers.get('X-Quiltt-Timestamp');
+
+    let debugExpected: string | null = null;
+    const debugSecret = Deno.env.get('QUILTT_WEBHOOK_SECRET') ?? '';
+    if (sigHeader && tsHeader && debugSecret) {
+      try {
+        debugExpected = await computeHmacB64(debugSecret, `v1${tsHeader}${debugBody}`);
+      } catch { /* ignore */ }
+    }
+    try {
+      const debugSb = createClient(
+        Deno.env.get('SUPABASE_URL')!,
+        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+      );
+      await debugSb.from('_quiltt_webhook_debug').insert({
+        headers:      debugHeaders,
+        body_text:    debugBody.slice(0, 4000),
+        sig_header:   sigHeader,
+        ts_header:    tsHeader,
+        expected_sig: debugExpected,
+        secret_prefix: debugSecret.slice(0, 8),
+        sig_match:    debugExpected !== null && sigHeader === debugExpected,
+        body_length:  debugBody.length,
+      });
+    } catch (debugErr) {
+      console.error('[or-quiltt-webhook][debug] capture failed:', debugErr instanceof Error ? debugErr.message : String(debugErr));
+    }
+    // ── END TEMP DEBUG CAPTURE ──
+
     if (!sigHeader || !tsHeader) {
       return new Response('missing signature headers', { status: 401 });
     }
@@ -86,7 +128,7 @@ Deno.serve(async (req: Request) => {
       return new Response('timestamp skew', { status: 401 });
     }
 
-    const body = await req.text();
+    const body = debugBody;
     if (body.length > MAX_BODY) {
       return new Response('payload too large', { status: 413 });
     }
