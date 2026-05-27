@@ -23,6 +23,12 @@ import type { Candle, HealthStatus, Pair } from "./types";
 
 const PAIR_MAP: Record<string, string> = {
   "BTC-USD": "tBTCUSD",
+  // Stablecoin / fiat-peg spot pairs. Bitfinex spot symbols use legacy
+  // 3-letter codes for these: UST=USDT, UDC=USDC. The base IS the stablecoin
+  // (peg measurement, NOT BTC priced in the stablecoin).
+  "USDT-USD": "tUSTUSD",
+  "USDC-USD": "tUDCUSD",
+  "DAI-USD": "tDAIUSD",
 };
 
 export class BitfinexSource extends BaseSource {

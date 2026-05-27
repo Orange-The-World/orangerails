@@ -33,6 +33,13 @@ const PAIR_MAP: Record<string, string> = {
   "BTC-EUR": "BTC-EUR",
   "BTC-GBP": "BTC-GBP",
   "BTC-INR": "BTC-INR",
+  // Stablecoin / fiat-peg spot pairs. NOTE: Coinbase Exchange does NOT list
+  // USDC-USD (USDC is their home stablecoin; the self-pair returns 404).
+  // PYUSD-USD and EURC-EUR verified live 2026-05-27 with non-zero volume.
+  "USDT-USD": "USDT-USD",
+  "DAI-USD": "DAI-USD",
+  "PYUSD-USD": "PYUSD-USD",
+  "EURC-EUR": "EURC-EUR",
 };
 
 export class CoinbaseExchangeSource extends BaseSource {

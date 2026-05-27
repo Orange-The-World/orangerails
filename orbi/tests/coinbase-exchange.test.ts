@@ -36,13 +36,21 @@ function mockFetchResponse(jsonBody: unknown, status = 200): Response {
 describe("CoinbaseExchangeSource — unit tests with mocked HTTP", () => {
   beforeEach(() => vi.restoreAllMocks());
 
-  it("config: coinbase_exchange, primary, 1.0 rps, four pairs", () => {
+  it("config: coinbase_exchange, primary, 1.0 rps, including stablecoin pairs", () => {
     const src = new CoinbaseExchangeSource();
     expect(src.name).toBe("coinbase_exchange");
     expect(src.role).toBe("primary");
     expect(src.rateLimitRps).toBe(1.0);
     expect(src.userAgent).toContain("Orange-Rails-ORBI/1.0");
-    expect(src.pairsSupported).toEqual(["BTC-USD", "BTC-EUR", "BTC-GBP", "BTC-INR"]);
+    expect(src.pairsSupported).toContain("BTC-USD");
+    expect(src.pairsSupported).toContain("BTC-EUR");
+    expect(src.pairsSupported).toContain("BTC-GBP");
+    expect(src.pairsSupported).toContain("BTC-INR");
+    expect(src.pairsSupported).toContain("USDT-USD");
+    expect(src.pairsSupported).toContain("DAI-USD");
+    expect(src.pairsSupported).toContain("PYUSD-USD");
+    expect(src.pairsSupported).toContain("EURC-EUR");
+    expect(src.pairsSupported).not.toContain("USDC-USD");
     // Coinbase Exchange does NOT list BTC-CAD
     expect(src.pairsSupported).not.toContain("BTC-CAD");
   });
