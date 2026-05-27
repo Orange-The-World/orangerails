@@ -1059,6 +1059,19 @@ function ConnectPageInner() {
           onConnectionLabelChange={setConnectionLabel}
           onContinue={handleContinueFromCredentials}
           onCancel={handleCancel}
+          // Only offer Back when the user actually came from the picker.
+          // If the URL deep-linked a provider (?provider=blink) there's
+          // no picker to go back to — hide the button.
+          onBack={
+            search.provider
+              ? undefined
+              : () => {
+                  setError(null);
+                  setManifest(null);
+                  setFormValues({});
+                  setStep("pick-provider");
+                }
+          }
           error={error}
         />
       )}
@@ -1113,6 +1126,7 @@ function EnterCredentialsStep({
   onConnectionLabelChange,
   onContinue,
   onCancel,
+  onBack,
   error,
 }: {
   providerLabel: string;
@@ -1124,6 +1138,10 @@ function EnterCredentialsStep({
   onConnectionLabelChange: (value: string) => void;
   onContinue: (e: React.FormEvent) => void;
   onCancel: () => void;
+  /** Optional. When provided, renders a "Back" button that returns the
+   *  user to the picker. Hidden when undefined (deep-linked entry — no
+   *  picker step to return to). */
+  onBack?: () => void;
   error: string | null;
 }) {
   const allRequiredFilled = fields.every(
@@ -1260,23 +1278,32 @@ function EnterCredentialsStep({
 
 
       {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+        <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
           {error}
         </div>
       )}
 
       <div className="flex gap-2 pt-2">
+        {onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Back
+          </button>
+        )}
         <button
           type="button"
           onClick={onCancel}
-          className="flex-1 rounded-md border border-input bg-background px-4 py-2 text-sm font-medium"
+          className="flex-1 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
         >
           Cancel
         </button>
         <button
           type="submit"
           disabled={!allRequiredFilled}
-          className="flex-1 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+          className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           Continue
         </button>
