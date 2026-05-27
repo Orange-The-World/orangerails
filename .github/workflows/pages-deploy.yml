@@ -3,10 +3,22 @@ name: Deploy to Cloudflare Pages
 on:
   push:
     branches: [dev, prod]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why are you redeploying? (e.g. cancelled deploy, asset cache bust)'
+        required: false
+        type: string
 
 concurrency:
   group: pages-${{ github.ref }}
-  cancel-in-progress: true
+  # Don't cancel in-progress runs. A merge train can produce two pushes
+  # in quick succession; cancelling the first means its commit's content
+  # never deploys (the second deploy ships its own sha, the first is
+  # silently dropped). 2026-05-27: this bit us when #134 squash-merged
+  # 90s after #135 and the docs/xpub-export changes did not ship until
+  # an empty redeploy commit was pushed. Queue serially instead.
+  cancel-in-progress: false
 
 jobs:
   deploy:
