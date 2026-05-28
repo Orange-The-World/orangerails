@@ -29,11 +29,13 @@ export type SourceAuthority =
   | "BCCH"
   | "BLOCKCHAIN_COM"
   | "BSP"
+  | "BCRP"
   | "BNM"
   | "BANREP"
   | "SARB"
   | "BCRP"
-  | "RBI";
+  | "RBI"
+  | "BI";
 
 export interface AuthorityRateInsert {
   source_currency: string;

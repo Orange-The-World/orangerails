@@ -42,6 +42,7 @@ import { BanrepSource } from "./sources/banrep";
 import { SarbSource } from "./sources/sarb";
 import { BcrpSource } from "./sources/bcrp";
 import { RbiSource } from "./sources/rbi";
+import { BiSource } from "./sources/bi";
 import {
   AuthorityBatchWriter,
   type AuthorityRateInsert,
@@ -131,7 +132,8 @@ type AuthorityKey =
   | "banrep"
   | "sarb"
   | "bcrp"
-  | "rbi";
+  | "rbi"
+  | "bi";
 
 async function fetchRowsForAuthority(
   authority: AuthorityKey,
@@ -332,7 +334,25 @@ async function fetchRowsForAuthority(
       });
       return src.toInserts(unique, fetchedAtIso);
     }
-
+    case "bi": {
+      const src = new BiSource();
+      const parsed = await src.fetchRange({
+        from,
+        to,
+      });
+      // Dedup by date — fetchRange already returns a unique-by-date list
+      // (the BI Unduh XLSX export contains one row per JISDOR
+      // publication), but we re-enforce here so a fixture override in
+      // tests can't trip the batch UPSERT's ON CONFLICT DO UPDATE path
+      // ("cannot affect row a second time").
+      const seen = new Set<string>();
+      const unique = parsed.filter((o) => {
+        if (seen.has(o.date)) return false;
+        seen.add(o.date);
+        return true;
+      });
+      return src.toInserts(unique, fetchedAtIso);
+    }
     case "boj": {
       const src = new BojSource();
       const yearFrom = Number(from.slice(0, 4));
@@ -371,6 +391,7 @@ function pairLabel(authority: AuthorityKey): string {
     case "sarb":    return "USD/ZAR";
     case "bcrp":    return "USD/PEN";
     case "rbi":     return "USD/INR";
+    case "bi":      return "USD/IDR";
   }
 }
 
@@ -477,15 +498,15 @@ export async function runCbBackfill(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch|bsp|bnm|banrep|sarb|bcrp|rbi> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
+    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch|bsp|bnm|banrep|sarb|bcrp|rbi|bi> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
     process.exit(2);
   }
   const [authorityArg, fromArg, toArg] = args as [string, string, string];
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch", "bsp", "bnm", "banrep", "sarb", "bcrp", "rbi"].includes(authorityArg)) {
-    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch, bsp, bnm, banrep, sarb, bcrp, rbi.`);
+  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch", "bsp", "bnm", "banrep", "sarb", "bcrp", "rbi", "bi"].includes(authorityArg)) {
+    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch, bsp, bnm, banrep, sarb, bcrp, rbi, bi.`);
     process.exit(2);
   }
   const authority = authorityArg as AuthorityKey;

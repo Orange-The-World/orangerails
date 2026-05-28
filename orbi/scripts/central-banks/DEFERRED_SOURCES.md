@@ -275,6 +275,35 @@ Status: **shipped 2026-05-27**.
 See `orbi/scripts/central-banks/sources/rbi.ts` and migration
 `orbi/schema/021_register_rbi.sql`.
 
+## Bank Indonesia (BI) — shipped via JISDOR Unduh XLSX export
+
+Status: **shipped 2026-05-28**.
+
+- BI publishes JISDOR (Jakarta Interbank Spot Dollar Offered Rate), the
+  official daily USD/IDR reference rate, on a SharePoint-hosted ASP.NET
+  WebForms page at
+  `https://www.bi.go.id/id/statistik/informasi-kurs/jisdor/default.aspx`.
+  Computed each business day at ~10:00 WIB (UTC+7) from volume-weighted
+  spot interbank quotes.
+- Sovereign-authoritative: page is served from www.bi.go.id under a
+  valid GlobalSign cert with O=Bank Indonesia. No auth, no API key, no
+  Akamai fingerprint — silent-friendly under ORBI's Hybrid Asymmetric
+  Strategy.
+- Transport: the page exposes a date-range form with two buttons —
+  "Cari" (Search, returns 10-row paginated HTML) and "Unduh" (Download,
+  returns the full matching range as a single XLSX attachment). ORBI
+  uses the Unduh path: one GET to harvest the `__VIEWSTATE` triple,
+  one POST to fetch the export. Empirically the BI backend serves a
+  5-year window (2021-01-01 → 2026-05-27, ~1,299 rows) in a ~32 KB
+  XLSX in under 5 seconds.
+- Header requirement: bare `User-Agent: curl/*` is blocked; a standard
+  Chrome string with an `Orange-Rails-ORBI/1.0` suffix-comment passes.
+- XLSX parsed in-process via the same `node:zlib` zip-reader pattern
+  used by BSP (no external dependency).
+
+See `orbi/scripts/central-banks/sources/bi.ts` and migration
+`orbi/schema/019_register_bi.sql`.
+
 ---
 
 ## What ships in Phase D.2
@@ -282,5 +311,5 @@ See `orbi/scripts/central-banks/sources/rbi.ts` and migration
 Bank of England (`BOE`), Banco Central de Chile (`BCCH`), Bangko
 Sentral ng Pilipinas (`BSP`), Bank Negara Malaysia (`BNM`), Banco de la
 República (`BANREP`), South African Reserve Bank (`SARB`), Banco
-Central de Reserva del Perú (`BCRP`), and Reserve Bank of India (`RBI`)
-ship fully working. See main README.
+Central de Reserva del Perú (`BCRP`), Reserve Bank of India (`RBI`),
+and Bank Indonesia (`BI`) ship fully working. See main README.
