@@ -187,8 +187,39 @@ See `orbi/scripts/central-banks/sources/banrep.ts` and migration
 
 ---
 
+## South African Reserve Bank (SARB) — shipped via Web API (EXCX135D)
+
+Status: **shipped 2026-05-27**.
+
+- SARB publishes the daily USD/ZAR indicative reference rate as
+  timeseries code `EXCX135D` ("Rand per US Dollar") via its public Web
+  API at
+  `https://custom.resbank.co.za/SarbWebApi/WebIndicators/Shared/GetTimeseriesObservations/EXCX135D/{startDate}/{endDate}`.
+  SARB's own description of the series: "Weighted average of the banks'
+  daily rates at approximately 10:30 am. Weights are based on the banks'
+  foreign exchange transactions." Coverage verified 2026-05-27:
+  2021-01-04 → present (1,348 rows over the 5-year window).
+- Sovereign-authoritative: served directly from SARB's
+  `custom.resbank.co.za` Web API (same host as the SARB homepage market
+  rates ticker). JSON, no auth, no API key, no Akamai-style WAF —
+  silent-friendly.
+- We already carry USD/ZAR via Frankfurter cross-rate; SARB adds the
+  sovereign-authority signature on the same pair, more defensible for
+  South African customer audits. Orchestrator's `source_authority='SARB'`
+  is what differentiates the rows.
+- ToS posture: SARB disclaimer prohibits redistribution without written
+  consent; ORBI uses this rate as an authoritative reference signal
+  (auditor-facing provenance), not for bulk republication — same
+  silent-posture stance applied to RBA.
+
+See `orbi/scripts/central-banks/sources/sarb.ts` and migration
+`orbi/schema/020_register_sarb.sql`.
+
+---
+
 ## What ships in Phase D.2
 
 Bank of England (`BOE`), Banco Central de Chile (`BCCH`), Bangko
-Sentral ng Pilipinas (`BSP`), Bank Negara Malaysia (`BNM`), and
-Banco de la República (`BANREP`) ship fully working. See main README.
+Sentral ng Pilipinas (`BSP`), Bank Negara Malaysia (`BNM`), Banco de la
+República (`BANREP`), and South African Reserve Bank (`SARB`) ship fully
+working. See main README.
