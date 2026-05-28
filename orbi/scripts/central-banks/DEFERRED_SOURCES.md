@@ -217,6 +217,40 @@ See `orbi/scripts/central-banks/sources/sarb.ts` and migration
 
 ---
 
+## Banco Central de Reserva del Perú (BCRP) — shipped via BCRPData API
+
+Status: **shipped 2026-05-27**.
+
+- BCRP publishes the daily USD/PEN interbank reference rate ("Tipo de
+  Cambio Interbancario - Venta", series `PD04638PD`) through the
+  BCRPData REST API at
+  `https://estadisticas.bcrp.gob.pe/estadisticas/series/api/PD04638PD/json/<from>/<to>`.
+  Free, no auth, no key, no Akamai/Incapsula fingerprint on the
+  `estadisticas` subdomain (the primary `www.bcrp.gob.pe` IS Incapsula-
+  fronted; we route around it).
+- Coverage: full daily coverage from at least 2003 onward; ORBI
+  consumes 2021-01-01 → present on first backfill.
+- Sovereign-authoritative: BCRPData is published directly by BCRP's
+  Gerencia Central de Estudios Económicos; the API is documented at
+  `https://estadisticas.bcrp.gob.pe/estadisticas/series/ayuda/api`.
+- Response uses Spanish-month-name dates ("04.Ene.21" = 2021-01-04) and
+  decimal-string values; parsed in-process with a defensive Spanish
+  date parser that accepts both BCRP's canonical "Set" and the
+  alternative "Sep" abbreviations for September.
+
+ToS: BCRP's Condiciones de Uso page
+(`https://estadisticas.bcrp.gob.pe/estadisticas/series/ayuda/condiciones-de-uso`)
+explicitly permits full or partial reproduction without prior
+authorization provided the source is cited
+("Puede reproducirse total o parcialmente, sin autorización expresa,
+siempre y cuando se cite la fuente."). Assessment:
+`permitted-with-attribution`.
+
+See `orbi/scripts/central-banks/sources/bcrp.ts` and migration
+`orbi/schema/023_register_bcrp.sql`.
+
+---
+
 ## What ships in Phase D.2
 
 Bank of England (`BOE`), Banco Central de Chile (`BCCH`), Bangko

@@ -40,6 +40,7 @@ import { BspSource } from "./sources/bsp";
 import { BnmSource } from "./sources/bnm";
 import { BanrepSource } from "./sources/banrep";
 import { SarbSource } from "./sources/sarb";
+import { BcrpSource } from "./sources/bcrp";
 import {
   AuthorityBatchWriter,
   type AuthorityRateInsert,
@@ -127,7 +128,8 @@ type AuthorityKey =
   | "bsp"
   | "bnm"
   | "banrep"
-  | "sarb";
+  | "sarb"
+  | "bcrp";
 
 async function fetchRowsForAuthority(
   authority: AuthorityKey,
@@ -213,6 +215,16 @@ async function fetchRowsForAuthority(
         { serie: parsed.map((r) => ({ fecha: `${r.date}T00:00:00.000Z`, valor: r.value })) },
         fetchedAtIso,
       );
+    }
+    case "bcrp": {
+      const src = new BcrpSource();
+      // fetchRange already dedups by date and filters to the window.
+      const parsed = await src.fetchRange({
+        from,
+        to,
+        log: (m) => console.log(m),
+      });
+      return src.parsedToInserts(parsed, fetchedAtIso, { from, to });
     }
     case "bsp": {
       const src = new BspSource();
@@ -337,6 +349,7 @@ function pairLabel(authority: AuthorityKey): string {
     case "bnm":     return "USD/MYR";
     case "banrep":  return "USD/COP";
     case "sarb":    return "USD/ZAR";
+    case "bcrp":    return "USD/PEN";
   }
 }
 
@@ -443,15 +456,15 @@ export async function runCbBackfill(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch|bsp|bnm|banrep|sarb> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
+    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch|bsp|bnm|banrep|sarb|bcrp> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
     process.exit(2);
   }
   const [authorityArg, fromArg, toArg] = args as [string, string, string];
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch", "bsp", "bnm", "banrep", "sarb"].includes(authorityArg)) {
-    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch, bsp, bnm, banrep, sarb.`);
+  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch", "bsp", "bnm", "banrep", "sarb", "bcrp"].includes(authorityArg)) {
+    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch, bsp, bnm, banrep, sarb, bcrp.`);
     process.exit(2);
   }
   const authority = authorityArg as AuthorityKey;

@@ -31,7 +31,8 @@ export type SourceAuthority =
   | "BSP"
   | "BNM"
   | "BANREP"
-  | "SARB";
+  | "SARB"
+  | "BCRP";
 
 export interface AuthorityRateInsert {
   source_currency: string;
