@@ -16,7 +16,22 @@ describe("LunoSource", () => {
   it("config", () => {
     const s = new LunoSource();
     expect(s.name).toBe("luno");
-    expect(s.pairsSupported).toEqual(["BTC-ZAR"]);
+    expect(s.pairsSupported).toEqual(["BTC-ZAR", "BTC-MYR"]);
+  });
+
+  it("fetch: supports BTC-MYR via the same ticker shape", async () => {
+    const myr = {
+      pair: "XBTMYR", timestamp: 1779938598317, bid: "295481.00", ask: "295691.00",
+      last_trade: "295695.00", rolling_24_hour_volume: "14.12", status: "ACTIVE",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockJson(myr)));
+    const s = new LunoSource();
+    const r = await s.fetch({ source: "BTC", target: "MYR" },
+      new Date("2026-05-27T00:00:00Z"), new Date("2026-05-27T00:01:30Z"));
+    expect(r.success).toBe(true);
+    expect(r.candles).toHaveLength(1);
+    expect(r.candles[0]!.close).toBe(295695);
+    expect(r.candles[0]!.volume).toBe(0);
   });
 
   it("fetch: emits one zero-volume candle from last_trade", async () => {

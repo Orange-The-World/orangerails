@@ -1,5 +1,5 @@
 /**
- * Luno source plug-in (BTC/ZAR) — ticker-only / B-single-eligible-only.
+ * Luno source plug-in (BTC/ZAR, BTC/MYR) — ticker-only / B-single-eligible-only.
  *
  * IMPORTANT (validated empirically 2026-05-26): Luno's documented public
  * candles endpoint
@@ -39,6 +39,10 @@ import type { Candle, HealthStatus, Pair } from "./types.ts";
 
 const PAIR_MAP: Record<string, string> = {
   "BTC-ZAR": "XBTZAR",
+  // Added 2026-05-27: BTC/MYR via Luno Malaysia (verified live last_trade
+  // 295,695 MYR, 14.12 BTC 24h rolling volume). Luno is the only keyless
+  // Bank Negara Malaysia-recognised venue listing this pair.
+  "BTC-MYR": "XBTMYR",
 };
 
 export class LunoSource extends BaseSource {

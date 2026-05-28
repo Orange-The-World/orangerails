@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily 03:00 UTC trigger for ORBI CB refresh
+Documentation=https://wiki.bitbooks.com/doc/orbi-operations-runbook-BWIfMr0e5J
+
+[Timer]
+# Fires every day at 03:00 UTC. Persistent=true means missed schedules
+# (server down at 03:00) run at next boot.
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=orbi-cb-daily-refresh.service
+
+[Install]
+WantedBy=timers.target

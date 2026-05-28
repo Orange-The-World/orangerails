@@ -1,0 +1,21 @@
+{
+  "_documentation": {
+    "watchdog_days": "Alert via Signal if no new row in N days. Tuned per CB to avoid weekend/holiday false-positives.",
+    "publish_cadence": "Human-readable publishing schedule.",
+    "schedule_offset_min": "Offset within the daily window. Bumps execution past known late-publish CBs.",
+    "active": "false skips the CB entirely (use for not-yet-implemented sources).",
+    "orchestrator_key": "Optional override for the CLI arg passed to scripts/central-banks/orchestrator.ts. Defaults to the config key. E.g. FED data is fetched via 'fred' source but stored as authority FED.",
+    "db_authority": "Optional override for the source_authority value stored in exchange_rates. Defaults to upper(config_key)."
+  },
+  "fed":     {"watchdog_days": 4, "publish_cadence": "business-days, ~21:00 UTC", "schedule_offset_min": 0,  "active": true,  "orchestrator_key": "fred", "db_authority": "FED"},
+  "ecb":     {"watchdog_days": 4, "publish_cadence": "business-days, ~14:15 UTC", "schedule_offset_min": 0,  "active": true},
+  "boe":     {"watchdog_days": 5, "publish_cadence": "business-days + UK holidays", "schedule_offset_min": 0,  "active": true},
+  "banxico": {"watchdog_days": 4, "publish_cadence": "business-days, ~12:00 UTC", "schedule_offset_min": 0,  "active": true},
+  "bcb":     {"watchdog_days": 2, "publish_cadence": "daily-incl-weekends, ~13:30 UTC", "schedule_offset_min": 30, "active": true},
+  "boc":     {"watchdog_days": 4, "publish_cadence": "business-days, ~16:30 UTC", "schedule_offset_min": 0,  "active": true},
+  "rba":     {"watchdog_days": 4, "publish_cadence": "business-days, AU evening UTC", "schedule_offset_min": 0,  "active": true},
+  "snb":     {"watchdog_days": 5, "publish_cadence": "business-days, ~CH afternoon UTC", "schedule_offset_min": 0,  "active": true},
+  "boj":     {"watchdog_days": 5, "publish_cadence": "business-days, ~JP evening UTC", "schedule_offset_min": 0,  "active": true},
+  "bsp":     {"watchdog_days": 4, "publish_cadence": "business-days, ~PH afternoon UTC", "schedule_offset_min": 0,  "active": true},
+  "bcch":    {"watchdog_days": 4, "publish_cadence": "business-days, ~CL afternoon UTC", "schedule_offset_min": 0,  "active": false, "_note": "Source on feat/cb-bcch-clp-via-mindicador branch. Set active=true once merged to dev."}
+}

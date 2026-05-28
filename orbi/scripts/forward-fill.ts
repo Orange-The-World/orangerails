@@ -35,6 +35,10 @@ import { BithumbSource } from "../src/sources/bithumb";
 import { RipioSource } from "../src/sources/ripio";
 import { BtseSource } from "../src/sources/btse";
 import { FiriSource } from "../src/sources/firi";
+import { BitkubSource } from "../src/sources/bitkub";
+import { IndodaxSource } from "../src/sources/indodax";
+import { CoinmateSource } from "../src/sources/coinmate";
+import { BudaSource } from "../src/sources/buda";
 import { FrankfurterSource } from "../src/sources/frankfurter";
 import { resolve, type ResolveResult } from "../src/calculate/resolve";
 import { resolveComposite, type CompositeResolveResult } from "../src/calculate/resolve-composite";
@@ -87,6 +91,17 @@ const DIRECT_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "NOK" }, // Firi
   { source: "BTC", target: "DKK" }, // Firi
   { source: "BTC", target: "NZD" }, // Independent Reserve
+  // Extension batch 2026-05-27 — BTC × emerging-market fiat.
+  // Each pair has at least one verified direct source plus a composite
+  // fallback entry below (PLN/PHP/ILS/AED/SAR/UAH are composite-only — no
+  // keyless venue we surveyed lists them with a public market API).
+  { source: "BTC", target: "THB" }, // Bitkub
+  { source: "BTC", target: "IDR" }, // Indodax
+  { source: "BTC", target: "MYR" }, // Luno (Malaysia)
+  { source: "BTC", target: "CZK" }, // Coinmate
+  { source: "BTC", target: "CLP" }, // Buda
+  { source: "BTC", target: "COP" }, // Buda
+  { source: "BTC", target: "PEN" }, // Buda
 ];
 
 // Composite pairs (Tier C via BTC/USD ORBI × USD/X Frankfurter).
@@ -103,6 +118,30 @@ const COMPOSITE_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "SEK" }, // composite-only — no direct source available
   { source: "BTC", target: "DKK" },
   { source: "BTC", target: "NZD" },
+  // 2026-05-27 BTC × emerging-market fiat extension.
+  // Composite fallback behind each direct source, plus six composite-only
+  // pairs where no keyless venue exposes a direct BTC/fiat market:
+  //   PLN — Kraken/Bitstamp delisted PLN spot; Polish exchanges keyless API absent.
+  //   PHP — PDAX returns HTTP 403 to non-resident IPs; Coins.ph public ticker
+  //         host (api.coins.asia) currently unreachable from our infra.
+  //   ILS — Bits of Gold sits behind Cloudflare bot protection.
+  //   AED — Rain / BitOasis public market data require auth.
+  //   SAR — Rain (sole regulated venue) public market data requires auth.
+  //   UAH — Kuna's v3/v4 public tickers no longer keyless; api.kuna.io
+  //         returns connection refused from our hosts.
+  { source: "BTC", target: "THB" },
+  { source: "BTC", target: "IDR" },
+  { source: "BTC", target: "MYR" },
+  { source: "BTC", target: "CZK" },
+  { source: "BTC", target: "PLN" }, // composite-only (no keyless direct venue)
+  { source: "BTC", target: "PHP" }, // composite-only
+  { source: "BTC", target: "ILS" }, // composite-only
+  // NOTE: CLP, COP, PEN are direct-only via Buda; ECB does not publish a
+  // USD/{CLP,COP,PEN} fixing through Frankfurter, so no composite fallback
+  // is configured (Buda outages mean a missed minute, not a stale-rate row).
+  // AED, SAR, UAH have neither a verified keyless direct source nor an ECB
+  // cross-rate; they are documented in the PR description as future
+  // credential / fetcher asks and intentionally excluded from this batch.
 ];
 
 // Stablecoin / fiat-peg spot pairs.
@@ -152,6 +191,10 @@ const allBtcSources: Source[] = [
   new RipioSource(),
   new BtseSource(),
   new FiriSource(),
+  new BitkubSource(),
+  new IndodaxSource(),
+  new CoinmateSource(),
+  new BudaSource(),
 ];
 const frankfurter = new FrankfurterSource();
 
