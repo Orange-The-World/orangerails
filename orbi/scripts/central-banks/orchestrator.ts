@@ -35,6 +35,7 @@ import { EcbSource, ECB_PAIRS } from "./sources/ecb";
 import { RbaSource } from "./sources/rba";
 import { SnbSource } from "./sources/snb";
 import { BojSource, type BojPair } from "./sources/boj";
+import { BcchSource } from "./sources/bcch";
 import {
   AuthorityBatchWriter,
   type AuthorityRateInsert,
@@ -117,7 +118,8 @@ type AuthorityKey =
   | "ecb"
   | "rba"
   | "snb"
-  | "boj";
+  | "boj"
+  | "bcch";
 
 async function fetchRowsForAuthority(
   authority: AuthorityKey,
@@ -190,6 +192,20 @@ async function fetchRowsForAuthority(
       const parsed = await runSnbPlaywright({ log: (m) => console.log(m) });
       return src.toInserts(parsed, fetchedAtIso);
     }
+    case "bcch": {
+      const src = new BcchSource();
+      const parsed = await src.fetchRange({
+        from,
+        to,
+        log: (m) => console.log(m),
+      });
+      // Reuse toInserts to keep field defaults in one place: synthesize a
+      // BcchRawResponse with the already-filtered observations.
+      return src.toInserts(
+        { serie: parsed.map((r) => ({ fecha: `${r.date}T00:00:00.000Z`, valor: r.value })) },
+        fetchedAtIso,
+      );
+    }
     case "boj": {
       const src = new BojSource();
       const yearFrom = Number(from.slice(0, 4));
@@ -221,6 +237,7 @@ function pairLabel(authority: AuthorityKey): string {
     case "rba":     return "USD/AUD";
     case "snb":     return "USD/CHF+CHF-crosses";
     case "boj":     return "USD/JPY+JPY-crosses";
+    case "bcch":    return "USD/CLP";
   }
 }
 
@@ -327,15 +344,15 @@ export async function runCbBackfill(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
+    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
     process.exit(2);
   }
   const [authorityArg, fromArg, toArg] = args as [string, string, string];
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj"].includes(authorityArg)) {
-    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj.`);
+  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch"].includes(authorityArg)) {
+    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch.`);
     process.exit(2);
   }
   const authority = authorityArg as AuthorityKey;

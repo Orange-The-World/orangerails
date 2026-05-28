@@ -82,6 +82,30 @@ Until that's resolved, BOJ stays deferred.
 
 ---
 
+## Banco Central de Chile (BCCH) - shipped via mindicador.cl proxy
+
+Status: **shipped 2026-05-27** (founder approved Option 1).
+
+- BCCH's official Siete REST API
+  (`https://si3.bcentral.cl/SieteRestWS/SieteRestWS.ashx`) requires
+  registered authentication, which violates ORBI's silent-posture rule
+  (no permission emails, no central-bank fingerprint).
+- mindicador.cl proxies the BCCH "Dólar Observado" series
+  (F073.TCO.PRE.Z.D) as free, no-auth JSON at
+  `https://mindicador.cl/api/dolar/<YYYY>`.
+- Coverage 2003-01-02 onward; no anti-scraping, no documented
+  commercial restriction.
+
+Authority tagging follows the established ECB-via-Frankfurter
+precedent: rows land with `source_authority='BCCH'` per data origin;
+transport (`mindicador.cl`) is recorded only on the providers row, not
+on the observation.
+
+See `orbi/scripts/central-banks/sources/bcch.ts` and migration
+`orbi/schema/016_register_bcch.sql`.
+
+---
+
 ## What ships in Phase D.2
 
 Only Bank of England (`BOE`) ships fully working. See main README.

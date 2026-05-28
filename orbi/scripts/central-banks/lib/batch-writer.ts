@@ -26,6 +26,7 @@ export type SourceAuthority =
   | "RBA"
   | "SNB"
   | "BOJ"
+  | "BCCH"
   | "BLOCKCHAIN_COM";
 
 export interface AuthorityRateInsert {
