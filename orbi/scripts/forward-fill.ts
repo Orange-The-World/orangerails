@@ -66,6 +66,17 @@ if (!m) {
 }
 const PROJECT_REF = m[1];
 
+// --- Local PG (bb-support self-hosted) ---
+// If ORBI_LOCAL_DB_URL is set, all writes go to local Postgres instead of
+// Supabase Mgmt API. This bypasses Cloud's Disk IO Budget bottleneck.
+// Local DB lives in the supabase-db container, exposed via orbi-pg-proxy on
+// 127.0.0.1:5435. Phase C sync handles pushing the serving subset to Cloud.
+const LOCAL_DB_URL = env.ORBI_LOCAL_DB_URL || "";
+import { SQL } from "bun";
+const localSql = LOCAL_DB_URL ? new SQL(LOCAL_DB_URL) : null;
+if (localSql) console.log("forward-fill: writing to LOCAL PG (", LOCAL_DB_URL.split("@")[1], ")");
+else console.log("forward-fill: writing to CLOUD Mgmt API (ORBI_LOCAL_DB_URL not set)");
+
 // --- Configured pairs ---
 
 // Direct pairs (resolved via VW-median across sources that quote them)
@@ -200,6 +211,12 @@ const frankfurter = new FrankfurterSource();
 
 // --- Helpers ---
 async function mgmtApiQuery(sql: string): Promise<unknown> {
+  if (localSql) {
+    // Local PG path — Bun.sql returns rows directly as an array.
+    const rows = await localSql.unsafe(sql);
+    return Array.isArray(rows) ? rows : [];
+  }
+  // Fallback: Cloud Mgmt API
   const res = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query`, {
     method: "POST",
     headers: {
@@ -384,7 +401,9 @@ async function writeCompositeRate(target: string, result: CompositeResolveResult
 // --- One iteration ---
 async function runIteration(label: string): Promise<void> {
   const t0 = Date.now();
-  const effectiveAt = new Date(Date.now() - 90_000); // 1.5 min back so candles have closed
+  // --at <iso> overrides effectiveAt for gap-fill of past minutes
+  const atArg = process.argv.find((a, i) => process.argv[i-1] === "--at");
+  const effectiveAt = atArg ? new Date(atArg) : new Date(Date.now() - 90_000);
 
   console.log(`\n[${new Date().toISOString()}] ${label} — effectiveAt=${effectiveAt.toISOString()}`);
 

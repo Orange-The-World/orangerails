@@ -154,7 +154,34 @@ interface DbContext {
   accessToken: string;
 }
 
+// Local PG override — if ORBI_LOCAL_DB_URL is set, all reads/writes go to
+// the bb-support self-hosted Postgres, bypassing Cloud's Disk IO Budget.
+import { SQL as _BunSQL } from "bun";
+const _localUrl = (typeof process !== "undefined" && process.env && process.env.ORBI_LOCAL_DB_URL) || "";
+// Also try /opt/bb-support/.env when run via systemd (env not propagated)
+let _resolvedLocalUrl = _localUrl;
+if (!_resolvedLocalUrl) {
+  try {
+    const txt = (await import("node:fs")).readFileSync("/opt/bb-support/.env", "utf8");
+    for (const line of txt.split("\n")) {
+      if (line.startsWith("ORBI_LOCAL_DB_URL=")) {
+        let v = line.slice("ORBI_LOCAL_DB_URL=".length).trim();
+        if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+        _resolvedLocalUrl = v;
+        break;
+      }
+    }
+  } catch {}
+}
+const localSql = _resolvedLocalUrl ? new _BunSQL(_resolvedLocalUrl) : null;
+if (localSql) console.log("reconcile-gaps: using LOCAL PG");
+else console.log("reconcile-gaps: using CLOUD Mgmt API");
+
 async function mgmtApiQuery(ctx: DbContext, sql: string): Promise<unknown> {
+  if (localSql) {
+    const rows = await localSql.unsafe(sql);
+    return Array.isArray(rows) ? rows : [];
+  }
   const res = await fetch(`https://api.supabase.com/v1/projects/${ctx.projectRef}/database/query`, {
     method: "POST",
     headers: {
