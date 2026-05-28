@@ -106,6 +106,28 @@ See `orbi/scripts/central-banks/sources/bcch.ts` and migration
 
 ---
 
+## Bangko Sentral ng Pilipinas (BSP) — shipped via pesodollar.xlsx
+
+Status: **shipped 2026-05-27**.
+
+- BSP publishes the daily USD/PHP reference rate (and monthly/annual
+  averages) in a single workbook at
+  `https://www.bsp.gov.ph/statistics/external/pesodollar.xlsx`. Daily
+  sheet covers 1978-01-03 → present; ORBI consumes 2021-01-01 → present
+  on first backfill.
+- Sovereign-authoritative: file is published directly from BSP's own
+  SharePoint path and referenced from the BSP ExchangeRate.aspx landing
+  page. No auth, no API key, no Akamai fingerprint — silent-friendly.
+- XLSX is parsed in-process via a minimal `node:zlib` zip reader (no
+  external dependency), matching the convention of every other
+  central-bank plug-in in this folder.
+
+See `orbi/scripts/central-banks/sources/bsp.ts` and migration
+`orbi/schema/017_register_bsp.sql`.
+
+---
+
 ## What ships in Phase D.2
 
-Only Bank of England (`BOE`) ships fully working. See main README.
+Bank of England (`BOE`), Banco Central de Chile (`BCCH`), and Bangko
+Sentral ng Pilipinas (`BSP`) ship fully working. See main README.

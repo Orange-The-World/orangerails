@@ -36,6 +36,7 @@ import { RbaSource } from "./sources/rba";
 import { SnbSource } from "./sources/snb";
 import { BojSource, type BojPair } from "./sources/boj";
 import { BcchSource } from "./sources/bcch";
+import { BspSource } from "./sources/bsp";
 import {
   AuthorityBatchWriter,
   type AuthorityRateInsert,
@@ -119,7 +120,8 @@ type AuthorityKey =
   | "rba"
   | "snb"
   | "boj"
-  | "bcch";
+  | "bcch"
+  | "bsp";
 
 async function fetchRowsForAuthority(
   authority: AuthorityKey,
@@ -206,6 +208,22 @@ async function fetchRowsForAuthority(
         fetchedAtIso,
       );
     }
+    case "bsp": {
+      const src = new BspSource();
+      const wb = await src.fetch();
+      const parsed = src.parseDaily(wb, from, to);
+      // Dedup by date — BSP's XLSX layout overlaps year blocks at the
+      // boundary in rare cases (Dec 31 appearing in both the prior-year
+      // block and the year-header padding); a single insert per
+      // (source_authority, bucket_ts) is required by ON CONFLICT.
+      const seen = new Set<string>();
+      const unique = parsed.filter((o) => {
+        if (seen.has(o.date)) return false;
+        seen.add(o.date);
+        return true;
+      });
+      return src.toInserts(unique, fetchedAtIso);
+    }
     case "boj": {
       const src = new BojSource();
       const yearFrom = Number(from.slice(0, 4));
@@ -238,6 +256,7 @@ function pairLabel(authority: AuthorityKey): string {
     case "snb":     return "USD/CHF+CHF-crosses";
     case "boj":     return "USD/JPY+JPY-crosses";
     case "bcch":    return "USD/CLP";
+    case "bsp":     return "USD/PHP";
   }
 }
 
@@ -344,15 +363,15 @@ export async function runCbBackfill(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
+    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch|bsp> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
     process.exit(2);
   }
   const [authorityArg, fromArg, toArg] = args as [string, string, string];
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch"].includes(authorityArg)) {
-    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch.`);
+  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch", "bsp"].includes(authorityArg)) {
+    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch, bsp.`);
     process.exit(2);
   }
   const authority = authorityArg as AuthorityKey;
