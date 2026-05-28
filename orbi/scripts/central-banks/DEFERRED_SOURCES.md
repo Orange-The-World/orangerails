@@ -127,7 +127,189 @@ See `orbi/scripts/central-banks/sources/bsp.ts` and migration
 
 ---
 
+## Bank Negara Malaysia (BNM) — shipped via Kijang Open API
+
+Status: **shipped 2026-05-27**.
+
+- BNM publishes the daily USD/MYR reference rate via the free, no-auth
+  Kijang Open API at
+  `https://api.bnm.gov.my/public/exchange-rate/USD/year/{YYYY}/month/{M}`.
+  Coverage verified 2021-01-04 → present on 2026-05-27.
+- Sovereign-authoritative: `api.bnm.gov.my` is operated directly by BNM
+  as part of their Open API Initiative. No auth, no API key, no Akamai
+  fingerprint — silent-friendly. The vendor `Accept:
+  application/vnd.BNM.API.v1+json` header is BNM's documented
+  content-negotiation contract.
+- Default 1130 session is the official noon reference accepted by
+  Malaysian tax (LHDN/IRBM). `middle_rate` is `null` in 1130 payloads;
+  daily mid is computed as `(buying_rate + selling_rate) / 2` — matches
+  the 1200-session `middle_rate` to ≤ 1e-4 on spot-check days.
+
+Sample observation (2024-01-15, 1130 session):
+```json
+{"date":"2024-01-15","buying_rate":4.63,"selling_rate":4.655,"middle_rate":null}
+```
+
+See `orbi/scripts/central-banks/sources/bnm.ts` and migration
+`orbi/schema/018_register_bnm.sql`.
+
+---
+
+## Banco de la República (BANREP) — shipped via datos.gov.co
+
+Status: **shipped 2026-05-28**.
+
+- BANREP / Superintendencia Financiera de Colombia publish the daily
+  USD/COP TRM (Tasa Representativa del Mercado), Colombia's official
+  daily reference rate (Resolución 8 de 2000, BANREP Junta Directiva).
+- `banrep.gov.co` itself is fronted by Radware Bot Manager and rejects
+  server-side fetches with HTTP 200 "Bot Manager Block" stubs regardless
+  of UA (same fingerprint pattern that blocked RBA in Phase D.2).
+  SuperFinanciera's portal exposes only an HTML query form.
+- Datos Abiertos Colombia (`datos.gov.co`, MinTIC), the national open
+  data portal, republishes the SuperFin-attributed series as a Socrata
+  SODA2 JSON dataset 32sa-8pi3. Coverage 1991-12-02 → present, license
+  CC BY-SA 4.0, provenance OFFICIAL, attribution Superintendencia
+  Financiera de Colombia.
+- Each upstream row carries a `[vigenciadesde, vigenciahasta]` interval;
+  ORBI expands every interval into one row per covered calendar day so
+  the daily series has no weekend gaps (the published TRM is legally in
+  force every covered day).
+
+Authority tagging follows the established ECB-via-Frankfurter and
+BCCH-via-mindicador.cl precedents: rows land with
+`source_authority='BANREP'` per data origin; transport
+(`datos.gov.co`) is recorded only on the providers row, not on the
+observation.
+
+See `orbi/scripts/central-banks/sources/banrep.ts` and migration
+`orbi/schema/022_register_banrep.sql`.
+
+---
+
+## South African Reserve Bank (SARB) — shipped via Web API (EXCX135D)
+
+Status: **shipped 2026-05-27**.
+
+- SARB publishes the daily USD/ZAR indicative reference rate as
+  timeseries code `EXCX135D` ("Rand per US Dollar") via its public Web
+  API at
+  `https://custom.resbank.co.za/SarbWebApi/WebIndicators/Shared/GetTimeseriesObservations/EXCX135D/{startDate}/{endDate}`.
+  SARB's own description of the series: "Weighted average of the banks'
+  daily rates at approximately 10:30 am. Weights are based on the banks'
+  foreign exchange transactions." Coverage verified 2026-05-27:
+  2021-01-04 → present (1,348 rows over the 5-year window).
+- Sovereign-authoritative: served directly from SARB's
+  `custom.resbank.co.za` Web API (same host as the SARB homepage market
+  rates ticker). JSON, no auth, no API key, no Akamai-style WAF —
+  silent-friendly.
+- We already carry USD/ZAR via Frankfurter cross-rate; SARB adds the
+  sovereign-authority signature on the same pair, more defensible for
+  South African customer audits. Orchestrator's `source_authority='SARB'`
+  is what differentiates the rows.
+- ToS posture: SARB disclaimer prohibits redistribution without written
+  consent; ORBI uses this rate as an authoritative reference signal
+  (auditor-facing provenance), not for bulk republication — same
+  silent-posture stance applied to RBA.
+
+See `orbi/scripts/central-banks/sources/sarb.ts` and migration
+`orbi/schema/020_register_sarb.sql`.
+
+---
+
+## Banco Central de Reserva del Perú (BCRP) — shipped via BCRPData API
+
+Status: **shipped 2026-05-27**.
+
+- BCRP publishes the daily USD/PEN interbank reference rate ("Tipo de
+  Cambio Interbancario - Venta", series `PD04638PD`) through the
+  BCRPData REST API at
+  `https://estadisticas.bcrp.gob.pe/estadisticas/series/api/PD04638PD/json/<from>/<to>`.
+  Free, no auth, no key, no Akamai/Incapsula fingerprint on the
+  `estadisticas` subdomain (the primary `www.bcrp.gob.pe` IS Incapsula-
+  fronted; we route around it).
+- Coverage: full daily coverage from at least 2003 onward; ORBI
+  consumes 2021-01-01 → present on first backfill.
+- Sovereign-authoritative: BCRPData is published directly by BCRP's
+  Gerencia Central de Estudios Económicos; the API is documented at
+  `https://estadisticas.bcrp.gob.pe/estadisticas/series/ayuda/api`.
+- Response uses Spanish-month-name dates ("04.Ene.21" = 2021-01-04) and
+  decimal-string values; parsed in-process with a defensive Spanish
+  date parser that accepts both BCRP's canonical "Set" and the
+  alternative "Sep" abbreviations for September.
+
+ToS: BCRP's Condiciones de Uso page
+(`https://estadisticas.bcrp.gob.pe/estadisticas/series/ayuda/condiciones-de-uso`)
+explicitly permits full or partial reproduction without prior
+authorization provided the source is cited
+("Puede reproducirse total o parcialmente, sin autorización expresa,
+siempre y cuando se cite la fuente."). Assessment:
+`permitted-with-attribution`.
+
+See `orbi/scripts/central-banks/sources/bcrp.ts` and migration
+`orbi/schema/023_register_bcrp.sql`.## Reserve Bank of India (RBI) — shipped via Reference Rate archive
+
+Status: **shipped 2026-05-27**.
+
+- RBI publishes the daily USD/INR Reference Rate via the archive page at
+  `https://www.rbi.org.in/Scripts/ReferenceRateArchive.aspx`. Since
+  2018-07-10 the underlying rate is computed by Financial Benchmarks
+  India Limited (FBIL) and labelled "Source: FBIL" on the RBI surface;
+  ORBI consumes the RBI page (sovereign authority) and tags rows with
+  `source_authority='RBI'`.
+- Sovereign-authoritative: served directly from the central bank's own
+  domain. Free, no API key, no permission email. Page is ASP.NET
+  WebForms protected by an ASP.NET_SessionId cookie + a
+  `__VIEWSTATE` / `__EVENTVALIDATION` token pair; the scraper performs
+  a GET to harvest the tokens, then one POST per calendar-year chunk.
+  No Akamai fingerprint observed from bb-support during 2026-05-27
+  validation — silent-friendly under ORBI's Hybrid Asymmetric Strategy.
+- Coverage gap: the archive endpoint returns observations from
+  2022-04-04 onward only (FBIL transition + RBI archive
+  re-architecture). The 2021-01-01 → 2022-04-03 window is not exposed
+  by this endpoint; ORBI consumers requiring an earlier USD/INR rate
+  should fall back to the ECB / Frankfurter cross-rate.
+- Server caps each response at ~995 rows; orchestrator's `fetchRange`
+  chunks by calendar year and dedupes by date.
+
+See `orbi/scripts/central-banks/sources/rbi.ts` and migration
+`orbi/schema/021_register_rbi.sql`.
+
+## Bank Indonesia (BI) — shipped via JISDOR Unduh XLSX export
+
+Status: **shipped 2026-05-28**.
+
+- BI publishes JISDOR (Jakarta Interbank Spot Dollar Offered Rate), the
+  official daily USD/IDR reference rate, on a SharePoint-hosted ASP.NET
+  WebForms page at
+  `https://www.bi.go.id/id/statistik/informasi-kurs/jisdor/default.aspx`.
+  Computed each business day at ~10:00 WIB (UTC+7) from volume-weighted
+  spot interbank quotes.
+- Sovereign-authoritative: page is served from www.bi.go.id under a
+  valid GlobalSign cert with O=Bank Indonesia. No auth, no API key, no
+  Akamai fingerprint — silent-friendly under ORBI's Hybrid Asymmetric
+  Strategy.
+- Transport: the page exposes a date-range form with two buttons —
+  "Cari" (Search, returns 10-row paginated HTML) and "Unduh" (Download,
+  returns the full matching range as a single XLSX attachment). ORBI
+  uses the Unduh path: one GET to harvest the `__VIEWSTATE` triple,
+  one POST to fetch the export. Empirically the BI backend serves a
+  5-year window (2021-01-01 → 2026-05-27, ~1,299 rows) in a ~32 KB
+  XLSX in under 5 seconds.
+- Header requirement: bare `User-Agent: curl/*` is blocked; a standard
+  Chrome string with an `Orange-Rails-ORBI/1.0` suffix-comment passes.
+- XLSX parsed in-process via the same `node:zlib` zip-reader pattern
+  used by BSP (no external dependency).
+
+See `orbi/scripts/central-banks/sources/bi.ts` and migration
+`orbi/schema/019_register_bi.sql`.
+
+---
+
 ## What ships in Phase D.2
 
-Bank of England (`BOE`), Banco Central de Chile (`BCCH`), and Bangko
-Sentral ng Pilipinas (`BSP`) ship fully working. See main README.
+Bank of England (`BOE`), Banco Central de Chile (`BCCH`), Bangko
+Sentral ng Pilipinas (`BSP`), Bank Negara Malaysia (`BNM`), Banco de la
+República (`BANREP`), South African Reserve Bank (`SARB`), Banco
+Central de Reserva del Perú (`BCRP`), Reserve Bank of India (`RBI`),
+and Bank Indonesia (`BI`) ship fully working. See main README.
