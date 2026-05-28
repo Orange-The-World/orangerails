@@ -1,5 +1,5 @@
 /**
- * orbi/edge-functions/on-demand-resolve — Supabase Deno Edge Function.
+ * supabase/functions/on-demand-resolve — Supabase Deno Edge Function.
  *
  * Given (source, target, effectiveAt), returns a CONFIRMED ORBI-M rate for
  * the 1-minute bucket containing that timestamp. Cache-first:
@@ -23,17 +23,17 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
-import { KrakenSource } from "../../src/sources/kraken.ts";
-import { BitstampSource } from "../../src/sources/bitstamp.ts";
-import { BitfinexSource } from "../../src/sources/bitfinex.ts";
-import { MempoolSpaceSource } from "../../src/sources/mempool-space.ts";
-import { BitsoSource } from "../../src/sources/bitso.ts";
-import { MercadoBitcoinSource } from "../../src/sources/mercado-bitcoin.ts";
-import { CoinbaseExchangeSource } from "../../src/sources/coinbase-exchange.ts";
-import { FrankfurterSource } from "../../src/sources/frankfurter.ts";
-import { resolve, partitionBucketTs } from "../../src/calculate/resolve.ts";
-import { resolveComposite } from "../../src/calculate/resolve-composite.ts";
-import type { Source } from "../../src/sources/interface.ts";
+import { KrakenSource } from "../../../orbi/src/sources/kraken.ts";
+import { BitstampSource } from "../../../orbi/src/sources/bitstamp.ts";
+import { BitfinexSource } from "../../../orbi/src/sources/bitfinex.ts";
+import { MempoolSpaceSource } from "../../../orbi/src/sources/mempool-space.ts";
+import { BitsoSource } from "../../../orbi/src/sources/bitso.ts";
+import { MercadoBitcoinSource } from "../../../orbi/src/sources/mercado-bitcoin.ts";
+import { CoinbaseExchangeSource } from "../../../orbi/src/sources/coinbase-exchange.ts";
+import { FrankfurterSource } from "../../../orbi/src/sources/frankfurter.ts";
+import { resolve, partitionBucketTs } from "../../../orbi/src/calculate/resolve.ts";
+import { resolveComposite } from "../../../orbi/src/calculate/resolve-composite.ts";
+import type { Source } from "../../../orbi/src/sources/interface.ts";
 import { handleRequest } from "./handler.ts";
 
 export const CORS_HEADERS = {

@@ -12,9 +12,9 @@
  * responsible for persisting the result.
  */
 
-import type { Source } from "../sources/interface";
-import type { Candle, Pair, SourceResponse } from "../sources/types";
-import { vwMedian, type SourceCandle, type VwMedianResult } from "./vw-median";
+import type { Source } from "../sources/interface.ts";
+import type { Candle, Pair, SourceResponse } from "../sources/types.ts";
+import { vwMedian, type SourceCandle, type VwMedianResult } from "./vw-median.ts";
 
 export interface ResolveRequest {
   pair: Pair;

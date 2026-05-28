@@ -46,8 +46,8 @@
  * for endpoint reference.
  */
 
-import { BaseSource, type BaseSourceConfig } from "./base";
-import type { Candle, HealthStatus, Pair } from "./types";
+import { BaseSource, type BaseSourceConfig } from "./base.ts";
+import type { Candle, HealthStatus, Pair } from "./types.ts";
 
 const PAIR_MAP: Record<string, string> = {
   "BTC-JPY": "btc_jpy",

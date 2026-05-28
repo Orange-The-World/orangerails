@@ -27,8 +27,8 @@
  *   - No outreach needed
  */
 
-import { BaseSource, type BaseSourceConfig } from "./base";
-import type { Candle, HealthStatus, Pair } from "./types";
+import { BaseSource, type BaseSourceConfig } from "./base.ts";
+import type { Candle, HealthStatus, Pair } from "./types.ts";
 
 const FIAT_MAP: Record<string, string> = {
   USD: "USD",

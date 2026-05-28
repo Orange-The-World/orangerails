@@ -13,9 +13,9 @@
  * Frankfurter provides USD↔X daily ECB rates back to 1999-01-04.
  */
 
-import type { Source } from "../sources/interface";
-import type { Pair } from "../sources/types";
-import { resolve, type ResolveResult } from "./resolve";
+import type { Source } from "../sources/interface.ts";
+import type { Pair } from "../sources/types.ts";
+import { resolve, type ResolveResult } from "./resolve.ts";
 
 export interface CompositeResolveRequest {
   /** The target pair, e.g. {source: 'BTC', target: 'INR'}. */

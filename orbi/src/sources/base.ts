@@ -18,9 +18,9 @@ import type {
   HealthStatus,
   Pair,
   SourceResponse,
-} from "./types";
-import type { Source } from "./interface";
-import { SOURCE_OPERATIONAL_RULES } from "./interface";
+} from "./types.ts";
+import type { Source } from "./interface.ts";
+import { SOURCE_OPERATIONAL_RULES } from "./interface.ts";
 
 export interface BaseSourceConfig {
   readonly name: string;

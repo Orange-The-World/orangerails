@@ -19,7 +19,7 @@
  * because at least one trade landed in it).
  */
 
-import type { Candle } from "./types";
+import type { Candle } from "./types.ts";
 
 export function aggregateTradesToCandles(
   trades: ReadonlyArray<{ ts: number; price: number; amount: number }>,

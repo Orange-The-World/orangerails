@@ -7,9 +7,9 @@
  */
 
 import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { partitionBucketTs, type ResolveResult } from "../../src/calculate/resolve.ts";
-import type { CompositeResolveResult } from "../../src/calculate/resolve-composite.ts";
-import type { Source } from "../../src/sources/interface.ts";
+import { partitionBucketTs, type ResolveResult } from "../../../orbi/src/calculate/resolve.ts";
+import type { CompositeResolveResult } from "../../../orbi/src/calculate/resolve-composite.ts";
+import type { Source } from "../../../orbi/src/sources/interface.ts";
 
 export const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -260,7 +260,7 @@ async function writeDirect(
         computed_at: new Date().toISOString(),
       },
       {
-        onConflict: "source_currency,target_currency,bucket_ts,granularity,product",
+        onConflict: "source_currency,target_currency,bucket_ts,granularity,product,source_authority",
       },
     )
     .select("id")
@@ -314,7 +314,7 @@ async function writeComposite(
         computed_at: new Date().toISOString(),
       },
       {
-        onConflict: "source_currency,target_currency,bucket_ts,granularity,product",
+        onConflict: "source_currency,target_currency,bucket_ts,granularity,product,source_authority",
       },
     )
     .select("id")

@@ -25,8 +25,8 @@
  * Pairs: BTC-BRL is the flagship; BTC-USDT and BTC-USDC also available.
  */
 
-import { BaseSource, type BaseSourceConfig } from "./base";
-import type { Candle, HealthStatus, Pair } from "./types";
+import { BaseSource, type BaseSourceConfig } from "./base.ts";
+import type { Candle, HealthStatus, Pair } from "./types.ts";
 
 const PAIR_MAP: Record<string, string> = {
   "BTC-BRL": "BTC-BRL",
