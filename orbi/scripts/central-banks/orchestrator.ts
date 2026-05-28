@@ -155,6 +155,7 @@ async function fetchRowsForAuthority(
         { from, to, apiKey, log: (m) => console.log(m) },
         fetchedAtIso,
       );
+    }
     case "ecb": {
       const src = new EcbSource();
       const all: AuthorityRateInsert[] = [];
