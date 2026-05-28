@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekly Sunday 04:00 UTC trigger for ORBI CB deep recovery
+Documentation=https://wiki.bitbooks.com/doc/orbi-operations-runbook-BWIfMr0e5J
+
+[Timer]
+# Sundays at 04:00 UTC — one hour after the daily refresh window, so they
+# never overlap. Persistent=true so a missed Sunday catches up at next boot.
+OnCalendar=Sun *-*-* 04:00:00 UTC
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=orbi-cb-deep-recovery.service
+
+[Install]
+WantedBy=timers.target

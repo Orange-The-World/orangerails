@@ -1,0 +1,32 @@
+[Unit]
+Description=ORBI CB daily refresh — self-healing gap-fill for all active central banks
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/AIHUB/REPOS/orangerails/orbi
+ExecStart=/opt/bb-support/scripts/with-secret.py \
+  --vars ORANGERAILS_PROD_ACCESS_TOKEN,ORANGERAILS_PROD_SUPABASE_URL,BANXICO_API_TOKEN,FRED_API_KEY \
+  -- /home/ubuntu/AIHUB/REPOS/orangerails/orbi/scripts/ops/cb-alert-on-failure.sh
+
+# Resource guards.
+MemoryMax=512M
+TasksMax=128
+TimeoutStartSec=3600
+
+# Filesystem scope.
+ProtectSystem=full
+PrivateTmp=no
+ReadOnlyPaths=/opt/bb-support
+ReadWritePaths=/tmp /home/ubuntu/AIHUB/REPOS/orangerails /var/log/orbi /var/run/orbi
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
