@@ -21,5 +21,6 @@
   "bcch":    {"watchdog_days": 4, "publish_cadence": "business-days, ~CL afternoon UTC", "schedule_offset_min": 0,  "active": false, "_note": "Source on feat/cb-bcch-clp-via-mindicador branch. Set active=true once merged to dev."},
   "banrep":  {"watchdog_days": 4, "publish_cadence": "business-days, CO afternoon UTC", "schedule_offset_min": 0,  "active": true},
   "sarb":    {"watchdog_days": 4, "publish_cadence": "business-days, ~ZA afternoon UTC", "schedule_offset_min": 0,  "active": true},
-  "bcrp":    {"watchdog_days": 4, "publish_cadence": "business-days, PE afternoon UTC", "schedule_offset_min": 0,  "active": true}
+  "bcrp":    {"watchdog_days": 4, "publish_cadence": "business-days, PE afternoon UTC", "schedule_offset_min": 0,  "active": true},
+  "rbi":     {"watchdog_days": 4, "publish_cadence": "business-days, IN afternoon UTC", "schedule_offset_min": 0,  "active": true}
 }

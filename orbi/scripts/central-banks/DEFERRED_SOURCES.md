@@ -247,7 +247,33 @@ siempre y cuando se cite la fuente."). Assessment:
 `permitted-with-attribution`.
 
 See `orbi/scripts/central-banks/sources/bcrp.ts` and migration
-`orbi/schema/023_register_bcrp.sql`.
+`orbi/schema/023_register_bcrp.sql`.## Reserve Bank of India (RBI) — shipped via Reference Rate archive
+
+Status: **shipped 2026-05-27**.
+
+- RBI publishes the daily USD/INR Reference Rate via the archive page at
+  `https://www.rbi.org.in/Scripts/ReferenceRateArchive.aspx`. Since
+  2018-07-10 the underlying rate is computed by Financial Benchmarks
+  India Limited (FBIL) and labelled "Source: FBIL" on the RBI surface;
+  ORBI consumes the RBI page (sovereign authority) and tags rows with
+  `source_authority='RBI'`.
+- Sovereign-authoritative: served directly from the central bank's own
+  domain. Free, no API key, no permission email. Page is ASP.NET
+  WebForms protected by an ASP.NET_SessionId cookie + a
+  `__VIEWSTATE` / `__EVENTVALIDATION` token pair; the scraper performs
+  a GET to harvest the tokens, then one POST per calendar-year chunk.
+  No Akamai fingerprint observed from bb-support during 2026-05-27
+  validation — silent-friendly under ORBI's Hybrid Asymmetric Strategy.
+- Coverage gap: the archive endpoint returns observations from
+  2022-04-04 onward only (FBIL transition + RBI archive
+  re-architecture). The 2021-01-01 → 2022-04-03 window is not exposed
+  by this endpoint; ORBI consumers requiring an earlier USD/INR rate
+  should fall back to the ECB / Frankfurter cross-rate.
+- Server caps each response at ~995 rows; orchestrator's `fetchRange`
+  chunks by calendar year and dedupes by date.
+
+See `orbi/scripts/central-banks/sources/rbi.ts` and migration
+`orbi/schema/021_register_rbi.sql`.
 
 ---
 
@@ -255,5 +281,6 @@ See `orbi/scripts/central-banks/sources/bcrp.ts` and migration
 
 Bank of England (`BOE`), Banco Central de Chile (`BCCH`), Bangko
 Sentral ng Pilipinas (`BSP`), Bank Negara Malaysia (`BNM`), Banco de la
-República (`BANREP`), and South African Reserve Bank (`SARB`) ship fully
-working. See main README.
+República (`BANREP`), South African Reserve Bank (`SARB`), Banco
+Central de Reserva del Perú (`BCRP`), and Reserve Bank of India (`RBI`)
+ship fully working. See main README.

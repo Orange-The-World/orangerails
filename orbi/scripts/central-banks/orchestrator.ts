@@ -41,6 +41,7 @@ import { BnmSource } from "./sources/bnm";
 import { BanrepSource } from "./sources/banrep";
 import { SarbSource } from "./sources/sarb";
 import { BcrpSource } from "./sources/bcrp";
+import { RbiSource } from "./sources/rbi";
 import {
   AuthorityBatchWriter,
   type AuthorityRateInsert,
@@ -129,7 +130,8 @@ type AuthorityKey =
   | "bnm"
   | "banrep"
   | "sarb"
-  | "bcrp";
+  | "bcrp"
+  | "rbi";
 
 async function fetchRowsForAuthority(
   authority: AuthorityKey,
@@ -312,6 +314,24 @@ async function fetchRowsForAuthority(
       });
       return src.toInserts(unique, fetchedAtIso);
     }
+    case "rbi": {
+      const src = new RbiSource();
+      const parsed = await src.fetchRange({
+        from,
+        to,
+        log: (m) => console.log(m),
+      });
+      // Dedup by date — fetchRange already chunks by calendar year and
+      // dedupes server-side overlaps, but we re-enforce here so a fixture
+      // override in tests can't trip the batch UPSERT's ON CONFLICT path.
+      const seen = new Set<string>();
+      const unique = parsed.filter((r) => {
+        if (seen.has(r.date)) return false;
+        seen.add(r.date);
+        return true;
+      });
+      return src.toInserts(unique, fetchedAtIso);
+    }
 
     case "boj": {
       const src = new BojSource();
@@ -350,6 +370,7 @@ function pairLabel(authority: AuthorityKey): string {
     case "banrep":  return "USD/COP";
     case "sarb":    return "USD/ZAR";
     case "bcrp":    return "USD/PEN";
+    case "rbi":     return "USD/INR";
   }
 }
 
@@ -456,15 +477,15 @@ export async function runCbBackfill(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch|bsp|bnm|banrep|sarb|bcrp> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
+    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch|bsp|bnm|banrep|sarb|bcrp|rbi> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
     process.exit(2);
   }
   const [authorityArg, fromArg, toArg] = args as [string, string, string];
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch", "bsp", "bnm", "banrep", "sarb", "bcrp"].includes(authorityArg)) {
-    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch, bsp, bnm, banrep, sarb, bcrp.`);
+  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch", "bsp", "bnm", "banrep", "sarb", "bcrp", "rbi"].includes(authorityArg)) {
+    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch, bsp, bnm, banrep, sarb, bcrp, rbi.`);
     process.exit(2);
   }
   const authority = authorityArg as AuthorityKey;
