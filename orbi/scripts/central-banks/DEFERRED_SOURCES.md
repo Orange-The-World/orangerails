@@ -127,7 +127,36 @@ See `orbi/scripts/central-banks/sources/bsp.ts` and migration
 
 ---
 
+## Bank Negara Malaysia (BNM) — shipped via Kijang Open API
+
+Status: **shipped 2026-05-27**.
+
+- BNM publishes the daily USD/MYR reference rate via the free, no-auth
+  Kijang Open API at
+  `https://api.bnm.gov.my/public/exchange-rate/USD/year/{YYYY}/month/{M}`.
+  Coverage verified 2021-01-04 → present on 2026-05-27.
+- Sovereign-authoritative: `api.bnm.gov.my` is operated directly by BNM
+  as part of their Open API Initiative. No auth, no API key, no Akamai
+  fingerprint — silent-friendly. The vendor `Accept:
+  application/vnd.BNM.API.v1+json` header is BNM's documented
+  content-negotiation contract.
+- Default 1130 session is the official noon reference accepted by
+  Malaysian tax (LHDN/IRBM). `middle_rate` is `null` in 1130 payloads;
+  daily mid is computed as `(buying_rate + selling_rate) / 2` — matches
+  the 1200-session `middle_rate` to ≤ 1e-4 on spot-check days.
+
+Sample observation (2024-01-15, 1130 session):
+```json
+{"date":"2024-01-15","buying_rate":4.63,"selling_rate":4.655,"middle_rate":null}
+```
+
+See `orbi/scripts/central-banks/sources/bnm.ts` and migration
+`orbi/schema/018_register_bnm.sql`.
+
+---
+
 ## What ships in Phase D.2
 
-Bank of England (`BOE`), Banco Central de Chile (`BCCH`), and Bangko
-Sentral ng Pilipinas (`BSP`) ship fully working. See main README.
+Bank of England (`BOE`), Banco Central de Chile (`BCCH`), Bangko
+Sentral ng Pilipinas (`BSP`), and Bank Negara Malaysia (`BNM`) ship
+fully working. See main README.

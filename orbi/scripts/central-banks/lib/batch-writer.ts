@@ -28,7 +28,8 @@ export type SourceAuthority =
   | "BOJ"
   | "BCCH"
   | "BLOCKCHAIN_COM"
-  | "BSP";
+  | "BSP"
+  | "BNM";
 
 export interface AuthorityRateInsert {
   source_currency: string;
