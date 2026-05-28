@@ -155,8 +155,40 @@ See `orbi/scripts/central-banks/sources/bnm.ts` and migration
 
 ---
 
+## Banco de la República (BANREP) — shipped via datos.gov.co
+
+Status: **shipped 2026-05-28**.
+
+- BANREP / Superintendencia Financiera de Colombia publish the daily
+  USD/COP TRM (Tasa Representativa del Mercado), Colombia's official
+  daily reference rate (Resolución 8 de 2000, BANREP Junta Directiva).
+- `banrep.gov.co` itself is fronted by Radware Bot Manager and rejects
+  server-side fetches with HTTP 200 "Bot Manager Block" stubs regardless
+  of UA (same fingerprint pattern that blocked RBA in Phase D.2).
+  SuperFinanciera's portal exposes only an HTML query form.
+- Datos Abiertos Colombia (`datos.gov.co`, MinTIC), the national open
+  data portal, republishes the SuperFin-attributed series as a Socrata
+  SODA2 JSON dataset 32sa-8pi3. Coverage 1991-12-02 → present, license
+  CC BY-SA 4.0, provenance OFFICIAL, attribution Superintendencia
+  Financiera de Colombia.
+- Each upstream row carries a `[vigenciadesde, vigenciahasta]` interval;
+  ORBI expands every interval into one row per covered calendar day so
+  the daily series has no weekend gaps (the published TRM is legally in
+  force every covered day).
+
+Authority tagging follows the established ECB-via-Frankfurter and
+BCCH-via-mindicador.cl precedents: rows land with
+`source_authority='BANREP'` per data origin; transport
+(`datos.gov.co`) is recorded only on the providers row, not on the
+observation.
+
+See `orbi/scripts/central-banks/sources/banrep.ts` and migration
+`orbi/schema/022_register_banrep.sql`.
+
+---
+
 ## What ships in Phase D.2
 
 Bank of England (`BOE`), Banco Central de Chile (`BCCH`), Bangko
-Sentral ng Pilipinas (`BSP`), and Bank Negara Malaysia (`BNM`) ship
-fully working. See main README.
+Sentral ng Pilipinas (`BSP`), Bank Negara Malaysia (`BNM`), and
+Banco de la República (`BANREP`) ship fully working. See main README.

@@ -18,5 +18,6 @@
   "boj":     {"watchdog_days": 5, "publish_cadence": "business-days, ~JP evening UTC", "schedule_offset_min": 0,  "active": true},
   "bsp":     {"watchdog_days": 4, "publish_cadence": "business-days, ~PH afternoon UTC", "schedule_offset_min": 0,  "active": true},
   "bnm":     {"watchdog_days": 4, "publish_cadence": "business-days, MY afternoon UTC", "schedule_offset_min": 0,  "active": true},
-  "bcch":    {"watchdog_days": 4, "publish_cadence": "business-days, ~CL afternoon UTC", "schedule_offset_min": 0,  "active": false, "_note": "Source on feat/cb-bcch-clp-via-mindicador branch. Set active=true once merged to dev."}
+  "bcch":    {"watchdog_days": 4, "publish_cadence": "business-days, ~CL afternoon UTC", "schedule_offset_min": 0,  "active": false, "_note": "Source on feat/cb-bcch-clp-via-mindicador branch. Set active=true once merged to dev."},
+  "banrep":  {"watchdog_days": 4, "publish_cadence": "business-days, CO afternoon UTC", "schedule_offset_min": 0,  "active": true}
 }

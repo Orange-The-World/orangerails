@@ -38,6 +38,7 @@ import { BojSource, type BojPair } from "./sources/boj";
 import { BcchSource } from "./sources/bcch";
 import { BspSource } from "./sources/bsp";
 import { BnmSource } from "./sources/bnm";
+import { BanrepSource } from "./sources/banrep";
 import {
   AuthorityBatchWriter,
   type AuthorityRateInsert,
@@ -123,7 +124,8 @@ type AuthorityKey =
   | "boj"
   | "bcch"
   | "bsp"
-  | "bnm";
+  | "bnm"
+  | "banrep";
 
 async function fetchRowsForAuthority(
   authority: AuthorityKey,
@@ -246,6 +248,36 @@ async function fetchRowsForAuthority(
       });
       return src.toInserts(unique, fetchedAtIso);
     }
+    case "banrep": {
+      const src = new BanrepSource();
+      // fetchRange widens the upstream query by 7 days on the leading edge
+      // so a TRM whose vigenciadesde precedes `from` but is still in force
+      // on `from` (Friday-before-holiday case) is captured and expanded.
+      const parsed = await src.fetchRange({
+        from,
+        to,
+        log: (m) => console.log(m),
+      });
+      // Dedup-by-date — fetchRange already dedupes, but we re-apply here
+      // to keep the orchestrator-level invariant explicit (one row per
+      // (source_authority, bucket_ts) in a single batch is required by
+      // ON CONFLICT). Same lesson learned in BCCH/BSP.
+      const seen = new Set<string>();
+      const unique = parsed.filter((r) => {
+        if (seen.has(r.date)) return false;
+        seen.add(r.date);
+        return true;
+      });
+      return src.toInserts(
+        unique.map((r) => ({
+          valor: r.value,
+          vigenciadesde: `${r.date}T00:00:00.000`,
+          vigenciahasta: `${r.date}T00:00:00.000`,
+        })),
+        fetchedAtIso,
+        { from, to },
+      );
+    }
     case "boj": {
       const src = new BojSource();
       const yearFrom = Number(from.slice(0, 4));
@@ -280,6 +312,7 @@ function pairLabel(authority: AuthorityKey): string {
     case "bcch":    return "USD/CLP";
     case "bsp":     return "USD/PHP";
     case "bnm":     return "USD/MYR";
+    case "banrep":  return "USD/COP";
   }
 }
 
@@ -386,15 +419,15 @@ export async function runCbBackfill(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch|bsp|bnm> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
+    console.error("usage: cb-backfill <authority: banxico|bcb|boc|boe|fred|ecb|rba|snb|boj|bcch|bsp|bnm|banrep> <from YYYY-MM-DD> <to YYYY-MM-DD> [--dry-run] [--resume]");
     process.exit(2);
   }
   const [authorityArg, fromArg, toArg] = args as [string, string, string];
   const dryRun = args.includes("--dry-run");
   const resume = args.includes("--resume");
 
-  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch", "bsp", "bnm"].includes(authorityArg)) {
-    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch, bsp, bnm.`);
+  if (!["banxico", "bcb", "boc", "boe", "fred", "ecb", "rba", "snb", "boj", "bcch", "bsp", "bnm", "banrep"].includes(authorityArg)) {
+    console.error(`Unknown authority: ${authorityArg}. Supported: banxico, bcb, boc, boe, fred, ecb, rba, snb, boj, bcch, bsp, bnm, banrep.`);
     process.exit(2);
   }
   const authority = authorityArg as AuthorityKey;
