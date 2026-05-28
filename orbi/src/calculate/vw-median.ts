@@ -14,7 +14,7 @@
  * reproduce any rate ORBI publishes. That's the public-goods commitment.
  */
 
-import type { Candle } from "../sources/types";
+import type { Candle } from "../sources/types.ts";
 
 export interface VwMedianResult {
   /** The canonical VW-median price. */

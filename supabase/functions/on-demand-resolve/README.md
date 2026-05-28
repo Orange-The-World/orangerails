@@ -140,7 +140,7 @@ supabase functions delete on-demand-resolve --project-ref <ref>
 ## Tests
 
 ```bash
-cd orbi/edge-functions/on-demand-resolve
+cd supabase/functions/on-demand-resolve
 deno test --allow-net --allow-env tests/
 ```
 

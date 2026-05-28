@@ -28,8 +28,8 @@
  *   - covers ~30 fiat currencies daily back to 1999-01-04
  */
 
-import { BaseSource, type BaseSourceConfig } from "./base";
-import type { Candle, HealthStatus, Pair } from "./types";
+import { BaseSource, type BaseSourceConfig } from "./base.ts";
+import type { Candle, HealthStatus, Pair } from "./types.ts";
 
 /**
  * Currencies Frankfurter publishes (verified via /currencies endpoint).

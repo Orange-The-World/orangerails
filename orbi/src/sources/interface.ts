@@ -13,7 +13,7 @@
  * See https://wiki.abascal.ca/doc/orbi-hybrid-asymmetric-risk-management-strategy-2AVKLwrxlF
  */
 
-import type { HealthStatus, Pair, SourceResponse } from "./types";
+import type { HealthStatus, Pair, SourceResponse } from "./types.ts";
 
 export interface Source {
   /** Unique identifier; matches exchange_rate_providers.name. */

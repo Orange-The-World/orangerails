@@ -1059,6 +1059,19 @@ function ConnectPageInner() {
           onConnectionLabelChange={setConnectionLabel}
           onContinue={handleContinueFromCredentials}
           onCancel={handleCancel}
+          // Only offer Back when the user actually came from the picker.
+          // If the URL deep-linked a provider (?provider=blink) there's
+          // no picker to go back to — hide the button.
+          onBack={
+            search.provider
+              ? undefined
+              : () => {
+                  setError(null);
+                  setManifest(null);
+                  setFormValues({});
+                  setStep("pick-provider");
+                }
+          }
           error={error}
         />
       )}
@@ -1113,6 +1126,7 @@ function EnterCredentialsStep({
   onConnectionLabelChange,
   onContinue,
   onCancel,
+  onBack,
   error,
 }: {
   providerLabel: string;
@@ -1124,16 +1138,15 @@ function EnterCredentialsStep({
   onConnectionLabelChange: (value: string) => void;
   onContinue: (e: React.FormEvent) => void;
   onCancel: () => void;
+  /** Optional. When provided, renders a "Back" button that returns the
+   *  user to the picker. Hidden when undefined (deep-linked entry — no
+   *  picker step to return to). */
+  onBack?: () => void;
   error: string | null;
 }) {
   const allRequiredFilled = fields.every(
     (f) => f.optional === true || (values[f.name] ?? "").trim().length > 0,
   );
-  // "How to get your credentials" banner: surface the first field that
-  // carries a clickable help link (helpHref). Per-field helpLabel text
-  // still renders inline under each input — the banner just makes the
-  // most important help link more discoverable.
-  const primaryHelp = fields.find((f) => f.helpHref);
   return (
     <form onSubmit={onContinue} className="mt-4 space-y-4">
       <div className="flex items-center gap-1.5">
@@ -1174,24 +1187,6 @@ function EnterCredentialsStep({
           </TooltipProvider>
         )}
       </div>
-
-      {primaryHelp && (
-        <div className="rounded-md border border-orange-500/30 bg-orange-500/5 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-medium uppercase tracking-wide text-orange-600 dark:text-orange-400">
-              How to get your {providerLabel} credentials
-            </span>
-            <a
-              href={primaryHelp.helpHref}
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs font-medium text-primary hover:underline"
-            >
-              {primaryHelp.helpLabel ?? "Open"} ↗
-            </a>
-          </div>
-        </div>
-      )}
 
       <div>
         <label htmlFor="connection-label" className="block text-sm font-medium">
@@ -1253,30 +1248,39 @@ function EnterCredentialsStep({
         </div>
       ))}
 
-      <p className="text-xs text-muted-foreground">
-        Your credentials are locked in this browser before they leave. Orange Rails stores only the
-        locked version and cannot read them.
+      <p className="text-xs text-slate-500">
+        Your information is encrypted with your vault password before it leaves your browser.
+        OrangeRails stores only ciphertext — you and only you can decrypt it.
       </p>
 
 
       {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+        <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
           {error}
         </div>
       )}
 
       <div className="flex gap-2 pt-2">
+        {onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            Back
+          </button>
+        )}
         <button
           type="button"
           onClick={onCancel}
-          className="flex-1 rounded-md border border-input bg-background px-4 py-2 text-sm font-medium"
+          className="flex-1 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
         >
           Cancel
         </button>
         <button
           type="submit"
           disabled={!allRequiredFilled}
-          className="flex-1 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+          className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           Continue
         </button>
@@ -1450,40 +1454,52 @@ function PickProviderStep({
 
   return (
     <div className="mt-4 space-y-4">
-      <div>
-        <h2 className="text-base font-semibold text-slate-900">Choose how to connect</h2>
+      <div className="text-center">
+        <h2 className="text-lg font-semibold text-slate-900">
+          {isSearching ? "Search results" : "Securely connect your account"}
+        </h2>
         <p className="mt-1 text-xs text-slate-500">
-          Search for a Bitcoin source or a bank.
+          {isSearching
+            ? `${filtered.length} match${filtered.length === 1 ? "" : "es"} for "${search.trim()}"`
+            : "Search for your bank or pick a popular option below."}
         </p>
       </div>
 
       {/* Search */}
-      <input
-        type="text"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search Bitcoin sources or banks…"
-        autoFocus
-        aria-label="Search Bitcoin sources or banks"
-        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
-        data-testid="provider-search"
-      />
+      <div className="relative">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search for your bank or Bitcoin source"
+          autoFocus
+          aria-label="Search for your bank or Bitcoin source"
+          className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 pr-10 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+          data-testid="provider-search"
+        />
+        <svg
+          className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          aria-hidden
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M11 17a6 6 0 100-12 6 6 0 000 12z" />
+        </svg>
+      </div>
 
-      {/* Bitcoin / exchange tile grid */}
+      {/* Tile grid — 4 columns at sm+, 2 on narrow viewports.
+          Wave's UX uses 4-up bank tiles in 2 rows = 8 quick-picks.
+          When searching, sections collapse into a flat grid. */}
       {filtered.length === 0 ? (
-        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-4 text-center text-xs text-slate-500">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-6 text-center text-xs text-slate-500">
           No matches for {search ? `"${search}"` : "the current filter"}.
         </div>
       ) : (
-        <div className="space-y-3" data-testid="provider-results">
+        <div data-testid="provider-results">
           {groups.map((g, gi) => (
-            <div key={g.label ?? `group-${gi}`} className="space-y-2">
-              {g.label && (
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                  {g.label}
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-2">
+            <div key={g.label ?? `group-${gi}`}>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {g.entries.map((p) => (
                   <ProviderTile
                     key={p.slug}
@@ -1529,6 +1545,32 @@ function PickProviderStep({
   );
 }
 
+// Deterministic brand color per provider slug. Hash → palette index.
+// Placeholder until per-provider logos ship; gives every tile a visually
+// distinct colored square so the grid pops (matches the Wave UX where
+// each bank has its own brand color).
+const TILE_PALETTE = [
+  "bg-orange-500",  // OrangeRails primary
+  "bg-blue-600",    // RBC-ish
+  "bg-emerald-600", // TD-ish
+  "bg-rose-600",    // Scotiabank-ish
+  "bg-red-700",     // CIBC-ish
+  "bg-indigo-600",
+  "bg-amber-500",   // Tangerine-ish
+  "bg-slate-800",   // dark fallback
+  "bg-teal-600",    // Desjardins-ish
+  "bg-purple-600",
+  "bg-cyan-600",
+  "bg-yellow-500",
+];
+
+function tileColor(slug: string): string {
+  // Cheap djb2-style hash for stable per-slug color.
+  let h = 5381;
+  for (let i = 0; i < slug.length; i += 1) h = ((h << 5) + h + slug.charCodeAt(i)) | 0;
+  return TILE_PALETTE[Math.abs(h) % TILE_PALETTE.length];
+}
+
 function ProviderTile({
   provider,
   busy,
@@ -1538,9 +1580,9 @@ function ProviderTile({
   busy: boolean;
   onPick: (slug: string) => void;
 }) {
-  // Visual initial — first letter of the provider name in a colored
-  // circle. Cheap placeholder until per-provider logos ship in a
-  // follow-up PR. Keeps Plaid/Quiltt's "tile with a glyph" feel.
+  // First letter of the provider name in a brand-colored square — Wave-style
+  // visual punch. Per-provider logos replace these in a future PR; the
+  // <ProviderTile> shape stays the same so the rollout is logo-by-logo.
   const initial = provider.displayName.slice(0, 1).toUpperCase();
   return (
     <button
@@ -1548,29 +1590,23 @@ function ProviderTile({
       onClick={() => onPick(provider.slug)}
       disabled={busy}
       data-testid={`provider-tile-${provider.slug}`}
-      className="flex h-20 w-full items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50"
+      title={provider.description ?? provider.displayName}
+      className="group flex h-24 w-full flex-col items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white p-2 text-center transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-sm disabled:opacity-50"
     >
       <span
-        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-600"
+        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-base font-bold text-white shadow-sm ${tileColor(provider.slug)}`}
         aria-hidden
       >
         {initial}
       </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate text-sm font-medium text-slate-900">
-            {provider.displayName}
+      <div className="flex w-full items-center justify-center gap-1">
+        <span className="truncate text-xs font-medium text-slate-900">
+          {provider.displayName}
+        </span>
+        {provider.status === "beta" && (
+          <span className="shrink-0 rounded-sm bg-amber-100 px-1 py-px text-[8px] font-bold uppercase tracking-wide text-amber-700">
+            β
           </span>
-          {provider.status === "beta" && (
-            <span className="shrink-0 rounded-sm bg-amber-100 px-1 py-px text-[9px] font-bold uppercase tracking-wide text-amber-700">
-              BETA
-            </span>
-          )}
-        </div>
-        {provider.description && (
-          <div className="mt-0.5 truncate text-[11px] text-slate-500">
-            {provider.description}
-          </div>
         )}
       </div>
     </button>
@@ -1697,28 +1733,58 @@ function PickWalletsStep({
 // --------------------------------------------------------------------
 
 function Shell({ platform, children }: { platform?: PlatformDisplay; children: React.ReactNode }) {
-  const accent = platform?.display_brand_color ?? "#F7931A";
-  // Plaid / Quiltt-style chrome: light, friendly, low-contrast. We hardcode
-  // the light tokens (not bg-background / bg-card) so the popup stays light
-  // regardless of the embedding page's theme.
+  // Plaid / Quiltt chrome pattern:
+  //   - Top: subtle "{App} uses OrangeRails to connect securely" line — not
+  //     a huge accent-color H1. Establishes the co-branding relationship
+  //     without overwhelming the actual step content.
+  //   - Middle: the step content (picker, credentials form, etc.)
+  //   - Bottom: small "Powered by OrangeRails" + privacy note.
+  // Hardcoded light tokens so the popup stays light regardless of the
+  // embedding page's theme.
   return (
     <div className="min-h-screen bg-slate-50 px-4 py-6 antialiased text-slate-900" style={{ colorScheme: "light" }}>
       <div className="mx-auto w-full max-w-md">
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="mb-4 border-b border-slate-200 pb-4">
-            {platform ? (
-              <h1 className="text-xl font-semibold tracking-tight" style={{ color: accent }}>
-                Connect to {platform.display_name}
-              </h1>
-            ) : (
-              <h1 className="text-xl font-semibold tracking-tight">Connect</h1>
-            )}
-            <p className="mt-1 text-xs text-slate-500">
-              Powered by OrangeRails. Your credentials never leave this connection.
-            </p>
-          </div>
+          {platform && (
+            <div className="mb-4 text-xs text-slate-500">
+              <span className="font-medium text-slate-700">{platform.display_name}</span>
+              {" uses OrangeRails to connect securely."}
+            </div>
+          )}
 
           {children}
+
+          {/* Plaid/Quiltt pattern: small Terms + Privacy line near the
+              card footer so the user sees them at every step. URLs are
+              placeholders — swap to real T&C / Privacy pages when they
+              ship. */}
+          <div className="mt-6 border-t border-slate-100 pt-4 text-center text-[11px] text-slate-400">
+            <p>
+              By continuing you agree to OrangeRails's{" "}
+              <a
+                href="/terms"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-slate-600"
+              >
+                Terms
+              </a>
+              {" "}and{" "}
+              <a
+                href="/privacy"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-slate-600"
+              >
+                Privacy Policy
+              </a>
+              .
+            </p>
+            <p className="mt-2 flex items-center justify-center gap-1.5">
+              <span>Powered by</span>
+              <span className="font-semibold text-slate-500">OrangeRails</span>
+            </p>
+          </div>
         </div>
       </div>
     </div>
@@ -1863,11 +1929,11 @@ function BankSearchResults({
   }
 
   return (
-    <div className="mt-3 space-y-2" data-testid="bank-search-results">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+    <div className="mt-4 space-y-2" data-testid="bank-search-results">
+      <div className="text-center text-[10px] font-semibold uppercase tracking-wider text-slate-400">
         Banks
       </div>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {institutions.slice(0, 12).map((inst, i) => {
           const id = inst.id ?? "";
           const name = inst.name ?? "Unknown bank";
@@ -1879,24 +1945,25 @@ function BankSearchResults({
               onClick={() => openBank(id)}
               disabled={!id}
               data-testid={`bank-tile-${id}`}
-              className="flex h-20 w-full items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-left transition-colors hover:border-slate-300 hover:bg-slate-50 disabled:opacity-50"
+              title={name}
+              className="group flex h-24 w-full flex-col items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white p-2 text-center transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-sm disabled:opacity-50"
             >
               {logoUrl ? (
                 <img
                   src={logoUrl}
                   alt=""
                   aria-hidden
-                  className="h-10 w-10 shrink-0 rounded-full object-contain"
+                  className="h-10 w-10 shrink-0 rounded-lg object-contain shadow-sm"
                 />
               ) : (
                 <span
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-600"
+                  className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-base font-bold text-white shadow-sm ${tileColor(id || name)}`}
                   aria-hidden
                 >
                   {name.slice(0, 1).toUpperCase()}
                 </span>
               )}
-              <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-900">
+              <span className="w-full truncate text-xs font-medium text-slate-900">
                 {name}
               </span>
             </button>

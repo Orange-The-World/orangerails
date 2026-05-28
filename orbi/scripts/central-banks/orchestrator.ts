@@ -155,6 +155,7 @@ async function fetchRowsForAuthority(
         { from, to, apiKey, log: (m) => console.log(m) },
         fetchedAtIso,
       );
+    }
     case "ecb": {
       const src = new EcbSource();
       const all: AuthorityRateInsert[] = [];
@@ -173,22 +174,38 @@ async function fetchRowsForAuthority(
     }
     case "snb": {
       const src = new SnbSource();
-      const body = await src.fetchCsv();
-      const parsed = src.parseCsv(body);
+      // SDMX CSV endpoints currently 404 for the daily cube
+      // (see DEFERRED_SOURCES.md, validated 2026-05-26). Try them anyway —
+      // if SNB ever restores the cube we'll silently pick it up — then fall
+      // back to the Playwright SPA scrape.
+      try {
+        const body = await src.fetchCsv();
+        const parsed = src.parseCsv(body);
+        if (parsed.length > 0) return src.toInserts(parsed, fetchedAtIso);
+      } catch (err) {
+        console.log(`  [snb] CSV path unavailable (${(err as Error).message.slice(0, 120)}); ` +
+          `falling back to Playwright runner.`);
+      }
+      const { runSnbPlaywright } = await import("./snb-playwright-runner");
+      const parsed = await runSnbPlaywright({ log: (m) => console.log(m) });
       return src.toInserts(parsed, fetchedAtIso);
     }
     case "boj": {
       const src = new BojSource();
       const yearFrom = Number(from.slice(0, 4));
       const yearTo = Number(to.slice(0, 4));
-      const all: AuthorityRateInsert[] = [];
+      // Direct GETs to famecgi2 return an HTML stub (no real session); the
+      // Playwright runner establishes the landing session, re-uses cookies,
+      // and decodes Shift_JIS via the existing BojSource helper.
+      const { runBojPlaywright } = await import("./boj-playwright-runner");
       const pairs: BojPair[] = ["USD/JPY", "EUR/JPY", "GBP/JPY"];
-      for (const pair of pairs) {
-        const body = await src.fetch({ pair, yearFrom, yearTo });
-        const parsed = src.parseCsv(body, pair);
-        all.push(...src.toInserts(parsed, fetchedAtIso));
-      }
-      return all;
+      const result = await runBojPlaywright({
+        pairs,
+        yearFrom,
+        yearTo,
+        log: (m) => console.log(m),
+      });
+      return src.toInserts(result.rows, fetchedAtIso);
     }
   }
 }
