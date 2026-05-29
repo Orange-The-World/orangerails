@@ -775,6 +775,19 @@ function ConnectPageInner() {
         fetchProviderManifest(search.provider),
       ])
         .then(([platformRes, manifestRes]) => {
+          // Client-side-manifest providers (Quiltt, Sparrow) have a
+          // dedicated route rather than the generic credential form.
+          // PR #147 wired this for the picker click path; the deep-link
+          // path below mirrors that — same code path as if the user had
+          // clicked the tile inside OR's picker. Without this, an
+          // integrator passing ?provider=quiltt lands on an empty
+          // credentials form (no credentialFields).
+          if (manifestRes.connectUrl) {
+            navigateToClientSideManifest(manifestRes, search).catch((err) =>
+              setLoadError(err instanceof Error ? err.message : String(err)),
+            );
+            return;
+          }
           setPlatform(platformRes);
           setManifest(manifestRes);
         })
