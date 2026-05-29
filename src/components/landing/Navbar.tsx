@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Zap, Github } from "lucide-react";
+import { Github } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const navLinks = [
@@ -39,7 +39,14 @@ export function Navbar() {
     >
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
         <Link to="/" className="flex items-center gap-2 font-semibold tracking-tight">
-          <Zap className="h-5 w-5 fill-primary text-primary" strokeWidth={2.5} />
+          <img
+            src="/favicon.svg"
+            alt=""
+            aria-hidden
+            className="h-6 w-6"
+            width={24}
+            height={24}
+          />
           <span className="text-lg">OrangeRails</span>
         </Link>
 
