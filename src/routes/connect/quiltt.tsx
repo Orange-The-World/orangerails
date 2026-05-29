@@ -37,8 +37,6 @@ import {
   Loader2,
   Lock,
 } from "lucide-react";
-import { Navbar } from "@/components/landing/Navbar";
-import { Footer } from "@/components/landing/Footer";
 
 export const Route = createFileRoute("/connect/quiltt")({
   head: () => ({
@@ -106,54 +104,85 @@ function QuilttConnectPage() {
     !!params.app_user_id &&
     !!params.widget_token;
 
+  // Tight popup-style chrome matching /connect. No marketing Navbar/Footer
+  // — this page is opened inside an integrator's popup window, not browsed
+  // to. Light theme hardcoded so it stays consistent regardless of the
+  // embedding page's theme.
   return (
-    <div className="min-h-screen bg-background text-foreground antialiased">
-      <Navbar />
-      <main className="mx-auto max-w-2xl px-6 py-16">
-        <button
-          type="button"
-          onClick={() => {
-            // If the user got here from the inline picker (typical), history.back()
-            // returns them with their search term intact. Fallback to /providers
-            // when there's no history (direct link from an integrator).
-            if (window.history.length > 1) {
-              window.history.back();
-            } else {
-              window.location.assign("/providers");
-            }
-          }}
-          className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Back
-        </button>
+    <div
+      className="min-h-screen bg-slate-50 px-4 py-6 antialiased text-slate-900"
+      style={{ colorScheme: "light" }}
+    >
+      <div className="mx-auto w-full max-w-md">
+        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <button
+            type="button"
+            onClick={() => {
+              if (window.history.length > 1) {
+                window.history.back();
+              } else {
+                window.location.assign("/providers");
+              }
+            }}
+            className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            Back
+          </button>
 
-        <header className="mt-6 space-y-3">
-          <div className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-card px-3 py-1 text-xs text-muted-foreground">
-            <Building2 className="h-3.5 w-3.5" />
-            US bank account · via Quiltt
+          <header className="mt-4 space-y-1.5">
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] text-slate-500">
+              <Building2 className="h-3 w-3" />
+              US bank account · via Quiltt
+            </div>
+            <h1 className="text-base font-semibold text-slate-900">
+              Connect your bank
+            </h1>
+            <p className="text-xs text-slate-500">
+              Your bank credentials never reach OrangeRails. Only encrypted
+              transaction data flows into your vault.
+            </p>
+          </header>
+
+          <section className="mt-4">
+            {haveAllParams ? (
+              <QuilttProvider token={params.session_token!}>
+                <ConnectorPanel params={params} />
+              </QuilttProvider>
+            ) : (
+              <MissingParamsView />
+            )}
+          </section>
+
+          <div className="mt-6 border-t border-slate-100 pt-4 text-center text-[11px] text-slate-400">
+            <p>
+              By continuing you agree to OrangeRails's{" "}
+              <a
+                href="/terms"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-slate-600"
+              >
+                Terms
+              </a>
+              {" "}and{" "}
+              <a
+                href="/privacy"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-slate-600"
+              >
+                Privacy Policy
+              </a>
+              .
+            </p>
+            <p className="mt-2 flex items-center justify-center gap-1.5">
+              <span>Powered by</span>
+              <span className="font-semibold text-slate-500">OrangeRails</span>
+            </p>
           </div>
-          <h1 className="text-3xl font-semibold tracking-tight">
-            Connect your bank
-          </h1>
-          <p className="text-muted-foreground">
-            Your bank credentials never reach OrangeRails. Quiltt brokers the
-            connection (Finicity, MX, Akoya, or Plaid depending on your bank),
-            and only encrypted transaction data flows into your OR vault.
-          </p>
-        </header>
-
-        <section className="mt-10 rounded-xl border border-border/60 bg-card/40 p-6">
-          {haveAllParams ? (
-            <QuilttProvider token={params.session_token!}>
-              <ConnectorPanel params={params} />
-            </QuilttProvider>
-          ) : (
-            <MissingParamsView />
-          )}
-        </section>
-      </main>
-      <Footer />
+        </div>
+      </div>
     </div>
   );
 }

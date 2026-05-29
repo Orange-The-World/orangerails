@@ -669,24 +669,37 @@ async function fetchQuilttBundleViaWidget(widgetToken: string): Promise<QuilttBu
 async function navigateToClientSideManifest(
   manifest: ProviderManifest,
   search: ConnectSearch,
+  /** Snapshot of widget_token from the URL fragment, captured during the
+   *  parent component's first render BEFORE readHandoffKeysFromFragment
+   *  strips the hash via history.replaceState. Pass null when not
+   *  available (e.g. direct deep-link from an integrator that passes
+   *  widget_token via the query string instead). */
+  fragmentWidgetToken: string | null,
 ): Promise<void> {
   if (!manifest.connectUrl) {
     throw new Error(`Provider "${manifest.displayName}" has no connectUrl.`);
   }
 
   if (manifest.slug === "quiltt") {
-    if (!search.widget_token) {
+    // V2 and other integrators pass widget_token via the URL fragment
+    // (so it never reaches OR's server logs). Fall back to the snapshot
+    // captured during render when it's not in the query string.
+    const widgetToken = search.widget_token ?? fragmentWidgetToken;
+    if (!widgetToken) {
       throw new Error(
         "Bank link requires a widget_token in the /connect URL. Your app's " +
           "backend must mint one via or-link-mint-token before opening this widget.",
       );
     }
-    const bundle = await fetchQuilttBundleViaWidget(search.widget_token);
+    const bundle = await fetchQuilttBundleViaWidget(widgetToken);
+    // Pipe widget_token through so /connect/quiltt's completeLinkOnOR
+    // can post it to or-quiltt-link-complete after the bank link finishes.
     const fragment = new URLSearchParams({
       session_token: bundle.session_token,
       connector_id:  bundle.connector_id,
       platform_slug: bundle.platform_slug,
       app_user_id:   bundle.app_user_id,
+      widget_token:  widgetToken,
     }).toString();
     window.location.assign(`${manifest.connectUrl}#${fragment}`);
     return;
@@ -727,6 +740,19 @@ function ConnectPage() {
 
 function ConnectPageInner() {
   const search = useSearch({ from: "/connect" }) as ConnectSearch;
+
+  // Snapshot the URL fragment SYNCHRONOUSLY during the first render — before
+  // readHandoffKeysFromFragment's useEffect strips it via history.replaceState.
+  // V2 and other integrators put widget_token in the fragment so it never
+  // reaches OR's server logs; the deep-link Quiltt handler (in a separate
+  // useEffect) needs it but would otherwise see an empty window.location.hash.
+  // useMemo with [] runs once during the first render pass.
+  const initialFragmentWidgetToken = useMemo<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const raw = window.location.hash.replace(/^#/, "");
+    if (!raw) return null;
+    return new URLSearchParams(raw).get("widget_token");
+  }, []);
 
   const [platform, setPlatform] = useState<PlatformDisplay | null>(null);
   const [manifest, setManifest] = useState<ProviderManifest | null>(null);
@@ -775,6 +801,19 @@ function ConnectPageInner() {
         fetchProviderManifest(search.provider),
       ])
         .then(([platformRes, manifestRes]) => {
+          // Client-side-manifest providers (Quiltt, Sparrow) have a
+          // dedicated route rather than the generic credential form.
+          // PR #147 wired this for the picker click path; the deep-link
+          // path below mirrors that — same code path as if the user had
+          // clicked the tile inside OR's picker. Without this, an
+          // integrator passing ?provider=quiltt lands on an empty
+          // credentials form (no credentialFields).
+          if (manifestRes.connectUrl) {
+            navigateToClientSideManifest(manifestRes, search, initialFragmentWidgetToken).catch((err) =>
+              setLoadError(err instanceof Error ? err.message : String(err)),
+            );
+            return;
+          }
           setPlatform(platformRes);
           setManifest(manifestRes);
         })
@@ -803,7 +842,7 @@ function ConnectPageInner() {
       // connect route rather than the generic credential form. Route there
       // instead of going to enter-credentials.
       if (m.connectUrl) {
-        await navigateToClientSideManifest(m, search);
+        await navigateToClientSideManifest(m, search, initialFragmentWidgetToken);
         return;
       }
 
