@@ -217,7 +217,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     }
   }, [phase, openConnector]);
 
-  async function completeLinkOnOR(connectionId: string | undefined) {
+  async function completeLinkOnOR(quilttConnectionId: string | undefined) {
     setPhase("completing");
     try {
       const supabaseUrl =
@@ -241,10 +241,25 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
           `or-quiltt-link-complete ${resp.status}: ${text.slice(0, 200)}`,
         );
       }
+      const completeJson = await resp.json().catch(() => ({}));
+      const orConnectionId = typeof completeJson?.connection_id === "string"
+        ? completeJson.connection_id : null;
+      const orSubaccountId = typeof completeJson?.subaccount_id === "string"
+        ? completeJson.subaccount_id : null;
       setPhase("done");
       if (window.opener) {
+        // Pass everything the integrating app needs to (a) find the OR
+        // connection row, (b) fetch the discovered accounts via
+        // or-quiltt-accounts using the Quiltt connection id.
         window.opener.postMessage(
-          { type: "OR_QUILTT_LINK_COMPLETE", connectionId: connectionId ?? null },
+          {
+            type: "OR_QUILTT_LINK_COMPLETE",
+            quilttConnectionId: quilttConnectionId ?? null,
+            orConnectionId,
+            orSubaccountId,
+            platformSlug: params.platform_slug,
+            appUserId:    params.app_user_id,
+          },
           "*",
         );
         // Auto-close after a brief "Bank linked" beat — saves the user a click
