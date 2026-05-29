@@ -26,16 +26,15 @@
  */
 
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { QuilttProvider } from "@quiltt/react/providers";
-import { QuilttButton } from "@quiltt/react/components";
+import { useQuilttConnector } from "@quiltt/react/hooks";
 import {
   AlertTriangle,
   ArrowLeft,
   Building2,
   CheckCircle2,
   Loader2,
-  Lock,
 } from "lucide-react";
 
 export const Route = createFileRoute("/connect/quiltt")({
@@ -190,6 +189,33 @@ function QuilttConnectPage() {
 function ConnectorPanel({ params }: { params: FragmentParams }) {
   const [phase, setPhase] = useState<Phase>("ready");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const autoOpenedRef = useRef(false);
+  const autoCloseTimerRef = useRef<number | null>(null);
+
+  // Imperative open — skip the user clicking "Open Quiltt"; the connector
+  // launches as soon as the session is ready. Cuts one window from the flow.
+  const { open: openConnector } = useQuilttConnector(params.connector_id!, {
+    institution: params.institution ?? undefined,
+    onExitSuccess: (metadata) => {
+      void completeLinkOnOR(metadata.connectionId);
+    },
+    onExitAbort: () => {
+      setPhase("aborted");
+    },
+    onExitError: (metadata) => {
+      setErrorMsg(
+        `Quiltt reported an error during link (connectorId=${metadata.connectorId}). Try again or contact support.`,
+      );
+      setPhase("error");
+    },
+  });
+
+  useEffect(() => {
+    if (phase === "ready" && !autoOpenedRef.current) {
+      autoOpenedRef.current = true;
+      openConnector();
+    }
+  }, [phase, openConnector]);
 
   async function completeLinkOnOR(connectionId: string | undefined) {
     setPhase("completing");
@@ -221,6 +247,11 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
           { type: "OR_QUILTT_LINK_COMPLETE", connectionId: connectionId ?? null },
           "*",
         );
+        // Auto-close after a brief "Bank linked" beat — saves the user a click
+        // and removes the dangling "Close window" CTA from the streamlined flow.
+        autoCloseTimerRef.current = window.setTimeout(() => {
+          window.close();
+        }, 1200);
       }
     } catch (e) {
       console.error("[connect/quiltt] complete failed:", e);
@@ -228,6 +259,14 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
       setPhase("error");
     }
   }
+
+  useEffect(() => {
+    return () => {
+      if (autoCloseTimerRef.current !== null) {
+        window.clearTimeout(autoCloseTimerRef.current);
+      }
+    };
+  }, []);
 
   if (phase === "completing") {
     return (
@@ -240,25 +279,14 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
 
   if (phase === "done") {
     return (
-      <div className="space-y-3">
+      <div className="space-y-2">
         <div className="flex items-center gap-2 text-emerald-600">
           <CheckCircle2 className="h-5 w-5" />
           <strong>Bank linked.</strong>
         </div>
-        <p className="text-sm text-muted-foreground">
-          You can close this window and return to your app. Background sync
-          will start delivering transactions to your vault once Quiltt's
-          initial scan finishes (usually within a few minutes).
+        <p className="text-xs text-slate-500">
+          Returning you to your app…
         </p>
-        {typeof window !== "undefined" && window.opener && (
-          <button
-            type="button"
-            onClick={() => window.close()}
-            className="inline-flex items-center justify-center rounded-md border border-border bg-card px-4 py-2 text-sm font-medium hover:bg-muted"
-          >
-            Close window
-          </button>
-        )}
       </div>
     );
   }
@@ -275,7 +303,10 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
         </p>
         <button
           type="button"
-          onClick={() => setPhase("ready")}
+          onClick={() => {
+            autoOpenedRef.current = false;
+            setPhase("ready");
+          }}
           className="inline-flex items-center justify-center rounded-md border border-border bg-card px-4 py-2 text-sm font-medium hover:bg-muted"
         >
           Try again
@@ -299,6 +330,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
         <button
           type="button"
           onClick={() => {
+            autoOpenedRef.current = false;
             setErrorMsg(null);
             setPhase("ready");
           }}
@@ -310,39 +342,11 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     );
   }
 
-  // phase === "ready"
+  // phase === "ready" — connector auto-opens via useEffect, no button click.
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Lock className="h-4 w-4" />
-        Quiltt session prepared. Connector{" "}
-        <code className="text-foreground">{params.connector_id}</code>
-      </div>
-      <p className="text-sm">
-        Click <strong>Open Quiltt</strong> to launch the bank-picker widget.
-        Quiltt prompts you for your bank login, brokers the consent, and hands
-        an opaque profile reference back to OrangeRails. Your credentials
-        never travel through our servers.
-      </p>
-      <QuilttButton
-        connectorId={params.connector_id!}
-        institution={params.institution ?? undefined}
-        onExitSuccess={(metadata) => {
-          void completeLinkOnOR(metadata.connectionId);
-        }}
-        onExitAbort={() => {
-          setPhase("aborted");
-        }}
-        onExitError={(metadata) => {
-          setErrorMsg(
-            `Quiltt reported an error during link (connectorId=${metadata.connectorId}). Try again or contact support.`,
-          );
-          setPhase("error");
-        }}
-        className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-      >
-        Open Quiltt
-      </QuilttButton>
+    <div className="flex items-center gap-3 text-sm text-slate-500">
+      <Loader2 className="h-4 w-4 animate-spin" />
+      Opening secure bank picker…
     </div>
   );
 }
