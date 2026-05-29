@@ -1,5 +1,4 @@
 import { Link } from "@tanstack/react-router";
-import { Zap } from "lucide-react";
 
 type FooterLink = { label: string; to?: string; href?: string };
 
@@ -47,7 +46,14 @@ export function Footer() {
         <div className="grid gap-10 md:grid-cols-5">
           <div>
             <Link to="/" className="flex items-center gap-2 font-semibold">
-              <Zap className="h-5 w-5 fill-primary text-primary" strokeWidth={2.5} />
+              <img
+                src="/favicon.svg"
+                alt=""
+                aria-hidden
+                className="h-6 w-6"
+                width={24}
+                height={24}
+              />
               <span>OrangeRails</span>
             </Link>
             <p className="mt-3 max-w-xs text-sm text-muted-foreground">
