@@ -666,6 +666,21 @@ async function fetchQuilttBundleViaWidget(widgetToken: string): Promise<QuilttBu
  *   open /connect/quiltt directly with session params they minted
  *   server-side.
  */
+/**
+ * Pull widget_token from the URL fragment when it's not in the query
+ * string. V2 (and any other integrator following the documented hand-off
+ * spec) puts cred_key + widget_token in the fragment so neither hits
+ * OR's server logs. The deep-link handler runs synchronously off
+ * search params, so we have to peek at window.location.hash directly.
+ */
+function readWidgetTokenFromFragment(): string | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.location.hash.replace(/^#/, "");
+  if (!raw) return null;
+  const sp = new URLSearchParams(raw);
+  return sp.get("widget_token");
+}
+
 async function navigateToClientSideManifest(
   manifest: ProviderManifest,
   search: ConnectSearch,
@@ -675,18 +690,25 @@ async function navigateToClientSideManifest(
   }
 
   if (manifest.slug === "quiltt") {
-    if (!search.widget_token) {
+    // V2 and other integrators pass widget_token via the URL fragment
+    // (so it never reaches OR's server logs). Fall back to that when
+    // it's not in the query string.
+    const widgetToken = search.widget_token ?? readWidgetTokenFromFragment();
+    if (!widgetToken) {
       throw new Error(
         "Bank link requires a widget_token in the /connect URL. Your app's " +
           "backend must mint one via or-link-mint-token before opening this widget.",
       );
     }
-    const bundle = await fetchQuilttBundleViaWidget(search.widget_token);
+    const bundle = await fetchQuilttBundleViaWidget(widgetToken);
+    // Pipe widget_token through so /connect/quiltt's completeLinkOnOR
+    // can post it to or-quiltt-link-complete after the bank link finishes.
     const fragment = new URLSearchParams({
       session_token: bundle.session_token,
       connector_id:  bundle.connector_id,
       platform_slug: bundle.platform_slug,
       app_user_id:   bundle.app_user_id,
+      widget_token:  widgetToken,
     }).toString();
     window.location.assign(`${manifest.connectUrl}#${fragment}`);
     return;
