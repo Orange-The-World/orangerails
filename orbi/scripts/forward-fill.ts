@@ -399,11 +399,13 @@ async function writeCompositeRate(target: string, result: CompositeResolveResult
 }
 
 // --- One iteration ---
-async function runIteration(label: string): Promise<void> {
+// effectiveAtOverride: if provided, use this minute bucket; otherwise derive
+// from clock (now - 90s). Catch-up loop in main() passes explicit minutes.
+async function runIteration(label: string, effectiveAtOverride?: Date): Promise<void> {
   const t0 = Date.now();
   // --at <iso> overrides effectiveAt for gap-fill of past minutes
   const atArg = process.argv.find((a, i) => process.argv[i-1] === "--at");
-  const effectiveAt = atArg ? new Date(atArg) : new Date(Date.now() - 90_000);
+  const effectiveAt = effectiveAtOverride ?? (atArg ? new Date(atArg) : new Date(Date.now() - 90_000));
 
   console.log(`\n[${new Date().toISOString()}] ${label} — effectiveAt=${effectiveAt.toISOString()}`);
 
@@ -421,11 +423,14 @@ async function runIteration(label: string): Promise<void> {
   );
   summaries.push(...stableResults);
 
-  // Composite pairs: sequential to share BTC/USD cache (which is re-resolved per call, but minimal overhead)
-  for (const p of COMPOSITE_PAIRS) {
-    const s = await publishComposite(p.target, effectiveAt);
-    summaries.push(s);
-  }
+  // Composite pairs: parallel (BTC/USD is re-resolved per pair but the
+  // overhead is dominated by network I/O on the cross-rate fetch, which
+  // benefits massively from concurrency). Pre-fix: 15 sequential calls cost
+  // ~45s and starved the loop of a full minute. Post-fix: ~3-5s.
+  const compositeResults = await Promise.all(
+    COMPOSITE_PAIRS.map((p) => publishComposite(p.target, effectiveAt)),
+  );
+  summaries.push(...compositeResults);
 
   for (const s of summaries) console.log("  ", s);
   const elapsed = Date.now() - t0;
@@ -444,18 +449,44 @@ async function main() {
   console.log("Starting ORBI forward-fill loop. Ctrl+C to stop.");
   console.log(`Publishing ${DIRECT_PAIRS.length} direct + ${STABLECOIN_PAIRS.length} stablecoin + ${COMPOSITE_PAIRS.length} composite pairs every minute.`);
 
+  // Track the last minute bucket we have published. Each loop turn computes
+  // the target bucket (now - 90s, floored to the minute) and publishes EVERY
+  // missed bucket between lastPublished+1m and target. This guarantees
+  // density even when iterations occasionally run > 60s (writer contention,
+  // upstream slowness, etc.) — pre-fix the loop slept to the next minute
+  // boundary regardless and silently skipped buckets, producing the 60-95%
+  // density the Coverage Validation Matrix flagged on 2026-05-29.
   let iteration = 0;
+  let lastPublishedMs: number | null = null;
   while (true) {
-    iteration++;
-    try {
-      await runIteration(`iteration #${iteration}`);
-    } catch (err) {
-      console.error(`Iteration #${iteration} unhandled error:`, err);
-    }
-    // Sleep until the next minute boundary (give 5s buffer for candles to close)
     const now = Date.now();
-    const nextBoundary = (Math.floor(now / 60_000) + 1) * 60_000 + 5_000;
-    const sleepMs = nextBoundary - now;
+    // Target bucket: floor((now - 90s) / 60s) * 60s — the most recent minute
+    // whose candles have had at least 30s to close on upstream venues.
+    const targetMs = Math.floor((now - 90_000) / 60_000) * 60_000;
+
+    // First boot: only publish the current target minute (don't backfill
+    // from cold-start — gap-fill jobs own that).
+    if (lastPublishedMs === null) lastPublishedMs = targetMs - 60_000;
+
+    // Catch up every missed minute between lastPublished+1m and target.
+    while (lastPublishedMs < targetMs) {
+      const bucketMs = lastPublishedMs + 60_000;
+      iteration++;
+      try {
+        await runIteration(`iteration #${iteration}`, new Date(bucketMs));
+        lastPublishedMs = bucketMs;
+      } catch (err) {
+        console.error(`Iteration #${iteration} unhandled error:`, err);
+        // On unhandled error, still advance the watermark to avoid an
+        // infinite tight loop on a poisoned minute.
+        lastPublishedMs = bucketMs;
+      }
+    }
+
+    // If we caught up to target, wait until the NEXT minute is eligible
+    // (target + 60s + 90s buffer past wall clock).
+    const nextTargetWallMs = lastPublishedMs + 60_000 + 90_000;
+    const sleepMs = Math.max(1_000, nextTargetWallMs - Date.now());
     await new Promise((r) => setTimeout(r, sleepMs));
   }
 }
