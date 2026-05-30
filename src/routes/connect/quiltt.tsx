@@ -471,12 +471,19 @@ function BankSearchStep({
             const id = inst.id ?? "";
             const name = inst.name ?? "Unknown bank";
             const logoUrl = inst.logo?.url;
+            // Quiltt's `institution` connector option accepts either an
+            // institution id or a free-text search term per @quiltt/core's
+            // ConnectorSDKConnectOptions.institution contract. Search
+            // results from useQuilttInstitutions sometimes don't include
+            // an id (Finicity Sandbox Bank is a known case), so fall
+            // back to the name — Quiltt re-resolves it server-side.
+            const pickValue = id || name;
             return (
               <button
                 key={id || `inst-${i}`}
                 type="button"
-                onClick={() => id && onPick(inst)}
-                disabled={!id}
+                onClick={() => pickValue && onPick({ id: pickValue, name, logo: inst.logo })}
+                disabled={!pickValue}
                 title={name}
                 className="group flex h-24 w-full flex-col items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white p-2 text-center transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-sm disabled:opacity-50"
               >
