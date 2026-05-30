@@ -36,6 +36,7 @@ import {
   CheckCircle2,
   Loader2,
   Search,
+  X,
 } from "lucide-react";
 
 interface InstitutionRow {
@@ -120,6 +121,31 @@ function QuilttConnectPage() {
     !!params.platform_slug &&
     !!params.app_user_id &&
     !!params.widget_token;
+  const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
+
+  function tryClose() {
+    setExitConfirmOpen(true);
+  }
+  function confirmExit() {
+    setExitConfirmOpen(false);
+    // Tell the integrating app the user bailed before the link was made.
+    if (window.opener) {
+      window.opener.postMessage(
+        { type: "OR_QUILTT_LINK_ABORT", reason: "user_dismissed_popup" },
+        "*",
+      );
+    }
+    window.close();
+    // Fallback if window.close() is blocked (only allowed for windows
+    // opened via window.open()): navigate to /providers so the user
+    // isn't stuck on a half-closed link page.
+    setTimeout(() => {
+      if (!window.closed) window.location.assign("/providers");
+    }, 200);
+  }
+  function dismissExit() {
+    setExitConfirmOpen(false);
+  }
 
   // Tight popup-style chrome matching /connect. No marketing Navbar/Footer
   // — this page is opened inside an integrator's popup window, not browsed
@@ -131,21 +157,34 @@ function QuilttConnectPage() {
       style={{ colorScheme: "light" }}
     >
       <div className="mx-auto w-full max-w-md">
-        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <button
-            type="button"
-            onClick={() => {
-              if (window.history.length > 1) {
-                window.history.back();
-              } else {
-                window.location.assign("/providers");
-              }
-            }}
-            className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Back
-          </button>
+        <div className="relative rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          {/* Top bar — Back (left) + X (right). X always triggers the
+              exit-confirmation dialog so the user doesn't lose progress
+              accidentally. Pattern mirrors Plaid Link / Quiltt Connector. */}
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => {
+                if (window.history.length > 1) {
+                  window.history.back();
+                } else {
+                  window.location.assign("/providers");
+                }
+              }}
+              className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Back
+            </button>
+            <button
+              type="button"
+              aria-label="Close"
+              onClick={tryClose}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
 
           <header className="mt-4 space-y-1.5">
             <div className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] text-slate-500">
@@ -198,6 +237,49 @@ function QuilttConnectPage() {
               <span className="font-semibold text-slate-500">OrangeRails</span>
             </p>
           </div>
+
+          {/* Exit confirmation overlay — Plaid Link parity. Sits on top
+              of the popup card so the user doesn't lose progress on an
+              accidental X click. */}
+          {exitConfirmOpen && (
+            <div
+              className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-white/95 px-6"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="exit-confirm-title"
+            >
+              <div className="w-full max-w-xs text-center">
+                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-rose-50">
+                  <AlertTriangle className="h-6 w-6 text-rose-500" />
+                </div>
+                <h2
+                  id="exit-confirm-title"
+                  className="text-lg font-semibold text-slate-900"
+                >
+                  Are you sure?
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Your progress will be lost if you exit.
+                </p>
+                <div className="mt-6 space-y-2">
+                  <button
+                    type="button"
+                    onClick={confirmExit}
+                    className="w-full rounded-full bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
+                  >
+                    Yes, exit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={dismissExit}
+                    className="w-full rounded-full border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-900 hover:bg-slate-50"
+                  >
+                    No, go back
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
