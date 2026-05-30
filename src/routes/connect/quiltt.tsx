@@ -28,14 +28,32 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QuilttProvider } from "@quiltt/react/providers";
-import { useQuilttConnector } from "@quiltt/react/hooks";
+import { useQuilttConnector, useQuilttInstitutions } from "@quiltt/react/hooks";
 import {
   AlertTriangle,
   ArrowLeft,
   Building2,
   CheckCircle2,
   Loader2,
+  Search,
 } from "lucide-react";
+
+interface InstitutionRow {
+  id?: string;
+  name?: string;
+  logo?: { url?: string };
+}
+
+// Deterministic brand color for a bank tile when no logo is returned.
+function tileColor(seed: string): string {
+  const palette = [
+    "bg-indigo-500", "bg-blue-500", "bg-purple-500", "bg-emerald-500",
+    "bg-amber-500", "bg-rose-500", "bg-cyan-500", "bg-orange-500",
+  ];
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
+  return palette[Math.abs(h) % palette.length];
+}
 
 export const Route = createFileRoute("/connect/quiltt")({
   head: () => ({
@@ -189,17 +207,31 @@ function QuilttConnectPage() {
 function ConnectorPanel({ params }: { params: FragmentParams }) {
   const [phase, setPhase] = useState<Phase>("ready");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Selected bank — set when the user clicks a tile from the inline
+  // institution search. The Quiltt Connector receives `institution` so
+  // it skips its own picker AND welcome screen, landing directly on the
+  // bank's login form. Pre-set via fragment param when the upstream
+  // integrator already knew which bank to open.
+  const [selectedInstitution, setSelectedInstitution] = useState<InstitutionRow | null>(
+    params.institution ? { id: params.institution } : null,
+  );
   const autoOpenedRef = useRef(false);
   const autoCloseTimerRef = useRef<number | null>(null);
 
-  // Imperative open — skip the user clicking "Open Quiltt"; the connector
-  // launches as soon as the session is ready. Cuts one window from the flow.
+  const effectiveInstitutionId = selectedInstitution?.id ?? params.institution ?? undefined;
+
+  // Imperative open — connector launches as soon as the user picks a bank
+  // (or the integrator pre-selected one via the institution fragment param).
   const { open: openConnector } = useQuilttConnector(params.connector_id!, {
-    institution: params.institution ?? undefined,
+    institution: effectiveInstitutionId,
     onExitSuccess: (metadata) => {
       void completeLinkOnOR(metadata.connectionId);
     },
     onExitAbort: () => {
+      // Drop the selection so the user lands back on the search step
+      // instead of being stuck waiting for the connector to re-open.
+      setSelectedInstitution(null);
+      autoOpenedRef.current = false;
       setPhase("aborted");
     },
     onExitError: (metadata) => {
@@ -211,11 +243,11 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   });
 
   useEffect(() => {
-    if (phase === "ready" && !autoOpenedRef.current) {
+    if (phase === "ready" && effectiveInstitutionId && !autoOpenedRef.current) {
       autoOpenedRef.current = true;
       openConnector();
     }
-  }, [phase, openConnector]);
+  }, [phase, effectiveInstitutionId, openConnector]);
 
   async function completeLinkOnOR(quilttConnectionId: string | undefined) {
     setPhase("completing");
@@ -357,11 +389,120 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     );
   }
 
-  // phase === "ready" — connector auto-opens via useEffect, no button click.
+  // phase === "ready"
+  // If a bank is already selected, the connector is auto-opening via the
+  // useEffect above; show a brief loader.
+  if (effectiveInstitutionId) {
+    return (
+      <div className="flex items-center gap-3 text-sm text-slate-500">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        {selectedInstitution?.name
+          ? `Opening ${selectedInstitution.name}…`
+          : "Opening secure bank picker…"}
+      </div>
+    );
+  }
+  // Otherwise: render the inline institution search step.
   return (
-    <div className="flex items-center gap-3 text-sm text-slate-500">
-      <Loader2 className="h-4 w-4 animate-spin" />
-      Opening secure bank picker…
+    <BankSearchStep
+      connectorId={params.connector_id!}
+      onPick={(inst) => setSelectedInstitution(inst)}
+    />
+  );
+}
+
+function BankSearchStep({
+  connectorId,
+  onPick,
+}: {
+  connectorId: string;
+  onPick: (inst: InstitutionRow) => void;
+}) {
+  const [term, setTerm] = useState("");
+  const { searchResults, isSearching, setSearchTerm } = useQuilttInstitutions(connectorId);
+
+  useEffect(() => {
+    setSearchTerm(term);
+  }, [term, setSearchTerm]);
+
+  const results = (Array.isArray(searchResults) ? searchResults : []) as InstitutionRow[];
+
+  return (
+    <div className="space-y-3">
+      <label htmlFor="bank-search" className="block text-xs font-medium text-slate-600">
+        Search your bank
+      </label>
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+        <input
+          id="bank-search"
+          type="text"
+          autoFocus
+          autoComplete="off"
+          value={term}
+          onChange={(e) => setTerm(e.target.value)}
+          placeholder="Chase, Bank of America, FinBank…"
+          className="w-full rounded-md border border-slate-200 bg-white py-1.5 pl-8 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200"
+        />
+      </div>
+
+      {term.trim().length < 2 && (
+        <p className="text-[11px] text-slate-400">
+          Type at least 2 characters to search Quiltt's institution catalog.
+        </p>
+      )}
+
+      {term.trim().length >= 2 && isSearching && results.length === 0 && (
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Searching banks…
+        </div>
+      )}
+
+      {term.trim().length >= 2 && !isSearching && results.length === 0 && (
+        <p className="text-xs text-slate-500">
+          No banks match "{term}". Try a shorter or different name.
+        </p>
+      )}
+
+      {results.length > 0 && (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {results.slice(0, 12).map((inst, i) => {
+            const id = inst.id ?? "";
+            const name = inst.name ?? "Unknown bank";
+            const logoUrl = inst.logo?.url;
+            return (
+              <button
+                key={id || `inst-${i}`}
+                type="button"
+                onClick={() => id && onPick(inst)}
+                disabled={!id}
+                title={name}
+                className="group flex h-24 w-full flex-col items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white p-2 text-center transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-sm disabled:opacity-50"
+              >
+                {logoUrl ? (
+                  <img
+                    src={logoUrl}
+                    alt=""
+                    aria-hidden
+                    className="h-10 w-10 shrink-0 rounded-lg object-contain shadow-sm"
+                  />
+                ) : (
+                  <span
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-base font-bold text-white shadow-sm ${tileColor(id || name)}`}
+                    aria-hidden
+                  >
+                    {name.slice(0, 1).toUpperCase()}
+                  </span>
+                )}
+                <span className="w-full truncate text-xs font-medium text-slate-900">
+                  {name}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
