@@ -59,6 +59,13 @@ async function gotoConnectorsTab(page: Page) {
 }
 
 test.describe('Quiltt full E2E — 2026-05-30', () => {
+  // Requires a real V2 vault password (from the wiki creds doc) to
+  // unlock the V2 modal + mint the OR widget token. CI doesn't have
+  // that secret, so skip the whole flow there.
+  test.skip(
+    !process.env.V2DEV_VAULT_PASSWORD,
+    'Requires V2DEV_VAULT_PASSWORD env var — laptop /PW only, not CI.',
+  );
   test.setTimeout(420_000); // 7 min — multi-step + cold Next.js compiles
 
   test('Full flow: V2 login → Bank tile → inline search → FinBank → Quiltt iframe', async ({ page, context }) => {
