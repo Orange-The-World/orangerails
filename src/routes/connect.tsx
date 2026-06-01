@@ -173,6 +173,11 @@ interface ConnectSearch {
   app_user_id?: string;
   provider?: string;
   return_to?: string;
+  // Optional Quiltt institution id (or free-text search term). When set
+  // by a consumer app's picker that resolved a bank tile via the
+  // or-institutions-catalog endpoint, this is threaded into the
+  // /connect/quiltt fragment so Quiltt opens pre-selected to that bank.
+  institution?: string;
 }
 
 export const Route = createFileRoute("/connect")({
@@ -182,6 +187,7 @@ export const Route = createFileRoute("/connect")({
     provider: typeof search.provider === "string" ? search.provider : undefined,
     return_to: typeof search.return_to === "string" ? search.return_to : undefined,
     widget_token: typeof search.widget_token === "string" ? search.widget_token : undefined,
+    institution: typeof search.institution === "string" ? search.institution : undefined,
   }),
   component: ConnectPage,
 });
@@ -692,15 +698,21 @@ async function navigateToClientSideManifest(
       );
     }
     const bundle = await fetchQuilttBundleViaWidget(widgetToken);
-    // Pipe widget_token through so /connect/quiltt's completeLinkOnOR
-    // can post it to or-quiltt-link-complete after the bank link finishes.
-    const fragment = new URLSearchParams({
+    // Pipe widget_token + institution (if pre-selected by the consumer
+    // app's picker) through so /connect/quiltt's ConnectorPanel can
+    // skip the inline bank search and launch Quiltt straight to the
+    // bank's login form.
+    const fragmentParams: Record<string, string> = {
       session_token: bundle.session_token,
       connector_id:  bundle.connector_id,
       platform_slug: bundle.platform_slug,
       app_user_id:   bundle.app_user_id,
       widget_token:  widgetToken,
-    }).toString();
+    };
+    if (search.institution) {
+      fragmentParams.institution = search.institution;
+    }
+    const fragment = new URLSearchParams(fragmentParams).toString();
     window.location.assign(`${manifest.connectUrl}#${fragment}`);
     return;
   }
