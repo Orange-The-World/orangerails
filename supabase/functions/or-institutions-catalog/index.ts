@@ -195,13 +195,17 @@ Deno.serve(async (req: Request) => {
       },
     );
   } catch (e) {
-    console.error('[or-institutions-catalog] search failed:', e instanceof Error ? e.message : String(e));
+    const errMsg = e instanceof Error ? e.message : String(e);
+    console.error('[or-institutions-catalog] search failed:', errMsg);
     return jsonResponse(
       {
         connector_id: connectorId,
         q,
         institutions: [],
-        warning: 'Catalog search failed; consumer should fall back to OR popup.',
+        // Diagnostic — surfaces upstream Quiltt errors so consumers can
+        // tell apart "Quiltt down" vs "no banks matched". Includes the
+        // upstream HTTP code when available; never includes secrets.
+        warning: `Catalog search failed: ${errMsg.slice(0, 250)}`,
       },
       200,
       { ...cors, 'cache-control': 'no-store' },
