@@ -99,8 +99,13 @@ async function searchQuilttInstitutions(
   const resp = await fetch(url, {
     method: 'GET',
     headers: {
-      'Authorization': `Bearer ${sessionToken}`,
-      'Content-Type':  'application/json',
+      'Authorization':   `Bearer ${sessionToken}`,
+      'Content-Type':    'application/json',
+      'Accept':          'application/json',
+      // Quiltt's /sdk/* endpoints reject calls without this header
+      // (returns 403 "This endpoint must be called from..."). Format
+      // per @quiltt/core utils/getSDKAgent — "Quiltt/<ver> (<platform>)".
+      'Quiltt-SDK-Agent': 'Quiltt/6.0.0 (Server)',
     },
   });
   if (resp.status === 401) {
