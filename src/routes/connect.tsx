@@ -160,6 +160,65 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
   return { credKey, txnKey };
 }
 
+/**
+ * Deferred-cred-key flow: instead of receiving the cred_key in the URL
+ * fragment up front (which forces the parent app to prompt for its
+ * vault password BEFORE the user fills the credential form), we
+ * postMessage `or-need-cred-key` to window.opener after the user
+ * clicks Save and wait for the parent to reply with `or-cred-key-ready`
+ * carrying a base64 32-byte AES-256-GCM key.
+ */
+async function requestHandoffKeysFromParent(): Promise<HandoffKeys> {
+  const opener = window.opener as Window | null;
+  if (!opener || opener.closed) {
+    throw new Error(
+      "Lost connection to the host app — please close this window and try again.",
+    );
+  }
+  const targetOrigin = document.referrer
+    ? new URL(document.referrer).origin
+    : "*";
+
+  return new Promise<HandoffKeys>((resolve, reject) => {
+    const TIMEOUT_MS = 120_000;
+    const onMessage = async (event: MessageEvent) => {
+      const data = event.data as unknown;
+      if (!data || typeof data !== "object") return;
+      if ((data as { type?: unknown }).type !== "or-cred-key-ready") return;
+      const credKeyB64 = (data as { credKey?: unknown }).credKey;
+      if (typeof credKeyB64 !== "string" || credKeyB64.length === 0) {
+        cleanup();
+        reject(new Error("Host app returned an empty unlock key."));
+        return;
+      }
+      try {
+        const bytes = base64ToBytes(credKeyB64);
+        if (bytes.length !== 32) {
+          throw new Error(
+            "Host app returned a key of the wrong size (expected 32 bytes).",
+          );
+        }
+        const credKey = await importAesKey(bytes.buffer as ArrayBuffer);
+        cleanup();
+        resolve({ credKey, txnKey: credKey });
+      } catch (err) {
+        cleanup();
+        reject(err);
+      }
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Host app did not return the unlock key in time."));
+    }, TIMEOUT_MS);
+    function cleanup() {
+      window.clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+    }
+    window.addEventListener("message", onMessage);
+    opener.postMessage({ type: "or-need-cred-key" }, targetOrigin);
+  });
+}
+
 // --------------------------------------------------------------------
 // Search-param schema (validated below).
 // --------------------------------------------------------------------
@@ -173,6 +232,16 @@ interface ConnectSearch {
   app_user_id?: string;
   provider?: string;
   return_to?: string;
+  // "1" when the parent app (V2) wants to deliver the cred_key by
+  // postMessage AFTER the user fills the credential form, instead of
+  // sending it in the URL fragment up front. Lets the parent defer its
+  // vault-password prompt until the moment the user clicks Save.
+  defer_cred_key?: string;
+  // Optional Quiltt institution id (or free-text search term). When set
+  // by a consumer app's picker that resolved a bank tile via the
+  // or-institutions-catalog endpoint, this is threaded into the
+  // /connect/quiltt fragment so Quiltt opens pre-selected to that bank.
+  institution?: string;
 }
 
 export const Route = createFileRoute("/connect")({
@@ -182,6 +251,8 @@ export const Route = createFileRoute("/connect")({
     provider: typeof search.provider === "string" ? search.provider : undefined,
     return_to: typeof search.return_to === "string" ? search.return_to : undefined,
     widget_token: typeof search.widget_token === "string" ? search.widget_token : undefined,
+    defer_cred_key: typeof search.defer_cred_key === "string" ? search.defer_cred_key : undefined,
+    institution: typeof search.institution === "string" ? search.institution : undefined,
   }),
   component: ConnectPage,
 });
@@ -692,15 +763,21 @@ async function navigateToClientSideManifest(
       );
     }
     const bundle = await fetchQuilttBundleViaWidget(widgetToken);
-    // Pipe widget_token through so /connect/quiltt's completeLinkOnOR
-    // can post it to or-quiltt-link-complete after the bank link finishes.
-    const fragment = new URLSearchParams({
+    // Pipe widget_token + institution (if pre-selected by the consumer
+    // app's picker) through so /connect/quiltt's ConnectorPanel can
+    // skip the inline bank search and launch Quiltt straight to the
+    // bank's login form.
+    const fragmentParams: Record<string, string> = {
       session_token: bundle.session_token,
       connector_id:  bundle.connector_id,
       platform_slug: bundle.platform_slug,
       app_user_id:   bundle.app_user_id,
       widget_token:  widgetToken,
-    }).toString();
+    };
+    if (search.institution) {
+      fragmentParams.institution = search.institution;
+    }
+    const fragment = new URLSearchParams(fragmentParams).toString();
     window.location.assign(`${manifest.connectUrl}#${fragment}`);
     return;
   }
@@ -932,6 +1009,24 @@ function ConnectPageInner() {
     setError(null);
     setStep("saving");
     try {
+      // Deferred-cred-key flow: the host app withheld the cred_key from
+      // the URL fragment so it could defer the vault-password prompt.
+      // Ask for it now over postMessage. The host prompts the user for
+      // their vault password and posts back `or-cred-key-ready`.
+      let handoff = handoffKeys;
+      if (!handoff && search.defer_cred_key === "1") {
+        try {
+          handoff = await requestHandoffKeysFromParent();
+        } catch (err) {
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Could not get the unlock key from the host app.",
+          );
+          setStep("pick-wallets");
+          return;
+        }
+      }
       const locked = await lockEverything({
         formValues,
         // User-supplied label (defaulted to the platform display name on
@@ -942,7 +1037,7 @@ function ConnectPageInner() {
             ? connectionLabel.trim()
             : platform.display_name,
         picks,
-        handoff: handoffKeys,
+        handoff,
       });
 
       const result = await callLinkComplete({
