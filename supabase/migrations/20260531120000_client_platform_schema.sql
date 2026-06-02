@@ -282,6 +282,7 @@ INSERT INTO client_platform.api_plans (product, tier, display_name, daily_quota,
   -- Orange Rails (mixed: self-serve for small devs, sales for enterprise)
   ('or', 'developer',   'Developer',   null, 10000,   10,  29,   75000,   true),
   ('or', 'business',    'Business',    null, 100000,  50,  299,  750000,  true),
-  ('or', 'enterprise',  'Enterprise',  null, null,    500, 0,    0,       true);
+  ('or', 'enterprise',  'Enterprise',  null, null,    500, 0,    0,       true)
+ON CONFLICT (product, tier) DO NOTHING;
 
 COMMIT;
