@@ -15,5 +15,3 @@ ALTER TABLE client_platform.api_keys ADD CONSTRAINT api_keys_key_hash_unique UNI
 CREATE INDEX api_keys_key_hash_idx ON client_platform.api_keys (key_hash) WHERE revoked_at IS NULL;
 
 COMMIT;
-
-\d client_platform.api_keys

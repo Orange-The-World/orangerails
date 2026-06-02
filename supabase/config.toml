@@ -108,5 +108,8 @@ verify_jwt = false
 [functions.or-quiltt-accounts]
 verify_jwt = false
 
+[functions.or-institutions-catalog]
+verify_jwt = false
+
 [functions.or-quiltt-session-via-widget]
 verify_jwt = false
