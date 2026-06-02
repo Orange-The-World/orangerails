@@ -16,7 +16,7 @@ CREATE SCHEMA IF NOT EXISTS client_platform;
 -- ============================================================================
 -- organizations: one row per customer (self-serve signup OR sales-created)
 -- ============================================================================
-CREATE TABLE client_platform.organizations (
+CREATE TABLE IF NOT EXISTS client_platform.organizations (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name            text NOT NULL,
   slug            text NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9][a-z0-9-]{2,40}$'),
@@ -28,13 +28,13 @@ CREATE TABLE client_platform.organizations (
   created_at      timestamptz NOT NULL DEFAULT now(),
   updated_at      timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX organizations_billing_email_idx ON client_platform.organizations (billing_email);
-CREATE INDEX organizations_status_idx ON client_platform.organizations (status) WHERE status <> 'active';
+CREATE INDEX IF NOT EXISTS organizations_billing_email_idx ON client_platform.organizations (billing_email);
+CREATE INDEX IF NOT EXISTS organizations_status_idx ON client_platform.organizations (status) WHERE status <> 'active';
 
 -- ============================================================================
 -- organization_entitlements: which products an org can use, and on which plan
 -- ============================================================================
-CREATE TABLE client_platform.organization_entitlements (
+CREATE TABLE IF NOT EXISTS client_platform.organization_entitlements (
   org_id        uuid NOT NULL REFERENCES client_platform.organizations(id) ON DELETE CASCADE,
   product       text NOT NULL CHECK (product IN ('truth','orbi','or')),
   plan_id       uuid,  -- nullable for sales-custom contracts (no catalog plan)
@@ -46,7 +46,7 @@ CREATE TABLE client_platform.organization_entitlements (
 -- ============================================================================
 -- organization_members: users with access to an org
 -- ============================================================================
-CREATE TABLE client_platform.organization_members (
+CREATE TABLE IF NOT EXISTS client_platform.organization_members (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id        uuid NOT NULL REFERENCES client_platform.organizations(id) ON DELETE CASCADE,
   user_id       uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -54,13 +54,13 @@ CREATE TABLE client_platform.organization_members (
   created_at    timestamptz NOT NULL DEFAULT now(),
   UNIQUE (org_id, user_id)
 );
-CREATE INDEX organization_members_user_id_idx ON client_platform.organization_members (user_id);
-CREATE INDEX organization_members_org_id_idx ON client_platform.organization_members (org_id);
+CREATE INDEX IF NOT EXISTS organization_members_user_id_idx ON client_platform.organization_members (user_id);
+CREATE INDEX IF NOT EXISTS organization_members_org_id_idx ON client_platform.organization_members (org_id);
 
 -- ============================================================================
 -- applications: apps within an org (an org may run multiple)
 -- ============================================================================
-CREATE TABLE client_platform.applications (
+CREATE TABLE IF NOT EXISTS client_platform.applications (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id        uuid NOT NULL REFERENCES client_platform.organizations(id) ON DELETE CASCADE,
   name          text NOT NULL,
@@ -69,12 +69,12 @@ CREATE TABLE client_platform.applications (
   created_at    timestamptz NOT NULL DEFAULT now(),
   archived_at   timestamptz
 );
-CREATE INDEX applications_org_id_idx ON client_platform.applications (org_id) WHERE archived_at IS NULL;
+CREATE INDEX IF NOT EXISTS applications_org_id_idx ON client_platform.applications (org_id) WHERE archived_at IS NULL;
 
 -- ============================================================================
 -- api_plans: tier catalog per product (Truth/ORBI/OR)
 -- ============================================================================
-CREATE TABLE client_platform.api_plans (
+CREATE TABLE IF NOT EXISTS client_platform.api_plans (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   product             text NOT NULL CHECK (product IN ('truth','orbi','or')),
   tier                text NOT NULL,
@@ -93,7 +93,7 @@ CREATE TABLE client_platform.api_plans (
 -- ============================================================================
 -- api_keys: hashed key material for an app
 -- ============================================================================
-CREATE TABLE client_platform.api_keys (
+CREATE TABLE IF NOT EXISTS client_platform.api_keys (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   app_id        uuid NOT NULL REFERENCES client_platform.applications(id) ON DELETE CASCADE,
   name          text NOT NULL,             -- user-chosen label ("prod", "staging")
@@ -105,13 +105,13 @@ CREATE TABLE client_platform.api_keys (
   last_used_at  timestamptz,
   revoked_at    timestamptz
 );
-CREATE INDEX api_keys_app_id_idx ON client_platform.api_keys (app_id) WHERE revoked_at IS NULL;
-CREATE INDEX api_keys_key_hash_idx ON client_platform.api_keys (key_hash) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS api_keys_app_id_idx ON client_platform.api_keys (app_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS api_keys_key_hash_idx ON client_platform.api_keys (key_hash) WHERE revoked_at IS NULL;
 
 -- ============================================================================
 -- api_usage: one row per API call (heavy table — partition later when needed)
 -- ============================================================================
-CREATE TABLE client_platform.api_usage (
+CREATE TABLE IF NOT EXISTS client_platform.api_usage (
   id              bigserial PRIMARY KEY,
   ts              timestamptz NOT NULL DEFAULT now(),
   org_id          uuid NOT NULL,        -- denormalized for fast rollups
@@ -124,14 +124,14 @@ CREATE TABLE client_platform.api_usage (
   rows_returned   int,
   client_ip       inet
 );
-CREATE INDEX api_usage_ts_idx ON client_platform.api_usage (ts);
-CREATE INDEX api_usage_org_ts_idx ON client_platform.api_usage (org_id, ts);
-CREATE INDEX api_usage_key_ts_idx ON client_platform.api_usage (key_id, ts);
+CREATE INDEX IF NOT EXISTS api_usage_ts_idx ON client_platform.api_usage (ts);
+CREATE INDEX IF NOT EXISTS api_usage_org_ts_idx ON client_platform.api_usage (org_id, ts);
+CREATE INDEX IF NOT EXISTS api_usage_key_ts_idx ON client_platform.api_usage (key_id, ts);
 
 -- ============================================================================
 -- audit_log: who did what (security + support)
 -- ============================================================================
-CREATE TABLE client_platform.audit_log (
+CREATE TABLE IF NOT EXISTS client_platform.audit_log (
   id              bigserial PRIMARY KEY,
   ts              timestamptz NOT NULL DEFAULT now(),
   org_id          uuid REFERENCES client_platform.organizations(id) ON DELETE SET NULL,
@@ -143,8 +143,8 @@ CREATE TABLE client_platform.audit_log (
   client_ip       inet,
   metadata        jsonb DEFAULT '{}'::jsonb
 );
-CREATE INDEX audit_log_org_ts_idx ON client_platform.audit_log (org_id, ts);
-CREATE INDEX audit_log_action_idx ON client_platform.audit_log (action);
+CREATE INDEX IF NOT EXISTS audit_log_org_ts_idx ON client_platform.audit_log (org_id, ts);
+CREATE INDEX IF NOT EXISTS audit_log_action_idx ON client_platform.audit_log (action);
 
 -- ============================================================================
 -- Helper functions for RLS policies
@@ -186,43 +186,52 @@ $$;
 -- ============================================================================
 
 ALTER TABLE client_platform.organizations ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS org_member_read ON client_platform.organizations;
 CREATE POLICY org_member_read ON client_platform.organizations
   FOR SELECT TO authenticated
   USING (client_platform.is_member_of(id));
+DROP POLICY IF EXISTS org_owner_update ON client_platform.organizations;
 CREATE POLICY org_owner_update ON client_platform.organizations
   FOR UPDATE TO authenticated
   USING (client_platform.has_role(id, 'owner'));
 
 ALTER TABLE client_platform.organization_entitlements ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS entitlement_member_read ON client_platform.organization_entitlements;
 CREATE POLICY entitlement_member_read ON client_platform.organization_entitlements
   FOR SELECT TO authenticated
   USING (client_platform.is_member_of(org_id));
 
 ALTER TABLE client_platform.organization_members ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS member_self_read ON client_platform.organization_members;
 CREATE POLICY member_self_read ON client_platform.organization_members
   FOR SELECT TO authenticated
   USING (client_platform.is_member_of(org_id));
+DROP POLICY IF EXISTS member_owner_manage ON client_platform.organization_members;
 CREATE POLICY member_owner_manage ON client_platform.organization_members
   FOR ALL TO authenticated
   USING (client_platform.has_role(org_id, 'owner'))
   WITH CHECK (client_platform.has_role(org_id, 'owner'));
 
 ALTER TABLE client_platform.applications ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS app_member_read ON client_platform.applications;
 CREATE POLICY app_member_read ON client_platform.applications
   FOR SELECT TO authenticated
   USING (client_platform.is_member_of(org_id));
+DROP POLICY IF EXISTS app_admin_write ON client_platform.applications;
 CREATE POLICY app_admin_write ON client_platform.applications
   FOR ALL TO authenticated
   USING (client_platform.has_role(org_id, 'admin'))
   WITH CHECK (client_platform.has_role(org_id, 'admin'));
 
 ALTER TABLE client_platform.api_keys ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS key_member_read ON client_platform.api_keys;
 CREATE POLICY key_member_read ON client_platform.api_keys
   FOR SELECT TO authenticated
   USING (EXISTS (
     SELECT 1 FROM client_platform.applications a
     WHERE a.id = api_keys.app_id AND client_platform.is_member_of(a.org_id)
   ));
+DROP POLICY IF EXISTS key_admin_write ON client_platform.api_keys;
 CREATE POLICY key_admin_write ON client_platform.api_keys
   FOR ALL TO authenticated
   USING (EXISTS (
@@ -235,16 +244,19 @@ CREATE POLICY key_admin_write ON client_platform.api_keys
   ));
 
 ALTER TABLE client_platform.api_plans ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS plans_public_read ON client_platform.api_plans;
 CREATE POLICY plans_public_read ON client_platform.api_plans
   FOR SELECT TO anon, authenticated
   USING (active = true);
 
 ALTER TABLE client_platform.api_usage ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS usage_member_read ON client_platform.api_usage;
 CREATE POLICY usage_member_read ON client_platform.api_usage
   FOR SELECT TO authenticated
   USING (client_platform.is_member_of(org_id));
 
 ALTER TABLE client_platform.audit_log ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS audit_owner_read ON client_platform.audit_log;
 CREATE POLICY audit_owner_read ON client_platform.audit_log
   FOR SELECT TO authenticated
   USING (org_id IS NOT NULL AND client_platform.has_role(org_id, 'owner'));
