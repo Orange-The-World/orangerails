@@ -27,7 +27,7 @@ BEGIN
     BEGIN
       ALTER TABLE client_platform.api_keys
         ADD CONSTRAINT api_keys_key_hash_unique UNIQUE (key_hash);
-    EXCEPTION WHEN duplicate_object THEN NULL;
+    EXCEPTION WHEN duplicate_object OR duplicate_table OR unique_violation THEN NULL;
     END;
     CREATE INDEX IF NOT EXISTS api_keys_key_hash_idx
       ON client_platform.api_keys (key_hash) WHERE revoked_at IS NULL;
@@ -43,7 +43,7 @@ BEGIN
   BEGIN
     ALTER TABLE client_platform.api_keys
       ADD CONSTRAINT api_keys_key_hash_unique UNIQUE (key_hash);
-  EXCEPTION WHEN duplicate_object THEN NULL;
+  EXCEPTION WHEN duplicate_object OR duplicate_table OR unique_violation THEN NULL;
   END;
   CREATE INDEX IF NOT EXISTS api_keys_key_hash_idx
     ON client_platform.api_keys (key_hash) WHERE revoked_at IS NULL;
