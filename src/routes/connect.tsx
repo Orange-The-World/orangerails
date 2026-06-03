@@ -831,6 +831,15 @@ function ConnectPageInner() {
     return new URLSearchParams(raw).get("widget_token");
   }, []);
 
+  // Snapshot defer_cred_key from the QUERY STRING on first render.
+  // TanStack Router validates ConnectSearch and may normalize the URL,
+  // dropping unknown-to-it params. Reading raw window.location.search
+  // synchronously on first render guarantees we see ?defer_cred_key=1.
+  const initialDeferCredKey = useMemo<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("defer_cred_key") === "1";
+  }, []);
+
   const [platform, setPlatform] = useState<PlatformDisplay | null>(null);
   const [manifest, setManifest] = useState<ProviderManifest | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1014,7 +1023,10 @@ function ConnectPageInner() {
       // Ask for it now over postMessage. The host prompts the user for
       // their vault password and posts back `or-cred-key-ready`.
       let handoff = handoffKeys;
-      if (!handoff && search.defer_cred_key === "1") {
+      // Combine the snapshot (URL on first render) with the router's current search.
+      // Either signal means deferred mode is active.
+      const deferActive = initialDeferCredKey || search.defer_cred_key === "1";
+      if (!handoff && deferActive) {
         try {
           handoff = await requestHandoffKeysFromParent();
         } catch (err) {
