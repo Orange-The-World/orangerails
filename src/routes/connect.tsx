@@ -77,6 +77,23 @@ import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
 // real integration that relies on the fallback — anyone running OR
 // would derive the same keys and could decrypt the credential.
 // --------------------------------------------------------------------
+// CRITICAL: capture defer_cred_key from window.location.search at MODULE
+// LOAD TIME, before TanStack Router initializes. Router's URL normalization
+// runs during init and STRIPS any param not strictly matched against its
+// route schema even when present in validateSearch. By the time React
+// renders ConnectPage, window.location.search is already mutated.
+//
+// Reading at module-eval time means this runs as soon as the SPA bundle
+// executes — before any router code runs. The result is captured in a
+// const and lives for the page lifetime.
+//
+// Bit me twice on 2026-06-03 — a useMemo([]) inside ConnectPage ran AFTER
+// Router stripped the URL, so the snapshot was always false. Module-level
+// is the only correct location.
+export const __OR_INITIAL_DEFER_CRED_KEY: boolean =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("defer_cred_key") === "1";
+
 const LINK_WIDGET_LOCK_PASSWORD = "orangerails-widget-default-lock-password-v1";
 const LINK_WIDGET_LOCK_SALT_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
@@ -831,14 +848,11 @@ function ConnectPageInner() {
     return new URLSearchParams(raw).get("widget_token");
   }, []);
 
-  // Snapshot defer_cred_key from the QUERY STRING on first render.
-  // TanStack Router validates ConnectSearch and may normalize the URL,
-  // dropping unknown-to-it params. Reading raw window.location.search
-  // synchronously on first render guarantees we see ?defer_cred_key=1.
-  const initialDeferCredKey = useMemo<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return new URLSearchParams(window.location.search).get("defer_cred_key") === "1";
-  }, []);
+  // Use the module-level snapshot captured BEFORE TanStack Router init.
+  // The previous useMemo approach was too late — Router strips the URL
+  // during init, before component render. See __OR_INITIAL_DEFER_CRED_KEY
+  // declaration at top of file.
+  const initialDeferCredKey = __OR_INITIAL_DEFER_CRED_KEY;
 
   const [platform, setPlatform] = useState<PlatformDisplay | null>(null);
   const [manifest, setManifest] = useState<ProviderManifest | null>(null);
