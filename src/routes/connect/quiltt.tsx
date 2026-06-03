@@ -325,11 +325,14 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   });
 
   useEffect(() => {
-    if (phase === "ready" && effectiveInstitutionId && !autoOpenedRef.current) {
+    // Always auto-open the Quiltt connector when ready. Quiltt's own
+    // iframe shows the institution picker — duplicating it in OR was
+    // confusing the user (and consumed Quiltt mints on each keystroke).
+    if (phase === "ready" && !autoOpenedRef.current) {
       autoOpenedRef.current = true;
       openConnector();
     }
-  }, [phase, effectiveInstitutionId, openConnector]);
+  }, [phase, openConnector]);
 
   async function completeLinkOnOR(quilttConnectionId: string | undefined) {
     setPhase("completing");
@@ -472,24 +475,16 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   }
 
   // phase === "ready"
-  // If a bank is already selected, the connector is auto-opening via the
-  // useEffect above; show a brief loader.
-  if (effectiveInstitutionId) {
-    return (
-      <div className="flex items-center gap-3 text-sm text-slate-500">
-        <Loader2 className="h-4 w-4 animate-spin" />
-        {selectedInstitution?.name
-          ? `Opening ${selectedInstitution.name}…`
-          : "Opening secure bank picker…"}
-      </div>
-    );
-  }
-  // Otherwise: render the inline institution search step.
+  // Always show a loader — the Quiltt connector auto-opens above. The
+  // inline OR search (BankSearchStep) has been retired because Quiltt's
+  // own iframe shows the institution picker.
   return (
-    <BankSearchStep
-      connectorId={params.connector_id!}
-      onPick={(inst) => setSelectedInstitution(inst)}
-    />
+    <div className="flex items-center gap-3 text-sm text-slate-500">
+      <Loader2 className="h-4 w-4 animate-spin" />
+      {selectedInstitution?.name
+        ? `Opening ${selectedInstitution.name}…`
+        : "Opening bank picker…"}
+    </div>
   );
 }
 
