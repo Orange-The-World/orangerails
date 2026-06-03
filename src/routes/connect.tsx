@@ -90,9 +90,19 @@ import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
 // Bit me twice on 2026-06-03 — a useMemo([]) inside ConnectPage ran AFTER
 // Router stripped the URL, so the snapshot was always false. Module-level
 // is the only correct location.
-export const __OR_INITIAL_DEFER_CRED_KEY: boolean =
-  typeof window !== "undefined" &&
-  new URLSearchParams(window.location.search).get("defer_cred_key") === "1";
+function __OR_readDeferCredKey(): boolean {
+  if (typeof window === "undefined") return false;
+  const searchHit =
+    new URLSearchParams(window.location.search).get("defer_cred_key") === "1";
+  const hashHit =
+    new URLSearchParams(window.location.hash.replace(/^#/, "")).get("defer_cred_key") === "1";
+  const result = searchHit || hashHit;
+  // eslint-disable-next-line no-console
+  console.log("[OR-defer] module-load snapshot", { searchHit, hashHit, result,
+    search: window.location.search, hash: window.location.hash });
+  return result;
+}
+export const __OR_INITIAL_DEFER_CRED_KEY: boolean = __OR_readDeferCredKey();
 
 const LINK_WIDGET_LOCK_PASSWORD = "orangerails-widget-default-lock-password-v1";
 const LINK_WIDGET_LOCK_SALT_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -1040,6 +1050,13 @@ function ConnectPageInner() {
       // Combine the snapshot (URL on first render) with the router's current search.
       // Either signal means deferred mode is active.
       const deferActive = initialDeferCredKey || search.defer_cred_key === "1";
+      // eslint-disable-next-line no-console
+      console.log("[OR-defer] handleConfirmPicks check", {
+        hasHandoff: !!handoff,
+        initialDeferCredKey,
+        searchDefer: search.defer_cred_key,
+        deferActive,
+      });
       if (!handoff && deferActive) {
         try {
           handoff = await requestHandoffKeysFromParent();
