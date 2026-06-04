@@ -404,7 +404,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     return (
       <div className="flex items-center gap-3 text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
-        Finalizing with OrangeRails…
+        Saving your connection…
       </div>
     );
   }
@@ -414,7 +414,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
       <div className="space-y-2">
         <div className="flex items-center gap-2 text-emerald-600">
           <CheckCircle2 className="h-5 w-5" />
-          <strong>Bank linked.</strong>
+          <strong>Bank connected!</strong>
         </div>
         <p className="text-xs text-slate-500">
           Returning you to your app…
