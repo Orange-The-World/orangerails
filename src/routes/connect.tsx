@@ -195,7 +195,12 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
  * clicks Save and wait for the parent to reply with `or-cred-key-ready`
  * carrying a base64 32-byte AES-256-GCM key.
  */
-async function requestHandoffKeysFromParent(): Promise<HandoffKeys> {
+async function requestHandoffKeysFromParent(
+  /** When supplied, the vault password is forwarded to the parent so it
+   *  can derive the cred_key immediately without prompting a separate
+   *  modal. Omit to preserve the legacy two-step flow. */
+  password?: string,
+): Promise<HandoffKeys> {
   const opener = window.opener as Window | null;
   if (!opener || opener.closed) {
     throw new Error(
@@ -242,7 +247,11 @@ async function requestHandoffKeysFromParent(): Promise<HandoffKeys> {
       window.removeEventListener("message", onMessage);
     }
     window.addEventListener("message", onMessage);
-    opener.postMessage({ type: "or-need-cred-key" }, targetOrigin);
+    // Include the password when the inline vault-password field is used,
+    // so the parent can derive the key without showing its own modal.
+    const msg: Record<string, unknown> = { type: "or-need-cred-key" };
+    if (password) msg.password = password;
+    opener.postMessage(msg, targetOrigin);
   });
 }
 
@@ -880,6 +889,10 @@ function ConnectPageInner() {
   // Continue. The value is encrypted client-side just like credentials —
   // OR never sees plaintext.
   const [connectionLabel, setConnectionLabel] = useState<string>("");
+  // Inline vault password — only used when defer_cred_key is active so the
+  // user can type their vault password in the same form instead of a
+  // separate modal in the parent app.
+  const [vaultPassword, setVaultPassword] = useState<string>("");
   const [discovered, setDiscovered] = useState<DiscoveredWallet[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
@@ -1059,7 +1072,9 @@ function ConnectPageInner() {
       });
       if (!handoff && deferActive) {
         try {
-          handoff = await requestHandoffKeysFromParent();
+          handoff = await requestHandoffKeysFromParent(
+            vaultPassword.length > 0 ? vaultPassword : undefined,
+          );
         } catch (err) {
           setError(
             err instanceof Error
@@ -1234,6 +1249,9 @@ function ConnectPageInner() {
           }
           connectionLabel={connectionLabel}
           onConnectionLabelChange={setConnectionLabel}
+          showVaultPassword={initialDeferCredKey || search.defer_cred_key === "1"}
+          vaultPassword={vaultPassword}
+          onVaultPasswordChange={setVaultPassword}
           onContinue={handleContinueFromCredentials}
           onCancel={handleCancel}
           // Only offer Back when the user actually came from the picker.
@@ -1301,6 +1319,9 @@ function EnterCredentialsStep({
   onValueChange,
   connectionLabel,
   onConnectionLabelChange,
+  showVaultPassword,
+  vaultPassword,
+  onVaultPasswordChange,
   onContinue,
   onCancel,
   onBack,
@@ -1313,6 +1334,12 @@ function EnterCredentialsStep({
   onValueChange: (name: string, value: string) => void;
   connectionLabel: string;
   onConnectionLabelChange: (value: string) => void;
+  /** When true, renders an inline vault password field so the parent app
+   *  can skip its own modal and derive the encryption key from the
+   *  password forwarded via postMessage. */
+  showVaultPassword?: boolean;
+  vaultPassword?: string;
+  onVaultPasswordChange?: (value: string) => void;
   onContinue: (e: React.FormEvent) => void;
   onCancel: () => void;
   /** Optional. When provided, renders a "Back" button that returns the
@@ -1324,6 +1351,7 @@ function EnterCredentialsStep({
   const allRequiredFilled = fields.every(
     (f) => f.optional === true || (values[f.name] ?? "").trim().length > 0,
   );
+  const vaultPasswordFilled = !showVaultPassword || (vaultPassword ?? "").length > 0;
   return (
     <form onSubmit={onContinue} className="mt-4 space-y-4">
       <div className="flex items-center gap-1.5">
@@ -1425,10 +1453,32 @@ function EnterCredentialsStep({
         </div>
       ))}
 
-      <p className="text-xs text-slate-500">
-        Your information is encrypted with your vault password before it leaves your browser.
-        OrangeRails stores only ciphertext — you and only you can decrypt it.
-      </p>
+      {showVaultPassword && (
+        <div className="border-t border-slate-200 pt-4">
+          <h3 className="text-sm font-semibold">Encrypt your credentials</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            Your vault password encrypts this data before it leaves your browser.
+            Orange Rails stores only ciphertext — you and only you can decrypt it.
+          </p>
+          <input
+            id="vault-password"
+            type="password"
+            autoComplete="current-password"
+            required
+            value={vaultPassword ?? ""}
+            onChange={(e) => onVaultPasswordChange?.(e.target.value)}
+            placeholder="Vault password"
+            className="mt-2 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+          />
+        </div>
+      )}
+
+      {!showVaultPassword && (
+        <p className="text-xs text-slate-500">
+          Your information is encrypted with your vault password before it leaves your browser.
+          OrangeRails stores only ciphertext — you and only you can decrypt it.
+        </p>
+      )}
 
 
       {error && (
@@ -1456,7 +1506,7 @@ function EnterCredentialsStep({
         </button>
         <button
           type="submit"
-          disabled={!allRequiredFilled}
+          disabled={!allRequiredFilled || !vaultPasswordFilled}
           className="flex-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           Continue
