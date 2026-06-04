@@ -1,7 +1,6 @@
--- Fix bitbooks-v2 platform api_key_hash to match V2dev's actual key.
--- The hash drifted when OR_BASE_URL was repointed during local-OR setup.
--- hash prefix: faa81c1225cb
+-- Fix bitbooks-v2 platform api_key_hash — strip .env quotes from key before hashing.
+-- V2's Next.js dotenv strips quotes; the hash must match the unquoted value.
 UPDATE public.platforms
-SET api_key_hash = 'faa81c1225cbba81a59e38a8a9df96a362683eac9f7d451da482768e3fa8bb1f',
+SET api_key_hash = 'a062878b4b05082f3f934f1879e76b9a3a21c58079ec48ed44e38035a8ce4dc3',
     updated_at = now()
 WHERE slug = 'bitbooks-v2';
