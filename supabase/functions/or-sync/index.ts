@@ -437,6 +437,83 @@ Deno.serve(async (req: Request) => {
                 .eq('event_id', ev.event_id);
             }
 
+            // ── Direct-fetch fallback: if no webhook events existed, fetch
+            // transactions for this connection directly via Quiltt GraphQL.
+            // This handles first-sync, sandbox environments, and any case
+            // where the webhook pipeline hasn't delivered events yet.
+            if (quilttSinkSynced === 0) {
+              const quilttConnIdDirect = conn.quiltt_connection_id ?? conn.external_connection_id ?? null;
+              if (quilttConnIdDirect) {
+                let afterDirect: string | null = null;
+                let pagesDirect = 0;
+                while (pagesDirect < QUILTT_SINK_MAX_PAGES) {
+                  const query = `
+                    query Q($connId: ID!, $first: Int!, $after: String) {
+                      transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          id amount currencyCode date description entryType status
+                          account { id }
+                        }
+                      }
+                    }
+                  `;
+                  const resp = await fetch('https://api.quiltt.io/v1/graphql', {
+                    method: 'POST',
+                    headers: {
+                      'Authorization': `Basic ${basicSink}`,
+                      'Content-Type':  'application/json',
+                    },
+                    body: JSON.stringify({
+                      query,
+                      variables: { connId: quilttConnIdDirect, first: QUILTT_SINK_TX_PAGE_SIZE, after: afterDirect },
+                    }),
+                  });
+                  if (!resp.ok) {
+                    console.error(`[or-sync] Quiltt direct-fetch GraphQL ${resp.status} for conn ${quilttConnIdDirect}`);
+                    break;
+                  }
+                  const json = await resp.json();
+                  const txs = (json?.data?.transactions?.nodes ?? []) as Array<{
+                    id: string; amount: number; currencyCode: string; date: string;
+                    description: string; entryType: string; status: string;
+                    account?: { id?: string };
+                  }>;
+                  const pageInfo = json?.data?.transactions?.pageInfo;
+                  for (const tx of txs) {
+                    const direction: 'in' | 'out' = tx.entryType === 'credit' ? 'in' : 'out';
+                    const normalized: NormalizedTransaction = {
+                      id:              tx.id,
+                      adapter:         'quiltt',
+                      direction,
+                      type:            direction === 'in' ? 'deposit' : 'withdrawal',
+                      amount:          Math.abs(tx.amount),
+                      currency:        tx.currencyCode ?? 'USD',
+                      description:     tx.description ?? null,
+                      counterparty:    null,
+                      status:          tx.status ?? 'posted',
+                      timestamp:       tx.date,
+                      source_wallet_id: tx.account?.id ?? null,
+                    };
+                    const out = sinkAdapter!.toAppShape({
+                      transaction:      normalized,
+                      or_connection_id: conn.id,
+                      or_subaccount_id: subaccountId,
+                      external_user_id:
+                        ctx.mode === 'direct'
+                          ? ctx.userId
+                          : await resolveExternalUserId(ctx.serviceClient, subaccountId),
+                    });
+                    sinkOutputs.push(out);
+                    quilttSinkSynced++;
+                  }
+                  if (!pageInfo?.hasNextPage) break;
+                  afterDirect = pageInfo.endCursor ?? null;
+                  pagesDirect++;
+                }
+              }
+            }
+
             await ctx.serviceClient
               .from('connections')
               .update({ last_sync_at: new Date().toISOString(), status: 'active' })
