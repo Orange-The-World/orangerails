@@ -328,8 +328,8 @@ Deno.serve(async (req: Request) => {
             }
 
             const QUILTT_SINK_INBOX_BATCH = 10;
-            const QUILTT_SINK_TX_PAGE_SIZE = 50;
-            const QUILTT_SINK_MAX_PAGES = 2;
+            const QUILTT_SINK_TX_PAGE_SIZE = 100;
+            const QUILTT_SINK_MAX_PAGES = 5;
 
             const { data: pendingSink, error: pendErrSink } = await ctx.serviceClient
               .from('quiltt_webhook_inbox')
