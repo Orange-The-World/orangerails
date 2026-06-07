@@ -321,6 +321,7 @@ Deno.serve(async (req: Request) => {
               .eq('subaccount_id', subaccountId)
               .maybeSingle();
             if (mapErrSink) throw mapErrSink;
+            console.log('[or-sync] quiltt profile_map lookup:', mapRowSink ? 'found profile=' + mapRowSink.quiltt_profile_id?.slice(0,8) : 'NOT FOUND');
             if (!mapRowSink) {
               results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
               continue;
@@ -448,6 +449,7 @@ Deno.serve(async (req: Request) => {
                   connections { nodes { id status } }
                 }
               `;
+              console.log('[or-sync] quiltt direct-fetch: profileId=', mapRowSink.quiltt_profile_id?.slice(0,8), 'apiKeyLen=', quilttApiKeySink?.length);
               const connResp = await fetch('https://api.quiltt.io/v1/graphql', {
                 method: 'POST',
                 headers: {
@@ -457,6 +459,8 @@ Deno.serve(async (req: Request) => {
                 body: JSON.stringify({ query: connQuery }),
               });
               const connJson = connResp.ok ? await connResp.json() : null;
+              console.log('[or-sync] quiltt connections query:', connResp.ok ? 'ok' : connResp.status, 'conns:', connJson?.data?.connections?.nodes?.length ?? 0);
+              if (connJson?.errors) console.error('[or-sync] quiltt GQL errors:', JSON.stringify(connJson.errors).slice(0, 500));
               const quilttConns = (connJson?.data?.connections?.nodes ?? []) as Array<{ id: string; status: string }>;
 
               for (const qc of quilttConns) {
