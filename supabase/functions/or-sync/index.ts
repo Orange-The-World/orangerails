@@ -949,7 +949,7 @@ Deno.serve(async (req: Request) => {
           }
         }
         await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: storedErr }).eq('id', conn.id);
-        results.push({ connection_id: conn.id, synced: 0, next_cursor: null, error: code, correlation_id: correlationId });
+        results.push({ connection_id: conn.id, synced: 0, next_cursor: null, error: code, correlation_id: correlationId, _debug_raw: raw.slice(0, 300) });
       }
     }
 
