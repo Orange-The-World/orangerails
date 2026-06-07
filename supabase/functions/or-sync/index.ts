@@ -303,8 +303,167 @@ Deno.serve(async (req: Request) => {
         // their Quiltt webhook data on next sync without OPK setup.
         if (conn.provider_type === 'quiltt') {
           if (sinkMode) {
-            // Sink mode (V2) doesn't yet support Quiltt — skip cleanly.
-            results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+            // ── Quiltt sink mode (V2) ─────────────────────────────────
+            // Same fetch logic as the legacy (encrypted-payload) path below,
+            // but instead of encrypting + storing in encrypted_transactions
+            // we normalise each Quiltt transaction into NormalizedTransaction
+            // and run it through the registered sink adapter. The consumer
+            // (V2) gets app-shaped rows in the response body.
+
+            const quilttApiKeySink = Deno.env.get('QUILTT_API_KEY');
+            if (!quilttApiKeySink) {
+              throw new Error('QUILTT_API_KEY not set on this Supabase project');
+            }
+
+            const { data: mapRowSink, error: mapErrSink } = await ctx.serviceClient
+              .from('quiltt_profile_map')
+              .select('quiltt_profile_id')
+              .eq('subaccount_id', subaccountId)
+              .maybeSingle();
+            if (mapErrSink) throw mapErrSink;
+            if (!mapRowSink) {
+              results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+              continue;
+            }
+
+            const QUILTT_SINK_INBOX_BATCH = 10;
+            const QUILTT_SINK_TX_PAGE_SIZE = 100;
+            const QUILTT_SINK_MAX_PAGES = 3;
+
+            const { data: pendingSink, error: pendErrSink } = await ctx.serviceClient
+              .from('quiltt_webhook_inbox')
+              .select('event_id, event_type, payload, attempts')
+              .eq('subaccount_id', subaccountId)
+              .is('processed_at', null)
+              .order('received_at', { ascending: true })
+              .limit(QUILTT_SINK_INBOX_BATCH);
+            if (pendErrSink) throw pendErrSink;
+
+            const basicSink = btoa(`${mapRowSink.quiltt_profile_id}:${quilttApiKeySink}`);
+            let quilttSinkSynced = 0;
+
+            for (const ev of (pendingSink ?? []) as Array<{
+              event_id: string; event_type: string; payload: { record?: { id?: string } };
+            }>) {
+              if (!ev.event_type.startsWith('connection.synced.successful')) {
+                await ctx.serviceClient
+                  .from('quiltt_webhook_inbox')
+                  .update({ processed_at: new Date().toISOString() })
+                  .eq('event_id', ev.event_id);
+                continue;
+              }
+              const quilttConnIdSink = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
+              if (!quilttConnIdSink) {
+                await ctx.serviceClient
+                  .from('quiltt_webhook_inbox')
+                  .update({ processed_at: new Date().toISOString(), last_error: 'event missing record.id' })
+                  .eq('event_id', ev.event_id);
+                continue;
+              }
+
+              let afterSink: string | null = null;
+              let pagesSink = 0;
+
+              while (pagesSink < QUILTT_SINK_MAX_PAGES) {
+                const query = `
+                  query Q($connId: ID!, $first: Int!, $after: String) {
+                    transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        id amount currencyCode date description entryType status
+                        account { id }
+                      }
+                    }
+                  }
+                `;
+                const resp = await fetch('https://api.quiltt.io/v1/graphql', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Basic ${basicSink}`,
+                    'Content-Type':  'application/json',
+                  },
+                  body: JSON.stringify({
+                    query,
+                    variables: { connId: quilttConnIdSink, first: QUILTT_SINK_TX_PAGE_SIZE, after: afterSink },
+                  }),
+                });
+                if (!resp.ok) {
+                  throw new Error(`Quiltt GraphQL ${resp.status}`);
+                }
+                const json = await resp.json();
+                const txs = (json?.data?.transactions?.nodes ?? []) as Array<{
+                  id: string; amount: number; currencyCode: string; date: string;
+                  description: string; entryType: string; status: string;
+                  account?: { id?: string };
+                }>;
+                const pageInfo = json?.data?.transactions?.pageInfo;
+
+                for (const tx of txs) {
+                  // Map Quiltt transaction to NormalizedTransaction for the sink adapter.
+                  const direction: 'in' | 'out' = tx.entryType === 'credit' ? 'in' : 'out';
+                  const normalized: NormalizedTransaction = {
+                    id:              tx.id,
+                    adapter:         'quiltt',
+                    direction,
+                    type:            direction === 'in' ? 'deposit' : 'withdrawal',
+                    amount:          Math.abs(tx.amount),
+                    currency:        tx.currencyCode ?? 'USD',
+                    description:     tx.description ?? null,
+                    counterparty:    null,
+                    status:          tx.status ?? 'posted',
+                    timestamp:       tx.date,
+                    source_wallet_id: tx.account?.id ?? null,
+                  };
+                  const out = sinkAdapter!.toAppShape({
+                    transaction:      normalized,
+                    or_connection_id: conn.id,
+                    or_subaccount_id: subaccountId,
+                    external_user_id:
+                      ctx.mode === 'direct'
+                        ? ctx.userId
+                        : await resolveExternalUserId(ctx.serviceClient, subaccountId),
+                  });
+                  sinkOutputs.push(out);
+                  quilttSinkSynced++;
+                }
+                if (!pageInfo?.hasNextPage) break;
+                afterSink = pageInfo.endCursor ?? null;
+                pagesSink++;
+              }
+
+              await ctx.serviceClient
+                .from('quiltt_webhook_inbox')
+                .update({ processed_at: new Date().toISOString() })
+                .eq('event_id', ev.event_id);
+            }
+
+            await ctx.serviceClient
+              .from('connections')
+              .update({ last_sync_at: new Date().toISOString(), status: 'active' })
+              .eq('id', conn.id);
+
+            results.push({ connection_id: conn.id, synced: quilttSinkSynced, next_cursor: null });
+
+            if (webhookEnabled && webhookPlatformId && quilttSinkSynced > 0) {
+              try {
+                await ctx.serviceClient.from('webhook_delivery').insert({
+                  platform_id:   webhookPlatformId,
+                  subaccount_id: subaccountId,
+                  event_type:    'sync.completed',
+                  payload: {
+                    event:         'sync.completed',
+                    provider:      'quiltt',
+                    subaccount_id: subaccountId,
+                    connection_id: conn.id,
+                    synced_count:  quilttSinkSynced,
+                    ts:            new Date().toISOString(),
+                  },
+                });
+              } catch (whErr) {
+                console.error(`[or-sync] webhook enqueue failed for quiltt sink conn ${conn.id}:`, whErr);
+              }
+            }
+
             continue;
           }
           const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
