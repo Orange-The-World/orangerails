@@ -438,11 +438,29 @@ Deno.serve(async (req: Request) => {
             }
 
             // ── Direct-fetch fallback: if no webhook events existed, fetch
-            // transactions for this connection directly via Quiltt GraphQL.
-            // This handles first-sync, sandbox environments, and any case
-            // where the webhook pipeline hasn't delivered events yet.
+            // transactions directly via Quiltt GraphQL. Query all connections
+            // under the Quiltt profile (the connections table doesn't store
+            // Quiltt connection IDs — only webhook payloads carry them).
             if (quilttSinkSynced === 0) {
-              const quilttConnIdDirect = conn.quiltt_connection_id ?? conn.external_connection_id ?? null;
+              // Fetch all Quiltt connections for this profile
+              const connQuery = `
+                query Q {
+                  connections { nodes { id status } }
+                }
+              `;
+              const connResp = await fetch('https://api.quiltt.io/v1/graphql', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Basic ${basicSink}`,
+                  'Content-Type':  'application/json',
+                },
+                body: JSON.stringify({ query: connQuery }),
+              });
+              const connJson = connResp.ok ? await connResp.json() : null;
+              const quilttConns = (connJson?.data?.connections?.nodes ?? []) as Array<{ id: string; status: string }>;
+
+              for (const qc of quilttConns) {
+              const quilttConnIdDirect = qc.id;
               if (quilttConnIdDirect) {
                 let afterDirect: string | null = null;
                 let pagesDirect = 0;
@@ -511,7 +529,8 @@ Deno.serve(async (req: Request) => {
                   afterDirect = pageInfo.endCursor ?? null;
                   pagesDirect++;
                 }
-              }
+              } // end quilttConnIdDirect check
+              } // end for qc of quilttConns
             }
 
             await ctx.serviceClient
