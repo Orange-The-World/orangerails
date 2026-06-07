@@ -411,7 +411,7 @@ Deno.serve(async (req: Request) => {
                     currency:        tx.currencyCode ?? 'USD',
                     description:     tx.description ?? null,
                     counterparty:    null,
-                    status:          tx.status ?? 'posted',
+                    status:          'posted',
                     timestamp:       tx.date,
                     source_wallet_id: tx.account?.id ?? null,
                   };
@@ -470,11 +470,11 @@ Deno.serve(async (req: Request) => {
                 let pagesDirect = 0;
                 while (pagesDirect < QUILTT_SINK_MAX_PAGES) {
                   const query = `
-                    query Q($connId: ID!, $first: Int!, $after: String) {
-                      transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+                    query Q($first: Int!, $after: String) {
+                      transactions(first: $first, after: $after) {
                         pageInfo { hasNextPage endCursor }
                         nodes {
-                          id amount currencyCode date description entryType status
+                          id amount currencyCode date description entryType
                           account { id }
                         }
                       }
@@ -488,7 +488,7 @@ Deno.serve(async (req: Request) => {
                     },
                     body: JSON.stringify({
                       query,
-                      variables: { connId: quilttConnIdDirect, first: QUILTT_SINK_TX_PAGE_SIZE, after: afterDirect },
+                      variables: { first: QUILTT_SINK_TX_PAGE_SIZE, after: afterDirect },
                     }),
                   });
                   if (!resp.ok) {
@@ -513,7 +513,7 @@ Deno.serve(async (req: Request) => {
                       currency:        tx.currencyCode ?? 'USD',
                       description:     tx.description ?? null,
                       counterparty:    null,
-                      status:          tx.status ?? 'posted',
+                      status:          'posted',
                       timestamp:       tx.date,
                       source_wallet_id: tx.account?.id ?? null,
                     };
