@@ -446,7 +446,7 @@ Deno.serve(async (req: Request) => {
               // Fetch all Quiltt connections for this profile
               const connQuery = `
                 query Q {
-                  connections { nodes { id status } }
+                  connections { id status }
                 }
               `;
               console.log('[or-sync] quiltt direct-fetch: profileId=', mapRowSink.quiltt_profile_id?.slice(0,8), 'apiKeyLen=', quilttApiKeySink?.length);
@@ -459,9 +459,9 @@ Deno.serve(async (req: Request) => {
                 body: JSON.stringify({ query: connQuery }),
               });
               const connJson = connResp.ok ? await connResp.json() : null;
-              console.log('[or-sync] quiltt connections query:', connResp.ok ? 'ok' : connResp.status, 'conns:', connJson?.data?.connections?.nodes?.length ?? 0);
+              console.log('[or-sync] quiltt connections query:', connResp.ok ? 'ok' : connResp.status, 'conns:', connJson?.data?.connections?.length ?? 0);
               if (connJson?.errors) console.error('[or-sync] quiltt GQL errors:', JSON.stringify(connJson.errors).slice(0, 500));
-              const quilttConns = (connJson?.data?.connections?.nodes ?? []) as Array<{ id: string; status: string }>;
+              const quilttConns = (connJson?.data?.connections ?? []) as Array<{ id: string; status: string }>;
 
               for (const qc of quilttConns) {
               const quilttConnIdDirect = qc.id;
