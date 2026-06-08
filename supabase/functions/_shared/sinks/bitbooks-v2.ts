@@ -143,7 +143,9 @@ export const bitbooksV2Sink: SinkAdapter = {
     // Override for bank transactions (Quiltt adapter): the YAML rules may
     // not match deposit/withdrawal types. Hardcode the wallet leg with
     // targetSourceWalletId so JE lines map to the correct bank account CoA.
+    console.log('[sink-debug] adapter=', tx.adapter, 'source_wallet_id=', tx.source_wallet_id?.slice(0,12), 'type=', tx.type, 'direction=', tx.direction);
     if (tx.adapter === 'quiltt' && tx.source_wallet_id) {
+      console.log('[sink-debug] QUILTT OVERRIDE ACTIVE');
       const walletHint: ResolvedCoaHint = {
         accountType: 'ASSET',
         accountSubType: 'WALLETS',
