@@ -305,6 +305,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   // Imperative open — connector launches as soon as the user picks a bank
   // (or the integrator pre-selected one via the institution fragment param).
   const { open: openConnector } = useQuilttConnector(params.connector_id!, {
+    themeMode: "light",
     institution: effectiveInstitutionId,
     onExitSuccess: (metadata) => {
       void completeLinkOnOR(metadata.connectionId);
@@ -404,7 +405,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     return (
       <div className="flex items-center gap-3 text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
-        Saving your connection…
+        Almost done…
       </div>
     );
   }
