@@ -92,7 +92,7 @@ output_tables:
       organizationId:    { from: input.org_id }
       date:              { from: canonical.timestamp, as: date }
       currency:          { from: derived.asset }
-      refNum:            { generated: "JE-OR-${canonical.id:0:12}" }   # required + unique per org
+      refNum:            { generated: "JE-OR-\${canonical.id:0:12}" }   # required + unique per org
       memo:              { from: canonical.description, optional: true }
       status:            { const: POSTED }
       sourceType:        { const: ORANGE_RAILS }
@@ -141,7 +141,7 @@ output_tables:
         accountType:     EXPENSE
         accountSubType:  OTHER_EXPENSES
         name:            "Network Fees"
-      refNum:            { generated: "OR-${canonical.id:0:12}" }
+      refNum:            { generated: "OR-\${canonical.id:0:12}" }
       memo:              { from: canonical.description, optional: true }
       journalEntryId:    { from: derived.parent_je_id }
 
