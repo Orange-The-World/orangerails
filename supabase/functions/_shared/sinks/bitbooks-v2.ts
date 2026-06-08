@@ -143,15 +143,13 @@ export const bitbooksV2Sink: SinkAdapter = {
     // Override for bank transactions (Quiltt adapter): the YAML rules may
     // not match deposit/withdrawal types. Hardcode the wallet leg with
     // targetSourceWalletId so JE lines map to the correct bank account CoA.
-    console.log('[sink-debug] adapter=', tx.adapter, 'source_wallet_id=', tx.source_wallet_id?.slice(0,12), 'type=', tx.type, 'direction=', tx.direction);
     if (tx.adapter === 'quiltt' && tx.source_wallet_id) {
-      console.log('[sink-debug] QUILTT OVERRIDE ACTIVE');
       const walletHint: ResolvedCoaHint = {
         accountType: 'ASSET',
         accountSubType: 'WALLETS',
         isWallet: true,
         targetSourceWalletId: tx.source_wallet_id,
-        currency: derived.asset,
+        currency: String(derived.asset ?? "USD"),
       };
       const otherHint: ResolvedCoaHint = tx.direction === 'in'
         ? { accountType: 'INCOME', accountSubType: 'SALES', name: 'Bank Deposits' }
@@ -209,12 +207,11 @@ export const bitbooksV2Sink: SinkAdapter = {
     // both lines with positive amountNative makes every transaction
     // appear as a debit on the wallet's CoA — wrong balance.
     const negatedAmount = `-${amount}`;
-    // DEBUG MARKER: if you see _v2sink=1 in the JEL hint, the new code is running
     const journalEntryLines: unknown[] = [
       {
         id: newId(),
         journalEntryId: jeId,
-        __resolveCoa: { ...hintToResolveShape(mapping.debit), _v2sink: 1 },
+        __resolveCoa: hintToResolveShape(mapping.debit),
         nativeCurrency: asset,
         amountNative: amount, // positive on the debit side
         debit: amount,
