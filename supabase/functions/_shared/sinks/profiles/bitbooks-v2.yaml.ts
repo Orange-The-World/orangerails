@@ -20,8 +20,8 @@
  */
 export const BITBOOKS_V2_PROFILE_YAML = `# BitBooks V2 — App Profile
 #
-# RUNTIME SOURCE: this file's TS sibling `bitbooks-v2.yaml.ts` is what
-# the edge-function bundle ships and what `profile-loader.ts` reads.
+# RUNTIME SOURCE: this file's TS sibling \`bitbooks-v2.yaml.ts\` is what
+# the edge-function bundle ships and what \`profile-loader.ts\` reads.
 # This .yaml is kept as a human-readable mirror for diffs and review;
 # when you change one, change the other.
 #
@@ -43,8 +43,8 @@ accepts_modules: [bitcoin]  # bitcoin only on day one; banking + exchange when t
 # Identity — how OR maps consumer-side identity to its subaccount
 # ─────────────────────────────────────────────────────────────────────────
 identity:
-  # V2 passes its `Organization.id` as `external_user_id` when calling
-  # or-provision. The sink uses that value as `organizationId` on every
+  # V2 passes its \`Organization.id\` as \`external_user_id\` when calling
+  # or-provision. The sink uses that value as \`organizationId\` on every
   # row it emits. One V2 organization = one OR subaccount.
   external_user_id_source: organization_id
 
@@ -309,7 +309,7 @@ override_path: /api/organizations/{organizationId}/orange-rails/account-mapping
 # Encryption profile
 # ─────────────────────────────────────────────────────────────────────────
 # V2 stores transactions in plaintext at rest. The sink emits no
-# `requires_encryption` paths. Source-provider credentials (Blink API key,
+# \`requires_encryption\` paths. Source-provider credentials (Blink API key,
 # etc.) are encrypted at OR with a key derived in the V2 customer's browser
 # from their vault password — that ZK property stays intact across V2's
 # plaintext data tier, because the credential never sits at rest plaintext
