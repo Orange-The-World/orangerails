@@ -1180,7 +1180,7 @@ function ConnectPageInner() {
 
   if (loadError) {
     return (
-      <Shell>
+      <Shell provider={search.provider}>
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
           {loadError}
         </div>
@@ -1199,7 +1199,7 @@ function ConnectPageInner() {
   // manifest is only required once we leave the picker step.
   if (!platform || (step !== "pick-provider" && !manifest)) {
     return (
-      <Shell>
+      <Shell provider={search.provider}>
         <p className="text-sm text-muted-foreground">Loading…</p>
       </Shell>
     );
@@ -1207,7 +1207,7 @@ function ConnectPageInner() {
 
   if (step === "done") {
     return (
-      <Shell platform={platform}>
+      <Shell platform={platform} provider={search.provider}>
         <StepDots step={3} />
         <p className="mt-4 text-sm text-foreground">Connected. You can close this window.</p>
       </Shell>
@@ -1215,7 +1215,7 @@ function ConnectPageInner() {
   }
 
   return (
-    <Shell platform={platform}>
+    <Shell platform={platform} provider={search.provider}>
       <StepDots
         step={
           step === "pick-provider" || step === "enter-credentials"
@@ -1959,15 +1959,22 @@ function PickWalletsStep({
 // Co-branded shell — Plaid-hybrid pattern.
 // --------------------------------------------------------------------
 
-function Shell({ platform, children }: { platform?: PlatformDisplay; children: React.ReactNode }) {
-  // Plaid / Quiltt chrome pattern:
-  //   - Top: subtle "{App} uses OrangeRails to connect securely" line — not
-  //     a huge accent-color H1. Establishes the co-branding relationship
-  //     without overwhelming the actual step content.
-  //   - Middle: the step content (picker, credentials form, etc.)
-  //   - Bottom: small "Powered by OrangeRails" + privacy note.
-  // Hardcoded light tokens so the popup stays light regardless of the
-  // embedding page's theme.
+function Shell({ platform, provider, children }: { platform?: PlatformDisplay; provider?: string; children: React.ReactNode }) {
+  // Two modes:
+  // 1. Quiltt (bank) flow → minimal, no OR branding
+  // 2. Bitcoin source flow → full OR branded experience
+  const isBank = provider === 'quiltt';
+
+  if (isBank) {
+    return (
+      <div className="min-h-screen bg-white antialiased text-slate-900" style={{ colorScheme: "light" }}>
+        <div className="mx-auto w-full max-w-md p-4">
+          {children}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 px-4 py-6 antialiased text-slate-900" style={{ colorScheme: "light" }}>
       <div className="mx-auto w-full max-w-md">
@@ -1981,10 +1988,6 @@ function Shell({ platform, children }: { platform?: PlatformDisplay; children: R
 
           {children}
 
-          {/* Plaid/Quiltt pattern: small Terms + Privacy line near the
-              card footer so the user sees them at every step. URLs are
-              placeholders — swap to real T&C / Privacy pages when they
-              ship. */}
           <div className="mt-6 border-t border-slate-100 pt-4 text-center text-[11px] text-slate-400">
             <p>
               By continuing you agree to OrangeRails's{" "}
