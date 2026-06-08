@@ -43,6 +43,15 @@ export interface ResolveResult {
   /** Computed from the contributing source count. */
   tier: "A" | "B" | "B-single";
   providerCount: number;
+  /**
+   * Max age (ms) of any contributing source's candle relative to the target
+   * bucket. 0 means every contributing source returned a candle for the
+   * exact target minute (fresh). >0 means at least one fall-forward kick-in.
+   * Forward-fill callers should treat values > 60_000ms as "stale" and
+   * decide per-pair whether to publish (e.g., thin-liquidity LatAm pairs
+   * should skip rather than emit a phantom 1m bucket from a stale trade).
+   */
+  staleMs: number;
   audit: ResolveAudit;
 }
 
@@ -143,6 +152,25 @@ export async function resolve(
 
   const tier = classifyTier(median.contributingSources.length);
 
+  // Compute max staleness across the contributing source candles. If any
+  // contributing source returned a candle whose bucket equals the target,
+  // staleMs is 0 (fresh). Otherwise it's the smallest positive delta among
+  // contributors — i.e., the freshest contributing candle is still N ms old.
+  const contributors = new Set(median.contributingSources);
+  const targetMs = bucketTs.getTime();
+  let staleMs = Number.POSITIVE_INFINITY;
+  let foundContributor = false;
+  for (const sc of sourceCandles) {
+    if (!contributors.has(sc.source)) continue;
+    const delta = targetMs - sc.candle.bucketTs.getTime();
+    // delta can be negative (candle ahead of target by <60s in the +60s
+    // carve-out); clamp those to 0 — they're effectively the target bucket.
+    const clamped = Math.max(0, delta);
+    if (clamped < staleMs) staleMs = clamped;
+    foundContributor = true;
+  }
+  if (!foundContributor || !Number.isFinite(staleMs)) staleMs = 0;
+
   const audit: ResolveAudit = {
     providerResponses,
     providersSucceeded: median.contributingSources,
@@ -156,6 +184,7 @@ export async function resolve(
     bucketTs,
     tier,
     providerCount: median.contributingSources.length,
+    staleMs,
     audit,
   };
 }

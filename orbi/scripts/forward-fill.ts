@@ -269,6 +269,22 @@ async function publishStablecoin(
   }
 }
 
+/**
+ * Pairs whose underlying venues are so thin that fall-forward staleness
+ * manufactures phantom 1m buckets if we publish a >60s-old candle as if
+ * it were a fresh tick. For these pairs, skip the publish when the
+ * resolved candle is older than the target minute — wait for a real trade
+ * (or the once-a-minute gap-fill batch) to fill the row.
+ *
+ * Added 2026-06-07 after BTC/COP showed min=max=220,942,298 for ~6
+ * consecutive minutes (dashboard top-mover spurious 4-6% jumps). The single
+ * Buda trade was being re-emitted to each minute bucket until staleness
+ * crossed MAX_STALENESS_MS in resolve.ts.
+ */
+const STALE_SUPPRESS_PAIRS = new Set(["CLP", "COP", "PEN"]);
+/** Threshold above which we treat the resolved rate as "stale" for the target minute. */
+const STALE_THRESHOLD_MS = 60_000;
+
 async function publishDirect(target: string, effectiveAt: Date): Promise<string> {
   const sources = sourcesForTarget(target);
   if (sources.length === 0) {
@@ -276,8 +292,11 @@ async function publishDirect(target: string, effectiveAt: Date): Promise<string>
   }
   try {
     const result = await resolve({ pair: { source: "BTC", target }, effectiveAt }, sources);
+    if (STALE_SUPPRESS_PAIRS.has(target) && result.staleMs > STALE_THRESHOLD_MS) {
+      return `BTC/${target}: SKIP stale (${(result.staleMs / 1000).toFixed(0)}s old, suppress-on-thin-venue)`;
+    }
     await writeRate(target, result, false, null);
-    return `BTC/${target}: ${result.rate.toFixed(2)} (Tier ${result.tier}, ${result.providerCount}src)`;
+    return `BTC/${target}: ${result.rate.toFixed(2)} (Tier ${result.tier}, ${result.providerCount}src${result.staleMs > 0 ? `, stale=${(result.staleMs / 1000).toFixed(0)}s` : ""})`;
   } catch (err) {
     return `BTC/${target}: FAIL — ${(err as Error).message.slice(0, 60)}`;
   }
@@ -398,10 +417,104 @@ async function writeCompositeRate(target: string, result: CompositeResolveResult
   `);
 }
 
+// --- Silent-write blackhole guard ---
+// 2026-05-30 incident: an orangerails-dev migration restarted pg-proxy (socat);
+// the Bun.SQL TCP connection survived but writes silently never reached PG.
+// The writer logged 700+ "success" iterations over 12h 50m with ZERO rows
+// landing. No error in journald, no exception in the writer.
+//
+// Mitigation: at the top of each iteration, verify our own recent writes are
+// visible in the DB. If 3 consecutive iterations show 0 recent ORBI rows,
+// throw — systemd Restart=on-failure re-establishes the connection.
+//
+// Warm-up: skip the check for the first 5 iterations (cold-start has no
+// recent writes yet by definition). Check window (5m) > iteration cadence
+// (~1m), so 3 consecutive zeroes = a real 3-5m write outage, not noise.
+//
+// The SELECT itself runs with a 2s statement_timeout so a hung connection
+// cannot lock up the writer; query errors are NOT treated as blackhole
+// evidence (could be a transient pooler blip — the existing error handling
+// upstream covers that case).
+let writeCheckIter = 0;
+let writeCheckConsecutiveDry = 0;
+
+async function checkWriteHealth(): Promise<void> {
+  writeCheckIter++;
+  if (writeCheckIter <= 5) return; // warm-up
+
+  let recentCount = -1;
+  // 2s wall-clock cap on the health query — a hung connection must not lock
+  // up the writer. Promise.race is tool-agnostic; works for both Bun.SQL and
+  // fetch paths.
+  const timeoutP = new Promise<never>((_, rej) =>
+    setTimeout(() => rej(new Error("health-check timeout (2s)")), 2_000),
+  );
+  try {
+    if (localSql) {
+      const queryP = localSql.unsafe(
+        `SELECT COUNT(*)::int AS n FROM exchange_rates WHERE bucket_ts > NOW() - INTERVAL '5 minutes' AND source_authority = 'ORBI' AND provenance = 'forward-fill'`,
+      );
+      const rows = (await Promise.race([queryP, timeoutP])) as unknown;
+      const arr = Array.isArray(rows) ? rows : [];
+      const row = arr[0] as { n?: number } | undefined;
+      recentCount = typeof row?.n === "number" ? row.n : -1;
+    } else {
+      // Cloud Mgmt API path — no statement_timeout knob; rely on fetch timeout.
+      const ac = new AbortController();
+      const to = setTimeout(() => ac.abort(), 2_000);
+      try {
+        const res = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query`, {
+          method: "POST",
+          signal: ac.signal,
+          headers: {
+            Authorization: `Bearer ${ACCESS_TOKEN}`,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; Orange-Rails-ORBI/1.0)",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            query: `SELECT COUNT(*)::int AS n FROM exchange_rates WHERE bucket_ts > NOW() - INTERVAL '5 minutes' AND source_authority = 'ORBI' AND provenance = 'forward-fill'`,
+          }),
+        });
+        if (res.ok) {
+          const j = (await res.json()) as Array<{ n?: number }>;
+          recentCount = typeof j?.[0]?.n === "number" ? j[0]!.n! : -1;
+        }
+      } finally {
+        clearTimeout(to);
+      }
+    }
+  } catch (err) {
+    // Query errors are NOT blackhole evidence — don't trip the guard.
+    console.warn(
+      `  write-health check query failed (not counted): ${(err as Error).message.slice(0, 120)}`,
+    );
+    return;
+  }
+
+  if (recentCount < 0) return; // could not determine — don't trip
+
+  if (recentCount > 0) {
+    writeCheckConsecutiveDry = 0;
+    return;
+  }
+
+  writeCheckConsecutiveDry++;
+  console.warn(
+    `  write-health: 0 recent ORBI rows in last 5m (consecutive_dry=${writeCheckConsecutiveDry}/3)`,
+  );
+  if (writeCheckConsecutiveDry >= 3) {
+    throw new Error(
+      `Silent write blackhole detected — ${writeCheckConsecutiveDry} consecutive iterations with 0 recent ORBI rows in DB`,
+    );
+  }
+}
+
 // --- One iteration ---
 // effectiveAtOverride: if provided, use this minute bucket; otherwise derive
 // from clock (now - 90s). Catch-up loop in main() passes explicit minutes.
 async function runIteration(label: string, effectiveAtOverride?: Date): Promise<void> {
+  await checkWriteHealth();
   const t0 = Date.now();
   // --at <iso> overrides effectiveAt for gap-fill of past minutes
   const atArg = process.argv.find((a, i) => process.argv[i-1] === "--at");

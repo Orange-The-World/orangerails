@@ -1,0 +1,65 @@
+{
+  "success": true,
+  "data": {
+    "owner_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+    "chain_id": 84532,
+    "summary": {
+      "position_count": 2,
+      "active_position_count": 1,
+      "total_collateral_sats": "500000",
+      "total_collateral_btc": 0.005,
+      "total_principal_usdc": "2000000000",
+      "total_principal_usdc_amount": 2000.0,
+      "worst_ltv_bps": 4000,
+      "weighted_rate_apr_bps": 597
+    },
+    "positions": [
+      {
+        "position_id": "226",
+        "market_id": 0,
+        "status": "active",
+        "accounts": {
+          "pledged_btc": {
+            "account_name": "Bitcoin, Pledged to Surge",
+            "asset": "BTC",
+            "collateral_sats": "500000",
+            "collateral_btc": 0.005,
+            "vault_address": null
+          },
+          "line_of_credit": {
+            "account_name": "Surge Line of Credit",
+            "asset": "USDC",
+            "principal_usdc": "2000000000",
+            "principal_usdc_amount": 2000.0,
+            "accrued_interest_usdc": null
+          }
+        },
+        "risk": { "ltv_bps": 4000, "liquidation_threshold_bps": 9000, "rate_apr_bps": 597, "rate_type": "variable" },
+        "timing": { "last_settlement_at": null, "last_position_update_at": "2026-05-15T07:01:16.870Z" }
+      },
+      {
+        "position_id": "201",
+        "market_id": 0,
+        "status": "closed",
+        "accounts": {
+          "pledged_btc": {
+            "account_name": "Bitcoin, Pledged to Surge",
+            "asset": "BTC",
+            "collateral_sats": "0",
+            "collateral_btc": 0,
+            "vault_address": null
+          },
+          "line_of_credit": {
+            "account_name": "Surge Line of Credit",
+            "asset": "USDC",
+            "principal_usdc": "0",
+            "principal_usdc_amount": 0,
+            "accrued_interest_usdc": null
+          }
+        },
+        "risk": { "ltv_bps": 0, "liquidation_threshold_bps": 9000, "rate_apr_bps": 612, "rate_type": "variable" },
+        "timing": { "last_settlement_at": "2026-04-30T12:00:00.000Z", "last_position_update_at": "2026-04-30T12:00:00.000Z" }
+      }
+    ]
+  }
+}

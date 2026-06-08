@@ -186,9 +186,59 @@ account_mapping_rules:
       targetSourceWalletId: { from: canonical.source_wallet_id }
       currency:           { from: derived.asset }
 
-  # Trade / deposit / withdrawal / fee — placeholder, route to SUSPENSE
-  # until exchange + bank source adapters land. V2's existing Suspense
-  # review UI surfaces these for human classification.
+  # Bank deposit IN → bank account (debit), uncategorized income (credit)
+  - when: { type: deposit, direction: in }
+    debit:
+      accountType:        ASSET
+      accountSubType:     WALLETS
+      isWallet:           true
+      targetSourceWalletId: { from: canonical.source_wallet_id }
+      currency:           { from: derived.asset }
+    credit:
+      accountType:        INCOME
+      accountSubType:     SALES
+      name:               "Bank Deposits"
+
+  # Bank withdrawal OUT → expense (debit), bank account (credit)
+  - when: { type: withdrawal, direction: out }
+    debit:
+      accountType:        EXPENSE
+      accountSubType:     OTHER_EXPENSES
+      name:               "Bank Withdrawals"
+    credit:
+      accountType:        ASSET
+      accountSubType:     WALLETS
+      isWallet:           true
+      targetSourceWalletId: { from: canonical.source_wallet_id }
+      currency:           { from: derived.asset }
+
+  # Bank deposit OUT (debit from bank) → expense, bank account credit
+  - when: { type: deposit, direction: out }
+    debit:
+      accountType:        EXPENSE
+      accountSubType:     OTHER_EXPENSES
+      name:               "Bank Withdrawals"
+    credit:
+      accountType:        ASSET
+      accountSubType:     WALLETS
+      isWallet:           true
+      targetSourceWalletId: { from: canonical.source_wallet_id }
+      currency:           { from: derived.asset }
+
+  # Bank withdrawal IN (credit to bank) → bank account debit, income credit
+  - when: { type: withdrawal, direction: in }
+    debit:
+      accountType:        ASSET
+      accountSubType:     WALLETS
+      isWallet:           true
+      targetSourceWalletId: { from: canonical.source_wallet_id }
+      currency:           { from: derived.asset }
+    credit:
+      accountType:        INCOME
+      accountSubType:     SALES
+      name:               "Bank Deposits"
+
+  # Trade / fee — placeholder, route to SUSPENSE for human classification.
   - default: true
     debit:
       accountType:        ASSET
