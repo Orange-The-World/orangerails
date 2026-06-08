@@ -401,7 +401,7 @@ Deno.serve(async (req: Request) => {
 
                 for (const tx of txs) {
                   // Map Quiltt transaction to NormalizedTransaction for the sink adapter.
-                  const direction: 'in' | 'out' = tx.entryType === 'credit' ? 'in' : 'out';
+                  const direction: 'in' | 'out' = tx.entryType.toUpperCase() === 'CREDIT' ? 'in' : 'out';
                   const normalized: NormalizedTransaction = {
                     id:              tx.id,
                     adapter:         'quiltt',
@@ -503,7 +503,7 @@ Deno.serve(async (req: Request) => {
                   }>;
                   const pageInfo = json?.data?.transactions?.pageInfo;
                   for (const tx of txs) {
-                    const direction: 'in' | 'out' = tx.entryType === 'credit' ? 'in' : 'out';
+                    const direction: 'in' | 'out' = tx.entryType.toUpperCase() === 'CREDIT' ? 'in' : 'out';
                     const normalized: NormalizedTransaction = {
                       id:              tx.id,
                       adapter:         'quiltt',
