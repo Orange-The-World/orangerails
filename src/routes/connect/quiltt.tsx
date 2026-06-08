@@ -153,54 +153,14 @@ function QuilttConnectPage() {
   // embedding page's theme.
   return (
     <div
-      className="min-h-screen bg-slate-50 px-4 py-6 antialiased text-slate-900"
+      className="min-h-screen bg-white antialiased text-slate-900"
       style={{ colorScheme: "light" }}
     >
-      <div className="mx-auto w-full max-w-md">
-        <div className="relative rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          {/* Top bar — Back (left) + X (right). X always triggers the
-              exit-confirmation dialog so the user doesn't lose progress
-              accidentally. Pattern mirrors Plaid Link / Quiltt Connector. */}
-          <div className="flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() => {
-                if (window.history.length > 1) {
-                  window.history.back();
-                } else {
-                  window.location.assign("/providers");
-                }
-              }}
-              className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              Back
-            </button>
-            <button
-              type="button"
-              aria-label="Close"
-              onClick={tryClose}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-
-          <header className="mt-4 space-y-1.5">
-            <div className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] text-slate-500">
-              <Building2 className="h-3 w-3" />
-              US bank account · via Quiltt
-            </div>
-            <h1 className="text-base font-semibold text-slate-900">
-              Connect your bank
-            </h1>
-            <p className="text-xs text-slate-500">
-              Your bank credentials never reach OrangeRails. Only encrypted
-              transaction data flows into your vault.
-            </p>
-          </header>
-
-          <section className="mt-4">
+      {/* Minimal container — Quiltt handles all UI/UX inside its iframe.
+          No OR chrome, no badges, no terms. This is the bank's flow. */}
+      <div className="mx-auto w-full">
+        <div className="relative">
+          <section>
             {haveAllParams ? (
               <QuilttProvider token={params.session_token!}>
                 <ConnectorPanel params={params} />
@@ -209,34 +169,6 @@ function QuilttConnectPage() {
               <MissingParamsView />
             )}
           </section>
-
-          <div className="mt-6 border-t border-slate-100 pt-4 text-center text-[11px] text-slate-400">
-            <p>
-              By continuing you agree to OrangeRails's{" "}
-              <a
-                href="/terms"
-                target="_blank"
-                rel="noreferrer"
-                className="underline hover:text-slate-600"
-              >
-                Terms
-              </a>
-              {" "}and{" "}
-              <a
-                href="/privacy"
-                target="_blank"
-                rel="noreferrer"
-                className="underline hover:text-slate-600"
-              >
-                Privacy Policy
-              </a>
-              .
-            </p>
-            <p className="mt-2 flex items-center justify-center gap-1.5">
-              <span>Powered by</span>
-              <span className="font-semibold text-slate-500">OrangeRails</span>
-            </p>
-          </div>
 
           {/* Exit confirmation overlay — Plaid Link parity. Sits on top
               of the popup card so the user doesn't lose progress on an
