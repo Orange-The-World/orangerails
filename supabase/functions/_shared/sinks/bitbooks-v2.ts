@@ -152,8 +152,8 @@ export const bitbooksV2Sink: SinkAdapter = {
         currency: String(derived.asset ?? "USD"),
       };
       const otherHint: ResolvedCoaHint = tx.direction === 'in'
-        ? { accountType: 'INCOME', accountSubType: 'SALES', name: 'Bank Deposits' }
-        : { accountType: 'EXPENSE', accountSubType: 'OTHER_EXPENSES', name: 'Bank Withdrawals' };
+        ? { accountType: 'INCOME', accountSubType: 'SALES', name: 'Uncategorized Deposit' }
+        : { accountType: 'EXPENSE', accountSubType: 'OTHER_EXPENSES', name: 'Uncategorized Expense' };
       mapping = {
         debit:  tx.direction === 'in' ? walletHint : otherHint,
         credit: tx.direction === 'in' ? otherHint  : walletHint,
