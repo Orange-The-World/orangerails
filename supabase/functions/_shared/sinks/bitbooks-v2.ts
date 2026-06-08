@@ -209,11 +209,12 @@ export const bitbooksV2Sink: SinkAdapter = {
     // both lines with positive amountNative makes every transaction
     // appear as a debit on the wallet's CoA — wrong balance.
     const negatedAmount = `-${amount}`;
+    // DEBUG MARKER: if you see _v2sink=1 in the JEL hint, the new code is running
     const journalEntryLines: unknown[] = [
       {
         id: newId(),
         journalEntryId: jeId,
-        __resolveCoa: hintToResolveShape(mapping.debit),
+        __resolveCoa: { ...hintToResolveShape(mapping.debit), _v2sink: 1 },
         nativeCurrency: asset,
         amountNative: amount, // positive on the debit side
         debit: amount,
