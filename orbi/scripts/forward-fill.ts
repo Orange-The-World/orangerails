@@ -40,6 +40,7 @@ import { IndodaxSource } from "../src/sources/indodax";
 import { CoinmateSource } from "../src/sources/coinmate";
 import { BudaSource } from "../src/sources/buda";
 import { FrankfurterSource } from "../src/sources/frankfurter";
+import { DbCrossRateSource } from "../src/sources/db-cross";
 import { resolve, type ResolveResult } from "../src/calculate/resolve";
 import { resolveComposite, type CompositeResolveResult } from "../src/calculate/resolve-composite";
 import type { Source } from "../src/sources/interface";
@@ -118,7 +119,13 @@ const DIRECT_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
 // Composite pairs (Tier C via BTC/USD ORBI × USD/X Frankfurter).
 // Acts as the fallback when a thin-liquidity direct source returns no candles
 // for the minute window. BTC/SEK is COMPOSITE-ONLY (no keyless venue lists it).
-const COMPOSITE_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
+type CompositePair = {
+  source: string;
+  target: string;
+  /** Where to fetch the USD/X cross-rate from. Default 'frankfurter'. */
+  crossMode?: 'frankfurter' | 'db-cross';
+};
+const COMPOSITE_PAIRS: ReadonlyArray<CompositePair> = [
   { source: "BTC", target: "INR" },
   { source: "BTC", target: "TRY" },
   { source: "BTC", target: "ZAR" },
@@ -147,6 +154,18 @@ const COMPOSITE_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "PLN" }, // composite-only (no keyless direct venue)
   { source: "BTC", target: "PHP" }, // composite-only
   { source: "BTC", target: "ILS" }, // composite-only
+  // 2026-06-08 — OXR-backed cross-rate pairs (closing task #25/#47).
+  // Frankfurter does not carry these (or stopped — BGN went 404
+  // post-EUR adoption 2026-01-01). USD/X lands daily on bb-support DB via
+  // /opt/bb-support/scripts/orbi-oxr-fallback.py with source_authority=OXR,
+  // granularity=1d. crossMode="db-cross" reads it instead of HTTP.
+  { source: "BTC", target: "KES", crossMode: "db-cross" },
+  { source: "BTC", target: "TWD", crossMode: "db-cross" },
+  { source: "BTC", target: "PKR", crossMode: "db-cross" },
+  { source: "BTC", target: "BGN", crossMode: "db-cross" },
+  { source: "BTC", target: "JMD", crossMode: "db-cross" },
+  { source: "BTC", target: "KWD", crossMode: "db-cross" },
+  { source: "BTC", target: "LBP", crossMode: "db-cross" },
   // NOTE: CLP, COP, PEN are direct-only via Buda; ECB does not publish a
   // USD/{CLP,COP,PEN} fixing through Frankfurter, so no composite fallback
   // is configured (Buda outages mean a missed minute, not a stale-rate row).
@@ -208,6 +227,23 @@ const allBtcSources: Source[] = [
   new BudaSource(),
 ];
 const frankfurter = new FrankfurterSource();
+// db-cross USD/X source for OXR-backed composites. Only constructed when
+// localSql is available (we read from local PG, not Mgmt API). If localSql
+// is null, the 7 OXR pairs fall through to a SKIP — never silently swap
+// to Frankfurter for a pair we know Frankfurter doesn't carry.
+// Freshness: 26h covers the daily OXR sync (04:30 UTC) plus 2h slack.
+const OXR_DB_CROSS_FRESHNESS_MS = 26 * 60 * 60 * 1000;
+const dbCross = localSql
+  ? new DbCrossRateSource(localSql, [
+      { target: "KES", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "TWD", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "PKR", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "BGN", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "JMD", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "KWD", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "LBP", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+    ])
+  : null;
 
 // --- Helpers ---
 async function mgmtApiQuery(sql: string): Promise<unknown> {
@@ -302,18 +338,42 @@ async function publishDirect(target: string, effectiveAt: Date): Promise<string>
   }
 }
 
-async function publishComposite(target: string, effectiveAt: Date): Promise<string> {
+async function publishComposite(
+  target: string,
+  effectiveAt: Date,
+  crossMode: 'frankfurter' | 'db-cross' = 'frankfurter',
+): Promise<string> {
+  let crossRateSource;
+  let viaLabel: string;
+  if (crossMode === 'db-cross') {
+    if (!dbCross) {
+      // db-cross requires localSql; if it's not configured, skip rather than
+      // fall back to Frankfurter (which doesn't carry these pairs).
+      return `BTC/${target}: SKIP composite — db-cross requested but ORBI_LOCAL_DB_URL not set`;
+    }
+    crossRateSource = dbCross;
+    viaLabel = 'DB (OXR)';
+  } else {
+    crossRateSource = frankfurter;
+    viaLabel = 'ECB';
+  }
   try {
     const result = await resolveComposite({
       pair: { source: "BTC", target },
       effectiveAt,
       btcSources: allBtcSources.slice(0, 6), // exclude Mercado Bitcoin (no USD)
-      crossRateSource: frankfurter,
+      crossRateSource,
     });
     await writeCompositeRate(target, result);
-    return `BTC/${target}: ${result.rate.toFixed(2)} (Tier C via ECB)`;
+    return `BTC/${target}: ${result.rate.toFixed(2)} (Tier C via ${viaLabel})`;
   } catch (err) {
-    return `BTC/${target}: FAIL composite — ${(err as Error).message.slice(0, 60)}`;
+    const msg = (err as Error).message;
+    // db-cross stale/missing rows surface as "no data" from resolveComposite;
+    // treat those as a clean SKIP so the loop summary doesn't flag a real fault.
+    if (crossMode === 'db-cross' && /stale|no USD|not configured|no data/i.test(msg)) {
+      return `BTC/${target}: SKIP composite — ${msg.slice(0, 100)}`;
+    }
+    return `BTC/${target}: FAIL composite — ${msg.slice(0, 60)}`;
   }
 }
 
@@ -541,7 +601,7 @@ async function runIteration(label: string, effectiveAtOverride?: Date): Promise<
   // benefits massively from concurrency). Pre-fix: 15 sequential calls cost
   // ~45s and starved the loop of a full minute. Post-fix: ~3-5s.
   const compositeResults = await Promise.all(
-    COMPOSITE_PAIRS.map((p) => publishComposite(p.target, effectiveAt)),
+    COMPOSITE_PAIRS.map((p) => publishComposite(p.target, effectiveAt, p.crossMode ?? 'frankfurter')),
   );
   summaries.push(...compositeResults);
 
