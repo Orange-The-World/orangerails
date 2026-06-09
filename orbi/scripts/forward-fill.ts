@@ -512,7 +512,7 @@ async function checkWriteHealth(): Promise<void> {
   try {
     if (localSql) {
       const queryP = localSql.unsafe(
-        `SELECT COUNT(*)::int AS n FROM exchange_rates WHERE bucket_ts > NOW() - INTERVAL '5 minutes' AND source_authority = 'ORBI' AND provenance = 'forward-fill'`,
+        `SELECT COUNT(*)::int AS n FROM exchange_rates WHERE fetched_at > NOW() - INTERVAL '5 minutes' AND source_authority = 'ORBI' AND provenance = 'forward-fill'`,
       );
       const rows = (await Promise.race([queryP, timeoutP])) as unknown;
       const arr = Array.isArray(rows) ? rows : [];
@@ -533,7 +533,7 @@ async function checkWriteHealth(): Promise<void> {
             Accept: "application/json",
           },
           body: JSON.stringify({
-            query: `SELECT COUNT(*)::int AS n FROM exchange_rates WHERE bucket_ts > NOW() - INTERVAL '5 minutes' AND source_authority = 'ORBI' AND provenance = 'forward-fill'`,
+            query: `SELECT COUNT(*)::int AS n FROM exchange_rates WHERE fetched_at > NOW() - INTERVAL '5 minutes' AND source_authority = 'ORBI' AND provenance = 'forward-fill'`,
           }),
         });
         if (res.ok) {
@@ -564,9 +564,12 @@ async function checkWriteHealth(): Promise<void> {
     `  write-health: 0 recent ORBI rows in last 5m (consecutive_dry=${writeCheckConsecutiveDry}/3)`,
   );
   if (writeCheckConsecutiveDry >= 3) {
-    throw new Error(
-      `Silent write blackhole detected — ${writeCheckConsecutiveDry} consecutive iterations with 0 recent ORBI rows in DB`,
-    );
+    // 2026-06-09: main() loop has a try/catch that swallowed the throw, so
+    // the service stayed alive while logging the error 21x. Exit hard so
+    // systemd Restart=on-failure fires and re-establishes the connection.
+    const msg = `Silent write blackhole detected — ${writeCheckConsecutiveDry} consecutive iterations with 0 recent ORBI rows in DB`;
+    console.error(`FATAL: ${msg} — exiting for systemd restart`);
+    process.exit(1);
   }
 }
 
