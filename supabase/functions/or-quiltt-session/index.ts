@@ -49,6 +49,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
+import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 
 const QUILTT_AUTH_URL = 'https://auth.quiltt.io/v1/users/sessions';
 
@@ -101,15 +102,27 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "existing_connection_id required when mode='reconnect'" }, 400, cors);
     }
 
-    const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
-    const connectorIdLink = Deno.env.get('QUILTT_CONNECTOR_ID_LINK');
-    const connectorIdReconnect = Deno.env.get('QUILTT_CONNECTOR_ID_RECONNECT') ?? connectorIdLink;
+    // Per-platform Quiltt config resolution (env fallback during transition).
+    let quilttCfg;
+    try {
+      quilttCfg = await resolveQuilttConfigForPlatform(auth.serviceClient, auth.platformId);
+    } catch (cfgErr) {
+      console.error('[or-quiltt-session] config resolve failed:', cfgErr);
+      return jsonResponse({ error: 'Quiltt config lookup failed' }, 500, cors);
+    }
+    const quilttApiKey = quilttCfg.apiKey;
+    const connectorIdLink = quilttCfg.connectorIdLink;
+    const connectorIdReconnect = quilttCfg.connectorIdReconnect;
     if (!quilttApiKey) {
-      console.error('[or-quiltt-session] QUILTT_API_KEY missing from env');
+      console.error(
+        `[or-quiltt-session] no Quiltt API key for platform=${quilttCfg.platformSlug} (source=${quilttCfg.source.apiKey})`,
+      );
       return jsonResponse({ error: 'Quiltt integration not configured (QUILTT_API_KEY)' }, 503, cors);
     }
     if (!connectorIdLink) {
-      console.error('[or-quiltt-session] QUILTT_CONNECTOR_ID_LINK missing from env');
+      console.error(
+        `[or-quiltt-session] no Quiltt connector_id for platform=${quilttCfg.platformSlug} (source=${quilttCfg.source.connectorIdLink})`,
+      );
       return jsonResponse({ error: 'Quiltt integration not configured (connector id)' }, 503, cors);
     }
     const connectorId = mode === 'reconnect' ? connectorIdReconnect : connectorIdLink;

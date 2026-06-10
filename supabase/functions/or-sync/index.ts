@@ -38,6 +38,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
+import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import {
   getSinkAdapter,
   listSinkFormats,
@@ -190,10 +191,30 @@ Deno.serve(async (req: Request) => {
       format?: string;
     };
 
-    const { credentials_key, transactions_key, connection_ids, format } = body ?? {};
+    const { credentials_key, transactions_key, connection_ids, format: bodyFormat } = body ?? {};
     if (!credentials_key) {
       return jsonResponse({ error: 'credentials_key required' }, 400, cors);
     }
+
+    // Resolve sink format: platforms.sink_format wins over body.format.
+    // Server-side resolution defends against a buggy or malicious caller
+    // asking for a sink shape that isn't theirs. body.format kept as a
+    // backwards-compat fallback for callers (V2) that pre-date the
+    // multi-tenant column. Once every platform row has sink_format
+    // populated, the body field can be deprecated.
+    let resolvedFormat: string | null = null;
+    try {
+      resolvedFormat = await resolveSinkFormatForPlatform(
+        auth.serviceClient,
+        auth.platformId,
+        bodyFormat ?? null,
+      );
+    } catch (resolveErr) {
+      console.error('[or-sync] sink_format resolve failed:', resolveErr);
+      // Fall back to body.format on resolution failure rather than break.
+      resolvedFormat = bodyFormat ?? null;
+    }
+    const format = resolvedFormat;
 
     // Mode selection — `format` flips into protocol-driven sink mode.
     const sinkMode = typeof format === 'string' && format.length > 0;
@@ -321,7 +342,6 @@ Deno.serve(async (req: Request) => {
               .eq('subaccount_id', subaccountId)
               .maybeSingle();
             if (mapErrSink) throw mapErrSink;
-            console.log('[or-sync] quiltt profile_map lookup:', mapRowSink ? 'found profile=' + mapRowSink.quiltt_profile_id?.slice(0,8) : 'NOT FOUND');
             if (!mapRowSink) {
               results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
               continue;
@@ -329,7 +349,7 @@ Deno.serve(async (req: Request) => {
 
             const QUILTT_SINK_INBOX_BATCH = 10;
             const QUILTT_SINK_TX_PAGE_SIZE = 100;
-            const QUILTT_SINK_MAX_PAGES = 5;
+            const QUILTT_SINK_MAX_PAGES = 3;
 
             const { data: pendingSink, error: pendErrSink } = await ctx.serviceClient
               .from('quiltt_webhook_inbox')
@@ -401,7 +421,7 @@ Deno.serve(async (req: Request) => {
 
                 for (const tx of txs) {
                   // Map Quiltt transaction to NormalizedTransaction for the sink adapter.
-                  const direction: 'in' | 'out' = tx.entryType.toUpperCase() === 'CREDIT' ? 'in' : 'out';
+                  const direction: 'in' | 'out' = tx.entryType === 'credit' ? 'in' : 'out';
                   const normalized: NormalizedTransaction = {
                     id:              tx.id,
                     adapter:         'quiltt',
@@ -411,7 +431,7 @@ Deno.serve(async (req: Request) => {
                     currency:        tx.currencyCode ?? 'USD',
                     description:     tx.description ?? null,
                     counterparty:    null,
-                    status:          'posted',
+                    status:          tx.status ?? 'posted',
                     timestamp:       tx.date,
                     source_wallet_id: tx.account?.id ?? null,
                   };
@@ -436,105 +456,6 @@ Deno.serve(async (req: Request) => {
                 .from('quiltt_webhook_inbox')
                 .update({ processed_at: new Date().toISOString() })
                 .eq('event_id', ev.event_id);
-            }
-
-            // ── Direct-fetch fallback: if no webhook events existed, fetch
-            // transactions directly via Quiltt GraphQL. Query all connections
-            // under the Quiltt profile (the connections table doesn't store
-            // Quiltt connection IDs — only webhook payloads carry them).
-            if (quilttSinkSynced === 0) {
-              // Fetch all Quiltt connections for this profile
-              const connQuery = `
-                query Q {
-                  connections { id status }
-                }
-              `;
-              console.log('[or-sync] quiltt direct-fetch: profileId=', mapRowSink.quiltt_profile_id?.slice(0,8), 'apiKeyLen=', quilttApiKeySink?.length);
-              const connResp = await fetch('https://api.quiltt.io/v1/graphql', {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Basic ${basicSink}`,
-                  'Content-Type':  'application/json',
-                },
-                body: JSON.stringify({ query: connQuery }),
-              });
-              const connJson = connResp.ok ? await connResp.json() : null;
-              console.log('[or-sync] quiltt connections query:', connResp.ok ? 'ok' : connResp.status, 'conns:', connJson?.data?.connections?.length ?? 0);
-              if (connJson?.errors) console.error('[or-sync] quiltt GQL errors:', JSON.stringify(connJson.errors).slice(0, 500));
-              const quilttConns = (connJson?.data?.connections ?? []) as Array<{ id: string; status: string }>;
-
-              for (const qc of quilttConns) {
-              const quilttConnIdDirect = qc.id;
-              if (quilttConnIdDirect) {
-                let afterDirect: string | null = null;
-                let pagesDirect = 0;
-                while (pagesDirect < QUILTT_SINK_MAX_PAGES) {
-                  const query = `
-                    query Q($first: Int!, $after: String) {
-                      transactions(first: $first, after: $after) {
-                        pageInfo { hasNextPage endCursor }
-                        nodes {
-                          id amount currencyCode date description entryType
-                          account { id }
-                        }
-                      }
-                    }
-                  `;
-                  const resp = await fetch('https://api.quiltt.io/v1/graphql', {
-                    method: 'POST',
-                    headers: {
-                      'Authorization': `Basic ${basicSink}`,
-                      'Content-Type':  'application/json',
-                    },
-                    body: JSON.stringify({
-                      query,
-                      variables: { first: QUILTT_SINK_TX_PAGE_SIZE, after: afterDirect },
-                    }),
-                  });
-                  if (!resp.ok) {
-                    console.error(`[or-sync] Quiltt direct-fetch GraphQL ${resp.status} for conn ${quilttConnIdDirect}`);
-                    break;
-                  }
-                  const json = await resp.json();
-                  const txs = (json?.data?.transactions?.nodes ?? []) as Array<{
-                    id: string; amount: number; currencyCode: string; date: string;
-                    description: string; entryType: string; status: string;
-                    account?: { id?: string };
-                  }>;
-                  const pageInfo = json?.data?.transactions?.pageInfo;
-                  for (const tx of txs) {
-                    const direction: 'in' | 'out' = tx.entryType.toUpperCase() === 'CREDIT' ? 'in' : 'out';
-                    const normalized: NormalizedTransaction = {
-                      id:              tx.id,
-                      adapter:         'quiltt',
-                      direction,
-                      type:            direction === 'in' ? 'deposit' : 'withdrawal',
-                      amount:          Math.abs(tx.amount),
-                      currency:        tx.currencyCode ?? 'USD',
-                      description:     tx.description ?? null,
-                      counterparty:    null,
-                      status:          'posted',
-                      timestamp:       tx.date,
-                      source_wallet_id: tx.account?.id ?? null,
-                    };
-                    const out = sinkAdapter!.toAppShape({
-                      transaction:      normalized,
-                      or_connection_id: conn.id,
-                      or_subaccount_id: subaccountId,
-                      external_user_id:
-                        ctx.mode === 'direct'
-                          ? ctx.userId
-                          : await resolveExternalUserId(ctx.serviceClient, subaccountId),
-                    });
-                    sinkOutputs.push(out);
-                    quilttSinkSynced++;
-                  }
-                  if (!pageInfo?.hasNextPage) break;
-                  afterDirect = pageInfo.endCursor ?? null;
-                  pagesDirect++;
-                }
-              } // end quilttConnIdDirect check
-              } // end for qc of quilttConns
             }
 
             await ctx.serviceClient
@@ -949,7 +870,7 @@ Deno.serve(async (req: Request) => {
           }
         }
         await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: storedErr }).eq('id', conn.id);
-        results.push({ connection_id: conn.id, synced: 0, next_cursor: null, error: code, correlation_id: correlationId, _debug_raw: raw.slice(0, 300) });
+        results.push({ connection_id: conn.id, synced: 0, next_cursor: null, error: code, correlation_id: correlationId });
       }
     }
 

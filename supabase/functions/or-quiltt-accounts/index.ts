@@ -39,6 +39,7 @@
 
 import { authenticateRequest } from '../_shared/platform-auth.ts';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 
@@ -84,9 +85,19 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'quiltt_connection_id required' }, 400, cors);
     }
 
-    const apiKey = Deno.env.get('QUILTT_API_KEY');
+    // Per-platform Quiltt API key resolution (env fallback during transition).
+    let quilttCfg;
+    try {
+      quilttCfg = await resolveQuilttConfigForPlatform(auth.serviceClient, auth.platformId);
+    } catch (cfgErr) {
+      console.error('[or-quiltt-accounts] config resolve failed:', cfgErr);
+      return jsonResponse({ error: 'Quiltt config lookup failed' }, 500, cors);
+    }
+    const apiKey = quilttCfg.apiKey;
     if (!apiKey) {
-      console.error('[or-quiltt-accounts] QUILTT_API_KEY not configured');
+      console.error(
+        `[or-quiltt-accounts] no Quiltt API key for platform=${quilttCfg.platformSlug} (source=${quilttCfg.source.apiKey})`,
+      );
       return jsonResponse({ error: 'Quiltt not configured on OR' }, 503, cors);
     }
 

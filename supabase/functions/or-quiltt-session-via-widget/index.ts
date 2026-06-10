@@ -39,6 +39,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 
 const QUILTT_AUTH_URL = 'https://auth.quiltt.io/v1/users/sessions';
 
@@ -123,15 +124,30 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Failed to read profile mapping' }, 500, cors);
     }
 
-    // 5. Required env: Quiltt master API key + Connector ID for the Link flow.
-    const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
-    const connectorId = Deno.env.get('QUILTT_CONNECTOR_ID_LINK');
+    // 5. Resolve Quiltt config — per-platform with env fallback.
+    //    This swaps the global QUILTT_API_KEY / QUILTT_CONNECTOR_ID_LINK
+    //    reads for a platforms-row lookup. Backwards compatible: if the
+    //    platform row's quiltt_api_key column is NULL, falls back to the
+    //    global env var (preserves V2's sandbox during the transition).
+    let quilttCfg;
+    try {
+      quilttCfg = await resolveQuilttConfigForPlatform(service, platform.data.id);
+    } catch (cfgErr) {
+      console.error('[or-quiltt-session-via-widget] config resolve failed:', cfgErr);
+      return jsonResponse({ error: 'Quiltt config lookup failed' }, 500, cors);
+    }
+    const quilttApiKey = quilttCfg.apiKey;
+    const connectorId = quilttCfg.connectorIdLink;
     if (!quilttApiKey) {
-      console.error('[or-quiltt-session-via-widget] QUILTT_API_KEY missing');
+      console.error(
+        `[or-quiltt-session-via-widget] no Quiltt API key for platform=${quilttCfg.platformSlug} (source=${quilttCfg.source.apiKey})`,
+      );
       return jsonResponse({ error: 'Quiltt integration not configured (QUILTT_API_KEY)' }, 503, cors);
     }
     if (!connectorId) {
-      console.error('[or-quiltt-session-via-widget] QUILTT_CONNECTOR_ID_LINK missing');
+      console.error(
+        `[or-quiltt-session-via-widget] no Quiltt connector_id for platform=${quilttCfg.platformSlug} (source=${quilttCfg.source.connectorIdLink})`,
+      );
       return jsonResponse({ error: 'Quiltt integration not configured (connector id)' }, 503, cors);
     }
 

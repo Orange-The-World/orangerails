@@ -18,13 +18,14 @@
 
 import type { SinkAdapter } from './types.ts';
 import { bitbooksV2Sink, ensureProfileLoaded as ensureV2ProfileLoaded } from './bitbooks-v2.ts';
+import { orangewayMeSink } from './orangeway-me.ts';
 
 const SINK_ADAPTERS: ReadonlyMap<string, SinkAdapter> = new Map<string, SinkAdapter>([
   [bitbooksV2Sink.format, bitbooksV2Sink],
+  [orangewayMeSink.format, orangewayMeSink],
   // Future:
-  // [bitbooksV3Sink.format, bitbooksV3Sink],   // when V3 migrates off the encrypted-payload-store flow
-  // [orangewaySink.format, orangewaySink],     // when OW joins the protocol
-  // [bitbooksPersonalSink.format, bitbooksPersonalSink],
+  // [bitbooksV3Sink.format, bitbooksV3Sink],
+  // [orangewayBooksSink.format, orangewayBooksSink],
 ]);
 
 /**

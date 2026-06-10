@@ -337,7 +337,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     return (
       <div className="flex items-center gap-3 text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
-        Almost done…
+        Saving your connection…
       </div>
     );
   }
