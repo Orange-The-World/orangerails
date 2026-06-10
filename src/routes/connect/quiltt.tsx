@@ -316,7 +316,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
         // and removes the dangling "Close window" CTA from the streamlined flow.
         autoCloseTimerRef.current = window.setTimeout(() => {
           window.close();
-        }, 1200);
+        }, 3000);
       }
     } catch (e) {
       console.error("[connect/quiltt] complete failed:", e);
