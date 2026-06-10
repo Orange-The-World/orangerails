@@ -139,7 +139,10 @@ export abstract class BaseSource implements Source {
         if (retryAfter) {
           const delaySec = parseFloat(retryAfter);
           if (!Number.isNaN(delaySec)) {
-            await sleep(delaySec * 1000);
+            // Cap server-dictated backoff at 60s — an adversarial or buggy
+            // Retry-After (e.g. 86400) must not freeze the writer loop.
+            // 2026-06-10: iteration #34 hung 80 min in a blocking wait.
+            await sleep(Math.min(delaySec, 60) * 1000);
           }
         }
         throw new RetryableHttpError(res.status, `HTTP ${res.status} from ${url}`);
