@@ -38,6 +38,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
+import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import {
   getSinkAdapter,
   listSinkFormats,
@@ -190,10 +191,30 @@ Deno.serve(async (req: Request) => {
       format?: string;
     };
 
-    const { credentials_key, transactions_key, connection_ids, format } = body ?? {};
+    const { credentials_key, transactions_key, connection_ids, format: bodyFormat } = body ?? {};
     if (!credentials_key) {
       return jsonResponse({ error: 'credentials_key required' }, 400, cors);
     }
+
+    // Resolve sink format: platforms.sink_format wins over body.format.
+    // Server-side resolution defends against a buggy or malicious caller
+    // asking for a sink shape that isn't theirs. body.format kept as a
+    // backwards-compat fallback for callers (V2) that pre-date the
+    // multi-tenant column. Once every platform row has sink_format
+    // populated, the body field can be deprecated.
+    let resolvedFormat: string | null = null;
+    try {
+      resolvedFormat = await resolveSinkFormatForPlatform(
+        auth.serviceClient,
+        auth.platformId,
+        bodyFormat ?? null,
+      );
+    } catch (resolveErr) {
+      console.error('[or-sync] sink_format resolve failed:', resolveErr);
+      // Fall back to body.format on resolution failure rather than break.
+      resolvedFormat = bodyFormat ?? null;
+    }
+    const format = resolvedFormat;
 
     // Mode selection — `format` flips into protocol-driven sink mode.
     const sinkMode = typeof format === 'string' && format.length > 0;

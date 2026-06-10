@@ -26,6 +26,7 @@
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import sodium from 'https://esm.sh/libsodium-wrappers-sumo@0.7.13';
+import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
@@ -51,8 +52,9 @@ Deno.serve(async (req: Request) => {
     return new Response('unauthorized', { status: 401 });
   }
 
-  const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
-  if (!quilttApiKey) return new Response('QUILTT_API_KEY missing', { status: 503 });
+  // Quiltt API key is resolved per-event inside the loop now (per-platform
+  // config; env fallback retained on resolveQuilttConfigForPlatform).
+  const envQuilttApiKey = Deno.env.get('QUILTT_API_KEY') ?? '';
 
   const client = createClient(
     Deno.env.get('SUPABASE_URL')!,
@@ -110,7 +112,28 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
-      const handled = await handleEvent(client, ev, platform_id, subaccount_id, quilttApiKey);
+      // Resolve the per-platform Quiltt API key for THIS event's platform.
+      // Each platform may use a different Quiltt application; using the
+      // wrong key here would fail every downstream Quiltt fetch silently
+      // or with a 401, masking the real cause. Env fallback covers the
+      // transition period before all platform rows are backfilled.
+      let perPlatformApiKey = envQuilttApiKey;
+      try {
+        const cfg = await resolveQuilttConfigForPlatform(client, platform_id);
+        if (cfg.apiKey) perPlatformApiKey = cfg.apiKey;
+      } catch (resolveErr) {
+        console.error(
+          `[or-quiltt-sync] config resolve failed for platform=${platform_id}:`,
+          resolveErr instanceof Error ? resolveErr.message : String(resolveErr),
+        );
+        // Fall through with env fallback.
+      }
+      if (!perPlatformApiKey) {
+        await bumpAttempts(client, ev.event_id, 'no-quiltt-api-key');
+        failed++;
+        continue;
+      }
+      const handled = await handleEvent(client, ev, platform_id, subaccount_id, perPlatformApiKey);
       if (handled === 'processed') {
         await markProcessed(client, ev.event_id);
         processed++;
