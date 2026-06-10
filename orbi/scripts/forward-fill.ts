@@ -507,7 +507,7 @@ async function checkWriteHealth(): Promise<void> {
   // up the writer. Promise.race is tool-agnostic; works for both Bun.SQL and
   // fetch paths.
   const timeoutP = new Promise<never>((_, rej) =>
-    setTimeout(() => rej(new Error("health-check timeout (2s)")), 2_000),
+    setTimeout(() => rej(new Error("health-check timeout (5s)")), 5_000),
   );
   try {
     if (localSql) {
@@ -521,7 +521,7 @@ async function checkWriteHealth(): Promise<void> {
     } else {
       // Cloud Mgmt API path — no statement_timeout knob; rely on fetch timeout.
       const ac = new AbortController();
-      const to = setTimeout(() => ac.abort(), 2_000);
+      const to = setTimeout(() => ac.abort(), 5_000);
       try {
         const res = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query`, {
           method: "POST",
