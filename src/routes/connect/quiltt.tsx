@@ -314,9 +314,9 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
         );
         // Auto-close after a brief "Bank linked" beat — saves the user a click
         // and removes the dangling "Close window" CTA from the streamlined flow.
-        autoCloseTimerRef.current = window.setTimeout(() => {
-          window.close();
-        }, 3000);
+        // No auto-close — let V2 process the postMessage first.
+        // User sees "Bank connected!" and can close manually, or V2
+        // closes the popup programmatically after processing.
       }
     } catch (e) {
       console.error("[connect/quiltt] complete failed:", e);
@@ -350,8 +350,15 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
           <strong>Bank connected!</strong>
         </div>
         <p className="text-xs text-slate-500">
-          Returning you to your app…
+          You can close this window.
         </p>
+        <button
+          type="button"
+          onClick={() => window.close()}
+          className="mt-3 inline-flex items-center justify-center rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+        >
+          Close
+        </button>
       </div>
     );
   }
