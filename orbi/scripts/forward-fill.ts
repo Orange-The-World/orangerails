@@ -622,6 +622,36 @@ async function main() {
     return;
   }
 
+  // Replay mode: re-emit every minute bucket in [--replay-from, --replay-to].
+  // Used to repair gaps after writer outages (2026-06-08/10 incidents).
+  // Inserts are idempotent (ON CONFLICT DO NOTHING) so overlap with live rows
+  // is safe. Run as a one-off CLI invocation, never as the systemd service.
+  const replayFromIdx = process.argv.indexOf("--replay-from");
+  const replayToIdx = process.argv.indexOf("--replay-to");
+  if (replayFromIdx !== -1 && replayToIdx !== -1) {
+    const from = new Date(process.argv[replayFromIdx + 1]);
+    const to = new Date(process.argv[replayToIdx + 1]);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+      console.error("replay: invalid --replay-from/--replay-to");
+      process.exit(2);
+    }
+    const fromMs = Math.floor(from.getTime() / 60_000) * 60_000;
+    const toMs = Math.floor(to.getTime() / 60_000) * 60_000;
+    const total = (toMs - fromMs) / 60_000 + 1;
+    console.log(`replay: ${total} buckets ${new Date(fromMs).toISOString()} -> ${new Date(toMs).toISOString()}`);
+    let n = 0;
+    for (let ms = fromMs; ms <= toMs; ms += 60_000) {
+      n++;
+      try {
+        await runIteration(`replay ${n}/${total}`, new Date(ms));
+      } catch (err) {
+        console.error(`replay bucket ${new Date(ms).toISOString()} failed:`, err);
+      }
+    }
+    console.log(`replay: done (${n} buckets)`);
+    return;
+  }
+
   console.log("Starting ORBI forward-fill loop. Ctrl+C to stop.");
   console.log(`Publishing ${DIRECT_PAIRS.length} direct + ${STABLECOIN_PAIRS.length} stablecoin + ${COMPOSITE_PAIRS.length} composite pairs every minute.`);
 
