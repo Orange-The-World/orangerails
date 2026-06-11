@@ -458,6 +458,81 @@ Deno.serve(async (req: Request) => {
                 .eq('event_id', ev.event_id);
             }
 
+            // ── Direct profile-wide fallback ──────────────────────────
+            // The webhook inbox is best-effort: a freshly linked bank may
+            // have transactions on Quiltt before any connection.synced
+            // webhook lands (or webhooks may be unconfigured). When the
+            // inbox yielded nothing, query the profile's transactions
+            // directly — same pattern or-quiltt-accounts uses for
+            // accounts. The sink consumer dedupes by transaction id, so
+            // this is idempotent with the webhook path.
+            if (quilttSinkSynced === 0) {
+              let afterDirect: string | null = null;
+              let pagesDirect = 0;
+              while (pagesDirect < QUILTT_SINK_MAX_PAGES) {
+                const queryDirect = `
+                  query Q($first: Int!, $after: String) {
+                    transactions(first: $first, after: $after) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        id amount currencyCode date description entryType status
+                        account { id }
+                      }
+                    }
+                  }
+                `;
+                const respDirect = await fetch('https://api.quiltt.io/v1/graphql', {
+                  method: 'POST',
+                  headers: { 'Authorization': `Basic ${basicSink}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ query: queryDirect, variables: { first: QUILTT_SINK_TX_PAGE_SIZE, after: afterDirect } }),
+                });
+                if (!respDirect.ok) {
+                  console.error(`[or-sync] Quiltt direct query ${respDirect.status}`);
+                  break;
+                }
+                const jsonDirect = await respDirect.json();
+                if (jsonDirect?.errors) {
+                  console.error('[or-sync] Quiltt direct GraphQL errors:', JSON.stringify(jsonDirect.errors).slice(0, 300));
+                  break;
+                }
+                const txsDirect = (jsonDirect?.data?.transactions?.nodes ?? []) as Array<{
+                  id: string; amount: number; currencyCode: string; date: string;
+                  description: string; entryType: string; status: string; account?: { id?: string };
+                }>;
+                for (const tx of txsDirect) {
+                  const direction: 'in' | 'out' = tx.entryType?.toUpperCase() === 'CREDIT' ? 'in' : 'out';
+                  const normalized: NormalizedTransaction = {
+                    id:               tx.id,
+                    adapter:          'quiltt',
+                    direction,
+                    type:             direction === 'in' ? 'deposit' : 'withdrawal',
+                    amount:           Math.abs(tx.amount),
+                    currency:         tx.currencyCode ?? 'USD',
+                    description:      tx.description ?? null,
+                    counterparty:     null,
+                    status:           tx.status ?? 'posted',
+                    timestamp:        tx.date,
+                    source_wallet_id: tx.account?.id ?? null,
+                  };
+                  const out = sinkAdapter!.toAppShape({
+                    transaction:      normalized,
+                    or_connection_id: conn.id,
+                    or_subaccount_id: subaccountId,
+                    external_user_id:
+                      ctx.mode === 'direct'
+                        ? ctx.userId
+                        : await resolveExternalUserId(ctx.serviceClient, subaccountId),
+                  });
+                  sinkOutputs.push(out);
+                  quilttSinkSynced++;
+                }
+                const pageInfoDirect = jsonDirect?.data?.transactions?.pageInfo;
+                if (!pageInfoDirect?.hasNextPage) break;
+                afterDirect = pageInfoDirect.endCursor ?? null;
+                pagesDirect++;
+              }
+            }
+
             await ctx.serviceClient
               .from('connections')
               .update({ last_sync_at: new Date().toISOString(), status: 'active' })
@@ -905,10 +980,17 @@ Deno.serve(async (req: Request) => {
  * (typically the platform's organizationId). Sink adapters use this as
  * their consumer-side row owner key.
  */
+// Memo cache — resolveExternalUserId is called once per transaction inside
+// the sink loops; without caching that is N identical DB round-trips per
+// sync (114 lookups for a 114-tx Mercury sync, ~10s wasted under load).
+// Cache per subaccount for the lifetime of the function invocation.
+const _externalUserIdCache = new Map<string, string>();
 async function resolveExternalUserId(
   serviceClient: ReturnType<typeof Object>,
   subaccountId: string,
 ): Promise<string> {
+  const cached = _externalUserIdCache.get(subaccountId);
+  if (cached !== undefined) return cached;
   // deno-lint-ignore no-explicit-any
   const sb = serviceClient as any;
   const { data, error } = await sb
@@ -919,5 +1001,7 @@ async function resolveExternalUserId(
   if (error || !data?.external_user_id) {
     throw new Error(`Could not resolve external_user_id for subaccount ${subaccountId}`);
   }
-  return data.external_user_id as string;
+  const val = data.external_user_id as string;
+  _externalUserIdCache.set(subaccountId, val);
+  return val;
 }
