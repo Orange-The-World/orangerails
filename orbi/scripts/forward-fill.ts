@@ -126,6 +126,13 @@ type CompositePair = {
   crossMode?: 'frankfurter' | 'db-cross';
 };
 const COMPOSITE_PAIRS: ReadonlyArray<CompositePair> = [
+  // 2026-06-12 — RESTORED to COMPOSITE_PAIRS after ecb-cross-3pair cohort
+  // proved fragile (self-deadlocking liveness probe, dead 3.5d). Frankfurter
+  // (ECB) publishes USD/{HUF,CNY,RON} live — confirmed 2026-06-12 — so the
+  // standard composite path works. Task #67.
+  { source: "BTC", target: "HUF" },
+  { source: "BTC", target: "CNY" },
+  { source: "BTC", target: "RON" },
   { source: "BTC", target: "INR" },
   { source: "BTC", target: "TRY" },
   { source: "BTC", target: "ZAR" },
