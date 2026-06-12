@@ -153,14 +153,54 @@ function QuilttConnectPage() {
   // embedding page's theme.
   return (
     <div
-      className="min-h-screen bg-white antialiased text-slate-900"
+      className="min-h-screen bg-slate-50 px-4 py-6 antialiased text-slate-900"
       style={{ colorScheme: "light" }}
     >
-      {/* Minimal container — Quiltt handles all UI/UX inside its iframe.
-          No OR chrome, no badges, no terms. This is the bank's flow. */}
-      <div className="mx-auto w-full">
-        <div className="relative">
-          <section>
+      <div className="mx-auto w-full max-w-md">
+        <div className="relative rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          {/* Top bar — Back (left) + X (right). X always triggers the
+              exit-confirmation dialog so the user doesn't lose progress
+              accidentally. Pattern mirrors Plaid Link / Quiltt Connector. */}
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => {
+                if (window.history.length > 1) {
+                  window.history.back();
+                } else {
+                  window.location.assign("/providers");
+                }
+              }}
+              className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              Back
+            </button>
+            <button
+              type="button"
+              aria-label="Close"
+              onClick={tryClose}
+              className="inline-flex h-7 w-7 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <header className="mt-4 space-y-1.5">
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] text-slate-500">
+              <Building2 className="h-3 w-3" />
+              US bank account · via Quiltt
+            </div>
+            <h1 className="text-base font-semibold text-slate-900">
+              Connect your bank
+            </h1>
+            <p className="text-xs text-slate-500">
+              Your bank credentials never reach OrangeRails. Only encrypted
+              transaction data flows into your vault.
+            </p>
+          </header>
+
+          <section className="mt-4">
             {haveAllParams ? (
               <QuilttProvider token={params.session_token!}>
                 <ConnectorPanel params={params} />
@@ -169,6 +209,34 @@ function QuilttConnectPage() {
               <MissingParamsView />
             )}
           </section>
+
+          <div className="mt-6 border-t border-slate-100 pt-4 text-center text-[11px] text-slate-400">
+            <p>
+              By continuing you agree to OrangeRails's{" "}
+              <a
+                href="/terms"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-slate-600"
+              >
+                Terms
+              </a>
+              {" "}and{" "}
+              <a
+                href="/privacy"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-slate-600"
+              >
+                Privacy Policy
+              </a>
+              .
+            </p>
+            <p className="mt-2 flex items-center justify-center gap-1.5">
+              <span>Powered by</span>
+              <span className="font-semibold text-slate-500">OrangeRails</span>
+            </p>
+          </div>
 
           {/* Exit confirmation overlay — Plaid Link parity. Sits on top
               of the popup card so the user doesn't lose progress on an
@@ -237,7 +305,6 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   // Imperative open — connector launches as soon as the user picks a bank
   // (or the integrator pre-selected one via the institution fragment param).
   const { open: openConnector } = useQuilttConnector(params.connector_id!, {
-    themeMode: "light",
     institution: effectiveInstitutionId,
     onExitSuccess: (metadata) => {
       void completeLinkOnOR(metadata.connectionId);
@@ -314,9 +381,9 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
         );
         // Auto-close after a brief "Bank linked" beat — saves the user a click
         // and removes the dangling "Close window" CTA from the streamlined flow.
-        // No auto-close — let V2 process the postMessage first.
-        // User sees "Bank connected!" and can close manually, or V2
-        // closes the popup programmatically after processing.
+        autoCloseTimerRef.current = window.setTimeout(() => {
+          window.close();
+        }, 1200);
       }
     } catch (e) {
       console.error("[connect/quiltt] complete failed:", e);
@@ -344,18 +411,18 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
 
   if (phase === "done") {
     return (
-      <div className="space-y-2">
-        <div className="flex items-center gap-2 text-emerald-600">
-          <CheckCircle2 className="h-5 w-5" />
-          <strong>Bank connected!</strong>
+      <div className="flex flex-col items-center gap-4 py-6 text-center">
+        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-orange-50 ring-1 ring-orange-100">
+          <CheckCircle2 className="h-7 w-7 text-orange-500" />
         </div>
-        <p className="text-xs text-slate-500">
-          You can close this window.
-        </p>
+        <div className="space-y-1">
+          <p className="text-base font-semibold text-slate-900">Your bank is connected</p>
+          <p className="text-sm text-slate-500">You can safely close this window.</p>
+        </div>
         <button
           type="button"
-          onClick={() => window.close()}
-          className="mt-3 inline-flex items-center justify-center rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+          onClick={tryClose}
+          className="mt-1 inline-flex w-full items-center justify-center rounded-full bg-orange-500 px-6 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-600 sm:w-auto"
         >
           Close
         </button>
