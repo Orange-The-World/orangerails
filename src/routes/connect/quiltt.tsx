@@ -415,15 +415,35 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   }
 
   // phase === "ready"
-  // Always show a loader — the Quiltt connector auto-opens above. The
-  // inline OR search (BankSearchStep) has been retired because Quiltt's
-  // own iframe shows the institution picker.
+  // The Quiltt connector auto-opens its own secure modal on top of this
+  // page. So this is NOT a loading state — it's an intentional backdrop
+  // behind Quiltt's window. A spinning loader here read as a second,
+  // competing "still loading" indicator next to Quiltt's. Show a calm,
+  // static prompt that points the user at Quiltt's window instead.
   return (
-    <div className="flex items-center gap-3 text-sm text-slate-500">
-      <Loader2 className="h-4 w-4 animate-spin" />
-      {selectedInstitution?.name
-        ? `Opening ${selectedInstitution.name}…`
-        : "Opening bank picker…"}
+    <div className="flex flex-col items-center gap-3 py-6 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-orange-50">
+        <Building2 className="h-6 w-6 text-orange-500" />
+      </div>
+      <p className="text-sm font-medium text-slate-900">
+        {selectedInstitution?.name
+          ? `Connecting to ${selectedInstitution.name}`
+          : "Connecting to your bank"}
+      </p>
+      <p className="max-w-xs text-xs text-slate-500">
+        Continue in the secure window. It opens automatically — if you closed it,
+        reopen with the button below.
+      </p>
+      <button
+        type="button"
+        onClick={() => {
+          autoOpenedRef.current = false;
+          setPhase("ready");
+        }}
+        className="mt-1 inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+      >
+        Reopen secure window
+      </button>
     </div>
   );
 }
