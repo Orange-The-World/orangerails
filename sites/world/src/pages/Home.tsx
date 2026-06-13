@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import BtcUsdChart from "@/components/BtcUsdChart";
 
 export default function Home() {
   return (
@@ -37,6 +38,16 @@ export default function Home() {
             Read the docs
           </Link>
         </div>
+      </section>
+
+      <section className="max-w-5xl mx-auto px-6 pb-24">
+        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <BtcUsdChart />
+        </div>
+        <p className="mt-3 text-center text-xs text-slate-400">
+          One pair shown. The full open dataset covers 28 BTC/fiat pairs and centuries of inflation,
+          metals, and monetary aggregates. See <a href="/data" className="text-orange hover:underline">/data</a>.
+        </p>
       </section>
 
       <footer className="border-t border-slate-200 mt-24">
