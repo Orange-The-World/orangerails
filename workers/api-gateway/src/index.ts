@@ -13,9 +13,6 @@
  *   /functions/... transparent passthrough to the upstream Supabase project.
  *                  Migration courtesy so existing clients keep working while
  *                  they cut over. Dropped after sunset (see Roadmap).
- *   /sync/blink    forwards to the Express adapter on bb-support via the
- *                  Cloudflare Tunnel hostname. OR-internal path used by the
- *                  `sync-blink` Supabase function to talk to Blink.
  *   /health        lightweight liveness check served locally by the Worker.
  *                  Does NOT forward — the Worker being reachable is enough
  *                  signal; bb-support liveness is checked separately.
@@ -28,8 +25,6 @@
 export interface Env {
   /** OR Supabase URL — e.g. https://lcdicqalreskibdfxkzb.supabase.co (prod) or the dev ref. Set per environment in wrangler.toml. */
   OR_SUPABASE_URL: string;
-  /** Cloudflare Tunnel hostname pointing at bb-support's Express adapter (Step 2 of the roadmap). Empty until Step 2 ships. */
-  BB_ADAPTER_URL: string;
 }
 
 type V1Route = {
@@ -139,17 +134,6 @@ export default {
 
     if (url.pathname.startsWith('/functions/')) {
       const upstream = new URL(url.pathname + url.search, env.OR_SUPABASE_URL).toString();
-      return proxyToSupabase(upstream, request);
-    }
-
-    if (url.pathname === '/sync/blink') {
-      if (!env.BB_ADAPTER_URL) {
-        return new Response(JSON.stringify({ error: 'adapter_not_configured' }), {
-          status: 503,
-          headers: { 'content-type': 'application/json' },
-        });
-      }
-      const upstream = new URL('/sync/blink' + url.search, env.BB_ADAPTER_URL).toString();
       return proxyToSupabase(upstream, request);
     }
 

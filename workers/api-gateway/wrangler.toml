@@ -5,7 +5,6 @@ workers_dev = true
 
 [vars]
 OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
-BB_ADAPTER_URL = ""
 
 # Staging deploys to a workers.dev URL for verification. The custom
 # domain `api-staging.orangerails.com` route is bound separately (one
@@ -18,7 +17,6 @@ workers_dev = true
 
 [env.staging.vars]
 OR_SUPABASE_URL = "https://gposxxmxenrdvewrprle.supabase.co"
-BB_ADAPTER_URL = ""
 
 # Production deploys to its workers.dev URL too. The api.orangerails.com
 # route is bound once in the CF dashboard pointing at this script name;
@@ -30,4 +28,3 @@ workers_dev = true
 
 [env.production.vars]
 OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
-BB_ADAPTER_URL = ""
