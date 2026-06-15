@@ -1,0 +1,54 @@
+# Caddy snippet for the Stealth Sync filter CDN.
+# Placed at /opt/orangerails/caddy/stealth.orangerails.com.caddy on bb-support.
+# Auto-imported by /etc/caddy/Caddyfile via `import /opt/orangerails/caddy/*.caddy`.
+#
+# Serves the BIP158 compact filter files written by btc-filter-worker.service
+# at /var/lib/btc-filter-worker/<height>.gcs.gz and <height>.json straight
+# out of the directory. The widget fetches them by URL like
+# https://stealth.orangerails.com/123456.gcs.gz and decompresses in-browser.
+#
+# Privacy controls (mandatory per STEALTH-SYNC-MASTER-PLAN.md §4.7):
+#  1. No authentication on requests
+#  2. Aggressive caching (each filter file is immutable by block height)
+#  3. No access logging
+#  4. Permissive CORS (the widget origin is connect.orangerails.com)
+#  5. Origin sees only this Caddy front-proxy, never user IPs directly
+
+stealth.orangerails.com {
+    # Privacy control 3: discard all access logs.
+    log {
+        output discard
+    }
+
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Robots-Tag "noindex, nofollow, noarchive"
+        # Filter files are content-addressed by block height. Once written
+        # they never change, so we mark them immutable for one year.
+        Cache-Control "public, max-age=31536000, immutable"
+        -Server
+        -X-Powered-By
+    }
+
+    @cors_preflight method OPTIONS
+    handle @cors_preflight {
+        header {
+            Access-Control-Allow-Origin "*"
+            Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+            Access-Control-Max-Age "86400"
+        }
+        respond 204
+    }
+
+    header Access-Control-Allow-Origin "*"
+
+    root * /var/lib/btc-filter-worker
+    file_server {
+        hide .*
+    }
+}
