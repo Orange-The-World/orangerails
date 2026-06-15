@@ -1,0 +1,28 @@
+name = "api-orangerails"
+main = "src/index.ts"
+compatibility_date = "2026-05-31"
+workers_dev = false
+
+[vars]
+OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
+BB_ADAPTER_URL = ""
+
+[env.staging]
+name = "api-orangerails-staging"
+routes = [
+  { pattern = "api-staging.orangerails.com/*", zone_name = "orangerails.com" },
+]
+
+[env.staging.vars]
+OR_SUPABASE_URL = "https://gposxxmxenrdvewrprle.supabase.co"
+BB_ADAPTER_URL = ""
+
+[env.production]
+name = "api-orangerails-production"
+routes = [
+  { pattern = "api.orangerails.com/*", zone_name = "orangerails.com" },
+]
+
+[env.production.vars]
+OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
+BB_ADAPTER_URL = ""

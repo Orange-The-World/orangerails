@@ -1,0 +1,16 @@
+{
+  "name": "@orangerails/api-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260601.0",
+    "vitest": "^2.1.0",
+    "wrangler": "^3.80.0"
+  }
+}
