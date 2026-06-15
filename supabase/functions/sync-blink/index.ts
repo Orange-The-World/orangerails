@@ -1,6 +1,120 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 
+const BLINK_API = 'https://api.blink.sv/graphql';
+
+const TRANSACTIONS_QUERY = `
+  query GetTransactions($after: String) {
+    me {
+      defaultAccount {
+        wallets {
+          id
+          walletCurrency
+          balance
+          transactions(first: 100, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
+                id
+                direction
+                status
+                memo
+                createdAt
+                settlementAmount
+                settlementCurrency
+                settlementFee
+                initiationVia {
+                  ... on InitiationViaLn { paymentHash }
+                  ... on InitiationViaOnChain { address }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+interface BlinkTx {
+  id: string;
+  direction: string;
+  status: string;
+  memo: string | null;
+  createdAt: number | string;
+  settlementAmount: number;
+  settlementCurrency?: string;
+  settlementFee?: number;
+  initiationVia?: { paymentHash?: string; address?: string };
+}
+
+interface OrTx {
+  id: string;
+  adapter: 'blink';
+  direction: 'in' | 'out';
+  type: 'lightning' | 'onchain';
+  amount_sats: number;
+  currency: string;
+  fee_sats: number;
+  description: string | null;
+  timestamp: string | number;
+  status: string;
+  raw: BlinkTx;
+}
+
+function normalize(tx: BlinkTx, walletCurrency: string): OrTx {
+  const type: 'lightning' | 'onchain' = tx.initiationVia?.paymentHash ? 'lightning' : 'onchain';
+  // Blink returns createdAt as a Unix timestamp in SECONDS. Postgres
+  // timestamptz requires an ISO 8601 string, so we convert here. If the
+  // value is already a string (defensive against future schema change),
+  // pass it through.
+  const timestamp =
+    typeof tx.createdAt === 'number'
+      ? new Date(tx.createdAt * 1000).toISOString()
+      : typeof tx.createdAt === 'string' && /^\d+$/.test(tx.createdAt)
+        ? new Date(Number(tx.createdAt) * 1000).toISOString()
+        : tx.createdAt;
+  return {
+    id: tx.id,
+    adapter: 'blink',
+    direction: tx.direction === 'RECEIVE' ? 'in' : 'out',
+    type,
+    amount_sats: Math.abs(tx.settlementAmount),
+    currency: tx.settlementCurrency || walletCurrency,
+    fee_sats: tx.settlementFee ?? 0,
+    description: tx.memo ?? null,
+    timestamp,
+    status: tx.status,
+    raw: tx,
+  };
+}
+
+async function syncBlink(
+  apiKey: string,
+  cursor: string | null,
+): Promise<{ transactions: OrTx[]; next_cursor: string | null }> {
+  const res = await fetch(BLINK_API, {
+    method: 'POST',
+    headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: TRANSACTIONS_QUERY, variables: { after: cursor || null } }),
+  });
+  if (!res.ok) throw new Error(`Blink HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.errors) throw new Error(data.errors[0].message);
+
+  const wallets = data.data.me.defaultAccount.wallets;
+  const transactions: OrTx[] = [];
+  let nextCursor: string | null = null;
+  for (const wallet of wallets) {
+    const { edges, pageInfo } = wallet.transactions;
+    if (pageInfo.hasNextPage) nextCursor = pageInfo.endCursor;
+    for (const { node: tx } of edges) {
+      transactions.push(normalize(tx, wallet.walletCurrency));
+    }
+  }
+  return { transactions, next_cursor: nextCursor };
+}
+
 Deno.serve(async (req: Request) => {
   const cors = buildCorsHeaders(req);
 
@@ -26,24 +140,14 @@ Deno.serve(async (req: Request) => {
     const { api_key, cursor } = body ?? {};
     if (!api_key || typeof api_key !== 'string') return jsonResponse({ error: 'api_key required' }, 400, cors);
 
-    const orBase = Deno.env.get('OR_API_URL') ?? 'https://api.orangerails.com';
-    const orRes = await fetch(`${orBase}/sync/blink`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key, cursor: cursor ?? null }),
-    });
-
-    if (!orRes.ok) {
-      const detail = await orRes.text().catch(() => '');
-      console.error('OrangeRails error:', orRes.status, detail);
-      return jsonResponse({ error: 'OrangeRails sync failed', status: orRes.status }, 502, cors);
-    }
-
-    const result = await orRes.json();
+    const result = await syncBlink(api_key, cursor ?? null);
     return jsonResponse(result, 200, cors);
-
   } catch (err) {
     console.error('sync-blink error:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('Blink HTTP')) {
+      return jsonResponse({ error: 'Blink sync failed', detail: msg }, 502, cors);
+    }
+    return jsonResponse({ error: 'Internal error', detail: msg }, 500, cors);
   }
 });
