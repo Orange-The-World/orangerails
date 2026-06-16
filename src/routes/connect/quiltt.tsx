@@ -29,7 +29,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttConnector, useQuilttInstitutions } from "@quiltt/react/hooks";
-import { AlertTriangle, CheckCircle2, Loader2, Search } from "lucide-react";
+import { AlertTriangle, Building2, CheckCircle2, Loader2, Search } from "lucide-react";
 
 interface InstitutionRow {
   id?: string;
