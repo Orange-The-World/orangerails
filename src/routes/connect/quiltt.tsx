@@ -346,9 +346,10 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            platform_slug: params.platform_slug!,
-            app_user_id:   params.app_user_id!,
-            widget_token:  params.widget_token!,
+            platform_slug:        params.platform_slug!,
+            app_user_id:          params.app_user_id!,
+            widget_token:         params.widget_token!,
+            quiltt_connection_id: quilttConnectionId ?? undefined,
           }),
         },
       );

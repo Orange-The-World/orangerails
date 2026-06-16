@@ -15,8 +15,12 @@
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
+const DEFAULT_LIMIT = 200;
+// Bumped from 200 → 1000. The prior cap surfaced as a "support ticket"
+// shape — banks with thousands of historical transactions appeared to
+// only sync 200 because the client only made one call. Clients should
+// still paginate with `before_occurred_at` / `cursor` for full history.
+const MAX_LIMIT = 1000;
 
 Deno.serve(async (req: Request) => {
   const cors = buildCorsHeaders(req);
