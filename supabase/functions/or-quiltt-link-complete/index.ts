@@ -62,6 +62,7 @@ interface LinkCompleteBody {
   app_user_id?: string;
   widget_token?: string;
   encrypted_label?: string;
+  quiltt_connection_id?: string;
 }
 
 function makeServiceClient(): SupabaseClient {
@@ -98,6 +99,12 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: 'encrypted_label must be base64 ciphertext ≤4 KB' }, 400, cors);
       }
     }
+    if (body.quiltt_connection_id !== undefined) {
+      if (typeof body.quiltt_connection_id !== 'string' || body.quiltt_connection_id.length > 256) {
+        return jsonResponse({ error: 'quiltt_connection_id must be a string ≤256 chars' }, 400, cors);
+      }
+    }
+    const quilttConnectionId = body.quiltt_connection_id ?? null;
 
     const service = makeServiceClient();
 
@@ -179,26 +186,35 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // 5. Upsert the connections row. One Quiltt connection row per
-    // subaccount (a Quiltt Profile maps 1:1 to a subaccount; multiple
-    // bank links under that Profile share this row). The unique key is
-    // (subaccount_id, provider_type) — but the schema doesn't enforce
-    // that, so we do find-or-create here.
-    const existing = await service
-      .from('connections')
-      .select('id')
-      .eq('subaccount_id', subaccountId)
-      .eq('provider_type', 'quiltt')
-      .maybeSingle();
-    if (existing.error) {
-      console.error('[or-quiltt-link-complete] connection lookup failed:', existing.error.message);
+    // 5. Find-or-create the connections row, keyed on the Quiltt connection id.
+    //
+    // One row per linked Quiltt connection (NOT per Profile). A single
+    // Quiltt Profile can host many bank links (e.g. Mercury + TD); each
+    // gets its own OR connection so labels, sync state, and account
+    // mappings don't collide.
+    //
+    // Legacy rows (created before the quiltt_connection_id column existed)
+    // have NULL quiltt_connection_id. The first relink of those banks
+    // upgrades the legacy row by stamping the connection id, instead of
+    // creating a duplicate. The partial unique index keeps subsequent
+    // relinks idempotent.
+    let connectionId: string;
+    const existingByQid = quilttConnectionId
+      ? await service
+          .from('connections')
+          .select('id')
+          .eq('subaccount_id', subaccountId)
+          .eq('provider_type', 'quiltt')
+          .eq('quiltt_connection_id', quilttConnectionId)
+          .maybeSingle()
+      : { data: null, error: null } as { data: { id: string } | null; error: null };
+    if (existingByQid.error) {
+      console.error('[or-quiltt-link-complete] connection lookup failed:', existingByQid.error.message);
       return jsonResponse({ error: 'Failed to look up connection' }, 500, cors);
     }
 
-    let connectionId: string;
-    if (existing.data) {
-      // Already linked. Update label if a new one was provided, then return.
-      connectionId = existing.data.id as string;
+    if (existingByQid.data) {
+      connectionId = existingByQid.data.id as string;
       if (body.encrypted_label !== undefined) {
         await service
           .from('connections')
@@ -206,23 +222,44 @@ Deno.serve(async (req: Request) => {
           .eq('id', connectionId);
       }
     } else {
-      const insertConn = await service
-        .from('connections')
-        .insert({
-          subaccount_id:           subaccountId,
-          provider_type:           'quiltt',
-          encrypted_label:         body.encrypted_label ?? null,
-          encrypted_credentials:   QUILTT_CREDENTIALS_SENTINEL,
-          credentials_key_version: 1,
-          status:                  'active',
-        })
-        .select('id')
-        .single();
-      if (insertConn.error || !insertConn.data) {
-        console.error('[or-quiltt-link-complete] connection insert failed:', insertConn.error?.message);
-        return jsonResponse({ error: 'Failed to create connection' }, 500, cors);
+      // Try to upgrade a legacy (NULL quiltt_connection_id) row before inserting.
+      const legacyLookup = quilttConnectionId
+        ? await service
+            .from('connections')
+            .select('id')
+            .eq('subaccount_id', subaccountId)
+            .eq('provider_type', 'quiltt')
+            .is('quiltt_connection_id', null)
+            .order('created_at', { ascending: true })
+            .limit(1)
+            .maybeSingle()
+        : { data: null, error: null } as { data: { id: string } | null; error: null };
+
+      if (legacyLookup.data) {
+        connectionId = legacyLookup.data.id as string;
+        const patch: Record<string, unknown> = { quiltt_connection_id: quilttConnectionId };
+        if (body.encrypted_label !== undefined) patch.encrypted_label = body.encrypted_label;
+        await service.from('connections').update(patch).eq('id', connectionId);
+      } else {
+        const insertConn = await service
+          .from('connections')
+          .insert({
+            subaccount_id:           subaccountId,
+            provider_type:           'quiltt',
+            quiltt_connection_id:    quilttConnectionId,
+            encrypted_label:         body.encrypted_label ?? null,
+            encrypted_credentials:   QUILTT_CREDENTIALS_SENTINEL,
+            credentials_key_version: 1,
+            status:                  'active',
+          })
+          .select('id')
+          .single();
+        if (insertConn.error || !insertConn.data) {
+          console.error('[or-quiltt-link-complete] connection insert failed:', insertConn.error?.message);
+          return jsonResponse({ error: 'Failed to create connection' }, 500, cors);
+        }
+        connectionId = insertConn.data.id as string;
       }
-      connectionId = insertConn.data.id as string;
     }
 
     return jsonResponse({ subaccount_id: subaccountId, connection_id: connectionId }, 200, cors);

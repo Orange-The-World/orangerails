@@ -31,7 +31,10 @@ import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
 const TX_PAGE_SIZE = 100;
-const MAX_PAGES = 5;          // safety cap per connection per invocation
+// 50 pages × 100 = 5,000 transactions per connection per webhook event.
+// Covers most banks' full available history (Quiltt typically caps at ~2y).
+// Still bounded so a hostile/buggy upstream can't burn unlimited time.
+const MAX_PAGES = 50;
 
 interface PendingEvent {
   event_id:      string;
@@ -207,14 +210,37 @@ async function handleEvent(
   // Schema note: connections.user_id was dropped in
   // 20260421200000_platforms_subaccounts.sql; the current owning column
   // is subaccount_id.
-  const { data: conn, error: connErr } = await client
+  // Route the event to the OR connection row whose quiltt_connection_id
+  // matches the webhook's connectionId. Falls back to a legacy NULL-id
+  // row only if no exact match exists — keeps banks linked before the
+  // multi-connection migration working. If both fail, surface the
+  // mismatch instead of silently writing to the wrong bank's bucket
+  // (which was the pre-fix root cause of Mercury+TD collisions).
+  let conn: { id: string } | null = null;
+  const exactMatch = await client
     .from('connections')
     .select('id')
     .eq('subaccount_id', subaccountId)
     .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
-  if (connErr) return `connection lookup failed: ${connErr.message}`;
-  if (!conn) return 'or-connection row not yet created';
+  if (exactMatch.error) return `connection lookup failed: ${exactMatch.error.message}`;
+  if (exactMatch.data) {
+    conn = exactMatch.data as { id: string };
+  } else {
+    const legacy = await client
+      .from('connections')
+      .select('id')
+      .eq('subaccount_id', subaccountId)
+      .eq('provider_type', 'quiltt')
+      .is('quiltt_connection_id', null)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
+    if (!legacy.data) return 'or-connection row not yet created';
+    conn = legacy.data as { id: string };
+  }
 
   let after: string | null = null;
   let pages = 0;
