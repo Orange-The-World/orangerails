@@ -113,6 +113,27 @@ function QuilttConnectPage() {
     !!params.platform_slug &&
     !!params.app_user_id &&
     !!params.widget_token;
+
+  // Scrub the URL fragment immediately after we've captured the params.
+  //
+  // The fragment carries OWM-side ZKA keys (cred_key, txn_key — both raw
+  // MEK-derived AES keys) plus the widget_token. While fragments never
+  // reach a server, they DO sit in window.location.href where any script
+  // on this origin can read them (including a browser extension with
+  // tabs permission, or a stray third-party script we add later). If the
+  // popup ever navigates away same-origin, they also land in browser
+  // history. history.replaceState rewrites the visible URL to '#' so the
+  // sensitive material is gone the moment the React component mounts.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!window.location.hash || window.location.hash === "#") return;
+    try {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    } catch {
+      // Some embeddings (sandboxed iframes) reject replaceState — accept
+      // the reduced posture rather than block the flow.
+    }
+  }, []);
   // Chromeless backdrop. We used to render a full card (header, footer,
   // terms, "Powered by OrangeRails") around Quiltt's iframe — but Quiltt's
   // modal renders ON TOP, leaving our chrome bleeding through behind/around
