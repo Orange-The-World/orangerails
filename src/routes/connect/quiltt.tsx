@@ -59,11 +59,11 @@ function tileColor(seed: string): string {
 export const Route = createFileRoute("/connect/quiltt")({
   head: () => ({
     meta: [
-      { title: "Connect your bank | OrangeRails" },
+      { title: "Connect your bank" },
       {
         name: "description",
         content:
-          "Link any US bank account through Quiltt (Finicity, MX, Akoya, Plaid). OrangeRails never sees your bank credentials.",
+          "Link your bank securely. Your credentials stay with your bank — only encrypted transaction data flows into your vault.",
       },
     ],
   }),
@@ -189,14 +189,12 @@ function QuilttConnectPage() {
           <header className="mt-4 space-y-1.5">
             <div className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] text-slate-500">
               <Building2 className="h-3 w-3" />
-              US bank account · via Quiltt
+              Secure bank link
             </div>
-            <h1 className="text-base font-semibold text-slate-900">
-              Connect your bank
-            </h1>
+            <h1 className="text-base font-semibold text-slate-900">Connect your bank</h1>
             <p className="text-xs text-slate-500">
-              Your bank credentials never reach OrangeRails. Only encrypted
-              transaction data flows into your vault.
+              Your credentials stay with your bank. Only encrypted transaction data flows into
+              your vault.
             </p>
           </header>
 
@@ -212,7 +210,7 @@ function QuilttConnectPage() {
 
           <div className="mt-6 border-t border-slate-100 pt-4 text-center text-[11px] text-slate-400">
             <p>
-              By continuing you agree to OrangeRails's{" "}
+              By continuing you agree to our{" "}
               <a
                 href="/terms"
                 target="_blank"
@@ -220,8 +218,8 @@ function QuilttConnectPage() {
                 className="underline hover:text-slate-600"
               >
                 Terms
-              </a>
-              {" "}and{" "}
+              </a>{" "}
+              and{" "}
               <a
                 href="/privacy"
                 target="_blank"
@@ -231,10 +229,6 @@ function QuilttConnectPage() {
                 Privacy Policy
               </a>
               .
-            </p>
-            <p className="mt-2 flex items-center justify-center gap-1.5">
-              <span>Powered by</span>
-              <span className="font-semibold text-slate-500">OrangeRails</span>
             </p>
           </div>
 
