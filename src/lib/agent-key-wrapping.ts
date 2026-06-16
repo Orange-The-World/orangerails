@@ -28,6 +28,7 @@ import {
   KEY_WRAP_STRATEGIES,
   DEFAULT_WRAP_ALGORITHM,
   base64ToBytes,
+  bytesToBase64,
   type WrapRecipient,
 } from "./key-wrapping";
 
@@ -90,10 +91,13 @@ export async function wrapDataKeysForAgent(
   }
 
   const recipientPubkey = base64ToBytes(agent.kem_pubkey);
+  // WrapRecipient field names are userId / publicKey — not the snake_case
+  // names this file used to use. The KeyWrapStrategy signature is
+  //   wrapForRecipient(dataKey: Uint8Array, recipientPublicKey: Uint8Array)
+  // so we pass the raw pubkey bytes, not the recipient object.
   const recipient: WrapRecipient = {
-    user_id: agent.shadow_user_id,
-    kem_pubkey: recipientPubkey,
-    algorithm,
+    userId: agent.shadow_user_id,
+    publicKey: recipientPubkey,
   };
 
   const envelopes: WrappedEnvelope[] = [];
@@ -104,11 +108,11 @@ export async function wrapDataKeysForAgent(
           `wrapDataKeysForAgent only supports 32-byte AES data keys.`,
       );
     }
-    const wrapped = await strategy.wrapForRecipient(dk.key_bytes, recipient);
+    const wrapped = await strategy.wrapForRecipient(dk.key_bytes, recipient.publicKey);
     envelopes.push({
       data_key_id: dk.data_key_id,
-      recipient_user_id: agent.shadow_user_id,
-      wrapped_ciphertext: wrapped,
+      recipient_user_id: recipient.userId,
+      wrapped_ciphertext: bytesToBase64(wrapped),
       algorithm,
     });
   }
