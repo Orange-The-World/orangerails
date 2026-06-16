@@ -36,6 +36,18 @@ const TX_PAGE_SIZE = 100;
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
 const MAX_PAGES = 50;
 
+// Per-event wall-clock budget. A pathological profile (many bound
+// connections, slow Quiltt responses, or hostile fanout) can otherwise
+// exhaust the Supabase edge-runtime ~150s wall and starve the rest of
+// the batch. Cap each event at 60s; if we run over, mark `partial` and
+// let the next cron tick pick up the remainder.
+const PER_EVENT_BUDGET_MS = 60_000;
+
+// Quiltt PROD geo-blocks Canada (and other non-US) at the GraphQL
+// layer. Supabase routes outbound through us-east-1 when this header
+// is set, dodging the 403. Same trick OWM uses on its OR proxy calls.
+const QUILTT_REGION_HEADER = 'us-east-1';
+
 interface PendingEvent {
   event_id:      string;
   event_type:    string;
@@ -245,8 +257,21 @@ async function handleEvent(
   let after: string | null = null;
   let pages = 0;
   let newRows = 0;
+  const eventStartMs = Date.now();
 
   while (pages < MAX_PAGES) {
+    // Wall-clock budget guard. If this single event has already burned
+    // PER_EVENT_BUDGET_MS, bail and let the next cron tick pick up the
+    // remainder. Stops one hostile/slow profile from starving the rest
+    // of the batch when the Supabase edge runtime would otherwise be
+    // killed at ~150s for the whole invocation.
+    if (Date.now() - eventStartMs > PER_EVENT_BUDGET_MS) {
+      console.warn(
+        `[or-quiltt-sync] event ${connectionId}: per-event budget exhausted after ${pages} pages, ${newRows} rows`,
+      );
+      break;
+    }
+
     const query = `
       query Q($first: Int!, $after: String) {
         transactions(first: $first, after: $after) {
@@ -263,6 +288,7 @@ async function handleEvent(
       headers: {
         'Authorization': `Basic ${basic}`,
         'Content-Type':  'application/json',
+        'x-region':      QUILTT_REGION_HEADER,
       },
       body: JSON.stringify({
         query,

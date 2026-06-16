@@ -52,6 +52,15 @@ interface RegisterBody {
   app_user_id?: string;
   opk_public?: string;
   opk_alg?: string;
+  /**
+   * Required when rotating an existing OPK (subaccount already has a
+   * non-null opk_public). Must be literal `true`. Prevents a quiet
+   * client bug from silently flipping a victim's seal key — every
+   * rotation now requires an explicit opt-in plus generates an audit row.
+   */
+  confirm_rotation?: boolean;
+  /** Optional free-text reason recorded on the rotation audit row. */
+  rotation_reason?: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -122,6 +131,21 @@ Deno.serve(async (req: Request) => {
           cors,
         );
       }
+      // Rotation guard: require explicit opt-in before overwriting an
+      // existing pubkey. Prevents a quiet client bug or a hostile
+      // integrator from silently flipping the seal key to attacker-
+      // controlled bytes. Audit row is written below in either case.
+      if (body.confirm_rotation !== true) {
+        return jsonResponse(
+          {
+            error:
+              'OPK rotation requires confirm_rotation: true — an OPK is already registered for this subaccount',
+            current_opk_registered_at: prior.opk_registered_at,
+          },
+          409,
+          cors,
+        );
+      }
       status = 'rotated';
     }
 
@@ -140,6 +164,27 @@ Deno.serve(async (req: Request) => {
     if (update.error || !update.data) {
       console.error('[or-sync-key-register] update failed:', update.error?.message);
       return jsonResponse({ error: 'Failed to register OPK' }, 500, cors);
+    }
+
+    // Append-only audit row for every state change. First registration
+    // (old_opk_public = NULL) and every subsequent rotation get one row.
+    // Best-effort: a failure to insert the audit row should not block the
+    // success response, but is logged so an operator can investigate.
+    const auditInsert = await auth.serviceClient.from('opk_key_rotations').insert({
+      subaccount_id:   prior.id,
+      platform_id:     auth.platformId,
+      old_opk_public:  prior.opk_public,
+      new_opk_public:  body.opk_public,
+      old_opk_alg:     prior.opk_alg,
+      new_opk_alg:     body.opk_alg,
+      rotation_reason: body.rotation_reason ?? null,
+      request_ip:      req.headers.get('cf-connecting-ip') ?? req.headers.get('x-forwarded-for') ?? null,
+    });
+    if (auditInsert.error) {
+      console.error(
+        '[or-sync-key-register] audit row insert failed:',
+        auditInsert.error.message,
+      );
     }
 
     return jsonResponse(

@@ -57,8 +57,16 @@ Deno.serve((req: Request) => {
     200,
     {
       ...cors,
-      // Cache for 5 minutes at the edge — catalog only changes on deploy.
-      'cache-control': 'public, max-age=300',
+      // Catalog only changes on deploy. Cache aggressively:
+      //   max-age=300                 browser / SDK cache: 5 min
+      //   s-maxage=600                CF Edge / shared cache: 10 min
+      //   stale-while-revalidate=60   serve stale up to 1 min while a
+      //                               fresh fetch is in flight
+      // After a deploy, clients still see the previous catalog until the
+      // cache windows expire; the catalog itself never has time-sensitive
+      // values (no per-user, per-credential data) so brief staleness is
+      // acceptable in exchange for the latency win.
+      'cache-control': 'public, max-age=300, s-maxage=600, stale-while-revalidate=60',
     },
   );
 });

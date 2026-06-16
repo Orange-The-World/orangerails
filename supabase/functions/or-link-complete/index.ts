@@ -174,33 +174,26 @@ Deno.serve(async (req: Request) => {
     // On success we atomically mark the token used so a replay fails.
     const requireToken = (Deno.env.get('REQUIRE_WIDGET_TOKEN') ?? 'false').toLowerCase() === 'true';
     if (body.widget_token) {
-      const { data: session, error: tokErr } = await serviceClient
-        .from('pending_widget_sessions')
-        .select('id, platform_id, app_user_id, expires_at, used_at')
-        .eq('id', body.widget_token)
-        .maybeSingle();
-      if (tokErr || !session) {
-        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-      }
-      if (session.used_at) {
-        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-      }
-      if (new Date(session.expires_at as string) < new Date()) {
-        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-      }
-      if (session.platform_id !== platform.id) {
-        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-      }
-      if (session.app_user_id !== body.app_user_id) {
-        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-      }
-      const { error: markErr } = await serviceClient
+      // Atomic claim: scope every guard into one UPDATE … RETURNING row.
+      // Postgres serialises concurrent updates on the same row, so exactly
+      // one of the racing requests gets the row back; the other 401s.
+      // Replaces the TOCTOU SELECT-then-UPDATE pattern that let two parallel
+      // requests with the same token both succeed.
+      const { data: claimed, error: claimErr } = await serviceClient
         .from('pending_widget_sessions')
         .update({ used_at: new Date().toISOString() })
         .eq('id', body.widget_token)
-        .is('used_at', null);
-      if (markErr) {
-        console.error('[or-link-complete] could not mark widget token used:', markErr.message);
+        .is('used_at', null)
+        .gt('expires_at', new Date().toISOString())
+        .eq('platform_id', platform.id)
+        .eq('app_user_id', body.app_user_id)
+        .select('id')
+        .maybeSingle();
+      if (claimErr) {
+        console.error('[or-link-complete] widget token claim error:', claimErr.message);
+        return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+      }
+      if (!claimed) {
         return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
       }
     } else if (requireToken) {
