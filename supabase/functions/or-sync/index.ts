@@ -800,38 +800,6 @@ Deno.serve(async (req: Request) => {
         const fp = await errorFingerprint(raw, errorClass);
         console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
 
-        // Temporary debug gate (DEV ONLY). Triple-gated:
-        //   1. OR_SYNC_DEBUG_CONNECTIONS env var must include this conn.id
-        //   2. Runtime SUPABASE_URL must match the OR DEV project ref
-        //      (hardcoded, so accidentally setting the env var on prod is
-        //      not enough to bypass this guard — the project ref check fails)
-        //   3. The plaintext path NEVER runs in any environment whose
-        //      SUPABASE_URL contains the OR PROD ref (extra-explicit deny)
-        //
-        // Per Codex review on PR #98: env-var-only gates are too weak; if
-        // the secret is accidentally copied to prod (env-file copy, dashboard
-        // misconfiguration), upstream errors would leak and break audit
-        // 2026-05-16 finding #1. Project-ref hardcoded guard fixes that.
-        //
-        // TODO 2026-05-22: REMOVE this entire block before promoting to prod.
-        // Keep the classifier expansions + errorFingerprint above; delete
-        // only this gated block.
-        const DEV_PROJECT_REF = 'gposxxmxenrdvewrprle';
-        const PROD_PROJECT_REF = 'lcdicqalreskibdfxkzb';
-        const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
-        const isDevProject = supabaseUrl.includes(DEV_PROJECT_REF);
-        const isProdProject = supabaseUrl.includes(PROD_PROJECT_REF);
-        if (isDevProject && !isProdProject) {
-          const debugList = (Deno.env.get('OR_SYNC_DEBUG_CONNECTIONS') ?? '')
-            .split(',')
-            .map(s => s.trim())
-            .filter(Boolean);
-          if (debugList.includes(conn.id)) {
-            const firstLine = raw.split('\n')[0]?.slice(0, 300) ?? '';
-            console.error(`[or-sync] DEBUG cid=${correlationId} raw_first_line=${firstLine}`);
-          }
-        }
-
         // Persist the taxonomy code on the connection row. In legacy
         // (non-sink) mode we still want it encrypted at rest so the column
         // shape stays uniform across modes. In sink mode the column is
