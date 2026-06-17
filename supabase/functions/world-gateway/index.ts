@@ -132,8 +132,12 @@ Deno.serve(async (req) => {
   await logUsage(platform, orgId, keyRow.app_id, keyRow.id, endpoint, status, latency, rows?.length ?? 0, req);
 
   if (error) {
+    // Log the full upstream error server-side; never echo it to the caller.
+    // Defense-in-depth: if orange-world-prod ever surfaces an error string
+    // that contains row-level data or operator-only context, the public
+    // truth-data API caller should not see it.
     console.error("data fetch failed", error);
-    return json({ error: "data_fetch_failed", detail: error.message }, 500);
+    return json({ error: "data_fetch_failed", detail: "upstream fetch failed" }, 500);
   }
 
   return json({ ok: true, count: rows?.length ?? 0, rows }, 200);
