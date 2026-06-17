@@ -40,6 +40,7 @@ import { IndodaxSource } from "../src/sources/indodax";
 import { CoinmateSource } from "../src/sources/coinmate";
 import { BudaSource } from "../src/sources/buda";
 import { FrankfurterSource } from "../src/sources/frankfurter";
+import { DbCrossRateSource } from "../src/sources/db-cross";
 import { resolve, type ResolveResult } from "../src/calculate/resolve";
 import { resolveComposite, type CompositeResolveResult } from "../src/calculate/resolve-composite";
 import type { Source } from "../src/sources/interface";
@@ -118,7 +119,20 @@ const DIRECT_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
 // Composite pairs (Tier C via BTC/USD ORBI × USD/X Frankfurter).
 // Acts as the fallback when a thin-liquidity direct source returns no candles
 // for the minute window. BTC/SEK is COMPOSITE-ONLY (no keyless venue lists it).
-const COMPOSITE_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
+type CompositePair = {
+  source: string;
+  target: string;
+  /** Where to fetch the USD/X cross-rate from. Default 'frankfurter'. */
+  crossMode?: 'frankfurter' | 'db-cross';
+};
+const COMPOSITE_PAIRS: ReadonlyArray<CompositePair> = [
+  // 2026-06-12 — RESTORED to COMPOSITE_PAIRS after ecb-cross-3pair cohort
+  // proved fragile (self-deadlocking liveness probe, dead 3.5d). Frankfurter
+  // (ECB) publishes USD/{HUF,CNY,RON} live — confirmed 2026-06-12 — so the
+  // standard composite path works. Task #67.
+  { source: "BTC", target: "HUF" },
+  { source: "BTC", target: "CNY" },
+  { source: "BTC", target: "RON" },
   { source: "BTC", target: "INR" },
   { source: "BTC", target: "TRY" },
   { source: "BTC", target: "ZAR" },
@@ -147,6 +161,18 @@ const COMPOSITE_PAIRS: ReadonlyArray<{ source: string; target: string }> = [
   { source: "BTC", target: "PLN" }, // composite-only (no keyless direct venue)
   { source: "BTC", target: "PHP" }, // composite-only
   { source: "BTC", target: "ILS" }, // composite-only
+  // 2026-06-08 — OXR-backed cross-rate pairs (closing task #25/#47).
+  // Frankfurter does not carry these (or stopped — BGN went 404
+  // post-EUR adoption 2026-01-01). USD/X lands daily on bb-support DB via
+  // /opt/bb-support/scripts/orbi-oxr-fallback.py with source_authority=OXR,
+  // granularity=1d. crossMode="db-cross" reads it instead of HTTP.
+  { source: "BTC", target: "KES", crossMode: "db-cross" },
+  { source: "BTC", target: "TWD", crossMode: "db-cross" },
+  { source: "BTC", target: "PKR", crossMode: "db-cross" },
+  // RETIRED 2026-06-12 lev adopted EUR — see BGN policy doc: { source: "BTC", target: "BGN", crossMode: "db-cross" },
+  { source: "BTC", target: "JMD", crossMode: "db-cross" },
+  { source: "BTC", target: "KWD", crossMode: "db-cross" },
+  { source: "BTC", target: "LBP", crossMode: "db-cross" },
   // NOTE: CLP, COP, PEN are direct-only via Buda; ECB does not publish a
   // USD/{CLP,COP,PEN} fixing through Frankfurter, so no composite fallback
   // is configured (Buda outages mean a missed minute, not a stale-rate row).
@@ -208,6 +234,23 @@ const allBtcSources: Source[] = [
   new BudaSource(),
 ];
 const frankfurter = new FrankfurterSource();
+// db-cross USD/X source for OXR-backed composites. Only constructed when
+// localSql is available (we read from local PG, not Mgmt API). If localSql
+// is null, the 7 OXR pairs fall through to a SKIP — never silently swap
+// to Frankfurter for a pair we know Frankfurter doesn't carry.
+// Freshness: 26h covers the daily OXR sync (04:30 UTC) plus 2h slack.
+const OXR_DB_CROSS_FRESHNESS_MS = 26 * 60 * 60 * 1000;
+const dbCross = localSql
+  ? new DbCrossRateSource(localSql, [
+      { target: "KES", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "TWD", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "PKR", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      // RETIRED 2026-06-12: { target: "BGN", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "JMD", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "KWD", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+      { target: "LBP", authorities: ["OXR"], freshnessMs: OXR_DB_CROSS_FRESHNESS_MS },
+    ])
+  : null;
 
 // --- Helpers ---
 async function mgmtApiQuery(sql: string): Promise<unknown> {
@@ -269,6 +312,22 @@ async function publishStablecoin(
   }
 }
 
+/**
+ * Pairs whose underlying venues are so thin that fall-forward staleness
+ * manufactures phantom 1m buckets if we publish a >60s-old candle as if
+ * it were a fresh tick. For these pairs, skip the publish when the
+ * resolved candle is older than the target minute — wait for a real trade
+ * (or the once-a-minute gap-fill batch) to fill the row.
+ *
+ * Added 2026-06-07 after BTC/COP showed min=max=220,942,298 for ~6
+ * consecutive minutes (dashboard top-mover spurious 4-6% jumps). The single
+ * Buda trade was being re-emitted to each minute bucket until staleness
+ * crossed MAX_STALENESS_MS in resolve.ts.
+ */
+const STALE_SUPPRESS_PAIRS = new Set(["CLP", "COP", "PEN"]);
+/** Threshold above which we treat the resolved rate as "stale" for the target minute. */
+const STALE_THRESHOLD_MS = 60_000;
+
 async function publishDirect(target: string, effectiveAt: Date): Promise<string> {
   const sources = sourcesForTarget(target);
   if (sources.length === 0) {
@@ -276,25 +335,52 @@ async function publishDirect(target: string, effectiveAt: Date): Promise<string>
   }
   try {
     const result = await resolve({ pair: { source: "BTC", target }, effectiveAt }, sources);
+    if (STALE_SUPPRESS_PAIRS.has(target) && result.staleMs > STALE_THRESHOLD_MS) {
+      return `BTC/${target}: SKIP stale (${(result.staleMs / 1000).toFixed(0)}s old, suppress-on-thin-venue)`;
+    }
     await writeRate(target, result, false, null);
-    return `BTC/${target}: ${result.rate.toFixed(2)} (Tier ${result.tier}, ${result.providerCount}src)`;
+    return `BTC/${target}: ${result.rate.toFixed(2)} (Tier ${result.tier}, ${result.providerCount}src${result.staleMs > 0 ? `, stale=${(result.staleMs / 1000).toFixed(0)}s` : ""})`;
   } catch (err) {
     return `BTC/${target}: FAIL — ${(err as Error).message.slice(0, 60)}`;
   }
 }
 
-async function publishComposite(target: string, effectiveAt: Date): Promise<string> {
+async function publishComposite(
+  target: string,
+  effectiveAt: Date,
+  crossMode: 'frankfurter' | 'db-cross' = 'frankfurter',
+): Promise<string> {
+  let crossRateSource;
+  let viaLabel: string;
+  if (crossMode === 'db-cross') {
+    if (!dbCross) {
+      // db-cross requires localSql; if it's not configured, skip rather than
+      // fall back to Frankfurter (which doesn't carry these pairs).
+      return `BTC/${target}: SKIP composite — db-cross requested but ORBI_LOCAL_DB_URL not set`;
+    }
+    crossRateSource = dbCross;
+    viaLabel = 'DB (OXR)';
+  } else {
+    crossRateSource = frankfurter;
+    viaLabel = 'ECB';
+  }
   try {
     const result = await resolveComposite({
       pair: { source: "BTC", target },
       effectiveAt,
       btcSources: allBtcSources.slice(0, 6), // exclude Mercado Bitcoin (no USD)
-      crossRateSource: frankfurter,
+      crossRateSource,
     });
     await writeCompositeRate(target, result);
-    return `BTC/${target}: ${result.rate.toFixed(2)} (Tier C via ECB)`;
+    return `BTC/${target}: ${result.rate.toFixed(2)} (Tier C via ${viaLabel})`;
   } catch (err) {
-    return `BTC/${target}: FAIL composite — ${(err as Error).message.slice(0, 60)}`;
+    const msg = (err as Error).message;
+    // db-cross stale/missing rows surface as "no data" from resolveComposite;
+    // treat those as a clean SKIP so the loop summary doesn't flag a real fault.
+    if (crossMode === 'db-cross' && /stale|no USD|not configured|no data/i.test(msg)) {
+      return `BTC/${target}: SKIP composite — ${msg.slice(0, 100)}`;
+    }
+    return `BTC/${target}: FAIL composite — ${msg.slice(0, 60)}`;
   }
 }
 
@@ -398,10 +484,107 @@ async function writeCompositeRate(target: string, result: CompositeResolveResult
   `);
 }
 
+// --- Silent-write blackhole guard ---
+// 2026-05-30 incident: an orangerails-dev migration restarted pg-proxy (socat);
+// the Bun.SQL TCP connection survived but writes silently never reached PG.
+// The writer logged 700+ "success" iterations over 12h 50m with ZERO rows
+// landing. No error in journald, no exception in the writer.
+//
+// Mitigation: at the top of each iteration, verify our own recent writes are
+// visible in the DB. If 3 consecutive iterations show 0 recent ORBI rows,
+// throw — systemd Restart=on-failure re-establishes the connection.
+//
+// Warm-up: skip the check for the first 5 iterations (cold-start has no
+// recent writes yet by definition). Check window (5m) > iteration cadence
+// (~1m), so 3 consecutive zeroes = a real 3-5m write outage, not noise.
+//
+// The SELECT itself runs with a 2s statement_timeout so a hung connection
+// cannot lock up the writer; query errors are NOT treated as blackhole
+// evidence (could be a transient pooler blip — the existing error handling
+// upstream covers that case).
+let writeCheckIter = 0;
+let writeCheckConsecutiveDry = 0;
+
+async function checkWriteHealth(): Promise<void> {
+  writeCheckIter++;
+  if (writeCheckIter <= 5) return; // warm-up
+
+  let recentCount = -1;
+  // 2s wall-clock cap on the health query — a hung connection must not lock
+  // up the writer. Promise.race is tool-agnostic; works for both Bun.SQL and
+  // fetch paths.
+  const timeoutP = new Promise<never>((_, rej) =>
+    setTimeout(() => rej(new Error("health-check timeout (5s)")), 5_000),
+  );
+  try {
+    if (localSql) {
+      const queryP = localSql.unsafe(
+        `SELECT COUNT(*)::int AS n FROM exchange_rates WHERE fetched_at > NOW() - INTERVAL '5 minutes' AND source_authority = 'ORBI' AND provenance = 'forward-fill'`,
+      );
+      const rows = (await Promise.race([queryP, timeoutP])) as unknown;
+      const arr = Array.isArray(rows) ? rows : [];
+      const row = arr[0] as { n?: number } | undefined;
+      recentCount = typeof row?.n === "number" ? row.n : -1;
+    } else {
+      // Cloud Mgmt API path — no statement_timeout knob; rely on fetch timeout.
+      const ac = new AbortController();
+      const to = setTimeout(() => ac.abort(), 5_000);
+      try {
+        const res = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query`, {
+          method: "POST",
+          signal: ac.signal,
+          headers: {
+            Authorization: `Bearer ${ACCESS_TOKEN}`,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; Orange-Rails-ORBI/1.0)",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            query: `SELECT COUNT(*)::int AS n FROM exchange_rates WHERE fetched_at > NOW() - INTERVAL '5 minutes' AND source_authority = 'ORBI' AND provenance = 'forward-fill'`,
+          }),
+        });
+        if (res.ok) {
+          const j = (await res.json()) as Array<{ n?: number }>;
+          recentCount = typeof j?.[0]?.n === "number" ? j[0]!.n! : -1;
+        }
+      } finally {
+        clearTimeout(to);
+      }
+    }
+  } catch (err) {
+    // Query errors are NOT blackhole evidence — don't trip the guard.
+    console.warn(
+      `  write-health check query failed (not counted): ${(err as Error).message.slice(0, 120)}`,
+    );
+    return;
+  }
+
+  if (recentCount < 0) return; // could not determine — don't trip
+
+  if (recentCount > 0) {
+    writeCheckConsecutiveDry = 0;
+    return;
+  }
+
+  writeCheckConsecutiveDry++;
+  console.warn(
+    `  write-health: 0 recent ORBI rows in last 5m (consecutive_dry=${writeCheckConsecutiveDry}/3)`,
+  );
+  if (writeCheckConsecutiveDry >= 3) {
+    // 2026-06-09: main() loop has a try/catch that swallowed the throw, so
+    // the service stayed alive while logging the error 21x. Exit hard so
+    // systemd Restart=on-failure fires and re-establishes the connection.
+    const msg = `Silent write blackhole detected — ${writeCheckConsecutiveDry} consecutive iterations with 0 recent ORBI rows in DB`;
+    console.error(`FATAL: ${msg} — exiting for systemd restart`);
+    process.exit(1);
+  }
+}
+
 // --- One iteration ---
 // effectiveAtOverride: if provided, use this minute bucket; otherwise derive
 // from clock (now - 90s). Catch-up loop in main() passes explicit minutes.
 async function runIteration(label: string, effectiveAtOverride?: Date): Promise<void> {
+  await checkWriteHealth();
   const t0 = Date.now();
   // --at <iso> overrides effectiveAt for gap-fill of past minutes
   const atArg = process.argv.find((a, i) => process.argv[i-1] === "--at");
@@ -428,7 +611,7 @@ async function runIteration(label: string, effectiveAtOverride?: Date): Promise<
   // benefits massively from concurrency). Pre-fix: 15 sequential calls cost
   // ~45s and starved the loop of a full minute. Post-fix: ~3-5s.
   const compositeResults = await Promise.all(
-    COMPOSITE_PAIRS.map((p) => publishComposite(p.target, effectiveAt)),
+    COMPOSITE_PAIRS.map((p) => publishComposite(p.target, effectiveAt, p.crossMode ?? 'frankfurter')),
   );
   summaries.push(...compositeResults);
 
@@ -443,6 +626,36 @@ async function main() {
 
   if (once) {
     await runIteration("one-shot");
+    return;
+  }
+
+  // Replay mode: re-emit every minute bucket in [--replay-from, --replay-to].
+  // Used to repair gaps after writer outages (2026-06-08/10 incidents).
+  // Inserts are idempotent (ON CONFLICT DO NOTHING) so overlap with live rows
+  // is safe. Run as a one-off CLI invocation, never as the systemd service.
+  const replayFromIdx = process.argv.indexOf("--replay-from");
+  const replayToIdx = process.argv.indexOf("--replay-to");
+  if (replayFromIdx !== -1 && replayToIdx !== -1) {
+    const from = new Date(process.argv[replayFromIdx + 1]);
+    const to = new Date(process.argv[replayToIdx + 1]);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+      console.error("replay: invalid --replay-from/--replay-to");
+      process.exit(2);
+    }
+    const fromMs = Math.floor(from.getTime() / 60_000) * 60_000;
+    const toMs = Math.floor(to.getTime() / 60_000) * 60_000;
+    const total = (toMs - fromMs) / 60_000 + 1;
+    console.log(`replay: ${total} buckets ${new Date(fromMs).toISOString()} -> ${new Date(toMs).toISOString()}`);
+    let n = 0;
+    for (let ms = fromMs; ms <= toMs; ms += 60_000) {
+      n++;
+      try {
+        await runIteration(`replay ${n}/${total}`, new Date(ms));
+      } catch (err) {
+        console.error(`replay bucket ${new Date(ms).toISOString()} failed:`, err);
+      }
+    }
+    console.log(`replay: done (${n} buckets)`);
     return;
   }
 

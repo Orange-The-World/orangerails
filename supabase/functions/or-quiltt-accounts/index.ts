@@ -39,6 +39,7 @@
 
 import { authenticateRequest } from '../_shared/platform-auth.ts';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 
@@ -55,6 +56,7 @@ interface QuilttAccount {
   state: string;
   currencyCode: string | null;
   institution: { name: string } | null;
+  balance: { current: number | null; available: number | null } | null;
 }
 
 Deno.serve(async (req: Request) => {
@@ -80,13 +82,26 @@ Deno.serve(async (req: Request) => {
     if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
       return jsonResponse({ error: 'app_user_id required (string, ≤256 chars)' }, 400, cors);
     }
-    if (!body.quiltt_connection_id || typeof body.quiltt_connection_id !== 'string') {
-      return jsonResponse({ error: 'quiltt_connection_id required' }, 400, cors);
-    }
+    // quiltt_connection_id is OPTIONAL. When omitted (empty string), we
+    // enumerate ALL connections under the profile. This is the fallback
+    // path V2 uses when the popup's postMessage didn't survive a
+    // cross-origin redirect (Finicity/MX PROD flows sever window.opener).
+    const connectionId =
+      typeof body.quiltt_connection_id === 'string' ? body.quiltt_connection_id.trim() : '';
 
-    const apiKey = Deno.env.get('QUILTT_API_KEY');
+    // Per-platform Quiltt API key resolution (env fallback during transition).
+    let quilttCfg;
+    try {
+      quilttCfg = await resolveQuilttConfigForPlatform(auth.serviceClient, auth.platformId);
+    } catch (cfgErr) {
+      console.error('[or-quiltt-accounts] config resolve failed:', cfgErr);
+      return jsonResponse({ error: 'Quiltt config lookup failed' }, 500, cors);
+    }
+    const apiKey = quilttCfg.apiKey;
     if (!apiKey) {
-      console.error('[or-quiltt-accounts] QUILTT_API_KEY not configured');
+      console.error(
+        `[or-quiltt-accounts] no Quiltt API key for platform=${quilttCfg.platformSlug} (source=${quilttCfg.source.apiKey})`,
+      );
       return jsonResponse({ error: 'Quiltt not configured on OR' }, 503, cors);
     }
 
@@ -121,47 +136,85 @@ Deno.serve(async (req: Request) => {
     }
     const profileId = mapLookup.data.quiltt_profile_id as string;
 
-    // Query Quiltt for the accounts under this connection.
+    // Query Quiltt for the accounts. Two modes:
+    //   - connectionId present: accounts under that one connection
+    //   - connectionId empty: ALL accounts across ALL profile connections
+    //     (fallback when the popup's postMessage was lost)
     // Schema reference: https://www.quiltt.dev/api-reference/graphql
-    const query = `
-      query Q($connId: ID!) {
-        connection(id: $connId) {
-          id
-          accounts {
+    const basic = btoa(`${profileId}:${apiKey}`);
+    let rawAccounts: QuilttAccount[] = [];
+
+    if (connectionId) {
+      const query = `
+        query Q($connId: ID!) {
+          connection(id: $connId) {
             id
-            name
-            mask
-            kind
-            state
-            currencyCode
-            institution { name }
+            accounts {
+              id
+              name
+              mask
+              kind
+              state
+              currencyCode
+              institution { name }
+              balance { current available }
+            }
           }
         }
+      `;
+      const resp = await fetch(QUILTT_GRAPHQL, {
+        method: 'POST',
+        headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables: { connId: connectionId } }),
+      });
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        console.error(`[or-quiltt-accounts] Quiltt ${resp.status}: ${errBody.slice(0, 300)}`);
+        return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
       }
-    `;
-    const basic = btoa(`${profileId}:${apiKey}`);
-    const resp = await fetch(QUILTT_GRAPHQL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${basic}`,
-        'Content-Type':  'application/json',
-      },
-      body: JSON.stringify({
-        query,
-        variables: { connId: body.quiltt_connection_id },
-      }),
-    });
-    if (!resp.ok) {
-      const errBody = await resp.text().catch(() => '');
-      console.error(`[or-quiltt-accounts] Quiltt ${resp.status}: ${errBody.slice(0, 300)}`);
-      return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
+      const json = await resp.json();
+      if (json.errors) {
+        console.error('[or-quiltt-accounts] Quiltt GraphQL errors:', JSON.stringify(json.errors).slice(0, 500));
+        return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
+      }
+      rawAccounts = json?.data?.connection?.accounts ?? [];
+    } else {
+      // Enumerate every connection under the profile and flatten accounts.
+      const query = `
+        query Q {
+          connections {
+            id
+            accounts {
+              id
+              name
+              mask
+              kind
+              state
+              currencyCode
+              institution { name }
+              balance { current available }
+            }
+          }
+        }
+      `;
+      const resp = await fetch(QUILTT_GRAPHQL, {
+        method: 'POST',
+        headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+      });
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        console.error(`[or-quiltt-accounts] Quiltt(all) ${resp.status}: ${errBody.slice(0, 300)}`);
+        return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
+      }
+      const json = await resp.json();
+      if (json.errors) {
+        console.error('[or-quiltt-accounts] Quiltt(all) GraphQL errors:', JSON.stringify(json.errors).slice(0, 500));
+        return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
+      }
+      const conns = (json?.data?.connections ?? []) as Array<{ accounts?: QuilttAccount[] }>;
+      rawAccounts = conns.flatMap((c) => c.accounts ?? []);
     }
-    const json = await resp.json();
-    if (json.errors) {
-      console.error('[or-quiltt-accounts] Quiltt GraphQL errors:', JSON.stringify(json.errors).slice(0, 500));
-      return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
-    }
-    const rawAccounts: QuilttAccount[] = json?.data?.connection?.accounts ?? [];
 
     const accounts = rawAccounts
       // Skip closed / disconnected accounts — don't surface them as
@@ -175,6 +228,8 @@ Deno.serve(async (req: Request) => {
         mask:             a.mask ?? null,
         currency:         a.currencyCode ?? null,
         state:            a.state,
+        balance_current:  a.balance?.current ?? null,
+        balance_available: a.balance?.available ?? null,
       }));
 
     return jsonResponse({ accounts }, 200, cors);

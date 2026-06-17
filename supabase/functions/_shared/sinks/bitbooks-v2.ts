@@ -138,7 +138,27 @@ export const bitbooksV2Sink: SinkAdapter = {
     const time = occurredAt.toISOString().slice(11, 19);
 
     // Engine-driven account-role resolution from the YAML rules.
-    const mapping = findMatchingRule(profile, tx, derived, inputCtx);
+    let mapping = findMatchingRule(profile, tx, derived, inputCtx);
+
+    // Override for bank transactions (Quiltt adapter): the YAML rules may
+    // not match deposit/withdrawal types. Hardcode the wallet leg with
+    // targetSourceWalletId so JE lines map to the correct bank account CoA.
+    if (tx.adapter === 'quiltt' && tx.source_wallet_id) {
+      const walletHint: ResolvedCoaHint = {
+        accountType: 'ASSET',
+        accountSubType: 'WALLETS',
+        isWallet: true,
+        targetSourceWalletId: tx.source_wallet_id,
+        currency: String(derived.asset ?? "USD"),
+      };
+      const otherHint: ResolvedCoaHint = tx.direction === 'in'
+        ? { accountType: 'INCOME', accountSubType: 'SALES', name: 'Uncategorized Deposit' }
+        : { accountType: 'EXPENSE', accountSubType: 'OTHER_EXPENSES', name: 'Uncategorized Expense' };
+      mapping = {
+        debit:  tx.direction === 'in' ? walletHint : otherHint,
+        credit: tx.direction === 'in' ? otherHint  : walletHint,
+      };
+    }
 
     // Wallet upsert — only if a source_wallet_id is set. The V2 sync handler
     // de-duplicates upserts within a sync batch.

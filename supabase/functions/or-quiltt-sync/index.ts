@@ -26,6 +26,7 @@
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import sodium from 'https://esm.sh/libsodium-wrappers-sumo@0.7.13';
+import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
@@ -66,8 +67,9 @@ Deno.serve(async (req: Request) => {
     return new Response('unauthorized', { status: 401 });
   }
 
-  const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
-  if (!quilttApiKey) return new Response('QUILTT_API_KEY missing', { status: 503 });
+  // Quiltt API key is resolved per-event inside the loop now (per-platform
+  // config; env fallback retained on resolveQuilttConfigForPlatform).
+  const envQuilttApiKey = Deno.env.get('QUILTT_API_KEY') ?? '';
 
   const client = createClient(
     Deno.env.get('SUPABASE_URL')!,
@@ -125,7 +127,28 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
-      const handled = await handleEvent(client, ev, platform_id, subaccount_id, quilttApiKey);
+      // Resolve the per-platform Quiltt API key for THIS event's platform.
+      // Each platform may use a different Quiltt application; using the
+      // wrong key here would fail every downstream Quiltt fetch silently
+      // or with a 401, masking the real cause. Env fallback covers the
+      // transition period before all platform rows are backfilled.
+      let perPlatformApiKey = envQuilttApiKey;
+      try {
+        const cfg = await resolveQuilttConfigForPlatform(client, platform_id);
+        if (cfg.apiKey) perPlatformApiKey = cfg.apiKey;
+      } catch (resolveErr) {
+        console.error(
+          `[or-quiltt-sync] config resolve failed for platform=${platform_id}:`,
+          resolveErr instanceof Error ? resolveErr.message : String(resolveErr),
+        );
+        // Fall through with env fallback.
+      }
+      if (!perPlatformApiKey) {
+        await bumpAttempts(client, ev.event_id, 'no-quiltt-api-key');
+        failed++;
+        continue;
+      }
+      const handled = await handleEvent(client, ev, platform_id, subaccount_id, perPlatformApiKey);
       if (handled === 'processed') {
         await markProcessed(client, ev.event_id);
         processed++;
@@ -250,13 +273,12 @@ async function handleEvent(
     }
 
     const query = `
-      query Q($connId: ID!, $first: Int!, $after: String) {
-        connection(id: $connId) { id }
-        transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+      query Q($first: Int!, $after: String) {
+        transactions(first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
             id amount currencyCode date description entryType status
-            account { id }
+            account { id connection { id } }
           }
         }
       }
@@ -270,7 +292,7 @@ async function handleEvent(
       },
       body: JSON.stringify({
         query,
-        variables: { connId: connectionId, first: TX_PAGE_SIZE, after },
+        variables: { first: TX_PAGE_SIZE, after },
       }),
     });
     if (!resp.ok) {
@@ -278,7 +300,19 @@ async function handleEvent(
       return `Quiltt GraphQL ${resp.status}: ${errBody.slice(0, 300)}`;
     }
     const json = await resp.json();
-    const txs = json?.data?.transactions?.nodes ?? [];
+    // Surface GraphQL errors instead of silently treating them as "0 txns".
+    // (The previous `filter: { connectionId }` was rejected by Quiltt's
+    // TransactionFilter and this swallowed the error → 0 rows forever.)
+    if (Array.isArray(json?.errors) && json.errors.length > 0) {
+      return `Quiltt GraphQL error: ${JSON.stringify(json.errors).slice(0, 300)}`;
+    }
+    const allTxs = json?.data?.transactions?.nodes ?? [];
+    // Quiltt can't filter transactions by connection, so scope here:
+    // keep only transactions whose account belongs to this event's connection.
+    const txs = allTxs.filter(
+      (tx: { account?: { connection?: { id?: string } } }) =>
+        tx.account?.connection?.id === connectionId,
+    );
     const pageInfo = json?.data?.transactions?.pageInfo;
 
     for (const tx of txs) {

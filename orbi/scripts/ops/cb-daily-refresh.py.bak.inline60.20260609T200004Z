@@ -6,10 +6,8 @@ For every active central bank in cb-refresh-config.json:
   1. Query MAX(bucket_ts) for that authority via Supabase Management API.
   2. Compute age_days vs today.
   3. If current -> skip.
-  4. If gap <= INLINE_GAP_FILL_MAX_DAYS (60) -> invoke
-     orchestrator.ts <cb> <last+1d> <today>. (Idempotent via ON CONFLICT.)
-  5. If gap exceeds INLINE_GAP_FILL_MAX_DAYS -> log a warning and flag STALE
-     so Sunday deep-recovery handles the big hole.
+  4. If gap within watchdog window -> invoke orchestrator.ts <cb> <last+1d> <today>.
+  5. If gap exceeds watchdog_days -> flag STALE (deep-recovery handles big holes).
   6. Write a status JSON and emit one Signal alert if any errors or stale CBs.
 
 Secret access: ORANGERAILS_PROD_ACCESS_TOKEN + ORANGERAILS_PROD_SUPABASE_URL
@@ -54,7 +52,6 @@ FOUNDER_NUMBER = "+17057123215"
 SENDER_NUMBER = "+15128818663"
 
 DEEP_RECOVERY_DAYS = 30
-INLINE_GAP_FILL_MAX_DAYS = 60  # If gap <= this, fill inline; else defer to Sunday batch.
 ORCHESTRATOR_TIMEOUT_SEC = 600  # 10 min per CB
 BUN_BIN = "/usr/local/bin/bun"
 
@@ -260,34 +257,14 @@ def process_cb(
             # business-day afternoons). Catch today's row on the next tick.
             status["result"] = "current"
             return status
-        if age > INLINE_GAP_FILL_MAX_DAYS:
-            # Hole too big for daily inline fill — defer to Sunday deep-recovery,
-            # which uses its own 30-day rolling window and chains as needed.
+        if age > watchdog:
             status["result"] = "STALE"
             status["message"] = (
-                f"Last row {last} is {age}d old (exceeds inline cap "
-                f"{INLINE_GAP_FILL_MAX_DAYS}d); deep-recovery will retry."
-            )
-            warn(
-                f"{cb}: gap {age}d > inline cap {INLINE_GAP_FILL_MAX_DAYS}d "
-                f"(watchdog={watchdog}d); deferring to deep-recovery."
+                f"Last row {last} is {age}d old (threshold {watchdog}d); deep-recovery will retry."
             )
             return status
-        if age > watchdog:
-            # Inside inline window but beyond the per-CB watchdog: still fill,
-            # but log it so the operator sees that the daily safety-net is
-            # carrying weight that the per-source timer should have caught.
-            log(
-                f"  -> {cb}: gap {age}d exceeds watchdog {watchdog}d but "
-                f"<= inline cap {INLINE_GAP_FILL_MAX_DAYS}d; filling inline."
-            )
         from_date = last + dt.timedelta(days=1)
         to_date = today
-        # Belt-and-suspenders cap at INLINE_GAP_FILL_MAX_DAYS (in case `last`
-        # is somehow null-ish or the math drifts).
-        earliest_allowed = today - dt.timedelta(days=INLINE_GAP_FILL_MAX_DAYS)
-        if from_date < earliest_allowed:
-            from_date = earliest_allowed
         if from_date > to_date:
             # Defensive: shouldn't happen given the age<=1 guard above.
             status["result"] = "current"

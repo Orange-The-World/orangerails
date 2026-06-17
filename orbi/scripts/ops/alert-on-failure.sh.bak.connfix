@@ -9,15 +9,6 @@
 # and exit with a meaningful status ourselves.
 set -uo pipefail
 
-# Concurrency guard: only one reconciler instance at a time.
-# Added 2026-06-10 after overlapping cron runs leaked 18+ bun processes
-# (10 PG connections each) and exhausted the connection slots.
-exec 9>/tmp/orbi-reconciler.lock
-if ! flock -n 9; then
-  echo "$(date -Is) reconciler already running; skipping this tick" >> /tmp/orbi-reconciler.log
-  exit 0
-fi
-
 REPO=/home/ubuntu/AIHUB/REPOS/orangerails/orbi
 LOG=/tmp/orbi-reconciler.log
 ALERT_STATE=/tmp/orbi-alert-last.json
@@ -57,7 +48,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
   exit "$RC"
 fi
 
-curl -sS --max-time 30 -X POST "$SIGNAL_URL" \
+curl -sS -X POST "$SIGNAL_URL" \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD" \
   -o "$ALERT_STATE" 2>>"$LOG" || true
