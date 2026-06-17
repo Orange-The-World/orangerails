@@ -3,12 +3,10 @@
 -- platforms on OR.
 -- ============================================================
 -- Both raw keys were generated 2026-05-13:
---   - bitbooks-v3 raw key was previously minted on the old Lovable Cloud
---     OR project (tbjffcasjkhhlmsqnjim) and carried over to the new
---     orangerails-prod (lcdicqalreskibdfxkzb) without rotation. Lives in
---     V3's edge function secret OR_PLATFORM_API_KEY on
---     pfoywzsziessalioerlg (V3 dev) and bitbooks-vault-prod (V3 prod
---     when wired).
+--   - bitbooks-v3 raw key was previously minted on the deprecated Lovable
+--     Cloud OR project and carried over to the current OR-prod project
+--     without rotation. Lives in V3's edge function secret
+--     OR_PLATFORM_API_KEY (V3 dev + V3 prod when wired).
 --   - orangeway raw key was freshly generated 2026-05-13 and persisted
 --     in /opt/bb-support/.env.sops as OW_OR_PLATFORM_API_KEY. Set on OW
 --     edge fns OR_PLATFORM_API_KEY at both orangeway-dev

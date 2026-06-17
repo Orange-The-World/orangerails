@@ -68,10 +68,19 @@ Additional principles:
 
 **Goal:** revert the V3 code paths that were built against the wrong architecture. Leave V3 in a clean state before building forward.
 
+> **Update 2026-06-16:** Phase 0 partially shipped via a different path.
+> `sync-blink/index.ts` was NOT deleted — it was refactored to inline the
+> Blink GraphQL adapter directly (cutting bb-support out of the OR
+> customer path). The function still exists and is the canonical entry
+> point for Blink sync. See commit `95a4d98` / PR #214 for the cut-over.
+> Steps 3.1.1 and 3.1.2 below describe the original delete-and-replace
+> plan; both are obsolete. Step 3.1.4 (connectors-table migration) is
+> still pending V3-side work.
+
 ### 3.1 V3 changes
 
-1. **Delete** `supabase/functions/sync-blink/index.ts` — no longer needed. Supabase dashboard: undeploy the function.
-2. **Simplify** `src/pages/Connections.tsx` — strip Blink-specific UI. Replace with a simple "Connect via OrangeRails (coming soon)" placeholder card. Keep the route; keep the page exists.
+1. ~~**Delete** `supabase/functions/sync-blink/index.ts`~~ — **superseded.** Function refactored in place (commit 95a4d98). Inlined Blink GraphQL call, removed bb-support hop.
+2. ~~**Simplify** `src/pages/Connections.tsx`~~ — **superseded.** Frontend re-architected around the canonical OR Link widget at `orangerails.com/connect/quiltt`; V3 frontend code path has changed.
 3. **Keep** the Sidebar nav item pointing at `/connections`.
 4. **Alter** the `connectors` table migration with a follow-up migration: drop the `config_encrypted` column (we will never store credentials in V3), add `or_access_token` (text, nullable) and `or_user_id` (text, nullable) columns. No migration is strictly required since the table is unused in production — but we do the migration anyway to make the DB schema match the intended design.
 5. **Commit and push** to main. Lovable auto-deploys.

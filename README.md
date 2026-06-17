@@ -106,11 +106,11 @@ This is the same architecture used by [Bitwarden](https://bitwarden.com/help/bit
 
 ## Status
 
-**Early development.** The OrangeRails API is live at `api.orangerails.com` with a minimal Blink adapter as a proof of concept. The full hub — auth, vault, Link widget, multi-adapter sync engine — is in active build following [the Implementation Plan](./docs/OrangeRails-Implementation-Plan.md).
+**Active development.** The OrangeRails API at `api.orangerails.com` is a Cloudflare Worker that proxies clean versioned paths (`/v1/...`) to the live OR Supabase project. Worker source: [`workers/api-gateway/`](./workers/api-gateway/). The full hub — auth, vault, Link widget, multi-adapter sync engine — is in active build following [the Implementation Plan](./docs/OrangeRails-Implementation-Plan.md).
 
-We are shipping in thin vertical slices. The first deliverable is a single end-to-end user flow: sign up, connect Blink, see your transactions flow into a connected app, end-to-end zero-knowledge.
+Live adapters today: Blink (inlined into the `sync-blink` Supabase function), plus the Quiltt bank flow that powers V2 BitBooks, V3 Vault, Orange Way Manager and Orange Way Books.
 
-**Nothing here is production-ready yet.** Star the repo to signal demand. [Watch the repo](https://github.com/MorningRevolution/orangerails) to follow the build.
+We are shipping in thin vertical slices. **Nothing here is production-ready for unaffiliated users yet** — every current consumer is a sibling app under the same ownership. Star the repo to signal demand. [Watch the repo](https://github.com/MorningRevolution/orangerails) to follow the build.
 
 ---
 
