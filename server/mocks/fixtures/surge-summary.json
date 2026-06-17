@@ -1,0 +1,21 @@
+{
+  "success": true,
+  "data": {
+    "owner_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+    "chain_id": 84532,
+    "position_count": 2,
+    "active_position_count": 1,
+    "total_collateral_sats": "500000",
+    "total_collateral_btc": 0.005,
+    "total_principal_usdc": "2000000000",
+    "total_principal_usdc_amount": 2000.0,
+    "worst_ltv_bps": 4000,
+    "weighted_rate_apr_bps": 597,
+    "data_quality": {
+      "source": "indexed_position_snapshot",
+      "events_available": true,
+      "accrued_interest_available": false,
+      "bitcoin_vault_history_available": false
+    }
+  }
+}

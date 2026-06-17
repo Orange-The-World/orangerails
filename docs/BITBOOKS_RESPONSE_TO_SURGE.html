@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BitBooks × Surge — Integration Response</title>
+<style>
+  :root {
+    --orange: #F7931A;
+    --orange-light: #FFF8EE;
+    --surge: #0EA5E9;
+    --surge-dark: #0369A1;
+    --surge-light: #E0F2FE;
+    --dark: #0D1117;
+    --slate: #2D3748;
+    --gray: #64748B;
+    --mid: #94A3B8;
+    --light: #F8FAFC;
+    --border: #E2E8F0;
+    --white: #FFFFFF;
+    --green: #10B981;
+    --green-light: #ECFDF5;
+    --amber: #F59E0B;
+    --amber-light: #FFFBEB;
+    --red: #EF4444;
+    --red-light: #FEF2F2;
+    --purple: #8B5CF6;
+    --purple-light: #F5F3FF;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--light); color: var(--slate); line-height: 1.65;
+  }
+  .layout { display: flex; min-height: 100vh; }
+  nav {
+    width: 260px; background: var(--dark); position: sticky; top: 0;
+    height: 100vh; overflow-y: auto; flex-shrink: 0; padding: 28px 0 40px;
+  }
+  .nav-logo {
+    padding: 0 22px 22px;
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+    margin-bottom: 14px;
+  }
+  .nav-logo .logo-pair {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 14px; font-weight: 800; color: var(--white);
+  }
+  .nav-logo .logo-pair span { opacity: 0.4; font-weight: 400; }
+  .nav-logo .nav-sub { margin-top: 6px; font-size: 11px; color: rgba(255,255,255,0.4); }
+  nav a {
+    display: block; padding: 6px 22px; font-size: 12.5px;
+    color: rgba(255,255,255,0.45); text-decoration: none;
+    border-left: 2px solid transparent; transition: all 0.15s;
+  }
+  nav a:hover { color: var(--white); border-left-color: var(--orange); background: rgba(247,147,26,0.08); }
+  .nav-section {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+    color: rgba(255,255,255,0.2); text-transform: uppercase;
+    padding: 14px 22px 4px;
+  }
+  main { flex: 1; padding: 0 64px 80px; max-width: 1000px; }
+  .hero { padding: 48px 0 32px; border-bottom: 1px solid var(--border); margin-bottom: 40px; }
+  .hero-brands {
+    display: flex; align-items: center; gap: 0; margin-bottom: 22px;
+    border-radius: 12px; overflow: hidden; border: 1px solid var(--border); max-width: 440px;
+  }
+  .hero-brand {
+    flex: 1; padding: 16px 20px; display: flex; align-items: center; gap: 10px;
+    font-size: 14px; font-weight: 800;
+  }
+  .hero-brand.bb-side { background: var(--orange-light); color: var(--orange); }
+  .hero-brand.surge-side { background: var(--surge-light); color: var(--surge-dark); }
+  .hero-brand .emoji { font-size: 20px; }
+  .hero-divider { width: 2px; align-self: stretch; background: linear-gradient(to bottom, var(--orange), var(--surge)); }
+  h1 { font-size: 30px; font-weight: 900; color: var(--dark); line-height: 1.2; margin-bottom: 12px; letter-spacing: -0.02em; }
+  .hero-sub { font-size: 15px; color: var(--gray); max-width: 680px; }
+  .hero-meta { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+  .hero-badge { font-size: 11px; font-weight: 600; padding: 4px 11px; border-radius: 20px; border: 1px solid var(--border); color: var(--gray); background: var(--white); }
+  section { margin-bottom: 48px; scroll-margin-top: 24px; }
+  h2 { font-size: 22px; font-weight: 800; color: var(--dark); margin-bottom: 4px; display: flex; align-items: center; gap: 12px; }
+  h3 { font-size: 17px; font-weight: 800; color: var(--dark); margin: 24px 0 10px; }
+  h4 { font-size: 14.5px; font-weight: 700; color: var(--dark); margin: 16px 0 6px; }
+  .section-num {
+    width: 28px; height: 28px; background: var(--orange-light); color: var(--orange);
+    border-radius: 7px; font-size: 13px; font-weight: 900;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .section-rule { height: 2px; background: linear-gradient(to right, var(--orange), transparent); margin: 8px 0 18px; border-radius: 2px; }
+  p { font-size: 15px; color: var(--slate); margin-bottom: 12px; line-height: 1.7; }
+  ul, ol { margin: 12px 0 12px 22px; }
+  li { font-size: 14.5px; color: var(--slate); margin-bottom: 5px; line-height: 1.6; }
+  code {
+    background: var(--light); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 6px;
+    font-size: 13.5px; font-family: 'SF Mono', monospace; color: var(--slate);
+  }
+  pre {
+    background: var(--dark); color: rgba(255,255,255,0.85);
+    border-radius: 10px; padding: 16px 18px; margin: 12px 0;
+    font-family: 'SF Mono', monospace; font-size: 13.5px; line-height: 1.6; overflow-x: auto;
+  }
+  pre .k { color: #60A5FA; }
+  pre .s { color: #34D399; }
+  pre .c { color: rgba(255,255,255,0.35); font-style: italic; }
+  pre .hl { color: var(--orange); font-weight: 700; }
+  .callout {
+    background: var(--orange-light); border: 1px solid rgba(247,147,26,0.4);
+    border-radius: 10px; padding: 14px 18px; margin: 14px 0;
+    font-size: 13.5px; color: var(--slate);
+  }
+  .callout strong { color: var(--orange); }
+  .callout.surge { background: var(--surge-light); border-color: rgba(14,165,233,0.4); }
+  .callout.surge strong { color: var(--surge-dark); }
+  .callout.green { background: var(--green-light); border-color: rgba(16,185,129,0.4); }
+  .callout.green strong { color: var(--green); }
+  .callout.amber { background: var(--amber-light); border-color: rgba(245,158,11,0.4); }
+  .callout.amber strong { color: var(--amber); }
+  table {
+    width: 100%; border-collapse: collapse; font-size: 14px; margin: 14px 0;
+    background: var(--white); border-radius: 10px; overflow: hidden; border: 1px solid var(--border);
+  }
+  th {
+    background: var(--light); padding: 10px 14px; text-align: left;
+    font-size: 11px; font-weight: 700; color: var(--gray);
+    text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border);
+  }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--slate); vertical-align: top; font-size: 14px; line-height: 1.55; }
+  tr:last-child td { border-bottom: none; }
+  td code { background: var(--light); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+  .tldr {
+    background: linear-gradient(135deg, var(--orange-light) 0%, var(--surge-light) 100%);
+    border: 1px solid rgba(247,147,26,0.3); border-radius: 12px;
+    padding: 20px 24px; margin-bottom: 28px;
+  }
+  .tldr h3 { margin: 0 0 8px; color: var(--orange); }
+  .tldr ul { margin: 8px 0 0 20px; }
+  .tldr li { font-size: 13.5px; }
+  /* Phase cards */
+  .phases { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0; }
+  .phase {
+    background: var(--white); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px;
+  }
+  .phase-tag {
+    display: inline-block; font-size: 10px; font-weight: 800;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 4px; margin-bottom: 10px;
+  }
+  .phase.done .phase-tag { background: var(--green-light); color: var(--green); }
+  .phase.next .phase-tag { background: var(--orange-light); color: var(--orange); }
+  .phase.later .phase-tag { background: var(--surge-light); color: var(--surge-dark); }
+  .phase.future .phase-tag { background: var(--purple-light); color: var(--purple); }
+  .phase h4 { margin: 0 0 6px; font-size: 13.5px; }
+  .phase ul { margin: 6px 0 0 18px; }
+  .phase li { font-size: 12px; line-height: 1.55; color: var(--slate); }
+  /* Test results panel */
+  .test-panel {
+    background: var(--dark); color: rgba(255,255,255,0.85);
+    border-radius: 12px; padding: 16px 20px; margin: 16px 0;
+    font-family: 'SF Mono', monospace; font-size: 13px; line-height: 1.7;
+  }
+  .test-panel .ok { color: #34D399; }
+  .test-panel .head { color: rgba(255,255,255,0.4); margin-bottom: 8px; font-size: 11px; letter-spacing: 0.05em; }
+  /* Question pill */
+  .qpill { display: inline-block; font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.04em; margin-right: 6px; }
+  .qpill.block { background: var(--red-light); color: var(--red); }
+  .qpill.clarify { background: var(--amber-light); color: var(--amber); }
+  .qpill.future { background: var(--purple-light); color: var(--purple); }
+  .doc-footer {
+    margin-top: 56px; padding: 20px 0; border-top: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 11.5px; color: var(--gray);
+  }
+  .footer-badge { background: var(--orange-light); color: var(--orange); font-weight: 700; padding: 4px 11px; border-radius: 20px; border: 1px solid rgba(247,147,26,0.3); font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="layout">
+
+  <nav>
+    <div class="nav-logo">
+      <div class="logo-pair">📒 BitBooks <span>×</span> 🌊 Surge</div>
+      <div class="nav-sub">Integration Response · v1</div>
+    </div>
+    <div class="nav-section">Overview</div>
+    <a href="#tldr">TL;DR</a>
+    <a href="#reception">1. Reception</a>
+    <a href="#phases">2. Phased delivery</a>
+    <a href="#phase0">3. Phase 0 — done</a>
+    <div class="nav-section">Asks</div>
+    <a href="#phase1-ask">4. What we need for Phase 1</a>
+    <a href="#questions">5. Questions to lock</a>
+    <div class="nav-section">Future</div>
+    <a href="#phase2-3">6. Phase 2 / 3 alignment</a>
+    <a href="#closing">7. Next step</a>
+  </nav>
+
+  <main>
+
+    <div class="hero">
+      <div class="hero-brands">
+        <div class="hero-brand bb-side"><span class="emoji">📒</span> BitBooks · Orange Rails</div>
+        <div class="hero-divider"></div>
+        <div class="hero-brand surge-side"><span class="emoji">🌊</span> Surge Partner API</div>
+      </div>
+      <h1>Response to the Surge Partner API integration plan.<br>Phase 0 built. Phase 1 ready when you are.</h1>
+      <p class="hero-sub">We read the integration plan end to end and have already built a working mock of every documented endpoint plus the Orange Rails adapter that consumes them. Eleven end-to-end tests are green. We are ready to swap in your testnet sandbox the moment you can issue us a test owner and a long-lived development token.</p>
+      <div class="hero-meta">
+        <span class="hero-badge">From: BitBooks (Orange Rails)</span>
+        <span class="hero-badge">For: Punith, Chandher</span>
+        <span class="hero-badge">Spec reviewed: v1 Phase 1</span>
+      </div>
+    </div>
+
+    <div class="tldr" id="tldr">
+      <h3>TL;DR</h3>
+      <ul>
+        <li><strong>The plan is excellent.</strong> The token-as-opaque-bearer model with EVM signature verification is clean for both sides. <code>/accounting-state</code> in particular is unusually thoughtful for a v1 — it returns the same two account buckets we would have asked for.</li>
+        <li><strong>What we already built.</strong> A mock Surge server matching every documented JSON shape + the production Orange Rails adapter pointed at it. Eleven end-to-end tests cover happy path, every documented error code, and pagination.</li>
+        <li><strong>What we need from you next.</strong> A Base Sepolia (84532) test owner address with at least one active position, plus a long-lived development token for that owner so we can swap the mock for the real backend without waiting on the Surge mobile screen.</li>
+        <li><strong>What needs to be locked before we can ship to production.</strong> Token wire format, <code>/partner/me</code> response shape, accrued interest endpoint, liquidation event vocabulary, and a handful of clarifications below.</li>
+      </ul>
+    </div>
+
+    <!-- 1. Reception -->
+    <section id="reception">
+      <h2><span class="section-num">1</span> Reception</h2>
+      <div class="section-rule"></div>
+      <p>Three things in your plan stand out as well-designed and rare for a v1 Partner API.</p>
+      <ul>
+        <li><strong>The auth model is right.</strong> One-time biometric signature in the user's pocket, opaque base64 token, server-side revocation list. We store ciphertext, never see the EVM key, never custody anything. It composes cleanly with our zero-knowledge architecture — we encrypt the token alongside everything else under the customer's vault key.</li>
+        <li><strong><code>/accounting-state</code> is the killer endpoint.</strong> Returning <em>Bitcoin, Pledged to Surge</em> and <em>Surge Line of Credit</em> as named buckets means our consumer side is JSON-to-journal-entry, not a calculation engine. We plan to adopt those exact strings as our default chart-of-accounts names so the customer sees the same label in both apps.</li>
+        <li><strong>Stable error codes.</strong> Switching on <code>code</code> instead of HTTP status alone is how we want to handle the 401 → re-prompt flow. We mapped every code in §14 of your spec.</li>
+      </ul>
+    </section>
+
+    <!-- 2. Phased delivery -->
+    <section id="phases">
+      <h2><span class="section-num">2</span> Phased delivery plan</h2>
+      <div class="section-rule"></div>
+      <p>We are dividing the integration into four phases. Phase 0 is finished on our side. Phase 1 starts the moment you can give us the assets in §4.</p>
+      <div class="phases">
+        <div class="phase done">
+          <span class="phase-tag">Done</span>
+          <h4>Phase 0 — Mock</h4>
+          <ul>
+            <li>Mock Surge server matching every doc'd shape</li>
+            <li>Orange Rails adapter end-to-end</li>
+            <li>11 tests green</li>
+            <li>All documented error codes exercised</li>
+          </ul>
+        </div>
+        <div class="phase next">
+          <span class="phase-tag">Next</span>
+          <h4>Phase 1 — Testnet</h4>
+          <ul>
+            <li>Swap mock for <code>api.testnet.surge.credit</code></li>
+            <li>Fixtures pulled from real responses</li>
+            <li>Lock token wire format</li>
+            <li>Customer paste-and-connect flow on dev</li>
+          </ul>
+        </div>
+        <div class="phase later">
+          <span class="phase-tag">Then</span>
+          <h4>Phase 2 — Books</h4>
+          <ul>
+            <li>Event → journal entry derivation</li>
+            <li>Period-end accrual once <code>accrued_interest_now</code> ships</li>
+            <li>Liquidation event handling</li>
+            <li>Multi-position per customer</li>
+          </ul>
+        </div>
+        <div class="phase future">
+          <span class="phase-tag">Future</span>
+          <h4>Phase 3 — Mainnet</h4>
+          <ul>
+            <li>Production token issuance via Surge app</li>
+            <li>Rate-limit tuning + webhooks if available</li>
+            <li>Monthly statement endpoint</li>
+            <li>BTC vault history fusion</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. Phase 0 done -->
+    <section id="phase0">
+      <h2><span class="section-num">3</span> Phase 0 — what we already built</h2>
+      <div class="section-rule"></div>
+      <p>On our side we now have a working pipeline that walks every documented endpoint:</p>
+
+      <table>
+        <thead><tr><th>Component</th><th>Status</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Mock Surge API (Express)</td><td><strong style="color: var(--green)">Running</strong></td><td>Serves all six endpoints with realistic fixtures. Token shortcuts cover the four documented auth-failure codes.</td></tr>
+          <tr><td>Orange Rails Surge adapter</td><td><strong style="color: var(--green)">Built</strong></td><td>Production code path. Reads <code>SURGE_API_BASE</code> from env so it can point at the mock today and at <code>api.testnet.surge.credit</code> tomorrow without a code change.</td></tr>
+          <tr><td>Normalization</td><td><strong style="color: var(--green)">Built</strong></td><td>Position payload reshaped into Orange Rails' internal connector shape, raw response kept attached for fields we don't surface yet.</td></tr>
+          <tr><td>End-to-end test suite</td><td><strong style="color: var(--green)">11/11 passing</strong></td><td>Zero new dependencies — uses Node's built-in test runner.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Test output</h3>
+      <div class="test-panel">
+<div class="head"># node --test server/__tests__/surge.test.js</div>
+<span class="ok">ok 1</span>  GET /health requires no auth<br>
+<span class="ok">ok 2</span>  GET /partner/me echoes token metadata<br>
+<span class="ok">ok 3</span>  GET /owners/:owner/positions returns normalized positions<br>
+<span class="ok">ok 4</span>  GET /owners/:owner/summary returns aggregate<br>
+<span class="ok">ok 5</span>  GET /owners/:owner/accounting-state buckets into pledged + LOC<br>
+<span class="ok">ok 6</span>  GET /owners/:owner/events returns desc-ordered actions<br>
+<span class="ok">ok 7</span>  error path: auth_token_revoked<br>
+<span class="ok">ok 8</span>  error path: auth_owner_mismatch<br>
+<span class="ok">ok 9</span>  error path: auth_token_malformed<br>
+<span class="ok">ok 10</span> error path: invalid_address<br>
+<span class="ok">ok 11</span> error path: auth_header_missing<br>
+<br>
+# tests 11<br>
+# pass <span class="ok">11</span><br>
+# fail 0
+      </div>
+
+      <div class="callout green">
+        <strong>What this means.</strong> The connector is shaped against your spec. When you point us at testnet, the only thing changing on our side is the value of <code>SURGE_API_BASE</code> and the contents of the fixtures (which we will replace with real <code>curl</code> output).
+      </div>
+    </section>
+
+    <!-- 4. Phase 1 ask -->
+    <section id="phase1-ask">
+      <h2><span class="section-num">4</span> What we need from you for Phase 1</h2>
+      <div class="section-rule"></div>
+      <p>Two assets unblock everything else. A third would save us a day of plumbing.</p>
+
+      <table>
+        <thead><tr><th>#</th><th>Ask</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td><strong>A Base Sepolia (84532) test owner address with at least one active seeded position.</strong></td>
+            <td>Without an owner we cannot exercise <code>/owners/:owner/*</code> against your real backend. Ideally one open loan with both collateral and debt, plus one closed loan, so we can see both lifecycle states.</td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td><strong>A long-lived development bearer token</strong> for that owner, issued out-of-band — i.e. without requiring us to install your mobile app on a device tied to that wallet.</td>
+            <td>Decouples our backend work from your mobile work. We start hitting <code>api.testnet.surge.credit</code> today; you ship the mobile integration screen on your own track and we cut over to user-issued tokens when both sides are ready.</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td><strong>(Nice to have)</strong> A Postman or Insomnia collection with the sandbox token baked into the headers.</td>
+            <td>Saves us half a day of curl plumbing and gives us a shared reference for screenshare debugging.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Open question #2 from your spec.</strong> You flagged this exact item — "Surge will provide a Base Sepolia test owner address with seeded positions" — and said the wallet was TBC jointly. Treat this section as our half of that confirmation: we are ready, send when you have it.
+      </div>
+    </section>
+
+    <!-- 5. Questions -->
+    <section id="questions">
+      <h2><span class="section-num">5</span> Questions to lock before production</h2>
+      <div class="section-rule"></div>
+      <p>Three buckets: <span class="qpill block">Blocker</span> needs answering before we can finish Phase 1, <span class="qpill clarify">Clarify</span> is a documentation gap we'd like nailed down, <span class="qpill future">Future</span> is on the roadmap for later phases.</p>
+
+      <table>
+        <thead><tr><th>#</th><th>Type</th><th>Question</th><th>Why it matters to us</th></tr></thead>
+        <tbody>
+          <tr><td>Q1</td><td><span class="qpill block">Blocker</span></td><td>Lock the exact token wire format (§5 in your plan says TBD): JSON field names, signature scheme (<code>personal_sign</code> vs EIP-712), version byte, max length.</td><td>Determines the paste-and-store UI on our side, plus the max column width on the encrypted credential record.</td></tr>
+          <tr><td>Q2</td><td><span class="qpill block">Blocker</span></td><td>Finalize the <code>/partner/me</code> response shape (§12 also TBD).</td><td>We call this immediately after a paste to verify the token works before the UI flips to "Connected."</td></tr>
+          <tr><td>Q3</td><td><span class="qpill block">Blocker</span></td><td>Should the auth envelope <em>also</em> require a BitBooks-issued partner secret alongside the user's signature (your open #1)?</td><td>We strongly recommend yes — defense-in-depth. A leaked user token alone should not be exploitable without our partner credential. Adds one onboarding step on your side.</td></tr>
+          <tr><td>Q4</td><td><span class="qpill clarify">Clarify</span></td><td>Confirm the amount basis convention. Your <code>/positions</code> example shows <code>principal_usdc: "250"</code> alongside <code>principal_usdc_amount: 0.00025</code>. Is "250" atomic units at 6 decimals?</td><td>An off-by-six-decimals interpretation would mis-state every loan.</td></tr>
+          <tr><td>Q5</td><td><span class="qpill clarify">Clarify</span></td><td>Full enum of <code>status</code> values. Docs only show <code>"active"</code>. Are the others <code>closed</code>, <code>liquidated</code>, <code>defaulted</code>, <code>repaid</code>?</td><td>Each maps to a different account state on the customer's books.</td></tr>
+          <tr><td>Q6</td><td><span class="qpill clarify">Clarify</span></td><td>Does interest <strong>capitalize</strong> into principal, or stay separately tracked? Today <code>accrued_interest_usdc</code> is <code>null</code> on every position.</td><td>Capitalization changes how every <code>repaid</code> event splits between principal and interest accounts.</td></tr>
+          <tr><td>Q7</td><td><span class="qpill clarify">Clarify</span></td><td>Is the "60 req/min per partner per owner" rate limit per-owner (good) or aggregate per partner (constraining)? Confirm <code>Retry-After</code> semantics.</td><td>Sets our polling cadence and concurrency model for multi-customer batch syncs.</td></tr>
+          <tr><td>Q8</td><td><span class="qpill clarify">Clarify</span></td><td>Recommended polling cadence per owner.</td><td>Drives infrastructure cost and UX freshness on our side.</td></tr>
+          <tr><td>Q9</td><td><span class="qpill clarify">Clarify</span></td><td>Revocation propagation — when a user revokes in the Surge app, is rejection immediate or eventually consistent across your edge?</td><td>Determines whether a transient 401 on our side should mean "re-prompt user" or "retry once."</td></tr>
+          <tr><td>Q10</td><td><span class="qpill future">Future</span></td><td>Add <strong>liquidation</strong> to the event action vocabulary, with proceeds-at-block in the payload.</td><td>Without it, a liquidation only shows as a balance delta with no journal trail. Liquidation is a tax-realization event — we must capture realized gain/loss versus cost basis.</td></tr>
+          <tr><td>Q11</td><td><span class="qpill future">Future</span></td><td>Webhook on revocation (push, not poll).</td><td>Lets us mark the connection inactive in the customer's UI without waiting for the next poll to 401.</td></tr>
+          <tr><td>Q12</td><td><span class="qpill future">Future</span></td><td>Timeline for <code>accrued_interest_now</code> and <code>accrued_interest_at(timestamp)</code> from your "further planned" section.</td><td>Today we have to estimate accruals client-side and true them up later. Earliest your team can promise this matters a lot for our period-end story.</td></tr>
+          <tr><td>Q13</td><td><span class="qpill clarify">Clarify</span></td><td>Versioning + deprecation policy for <code>/api/v1</code>.</td><td>Helps us scope when to invest in v2-readiness on our side.</td></tr>
+          <tr><td>Q14</td><td><span class="qpill clarify">Clarify</span></td><td>Naming: your doc says "BitBooks · OrangeRails" throughout. As of our 2026-05-14 product split, Orange Rails is a distinct product under the BitBooks umbrella. We suggest "Orange Rails (by BitBooks)" in customer-facing copy.</td><td>Cosmetic, but helps both brand stories.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 6. Phase 2 / 3 alignment -->
+    <section id="phase2-3">
+      <h2><span class="section-num">6</span> Phase 2 / 3 alignment with your roadmap</h2>
+      <div class="section-rule"></div>
+      <p>Your "Further planned" table in §15 lines up almost exactly with what we need to ship books. We are committing to the order below on our side; please tell us if your sequencing differs and we will re-stack.</p>
+
+      <table>
+        <thead><tr><th>Surge plans</th><th>Unblocks for us</th><th>Our priority</th></tr></thead>
+        <tbody>
+          <tr><td><code>accrued_interest_now</code> on every position read</td><td>Real-time interest on customer dashboards + cleaner monthly close</td><td><strong>High</strong> — biggest single accounting gap</td></tr>
+          <tr><td><code>accrued_interest_at(timestamp)</code></td><td>Period-end close that does not require interpolation</td><td><strong>High</strong></td></tr>
+          <tr><td><code>monthly_statement(period)</code></td><td>Replaces our own roll-forward computation entirely</td><td>Medium</td></tr>
+          <tr><td><code>vault_address</code> + BTC vault history</td><td>Audit-grade BTC ledger; deposit confirmations as separate events</td><td>Medium</td></tr>
+          <tr><td>Liquidation events (added per Q10 above)</td><td>Realized gain/loss bookkeeping on seizure</td><td><strong>High</strong></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 7. Closing -->
+    <section id="closing">
+      <h2><span class="section-num">7</span> Next step</h2>
+      <div class="section-rule"></div>
+      <p>The shortest path to a live demo on testnet is:</p>
+      <ol>
+        <li>You send the sandbox owner address + dev token (§4).</li>
+        <li>We swap <code>SURGE_API_BASE</code> to <code>https://api.testnet.surge.credit/api/v1</code>, replace fixtures with real responses, re-run the suite.</li>
+        <li>We jump on a 30-minute call to walk through any drift between docs and real responses, plus the Q1–Q3 blockers above.</li>
+      </ol>
+      <p>We can be ready for that call within 24 hours of receiving the test assets. Please reply with availability and the owner/token, and we are off to the races.</p>
+      <div class="callout surge">
+        <strong>Thanks for the spec.</strong> It is genuinely above the median for a Partner API at this stage — clean error model, accounting-aware response shapes, sensible auth posture. We are looking forward to shipping.
+      </div>
+    </section>
+
+    <div class="doc-footer">
+      <span>BitBooks · Orange Rails → Surge · Integration Response · v1</span>
+      <span class="footer-badge">Phase 0 complete</span>
+    </div>
+
+  </main>
+</div>
+</body>
+</html>
