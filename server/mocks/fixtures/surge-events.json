@@ -10,10 +10,10 @@
       "occurred_at": "2026-05-15T07:01:00.000Z",
       "block_number": 41538200,
       "transaction_hash": "0x4b6b0001",
-      "debt": { "atomic": "2000000000", "amount": 2000.0, "asset": "USDC" },
+      "debt": { "usdc": "2000000000", "usdc_amount": 2000.0 },
       "repaid": null,
       "collateral": null,
-      "remaining_debt": { "atomic": "2000000000", "amount": 2000.0 }
+      "remaining_debt": { "usdc": "2000000000", "usdc_amount": 2000.0 }
     },
     {
       "id": "84532-0x4b6b-004",
@@ -53,9 +53,9 @@
       "block_number": 41200000,
       "transaction_hash": "0x4b6b0004",
       "debt": null,
-      "repaid": { "atomic": "1500000000", "amount": 1500.0, "asset": "USDC" },
+      "repaid": { "usdc": "1500000000", "usdc_amount": 1500.0 },
       "collateral": null,
-      "remaining_debt": { "atomic": "0", "amount": 0 }
+      "remaining_debt": { "usdc": "0", "usdc_amount": 0 }
     },
     {
       "id": "84532-0x4b6b-001",
@@ -74,16 +74,10 @@
   ],
   "meta": {
     "count": 5,
-    "owner_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+    "borrower_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
     "chain_id": 84532,
     "source": "indexer_graphql",
     "order": "desc",
-    "include_raw": false,
-    "data_quality": {
-      "source": "indexer_graphql",
-      "events_available": true,
-      "accounting_grade": false,
-      "bitcoin_vault_history_available": false
-    }
+    "include_raw": false
   }
 }
