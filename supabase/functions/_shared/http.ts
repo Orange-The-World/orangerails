@@ -25,7 +25,7 @@ const ALLOWED_ORIGINS: ReadonlySet<string> = new Set<string>([
   'https://v2dev.bitbooks.com',
   // OrangeRails own /app + Lovable preview + dev domain (added 2026-05-22)
   'https://orangerails.com',
-  'https://dev.orangerails.com',
+  'https://orangerails.dev',
   'https://orangerails-cloud.lovable.app',
 ]);
 
