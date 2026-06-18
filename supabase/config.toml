@@ -1,4 +1,4 @@
-project_id = "gposxxmxenrdvewrprle"
+project_id = "fzwmnzmtqidumdqjdddz"
 
 # Functions deployed with verify_jwt = false do their OWN auth at the
 # function-code level (X-Platform-API-Key via _shared/platform-auth.ts,

@@ -71,7 +71,7 @@ jobs:
             echo "supabase_ref=lcdicqalreskibdfxkzb" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_name }}" = "dev" ]; then
             echo "project=orangerails-dev" >> "$GITHUB_OUTPUT"
-            echo "supabase_ref=gposxxmxenrdvewrprle" >> "$GITHUB_OUTPUT"
+            echo "supabase_ref=fzwmnzmtqidumdqjdddz" >> "$GITHUB_OUTPUT"
           else
             echo "Unknown branch ${{ github.ref_name }} — skipping deploy"
             exit 0

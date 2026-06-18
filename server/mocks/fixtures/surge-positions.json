@@ -5,7 +5,7 @@
       "position_id": "226",
       "nft_id": 226,
       "chain_id": 84532,
-      "owner_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+      "borrower_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
       "vault_address": null,
       "market_id": 0,
       "status": "active",
@@ -22,14 +22,13 @@
       "ltv_bps": 4000,
       "liquidation_threshold_bps": 9000,
       "last_settlement_at": null,
-      "last_position_update_at": "2026-05-15T07:01:16.870Z",
-      "updated_at": "2026-05-15T07:01:18.912Z"
+      "last_position_update_at": "2026-05-15T07:01:16.870Z"
     },
     {
       "position_id": "201",
       "nft_id": 201,
       "chain_id": 84532,
-      "owner_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+      "borrower_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
       "vault_address": null,
       "market_id": 0,
       "status": "closed",
@@ -46,13 +45,12 @@
       "ltv_bps": 0,
       "liquidation_threshold_bps": 9000,
       "last_settlement_at": "2026-04-30T12:00:00.000Z",
-      "last_position_update_at": "2026-04-30T12:00:00.000Z",
-      "updated_at": "2026-04-30T12:00:00.912Z"
+      "last_position_update_at": "2026-04-30T12:00:00.000Z"
     }
   ],
   "meta": {
     "count": 2,
-    "owner_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+    "borrower_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
     "chain_id": 84532
   }
 }

@@ -24,6 +24,7 @@ import { blinkAdapter } from './blink.ts';
 import { xpubAdapter } from './xpub.ts';
 import { btcpayAdapter } from './btcpay.ts';
 import { strikeAdapter } from './strike.ts';
+import { surgeAdapter } from './surge.ts';
 import { makeCcxtAdapter } from './_ccxt.ts';
 import { CCXT_MANIFEST } from './_ccxt-manifest.ts';
 
@@ -47,6 +48,7 @@ const PROVIDERS: ReadonlyArray<ProviderAdapter> = [
   xpubAdapter,
   btcpayAdapter,
   strikeAdapter,
+  surgeAdapter,
   // CCXT-backed exchanges (manifest-driven, 98 today)
   ...ccxtAdapters,
 ];

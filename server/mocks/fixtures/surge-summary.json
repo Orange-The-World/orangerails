@@ -1,7 +1,7 @@
 {
   "success": true,
   "data": {
-    "owner_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+    "borrower_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
     "chain_id": 84532,
     "position_count": 2,
     "active_position_count": 1,
@@ -15,6 +15,7 @@
       "source": "indexed_position_snapshot",
       "events_available": true,
       "accrued_interest_available": false,
+      "vault_address_available": false,
       "bitcoin_vault_history_available": false
     }
   }
