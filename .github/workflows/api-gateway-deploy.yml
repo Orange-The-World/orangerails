@@ -1,0 +1,59 @@
+name: Deploy api.orangerails.com Worker
+
+# Phase 3A: auto-deploy gated to manual-trigger only during OSS launch.
+# OLD MorningRevolution/orangerails continues serving prod via its own workflow.
+# Re-enable push triggers when Phase 3B (prod migration) is sequenced.
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why are you redeploying? (e.g. config bust, route map change)'
+        required: false
+        type: string
+
+concurrency:
+  group: api-gateway-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install
+        working-directory: workers/api-gateway
+        run: bun install
+
+      - name: Test
+        working-directory: workers/api-gateway
+        run: bunx vitest run --config vitest.config.ts
+
+      - name: Pick environment for this branch
+        id: env
+        run: |
+          if [ "${{ github.ref_name }}" = "prod" ]; then
+            echo "env=production" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_name }}" = "dev" ]; then
+            echo "env=staging" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unknown branch ${{ github.ref_name }} , skipping deploy"
+            exit 0
+          fi
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers/api-gateway
+          command: deploy --env ${{ steps.env.outputs.env }}

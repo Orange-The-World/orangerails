@@ -1,0 +1,17 @@
+{
+  "name": "or-bip158-wasm",
+  "type": "module",
+  "description": "BIP158 compact-block-filter matcher compiled to WebAssembly for Orange Rails Stealth Sync.",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "files": [
+    "or_bip158_wasm_bg.wasm",
+    "or_bip158_wasm.js",
+    "or_bip158_wasm.d.ts"
+  ],
+  "main": "or_bip158_wasm.js",
+  "types": "or_bip158_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
