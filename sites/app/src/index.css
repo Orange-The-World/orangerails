@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --orange: 24 100% 50%;
+  --orange-dark: 19 95% 42%;
+}
+
+@layer base {
+  body {
+    @apply bg-white text-slate-900 antialiased;
+    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+}

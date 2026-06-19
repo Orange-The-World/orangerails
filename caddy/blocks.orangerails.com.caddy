@@ -1,0 +1,60 @@
+# Caddy snippet for the Stealth Sync block source service.
+# Placed at /opt/orangerails/caddy/blocks.orangerails.com.caddy on operator infrastructure.
+# Auto-imported by /etc/caddy/Caddyfile via `import /opt/*/caddy/*.caddy`.
+#
+# Reverse-proxies https://blocks.orangerails.com to a local Bun service
+# (btc-block-source.service) on 127.0.0.1:3010, which serves raw blocks,
+# headers, and a tip / date->height endpoint backed by the local Bitcoin
+# Core node.
+#
+# Privacy controls (mandatory per STEALTH-SYNC-MASTER-PLAN.md §4.7):
+#  1. No authentication on requests
+#  2. Aggressive caching (block content is content-addressed by hash)
+#  3. No access logging
+#  4. Permissive CORS (the widget origin is connect.orangerails.com)
+#  5. Origin sees only this Caddy front-proxy, never user IPs directly
+#
+# After editing: sudo systemctl reload caddy
+
+blocks.orangerails.com {
+    # Privacy control 3: discard all access logs.
+    log {
+        output discard
+    }
+
+    encode zstd gzip
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Robots-Tag "noindex, nofollow, noarchive"
+        -Server
+        -X-Powered-By
+    }
+
+    # CORS: the widget on connect.orangerails.com fetches directly from here.
+    @cors_preflight method OPTIONS
+    handle @cors_preflight {
+        header {
+            Access-Control-Allow-Origin "*"
+            Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+            Access-Control-Max-Age "86400"
+        }
+        respond 204
+    }
+
+    header Access-Control-Allow-Origin "*"
+
+    # The Bun service sets its own Cache-Control per endpoint:
+    #   /block/* and /block-header/*  -> public, max-age=86400, immutable
+    #   /tip                          -> public, max-age=10
+    #   /height                       -> public, max-age=300
+    # so we do not override here.
+
+    reverse_proxy 127.0.0.1:3010 {
+        header_up -Cookie
+        header_up X-Forwarded-For ""
+    }
+}

@@ -1,0 +1,8 @@
+# FUNDING.yml , where to support OrangeRails development.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+
+# GitHub Sponsors , approved and live.
+github: [Orange-The-World]
+
+# Lightning address , planned. Uncomment once an LN address is live.
+# custom: ["lightning:YOUR-LN-ADDRESS@YOUR-DOMAIN"]
