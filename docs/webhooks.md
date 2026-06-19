@@ -38,7 +38,7 @@ connection. Failed connections do not emit. Empty syncs
 (`synced_count: 0`) still emit; consumers that want only non-empty
 events can filter on the field.
 
-Example payload:
+Example payload (dual-shape — both flat and nested fields are emitted during the SDK transition window so legacy hand-rolled receivers and `@orangerails/webhooks` consumers both work):
 
 ```json
 {
@@ -46,9 +46,18 @@ Example payload:
   "subaccount_id": "11111111-1111-1111-1111-111111111111",
   "connection_id": "22222222-2222-2222-2222-222222222222",
   "synced_count": 17,
-  "ts": "2026-05-22T12:00:00.000Z"
+  "ts": "2026-05-22T12:00:00.000Z",
+  "type": "sync.completed",
+  "data": {
+    "subaccount_id": "11111111-1111-1111-1111-111111111111",
+    "connection_id": "22222222-2222-2222-2222-222222222222",
+    "synced_count": 17,
+    "ts": "2026-05-22T12:00:00.000Z"
+  }
 }
 ```
+
+After all consumers migrate to `@orangerails/webhooks` (target end Q3 2026), the top-level `event` and flat fields will be removed and only `{ type, data }` will remain — matching Stripe / Linear / Shopify convention.
 
 ## Signature scheme
 

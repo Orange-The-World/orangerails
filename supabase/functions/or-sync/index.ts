@@ -868,16 +868,37 @@ Deno.serve(async (req: Request) => {
         // webhook_url configured (most direct-mode users today).
         if (webhookEnabled && webhookPlatformId) {
           try {
+            // Dual-shape payload — emitted in parallel during the SDK
+            // transition window (May 2026 → ~end Q3 2026).
+            //
+            // - Top-level `event` + flat fields preserves the legacy
+            //   wire format that hand-rolled receivers (V2 pre-SDK, OW
+            //   pre-SDK) read. Removing it would break them mid-flight.
+            // - Top-level `type` + nested `data` matches the shape
+            //   `@orangerails/webhooks` (and the broader industry
+            //   convention: Stripe, Linear, Shopify) expect.
+            //
+            // Once every known consumer is on the SDK, drop the flat
+            // fields and keep only { type, data }. Tracked in OR's
+            // webhook architecture doc on wiki.abascal.ca.
+            const ts = new Date().toISOString();
+            const data = {
+              subaccount_id: subaccountId,
+              connection_id: conn.id,
+              synced_count: newTxs.length,
+              ts,
+            };
             await ctx.serviceClient.from('webhook_delivery').insert({
               platform_id: webhookPlatformId,
               subaccount_id: subaccountId,
               event_type: 'sync.completed',
               payload: {
+                // legacy flat shape
                 event: 'sync.completed',
-                subaccount_id: subaccountId,
-                connection_id: conn.id,
-                synced_count: newTxs.length,
-                ts: new Date().toISOString(),
+                ...data,
+                // canonical shape consumed by @orangerails/webhooks
+                type: 'sync.completed',
+                data,
               },
             });
           } catch (whErr) {
