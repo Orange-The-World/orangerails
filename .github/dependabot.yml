@@ -1,0 +1,50 @@
+version: 2
+updates:
+  # Frontend + server dependencies (shared root package.json).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+    groups:
+      patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+      major-updates:
+        update-types:
+          - "major"
+
+  # Server workspace (has its own package.json under /server).
+  - package-ecosystem: "npm"
+    directory: "/server"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(server-deps)"
+    labels:
+      - "dependencies"
+      - "server"
+    groups:
+      patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+
+  # GitHub Actions versions.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"
+    labels:
+      - "dependencies"
+      - "ci"

@@ -1,0 +1,30 @@
+# CODEOWNERS — who gets auto-requested as a reviewer for each area.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Format: <pattern>  <owner> [<owner> ...]
+# Match precedence: LAST matching line wins. Catch-all goes first.
+
+# Default owner — every path, unless overridden below.
+*                               @Orange-The-World
+
+# Adapters — new connectors expand the trust surface. Require an owner review.
+/server/adapters/               @Orange-The-World
+
+# Server + auth + sync logic.
+/server/                        @Orange-The-World
+
+# Supabase schema + RLS — migrations are the source of truth.
+/supabase/                      @Orange-The-World
+
+# Cryptographic primitives (vault key derivation, ciphertext shape, link widget).
+/src/lib/                       @Orange-The-World
+
+# Docs — narrative surface of the project.
+/README.md                      @Orange-The-World
+/CONTRIBUTING.md                @Orange-The-World
+/SECURITY.md                    @Orange-The-World
+/CODE_OF_CONDUCT.md             @Orange-The-World
+/docs/                          @Orange-The-World
+
+# GitHub workflows + community health files.
+/.github/                       @Orange-The-World
