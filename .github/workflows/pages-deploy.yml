@@ -86,7 +86,7 @@ jobs:
           command: pages deploy dist --project-name=${{ steps.target.outputs.project }} --branch=${{ github.ref_name }} --commit-dirty=true
 
       - name: Setup Supabase CLI
-        uses: supabase/setup-cli@v1
+        uses: supabase/setup-cli@v2
         with:
           version: latest
 
