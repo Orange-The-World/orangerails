@@ -210,10 +210,15 @@ async function fetchRowsForAuthority(
     }
     case "rba": {
       const src = new RbaSource();
-      // Default to the "current" dataset; runner on jarvis can manually
-      // invoke historical-1969-2009 / historical-2010-2022 separately.
-      const body = await src.fetch({ dataset: "current" });
-      return src.toInserts(body, fetchedAtIso);
+      // Pull all three RBA F11 datasets in one run: monthly XLS
+      // (1969-2009), monthly XLS (2010-current), and daily CSV
+      // (~2023+). fetchAll() dedupes by date; daily CSV wins on overlap.
+      const { rows, perDataset } = await src.fetchAll({ log: (m) => console.log(m) });
+      const summary = Object.entries(perDataset)
+        .map(([k, v]) => v.error ? k+"=ERR" : k+"="+v.rows)
+        .join(", ");
+      console.log("  [rba] combined: "+rows.length+" unique dates ("+summary+")");
+      return src.toInsertsFromRows(rows, fetchedAtIso);
     }
     case "snb": {
       const src = new SnbSource();
