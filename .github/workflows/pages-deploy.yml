@@ -37,7 +37,7 @@ jobs:
           bun-version: latest
 
       - name: Setup Node 24 (for Vite crypto.hash)
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: 24
 
