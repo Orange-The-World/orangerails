@@ -113,5 +113,7 @@ verify_jwt = false
 [functions.or-quiltt-session-via-widget]
 verify_jwt = false
 
+# Public bootstrap handshake , authentication is by X-OR-Api-Key, no JWT yet.
+# This endpoint is what every consumer calls before it has any other OR context.
 [functions.or-platform-bootstrap]
 verify_jwt = false
