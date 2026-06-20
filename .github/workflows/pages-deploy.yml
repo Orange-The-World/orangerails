@@ -1,9 +1,8 @@
 name: Deploy to Cloudflare Pages
 
-# Phase 3A: auto-deploy gated to manual-trigger only during OSS launch.
-# OLD MorningRevolution/orangerails continues serving prod via its own workflow.
-# Re-enable push triggers when Phase 3B (prod migration) is sequenced.
 on:
+  push:
+    branches: [dev, prod]
   workflow_dispatch:
     inputs:
       reason:
@@ -69,12 +68,12 @@ jobs:
         run: |
           if [ "${{ github.ref_name }}" = "prod" ]; then
             echo "project=orangerails-prod" >> "$GITHUB_OUTPUT"
-            echo "supabase_ref=${{ vars.VITE_SUPABASE_PROJECT_ID_PROD }}" >> "$GITHUB_OUTPUT"
+            echo "supabase_ref=lcdicqalreskibdfxkzb" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_name }}" = "dev" ]; then
             echo "project=orangerails-dev" >> "$GITHUB_OUTPUT"
-            echo "supabase_ref=${{ vars.VITE_SUPABASE_PROJECT_ID_DEV }}" >> "$GITHUB_OUTPUT"
+            echo "supabase_ref=fzwmnzmtqidumdqjdddz" >> "$GITHUB_OUTPUT"
           else
-            echo "Unknown branch ${{ github.ref_name }} , skipping deploy"
+            echo "Unknown branch ${{ github.ref_name }} — skipping deploy"
             exit 0
           fi
 
@@ -113,7 +112,7 @@ jobs:
         # The Supabase CLI's `db push` requires a linked project + DB
         # password we don't have in CI. The Management API SQL endpoint
         # (POST /v1/projects/{ref}/database/query) does NOT need the DB
-        # password , it auths with SUPABASE_ACCESS_TOKEN , so we use it
+        # password — it auths with SUPABASE_ACCESS_TOKEN — so we use it
         # directly. We track applied versions in
         # supabase_migrations.schema_migrations the same way `supabase db
         # push` would, so manual recovery via the CLI later stays clean.
