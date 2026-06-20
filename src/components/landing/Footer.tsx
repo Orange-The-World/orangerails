@@ -6,9 +6,9 @@ const cols: { title: string; links: FooterLink[] }[] = [
   {
     title: "Product",
     links: [
-      { label: "Connections", to: "/providers" },
+      { label: "Connections", href: "https://orangerails.com/providers" },
       { label: "Connect a wallet", href: "https://app.orangerails.com/connect" },
-      { label: "Pricing", to: "/pricing" },
+      { label: "Pricing", href: "https://orangerails.com/pricing" },
       { label: "Docs", href: "https://docs.orangerails.com" },
     ],
   },
@@ -18,14 +18,14 @@ const cols: { title: string; links: FooterLink[] }[] = [
       { label: "About", href: "#" },
       { label: "Blog", href: "#" },
       { label: "Security", href: "#" },
-      { label: "Open source philosophy", to: "/open-source" },
+      { label: "Open source philosophy", href: "https://orangerails.com/open-source" },
     ],
   },
   {
     title: "Help",
     links: [
       { label: "Support", href: "https://support.orangerails.com" },
-      { label: "Feedback", href: "https://feedback.bitbooks.com" },
+      { label: "Feedback", href: "https://support.orangerails.com/feedback" },
       { label: "Docs", href: "https://docs.orangerails.com" },
     ],
   },
