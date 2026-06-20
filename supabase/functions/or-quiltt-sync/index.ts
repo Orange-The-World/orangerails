@@ -26,12 +26,14 @@
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import sodium from 'https://esm.sh/libsodium-wrappers-sumo@0.7.13';
-import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
 const TX_PAGE_SIZE = 100;
-const MAX_PAGES = 5;          // safety cap per connection per invocation
+// 50 pages × 100 = 5,000 transactions per connection per webhook event.
+// Covers most banks' full available history (Quiltt typically caps at ~2y).
+// Still bounded so a hostile/buggy upstream can't burn unlimited time.
+const MAX_PAGES = 50;
 
 interface PendingEvent {
   event_id:      string;
@@ -52,9 +54,8 @@ Deno.serve(async (req: Request) => {
     return new Response('unauthorized', { status: 401 });
   }
 
-  // Quiltt API key is resolved per-event inside the loop now (per-platform
-  // config; env fallback retained on resolveQuilttConfigForPlatform).
-  const envQuilttApiKey = Deno.env.get('QUILTT_API_KEY') ?? '';
+  const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
+  if (!quilttApiKey) return new Response('QUILTT_API_KEY missing', { status: 503 });
 
   const client = createClient(
     Deno.env.get('SUPABASE_URL')!,
@@ -112,28 +113,7 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
-      // Resolve the per-platform Quiltt API key for THIS event's platform.
-      // Each platform may use a different Quiltt application; using the
-      // wrong key here would fail every downstream Quiltt fetch silently
-      // or with a 401, masking the real cause. Env fallback covers the
-      // transition period before all platform rows are backfilled.
-      let perPlatformApiKey = envQuilttApiKey;
-      try {
-        const cfg = await resolveQuilttConfigForPlatform(client, platform_id);
-        if (cfg.apiKey) perPlatformApiKey = cfg.apiKey;
-      } catch (resolveErr) {
-        console.error(
-          `[or-quiltt-sync] config resolve failed for platform=${platform_id}:`,
-          resolveErr instanceof Error ? resolveErr.message : String(resolveErr),
-        );
-        // Fall through with env fallback.
-      }
-      if (!perPlatformApiKey) {
-        await bumpAttempts(client, ev.event_id, 'no-quiltt-api-key');
-        failed++;
-        continue;
-      }
-      const handled = await handleEvent(client, ev, platform_id, subaccount_id, perPlatformApiKey);
+      const handled = await handleEvent(client, ev, platform_id, subaccount_id, quilttApiKey);
       if (handled === 'processed') {
         await markProcessed(client, ev.event_id);
         processed++;
@@ -207,14 +187,37 @@ async function handleEvent(
   // Schema note: connections.user_id was dropped in
   // 20260421200000_platforms_subaccounts.sql; the current owning column
   // is subaccount_id.
-  const { data: conn, error: connErr } = await client
+  // Route the event to the OR connection row whose quiltt_connection_id
+  // matches the webhook's connectionId. Falls back to a legacy NULL-id
+  // row only if no exact match exists — keeps banks linked before the
+  // multi-connection migration working. If both fail, surface the
+  // mismatch instead of silently writing to the wrong bank's bucket
+  // (which was the pre-fix root cause of Mercury+TD collisions).
+  let conn: { id: string } | null = null;
+  const exactMatch = await client
     .from('connections')
     .select('id')
     .eq('subaccount_id', subaccountId)
     .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
-  if (connErr) return `connection lookup failed: ${connErr.message}`;
-  if (!conn) return 'or-connection row not yet created';
+  if (exactMatch.error) return `connection lookup failed: ${exactMatch.error.message}`;
+  if (exactMatch.data) {
+    conn = exactMatch.data as { id: string };
+  } else {
+    const legacy = await client
+      .from('connections')
+      .select('id')
+      .eq('subaccount_id', subaccountId)
+      .eq('provider_type', 'quiltt')
+      .is('quiltt_connection_id', null)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
+    if (!legacy.data) return 'or-connection row not yet created';
+    conn = legacy.data as { id: string };
+  }
 
   let after: string | null = null;
   let pages = 0;
@@ -222,12 +225,13 @@ async function handleEvent(
 
   while (pages < MAX_PAGES) {
     const query = `
-      query Q($first: Int!, $after: String) {
-        transactions(first: $first, after: $after) {
+      query Q($connId: ID!, $first: Int!, $after: String) {
+        connection(id: $connId) { id }
+        transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
             id amount currencyCode date description entryType status
-            account { id connection { id } }
+            account { id }
           }
         }
       }
@@ -240,7 +244,7 @@ async function handleEvent(
       },
       body: JSON.stringify({
         query,
-        variables: { first: TX_PAGE_SIZE, after },
+        variables: { connId: connectionId, first: TX_PAGE_SIZE, after },
       }),
     });
     if (!resp.ok) {
@@ -248,19 +252,7 @@ async function handleEvent(
       return `Quiltt GraphQL ${resp.status}: ${errBody.slice(0, 300)}`;
     }
     const json = await resp.json();
-    // Surface GraphQL errors instead of silently treating them as "0 txns".
-    // (The previous `filter: { connectionId }` was rejected by Quiltt's
-    // TransactionFilter and this swallowed the error → 0 rows forever.)
-    if (Array.isArray(json?.errors) && json.errors.length > 0) {
-      return `Quiltt GraphQL error: ${JSON.stringify(json.errors).slice(0, 300)}`;
-    }
-    const allTxs = json?.data?.transactions?.nodes ?? [];
-    // Quiltt can't filter transactions by connection, so scope here:
-    // keep only transactions whose account belongs to this event's connection.
-    const txs = allTxs.filter(
-      (tx: { account?: { connection?: { id?: string } } }) =>
-        tx.account?.connection?.id === connectionId,
-    );
+    const txs = json?.data?.transactions?.nodes ?? [];
     const pageInfo = json?.data?.transactions?.pageInfo;
 
     for (const tx of txs) {
