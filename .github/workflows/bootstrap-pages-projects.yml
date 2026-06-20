@@ -1,0 +1,43 @@
+name: Bootstrap missing CF Pages projects
+
+# One-shot helper: creates the 4 Pages projects that don't exist yet
+# (orangerails-app-dev, orange-world-dev, orbi-dev, orbi-prod) using the
+# CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID secrets already wired into
+# this repo. Trigger via `gh workflow run bootstrap-pages-projects.yml`.
+# Idempotent: a 409 "already exists" from the API is treated as success.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create projects via Cloudflare API
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -e
+          create() {
+            local NAME="$1" REPO="$2" ROOT_DIR="$3" OUT_DIR="${4:-dist}" BUILD="${5:-bun run build}"
+            local ROOT_BLOCK=""
+            [ -n "$ROOT_DIR" ] && ROOT_BLOCK=",\"root_dir\":\"$ROOT_DIR\""
+            echo "=== $NAME ==="
+            local RESP=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"name\":\"$NAME\",\"production_branch\":\"dev\",\"source\":{\"type\":\"github\",\"config\":{\"owner\":\"Orange-The-World\",\"repo_name\":\"$REPO\",\"production_branch\":\"dev\",\"deployments_enabled\":true,\"pr_comments_enabled\":true,\"preview_deployment_setting\":\"all\"}},\"build_config\":{\"build_command\":\"$BUILD\",\"destination_dir\":\"$OUT_DIR\"$ROOT_BLOCK}}")
+            echo "$RESP" | python3 -c "import json,sys; r=json.load(sys.stdin); print('  ok' if r.get('success') else '  ' + json.dumps(r.get('errors',[])))"
+          }
+
+          create orangerails-app-dev orangerails ""           dist "bun run build"
+          create orange-world-dev    orange-world sites/world dist "bun run build"
+          create orbi-dev            orbi         ""          public ":"
+          create orbi-prod           orbi         ""          public ":"
+
+          echo ""
+          echo "=== final project list ==="
+          curl -sH "Authorization: Bearer $TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects" \
+            | python3 -c "import json,sys; [print('  ' + p['name']) for p in json.load(sys.stdin).get('result',[])]"
