@@ -1,0 +1,36 @@
+name: List CF Pages env vars
+
+on:
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show env vars per project (names + previews only, never raw values)
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -e
+          for proj in orangerails-prod orangerails-dev orangerails-app orangerails-app-dev orangerails-world orange-world-dev; do
+            echo "=== $proj ==="
+            curl -sH "Authorization: Bearer $TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects/$proj" \
+              | python3 -c "
+import json, sys
+d = json.load(sys.stdin).get('result', {}) or {}
+deploy_cfg = d.get('deployment_configs') or {}
+for env in ('preview', 'production'):
+    cfg = deploy_cfg.get(env) or {}
+    env_vars = (cfg.get('env_vars') or {})
+    print(f'  [{env}] {len(env_vars)} vars:')
+    for k, v in sorted(env_vars.items()):
+        if isinstance(v, dict):
+            val_type = v.get('type', '?')
+            print(f'    - {k} ({val_type})')
+        else:
+            print(f'    - {k}')
+"
+            echo ""
+          done
