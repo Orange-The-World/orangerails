@@ -29,7 +29,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttConnector, useQuilttInstitutions } from "@quiltt/react/hooks";
-import { AlertTriangle, Building2, CheckCircle2, Loader2, Search } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, Search } from "lucide-react";
 
 interface InstitutionRow {
   id?: string;
@@ -51,11 +51,11 @@ function tileColor(seed: string): string {
 export const Route = createFileRoute("/connect/quiltt")({
   head: () => ({
     meta: [
-      { title: "Connect your bank" },
+      { title: "Connect your bank | OrangeRails" },
       {
         name: "description",
         content:
-          "Link your bank securely. Your credentials stay with your bank — only encrypted transaction data flows into your vault.",
+          "Link any US bank account through Quiltt (Finicity, MX, Akoya, Plaid). OrangeRails never sees your bank credentials.",
       },
     ],
   }),
@@ -113,6 +113,27 @@ function QuilttConnectPage() {
     !!params.platform_slug &&
     !!params.app_user_id &&
     !!params.widget_token;
+
+  // Scrub the URL fragment immediately after we've captured the params.
+  //
+  // The fragment carries OWM-side ZKA keys (cred_key, txn_key — both raw
+  // MEK-derived AES keys) plus the widget_token. While fragments never
+  // reach a server, they DO sit in window.location.href where any script
+  // on this origin can read them (including a browser extension with
+  // tabs permission, or a stray third-party script we add later). If the
+  // popup ever navigates away same-origin, they also land in browser
+  // history. history.replaceState rewrites the visible URL to '#' so the
+  // sensitive material is gone the moment the React component mounts.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!window.location.hash || window.location.hash === "#") return;
+    try {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    } catch {
+      // Some embeddings (sandboxed iframes) reject replaceState — accept
+      // the reduced posture rather than block the flow.
+    }
+  }, []);
   // Chromeless backdrop. We used to render a full card (header, footer,
   // terms, "Powered by OrangeRails") around Quiltt's iframe — but Quiltt's
   // modal renders ON TOP, leaving our chrome bleeding through behind/around
@@ -271,21 +292,14 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
 
   if (phase === "done") {
     return (
-      <div className="flex flex-col items-center gap-4 py-6 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-orange-50 ring-1 ring-orange-100">
-          <CheckCircle2 className="h-7 w-7 text-orange-500" />
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-emerald-600">
+          <CheckCircle2 className="h-5 w-5" />
+          <strong>Bank connected!</strong>
         </div>
-        <div className="space-y-1">
-          <p className="text-base font-semibold text-slate-900">Your bank is connected</p>
-          <p className="text-sm text-slate-500">You can safely close this window.</p>
-        </div>
-        <button
-          type="button"
-          onClick={tryClose}
-          className="mt-1 inline-flex w-full items-center justify-center rounded-full bg-orange-500 px-6 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-600 sm:w-auto"
-        >
-          Close
-        </button>
+        <p className="text-xs text-slate-500">
+          Returning you to your app…
+        </p>
       </div>
     );
   }
@@ -342,35 +356,15 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   }
 
   // phase === "ready"
-  // The Quiltt connector auto-opens its own secure modal on top of this
-  // page. So this is NOT a loading state — it's an intentional backdrop
-  // behind Quiltt's window. A spinning loader here read as a second,
-  // competing "still loading" indicator next to Quiltt's. Show a calm,
-  // static prompt that points the user at Quiltt's window instead.
+  // Always show a loader — the Quiltt connector auto-opens above. The
+  // inline OR search (BankSearchStep) has been retired because Quiltt's
+  // own iframe shows the institution picker.
   return (
-    <div className="flex flex-col items-center gap-3 py-6 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-orange-50">
-        <Building2 className="h-6 w-6 text-orange-500" />
-      </div>
-      <p className="text-sm font-medium text-slate-900">
-        {selectedInstitution?.name
-          ? `Connecting to ${selectedInstitution.name}`
-          : "Connecting to your bank"}
-      </p>
-      <p className="max-w-xs text-xs text-slate-500">
-        Continue in the secure window. It opens automatically — if you closed it,
-        reopen with the button below.
-      </p>
-      <button
-        type="button"
-        onClick={() => {
-          autoOpenedRef.current = false;
-          setPhase("ready");
-        }}
-        className="mt-1 inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-      >
-        Reopen secure window
-      </button>
+    <div className="flex items-center gap-3 text-sm text-slate-500">
+      <Loader2 className="h-4 w-4 animate-spin" />
+      {selectedInstitution?.name
+        ? `Opening ${selectedInstitution.name}…`
+        : "Opening bank picker…"}
     </div>
   );
 }
