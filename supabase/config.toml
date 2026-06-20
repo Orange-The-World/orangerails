@@ -112,3 +112,6 @@ verify_jwt = false
 
 [functions.or-quiltt-session-via-widget]
 verify_jwt = false
+
+[functions.or-platform-bootstrap]
+verify_jwt = false
