@@ -56,6 +56,7 @@ interface QuilttAccount {
   state: string;
   currencyCode: string | null;
   institution: { name: string } | null;
+  balance: { current: number | null; available: number | null } | null;
 }
 
 Deno.serve(async (req: Request) => {
@@ -156,6 +157,7 @@ Deno.serve(async (req: Request) => {
               state
               currencyCode
               institution { name }
+              balance { current available }
             }
           }
         }
@@ -190,6 +192,7 @@ Deno.serve(async (req: Request) => {
               state
               currencyCode
               institution { name }
+              balance { current available }
             }
           }
         }
@@ -225,6 +228,8 @@ Deno.serve(async (req: Request) => {
         mask:             a.mask ?? null,
         currency:         a.currencyCode ?? null,
         state:            a.state,
+        balance_current:  a.balance?.current ?? null,
+        balance_available: a.balance?.available ?? null,
       }));
 
     return jsonResponse({ accounts }, 200, cors);
