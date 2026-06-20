@@ -18,7 +18,7 @@ Two columns on `public.platforms` drive webhook delivery:
 
 Set both via the platform-admin UI (or directly via SQL during
 onboarding). Generate the secret with `openssl rand -hex 32`. The
-secret never leaves OR after that one-time hand-off , consumers
+secret never leaves OR after that one-time hand-off — consumers
 store their own copy and verify against incoming `X-OR-Signature`
 headers.
 
@@ -32,13 +32,13 @@ load for platforms that haven't opted in).
 |------------------|--------------|---------------------------------------------------------------|
 | `sync.completed` | `or-sync`    | `event`, `subaccount_id`, `connection_id`, `synced_count`, `ts` |
 
-One row is enqueued per connection that completed successfully , so a
+One row is enqueued per connection that completed successfully — so a
 multi-connection sync produces multiple webhook events, one per
 connection. Failed connections do not emit. Empty syncs
 (`synced_count: 0`) still emit; consumers that want only non-empty
 events can filter on the field.
 
-Example payload:
+Example payload (dual-shape — both flat and nested fields are emitted during the SDK transition window so legacy hand-rolled receivers and `@orangerails/webhooks` consumers both work):
 
 ```json
 {
@@ -46,9 +46,18 @@ Example payload:
   "subaccount_id": "11111111-1111-1111-1111-111111111111",
   "connection_id": "22222222-2222-2222-2222-222222222222",
   "synced_count": 17,
-  "ts": "2026-05-22T12:00:00.000Z"
+  "ts": "2026-05-22T12:00:00.000Z",
+  "type": "sync.completed",
+  "data": {
+    "subaccount_id": "11111111-1111-1111-1111-111111111111",
+    "connection_id": "22222222-2222-2222-2222-222222222222",
+    "synced_count": 17,
+    "ts": "2026-05-22T12:00:00.000Z"
+  }
 }
 ```
+
+After all consumers migrate to `@orangerails/webhooks` (target end Q3 2026), the top-level `event` and flat fields will be removed and only `{ type, data }` will remain — matching Stripe / Linear / Shopify convention.
 
 ## Signature scheme
 
@@ -56,10 +65,10 @@ OR ships **two signature wire formats in parallel** during a transition
 window. Consumers should prefer **v2** (more secure, easier to dedupe)
 and may keep v1 verification as a fallback during the rollout.
 
-The **`@orangerails/webhooks` npm package** wraps both , most consumers
+The **`@orangerails/webhooks` npm package** wraps both — most consumers
 should import it instead of hand-rolling verification.
 
-### Wire-format v2 (preferred , added 2026-05-23)
+### Wire-format v2 (preferred — added 2026-05-23)
 
 Every webhook POST carries three headers in v2:
 
@@ -74,7 +83,7 @@ where `<hex>` is the lowercase hex encoding of
 
 The timestamp `<unix_ts>` is the dispatcher's UTC unix time (seconds)
 at the moment the request was signed. Consumers SHOULD reject if
-`abs(now - ts) > 300` (5-minute tolerance , same default as Stripe).
+`abs(now - ts) > 300` (5-minute tolerance — same default as Stripe).
 Putting the timestamp inside the signed material defeats naive replay
 of a captured request.
 
@@ -82,7 +91,7 @@ of a captured request.
 Consumers MUST treat a second event with the same `X-OR-Event-Id` as a
 duplicate (idempotent processing).
 
-### Wire-format v1 (legacy , retained for back-compat)
+### Wire-format v1 (legacy — retained for back-compat)
 
 ```
 X-OR-Signature: <hex>
@@ -96,11 +105,11 @@ have migrated to v2 (target: end Q3 2026).
 ### Verification rules (both versions)
 
 - Recompute the HMAC over the raw request body (NOT a re-serialized
-  JSON , byte-for-byte the bytes that arrived) with the stored secret.
+  JSON — byte-for-byte the bytes that arrived) with the stored secret.
 - Compare in constant time.
 - Rejecting unsigned or invalid-signature requests is the consumer's
   responsibility. OR does not retry differently based on signature
-  validation outcome , a non-2xx response from your endpoint is a
+  validation outcome — a non-2xx response from your endpoint is a
   non-2xx response regardless of reason.
 
 ## Retry policy
