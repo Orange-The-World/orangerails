@@ -2,7 +2,7 @@
 -- Per-platform Quiltt config + sink format on platforms table
 -- ============================================================
 -- Architectural foundation: OR is the multi-tenant Plaid-for-Bitcoin-
--- native-apps gateway. Multiple consumer apps (V2 BitBooks, OWM, OWB,
+-- native-apps gateway. Multiple consumer apps (
 -- future) share one BitBest Quiltt application but should each pick
 -- their own Quiltt Profile, Connector, and API key without OR-wide
 -- secret swaps that break sibling consumers.
