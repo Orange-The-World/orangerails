@@ -54,3 +54,4 @@ coverage/
 dist/
 .next/
 test-results/
+supabase/.temp/

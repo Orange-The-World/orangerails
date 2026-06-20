@@ -7,7 +7,6 @@ project_id = "fzwmnzmtqidumdqjdddz"
 # through to them; otherwise the gateway returns 401 with
 # UNAUTHORIZED_NO_AUTH_HEADER before the function code can run and apply
 # its own auth check. See full audit at
-# /tmp/audit-or-2026-05-22/edge-function-auth-audit.md (2026-05-22).
 #
 # Functions NOT listed here (e.g. or-agent-invite-mint, or-agent-revoke,
 # or-mcp, sync-blink) intentionally require a real Supabase / shadow-user
