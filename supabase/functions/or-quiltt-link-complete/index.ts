@@ -1,5 +1,5 @@
 /**
- * or-quiltt-link-complete , finish the Quiltt link round trip.
+ * or-quiltt-link-complete — finish the Quiltt link round trip.
  *
  * Called by the /connect/quiltt browser route after Quiltt's React SDK
  * fires onExitSuccess. Quiltt has now linked the user's bank under their
@@ -10,7 +10,7 @@
  *
  * Why this is separate from or-link-complete: or-link-complete is built
  * for credential-based providers (Blink, Kraken, …) where the body
- * carries encrypted_credentials + a wallets array. Quiltt has neither ,
+ * carries encrypted_credentials + a wallets array. Quiltt has neither —
  * the bank credentials live with Quiltt, not OR. Trying to overload
  * or-link-complete for Quiltt muddied the validation logic; a dedicated
  * endpoint is clearer.
@@ -23,7 +23,7 @@
  * Pre-condition: or-quiltt-session has already been called for this
  * (platform, app_user_id), so the subaccount exists and the
  * quiltt_profile_map row has been written. This function refuses to
- * create the connection if the profile map is missing , that means
+ * create the connection if the profile map is missing — that means
  * something earlier in the flow broke and the user wouldn't get sync
  * either way.
  *
@@ -32,21 +32,21 @@
  *   app_user_id:     string  the integrating app's user id
  *   widget_token:    string  UUID from or-link-mint-token (single-use)
  *   encrypted_label?: string base64 AES-256-GCM ORK-encrypted label
- *                            (optional , Quiltt doesn't require a label,
+ *                            (optional — Quiltt doesn't require a label,
  *                            but the integrator can supply "Personal
  *                            checking" for the user's eyes only).
  *
  * Response 200:
  *   { subaccount_id, connection_id }
  *
- * Response 400 , missing/bad fields
- * Response 401 , invalid/expired/replayed widget token
- * Response 404 , unknown platform OR no quiltt_profile_map row (call
+ * Response 400 — missing/bad fields
+ * Response 401 — invalid/expired/replayed widget token
+ * Response 404 — unknown platform OR no quiltt_profile_map row (call
  *                or-quiltt-session first)
  *
  * Schema note: connections.encrypted_credentials is NOT NULL, so we
  * store the sentinel literal 'quiltt-managed'. The bank credentials
- * never exist server-side under any key , Quiltt holds them. The
+ * never exist server-side under any key — Quiltt holds them. The
  * sentinel is a clear marker that this connection has no decryptable
  * payload here.
  */
@@ -118,38 +118,41 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Unknown platform' }, 404, cors);
     }
 
-    // 2. Atomically claim the widget token in a single statement.
-    //
-    // The old pattern (SELECT used_at → check NULL in JS → UPDATE) had a
-    // TOCTOU window where two parallel requests with the same token both
-    // passed validation and both succeeded. supabase-js doesn't return
-    // rowcount on .update() so a no-op overwrite still produced markErr=null,
-    // letting both branches proceed.
-    //
-    // The fix: scope every guard into one UPDATE … WHERE … RETURNING row, and
-    // treat "no row returned" as the ONLY success signal. Postgres serialises
-    // concurrent updates on the same row, so exactly one of the racing requests
-    // gets the row back; the other sees `data === null` and 401s.
-    const claim = await service
+    // 2. Verify widget token (same rules as or-link-complete).
+    const session = await service
+      .from('pending_widget_sessions')
+      .select('id, platform_id, app_user_id, expires_at, used_at')
+      .eq('id', body.widget_token)
+      .maybeSingle();
+    if (session.error || !session.data) {
+      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+    }
+    if (session.data.used_at) {
+      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+    }
+    if (new Date(session.data.expires_at as string) < new Date()) {
+      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+    }
+    if (session.data.platform_id !== platform.data.id) {
+      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+    }
+    if (session.data.app_user_id !== body.app_user_id) {
+      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+    }
+
+    // Atomically mark the token used.
+    const markUsed = await service
       .from('pending_widget_sessions')
       .update({ used_at: new Date().toISOString() })
       .eq('id', body.widget_token)
-      .is('used_at', null)
-      .gt('expires_at', new Date().toISOString())
-      .eq('platform_id', platform.data.id)
-      .eq('app_user_id', body.app_user_id)
-      .select('id')
-      .maybeSingle();
-    if (claim.error) {
-      console.error('[or-quiltt-link-complete] widget token claim error:', claim.error.message);
-      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-    }
-    if (!claim.data) {
+      .is('used_at', null);
+    if (markUsed.error) {
+      console.error('[or-quiltt-link-complete] could not mark widget token used:', markUsed.error.message);
       return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
     }
 
     // 3. Resolve subaccount via the (platform, external_user_id) unique key.
-    // The subaccount must already exist , or-quiltt-session creates it on
+    // The subaccount must already exist — or-quiltt-session creates it on
     // first mint, and we're only called after that.
     const subLookup = await service
       .from('subaccounts')
@@ -158,9 +161,9 @@ Deno.serve(async (req: Request) => {
       .eq('external_user_id', body.app_user_id)
       .maybeSingle();
     if (subLookup.error || !subLookup.data) {
-      console.error('[or-quiltt-link-complete] subaccount missing , or-quiltt-session was not called first');
+      console.error('[or-quiltt-link-complete] subaccount missing — or-quiltt-session was not called first');
       return jsonResponse(
-        { error: 'subaccount not provisioned , call or-quiltt-session before linking' },
+        { error: 'subaccount not provisioned — call or-quiltt-session before linking' },
         404,
         cors,
       );
@@ -168,7 +171,7 @@ Deno.serve(async (req: Request) => {
     const subaccountId = subLookup.data.id as string;
 
     // 4. Confirm a quiltt_profile_map row exists. If it doesn't, the
-    // earlier or-quiltt-session call didn't persist properly , refuse
+    // earlier or-quiltt-session call didn't persist properly — refuse
     // rather than create an orphaned connection.
     const mapLookup = await service
       .from('quiltt_profile_map')
@@ -177,7 +180,7 @@ Deno.serve(async (req: Request) => {
       .maybeSingle();
     if (mapLookup.error || !mapLookup.data) {
       return jsonResponse(
-        { error: 'quiltt_profile_map missing for subaccount , call or-quiltt-session first' },
+        { error: 'quiltt_profile_map missing for subaccount — call or-quiltt-session first' },
         404,
         cors,
       );
