@@ -1,11 +1,11 @@
 /**
- * or-providers , public catalog of source providers OR supports.
+ * or-providers — public catalog of source providers OR supports.
  *
  * Consumer apps (V2, V3, OrangeWay, Personal) call this to render their
  * "Add Connection" picker dynamically. Adding a new provider on the OR
  * side automatically surfaces it in every consumer with no redeploy.
  *
- * No auth required , the catalog is public. Listing what providers exist
+ * No auth required — the catalog is public. Listing what providers exist
  * is the same level of disclosure as the protocol documentation; nothing
  * about a specific subaccount or credential is returned.
  *
@@ -25,9 +25,9 @@
  *   }
  *
  * Status values:
- *   - "live"        , adapter shipped, picker tile clickable
- *   - "beta"        , adapter shipped, surface a beta badge in the UI
- *   - "coming_soon" , placeholder manifest, no adapter yet, picker tile greyed out
+ *   - "live"        — adapter shipped, picker tile clickable
+ *   - "beta"        — adapter shipped, surface a beta badge in the UI
+ *   - "coming_soon" — placeholder manifest, no adapter yet, picker tile greyed out
  *
  * Caching: response is identical for every caller. CDN-friendly. The
  * provider catalog only changes on OR deploy, so consumers can cache
@@ -45,9 +45,9 @@ Deno.serve((req: Request) => {
   }
 
   // Both halves of the picker contract in one round trip:
-  //   providers[]  , the list a consumer renders inside a category, with
+  //   providers[]  — the list a consumer renders inside a category, with
   //                  search-friendly fields (description, tags, popularity)
-  //   categories[] , the top-level tiles for the picker, with a
+  //   categories[] — the top-level tiles for the picker, with a
   //                  providerCount so empty categories can be greyed out
   return jsonResponse(
     {
