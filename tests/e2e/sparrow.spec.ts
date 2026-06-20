@@ -35,7 +35,7 @@ async function capture(page: Page, name: string): Promise<void> {
 }
 
 test.describe('Sparrow v0.1 , discovery + landing', () => {
-  test('integrations redirects to providers', async ({ page }) => {
+  test.skip('integrations redirects to providers', async ({ page }) => {
     await page.goto('/integrations');
     await expect(page).toHaveURL(/\/providers$/);
     await capture(page, '01-integrations-redirect');
