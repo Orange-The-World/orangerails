@@ -28,50 +28,50 @@ export interface ErrorCatalogEntry {
   help_url: string;
 }
 
-// const KB_BASE = "https://support.bitbooks.com/sync";  // restore when KB articles ship
+// const KB_BASE = "https://docs.orangerails.com/sync";  // restore when KB articles ship
 
 export const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
   UPSTREAM_AUTH_FAILED: {
     title: "Your bank disconnected this account",
     body: "This usually happens when your bank password changed or the connection expired.",
     action: "Reconnect this account",
-    help_url: "",  // TODO: re-enable once articles published to support.bitbooks.com
+    help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
   },
   UPSTREAM_RATE_LIMITED: {
     title: "Your bank is briefly busy",
     body: "Your bank is asking us to slow down. This usually clears in 5 to 10 minutes.",
     action: null,
-    help_url: "",  // TODO: re-enable once articles published to support.bitbooks.com
+    help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
   },
   UPSTREAM_UNAVAILABLE: {
     title: "Your bank is temporarily unreachable",
     body: "Your bank's service is unreachable right now. Try again in a few minutes.",
     action: null,
-    help_url: "",  // TODO: re-enable once articles published to support.bitbooks.com
+    help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
   },
   UPSTREAM_BAD_REQUEST: {
     title: "Your bank rejected the request",
     body: "Your bank didn't accept the sync request. Reconnecting this account usually fixes it.",
     action: "Reconnect this account",
-    help_url: "",  // TODO: re-enable once articles published to support.bitbooks.com
+    help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
   },
   UPSTREAM_PARSE_FAILED: {
     title: "We couldn't read your bank's response",
     body: "Your bank sent data in a shape we did not expect. This is something we need to fix on our side.",
     action: null,
-    help_url: "",  // TODO: re-enable once articles published to support.bitbooks.com
+    help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
   },
   ADAPTER_CONFIG_ERROR: {
     title: "Connection setup incomplete",
     body: "This account is missing some configuration. Reconnect it and complete every step of the setup flow.",
     action: "Reconnect this account",
-    help_url: "",  // TODO: re-enable once articles published to support.bitbooks.com
+    help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
   },
   UPSTREAM_OTHER: {
     title: "Something went wrong",
     body: "We hit an unexpected error syncing this account. Try again in a few minutes. If it keeps happening, contact support and share the reference code below.",
     action: null,
-    help_url: "",  // TODO: re-enable once articles published to support.bitbooks.com
+    help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
   },
 };
 
