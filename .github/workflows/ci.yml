@@ -29,7 +29,7 @@ jobs:
 
       - name: Lint
         run: bun run lint
-        # Don't fail the whole CI on lint warnings yet , the codebase
+        # Don't fail the whole CI on lint warnings yet — the codebase
         # is young, warnings are noise, and a false-red CI trains
         # everyone to ignore the signal.
         continue-on-error: true
