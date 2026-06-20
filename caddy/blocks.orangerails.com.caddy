@@ -1,5 +1,5 @@
 # Caddy snippet for the Stealth Sync block source service.
-# Placed at /opt/orangerails/caddy/blocks.orangerails.com.caddy on operator infrastructure.
+# Placed at /opt/orangerails/caddy/blocks.orangerails.com.caddy on maintainer infrastructure.
 # Auto-imported by /etc/caddy/Caddyfile via `import /opt/*/caddy/*.caddy`.
 #
 # Reverse-proxies https://blocks.orangerails.com to a local Bun service
