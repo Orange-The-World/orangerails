@@ -1,5 +1,5 @@
 /**
- * /connect/quiltt , Quiltt bank-link bridge page.
+ * /connect/quiltt — Quiltt bank-link bridge page.
  *
  * The integrating app's backend calls or-link-mint-token + or-quiltt-session,
  * then opens this page (popup or redirect) with the resulting params in the
@@ -19,7 +19,7 @@
  *   5. We POST to or-quiltt-link-complete to create the OR connections row
  *   6. We close the popup (or surface a "return to app" CTA)
  *
- * The Quiltt connection_id from onExitSuccess is NOT required on our side ,
+ * The Quiltt connection_id from onExitSuccess is NOT required on our side —
  * or-quiltt-link-complete only needs (platform_slug, app_user_id, widget_token)
  * because one OR connections row covers all Quiltt links for a Profile (Phase
  * 1 design). The Quiltt connection_id arrives separately via webhook events.
@@ -29,7 +29,15 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttConnector, useQuilttInstitutions } from "@quiltt/react/hooks";
-import { AlertTriangle, Building2, CheckCircle2, Loader2, Search } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Building2,
+  CheckCircle2,
+  Loader2,
+  Search,
+  X,
+} from "lucide-react";
 
 interface InstitutionRow {
   id?: string;
@@ -51,11 +59,11 @@ function tileColor(seed: string): string {
 export const Route = createFileRoute("/connect/quiltt")({
   head: () => ({
     meta: [
-      { title: "Connect your bank" },
+      { title: "Connect your bank | OrangeRails" },
       {
         name: "description",
         content:
-          "Link your bank securely. Your credentials stay with your bank , only encrypted transaction data flows into your vault.",
+          "Link any US bank account through Quiltt (Finicity, MX, Akoya, Plaid). OrangeRails never sees your bank credentials.",
       },
     ],
   }),
@@ -70,7 +78,7 @@ interface FragmentParams {
   widget_token: string | null;
   /**
    * Optional. When set (by the upstream picker's bank-tile click), the
-   * Quiltt Connector opens pre-selected to this institution , the user
+   * Quiltt Connector opens pre-selected to this institution — the user
    * skips Quiltt's own picker and lands on the bank's login screen.
    * Accepts either a Quiltt institution ID or a free-text search term
    * per @quiltt/core's ConnectorSDKConnectOptions.institution contract.
@@ -113,55 +121,99 @@ function QuilttConnectPage() {
     !!params.platform_slug &&
     !!params.app_user_id &&
     !!params.widget_token;
+  const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
 
-  // Scrub the URL fragment immediately after we've captured the params.
-  //
-  // The fragment carries OWM-side ZKA keys (cred_key, txn_key , both raw
-  // MEK-derived AES keys) plus the widget_token. While fragments never
-  // reach a server, they DO sit in window.location.href where any script
-  // on this origin can read them (including a browser extension with
-  // tabs permission, or a stray third-party script we add later). If the
-  // popup ever navigates away same-origin, they also land in browser
-  // history. history.replaceState rewrites the visible URL to '#' so the
-  // sensitive material is gone the moment the React component mounts.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!window.location.hash || window.location.hash === "#") return;
-    try {
-      window.history.replaceState(null, "", window.location.pathname + window.location.search);
-    } catch {
-      // Some embeddings (sandboxed iframes) reject replaceState , accept
-      // the reduced posture rather than block the flow.
+  function tryClose() {
+    setExitConfirmOpen(true);
+  }
+  function confirmExit() {
+    setExitConfirmOpen(false);
+    // Tell the integrating app the user bailed before the link was made.
+    if (window.opener) {
+      window.opener.postMessage(
+        { type: "OR_QUILTT_LINK_ABORT", reason: "user_dismissed_popup" },
+        "*",
+      );
     }
-  }, []);
-  // Chromeless backdrop. We used to render a full card (header, footer,
-  // terms, "Powered by OrangeRails") around Quiltt's iframe , but Quiltt's
-  // modal renders ON TOP, leaving our chrome bleeding through behind/around
-  // it. Founder feedback (2026-06-16): "Quiltt is inside OR popup" , the
-  // intent is that the popup look like Quiltt's own UI, not a frame around
-  // it. So the success path renders a blank backdrop and lets the Quiltt
-  // connector own the visible surface.
-  //
-  // OR chrome ONLY appears on:
-  //   - missing-params (integrator misconfiguration; needs the diagnostic)
-  //   - error / aborted (so the user has a Try again button to act on)
-  //   - exit-confirm overlay (Plaid-parity bail-out dialog)
+    window.close();
+    // Fallback if window.close() is blocked (only allowed for windows
+    // opened via window.open()): navigate to /providers so the user
+    // isn't stuck on a half-closed link page.
+    setTimeout(() => {
+      if (!window.closed) window.location.assign("/providers");
+    }, 200);
+  }
+  function dismissExit() {
+    setExitConfirmOpen(false);
+  }
+
+  // Tight popup-style chrome matching /connect. No marketing Navbar/Footer
+  // — this page is opened inside an integrator's popup window, not browsed
+  // to. Light theme hardcoded so it stays consistent regardless of the
+  // embedding page's theme.
   return (
     <div
       className="min-h-screen bg-white antialiased text-slate-900"
       style={{ colorScheme: "light" }}
     >
-      {haveAllParams ? (
-        <QuilttProvider token={params.session_token!}>
-          <ConnectorPanel params={params} />
-        </QuilttProvider>
-      ) : (
-        <div className="mx-auto w-full max-w-md px-4 py-6">
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <MissingParamsView />
-          </div>
+      {/* Minimal container — Quiltt handles all UI/UX inside its iframe.
+          No OR chrome, no badges, no terms. This is the bank's flow. */}
+      <div className="mx-auto w-full">
+        <div className="relative">
+          <section>
+            {haveAllParams ? (
+              <QuilttProvider token={params.session_token!}>
+                <ConnectorPanel params={params} />
+              </QuilttProvider>
+            ) : (
+              <MissingParamsView />
+            )}
+          </section>
+
+          {/* Exit confirmation overlay — Plaid Link parity. Sits on top
+              of the popup card so the user doesn't lose progress on an
+              accidental X click. */}
+          {exitConfirmOpen && (
+            <div
+              className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-white/95 px-6"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="exit-confirm-title"
+            >
+              <div className="w-full max-w-xs text-center">
+                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-rose-50">
+                  <AlertTriangle className="h-6 w-6 text-rose-500" />
+                </div>
+                <h2
+                  id="exit-confirm-title"
+                  className="text-lg font-semibold text-slate-900"
+                >
+                  Are you sure?
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Your progress will be lost if you exit.
+                </p>
+                <div className="mt-6 space-y-2">
+                  <button
+                    type="button"
+                    onClick={confirmExit}
+                    className="w-full rounded-full bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
+                  >
+                    Yes, exit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={dismissExit}
+                    className="w-full rounded-full border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-900 hover:bg-slate-50"
+                  >
+                    No, go back
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -169,7 +221,7 @@ function QuilttConnectPage() {
 function ConnectorPanel({ params }: { params: FragmentParams }) {
   const [phase, setPhase] = useState<Phase>("ready");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  // Selected bank , set when the user clicks a tile from the inline
+  // Selected bank — set when the user clicks a tile from the inline
   // institution search. The Quiltt Connector receives `institution` so
   // it skips its own picker AND welcome screen, landing directly on the
   // bank's login form. Pre-set via fragment param when the upstream
@@ -182,9 +234,10 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
 
   const effectiveInstitutionId = selectedInstitution?.id ?? params.institution ?? undefined;
 
-  // Imperative open , connector launches as soon as the user picks a bank
+  // Imperative open — connector launches as soon as the user picks a bank
   // (or the integrator pre-selected one via the institution fragment param).
   const { open: openConnector } = useQuilttConnector(params.connector_id!, {
+    themeMode: "light",
     institution: effectiveInstitutionId,
     onExitSuccess: (metadata) => {
       void completeLinkOnOR(metadata.connectionId);
@@ -206,7 +259,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
 
   useEffect(() => {
     // Always auto-open the Quiltt connector when ready. Quiltt's own
-    // iframe shows the institution picker , duplicating it in OR was
+    // iframe shows the institution picker — duplicating it in OR was
     // confusing the user (and consumed Quiltt mints on each keystroke).
     if (phase === "ready" && !autoOpenedRef.current) {
       autoOpenedRef.current = true;
@@ -226,10 +279,9 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            platform_slug:        params.platform_slug!,
-            app_user_id:          params.app_user_id!,
-            widget_token:         params.widget_token!,
-            quiltt_connection_id: quilttConnectionId ?? undefined,
+            platform_slug: params.platform_slug!,
+            app_user_id:   params.app_user_id!,
+            widget_token:  params.widget_token!,
           }),
         },
       );
@@ -260,11 +312,11 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
           },
           "*",
         );
-        // Auto-close after a brief "Bank linked" beat , saves the user a click
+        // Auto-close after a brief "Bank linked" beat — saves the user a click
         // and removes the dangling "Close window" CTA from the streamlined flow.
         autoCloseTimerRef.current = window.setTimeout(() => {
           window.close();
-        }, 1200);
+        }, 3000);
       }
     } catch (e) {
       console.error("[connect/quiltt] complete failed:", e);
@@ -285,28 +337,21 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     return (
       <div className="flex items-center gap-3 text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
-        Saving your connection…
+        Almost done…
       </div>
     );
   }
 
   if (phase === "done") {
     return (
-      <div className="flex flex-col items-center gap-4 py-6 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-orange-50 ring-1 ring-orange-100">
-          <CheckCircle2 className="h-7 w-7 text-orange-500" />
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-emerald-600">
+          <CheckCircle2 className="h-5 w-5" />
+          <strong>Bank connected!</strong>
         </div>
-        <div className="space-y-1">
-          <p className="text-base font-semibold text-slate-900">Your bank is connected</p>
-          <p className="text-sm text-slate-500">You can safely close this window.</p>
-        </div>
-        <button
-          type="button"
-          onClick={tryClose}
-          className="mt-1 inline-flex w-full items-center justify-center rounded-full bg-orange-500 px-6 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-600 sm:w-auto"
-        >
-          Close
-        </button>
+        <p className="text-xs text-slate-500">
+          Returning you to your app…
+        </p>
       </div>
     );
   }
@@ -363,35 +408,15 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   }
 
   // phase === "ready"
-  // The Quiltt connector auto-opens its own secure modal on top of this
-  // page. So this is NOT a loading state , it's an intentional backdrop
-  // behind Quiltt's window. A spinning loader here read as a second,
-  // competing "still loading" indicator next to Quiltt's. Show a calm,
-  // static prompt that points the user at Quiltt's window instead.
+  // Always show a loader — the Quiltt connector auto-opens above. The
+  // inline OR search (BankSearchStep) has been retired because Quiltt's
+  // own iframe shows the institution picker.
   return (
-    <div className="flex flex-col items-center gap-3 py-6 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-orange-50">
-        <Building2 className="h-6 w-6 text-orange-500" />
-      </div>
-      <p className="text-sm font-medium text-slate-900">
-        {selectedInstitution?.name
-          ? `Connecting to ${selectedInstitution.name}`
-          : "Connecting to your bank"}
-      </p>
-      <p className="max-w-xs text-xs text-slate-500">
-        Continue in the secure window. It opens automatically , if you closed it,
-        reopen with the button below.
-      </p>
-      <button
-        type="button"
-        onClick={() => {
-          autoOpenedRef.current = false;
-          setPhase("ready");
-        }}
-        className="mt-1 inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-      >
-        Reopen secure window
-      </button>
+    <div className="flex items-center gap-3 text-sm text-slate-500">
+      <Loader2 className="h-4 w-4 animate-spin" />
+      {selectedInstitution?.name
+        ? `Opening ${selectedInstitution.name}…`
+        : "Opening bank picker…"}
     </div>
   );
 }
@@ -461,7 +486,7 @@ function BankSearchStep({
             // ConnectorSDKConnectOptions.institution contract. Search
             // results from useQuilttInstitutions sometimes don't include
             // an id (Finicity Sandbox Bank is a known case), so fall
-            // back to the name , Quiltt re-resolves it server-side.
+            // back to the name — Quiltt re-resolves it server-side.
             const pickValue = id || name;
             return (
               <button
@@ -513,7 +538,7 @@ function MissingParamsView() {
       </p>
       <details className="text-xs text-muted-foreground">
         <summary className="cursor-pointer">
-          For integrators , expected fragment
+          For integrators — expected fragment
         </summary>
         <pre className="mt-2 overflow-x-auto rounded bg-muted/40 p-3 font-mono">{`#session_token=<jwt>
 &connector_id=<conn_...>
