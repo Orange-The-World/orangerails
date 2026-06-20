@@ -28,6 +28,15 @@
  *
  * verify_jwt = false in supabase/config.toml , this endpoint is the
  * first call a consumer makes, before it knows its own platform JWT.
+ *
+ * See also:
+ *   supabase/functions/_shared/platform-auth.ts ,   the shared auth helper
+ *                                                  every other or-* function uses;
+ *                                                  same SHA-256 lookup against
+ *                                                  the same api_key_hash column.
+ *   supabase/migrations/20260620180000_platform_bootstrap_columns.sql ,
+ *                                                  the migration that added the
+ *                                                  bootstrap response columns.
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -102,22 +111,25 @@ Deno.serve(async (req: Request) => {
     .eq('api_key_hash', keyHash)
     .maybeSingle();
 
-  if (error) {
+  // Auth failures collapse to a single opaque envelope. Distinguishing
+  // "no row" from "row exists but suspended" from "row exists but the
+  // prefixed key segments do not match" would let an attacker enumerate
+  // platform slugs and statuses. Keep one shape and one status.
+  //
+  // Server-side, log the real reason so SOC2 CC6.1 / CC7.2 access-denied
+  // queries can still be answered from Supabase function logs. This log
+  // line never reaches the client.
+  if (error || !row || row.status !== 'active') {
+    const reason = error ? 'db_error' : !row ? 'no_row' : 'inactive_status';
+    console.log(JSON.stringify({
+      event: 'bootstrap_auth_fail',
+      reason,
+      status: row?.status ?? null,
+      slug_prefix: parsePrefixedKey(rawKey)?.slug ?? null,
+    }));
     return new Response(
-      JSON.stringify({ error: 'OR lookup failed.', detail: error.message }),
-      { status: 500, headers: JSON_HEADERS },
-    );
-  }
-  if (!row) {
-    return new Response(
-      JSON.stringify({ error: 'API key not recognized.' }),
+      JSON.stringify({ error: 'unauthorized' }),
       { status: 401, headers: JSON_HEADERS },
-    );
-  }
-  if (row.status !== 'active') {
-    return new Response(
-      JSON.stringify({ error: `Platform ${row.slug} is ${row.status}.` }),
-      { status: 403, headers: JSON_HEADERS },
     );
   }
 
@@ -129,8 +141,16 @@ Deno.serve(async (req: Request) => {
   const parsed = parsePrefixedKey(rawKey);
   if (parsed) {
     if (parsed.slug !== row.slug || parsed.env !== row.env) {
+      console.log(JSON.stringify({
+        event: 'bootstrap_auth_fail',
+        reason: 'prefix_mismatch',
+        slug: row.slug,
+        env: row.env,
+        slug_prefix: parsed.slug,
+        env_prefix: parsed.env,
+      }));
       return new Response(
-        JSON.stringify({ error: 'Key shape does not match platform identity.' }),
+        JSON.stringify({ error: 'unauthorized' }),
         { status: 401, headers: JSON_HEADERS },
       );
     }
