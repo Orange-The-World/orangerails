@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import BtcUsdChart from "@/components/BtcUsdChart";
+import PurchasingPowerChart from "@/components/PurchasingPowerChart";
 
 export default function Home() {
   return (
@@ -48,6 +49,19 @@ export default function Home() {
           One pair shown. The full open dataset covers 28 BTC/fiat pairs and centuries of inflation,
           metals, and monetary aggregates. See <a href="/data" className="text-orange hover:underline">/data</a>.
         </p>
+      </section>
+
+      <section className="max-w-5xl mx-auto px-6 pb-24">
+        <div className="text-center mb-6">
+          <h2 className="text-2xl font-bold text-slate-900">The reason the chart above matters.</h2>
+          <p className="mt-2 text-slate-600 max-w-2xl mx-auto">
+            A dollar in 1913 — the year the Federal Reserve opened — has lost most of its
+            buying power. Here is what is left, by month, since then.
+          </p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <PurchasingPowerChart />
+        </div>
       </section>
 
       <footer className="border-t border-slate-200 mt-24">
