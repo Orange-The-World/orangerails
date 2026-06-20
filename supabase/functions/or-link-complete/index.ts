@@ -45,6 +45,7 @@
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
+import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
 
 const MAX_WALLETS_PER_CALL = 50;
 const MAX_ENCRYPTED_METADATA_LEN = 8192;
@@ -156,6 +157,24 @@ Deno.serve(async (req: Request) => {
       .maybeSingle();
     if (platErr || !platform) {
       return jsonResponse({ error: "Unknown platform" }, 404, cors);
+    }
+
+    // Rate limit: max 10 link-complete calls per platform per minute.
+    // Defaults to log-only mode (warning in console.error, request still
+    // allowed) so we can baseline real usage before enforcing. Set
+    // RATE_LIMIT_ENFORCE=true on the project to flip into 429 rejection.
+    const limit = await checkPlatformRateLimit({
+      supabase: serviceClient,
+      key: platform.id,
+      scope: 'or-link-complete',
+      maxPerMinute: 10,
+    });
+    if (!limit.allowed) {
+      return jsonResponse(
+        { error: 'rate_limited', detail: `Try again in ${limit.retryAfterSeconds}s` },
+        429,
+        { ...cors, 'retry-after': String(limit.retryAfterSeconds) },
+      );
     }
 
     // Audit 2026-05-16 High #3: verify the widget session token.
