@@ -1,5 +1,5 @@
 /**
- * or-quiltt-sync , drain quiltt_webhook_inbox, pull data from Quiltt
+ * or-quiltt-sync — drain quiltt_webhook_inbox, pull data from Quiltt
  * GraphQL, seal under each user's OPK, persist as encrypted_transactions.
  *
  * Trigger: HTTP POST (callable manually for testing; wire to supabase_cron
@@ -19,9 +19,9 @@
  * only; never callable from integrators or browsers.
  *
  * Env vars:
- *   QUILTT_API_KEY              , Model A master key
- *   OR_INTERNAL_WORKER_TOKEN    , caller auth for this endpoint
- *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY , standard
+ *   QUILTT_API_KEY              — Model A master key
+ *   OR_INTERNAL_WORKER_TOKEN    — caller auth for this endpoint
+ *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY — standard
  */
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -31,22 +31,7 @@ import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
 const TX_PAGE_SIZE = 100;
-// 50 pages × 100 = 5,000 transactions per connection per webhook event.
-// Covers most banks' full available history (Quiltt typically caps at ~2y).
-// Still bounded so a hostile/buggy upstream can't burn unlimited time.
-const MAX_PAGES = 50;
-
-// Per-event wall-clock budget. A pathological profile (many bound
-// connections, slow Quiltt responses, or hostile fanout) can otherwise
-// exhaust the Supabase edge-runtime ~150s wall and starve the rest of
-// the batch. Cap each event at 60s; if we run over, mark `partial` and
-// let the next cron tick pick up the remainder.
-const PER_EVENT_BUDGET_MS = 60_000;
-
-// Quiltt PROD geo-blocks Canada (and other non-US) at the GraphQL
-// layer. Supabase routes outbound through us-east-1 when this header
-// is set, dodging the 403. Same trick OWM uses on its OR proxy calls.
-const QUILTT_REGION_HEADER = 'us-east-1';
+const MAX_PAGES = 5;          // safety cap per connection per invocation
 
 interface PendingEvent {
   event_id:      string;
@@ -222,63 +207,28 @@ async function handleEvent(
   // Schema note: connections.user_id was dropped in
   // 20260421200000_platforms_subaccounts.sql; the current owning column
   // is subaccount_id.
-  // Route the event to the OR connection row whose quiltt_connection_id
-  // matches the webhook's connectionId. Falls back to a legacy NULL-id
-  // row only if no exact match exists , keeps banks linked before the
-  // multi-connection migration working. If both fail, surface the
-  // mismatch instead of silently writing to the wrong bank's bucket
-  // (which was the pre-fix root cause of Mercury+TD collisions).
-  let conn: { id: string } | null = null;
-  const exactMatch = await client
+  const { data: conn, error: connErr } = await client
     .from('connections')
     .select('id')
     .eq('subaccount_id', subaccountId)
     .eq('provider_type', 'quiltt')
-    .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
-  if (exactMatch.error) return `connection lookup failed: ${exactMatch.error.message}`;
-  if (exactMatch.data) {
-    conn = exactMatch.data as { id: string };
-  } else {
-    const legacy = await client
-      .from('connections')
-      .select('id')
-      .eq('subaccount_id', subaccountId)
-      .eq('provider_type', 'quiltt')
-      .is('quiltt_connection_id', null)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
-    if (!legacy.data) return 'or-connection row not yet created';
-    conn = legacy.data as { id: string };
-  }
+  if (connErr) return `connection lookup failed: ${connErr.message}`;
+  if (!conn) return 'or-connection row not yet created';
 
   let after: string | null = null;
   let pages = 0;
   let newRows = 0;
-  const eventStartMs = Date.now();
 
   while (pages < MAX_PAGES) {
-    // Wall-clock budget guard. If this single event has already burned
-    // PER_EVENT_BUDGET_MS, bail and let the next cron tick pick up the
-    // remainder. Stops one hostile/slow profile from starving the rest
-    // of the batch when the Supabase edge runtime would otherwise be
-    // killed at ~150s for the whole invocation.
-    if (Date.now() - eventStartMs > PER_EVENT_BUDGET_MS) {
-      console.warn(
-        `[or-quiltt-sync] event ${connectionId}: per-event budget exhausted after ${pages} pages, ${newRows} rows`,
-      );
-      break;
-    }
-
     const query = `
-      query Q($first: Int!, $after: String) {
-        transactions(first: $first, after: $after) {
+      query Q($connId: ID!, $first: Int!, $after: String) {
+        connection(id: $connId) { id }
+        transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
             id amount currencyCode date description entryType status
-            account { id connection { id } }
+            account { id }
           }
         }
       }
@@ -288,11 +238,10 @@ async function handleEvent(
       headers: {
         'Authorization': `Basic ${basic}`,
         'Content-Type':  'application/json',
-        'x-region':      QUILTT_REGION_HEADER,
       },
       body: JSON.stringify({
         query,
-        variables: { first: TX_PAGE_SIZE, after },
+        variables: { connId: connectionId, first: TX_PAGE_SIZE, after },
       }),
     });
     if (!resp.ok) {
@@ -300,19 +249,7 @@ async function handleEvent(
       return `Quiltt GraphQL ${resp.status}: ${errBody.slice(0, 300)}`;
     }
     const json = await resp.json();
-    // Surface GraphQL errors instead of silently treating them as "0 txns".
-    // (The previous `filter: { connectionId }` was rejected by Quiltt's
-    // TransactionFilter and this swallowed the error → 0 rows forever.)
-    if (Array.isArray(json?.errors) && json.errors.length > 0) {
-      return `Quiltt GraphQL error: ${JSON.stringify(json.errors).slice(0, 300)}`;
-    }
-    const allTxs = json?.data?.transactions?.nodes ?? [];
-    // Quiltt can't filter transactions by connection, so scope here:
-    // keep only transactions whose account belongs to this event's connection.
-    const txs = allTxs.filter(
-      (tx: { account?: { connection?: { id?: string } } }) =>
-        tx.account?.connection?.id === connectionId,
-    );
+    const txs = json?.data?.transactions?.nodes ?? [];
     const pageInfo = json?.data?.transactions?.pageInfo;
 
     for (const tx of txs) {
@@ -360,7 +297,7 @@ async function handleEvent(
 
   // Outbound webhook fan-out. Mirrors or-sync's enqueue pattern: insert a
   // webhook_delivery row when newRows > 0, let or-webhook-dispatch pick it
-  // up on its own schedule. Best-effort , failure here must not mark the
+  // up on its own schedule. Best-effort — failure here must not mark the
   // inbox event as failed; the user data is already landed.
   if (newRows > 0) {
     try {

@@ -1,5 +1,5 @@
 /**
- * or-quiltt-session-via-widget , mint a Quiltt session from a widget_token.
+ * or-quiltt-session-via-widget — mint a Quiltt session from a widget_token.
  *
  * The OR /connect picker page lives in the user's browser. Browsers don't
  * have the integrating app's X-Platform-API-Key (that's a server secret).
@@ -7,7 +7,7 @@
  * integrator's backend via or-link-mint-token before the popup opened.
  *
  * This endpoint trades a valid widget_token for a Quiltt session bundle
- * , the same shape or-quiltt-session returns to platform-mode callers ,
+ * — the same shape or-quiltt-session returns to platform-mode callers —
  * so the picker can:
  *
  *   1. Wrap inline UI in <QuilttProvider token={...}>
@@ -17,7 +17,7 @@
  *
  * Auth: widget_token only (no headers). The token is single-use on
  * or-link-complete / or-quiltt-link-complete, but this endpoint does
- * NOT consume it , verification only. The downstream link-complete
+ * NOT consume it — verification only. The downstream link-complete
  * call later in the flow burns the token as designed.
  *
  * POST body:
@@ -30,11 +30,11 @@
  *     expires_at
  *   }
  *
- * Response 400 , missing/bad body
- * Response 401 , invalid/expired/used widget token
- * Response 429 , Quiltt rate-limited the session mint
- * Response 502 , Quiltt returned non-2xx
- * Response 503 , QUILTT_API_KEY or QUILTT_CONNECTOR_ID_LINK missing on this project
+ * Response 400 — missing/bad body
+ * Response 401 — invalid/expired/used widget token
+ * Response 429 — Quiltt rate-limited the session mint
+ * Response 502 — Quiltt returned non-2xx
+ * Response 503 — QUILTT_API_KEY or QUILTT_CONNECTOR_ID_LINK missing on this project
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -124,7 +124,7 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Failed to read profile mapping' }, 500, cors);
     }
 
-    // 5. Resolve Quiltt config , per-platform with env fallback.
+    // 5. Resolve Quiltt config — per-platform with env fallback.
     //    This swaps the global QUILTT_API_KEY / QUILTT_CONNECTOR_ID_LINK
     //    reads for a platforms-row lookup. Backwards compatible: if the
     //    platform row's quiltt_api_key column is NULL, falls back to the
@@ -151,7 +151,7 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Quiltt integration not configured (connector id)' }, 503, cors);
     }
 
-    // 6. Mint Quiltt session , reuse existing Profile when present, else mint
+    // 6. Mint Quiltt session — reuse existing Profile when present, else mint
     //    fresh and stamp OR metadata for webhook round-tripping.
     const mintBody = mapLookup.data
       ? { userId: mapLookup.data.quiltt_profile_id }
@@ -200,7 +200,7 @@ Deno.serve(async (req: Request) => {
         });
       if (insertMap.error) {
         console.error('[or-quiltt-session-via-widget] profile map insert failed:', insertMap.error.message);
-        // Non-fatal , token is still usable; the worker resolves mapping on webhook arrival.
+        // Non-fatal — token is still usable; the worker resolves mapping on webhook arrival.
       }
     }
 
