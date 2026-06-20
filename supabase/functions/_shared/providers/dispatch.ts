@@ -8,9 +8,9 @@
  *   1. Implement the ProviderAdapter in _shared/providers/<slug>.ts
  *   2. Import it here
  *   3. Add to the PROVIDERS array below
- *   4. Done , all three edge functions auto-discover it via the registry
+ *   4. Done — all three edge functions auto-discover it via the registry
  *
- * Adding a new CCXT exchange: regenerate _ccxt/manifest.ts (see
+ * Adding a new CCXT exchange: regenerate _ccxt-manifest.ts (see
  * scripts/generate-ccxt-manifest.mjs). Don't hand-edit dispatch.
  *
  * Provider roadmap (OrangeRails-Protocol.html §18):
@@ -20,13 +20,13 @@
  */
 
 import type { ProviderAdapter } from './types.ts';
-import { blinkAdapter } from './blink/index.ts';
-import { xpubAdapter } from './xpub/index.ts';
-import { btcpayAdapter } from './btcpay/index.ts';
-import { strikeAdapter } from './strike/index.ts';
-import { surgeAdapter } from './surge/index.ts';
-import { makeCcxtAdapter } from './_ccxt/index.ts';
-import { CCXT_MANIFEST } from './_ccxt/manifest.ts';
+import { blinkAdapter } from './blink.ts';
+import { xpubAdapter } from './xpub.ts';
+import { btcpayAdapter } from './btcpay.ts';
+import { strikeAdapter } from './strike.ts';
+import { surgeAdapter } from './surge.ts';
+import { makeCcxtAdapter } from './_ccxt.ts';
+import { CCXT_MANIFEST } from './_ccxt-manifest.ts';
 
 // CCXT-backed exchanges. Generated from CCXT introspection so the picker
 // reflects whatever ccxt@<pinned> supports without per-exchange code.
@@ -59,7 +59,7 @@ const PROVIDER_MAP: ReadonlyMap<string, ProviderAdapter> = new Map(
 
 /**
  * Look up the registered adapter for a provider slug. Returns null when
- * the slug is unknown , callers should surface this as a 400 listing the
+ * the slug is unknown — callers should surface this as a 400 listing the
  * supported providers via `listProviderSlugs()`.
  */
 export function getProvider(slug: string): ProviderAdapter | null {
@@ -72,7 +72,7 @@ export function listProviderSlugs(): string[] {
 }
 
 /**
- * Public adapter manifest , what platforms (V2, V3, OW) read to render the
+ * Public adapter manifest — what platforms (V2, V3, OW) read to render the
  * "add connection" UI. No internal handler functions exposed.
  *
  * The `category` + `tags` + `popularity` fields drive a picker that scales
@@ -102,25 +102,25 @@ export interface ProviderManifest {
 }
 
 /**
- * Roadmap entries , providers we want to surface as greyed-out tiles
+ * Roadmap entries — providers we want to surface as greyed-out tiles
  * before their adapter ships. Keeping them here (not in PROVIDERS) means
  * edge functions still 400 if a caller tries to use them, but the
  * picker UI knows to render them as "Coming soon".
  *
- * Move an entry into PROVIDERS the moment its adapter lands , at that
+ * Move an entry into PROVIDERS the moment its adapter lands — at that
  * point its `status` flips to 'live' from the adapter declaration.
  */
 const ROADMAP_MANIFESTS: ReadonlyArray<ProviderManifest> = [];
 
 /**
- * Client-side manifest entries , providers whose connect flow lives in
+ * Client-side manifest entries — providers whose connect flow lives in
  * the browser (e.g. Stealth Sync) rather than as a server adapter under
  * `dispatch.ts`'s PROVIDERS. These appear in the picker with `status:
  * 'live'` and a `connectUrl` that the picker routes to on tile click.
  *
  * Edge functions still 400 if a caller tries to create a server-side
  * connection for these slugs, because no server adapter exists. That is
- * intentional , these providers do not flow through the server adapter
+ * intentional — these providers do not flow through the server adapter
  * dispatch at all.
  */
 const CLIENT_SIDE_MANIFESTS: ReadonlyArray<ProviderManifest> = [
