@@ -1,10 +1,9 @@
-name: Bootstrap missing CF Pages projects
+name: Bootstrap + list CF Pages projects
 
-# One-shot helper: creates the 4 Pages projects that don't exist yet
-# (orangerails-app-dev, orange-world-dev, orbi-dev, orbi-prod) using the
-# CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID secrets already wired into
-# this repo. Trigger via `gh workflow run bootstrap-pages-projects.yml`.
-# Idempotent: a 409 "already exists" from the API is treated as success.
+# One-shot helper: idempotent. Creates missing projects, then lists
+# all 8 Orange Rails Pages projects with their Git source, build
+# config, and most recent deployment status. Useful when a live URL
+# is serving stale content and we need to know whether a build ran.
 
 on:
   workflow_dispatch:
@@ -13,22 +12,21 @@ jobs:
   bootstrap:
     runs-on: ubuntu-latest
     steps:
-      - name: Create projects via Cloudflare API
+      - name: Create + list
         env:
           TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ACCT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -e
+
           create() {
             local NAME="$1" REPO="$2" ROOT_DIR="$3" OUT_DIR="${4:-dist}" BUILD="${5:-bun run build}"
             local ROOT_BLOCK=""
             [ -n "$ROOT_DIR" ] && ROOT_BLOCK=",\"root_dir\":\"$ROOT_DIR\""
-            echo "=== $NAME ==="
             local RESP=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
               -d "{\"name\":\"$NAME\",\"production_branch\":\"dev\",\"source\":{\"type\":\"github\",\"config\":{\"owner\":\"Orange-The-World\",\"repo_name\":\"$REPO\",\"production_branch\":\"dev\",\"deployments_enabled\":true,\"pr_comments_enabled\":true,\"preview_deployment_setting\":\"all\"}},\"build_config\":{\"build_command\":\"$BUILD\",\"destination_dir\":\"$OUT_DIR\"$ROOT_BLOCK}}")
-            echo "$RESP" | python3 -c "import json,sys; r=json.load(sys.stdin); print('  ok' if r.get('success') else '  ' + json.dumps(r.get('errors',[])))"
+            echo "$RESP" | python3 -c "import json,sys; r=json.load(sys.stdin); print('  create:', 'ok' if r.get('success') else r.get('errors',[]))"
           }
 
           create orangerails-app-dev orangerails ""           dist "bun run build"
@@ -37,7 +35,13 @@ jobs:
           create orbi-prod           orbi         ""          public ":"
 
           echo ""
-          echo "=== final project list ==="
-          curl -sH "Authorization: Bearer $TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects" \
-            | python3 -c "import json,sys; [print('  ' + p['name']) for p in json.load(sys.stdin).get('result',[])]"
+          for proj in orangerails-prod orangerails-dev orangerails-app orangerails-app-dev orangerails-world orange-world-dev orbi-dev orbi-prod; do
+            echo "=== $proj ==="
+            curl -sH "Authorization: Bearer $TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects/$proj" \
+              | python3 -c "import json,sys; d=json.load(sys.stdin).get('result',{}) or {}; src=d.get('source') or {}; cfg=src.get('config') or {}; bc=d.get('build_config') or {}; print('  source:', src.get('type','none'), '->', (cfg.get('owner','') + '/' + cfg.get('repo_name','')) if cfg.get('repo_name') else '(none)', 'branch=' + cfg.get('production_branch','-')); print('  build:', repr(bc.get('build_command')), 'out=' + repr(bc.get('destination_dir')), 'root=' + repr(bc.get('root_dir')))"
+            curl -sH "Authorization: Bearer $TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects/$proj/deployments?per_page=3" \
+              | python3 -c "import json,sys; ds=json.load(sys.stdin).get('result',[]) or []; print('  (no deployments)') if not ds else [print('  ' + d.get('created_on','')[:19], 'env=' + (d.get('environment') or '?'), 'stage=' + ((d.get('latest_stage') or {}).get('name') or '?') + '/' + ((d.get('latest_stage') or {}).get('status') or '?'), 'branch=' + ((d.get('deployment_trigger') or {}).get('metadata') or {}).get('branch','-'), 'commit=' + (((d.get('deployment_trigger') or {}).get('metadata') or {}).get('commit_hash','-'))[:8]) for d in ds[:3]]"
+            echo ""
+          done
