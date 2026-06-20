@@ -309,7 +309,7 @@ export const surgeAdapter: ProviderAdapter = {
       placeholder: 'Paste the token from Surge Credit → Settings → Integrations → BitBooks → Generate',
       multiline: true,
       helpLabel: 'How to generate this token',
-      helpHref: 'https://maintainer-only/doc/integration-surge-orange-rails-3vbNhDWMUO',
+      helpHref: 'https://maintainer-only(maintainer-only docs)',
     },
   ],
 

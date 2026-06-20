@@ -100,7 +100,7 @@ const rate = await getOrResolveRate(
 ## Deploy
 
 ```bash
-cd ~/AIHUB/REPOS/orangerails
+cd <repo root>
 supabase functions deploy on-demand-resolve \
   --project-ref <ORANGERAILS_PROD_REF> \
   --no-verify-jwt
@@ -151,7 +151,7 @@ network or DB needed. CI should run these on every PR that touches
 ## Smoke test (against deployed PROD function)
 
 ```bash
-cd ~/AIHUB/REPOS/orangerails/orbi
+cd <repo root>/orbi
 bun run scripts/test-edge-function.ts
 ```
 

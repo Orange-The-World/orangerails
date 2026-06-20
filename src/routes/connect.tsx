@@ -207,13 +207,32 @@ async function requestHandoffKeysFromParent(
       "Lost connection to the host app , please close this window and try again.",
     );
   }
-  const targetOrigin = document.referrer
-    ? new URL(document.referrer).origin
-    : "*";
+
+  // The cred_key is the user's vault-unlock AES key. We refuse to send the
+  // "or-need-cred-key" handshake (which may carry the vault password) OR
+  // accept the "or-cred-key-ready" reply (which carries the key itself)
+  // unless we can pin a concrete opener origin. Falling back to "*" would
+  // let any window in the tab tree receive the password or supply a
+  // forged key.
+  const openerOrigin = (() => {
+    if (!document.referrer) return null;
+    try {
+      return new URL(document.referrer).origin;
+    } catch {
+      return null;
+    }
+  })();
+  if (!openerOrigin) {
+    throw new Error(
+      "Cannot verify the host app's origin , please open this from the host app and try again.",
+    );
+  }
 
   return new Promise<HandoffKeys>((resolve, reject) => {
     const TIMEOUT_MS = 120_000;
     const onMessage = async (event: MessageEvent) => {
+      if (event.source !== opener) return;
+      if (event.origin !== openerOrigin) return;
       const data = event.data as unknown;
       if (!data || typeof data !== "object") return;
       if ((data as { type?: unknown }).type !== "or-cred-key-ready") return;
@@ -251,7 +270,7 @@ async function requestHandoffKeysFromParent(
     // so the parent can derive the key without showing its own modal.
     const msg: Record<string, unknown> = { type: "or-need-cred-key" };
     if (password) msg.password = password;
-    opener.postMessage(msg, targetOrigin);
+    opener.postMessage(msg, openerOrigin);
   });
 }
 

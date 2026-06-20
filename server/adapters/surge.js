@@ -1,5 +1,5 @@
 // Surge Partner API adapter (v1.1).
-// Spec: https://maintainer-only/doc/integration-surge-orange-rails-3vbNhDWMUO
+// Spec: https://maintainer-only(maintainer-only docs)
 // OpenAPI: docs/openapi.yaml (delivered 2026-06-17 with sandbox token)
 //
 // Auth model: the borrower signs a canonical EIP-191 personal_sign message

@@ -75,7 +75,7 @@ comment on column public.platforms.sink_format is
 -- A second migration (run AFTER the operator pastes values into a
 -- secrets-only script) will populate them — values cannot land in a
 -- committed SQL file. See companion script: scripts/backfill-platform-
--- quiltt-config.sh (NOT in git; lives in jarvis tmpfs at run time).
+-- quiltt-config.sh (NOT in git; lives in operator-side tmpfs at run time).
 --
 -- Sink format CAN be set here because it's a public slug, not a secret.
 
