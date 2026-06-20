@@ -19,7 +19,7 @@
  *   JSON-RPC 2.0 request, e.g.
  *     { "jsonrpc": "2.0", "id": 1, "method": "tools/list" }
  *     { "jsonrpc": "2.0", "id": 2, "method": "tools/call",
- *       "params": { "name": "books.ping", "arguments": {} } }
+ *       "params": { "name": "orca.ping", "arguments": {} } }
  *
  * Response:
  *   Content-Type: text/event-stream
@@ -49,7 +49,7 @@ const PROTOCOL_VERSION = '2025-11-25';
 
 const TOOLS = [
   {
-    name: 'books.ping',
+    name: 'orca.ping',
     description:
       'Smoke check. Returns "pong" plus the calling agent member id and the server time.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
@@ -126,7 +126,7 @@ async function handleToolCall(
   jwt: string,
   supabaseUrl: string,
 ): Promise<unknown> {
-  if (toolName === 'books.ping') {
+  if (toolName === 'orca.ping') {
     // Validate the token by calling Supabase auth introspection, same as
     // the stdio path. Surfaces 401 if revoked.
     const introspect = await fetch(`${supabaseUrl}/auth/v1/user`, {
