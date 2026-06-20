@@ -1,5 +1,5 @@
 /**
- * or-sync-key-register , register a subaccount's OPK (delivery key).
+ * or-sync-key-register — register a subaccount's OPK (delivery key).
  *
  * Called by an integrator backend (platform mode) when their user opts
  * in to background sync. The browser derives the X25519 keypair from
@@ -55,7 +55,7 @@ interface RegisterBody {
   /**
    * Required when rotating an existing OPK (subaccount already has a
    * non-null opk_public). Must be literal `true`. Prevents a quiet
-   * client bug from silently flipping a victim's seal key , every
+   * client bug from silently flipping a victim's seal key — every
    * rotation now requires an explicit opt-in plus generates an audit row.
    */
   confirm_rotation?: boolean;
@@ -139,7 +139,7 @@ Deno.serve(async (req: Request) => {
         return jsonResponse(
           {
             error:
-              'OPK rotation requires confirm_rotation: true , an OPK is already registered for this subaccount',
+              'OPK rotation requires confirm_rotation: true — an OPK is already registered for this subaccount',
             current_opk_registered_at: prior.opk_registered_at,
           },
           409,

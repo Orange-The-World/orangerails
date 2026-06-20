@@ -118,36 +118,33 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Unknown platform' }, 404, cors);
     }
 
-    // 2. Verify widget token (same rules as or-link-complete).
-    const session = await service
-      .from('pending_widget_sessions')
-      .select('id, platform_id, app_user_id, expires_at, used_at')
-      .eq('id', body.widget_token)
-      .maybeSingle();
-    if (session.error || !session.data) {
-      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-    }
-    if (session.data.used_at) {
-      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-    }
-    if (new Date(session.data.expires_at as string) < new Date()) {
-      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-    }
-    if (session.data.platform_id !== platform.data.id) {
-      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-    }
-    if (session.data.app_user_id !== body.app_user_id) {
-      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
-    }
-
-    // Atomically mark the token used.
-    const markUsed = await service
+    // 2. Atomically claim the widget token in a single statement.
+    //
+    // The old pattern (SELECT used_at → check NULL in JS → UPDATE) had a
+    // TOCTOU window where two parallel requests with the same token both
+    // passed validation and both succeeded. supabase-js doesn't return
+    // rowcount on .update() so a no-op overwrite still produced markErr=null,
+    // letting both branches proceed.
+    //
+    // The fix: scope every guard into one UPDATE … WHERE … RETURNING row, and
+    // treat "no row returned" as the ONLY success signal. Postgres serialises
+    // concurrent updates on the same row, so exactly one of the racing requests
+    // gets the row back; the other sees `data === null` and 401s.
+    const claim = await service
       .from('pending_widget_sessions')
       .update({ used_at: new Date().toISOString() })
       .eq('id', body.widget_token)
-      .is('used_at', null);
-    if (markUsed.error) {
-      console.error('[or-quiltt-link-complete] could not mark widget token used:', markUsed.error.message);
+      .is('used_at', null)
+      .gt('expires_at', new Date().toISOString())
+      .eq('platform_id', platform.data.id)
+      .eq('app_user_id', body.app_user_id)
+      .select('id')
+      .maybeSingle();
+    if (claim.error) {
+      console.error('[or-quiltt-link-complete] widget token claim error:', claim.error.message);
+      return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
+    }
+    if (!claim.data) {
       return jsonResponse({ error: 'Invalid widget token' }, 401, cors);
     }
 

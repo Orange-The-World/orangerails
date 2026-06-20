@@ -1,5 +1,5 @@
 /**
- * or-link-complete , end of the /connect Link widget round trip.
+ * or-link-complete — end of the /connect Link widget round trip.
  *
  * Called by the unauthenticated /connect widget after the end user has
  * pasted their provider API key and picked which discovered wallets to
@@ -45,7 +45,6 @@
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
-import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
 
 const MAX_WALLETS_PER_CALL = 50;
 const MAX_ENCRYPTED_METADATA_LEN = 8192;
@@ -109,7 +108,7 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "encrypted_credentials required (base64, ≤64 KB)" }, 400, cors);
     }
 
-    // Normalize wallet shape , accept either the new `wallets` array or the
+    // Normalize wallet shape — accept either the new `wallets` array or the
     // legacy single-wallet (external_wallet_id + encrypted_metadata) fields.
     let wallets: InboundWallet[] = [];
     if (Array.isArray(body.wallets) && body.wallets.length > 0) {
@@ -159,24 +158,6 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Unknown platform" }, 404, cors);
     }
 
-    // Rate limit: max 10 link-complete calls per platform per minute.
-    // Defaults to log-only mode (warning in console.error, request still
-    // allowed) so we can baseline real usage before enforcing. Set
-    // RATE_LIMIT_ENFORCE=true on the project to flip into 429 rejection.
-    const limit = await checkPlatformRateLimit({
-      supabase: serviceClient,
-      key: platform.id,
-      scope: 'or-link-complete',
-      maxPerMinute: 10,
-    });
-    if (!limit.allowed) {
-      return jsonResponse(
-        { error: 'rate_limited', detail: `Try again in ${limit.retryAfterSeconds}s` },
-        429,
-        { ...cors, 'retry-after': String(limit.retryAfterSeconds) },
-      );
-    }
-
     // Audit 2026-05-16 High #3: verify the widget session token.
     //
     // The integrating app's backend calls or-link-mint-token with its
@@ -217,7 +198,7 @@ Deno.serve(async (req: Request) => {
       }
     } else if (requireToken) {
       return jsonResponse(
-        { error: 'widget_token required , call or-link-mint-token first' },
+        { error: 'widget_token required — call or-link-mint-token first' },
         401,
         cors,
       );
@@ -245,7 +226,7 @@ Deno.serve(async (req: Request) => {
       // Common integrator footgun: passing OR's internal subaccount UUID
       // here instead of the platform's external user id. We can't tell
       // from this side whether app_user_id is "wrong" or just "first
-      // touch from this user" , but we can detect when the same platform
+      // touch from this user" — but we can detect when the same platform
       // already has a subaccount under a DIFFERENT external_user_id and
       // log a structured warning so the integrator notices fast.
       const { count: platformSubaccountCount } = await serviceClient
@@ -256,7 +237,7 @@ Deno.serve(async (req: Request) => {
       if ((platformSubaccountCount ?? 0) > 0) {
         console.warn(
           "[or-link-complete] minting new subaccount under platform_slug=%s with " +
-            "app_user_id=%s , this platform already has %d other subaccount(s). " +
+            "app_user_id=%s — this platform already has %d other subaccount(s). " +
             "Common cause: the integrator passed OR's subaccount_id (UUID) as " +
             "app_user_id instead of their own user-id. See Consumer-Integration-Guide.md " +
             "section 'Wire-format gotchas: app_user_id is your platform's user-id, " +
@@ -343,7 +324,7 @@ Deno.serve(async (req: Request) => {
         // Diagnostic: integrators that wire app_user_id wrong end up
         // creating a new subaccount on every connect. Surface the flag
         // so the consumer can warn the user "this looks like a fresh
-        // setup , was this intentional?" instead of silently piling up
+        // setup — was this intentional?" instead of silently piling up
         // orphan subaccounts.
         subaccount_was_newly_created: subaccountWasNewlyCreated,
       },

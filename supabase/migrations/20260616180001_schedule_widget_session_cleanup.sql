@@ -10,10 +10,10 @@
 -- tokens have a 5 min TTL, so the worst-case latency before a used token
 -- is physically removed is ~2 hours.
 --
--- Note on dollar quoting: the outer DO block uses $outer$ … $outer$ so
--- the cron.schedule SQL body (a regular '…' literal) is unambiguous.
+-- Safe to re-apply: cron.schedule with an existing jobname errors; we
+-- guard with an unschedule+schedule pattern.
 
-DO $outer$
+DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_extension WHERE extname = 'pg_cron'
@@ -26,10 +26,10 @@ BEGIN
     PERFORM cron.schedule(
       'cleanup_expired_widget_sessions_hourly',
       '7 * * * *',  -- :07 every hour, off the top-of-hour rush
-      'SELECT public.cleanup_expired_widget_sessions();'
+      $$SELECT public.cleanup_expired_widget_sessions();$$
     );
   ELSE
     RAISE NOTICE 'pg_cron not installed — widget session cleanup will not run automatically. Install with CREATE EXTENSION pg_cron; on the postgres role.';
   END IF;
 END
-$outer$;
+$$;

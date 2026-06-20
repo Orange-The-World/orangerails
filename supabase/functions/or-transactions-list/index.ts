@@ -22,6 +22,14 @@ const DEFAULT_LIMIT = 200;
 // still paginate with `before_occurred_at` / `cursor` for full history.
 const MAX_LIMIT = 1000;
 
+// Per-response byte cap. encrypted_payload is unbounded base64 ciphertext
+// (no DB CHECK), so 1000 rows × N KB can hit edge-function memory limits
+// or trip statement_timeout mid-stream. We early-cut the response when the
+// running ciphertext byte total crosses this threshold and return a
+// cursor for the client to resume. Picked at 4 MB to leave headroom under
+// Supabase's 6 MB response cap.
+const MAX_RESPONSE_PAYLOAD_BYTES = 4 * 1024 * 1024;
+
 Deno.serve(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -61,7 +69,32 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: 'Failed to list transactions' }, 500, cors);
     }
 
-    return jsonResponse({ transactions: rows ?? [] }, 200, cors);
+    // Byte-cap the response. Walk rows in order, summing encrypted_payload
+    // length; stop as soon as we'd cross MAX_RESPONSE_PAYLOAD_BYTES. Return
+    // the last included row's occurred_at as next_before so the client can
+    // resume with one more call. Truncation only fires for genuinely huge
+    // payloads — most callers will receive every row they asked for.
+    const out: typeof rows = [];
+    let byteTotal = 0;
+    let truncated = false;
+    for (const row of rows ?? []) {
+      const payloadLen = (row.encrypted_payload as string | null)?.length ?? 0;
+      if (out.length > 0 && byteTotal + payloadLen > MAX_RESPONSE_PAYLOAD_BYTES) {
+        truncated = true;
+        break;
+      }
+      out.push(row);
+      byteTotal += payloadLen;
+    }
+    const next_before = truncated && out.length > 0
+      ? (out[out.length - 1].occurred_at as string)
+      : null;
+
+    return jsonResponse(
+      { transactions: out, truncated, next_before },
+      200,
+      cors,
+    );
   } catch (err) {
     console.error('[or-transactions-list] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
