@@ -1,28 +1,32 @@
 // Shared HTTP helpers for Supabase Edge Functions
 
 // Custom headers for OR's auth modes:
-//   x-platform-api-key , Plaid-style platform API key for SaaS integrators
+//   x-platform-api-key — Plaid-style platform API key for SaaS integrators
+//                        (BitBooks V3, BitBooks Personal, future apps)
 const ALLOWED_HEADERS = 'authorization, x-client-info, apikey, content-type, x-platform-api-key';
 const ALLOWED_METHODS = 'GET, POST, OPTIONS';
 const MAX_BODY_BYTES = 1_000_000; // 1 MB
 
-// Static CORS allow-list , covers only Orange Rails-owned origins and local
-// development hosts. Customer- and integrator-specific origins are validated
-// at runtime via the `platforms.cors_origin` DB lookup (see the
-// 20260424120000 migration). Add entries here only for public Orange Rails
-// properties.
+// Static CORS allow-list. Each registered platform that calls OR directly
+// from the browser (or-sync, or-transactions-list, etc.) needs its origin
+// listed here. The platforms.cors_origin column was added in the
+// 20260424120000 migration so this can move to a database-backed lookup
+// before the second external platform onboards (see V2-OR-INTEGRATION-PR-SPEC §10).
 //
 // Add entries by exact origin match (no trailing slash, no wildcards).
 const ALLOWED_ORIGINS: ReadonlySet<string> = new Set<string>([
-  'https://orangerails.com',
-  'https://dev.orangerails.com',
-  'https://app.orangerails.com',
-  'https://orangerails.dev',
-  'http://localhost:3000',
+  // BitBooks V3 (existing)
+  'https://bitbooks-v3.lovable.app',
+  'https://app.bitbooks.com',
+  'https://v3dev.bitbooks.com',
   'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:5180',
-  'http://localhost:5181',
+  // BitBooks V2 (added 2026-04-24 for thin-slice integration)
+  'http://localhost:3000',
+  'https://v2dev.bitbooks.com',
+  // OrangeRails own /app + Lovable preview + dev domain (added 2026-05-22)
+  'https://orangerails.com',
+  'https://orangerails.dev',
+  'https://orangerails-cloud.lovable.app',
 ]);
 
 export function buildCorsHeaders(req: Request): Record<string, string> {
@@ -31,7 +35,7 @@ export function buildCorsHeaders(req: Request): Record<string, string> {
   // origins. Browsers reject cross-origin responses without an explicit
   // Allow-Origin match; server-to-server callers don't enforce CORS so
   // they keep working. The only case where '*' is correct is a fully
-  // public endpoint with no auth (or-providers, or-platform-display) ,
+  // public endpoint with no auth (or-providers, or-platform-display) —
   // those handlers should call buildPublicCorsHeaders explicitly.
   const headers: Record<string, string> = {
     'Access-Control-Allow-Headers': ALLOWED_HEADERS,
@@ -47,7 +51,7 @@ export function buildCorsHeaders(req: Request): Record<string, string> {
 /**
  * For endpoints that are intentionally public (no auth, anonymous fetch).
  * Returns Access-Control-Allow-Origin: * regardless of the request origin.
- * Use sparingly , only on or-providers and or-platform-display today.
+ * Use sparingly — only on or-providers and or-platform-display today.
  */
 export function buildPublicCorsHeaders(): Record<string, string> {
   return {

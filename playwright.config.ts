@@ -6,7 +6,7 @@ import { defineConfig, devices } from '@playwright/test';
  * Default target: orangerails.dev (the deployed dev site).
  * Override with: PLAYWRIGHT_BASE_URL=https://localhost:8080 npx playwright test
  *
- * Tests live in tests/e2e/. They are intentionally shallow , page loads,
+ * Tests live in tests/e2e/. They are intentionally shallow — page loads,
  * no console errors, key routes return 200. Deeper integration tests
  * (auth, dashboard, MCP flow) come later in the implementation plan.
  */
