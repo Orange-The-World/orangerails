@@ -1,11 +1,6 @@
 name: Deploy api.orangerails.com Worker
 
 on:
-  push:
-    branches: [dev, prod]
-    paths:
-      - 'workers/api-gateway/**'
-      - '.github/workflows/api-gateway-deploy.yml'
   workflow_dispatch:
     inputs:
       reason:
