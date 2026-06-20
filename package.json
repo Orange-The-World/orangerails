@@ -1,19 +1,19 @@
 {
   "name": "orangerails",
   "description": "Open-source, zero-knowledge Bitcoin-first aggregation rails. Self-hostable. Apache-2.0.",
-  "private": false,
+  "private": true,
   "sideEffects": false,
   "version": "0.1.0",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Orange-The-World/orangerails.git"
+    "url": "https://github.com/MorningRevolution/orangerails.git"
   },
   "bugs": {
-    "url": "https://github.com/Orange-The-World/orangerails/issues"
+    "url": "https://github.com/MorningRevolution/orangerails/issues"
   },
   "license": "Apache-2.0",
-  "homepage": "https://github.com/Orange-The-World/orangerails",
+  "homepage": "https://github.com/MorningRevolution/orangerails",
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
@@ -96,13 +96,14 @@
     "@vitejs/plugin-react": "^5.0.4",
     "@vitejs/plugin-react-swc": "^4.3.0",
     "@vitest/ui": "^4.1.4",
-    "ccxt": "4.4.30",
+    "ccxt": "4.5.56",
     "eslint": "^9.32.0",
     "eslint-config-prettier": "^10.1.1",
     "eslint-plugin-prettier": "^5.2.6",
     "eslint-plugin-react-hooks": "^5.2.0",
-    "eslint-plugin-react-refresh": "^0.4.20",
+    "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^15.15.0",
+    "lovable-tagger": "^1.1.13",
     "prettier": "^3.7.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.56.1",
