@@ -143,15 +143,11 @@ Deno.serve(async (req: Request) => {
     const result = await syncBlink(api_key, cursor ?? null);
     return jsonResponse(result, 200, cors);
   } catch (err) {
-    // Log the full error server-side for diagnostics, but never echo upstream
-    // response bodies (or err.message which may include them) to the client.
-    // Defense-in-depth: if a provider's error response ever contains the
-    // api_key or request echo, the client must not see it.
     console.error('sync-blink error:', err);
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.startsWith('Blink HTTP')) {
-      return jsonResponse({ error: 'Blink sync failed' }, 502, cors);
+      return jsonResponse({ error: 'Blink sync failed', detail: msg }, 502, cors);
     }
-    return jsonResponse({ error: 'Internal error' }, 500, cors);
+    return jsonResponse({ error: 'Internal error', detail: msg }, 500, cors);
   }
 });
