@@ -1,17 +1,17 @@
 /**
- * or-quiltt-accounts , list the bank accounts under a Quiltt connection.
+ * or-quiltt-accounts — list the bank accounts under a Quiltt connection.
  *
- * Integrating apps (multi-tenant platforms, Orange Way, etc.) call this immediately
+ * Integrating apps (V2 BitBooks, Orange Way, etc.) call this immediately
  * after a successful Quiltt link to discover which accounts the user
  * just authorized. The response feeds the post-link review screen ("you
- * linked 3 accounts at Chase , pick which to import") and seeds the
+ * linked 3 accounts at Chase — pick which to import") and seeds the
  * integrator's local wallet rows.
  *
  * Why a dedicated endpoint: V2 cannot talk to Quiltt directly because
  * Quiltt's API key is bound to OR's account, and the per-user Profile
  * id lives in OR's `quiltt_profile_map`. OR brokers the GraphQL call
  * with Basic auth (`profile_id:api_key`) and hands back the cleartext
- * account metadata (institution name, mask, type, currency) , none of
+ * account metadata (institution name, mask, type, currency) — none of
  * which is sensitive enough to require ZKA-style encryption.
  *
  * Auth: X-Platform-API-Key (platform mode). Direct mode is rejected:
@@ -29,12 +29,12 @@
  *       ...
  *     ] }
  *
- * Response 400 , missing/bad fields
- * Response 401 , invalid platform key
- * Response 403 , direct mode rejected
- * Response 404 , no quiltt_profile_map for this (platform, app_user_id)
- * Response 502 , upstream Quiltt error
- * Response 503 , QUILTT_API_KEY not configured
+ * Response 400 — missing/bad fields
+ * Response 401 — invalid platform key
+ * Response 403 — direct mode rejected
+ * Response 404 — no quiltt_profile_map for this (platform, app_user_id)
+ * Response 502 — upstream Quiltt error
+ * Response 503 — QUILTT_API_KEY not configured
  */
 
 import { authenticateRequest } from '../_shared/platform-auth.ts';
@@ -56,7 +56,6 @@ interface QuilttAccount {
   state: string;
   currencyCode: string | null;
   institution: { name: string } | null;
-  balance: { current: number | null; available: number | null } | null;
 }
 
 Deno.serve(async (req: Request) => {
@@ -82,12 +81,9 @@ Deno.serve(async (req: Request) => {
     if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
       return jsonResponse({ error: 'app_user_id required (string, ≤256 chars)' }, 400, cors);
     }
-    // quiltt_connection_id is OPTIONAL. When omitted (empty string), we
-    // enumerate ALL connections under the profile. This is the fallback
-    // path V2 uses when the popup's postMessage didn't survive a
-    // cross-origin redirect (Finicity/MX PROD flows sever window.opener).
-    const connectionId =
-      typeof body.quiltt_connection_id === 'string' ? body.quiltt_connection_id.trim() : '';
+    if (!body.quiltt_connection_id || typeof body.quiltt_connection_id !== 'string') {
+      return jsonResponse({ error: 'quiltt_connection_id required' }, 400, cors);
+    }
 
     // Per-platform Quiltt API key resolution (env fallback during transition).
     let quilttCfg;
@@ -114,7 +110,7 @@ Deno.serve(async (req: Request) => {
       .maybeSingle();
     if (subLookup.error || !subLookup.data) {
       return jsonResponse(
-        { error: 'subaccount not provisioned , call or-quiltt-session before linking' },
+        { error: 'subaccount not provisioned — call or-quiltt-session before linking' },
         404,
         cors,
       );
@@ -136,88 +132,50 @@ Deno.serve(async (req: Request) => {
     }
     const profileId = mapLookup.data.quiltt_profile_id as string;
 
-    // Query Quiltt for the accounts. Two modes:
-    //   - connectionId present: accounts under that one connection
-    //   - connectionId empty: ALL accounts across ALL profile connections
-    //     (fallback when the popup's postMessage was lost)
+    // Query Quiltt for the accounts under this connection.
     // Schema reference: https://www.quiltt.dev/api-reference/graphql
+    const query = `
+      query Q($connId: ID!) {
+        connection(id: $connId) {
+          id
+          accounts {
+            id
+            name
+            mask
+            kind
+            state
+            currencyCode
+            institution { name }
+          }
+        }
+      }
+    `;
     const basic = btoa(`${profileId}:${apiKey}`);
-    let rawAccounts: QuilttAccount[] = [];
-
-    if (connectionId) {
-      const query = `
-        query Q($connId: ID!) {
-          connection(id: $connId) {
-            id
-            accounts {
-              id
-              name
-              mask
-              kind
-              state
-              currencyCode
-              institution { name }
-              balance { current available }
-            }
-          }
-        }
-      `;
-      const resp = await fetch(QUILTT_GRAPHQL, {
-        method: 'POST',
-        headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, variables: { connId: connectionId } }),
-      });
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        console.error(`[or-quiltt-accounts] Quiltt ${resp.status}: ${errBody.slice(0, 300)}`);
-        return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
-      }
-      const json = await resp.json();
-      if (json.errors) {
-        console.error('[or-quiltt-accounts] Quiltt GraphQL errors:', JSON.stringify(json.errors).slice(0, 500));
-        return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
-      }
-      rawAccounts = json?.data?.connection?.accounts ?? [];
-    } else {
-      // Enumerate every connection under the profile and flatten accounts.
-      const query = `
-        query Q {
-          connections {
-            id
-            accounts {
-              id
-              name
-              mask
-              kind
-              state
-              currencyCode
-              institution { name }
-              balance { current available }
-            }
-          }
-        }
-      `;
-      const resp = await fetch(QUILTT_GRAPHQL, {
-        method: 'POST',
-        headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query }),
-      });
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        console.error(`[or-quiltt-accounts] Quiltt(all) ${resp.status}: ${errBody.slice(0, 300)}`);
-        return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
-      }
-      const json = await resp.json();
-      if (json.errors) {
-        console.error('[or-quiltt-accounts] Quiltt(all) GraphQL errors:', JSON.stringify(json.errors).slice(0, 500));
-        return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
-      }
-      const conns = (json?.data?.connections ?? []) as Array<{ accounts?: QuilttAccount[] }>;
-      rawAccounts = conns.flatMap((c) => c.accounts ?? []);
+    const resp = await fetch(QUILTT_GRAPHQL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${basic}`,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        variables: { connId: body.quiltt_connection_id },
+      }),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      console.error(`[or-quiltt-accounts] Quiltt ${resp.status}: ${errBody.slice(0, 300)}`);
+      return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
     }
+    const json = await resp.json();
+    if (json.errors) {
+      console.error('[or-quiltt-accounts] Quiltt GraphQL errors:', JSON.stringify(json.errors).slice(0, 500));
+      return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
+    }
+    const rawAccounts: QuilttAccount[] = json?.data?.connection?.accounts ?? [];
 
     const accounts = rawAccounts
-      // Skip closed / disconnected accounts , don't surface them as
+      // Skip closed / disconnected accounts — don't surface them as
       // import candidates.
       .filter((a) => a.state === 'OPEN' || a.state === 'ACTIVE' || !a.state)
       .map((a) => ({
@@ -228,8 +186,6 @@ Deno.serve(async (req: Request) => {
         mask:             a.mask ?? null,
         currency:         a.currencyCode ?? null,
         state:            a.state,
-        balance_current:  a.balance?.current ?? null,
-        balance_available: a.balance?.available ?? null,
       }));
 
     return jsonResponse({ accounts }, 200, cors);

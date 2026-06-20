@@ -1,5 +1,5 @@
 /**
- * or-quiltt-session , mint a Quiltt session token for the link flow.
+ * or-quiltt-session — mint a Quiltt session token for the link flow.
  *
  * Called by an integrator backend when their user wants to link a bank.
  * Returns a short-lived Quiltt session token + the OR-owned Connector
@@ -33,14 +33,14 @@
  *     expires_at: string                 // ISO 8601
  *   }
  *
- * Quiltt rate limits sessions to 10/hour, 20/day per Profile , the
+ * Quiltt rate limits sessions to 10/hour, 20/day per Profile — the
  * caller should cache the returned token until expires_at rather than
  * re-minting on every page load.
  *
  * Env vars required:
- *   QUILTT_API_KEY           , OR's master Quiltt API key (Model A)
- *   QUILTT_CONNECTOR_ID_LINK , Connector created in the Quiltt dashboard
- *   QUILTT_CONNECTOR_ID_RECONNECT , optional, falls back to LINK if missing
+ *   QUILTT_API_KEY           — OR's master Quiltt API key (Model A)
+ *   QUILTT_CONNECTOR_ID_LINK — Connector created in the Quiltt dashboard
+ *   QUILTT_CONNECTOR_ID_RECONNECT — optional, falls back to LINK if missing
  *
  * Model B (per-platform Quiltt key) reads from platforms.quiltt_api_key_ciphertext
  * when populated. Phase 1 ships Model A only; Model B fallback is a 1-line

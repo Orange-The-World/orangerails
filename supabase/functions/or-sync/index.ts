@@ -1,16 +1,16 @@
 /**
- * or-sync , server-side ZKA sync, subaccount-scoped.
+ * or-sync — server-side ZKA sync, subaccount-scoped.
  *
  * Replaces the previous user_app_grants token approach with the
  * platform/subaccount model from OrangeRails-Platform-Design.md.
  *
  * Auth (one of):
- *   - X-Platform-API-Key: <hex>   → platform mode (third-party platforms, etc.)
+ *   - X-Platform-API-Key: <hex>   → platform mode (BitBooks V3 etc.)
  *     Body MUST include subaccount_id (validated to belong to platform)
  *   - Authorization: Bearer <jwt> → direct mode (orangerails.com/app)
  *     Subaccount auto-resolved to the user's direct subaccount
  *
- * POST body , TWO MODES:
+ * POST body — TWO MODES:
  *
  *   1. Encrypted-payload mode (legacy, V3 today):
  *        { subaccount_id?, connection_ids?, credentials_key, transactions_key }
@@ -48,7 +48,7 @@ import {
 import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
-import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
+import { drainStrikeQueue } from '../_shared/providers/strike-queue.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //
@@ -90,7 +90,7 @@ function classifyUpstreamError(raw: string): UpstreamErrorCode {
   if (/(syntaxerror|unexpected (token|end of json)|json[. ]*parse|invalid json)/.test(m)) {
     return 'UPSTREAM_PARSE_FAILED';
   }
-  // OR's own bug , adapter received malformed credentials/config (NOT upstream's fault).
+  // OR's own bug — adapter received malformed credentials/config (NOT upstream's fault).
   // Pattern matches "[provider] credentials.field required|missing|invalid".
   if (/(\[\w+\] )?credentials\.\w+ (required|missing|invalid)|credentials must be|credentials json/.test(m)) {
     return 'ADAPTER_CONFIG_ERROR';
@@ -112,7 +112,7 @@ function randomCorrelationId(): string {
 // fingerprint is stable across different requests with the same root cause
 // (e.g. same Strike error returns the same fp regardless of correlation IDs
 // in the upstream body). Audit 2026-05-16 finding #1: no plaintext content
-// in logs , only a deterministic hash. Operator greps to correlate.
+// in logs — only a deterministic hash. Operator greps to correlate.
 async function errorFingerprint(raw: string, errorClass: string): Promise<string> {
   const firstLine = raw.split('\n')[0] ?? raw;
   const redacted = firstLine
@@ -216,7 +216,7 @@ Deno.serve(async (req: Request) => {
     }
     const format = resolvedFormat;
 
-    // Mode selection , `format` flips into protocol-driven sink mode.
+    // Mode selection — `format` flips into protocol-driven sink mode.
     const sinkMode = typeof format === 'string' && format.length > 0;
     let sinkAdapter: ReturnType<typeof getSinkAdapter> = null;
     if (sinkMode) {
@@ -278,7 +278,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const credsKey = await importAesKey(credentials_key);
-    // Only imported in legacy mode , sink mode never encrypts payloads.
+    // Only imported in legacy mode — sink mode never encrypts payloads.
     const txnsKey: CryptoKey | null = sinkMode ? null : await importAesKey(transactions_key!);
 
     let connQuery = ctx.serviceClient
@@ -456,81 +456,6 @@ Deno.serve(async (req: Request) => {
                 .from('quiltt_webhook_inbox')
                 .update({ processed_at: new Date().toISOString() })
                 .eq('event_id', ev.event_id);
-            }
-
-            // ── Direct profile-wide fallback ──────────────────────────
-            // The webhook inbox is best-effort: a freshly linked bank may
-            // have transactions on Quiltt before any connection.synced
-            // webhook lands (or webhooks may be unconfigured). When the
-            // inbox yielded nothing, query the profile's transactions
-            // directly , same pattern or-quiltt-accounts uses for
-            // accounts. The sink consumer dedupes by transaction id, so
-            // this is idempotent with the webhook path.
-            if (quilttSinkSynced === 0) {
-              let afterDirect: string | null = null;
-              let pagesDirect = 0;
-              while (pagesDirect < QUILTT_SINK_MAX_PAGES) {
-                const queryDirect = `
-                  query Q($first: Int!, $after: String) {
-                    transactions(first: $first, after: $after) {
-                      pageInfo { hasNextPage endCursor }
-                      nodes {
-                        id amount currencyCode date description entryType status
-                        account { id }
-                      }
-                    }
-                  }
-                `;
-                const respDirect = await fetch('https://api.quiltt.io/v1/graphql', {
-                  method: 'POST',
-                  headers: { 'Authorization': `Basic ${basicSink}`, 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ query: queryDirect, variables: { first: QUILTT_SINK_TX_PAGE_SIZE, after: afterDirect } }),
-                });
-                if (!respDirect.ok) {
-                  console.error(`[or-sync] Quiltt direct query ${respDirect.status}`);
-                  break;
-                }
-                const jsonDirect = await respDirect.json();
-                if (jsonDirect?.errors) {
-                  console.error('[or-sync] Quiltt direct GraphQL errors:', JSON.stringify(jsonDirect.errors).slice(0, 300));
-                  break;
-                }
-                const txsDirect = (jsonDirect?.data?.transactions?.nodes ?? []) as Array<{
-                  id: string; amount: number; currencyCode: string; date: string;
-                  description: string; entryType: string; status: string; account?: { id?: string };
-                }>;
-                for (const tx of txsDirect) {
-                  const direction: 'in' | 'out' = tx.entryType?.toUpperCase() === 'CREDIT' ? 'in' : 'out';
-                  const normalized: NormalizedTransaction = {
-                    id:               tx.id,
-                    adapter:          'quiltt',
-                    direction,
-                    type:             direction === 'in' ? 'deposit' : 'withdrawal',
-                    amount:           Math.abs(tx.amount),
-                    currency:         tx.currencyCode ?? 'USD',
-                    description:      tx.description ?? null,
-                    counterparty:     null,
-                    status:           tx.status ?? 'posted',
-                    timestamp:        tx.date,
-                    source_wallet_id: tx.account?.id ?? null,
-                  };
-                  const out = sinkAdapter!.toAppShape({
-                    transaction:      normalized,
-                    or_connection_id: conn.id,
-                    or_subaccount_id: subaccountId,
-                    external_user_id:
-                      ctx.mode === 'direct'
-                        ? ctx.userId
-                        : await resolveExternalUserId(ctx.serviceClient, subaccountId),
-                  });
-                  sinkOutputs.push(out);
-                  quilttSinkSynced++;
-                }
-                const pageInfoDirect = jsonDirect?.data?.transactions?.pageInfo;
-                if (!pageInfoDirect?.hasNextPage) break;
-                afterDirect = pageInfoDirect.endCursor ?? null;
-                pagesDirect++;
-              }
             }
 
             await ctx.serviceClient
@@ -756,7 +681,7 @@ Deno.serve(async (req: Request) => {
         // Look up the user's source-wallet selection. If any rows exist with
         // is_synced=true we go wallet-scoped; otherwise we fall back to the
         // legacy account-wide path. We deliberately do NOT auto-backfill
-        // source_wallets here , legacy connections continue working untouched
+        // source_wallets here — legacy connections continue working untouched
         // until the user opts in by re-running discovery from the UI.
         const { data: sourceWallets, error: swErr } = await ctx.serviceClient
           .from('source_wallets')
@@ -772,9 +697,9 @@ Deno.serve(async (req: Request) => {
         if (conn.provider_type === 'strike') {
           // Strike uses BOTH paths now (V3 ADR 2026-05-25):
           //   1. Per-state polling via GET /v1/invoices?$filter=(state eq 'X')
-          //      , historical backfill + catchup. Compound `or` filters trip
+          //      — historical backfill + catchup. Compound `or` filters trip
           //      Cloudflare so we iterate states; simple `eq` is fine.
-          //   2. Webhook queue drain (drainStrikeQueue) , near-real-time
+          //   2. Webhook queue drain (drainStrikeQueue) — near-real-time
           //      updates for events received since last sync.
           // Both paths merge into newTxs. Idempotent on the consumer side
           // via UNIQUE (connection_id, external_id) so duplicates are no-ops.
@@ -844,7 +769,7 @@ Deno.serve(async (req: Request) => {
             })),
           );
           // Update on conflict (don't skip): re-syncing a connection after a
-          // user adds source_wallets , or after any adapter improvement , must
+          // user adds source_wallets — or after any adapter improvement — must
           // re-encrypt and overwrite the existing payload so newer fields
           // (e.g. source_wallet_id) backfill onto pre-existing rows.
           const { error: upsertErr } = await ctx.serviceClient
@@ -896,18 +821,50 @@ Deno.serve(async (req: Request) => {
         const fp = await errorFingerprint(raw, errorClass);
         console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
 
+        // Temporary debug gate (DEV ONLY). Triple-gated:
+        //   1. OR_SYNC_DEBUG_CONNECTIONS env var must include this conn.id
+        //   2. Runtime SUPABASE_URL must match the OR DEV project ref
+        //      (hardcoded, so accidentally setting the env var on prod is
+        //      not enough to bypass this guard — the project ref check fails)
+        //   3. The plaintext path NEVER runs in any environment whose
+        //      SUPABASE_URL contains the OR PROD ref (extra-explicit deny)
+        //
+        // Per Codex review on PR #98: env-var-only gates are too weak; if
+        // the secret is accidentally copied to prod (env-file copy, dashboard
+        // misconfiguration), upstream errors would leak and break audit
+        // 2026-05-16 finding #1. Project-ref hardcoded guard fixes that.
+        //
+        // TODO 2026-05-22: REMOVE this entire block before promoting to prod.
+        // Keep the classifier expansions + errorFingerprint above; delete
+        // only this gated block.
+        const DEV_PROJECT_REF = 'gposxxmxenrdvewrprle';
+        const PROD_PROJECT_REF = 'lcdicqalreskibdfxkzb';
+        const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+        const isDevProject = supabaseUrl.includes(DEV_PROJECT_REF);
+        const isProdProject = supabaseUrl.includes(PROD_PROJECT_REF);
+        if (isDevProject && !isProdProject) {
+          const debugList = (Deno.env.get('OR_SYNC_DEBUG_CONNECTIONS') ?? '')
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean);
+          if (debugList.includes(conn.id)) {
+            const firstLine = raw.split('\n')[0]?.slice(0, 300) ?? '';
+            console.error(`[or-sync] DEBUG cid=${correlationId} raw_first_line=${firstLine}`);
+          }
+        }
+
         // Persist the taxonomy code on the connection row. In legacy
         // (non-sink) mode we still want it encrypted at rest so the column
         // shape stays uniform across modes. In sink mode the column is
         // plaintext per the V2 contract. We NEVER fall back to writing the
-        // raw upstream message , if encryption fails, store only the code.
+        // raw upstream message — if encryption fails, store only the code.
         const persistable = `${code}:${correlationId}`;
         let storedErr: string | null = persistable;
         if (!sinkMode) {
           try {
             storedErr = await encryptAes(persistable, txnsKey!);
           } catch {
-            // Encryption failed , store the unencrypted taxonomy code, not the raw message.
+            // Encryption failed — store the unencrypted taxonomy code, not the raw message.
             // (Code + correlation ID contain no customer plaintext.)
             storedErr = persistable;
           }
@@ -948,17 +905,10 @@ Deno.serve(async (req: Request) => {
  * (typically the platform's organizationId). Sink adapters use this as
  * their consumer-side row owner key.
  */
-// Memo cache , resolveExternalUserId is called once per transaction inside
-// the sink loops; without caching that is N identical DB round-trips per
-// sync (114 lookups for a 114-tx Mercury sync, ~10s wasted under load).
-// Cache per subaccount for the lifetime of the function invocation.
-const _externalUserIdCache = new Map<string, string>();
 async function resolveExternalUserId(
   serviceClient: ReturnType<typeof Object>,
   subaccountId: string,
 ): Promise<string> {
-  const cached = _externalUserIdCache.get(subaccountId);
-  if (cached !== undefined) return cached;
   // deno-lint-ignore no-explicit-any
   const sb = serviceClient as any;
   const { data, error } = await sb
@@ -969,7 +919,5 @@ async function resolveExternalUserId(
   if (error || !data?.external_user_id) {
     throw new Error(`Could not resolve external_user_id for subaccount ${subaccountId}`);
   }
-  const val = data.external_user_id as string;
-  _externalUserIdCache.set(subaccountId, val);
-  return val;
+  return data.external_user_id as string;
 }

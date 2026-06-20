@@ -11,7 +11,7 @@
  *   3. Add to the SINK_ADAPTERS map below
  *   4. The consumer can now call or-sync with `format: '<app-slug>'`
  *
- * The framework is intentionally minimal , slug → adapter map. No YAML loader
+ * The framework is intentionally minimal — slug → adapter map. No YAML loader
  * yet (today's adapters are TypeScript). When more than three consumers ship,
  * extract the account-mapping rules to YAML and load at startup.
  */
