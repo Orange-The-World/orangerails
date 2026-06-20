@@ -1,0 +1,56 @@
+{
+  "success": true,
+  "data": [
+    {
+      "position_id": "226",
+      "nft_id": 226,
+      "chain_id": 84532,
+      "borrower_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+      "vault_address": null,
+      "market_id": 0,
+      "status": "active",
+      "collateral_asset": "BTC",
+      "collateral_sats": "500000",
+      "collateral_btc": 0.005,
+      "debt_asset": "USDC",
+      "principal_usdc": "2000000000",
+      "principal_usdc_amount": 2000.0,
+      "accrued_interest_usdc": null,
+      "amount_decimals": { "collateral_sats": 8, "usdc": 6 },
+      "rate_type": "variable",
+      "rate_apr_bps": 597,
+      "ltv_bps": 4000,
+      "liquidation_threshold_bps": 9000,
+      "last_settlement_at": null,
+      "last_position_update_at": "2026-05-15T07:01:16.870Z"
+    },
+    {
+      "position_id": "201",
+      "nft_id": 201,
+      "chain_id": 84532,
+      "borrower_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+      "vault_address": null,
+      "market_id": 0,
+      "status": "closed",
+      "collateral_asset": "BTC",
+      "collateral_sats": "0",
+      "collateral_btc": 0,
+      "debt_asset": "USDC",
+      "principal_usdc": "0",
+      "principal_usdc_amount": 0,
+      "accrued_interest_usdc": null,
+      "amount_decimals": { "collateral_sats": 8, "usdc": 6 },
+      "rate_type": "variable",
+      "rate_apr_bps": 612,
+      "ltv_bps": 0,
+      "liquidation_threshold_bps": 9000,
+      "last_settlement_at": "2026-04-30T12:00:00.000Z",
+      "last_position_update_at": "2026-04-30T12:00:00.000Z"
+    }
+  ],
+  "meta": {
+    "count": 2,
+    "borrower_address": "0xf3fE9fa2F90D18937A5f0c824BAfB612f215FB1c",
+    "chain_id": 84532
+  }
+}
