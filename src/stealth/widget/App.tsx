@@ -53,15 +53,45 @@ function isAllowedOrigin(origin: string, allowlist: ReadonlySet<string>): boolea
   return allowlist.has(origin);
 }
 
+/**
+ * Resolve the most specific origin we can target the READY message at.
+ *
+ * Order of preference:
+ *  1. Explicit `?parent_origin=https://app.example.com` query parameter on the
+ *     widget URL. Opener apps that want strict origin targeting on READY can
+ *     append this to the popup URL.
+ *  2. `document.referrer` origin if set. Browsers preserve this when the
+ *     popup is opened without a `noreferrer` flag.
+ *  3. Fall back to `"*"`. READY carries no secrets (type + protocol_version
+ *     only). The INIT handshake is where the real origin allowlist is enforced.
+ */
+function pickReadyTargetOrigin(): string {
+  if (typeof window === "undefined") return "*";
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const declared = params.get("parent_origin");
+    if (declared && /^https?:\/\/[^/?#]+$/.test(declared)) return declared;
+  } catch {
+    // window.location unavailable or malformed; fall through.
+  }
+  try {
+    if (document.referrer) {
+      const referrerOrigin = new URL(document.referrer).origin;
+      if (referrerOrigin && referrerOrigin !== "null") return referrerOrigin;
+    }
+  } catch {
+    // referrer missing or unparsable; fall through.
+  }
+  return "*";
+}
+
 function postReady(target: Window | null) {
   if (!target) return;
   const ready: StealthReadyMessage = {
     type: "OR_STEALTH_READY",
     protocol_version: STEALTH_PROTOCOL_VERSION,
   };
-  // Origin '*' is acceptable here , the READY message contains no secrets,
-  // and we have not yet learned the trusted callback origin from INIT.
-  target.postMessage(ready, "*");
+  target.postMessage(ready, pickReadyTargetOrigin());
 }
 
 function postError(
