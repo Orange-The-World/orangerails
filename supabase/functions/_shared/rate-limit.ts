@@ -2,13 +2,13 @@
  * Per-(key, scope) one-minute rate limit, backed by public.platform_rate_limits.
  *
  * Designed to be added to a hot path with minimal risk:
- *   - **Fail open** , any error in the rate-limit machinery returns
+ *   - **Fail open** — any error in the rate-limit machinery returns
  *     { allowed: true } so a transient DB issue can't lock callers out.
- *   - **Log-only mode by default** , `RATE_LIMIT_ENFORCE` env var must be
+ *   - **Log-only mode by default** — `RATE_LIMIT_ENFORCE` env var must be
  *     set to "true" to actually reject. Otherwise the throttle just records
  *     the violation in console.error so we can baseline usage before
  *     enforcing.
- *   - **Atomic UPSERT** , one round trip per request; no read-then-write
+ *   - **Atomic UPSERT** — one round trip per request; no read-then-write
  *     race window.
  *
  * Caller pattern (or-link-complete is the first integration):
@@ -99,7 +99,7 @@ export async function checkPlatformRateLimit(
     // conflict (because we passed count: 1 in the values). That's wrong for
     // a true increment. To get atomic increment with upsert we need a
     // post-write update, or a stored function. Do the increment here as a
-    // separate atomic update , the SELECT in the next call gives us the
+    // separate atomic update — the SELECT in the next call gives us the
     // accurate post-increment count.
     const { data: incremented, error: incErr } = await supabase.rpc(
       'increment_platform_rate_limit',
