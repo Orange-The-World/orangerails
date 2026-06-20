@@ -7,11 +7,14 @@ type NavLink =
   | { kind: "internal"; to: string; label: string }
   | { kind: "external"; href: string; label: string };
 
+// Marketing site lives in a separate repo at https://orangerails.com.
+// Pages here are served from there, so the links are external. A
+// click from inside the integrator app cleanly leaves to marketing.
 const navLinks: NavLink[] = [
-  { kind: "internal", to: "/integrations", label: "Integrations" },
-  { kind: "internal", to: "/pricing", label: "Pricing" },
+  { kind: "external", href: "https://orangerails.com/integrations", label: "Integrations" },
+  { kind: "external", href: "https://orangerails.com/pricing", label: "Pricing" },
   { kind: "external", href: "https://docs.orangerails.com", label: "Docs" },
-  { kind: "internal", to: "/open-source", label: "Open Source" },
+  { kind: "external", href: "https://orangerails.com/open-source", label: "Open Source" },
 ];
 
 export function Navbar() {
