@@ -1,9 +1,8 @@
-name: Bootstrap + list CF Pages projects
+name: Bootstrap + patch CF Pages projects
 
-# One-shot helper: idempotent. Creates missing projects, then lists
-# all 8 Orange Rails Pages projects with their Git source, build
-# config, and most recent deployment status. Useful when a live URL
-# is serving stale content and we need to know whether a build ran.
+# Idempotent. Ensures all 8 Orange Rails CF Pages projects have the
+# correct Git source AND build configuration. Re-run any time the
+# dashboard state and the desired state drift.
 
 on:
   workflow_dispatch:
@@ -12,36 +11,46 @@ jobs:
   bootstrap:
     runs-on: ubuntu-latest
     steps:
-      - name: Create + list
+      - name: Patch project configs
         env:
           TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ACCT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -e
 
-          create() {
-            local NAME="$1" REPO="$2" ROOT_DIR="$3" OUT_DIR="${4:-dist}" BUILD="${5:-bun run build}"
+          # PATCH build_config + source (deployments_enabled). NAME, REPO, BRANCH, ROOT, OUT, BUILD.
+          patch() {
+            local NAME="$1" REPO="$2" BRANCH="$3" ROOT_DIR="$4" OUT_DIR="$5" BUILD="$6"
             local ROOT_BLOCK=""
             [ -n "$ROOT_DIR" ] && ROOT_BLOCK=",\"root_dir\":\"$ROOT_DIR\""
-            local RESP=$(curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects" \
+            echo "=== $NAME ($REPO @ $BRANCH, build=$BUILD out=$OUT_DIR root=$ROOT_DIR) ==="
+            local RESP
+            RESP=$(curl -sS -X PATCH "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects/$NAME" \
               -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-              -d "{\"name\":\"$NAME\",\"production_branch\":\"dev\",\"source\":{\"type\":\"github\",\"config\":{\"owner\":\"Orange-The-World\",\"repo_name\":\"$REPO\",\"production_branch\":\"dev\",\"deployments_enabled\":true,\"pr_comments_enabled\":true,\"preview_deployment_setting\":\"all\"}},\"build_config\":{\"build_command\":\"$BUILD\",\"destination_dir\":\"$OUT_DIR\"$ROOT_BLOCK}}")
-            echo "$RESP" | python3 -c "import json,sys; r=json.load(sys.stdin); print('  create:', 'ok' if r.get('success') else r.get('errors',[]))"
+              -d "{\"production_branch\":\"$BRANCH\",\"source\":{\"type\":\"github\",\"config\":{\"owner\":\"Orange-The-World\",\"repo_name\":\"$REPO\",\"production_branch\":\"$BRANCH\",\"deployments_enabled\":true,\"pr_comments_enabled\":true,\"preview_deployment_setting\":\"all\"}},\"build_config\":{\"build_command\":\"$BUILD\",\"destination_dir\":\"$OUT_DIR\"$ROOT_BLOCK}}")
+            echo "$RESP" | python3 -c "import json,sys; r=json.load(sys.stdin); print('  patch:', 'ok' if r.get('success') else r.get('errors',[]))"
           }
 
-          create orangerails-app-dev orangerails ""           dist "bun run build"
-          create orange-world-dev    orange-world sites/world dist "bun run build"
-          create orbi-dev            orbi         ""          public ":"
-          create orbi-prod           orbi         ""          public ":"
+          # Marketing site (orangerails-marketing repo) -> orangerails.com + dev.orangerails.com
+          patch orangerails-prod      orangerails-marketing prod ""           dist "bun run build"
+          patch orangerails-dev       orangerails-marketing dev  ""           dist "bun run build"
+
+          # Core OR app (orangerails repo) -> app.orangerails.com + dev app
+          patch orangerails-app       orangerails           prod ""           dist "bun run build"
+          patch orangerails-app-dev   orangerails           dev  ""           dist "bun run build"
+
+          # Orange World (orange-world repo) -> orangethe.world + dev.orangethe.world
+          patch orangerails-world     orange-world          prod sites/world  dist "bun run build"
+          patch orange-world-dev      orange-world          dev  sites/world  dist "bun run build"
+
+          # ORBI placeholders -> repo has no frontend yet, ship the README as a static landing
+          patch orbi-prod             orbi                  prod ""           "" "mkdir -p out && cp README.md out/index.md && echo '<!DOCTYPE html><meta http-equiv=refresh content=\"0;url=https://github.com/Orange-The-World/orbi\">' > out/index.html"
+          patch orbi-dev              orbi                  dev  ""           "" "mkdir -p out && cp README.md out/index.md && echo '<!DOCTYPE html><meta http-equiv=refresh content=\"0;url=https://github.com/Orange-The-World/orbi\">' > out/index.html"
 
           echo ""
+          echo "=== verify ==="
           for proj in orangerails-prod orangerails-dev orangerails-app orangerails-app-dev orangerails-world orange-world-dev orbi-dev orbi-prod; do
-            echo "=== $proj ==="
             curl -sH "Authorization: Bearer $TOKEN" \
               "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects/$proj" \
-              | python3 -c "import json,sys; d=json.load(sys.stdin).get('result',{}) or {}; src=d.get('source') or {}; cfg=src.get('config') or {}; bc=d.get('build_config') or {}; print('  source:', src.get('type','none'), '->', (cfg.get('owner','') + '/' + cfg.get('repo_name','')) if cfg.get('repo_name') else '(none)', 'branch=' + cfg.get('production_branch','-')); print('  build:', repr(bc.get('build_command')), 'out=' + repr(bc.get('destination_dir')), 'root=' + repr(bc.get('root_dir')))"
-            curl -sH "Authorization: Bearer $TOKEN" \
-              "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects/$proj/deployments?per_page=3" \
-              | python3 -c "import json,sys; ds=json.load(sys.stdin).get('result',[]) or []; print('  (no deployments)') if not ds else [print('  ' + d.get('created_on','')[:19], 'env=' + (d.get('environment') or '?'), 'stage=' + ((d.get('latest_stage') or {}).get('name') or '?') + '/' + ((d.get('latest_stage') or {}).get('status') or '?'), 'branch=' + ((d.get('deployment_trigger') or {}).get('metadata') or {}).get('branch','-'), 'commit=' + (((d.get('deployment_trigger') or {}).get('metadata') or {}).get('commit_hash','-'))[:8]) for d in ds[:3]]"
-            echo ""
+              | python3 -c "import json,sys,os; d=json.load(sys.stdin).get('result',{}); src=d.get('source') or {}; cfg=src.get('config') or {}; bc=d.get('build_config') or {}; print('  ' + '${proj}', '-> ' + cfg.get('repo_name','?') + '@' + cfg.get('production_branch','?'), 'build=' + repr(bc.get('build_command'))[:60], 'out=' + repr(bc.get('destination_dir'))[:20], 'root=' + repr(bc.get('root_dir'))[:20])" 2>/dev/null || true
           done
