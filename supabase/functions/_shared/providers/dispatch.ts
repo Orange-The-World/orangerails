@@ -20,13 +20,13 @@
  */
 
 import type { ProviderAdapter } from './types.ts';
-import { blinkAdapter } from './blink.ts';
-import { xpubAdapter } from './xpub.ts';
-import { btcpayAdapter } from './btcpay.ts';
-import { strikeAdapter } from './strike.ts';
-import { surgeAdapter } from './surge.ts';
-import { makeCcxtAdapter } from './_ccxt.ts';
-import { CCXT_MANIFEST } from './_ccxt-manifest.ts';
+import { blinkAdapter } from './blink/index.ts';
+import { xpubAdapter } from './xpub/index.ts';
+import { btcpayAdapter } from './btcpay/index.ts';
+import { strikeAdapter } from './strike/index.ts';
+import { surgeAdapter } from './surge/index.ts';
+import { makeCcxtAdapter } from './_ccxt/index.ts';
+import { CCXT_MANIFEST } from './_ccxt/manifest.ts';
 
 // CCXT-backed exchanges. Generated from CCXT introspection so the picker
 // reflects whatever ccxt@<pinned> supports without per-exchange code.
