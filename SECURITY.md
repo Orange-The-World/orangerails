@@ -211,3 +211,12 @@ no key material leaking into thrown error messages.
 Found a vulnerability? Please do not open a public GitHub issue.
 Email the maintainers directly with a description and reproduction steps.
 We target 72-hour acknowledgment and 90-day coordinated disclosure.
+
+## Reporting a vulnerability
+
+Please report security vulnerabilities through GitHub's private vulnerability disclosure:
+https://github.com/Orange-The-World/orangerails/security/advisories/new
+
+We aim to acknowledge within 72 hours and ship a fix or workaround within 90 days for confirmed issues. Critical issues (active exploitation, easily-exploitable credential disclosure) get expedited handling.
+
+Do not file public issues for security findings.

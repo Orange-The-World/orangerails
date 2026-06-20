@@ -26,15 +26,15 @@ function initPostHogIfConsented() {
     return;
   }
   if (consent !== "accept") return;
-      posthog.init("phc_ufrtHMjamZtq8ZhWA53ALx5KwSd3xKNbiDW9GH8UXNqn", {
-      api_host: "https://eu.i.posthog.com",
-      persistence: "memory",
-      person_profiles: "never",
-      capture_pageview: true,
-      autocapture: false,
-      disable_session_recording: true,
-      respect_dnt: true,
-    });
+  posthog.init("phc_ufrtHMjamZtq8ZhWA53ALx5KwSd3xKNbiDW9GH8UXNqn", {
+    api_host: "https://eu.i.posthog.com",
+    persistence: "memory",
+    person_profiles: "never",
+    capture_pageview: true,
+    autocapture: false,
+    disable_session_recording: true,
+    respect_dnt: true,
+  });
 }
 
 function NotFoundComponent() {
@@ -67,7 +67,7 @@ export const Route = createRootRoute({
       { name: "theme-color", content: "#F7931A" },
       { name: "robots", content: "index, follow" },
       { name: "author", content: "OrangeRails" },
-      { name: "keywords", content: "Bitcoin, Plaid alternative, open source, zero-knowledge, financial data API, Bitcoin accounting, Lightning Network, self-hostable, Apache 2.0, BTCPay, Blink, mining payouts" },
+      { name: "keywords", content: "Bitcoin, open source, zero-knowledge, financial data API, Bitcoin accounting, Lightning Network, self-hostable, Apache 2.0, BTCPay, Blink, mining payouts" },
       { property: "og:type", content: "website" },
       { property: "og:site_name", content: "OrangeRails" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -94,7 +94,7 @@ export const Route = createRootRoute({
           url: "https://orangerails.com",
           logo: "https://orangerails.com/favicon.svg",
           description:
-            "Open-source, zero-knowledge, Bitcoin-first alternative to Plaid. Apache 2.0.",
+            "Open-source, zero-knowledge, Bitcoin-first way to share bank data with your bookkeeper. Apache 2.0.",
           sameAs: ["https://orangerails.com"],
         }),
       },
@@ -126,11 +126,6 @@ initPostHogIfConsented();
   );
 }
 
-
-// One-time analytics-notice banner shown once per browser, dismissed via
-// localStorage (UI state, not tracking , exempt from consent under
-// GDPR Article 6 because it's strictly necessary for the banner not to
-// nag). Same wording shipped across every BitBooks-family surface.
 function AnalyticsNotice() {
   const [decided, setDecided] = useState(() => {
     if (typeof window === "undefined") return true;
@@ -179,53 +174,4 @@ function AnalyticsNotice() {
     </div>
   );
 }
-    };
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => window.removeEventListener("scroll", onScroll);
-  }, [show]);
-  if (!show) return null;
-  const dismiss = () => { localStorage.setItem("bb_notice_dismissed", "1"); setShow(false); };
-  return (
-    <div
-      style={{
-        position: "fixed", left: 20, bottom: 20, zIndex: 9999,
-        maxWidth: 320, padding: "14px 16px",
-        background: "#0F172A", color: "#FAFAF9",
-        borderRadius: 14,
-        boxShadow: "0 12px 32px rgba(0,0,0,0.28), 0 2px 6px rgba(0,0,0,0.18)",
-        font: "12.5px/1.5 -apple-system, 'Plus Jakarta Sans', system-ui, sans-serif",
-        animation: "bbnotin 260ms cubic-bezier(0.16,1,0.3,1)",
-      }}
-      role="region"
-      aria-label="Analytics notice"
-    >
-      <style>{`@keyframes bbnotin{from{transform:translateY(16px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
-      <button
-        type="button"
-        onClick={dismiss}
-        aria-label="Close"
-        style={{
-          position: "absolute", top: 6, right: 8,
-          background: "transparent", color: "#94A3B8", border: 0,
-          fontSize: 18, lineHeight: 1, padding: "4px 6px",
-          cursor: "pointer", borderRadius: 6,
-        }}
-      >×</button>
-      <p style={{ margin: "0 0 10px 0", paddingRight: 18 }}>
-        Anonymous analytics ,{" "}
-        <strong style={{ color: "#fff" }}>no tracking, no profiles, no cookies.</strong>{" "}
-        A session cookie is set only if you sign in, and is deleted when you sign out.
-      </p>
-      <button
-        type="button"
-        onClick={dismiss}
-        style={{
-          background: "#F7931A", color: "#fff", border: 0, borderRadius: 8,
-          padding: "6px 14px", font: "inherit", fontWeight: 600, fontSize: 12.5, cursor: "pointer",
-        }}
-      >
-        Got it
-      </button>
-    </div>
-  );
-}
+
