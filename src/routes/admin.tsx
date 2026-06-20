@@ -7,6 +7,10 @@ export const Route = createFileRoute('/admin')({
 });
 
 function AdminLayout() {
+  // Server-side enforcement: admin tables (customers, subscriptions,
+  // invoices, payments) are gated by RLS policies that key off
+  // auth.jwt() ->> 'app_metadata' -> 'role' == 'staff'. This
+  // client-side check is defense-in-depth, not the primary lock.
   const role = useRole();
   const navigate = useNavigate();
 
