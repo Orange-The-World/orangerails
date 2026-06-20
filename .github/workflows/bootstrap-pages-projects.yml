@@ -1,8 +1,4 @@
-name: Bootstrap + patch + list CF Pages projects
-
-# Idempotent. Ensures all 8 Orange Rails CF Pages projects have the
-# correct Git source AND build configuration. Also lists the configured
-# variable NAMES (never values) so we can see what's wired per project.
+name: Bootstrap CF Pages projects
 
 on:
   workflow_dispatch:
@@ -11,46 +7,19 @@ jobs:
   bootstrap:
     runs-on: ubuntu-latest
     steps:
-      - name: Patch + list
+      - name: List config + variable names
         env:
           TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ACCT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -e
-
-          patch() {
-            local NAME="$1" REPO="$2" BRANCH="$3" ROOT_DIR="$4" OUT_DIR="$5" BUILD="$6"
-            local ROOT_BLOCK=""
-            [ -n "$ROOT_DIR" ] && ROOT_BLOCK=",\"root_dir\":\"$ROOT_DIR\""
-            echo "=== $NAME ($REPO @ $BRANCH) ==="
-            local RESP
-            RESP=$(curl -sS -X PATCH "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects/$NAME" \
-              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-              -d "{\"production_branch\":\"$BRANCH\",\"source\":{\"type\":\"github\",\"config\":{\"owner\":\"Orange-The-World\",\"repo_name\":\"$REPO\",\"production_branch\":\"$BRANCH\",\"deployments_enabled\":true,\"pr_comments_enabled\":true,\"preview_deployment_setting\":\"all\"}},\"build_config\":{\"build_command\":\"$BUILD\",\"destination_dir\":\"$OUT_DIR\"$ROOT_BLOCK}}")
-            echo "$RESP" | python3 -c "import json,sys; r=json.load(sys.stdin); print('  patch:', 'ok' if r.get('success') else r.get('errors',[]))"
-          }
-
-          patch orangerails-prod      orangerails-marketing prod ""           dist "bun run build"
-          patch orangerails-dev       orangerails-marketing dev  ""           dist "bun run build"
-          patch orangerails-app       orangerails           prod ""           dist "bun run build"
-          patch orangerails-app-dev   orangerails           dev  ""           dist "bun run build"
-          patch orangerails-world     orange-world          prod sites/world  dist "bun run build"
-          patch orange-world-dev      orange-world          dev  sites/world  dist "bun run build"
-
-          echo ""
-          echo "=== configured variable NAMES per project (values never printed) ==="
           for proj in orangerails-prod orangerails-dev orangerails-app orangerails-app-dev orangerails-world orange-world-dev orbi-dev orbi-prod; do
-            echo "--- $proj ---"
+            echo "=== $proj ==="
             curl -sH "Authorization: Bearer $TOKEN" \
-              "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects/$proj" \
-              | python3 -c "
-import json, sys
-d = json.load(sys.stdin).get('result', {}) or {}
-deploy_cfg = d.get('deployment_configs') or {}
-for which in ('preview', 'production'):
-    cfg = deploy_cfg.get(which) or {}
-    raw = (cfg.get('env_vars') or {})
-    names = sorted(raw.keys())
-    print('  [' + which + '] ' + str(len(names)) + ': ' + (', '.join(names) if names else '(none)'))
-"
+              "https://api.cloudflare.com/client/v4/accounts/$ACCT/pages/projects/$proj" > /tmp/p.json
+            jq -r '"  source: \(.result.source.config.owner)/\(.result.source.config.repo_name) @ \(.result.source.config.production_branch)"' /tmp/p.json
+            jq -r '"  build: " + (.result.build_config.build_command // "(none)") + " out=" + (.result.build_config.destination_dir // "(none)") + " root=" + (.result.build_config.root_dir // "")' /tmp/p.json
+            echo "  preview vars:    $(jq -r '.result.deployment_configs.preview.env_vars | keys | join(", ")' /tmp/p.json)"
+            echo "  production vars: $(jq -r '.result.deployment_configs.production.env_vars | keys | join(", ")' /tmp/p.json)"
+            echo ""
           done
