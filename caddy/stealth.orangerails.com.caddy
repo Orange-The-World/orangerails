@@ -1,5 +1,5 @@
 # Caddy snippet for the Stealth Sync filter CDN.
-# Placed at /opt/orangerails/caddy/stealth.orangerails.com.caddy on operator infrastructure.
+# Placed at /opt/orangerails/caddy/stealth.orangerails.com.caddy on maintainer infrastructure.
 # Auto-imported by /etc/caddy/Caddyfile via `import /opt/orangerails/caddy/*.caddy`.
 #
 # Serves the BIP158 compact filter files written by btc-filter-worker.service
