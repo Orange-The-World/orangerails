@@ -1,10 +1,10 @@
 /**
- * Agent key wrapping , owner-side helper to wrap org data keys for a
+ * Agent key wrapping — owner-side helper to wrap org data keys for a
  * newly-activated AI agent member.
  *
  * Lifecycle:
  *   1. Owner mints invitation (or-agent-invite-mint)
- *   2. Agent CLI redeems (or-agent-invite-redeem) , agent_members row gains
+ *   2. Agent CLI redeems (or-agent-invite-redeem) — agent_members row gains
  *      activated_at + shadow_user_id + identity_pubkey + kem_pubkey
  *   3. Owner's browser detects activation (polling or realtime subscription)
  *   4. THIS MODULE wraps each currently-unlocked org data key for the new
@@ -35,9 +35,9 @@ import {
 export interface AgentMemberForWrap {
   /** agent_members.id */
   id: string;
-  /** agent_members.shadow_user_id , recipient on wrapped_data_keys */
+  /** agent_members.shadow_user_id — recipient on wrapped_data_keys */
   shadow_user_id: string;
-  /** agent_members.kem_pubkey , base64 of the hybrid X25519+ML-KEM-768 public key */
+  /** agent_members.kem_pubkey — base64 of the hybrid X25519+ML-KEM-768 public key */
   kem_pubkey: string;
 }
 
@@ -70,7 +70,7 @@ export interface SupabaseLike {
 
 /**
  * Wraps each data key for the agent's kem_pubkey and returns the
- * envelopes (NOT yet persisted , caller decides when to insert).
+ * envelopes (NOT yet persisted — caller decides when to insert).
  */
 export async function wrapDataKeysForAgent(
   agent: AgentMemberForWrap,
@@ -78,10 +78,10 @@ export async function wrapDataKeysForAgent(
   algorithm: string = DEFAULT_WRAP_ALGORITHM,
 ): Promise<WrappedEnvelope[]> {
   if (!agent.kem_pubkey || agent.kem_pubkey.length === 0) {
-    throw new Error("agent kem_pubkey is missing , agent must be activated first");
+    throw new Error("agent kem_pubkey is missing — agent must be activated first");
   }
   if (!agent.shadow_user_id) {
-    throw new Error("agent shadow_user_id is missing , agent must be activated first");
+    throw new Error("agent shadow_user_id is missing — agent must be activated first");
   }
   if (dataKeys.length === 0) return [];
 
@@ -91,7 +91,7 @@ export async function wrapDataKeysForAgent(
   }
 
   const recipientPubkey = base64ToBytes(agent.kem_pubkey);
-  // WrapRecipient field names are userId / publicKey , not the snake_case
+  // WrapRecipient field names are userId / publicKey — not the snake_case
   // names this file used to use. The KeyWrapStrategy signature is
   //   wrapForRecipient(dataKey: Uint8Array, recipientPublicKey: Uint8Array)
   // so we pass the raw pubkey bytes, not the recipient object.
