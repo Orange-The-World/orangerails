@@ -38,7 +38,7 @@ jobs:
 
       - name: Test
         working-directory: workers/api-gateway
-        run: bun test
+        run: bunx vitest run --config vitest.config.ts
 
       - name: Pick environment for this branch
         id: env
