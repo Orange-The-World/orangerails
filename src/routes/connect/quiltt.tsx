@@ -29,7 +29,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttConnector, useQuilttInstitutions } from "@quiltt/react/hooks";
-import { AlertTriangle, CheckCircle2, Loader2, Search } from "lucide-react";
+import { AlertTriangle, Building2, CheckCircle2, Loader2, Search } from "lucide-react";
 
 interface InstitutionRow {
   id?: string;
@@ -51,11 +51,11 @@ function tileColor(seed: string): string {
 export const Route = createFileRoute("/connect/quiltt")({
   head: () => ({
     meta: [
-      { title: "Connect your bank | OrangeRails" },
+      { title: "Connect your bank" },
       {
         name: "description",
         content:
-          "Link any US bank account through Quiltt (Finicity, MX, Akoya, Plaid). OrangeRails never sees your bank credentials.",
+          "Link your bank securely. Your credentials stay with your bank — only encrypted transaction data flows into your vault.",
       },
     ],
   }),
@@ -271,14 +271,21 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
 
   if (phase === "done") {
     return (
-      <div className="space-y-2">
-        <div className="flex items-center gap-2 text-emerald-600">
-          <CheckCircle2 className="h-5 w-5" />
-          <strong>Bank connected!</strong>
+      <div className="flex flex-col items-center gap-4 py-6 text-center">
+        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-orange-50 ring-1 ring-orange-100">
+          <CheckCircle2 className="h-7 w-7 text-orange-500" />
         </div>
-        <p className="text-xs text-slate-500">
-          Returning you to your app…
-        </p>
+        <div className="space-y-1">
+          <p className="text-base font-semibold text-slate-900">Your bank is connected</p>
+          <p className="text-sm text-slate-500">You can safely close this window.</p>
+        </div>
+        <button
+          type="button"
+          onClick={tryClose}
+          className="mt-1 inline-flex w-full items-center justify-center rounded-full bg-orange-500 px-6 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-600 sm:w-auto"
+        >
+          Close
+        </button>
       </div>
     );
   }
@@ -335,15 +342,35 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   }
 
   // phase === "ready"
-  // Always show a loader — the Quiltt connector auto-opens above. The
-  // inline OR search (BankSearchStep) has been retired because Quiltt's
-  // own iframe shows the institution picker.
+  // The Quiltt connector auto-opens its own secure modal on top of this
+  // page. So this is NOT a loading state — it's an intentional backdrop
+  // behind Quiltt's window. A spinning loader here read as a second,
+  // competing "still loading" indicator next to Quiltt's. Show a calm,
+  // static prompt that points the user at Quiltt's window instead.
   return (
-    <div className="flex items-center gap-3 text-sm text-slate-500">
-      <Loader2 className="h-4 w-4 animate-spin" />
-      {selectedInstitution?.name
-        ? `Opening ${selectedInstitution.name}…`
-        : "Opening bank picker…"}
+    <div className="flex flex-col items-center gap-3 py-6 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-orange-50">
+        <Building2 className="h-6 w-6 text-orange-500" />
+      </div>
+      <p className="text-sm font-medium text-slate-900">
+        {selectedInstitution?.name
+          ? `Connecting to ${selectedInstitution.name}`
+          : "Connecting to your bank"}
+      </p>
+      <p className="max-w-xs text-xs text-slate-500">
+        Continue in the secure window. It opens automatically — if you closed it,
+        reopen with the button below.
+      </p>
+      <button
+        type="button"
+        onClick={() => {
+          autoOpenedRef.current = false;
+          setPhase("ready");
+        }}
+        className="mt-1 inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+      >
+        Reopen secure window
+      </button>
     </div>
   );
 }
