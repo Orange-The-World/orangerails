@@ -1,0 +1,52 @@
+name: Dependabot lockfile regen
+
+# Dependabot does not know how to regenerate Bun's lockfile when it bumps
+# an npm dependency, so every Dependabot PR fails the `bun install
+# --frozen-lockfile` step in CI. This workflow runs on Dependabot PRs only,
+# regenerates the lockfile, and commits it back to the PR branch so the
+# main CI workflow then sees an in-sync tree.
+#
+# The synchronize event from the regen-push re-triggers this workflow.
+# On the second run the lockfile is already in sync, so the commit step
+# is a no-op and the loop terminates.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  fix-lockfile:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Regenerate lockfile
+        run: bun install --no-frozen-lockfile
+
+      - name: Commit lockfile if it changed
+        run: |
+          # Stage whichever lockfile this repo uses (Bun ships either
+          # bun.lockb binary OR bun.lock text format).
+          git add bun.lockb bun.lock 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "Lockfile already in sync, nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(deps): regenerate Bun lockfile for Dependabot bump"
+          git push
