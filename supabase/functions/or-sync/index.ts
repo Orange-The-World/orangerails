@@ -49,7 +49,7 @@ import {
 import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
-import { drainStrikeQueue } from '../_shared/providers/strike-queue.ts';
+import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //
