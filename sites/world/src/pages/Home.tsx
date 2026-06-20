@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import BtcUsdChart from "@/components/BtcUsdChart";
 import PurchasingPowerChart from "@/components/PurchasingPowerChart";
+import BtcVsGoldChart from "@/components/BtcVsGoldChart";
 
 export default function Home() {
   return (
@@ -61,6 +62,19 @@ export default function Home() {
         </div>
         <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <PurchasingPowerChart />
+        </div>
+      </section>
+
+      <section className="max-w-5xl mx-auto px-6 pb-24">
+        <div className="text-center mb-6">
+          <h2 className="text-2xl font-bold text-slate-900">Bitcoin, priced in gold.</h2>
+          <p className="mt-2 text-slate-600 max-w-2xl mx-auto">
+            Strip out the dollar entirely. How many ounces of gold has one Bitcoin bought,
+            day by day, on the days the London gold market sets a price?
+          </p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <BtcVsGoldChart />
         </div>
       </section>
 
