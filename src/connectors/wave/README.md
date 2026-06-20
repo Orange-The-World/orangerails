@@ -21,7 +21,7 @@ imports cleanly into V3's existing CSV import wizard (and through it into
 ## What it does NOT do
 
 - It does not call Wave's API. Use the existing `scripts/wave-backup.py` on
-  jarvis for that; this module consumes the JSON files that produces.
+  the maintainer host for that; this module consumes the JSON files that produces.
 - It does not import transactions via API. Wave's API has no transaction
   endpoint , money transactions must come from Wave's UI CSV export. See
   `notes/wave-accounting/backups/2026-05-19/homesweethome/_unavailable_via_api.json`.
@@ -69,7 +69,7 @@ bun run scripts/wave-convert.ts <input-dir> <output-dir>
 
 `<input-dir>` must contain `accounts.json`. Optional siblings:
 `customers.json`, `vendors.json`, `accounting.csv` , each unlocks one more
-output CSV. The accompanying `scripts/wave-backup.py` (on jarvis) writes the
+output CSV. The accompanying `scripts/wave-backup.py` (on the maintainer host) writes the
 JSON shape this connector expects.
 
 Wave's `accounting.csv` is not produced by the API. Export it from the Wave
