@@ -60,16 +60,12 @@ BEGIN
   END IF;
 END $$;
 
--- 5. source_wallets.subaccount_id — read on every wallet list/sync
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'source_wallets'
-  ) THEN
-    CREATE INDEX IF NOT EXISTS idx_source_wallets_subaccount
-      ON public.source_wallets(subaccount_id);
-  END IF;
-END $$;
+-- 5. source_wallets.subaccount_id — REMOVED 2026-06-17.
+--    The column does not exist on either OR DEV or OR PROD (confirmed via
+--    information_schema). source_wallets joins via connection_id (indexed
+--    by 20260423000000_source_wallets.sql:idx_source_wallets_connection),
+--    not subaccount_id. The audit finding that suggested this index was
+--    based on an incorrect column assumption.
 
 -- After this migration ships, queries that previously walked the full
 -- connections / webhook_delivery / quiltt_webhook_inbox tables become
