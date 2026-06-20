@@ -12,7 +12,7 @@
  * Resolution order, per field, for each call:
  *   1. `platforms.<column>` if non-NULL (per-platform value)
  *   2. Process env `QUILTT_*` (global fallback during transition)
- *   3. `undefined` , caller decides whether that's fatal
+ *   3. `undefined` — caller decides whether that's fatal
  *
  * The env-fallback path is intentional: it keeps OR backwards-compatible
  * during the multi-tenant transition. Once every consumer platform's row
@@ -28,7 +28,7 @@ export interface PlatformQuilttConfig {
   connectorIdLink: string;
   /** Connector id for repairing an expired connection. Falls back to LINK. */
   connectorIdReconnect: string;
-  /** Catalog Profile id , the rate-limit subject (10/hr, 20/day). May be ''. */
+  /** Catalog Profile id — the rate-limit subject (10/hr, 20/day). May be ''. */
   catalogProfileId: string;
   /** Public half of the API key, used for rotation. May be ''. */
   apiKeyId: string;

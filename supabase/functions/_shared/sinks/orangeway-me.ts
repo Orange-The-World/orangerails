@@ -12,14 +12,14 @@
  * a plaintext amount, description, merchant, or memo.
  *
  * The brief in-memory exposure inside OR (Quiltt → OR → client) is the
- * unavoidable cost of pulling bank data , Quiltt itself sees plaintext
+ * unavoidable cost of pulling bank data — Quiltt itself sees plaintext
  * because it has to log into the bank. The ZKA guarantee covers the
  * at-rest boundary at OR + OWM, not the in-flight transformation step.
  *
  * Row shapes match the public.transactions + public.connection_account_map
  * schemas in OWM (see migration 20260418021640_… and 20260423120000_…).
  *
- * Account creation happens out of band via owm-or-discover-quiltt , by the
+ * Account creation happens out of band via owm-or-discover-quiltt — by the
  * time or-sync runs for a connection, the account row already exists.
  * This sink emits only transaction rows + (idempotent) connection-account
  * mapping hints. If the mapping is missing, the OWM client uses
@@ -71,7 +71,7 @@ function transactionRow(input: SinkInput) {
   const { transaction: tx, or_connection_id, or_subaccount_id, external_user_id } = input;
 
   // OWM stores `date` plaintext (it's needed for sort/index and is not
-  // a load-bearing privacy field , bank statements regularly publish dates
+  // a load-bearing privacy field — bank statements regularly publish dates
   // in clear). The cleartext occurredAt is preserved here.
   const occurredAt = new Date(tx.timestamp);
   const date = occurredAt.toISOString().slice(0, 10); // YYYY-MM-DD
@@ -98,7 +98,7 @@ function transactionRow(input: SinkInput) {
   }
 
   return {
-    // Server-generated UUID at INSERT , placeholder so the row stays
+    // Server-generated UUID at INSERT — placeholder so the row stays
     // structurally complete on the wire. Client overwrites before INSERT.
     id: null,
     user_id: external_user_id,
@@ -112,7 +112,7 @@ function transactionRow(input: SinkInput) {
                        // scope explicitly via household-osk wrapping.
     date,
 
-    // Encrypted-at-rest fields , PLAINTEXT on the wire, ciphertext after
+    // Encrypted-at-rest fields — PLAINTEXT on the wire, ciphertext after
     // the client's AES-GCM step. Paths listed in requires_encryption.
     enc_amount:      plaintextAmount,
     enc_description: tx.description ?? '',
@@ -128,7 +128,7 @@ function transactionRow(input: SinkInput) {
 
     is_split_parent: false,
 
-    // Provenance , the only OR-side bookkeeping that survives into OWM.
+    // Provenance — the only OR-side bookkeeping that survives into OWM.
     // Lets owm-or-sync-stream dedupe re-syncs by (or_subaccount_id, external_id).
     _meta: {
       or_subaccount_id,
@@ -143,7 +143,7 @@ function transactionRow(input: SinkInput) {
 /**
  * Build the connection_account_map row. Tells OWM which `accounts.id`
  * this OR external wallet should resolve to. The encrypted_account_id
- * column is MEK-ciphertext of an OWM accounts.id UUID , the client
+ * column is MEK-ciphertext of an OWM accounts.id UUID — the client
  * provides it after vault-side lookup. We emit a hint here so the
  * client can find or create the mapping idempotently.
  */
