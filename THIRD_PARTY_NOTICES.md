@@ -1,36 +1,423 @@
 # Third-party notices
 
-This document aggregates the licenses of third-party components shipped or
-linked by Orange Rails. Each component is governed by the license stated in
-its own source distribution.
+This document aggregates the licenses of NPM dependencies shipped or linked by `orangerails-dev`. Each component is governed by the license stated in its own source distribution.
 
-## NPM dependencies
+Total packages: **403**
+Distinct license strings: **16**
 
-The runtime and build-time NPM dependency tree is the source of truth for
-this list. To regenerate a fresh inventory:
+## NPM dependencies (production)
+
+| Package | Version | License | Repository |
+|---------|---------|---------|------------|
+| @apollo/client | 4.2.0 | MIT | https://github.com/apollographql/apollo-client |
+| @babel/code-frame | 7.29.0 | MIT | https://github.com/babel/babel |
+| @babel/compat-data | 7.29.0 | MIT | https://github.com/babel/babel |
+| @babel/core | 7.29.0 | MIT | https://github.com/babel/babel |
+| @babel/generator | 7.29.1 | MIT | https://github.com/babel/babel |
+| @babel/helper-compilation-targets | 7.28.6 | MIT | https://github.com/babel/babel |
+| @babel/helper-globals | 7.28.0 | MIT | https://github.com/babel/babel |
+| @babel/helper-module-imports | 7.28.6 | MIT | https://github.com/babel/babel |
+| @babel/helper-module-transforms | 7.28.6 | MIT | https://github.com/babel/babel |
+| @babel/helper-plugin-utils | 7.28.6 | MIT | https://github.com/babel/babel |
+| @babel/helper-string-parser | 7.27.1 | MIT | https://github.com/babel/babel |
+| @babel/helper-validator-identifier | 7.28.5 | MIT | https://github.com/babel/babel |
+| @babel/helper-validator-option | 7.27.1 | MIT | https://github.com/babel/babel |
+| @babel/helpers | 7.29.2 | MIT | https://github.com/babel/babel |
+| @babel/parser | 7.29.2 | MIT | https://github.com/babel/babel |
+| @babel/plugin-syntax-jsx | 7.28.6 | MIT | https://github.com/babel/babel |
+| @babel/plugin-syntax-typescript | 7.28.6 | MIT | https://github.com/babel/babel |
+| @babel/runtime | 7.29.2 | MIT | https://github.com/babel/babel |
+| @babel/template | 7.28.6 | MIT | https://github.com/babel/babel |
+| @babel/traverse | 7.29.0 | MIT | https://github.com/babel/babel |
+| @babel/types | 7.29.0 | MIT | https://github.com/babel/babel |
+| @date-fns/tz | 1.4.1 | MIT | https://github.com/date-fns/tz |
+| @esbuild/linux-x64 | 0.27.7 | MIT | https://github.com/evanw/esbuild |
+| @fast-csv/format | 4.3.5 | MIT | https://github.com/C2FO/fast-csv |
+| @fast-csv/parse | 4.3.6 | MIT | https://github.com/C2FO/fast-csv |
+| @floating-ui/core | 1.7.5 | MIT | https://github.com/floating-ui/floating-ui |
+| @floating-ui/dom | 1.7.6 | MIT | https://github.com/floating-ui/floating-ui |
+| @floating-ui/react-dom | 2.1.8 | MIT | https://github.com/floating-ui/floating-ui |
+| @floating-ui/utils | 0.2.11 | MIT | https://github.com/floating-ui/floating-ui |
+| @graphql-typed-document-node/core | 3.2.0 | MIT | https://github.com/dotansimha/graphql-typed-document-node |
+| @hookform/resolvers | 5.2.2 | MIT | https://github.com/react-hook-form/resolvers |
+| @jridgewell/gen-mapping | 0.3.13 | MIT | https://github.com/jridgewell/sourcemaps |
+| @jridgewell/remapping | 2.3.5 | MIT | https://github.com/jridgewell/sourcemaps |
+| @jridgewell/resolve-uri | 3.1.2 | MIT | https://github.com/jridgewell/resolve-uri |
+| @jridgewell/sourcemap-codec | 1.5.5 | MIT | https://github.com/jridgewell/sourcemaps |
+| @jridgewell/trace-mapping | 0.3.31 | MIT | https://github.com/jridgewell/sourcemaps |
+| @noble/ciphers | 2.2.0 | MIT | https://github.com/paulmillr/noble-ciphers |
+| @noble/curves | 2.2.0 | MIT | https://github.com/paulmillr/noble-curves |
+| @noble/hashes | 2.2.0 | MIT | https://github.com/paulmillr/noble-hashes |
+| @noble/post-quantum | 0.6.1 | MIT | https://github.com/paulmillr/noble-post-quantum |
+| @opentelemetry/api | 1.9.1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/api-logs | 0.208.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/core | 2.2.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/core | 2.7.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/exporter-logs-otlp-http | 0.208.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/otlp-exporter-base | 0.208.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/otlp-transformer | 0.208.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/resources | 2.2.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/resources | 2.7.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/sdk-logs | 0.208.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/sdk-metrics | 2.2.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/sdk-trace-base | 2.2.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @opentelemetry/semantic-conventions | 1.40.0 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-js |
+| @posthog/core | 1.27.7 | MIT | https://github.com/PostHog/posthog-js |
+| @posthog/types | 1.372.3 | MIT | https://github.com/PostHog/posthog-js |
+| @protobufjs/aspromise | 1.1.2 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @protobufjs/base64 | 1.1.2 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @protobufjs/codegen | 2.0.5 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @protobufjs/eventemitter | 1.1.0 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @protobufjs/fetch | 1.1.0 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @protobufjs/float | 1.0.2 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @protobufjs/inquire | 1.1.1 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @protobufjs/path | 1.1.2 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @protobufjs/pool | 1.1.0 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @protobufjs/utf8 | 1.1.1 | BSD-3-Clause | https://github.com/dcodeIO/protobuf.js |
+| @quiltt/core | 6.0.0 | MIT | https://github.com/quiltt/quiltt-sdks |
+| @quiltt/react | 6.0.0 | MIT | https://github.com/quiltt/quiltt-sdks |
+| @radix-ui/number | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/primitive | 1.1.3 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-accordion | 1.2.12 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-alert-dialog | 1.1.15 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-arrow | 1.1.7 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-aspect-ratio | 1.1.8 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-avatar | 1.1.11 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-checkbox | 1.3.3 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-collapsible | 1.1.12 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-collection | 1.1.7 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-compose-refs | 1.1.2 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-context | 1.1.2 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-context | 1.1.3 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-context-menu | 2.2.16 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-dialog | 1.1.15 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-direction | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-dismissable-layer | 1.1.11 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-dropdown-menu | 2.1.16 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-focus-guards | 1.1.3 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-focus-scope | 1.1.7 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-hover-card | 1.1.15 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-id | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-label | 2.1.8 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-menu | 2.1.16 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-menubar | 1.1.16 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-navigation-menu | 1.2.14 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-popover | 1.1.15 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-popper | 1.2.8 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-portal | 1.1.9 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-presence | 1.1.5 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-primitive | 2.1.3 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-primitive | 2.1.4 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-progress | 1.1.8 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-radio-group | 1.3.8 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-roving-focus | 1.1.11 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-scroll-area | 1.2.10 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-select | 2.2.6 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-separator | 1.1.8 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-slider | 1.3.6 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-slot | 1.2.3 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-slot | 1.2.4 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-switch | 1.2.6 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-tabs | 1.1.13 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-toggle | 1.1.10 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-toggle-group | 1.1.11 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-tooltip | 1.2.8 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-use-callback-ref | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-use-controllable-state | 1.2.2 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-use-effect-event | 0.0.2 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-use-escape-keydown | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-use-is-hydrated | 0.1.0 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-use-layout-effect | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-use-previous | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-use-rect | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-use-size | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/react-visually-hidden | 1.2.3 | MIT | https://github.com/radix-ui/primitives |
+| @radix-ui/rect | 1.1.1 | MIT | https://github.com/radix-ui/primitives |
+| @rails/actioncable | 8.1.300 | MIT | https://github.com/rails/rails |
+| @rollup/rollup-linux-x64-gnu | 4.60.2 | MIT | https://github.com/rollup/rollup |
+| @rollup/rollup-linux-x64-musl | 4.60.2 | MIT | https://github.com/rollup/rollup |
+| @standard-schema/utils | 0.3.0 | MIT | https://github.com/standard-schema/standard-schema |
+| @supabase/auth-js | 2.104.0 | MIT | https://github.com/supabase/supabase-js |
+| @supabase/functions-js | 2.104.0 | MIT | https://github.com/supabase/supabase-js |
+| @supabase/phoenix | 0.4.0 | MIT | https://github.com/supabase/phoenix |
+| @supabase/postgrest-js | 2.104.0 | MIT | https://github.com/supabase/supabase-js |
+| @supabase/realtime-js | 2.104.0 | MIT | https://github.com/supabase/supabase-js |
+| @supabase/storage-js | 2.104.0 | MIT | https://github.com/supabase/supabase-js |
+| @supabase/supabase-js | 2.104.0 | MIT | https://github.com/supabase/supabase-js |
+| @tabby_ai/hijri-converter | 1.0.5 | MIT |  |
+| @tailwindcss/node | 4.2.3 | MIT | https://github.com/tailwindlabs/tailwindcss |
+| @tailwindcss/oxide | 4.2.3 | MIT | https://github.com/tailwindlabs/tailwindcss |
+| @tailwindcss/oxide-linux-x64-gnu | 4.2.3 | MIT | https://github.com/tailwindlabs/tailwindcss |
+| @tailwindcss/oxide-linux-x64-musl | 4.2.3 | MIT | https://github.com/tailwindlabs/tailwindcss |
+| @tailwindcss/vite | 4.2.3 | MIT | https://github.com/tailwindlabs/tailwindcss |
+| @tanstack/history | 1.161.6 | MIT | https://github.com/TanStack/router |
+| @tanstack/query-core | 5.99.2 | MIT | https://github.com/TanStack/query |
+| @tanstack/react-query | 5.99.2 | MIT | https://github.com/TanStack/query |
+| @tanstack/react-router | 1.168.23 | MIT | https://github.com/TanStack/router |
+| @tanstack/react-store | 0.9.3 | MIT | https://github.com/TanStack/store |
+| @tanstack/router-core | 1.168.15 | MIT | https://github.com/TanStack/router |
+| @tanstack/router-generator | 1.166.32 | MIT | https://github.com/TanStack/router |
+| @tanstack/router-plugin | 1.167.22 | MIT | https://github.com/TanStack/router |
+| @tanstack/router-utils | 1.161.6 | MIT | https://github.com/TanStack/router |
+| @tanstack/store | 0.9.3 | MIT | https://github.com/TanStack/store |
+| @tanstack/virtual-file-routes | 1.161.7 | MIT | https://github.com/TanStack/router |
+| @types/d3-array | 3.2.2 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/d3-color | 3.1.3 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/d3-ease | 3.0.2 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/d3-interpolate | 3.0.4 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/d3-path | 3.1.1 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/d3-scale | 4.0.9 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/d3-shape | 3.1.8 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/d3-time | 3.0.4 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/d3-timer | 3.0.2 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/estree | 1.0.8 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/node | 14.18.63 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/node | 22.19.17 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/react | 19.2.14 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/react-dom | 19.2.3 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/trusted-types | 2.0.7 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @types/ws | 8.18.1 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
+| @wry/caches | 1.0.1 | MIT | https://github.com/benjamn/wryware |
+| @wry/context | 0.7.4 | MIT | https://github.com/benjamn/wryware |
+| @wry/equality | 0.5.7 | MIT | https://github.com/benjamn/wryware |
+| @wry/trie | 0.5.0 | MIT | https://github.com/benjamn/wryware |
+| acorn | 8.16.0 | MIT | https://github.com/acornjs/acorn |
+| ansis | 4.2.0 | ISC | https://github.com/webdiscus/ansis |
+| anymatch | 3.1.3 | ISC | https://github.com/micromatch/anymatch |
+| archiver | 5.3.2 | MIT | https://github.com/archiverjs/node-archiver |
+| archiver-utils | 2.1.0 | MIT | https://github.com/archiverjs/archiver-utils |
+| archiver-utils | 3.0.4 | MIT | https://github.com/archiverjs/archiver-utils |
+| aria-hidden | 1.2.6 | MIT | https://github.com/theKashey/aria-hidden |
+| async | 3.2.6 | MIT | https://github.com/caolan/async |
+| babel-dead-code-elimination | 1.0.12 | MIT | https://github.com/pcattori/babel-dead-code-elimination |
+| balanced-match | 1.0.2 | MIT | https://github.com/juliangruber/balanced-match |
+| base64-js | 1.5.1 | MIT | https://github.com/beatgammit/base64-js |
+| baseline-browser-mapping | 2.10.20 | Apache-2.0 | https://github.com/web-platform-dx/baseline-browser-mapping |
+| big-integer | 1.6.52 | Unlicense | https://github.com/peterolson/BigInteger.js |
+| binary | 0.3.0 | MIT | https://github.com/substack/node-binary |
+| binary-extensions | 2.3.0 | MIT | https://github.com/sindresorhus/binary-extensions |
+| bl | 4.1.0 | MIT | https://github.com/rvagg/bl |
+| bluebird | 3.4.7 | MIT | https://github.com/petkaantonov/bluebird |
+| brace-expansion | 1.1.14 | MIT | https://github.com/juliangruber/brace-expansion |
+| brace-expansion | 2.1.0 | MIT | https://github.com/juliangruber/brace-expansion |
+| braces | 3.0.3 | MIT | https://github.com/micromatch/braces |
+| browserslist | 4.28.2 | MIT | https://github.com/browserslist/browserslist |
+| buffer | 5.7.1 | MIT | https://github.com/feross/buffer |
+| buffer-crc32 | 0.2.13 | MIT | https://github.com/brianloveswords/buffer-crc32 |
+| buffer-indexof-polyfill | 1.0.2 | MIT | https://github.com/sarosia/buffer-indexof-polyfill |
+| buffers | 0.1.1 | Custom: http://github.com/substack/node-bufferlist | https://github.com/substack/node-buffers |
+| caniuse-lite | 1.0.30001788 | CC-BY-4.0 | https://github.com/browserslist/caniuse-lite |
+| chainsaw | 0.1.0 | MIT* | https://github.com/substack/node-chainsaw |
+| chokidar | 3.6.0 | MIT | https://github.com/paulmillr/chokidar |
+| class-variance-authority | 0.7.1 | Apache-2.0 | https://github.com/joe-bell/cva |
+| clsx | 2.1.1 | MIT | https://github.com/lukeed/clsx |
+| cmdk | 1.1.1 | MIT | https://github.com/pacocoursey/cmdk |
+| compress-commons | 4.1.2 | MIT | https://github.com/archiverjs/node-compress-commons |
+| concat-map | 0.0.1 | MIT | https://github.com/substack/node-concat-map |
+| convert-source-map | 2.0.0 | MIT | https://github.com/thlorenz/convert-source-map |
+| cookie-es | 3.1.1 | MIT | https://github.com/unjs/cookie-es |
+| core-js | 3.49.0 | MIT | https://github.com/zloirock/core-js |
+| core-util-is | 1.0.3 | MIT | https://github.com/isaacs/core-util-is |
+| crc-32 | 1.2.2 | Apache-2.0 | https://github.com/SheetJS/js-crc32 |
+| crc32-stream | 4.0.3 | MIT | https://github.com/archiverjs/node-crc32-stream |
+| cross-fetch | 4.1.0 | MIT | https://github.com/lquixada/cross-fetch |
+| csstype | 3.2.3 | MIT | https://github.com/frenic/csstype |
+| d3-array | 3.2.4 | ISC | https://github.com/d3/d3-array |
+| d3-color | 3.1.0 | ISC | https://github.com/d3/d3-color |
+| d3-ease | 3.0.1 | BSD-3-Clause | https://github.com/d3/d3-ease |
+| d3-format | 3.1.2 | ISC | https://github.com/d3/d3-format |
+| d3-interpolate | 3.0.1 | ISC | https://github.com/d3/d3-interpolate |
+| d3-path | 3.1.0 | ISC | https://github.com/d3/d3-path |
+| d3-scale | 4.0.2 | ISC | https://github.com/d3/d3-scale |
+| d3-shape | 3.2.0 | ISC | https://github.com/d3/d3-shape |
+| d3-time | 3.1.0 | ISC | https://github.com/d3/d3-time |
+| d3-time-format | 4.1.0 | ISC | https://github.com/d3/d3-time-format |
+| d3-timer | 3.0.1 | ISC | https://github.com/d3/d3-timer |
+| date-fns | 4.1.0 | MIT | https://github.com/date-fns/date-fns |
+| date-fns-jalali | 4.1.0-0 | MIT | https://github.com/date-fns-jalali/date-fns-jalali |
+| dayjs | 1.11.20 | MIT | https://github.com/iamkun/dayjs |
+| debug | 4.4.3 | MIT | https://github.com/debug-js/debug |
+| decimal.js-light | 2.5.1 | MIT | https://github.com/MikeMcl/decimal.js-light |
+| detect-libc | 2.1.2 | Apache-2.0 | https://github.com/lovell/detect-libc |
+| detect-node-es | 1.1.0 | MIT | https://github.com/thekashey/detect-node |
+| diff | 8.0.4 | BSD-3-Clause | https://github.com/kpdecker/jsdiff |
+| dom-helpers | 5.2.1 | MIT | https://github.com/react-bootstrap/dom-helpers |
+| dompurify | 3.4.1 | (MPL-2.0 OR Apache-2.0) | https://github.com/cure53/DOMPurify |
+| duplexer2 | 0.1.4 | BSD-3-Clause | https://github.com/deoxxa/duplexer2 |
+| electron-to-chromium | 1.5.340 | ISC | https://github.com/Kilian/electron-to-chromium |
+| embla-carousel | 8.6.0 | MIT | https://github.com/davidjerleke/embla-carousel |
+| embla-carousel-react | 8.6.0 | MIT | https://github.com/davidjerleke/embla-carousel |
+| embla-carousel-reactive-utils | 8.6.0 | MIT | https://github.com/davidjerleke/embla-carousel |
+| end-of-stream | 1.4.5 | MIT | https://github.com/mafintosh/end-of-stream |
+| enhanced-resolve | 5.20.1 | MIT | https://github.com/webpack/enhanced-resolve |
+| esbuild | 0.27.7 | MIT | https://github.com/evanw/esbuild |
+| escalade | 3.2.0 | MIT | https://github.com/lukeed/escalade |
+| eventemitter3 | 4.0.7 | MIT | https://github.com/primus/eventemitter3 |
+| exceljs | 4.4.0 | MIT | https://github.com/exceljs/exceljs |
+| fast-csv | 4.3.6 | MIT | https://github.com/C2FO/fast-csv |
+| fast-equals | 5.4.0 | MIT | https://github.com/planttheidea/fast-equals |
+| fdir | 6.5.0 | MIT | https://github.com/thecodrr/fdir |
+| fflate | 0.4.8 | MIT | https://github.com/101arrowz/fflate |
+| fill-range | 7.1.1 | MIT | https://github.com/jonschlinkert/fill-range |
+| fs-constants | 1.0.0 | MIT | https://github.com/mafintosh/fs-constants |
+| fs.realpath | 1.0.0 | ISC | https://github.com/isaacs/fs.realpath |
+| fstream | 1.0.12 | ISC | https://github.com/npm/fstream |
+| gensync | 1.0.0-beta.2 | MIT | https://github.com/loganfsmyth/gensync |
+| get-nonce | 1.0.1 | MIT | https://github.com/theKashey/get-nonce |
+| get-tsconfig | 4.14.0 | MIT | https://github.com/privatenumber/get-tsconfig |
+| glob | 7.2.3 | ISC | https://github.com/isaacs/node-glob |
+| glob-parent | 5.1.2 | ISC | https://github.com/gulpjs/glob-parent |
+| globrex | 0.1.2 | MIT | https://github.com/terkelg/globrex |
+| graceful-fs | 4.2.11 | ISC | https://github.com/isaacs/node-graceful-fs |
+| graphql | 16.14.0 | MIT | https://github.com/graphql/graphql-js |
+| graphql-tag | 2.12.6 | MIT | https://github.com/apollographql/graphql-tag |
+| hash-wasm | 4.12.0 | MIT | https://github.com/Daninet/hash-wasm |
+| iceberg-js | 0.8.1 | MIT | https://github.com/supabase/iceberg-js |
+| ieee754 | 1.2.1 | BSD-3-Clause | https://github.com/feross/ieee754 |
+| immediate | 3.0.6 | MIT | https://github.com/calvinmetcalf/immediate |
+| inflight | 1.0.6 | ISC | https://github.com/npm/inflight |
+| inherits | 2.0.4 | ISC | https://github.com/isaacs/inherits |
+| input-otp | 1.4.2 | MIT | https://github.com/guilhermerodz/input-otp |
+| internmap | 2.0.3 | ISC | https://github.com/mbostock/internmap |
+| is-binary-path | 2.1.0 | MIT | https://github.com/sindresorhus/is-binary-path |
+| is-extglob | 2.1.1 | MIT | https://github.com/jonschlinkert/is-extglob |
+| is-glob | 4.0.3 | MIT | https://github.com/micromatch/is-glob |
+| is-number | 7.0.0 | MIT | https://github.com/jonschlinkert/is-number |
+| isarray | 1.0.0 | MIT | https://github.com/juliangruber/isarray |
+| isbot | 5.1.39 | Unlicense | https://github.com/omrilotan/isbot |
+| jiti | 2.6.1 | MIT | https://github.com/unjs/jiti |
+| js-tokens | 4.0.0 | MIT | https://github.com/lydell/js-tokens |
+| jsesc | 3.1.0 | MIT | https://github.com/mathiasbynens/jsesc |
+| json5 | 2.2.3 | MIT | https://github.com/json5/json5 |
+| jszip | 3.10.1 | (MIT OR GPL-3.0-or-later) | https://github.com/Stuk/jszip |
+| lazystream | 1.0.1 | MIT | https://github.com/jpommerening/node-lazystream |
+| lie | 3.3.0 | MIT | https://github.com/calvinmetcalf/lie |
+| lightningcss | 1.32.0 | MPL-2.0 | https://github.com/parcel-bundler/lightningcss |
+| lightningcss-linux-x64-gnu | 1.32.0 | MPL-2.0 | https://github.com/parcel-bundler/lightningcss |
+| lightningcss-linux-x64-musl | 1.32.0 | MPL-2.0 | https://github.com/parcel-bundler/lightningcss |
+| listenercount | 1.0.1 | ISC | https://github.com/jden/node-listenercount |
+| lodash | 4.18.1 | MIT | https://github.com/lodash/lodash |
+| lodash.defaults | 4.2.0 | MIT | https://github.com/lodash/lodash |
+| lodash.difference | 4.5.0 | MIT | https://github.com/lodash/lodash |
+| lodash.escaperegexp | 4.1.2 | MIT | https://github.com/lodash/lodash |
+| lodash.flatten | 4.4.0 | MIT | https://github.com/lodash/lodash |
+| lodash.groupby | 4.6.0 | MIT | https://github.com/lodash/lodash |
+| lodash.isboolean | 3.0.3 | MIT | https://github.com/lodash/lodash |
+| lodash.isequal | 4.5.0 | MIT | https://github.com/lodash/lodash |
+| lodash.isfunction | 3.0.9 | MIT | https://github.com/lodash/lodash |
+| lodash.isnil | 4.0.0 | MIT | https://github.com/lodash/lodash |
+| lodash.isplainobject | 4.0.6 | MIT | https://github.com/lodash/lodash |
+| lodash.isundefined | 3.0.1 | MIT | https://github.com/lodash/lodash |
+| lodash.union | 4.6.0 | MIT | https://github.com/lodash/lodash |
+| lodash.uniq | 4.5.0 | MIT | https://github.com/lodash/lodash |
+| long | 5.3.2 | Apache-2.0 | https://github.com/dcodeIO/long.js |
+| loose-envify | 1.4.0 | MIT | https://github.com/zertosh/loose-envify |
+| lru-cache | 5.1.1 | ISC | https://github.com/isaacs/node-lru-cache |
+| lucide-react | 0.575.0 | ISC | https://github.com/lucide-icons/lucide |
+| magic-string | 0.30.21 | MIT | https://github.com/Rich-Harris/magic-string |
+| minimatch | 3.1.5 | ISC | https://github.com/isaacs/minimatch |
+| minimatch | 5.1.9 | ISC | https://github.com/isaacs/minimatch |
+| mkdirp | 3.0.1 | MIT | https://github.com/isaacs/node-mkdirp |
+| ms | 2.1.3 | MIT | https://github.com/vercel/ms |
+| nanoid | 3.3.11 | MIT | https://github.com/ai/nanoid |
+| node-fetch | 2.7.0 | MIT | https://github.com/bitinn/node-fetch |
+| node-releases | 2.0.37 | MIT | https://github.com/chicoxyzzy/node-releases |
+| normalize-path | 3.0.0 | MIT | https://github.com/jonschlinkert/normalize-path |
+| object-assign | 4.1.1 | MIT | https://github.com/sindresorhus/object-assign |
+| once | 1.4.0 | ISC | https://github.com/isaacs/once |
+| optimism | 0.18.1 | MIT | https://github.com/benjamn/optimism |
+| orangerails | 0.1.0 | UNLICENSED | https://github.com/MorningRevolution/orangerails |
+| pako | 1.0.11 | (MIT AND Zlib) | https://github.com/nodeca/pako |
+| path-is-absolute | 1.0.1 | MIT | https://github.com/sindresorhus/path-is-absolute |
+| pathe | 2.0.3 | MIT | https://github.com/unjs/pathe |
+| picocolors | 1.1.1 | ISC | https://github.com/alexeyraspopov/picocolors |
+| picomatch | 2.3.2 | MIT | https://github.com/micromatch/picomatch |
+| picomatch | 4.0.4 | MIT | https://github.com/micromatch/picomatch |
+| postcss | 8.5.10 | MIT | https://github.com/postcss/postcss |
+| posthog-js | 1.372.3 | MIT* | https://github.com/PostHog/posthog-js |
+| preact | 10.29.1 | MIT | https://github.com/preactjs/preact |
+| prettier | 3.8.3 | MIT | https://github.com/prettier/prettier |
+| process-nextick-args | 2.0.1 | MIT | https://github.com/calvinmetcalf/process-nextick-args |
+| prop-types | 15.8.1 | MIT | https://github.com/facebook/prop-types |
+| protobufjs | 7.5.6 | BSD-3-Clause | https://github.com/protobufjs/protobuf.js |
+| query-selector-shadow-dom | 1.0.1 | MIT | https://github.com/webdriverio/query-selector-shadow-dom |
+| react | 19.2.5 | MIT | https://github.com/facebook/react |
+| react-day-picker | 9.14.0 | MIT | https://github.com/gpbl/react-day-picker |
+| react-dom | 19.2.5 | MIT | https://github.com/facebook/react |
+| react-hook-form | 7.73.1 | MIT | https://github.com/react-hook-form/react-hook-form |
+| react-is | 16.13.1 | MIT | https://github.com/facebook/react |
+| react-is | 18.3.1 | MIT | https://github.com/facebook/react |
+| react-remove-scroll | 2.7.2 | MIT | https://github.com/theKashey/react-remove-scroll |
+| react-remove-scroll-bar | 2.3.8 | MIT | https://github.com/theKashey/react-remove-scroll-bar |
+| react-resizable-panels | 4.10.0 | MIT | https://github.com/bvaughn/react-resizable-panels |
+| react-smooth | 4.0.4 | MIT | https://github.com/recharts/react-smooth |
+| react-style-singleton | 2.2.3 | MIT | https://github.com/theKashey/react-style-singleton |
+| react-transition-group | 4.4.5 | BSD-3-Clause | https://github.com/reactjs/react-transition-group |
+| readable-stream | 2.3.8 | MIT | https://github.com/nodejs/readable-stream |
+| readable-stream | 3.6.2 | MIT | https://github.com/nodejs/readable-stream |
+| readdir-glob | 1.1.3 | Apache-2.0 | https://github.com/Yqnn/node-readdir-glob |
+| readdirp | 3.6.0 | MIT | https://github.com/paulmillr/readdirp |
+| recharts | 2.15.4 | MIT | https://github.com/recharts/recharts |
+| recharts-scale | 0.4.5 | MIT | https://github.com/recharts/recharts-scale |
+| resolve-pkg-maps | 1.0.0 | MIT | https://github.com/privatenumber/resolve-pkg-maps |
+| rimraf | 2.7.1 | ISC | https://github.com/isaacs/rimraf |
+| rollup | 4.60.2 | MIT | https://github.com/rollup/rollup |
+| rxjs | 7.8.2 | Apache-2.0 | https://github.com/reactivex/rxjs |
+| safe-buffer | 5.1.2 | MIT | https://github.com/feross/safe-buffer |
+| saxes | 5.0.1 | ISC | https://github.com/lddubeau/saxes |
+| scheduler | 0.27.0 | MIT | https://github.com/facebook/react |
+| semver | 6.3.1 | ISC | https://github.com/npm/node-semver |
+| seroval | 1.5.2 | MIT | https://github.com/lxsmnsyc/seroval |
+| seroval-plugins | 1.5.2 | MIT | https://github.com/lxsmnsyc/seroval |
+| setimmediate | 1.0.5 | MIT | https://github.com/YuzuJS/setImmediate |
+| sonner | 2.0.7 | MIT | https://github.com/emilkowalski/sonner |
+| source-map-js | 1.2.1 | BSD-3-Clause | https://github.com/7rulnik/source-map-js |
+| string_decoder | 1.1.1 | MIT | https://github.com/nodejs/string_decoder |
+| tailwind-merge | 3.5.0 | MIT | https://github.com/dcastil/tailwind-merge |
+| tailwindcss | 4.2.3 | MIT | https://github.com/tailwindlabs/tailwindcss |
+| tapable | 2.3.2 | MIT | https://github.com/webpack/tapable |
+| tar-stream | 2.2.0 | MIT | https://github.com/mafintosh/tar-stream |
+| tiny-invariant | 1.3.3 | MIT | https://github.com/alexreardon/tiny-invariant |
+| tinyglobby | 0.2.16 | MIT | https://github.com/SuperchupuDev/tinyglobby |
+| tmp | 0.2.5 | MIT | https://github.com/raszi/node-tmp |
+| to-regex-range | 5.0.1 | MIT | https://github.com/micromatch/to-regex-range |
+| tr46 | 0.0.3 | MIT | https://github.com/Sebmaster/tr46.js |
+| traverse | 0.3.9 | MIT* | https://github.com/substack/js-traverse |
+| tsconfck | 3.1.6 | MIT | https://github.com/dominikg/tsconfck |
+| tslib | 2.8.1 | 0BSD | https://github.com/Microsoft/tslib |
+| tsx | 4.21.0 | MIT | https://github.com/privatenumber/tsx |
+| tw-animate-css | 1.4.0 | MIT | https://github.com/Wombosvideo/tw-animate-css |
+| typescript | 5.9.3 | Apache-2.0 | https://github.com/microsoft/TypeScript |
+| undici-types | 6.21.0 | MIT | https://github.com/nodejs/undici |
+| unplugin | 2.3.11 | MIT | https://github.com/unjs/unplugin |
+| unzipper | 0.10.14 | MIT | https://github.com/ZJONSSON/node-unzipper |
+| update-browserslist-db | 1.2.3 | MIT | https://github.com/browserslist/update-db |
+| use-callback-ref | 1.3.3 | MIT | https://github.com/theKashey/use-callback-ref |
+| use-debounce | 10.1.1 | MIT | https://github.com/xnimorz/use-debounce |
+| use-sidecar | 1.1.3 | MIT | https://github.com/theKashey/use-sidecar |
+| use-sync-external-store | 1.6.0 | MIT | https://github.com/facebook/react |
+| util-deprecate | 1.0.2 | MIT | https://github.com/TooTallNate/util-deprecate |
+| uuid | 8.3.2 | MIT | https://github.com/uuidjs/uuid |
+| vaul | 1.1.2 | MIT | https://github.com/emilkowalski/vaul |
+| victory-vendor | 36.9.2 | MIT AND ISC | https://github.com/FormidableLabs/victory |
+| vite | 7.3.2 | MIT | https://github.com/vitejs/vite |
+| vite-tsconfig-paths | 6.1.1 | MIT | https://github.com/aleclarson/vite-tsconfig-paths |
+| web-vitals | 5.2.0 | Apache-2.0 | https://github.com/GoogleChrome/web-vitals |
+| webidl-conversions | 3.0.1 | BSD-2-Clause | https://github.com/jsdom/webidl-conversions |
+| webpack-virtual-modules | 0.6.2 | MIT | https://github.com/sysgears/webpack-virtual-modules |
+| whatwg-url | 5.0.0 | MIT | https://github.com/jsdom/whatwg-url |
+| wrappy | 1.0.2 | ISC | https://github.com/npm/wrappy |
+| ws | 8.20.0 | MIT | https://github.com/websockets/ws |
+| xmlchars | 2.2.0 | MIT | https://github.com/lddubeau/xmlchars |
+| yallist | 3.1.1 | ISC | https://github.com/isaacs/yallist |
+| zip-stream | 4.1.1 | MIT | https://github.com/archiverjs/node-zip-stream |
+| zod | 3.25.76 | MIT | https://github.com/colinhacks/zod |
+
+## Regenerating this file
 
 ```bash
-bunx license-checker --production --json > third-party-npm.json
+bunx license-checker --production --json > /tmp/licenses.json
+python3 scripts/gen-third-party-notices.py /tmp/licenses.json THIRD_PARTY_NOTICES.md
 ```
 
-## Cargo dependencies (Rust crates)
-
-```bash
-cargo about generate --output-file third-party-cargo.html
-```
-
-## Notable inclusions
-
-- **@noble/curves**, **@noble/hashes** — MIT (Paul Miller).
-- **viem**, **wagmi** — MIT.
-- **deno_std** — MIT (Deno authors). Edge function shared modules.
-- **@supabase/supabase-js** — MIT.
-- **shadcn/ui** components — MIT.
-- **react**, **react-dom** — MIT (Meta).
-- **typescript** — Apache 2.0 (Microsoft).
-- **vite** — MIT.
-- **tailwindcss** — MIT.
-
-If you reuse Orange Rails downstream, regenerate the inventories above
-against your own lockfile; the dependency surface evolves with each
-release.
+If `bunx` is not available, `npx license-checker` works the same way.
