@@ -1,8 +1,8 @@
-# api.orangerails.com , Canonical API Gateway
+# api.orangerails.com — Canonical API Gateway
 
 Single canonical entry point for every external client of Orange Rails.
 
-**Wiki:** `Apps/🚂 Orange Rails/api.orangerails.com , Canonical Gateway/Proposal`
+**Wiki:** `Apps/🚂 Orange Rails/api.orangerails.com — Canonical Gateway/Proposal`
 
 ## Routing
 
@@ -10,7 +10,7 @@ Single canonical entry point for every external client of Orange Rails.
 |-------------|-------------|-------|
 | `/v1/*` | OR Supabase edge functions, per `V1_ROUTES` map in `src/index.ts` | New canonical client surface |
 | `/functions/*` | OR Supabase, transparent passthrough | Migration courtesy; dropped after sunset |
-| `/sync/blink` | maintainer-hosted Express adapter via Cloudflare Tunnel | OR-internal, used by `sync-blink` edge function |
+| `/sync/blink` | maintainer infrastructure Express adapter via Cloudflare Tunnel | OR-internal, used by `sync-blink` edge function |
 | `/health` | Served locally by the Worker | Liveness only |
 | anything else | 404 | Closed by default |
 
@@ -36,7 +36,7 @@ bunx wrangler deploy --env staging      # or --env production
 bun test
 ```
 
-Tests cover route map, header hygiene, legacy passthrough, sync/blink, preflight, and unknown route 404s. Tests do not hit Supabase , `fetch` is stubbed.
+Tests cover route map, header hygiene, legacy passthrough, sync/blink, preflight, and unknown route 404s. Tests do not hit Supabase — `fetch` is stubbed.
 
 ## Adding a new public route
 
