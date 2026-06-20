@@ -222,13 +222,12 @@ async function handleEvent(
 
   while (pages < MAX_PAGES) {
     const query = `
-      query Q($connId: ID!, $first: Int!, $after: String) {
-        connection(id: $connId) { id }
-        transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+      query Q($first: Int!, $after: String) {
+        transactions(first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
             id amount currencyCode date description entryType status
-            account { id }
+            account { id connection { id } }
           }
         }
       }
@@ -241,7 +240,7 @@ async function handleEvent(
       },
       body: JSON.stringify({
         query,
-        variables: { connId: connectionId, first: TX_PAGE_SIZE, after },
+        variables: { first: TX_PAGE_SIZE, after },
       }),
     });
     if (!resp.ok) {
@@ -249,7 +248,19 @@ async function handleEvent(
       return `Quiltt GraphQL ${resp.status}: ${errBody.slice(0, 300)}`;
     }
     const json = await resp.json();
-    const txs = json?.data?.transactions?.nodes ?? [];
+    // Surface GraphQL errors instead of silently treating them as "0 txns".
+    // (The previous `filter: { connectionId }` was rejected by Quiltt's
+    // TransactionFilter and this swallowed the error → 0 rows forever.)
+    if (Array.isArray(json?.errors) && json.errors.length > 0) {
+      return `Quiltt GraphQL error: ${JSON.stringify(json.errors).slice(0, 300)}`;
+    }
+    const allTxs = json?.data?.transactions?.nodes ?? [];
+    // Quiltt can't filter transactions by connection, so scope here:
+    // keep only transactions whose account belongs to this event's connection.
+    const txs = allTxs.filter(
+      (tx: { account?: { connection?: { id?: string } } }) =>
+        tx.account?.connection?.id === connectionId,
+    );
     const pageInfo = json?.data?.transactions?.pageInfo;
 
     for (const tx of txs) {
