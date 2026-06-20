@@ -52,6 +52,8 @@ const V1_ROUTES: Record<string, V1Route> = {
   'POST /v1/quiltt/sync':               { method: 'POST', fn: 'or-quiltt-sync' },
   'POST /v1/transactions/list':         { method: 'POST', fn: 'or-transactions-list' },
   'GET  /v1/providers':                 { method: 'GET',  fn: 'or-providers' },
+  'GET  /v1/platform/config':           { method: 'GET',  fn: 'or-platform-bootstrap' },
+  'POST /v1/platform/config':           { method: 'POST', fn: 'or-platform-bootstrap' },
   // Truth-data routes — world-gateway has a sub-path per dataset.
   'GET  /v1/truth/precious-metals':           { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'precious-metals' },
   'GET  /v1/truth/inflation':                 { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'inflation' },
@@ -104,7 +106,7 @@ export default {
         headers: {
           'access-control-allow-origin': '*',
           'access-control-allow-methods': 'GET,POST,OPTIONS',
-          'access-control-allow-headers': 'authorization,content-type,x-platform-api-key,x-or-widget-token,x-region',
+          'access-control-allow-headers': 'authorization,content-type,x-platform-api-key,x-or-api-key,x-or-widget-token,x-region',
           'access-control-max-age': '86400',
         },
       });
