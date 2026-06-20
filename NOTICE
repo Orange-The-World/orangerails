@@ -1,0 +1,28 @@
+Orange Rails
+Copyright 2026 Orange-The-World contributors
+
+This product includes software developed by the Orange-The-World project
+and its contributors (https://github.com/Orange-The-World).
+
+------------------------------------------------------------
+License split
+------------------------------------------------------------
+
+The bulk of this repository is distributed under the Apache License,
+Version 2.0 (see LICENSE). One subdirectory carries a different license:
+
+  - crates/or-bip158-wasm/  AGPL-3.0-or-later
+    Stealth Sync BIP-157/158 client-side filter matcher.
+
+See LICENSE-NOTICE.md for the rationale and reuse guidance.
+
+------------------------------------------------------------
+Third-party notices
+------------------------------------------------------------
+
+This software incorporates components from the projects listed in
+THIRD_PARTY_NOTICES.md (generated from package manifests). Each component
+is governed by the license stated in its own source distribution.
+
+For the upstream MorningRevolution/orangerails fork lineage, see the
+"Project lineage" section of README.md.
