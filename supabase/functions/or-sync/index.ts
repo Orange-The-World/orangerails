@@ -5,7 +5,7 @@
  * platform/subaccount model from OrangeRails-Platform-Design.md.
  *
  * Auth (one of):
- *   - X-Platform-API-Key: <hex>   → platform mode (BitBooks V3 etc.)
+ *   - X-Platform-API-Key: <hex>   → platform mode (multi-tenant integrators)
  *     Body MUST include subaccount_id (validated to belong to platform)
  *   - Authorization: Bearer <jwt> → direct mode (orangerails.com/app)
  *     Subaccount auto-resolved to the user's direct subaccount

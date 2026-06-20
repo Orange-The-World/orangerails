@@ -1,7 +1,7 @@
 /**
  * or-quiltt-accounts — list the bank accounts under a Quiltt connection.
  *
- * Integrating apps (V2 BitBooks, Orange Way, etc.) call this immediately
+ * Integrating apps call this immediately
  * after a successful Quiltt link to discover which accounts the user
  * just authorized. The response feeds the post-link review screen ("you
  * linked 3 accounts at Chase — pick which to import") and seeds the
