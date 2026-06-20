@@ -6,6 +6,37 @@ import { PostHogProvider } from "posthog-js/react";
 import appCss from "../styles.css?url";
 import { VaultProvider } from "@/context/VaultContext";
 
+const ANALYTICS_CONSENT_KEY = "or-analytics-consent";
+
+function dntActive() {
+  try {
+    return typeof navigator !== "undefined" && navigator.doNotTrack === "1";
+  } catch {
+    return false;
+  }
+}
+
+function initPostHogIfConsented() {
+  if (typeof window === "undefined") return;
+  if (dntActive()) return;
+  let consent: string | null = null;
+  try {
+    consent = window.localStorage.getItem(ANALYTICS_CONSENT_KEY);
+  } catch {
+    return;
+  }
+  if (consent !== "accept") return;
+      posthog.init("phc_ufrtHMjamZtq8ZhWA53ALx5KwSd3xKNbiDW9GH8UXNqn", {
+      api_host: "https://eu.i.posthog.com",
+      persistence: "memory",
+      person_profiles: "never",
+      capture_pageview: true,
+      autocapture: false,
+      disable_session_recording: true,
+      respect_dnt: true,
+    });
+}
+
 function NotFoundComponent() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
@@ -81,15 +112,7 @@ function RootComponent() {
     // no session recording, no person profiles. Each page load is a
     // fresh anonymous event stream. Pageview + explicit captures only.
     // phc_ keys are PostHog "Project API Keys" , write-only, public-safe.
-    posthog.init("phc_ufrtHMjamZtq8ZhWA53ALx5KwSd3xKNbiDW9GH8UXNqn", {
-      api_host: "https://eu.i.posthog.com",
-      persistence: "memory",
-      person_profiles: "never",
-      capture_pageview: true,
-      autocapture: false,
-      disable_session_recording: true,
-      respect_dnt: true,
-    });
+initPostHogIfConsented();
     posthog.register({ app: "orangerails", brand: "orange-rails" });
   }, []);
 
@@ -109,26 +132,53 @@ function RootComponent() {
 // GDPR Article 6 because it's strictly necessary for the banner not to
 // nag). Same wording shipped across every BitBooks-family surface.
 function AnalyticsNotice() {
-  const [show, setShow] = useState(false);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    // Suppress the banner on widget popup routes (/connect and
-    // /connect/stealth). These are not public marketing pages , they
-    // open from inside a consuming app and the user has already
-    // accepted (or not) the analytics notice on the public page they
-    // came from. Showing the banner again inside the popup is noisy
-    // UX and steals real estate from the actual widget.
-    const path = window.location.pathname;
-    if (path === "/connect" || path.startsWith("/connect/")) return;
-    setShow(localStorage.getItem("bb_notice_dismissed") !== "1");
-  }, []);
-  useEffect(() => {
-    if (!show) return;
-    const onScroll = () => {
-      if (window.scrollY > 600) {
-        localStorage.setItem("bb_notice_dismissed", "1");
-        setShow(false);
-      }
+  const [decided, setDecided] = useState(() => {
+    if (typeof window === "undefined") return true;
+    if (dntActive()) return true;
+    try {
+      return window.localStorage.getItem(ANALYTICS_CONSENT_KEY) !== null;
+    } catch {
+      return true;
+    }
+  });
+  if (decided) return null;
+  const accept = () => {
+    try {
+      window.localStorage.setItem(ANALYTICS_CONSENT_KEY, "accept");
+    } catch {}
+    initPostHogIfConsented();
+    setDecided(true);
+  };
+  const decline = () => {
+    try {
+      window.localStorage.setItem(ANALYTICS_CONSENT_KEY, "decline");
+    } catch {}
+    setDecided(true);
+  };
+  return (
+    <div className="fixed bottom-4 left-4 right-4 z-50 mx-auto max-w-xl rounded-lg border border-border bg-card p-4 text-sm shadow-lg">
+      <p className="mb-3">
+        We use cookieless PostHog to count visits and improve the site. May we count yours? You can change your mind any time in the footer.
+      </p>
+      <div className="flex gap-2 justify-end">
+        <button
+          type="button"
+          onClick={decline}
+          className="rounded border border-border px-3 py-1 text-sm hover:bg-muted"
+        >
+          No thanks
+        </button>
+        <button
+          type="button"
+          onClick={accept}
+          className="rounded bg-primary px-3 py-1 text-sm text-primary-foreground hover:opacity-90"
+        >
+          Accept
+        </button>
+      </div>
+    </div>
+  );
+}
     };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
