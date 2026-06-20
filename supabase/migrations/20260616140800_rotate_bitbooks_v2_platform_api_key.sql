@@ -21,7 +21,18 @@
 --      new key; OR's new hash matches; auth restored.
 --   5. Total V2 prod auth-fail window: redeploy duration (typically <2 min).
 
-UPDATE public.platforms
-SET api_key_hash = '40c7758dc3e05a62922e8342b09edc01699097d92034d38000cc26a304923748',
-    updated_at   = NOW()
-WHERE slug = 'bitbooks-v2';
+-- OR DEV (gposxxmxenrdvewrprle) does not have the `platforms` table — V2 only
+-- talks to OR PROD, so the rotation is a no-op on DEV. Guard the UPDATE so
+-- the migration is idempotent + safe to apply via Mgmt API on either project.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_tables
+    WHERE schemaname = 'public' AND tablename = 'platforms'
+  ) THEN
+    UPDATE public.platforms
+    SET api_key_hash = '40c7758dc3e05a62922e8342b09edc01699097d92034d38000cc26a304923748',
+        updated_at   = NOW()
+    WHERE slug = 'bitbooks-v2';
+  END IF;
+END $$;
