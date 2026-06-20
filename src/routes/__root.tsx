@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Outlet, Link, createRootRoute, HeadContent } from "@tanstack/react-router";
+import { Outlet, Link, createRootRoute, HeadContent, useRouterState } from "@tanstack/react-router";
 import posthog from "posthog-js";
 import { PostHogProvider } from "posthog-js/react";
 
@@ -126,7 +126,32 @@ initPostHogIfConsented();
   );
 }
 
+const NON_MARKETING_ROUTE_PREFIXES = [
+  "/connect",
+  "/app",
+  "/unlock",
+  "/signup",
+  "/signin",
+  "/signout",
+  "/api",
+  "/admin",
+  "/embed",
+  "/widget",
+  "/_",
+];
+
+function isMarketingPathname(pathname: string): boolean {
+  if (!pathname) return false;
+  for (const prefix of NON_MARKETING_ROUTE_PREFIXES) {
+    if (pathname === prefix || pathname.startsWith(prefix + "/")) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function AnalyticsNotice() {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [decided, setDecided] = useState(() => {
     if (typeof window === "undefined") return true;
     if (dntActive()) return true;
@@ -136,6 +161,7 @@ function AnalyticsNotice() {
       return true;
     }
   });
+  if (!isMarketingPathname(pathname)) return null;
   if (decided) return null;
   const accept = () => {
     try {
