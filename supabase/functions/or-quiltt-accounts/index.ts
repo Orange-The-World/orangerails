@@ -39,7 +39,7 @@
 
 import { authenticateRequest } from '../_shared/platform-auth.ts';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
+import { resolveQuilttConfigForPlatform } from '../_shared/connections/quiltt/config.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 

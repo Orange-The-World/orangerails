@@ -60,7 +60,7 @@ import type {
   NormalizedTransaction,
   SyncResult,
   CredentialField,
-} from './types.ts';
+} from '../types.ts';
 
 // ─── Per-exchange config ─────────────────────────────────────────────────
 

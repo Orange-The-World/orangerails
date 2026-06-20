@@ -46,7 +46,7 @@ import type {
   DiscoveredWallet,
   NormalizedTransaction,
   SyncResult,
-} from './types.ts';
+} from '../types.ts';
 
 const PAGE_SIZE = 100;
 const MAX_PAGES_PER_STORE = 50; // safety cap — 5,000 invoices per store per sync

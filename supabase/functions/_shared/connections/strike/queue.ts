@@ -40,8 +40,8 @@ import {
   strikeGetPaymentById,
   strikeGetPayoutById,
   strikeGetReceiveById,
-} from './strike.ts';
-import type { NormalizedTransaction, SyncResult } from './types.ts';
+} from './adapter.ts';
+import type { NormalizedTransaction, SyncResult } from '../types.ts';
 
 const DRAIN_BATCH = 100;
 

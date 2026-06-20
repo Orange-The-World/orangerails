@@ -9,7 +9,7 @@
  * POST body:
  *   subaccount_id?:        uuid    required in platform mode
  *   provider_type:         string  any registered provider slug — see
- *                                   _shared/providers/dispatch.ts
+ *                                   _shared/connections/_registry.ts
  *   encrypted_label:       string  base64 AES-256-GCM (ORK-encrypted)
  *   encrypted_credentials: string  base64 AES-256-GCM (ORK-encrypted)
  *
@@ -19,7 +19,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
-import { getProvider, listProviderSlugs } from '../_shared/providers/dispatch.ts';
+import { getProvider, listProviderSlugs } from '../_shared/connections/_registry.ts';
 
 Deno.serve(async (req: Request) => {
   const cors = buildCorsHeaders(req);

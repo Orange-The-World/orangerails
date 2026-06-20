@@ -20,7 +20,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
-import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
+import { getProvider, parseCredentials } from '../_shared/connections/_registry.ts';
 
 // ─── AES-256-GCM helpers (kept inline for edge-fn isolation) ────────────────
 

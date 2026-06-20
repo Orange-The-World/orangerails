@@ -18,10 +18,10 @@
 
 /**
  * Canonical transaction shape — single source of truth lives in
- * `_shared/providers/types.ts` (sources produce, sinks consume). Re-exported
+ * `_shared/connections/types.ts` (sources produce, sinks consume). Re-exported
  * here so sink modules can keep their existing import path.
  */
-import type { NormalizedTransaction } from '../providers/types.ts';
+import type { NormalizedTransaction } from '../connections/types.ts';
 export type { NormalizedTransaction };
 
 /**

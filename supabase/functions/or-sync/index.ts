@@ -33,12 +33,12 @@
  *
  * Mode is selected by presence of `format`. See OrangeRails-Protocol.html §8
  * for the protocol contract; see _shared/sinks/dispatch.ts for the sink
- * registry; see _shared/providers/dispatch.ts for the source adapter registry.
+ * registry; see _shared/connections/_registry.ts for the source adapter registry.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
-import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
+import { resolveSinkFormatForPlatform } from '../_shared/connections/quiltt/config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import {
   getSinkAdapter,
@@ -47,9 +47,9 @@ import {
   ensureProfileForFormat,
 } from '../_shared/sinks/dispatch.ts';
 import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
-import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
-import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
-import { drainStrikeQueue } from '../_shared/providers/strike-queue.ts';
+import { getProvider, parseCredentials } from '../_shared/connections/_registry.ts';
+import type { NormalizedTransaction } from '../_shared/connections/_registry.ts';
+import { drainStrikeQueue } from '../_shared/connections/strike/queue.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //

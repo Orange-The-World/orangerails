@@ -44,7 +44,7 @@
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
-import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
+import { getProvider, listProviderSlugs } from "../_shared/connections/_registry.ts";
 import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
 
 const MAX_WALLETS_PER_CALL = 50;

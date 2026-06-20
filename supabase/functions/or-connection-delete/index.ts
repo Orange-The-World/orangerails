@@ -18,7 +18,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
-import { strikeDeleteSubscription, parseStrikeCredentials } from '../_shared/providers/strike.ts';
+import { strikeDeleteSubscription, parseStrikeCredentials } from '../_shared/connections/strike/adapter.ts';
 
 // ─── AES helpers (mirror or-sync's pattern; will share once a util module lands) ─
 

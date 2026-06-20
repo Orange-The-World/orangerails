@@ -64,7 +64,7 @@ import type {
   DiscoveredWallet,
   NormalizedTransaction,
   SyncResult,
-} from './types.ts';
+} from '../types.ts';
 
 const STRIKE_API = 'https://api.strike.me/v1';
 const SOURCE_WALLET_ID = 'strike';

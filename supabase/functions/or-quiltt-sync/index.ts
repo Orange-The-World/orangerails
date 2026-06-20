@@ -26,7 +26,7 @@
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import sodium from 'https://esm.sh/libsodium-wrappers-sumo@0.7.13';
-import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
+import { resolveQuilttConfigForPlatform } from '../_shared/connections/quiltt/config.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation

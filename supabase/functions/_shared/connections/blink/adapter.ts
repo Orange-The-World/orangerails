@@ -22,7 +22,7 @@ import type {
   DiscoveredWallet,
   NormalizedTransaction,
   SyncResult,
-} from './types.ts';
+} from '../types.ts';
 
 const BLINK_API = 'https://api.blink.sv/graphql';
 const PAGE_SIZE = 50;

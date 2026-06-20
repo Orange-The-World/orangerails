@@ -39,7 +39,7 @@ import type {
   DiscoveredWallet,
   NormalizedTransaction,
   SyncResult,
-} from './types.ts';
+} from '../types.ts';
 
 // ─── Constants ───────────────────────────────────────────────────────────
 

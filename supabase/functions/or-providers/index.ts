@@ -35,7 +35,7 @@
  */
 
 import { buildPublicCorsHeaders, jsonResponse } from '../_shared/http.ts';
-import { listProviderManifests, listCategoryManifests } from '../_shared/providers/dispatch.ts';
+import { listProviderManifests, listCategoryManifests } from '../_shared/connections/_registry.ts';
 
 Deno.serve((req: Request) => {
   const cors = buildPublicCorsHeaders();

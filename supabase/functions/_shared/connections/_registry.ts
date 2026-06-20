@@ -5,7 +5,7 @@
  * adapter for a connection's `provider_type` slug here.
  *
  * Adding a new native provider:
- *   1. Implement the ProviderAdapter in _shared/providers/<slug>.ts
+ *   1. Implement the ProviderAdapter in _shared/connections/<slug>/adapter.ts
  *   2. Import it here
  *   3. Add to the PROVIDERS array below
  *   4. Done — all three edge functions auto-discover it via the registry
@@ -20,13 +20,13 @@
  */
 
 import type { ProviderAdapter } from './types.ts';
-import { blinkAdapter } from './blink.ts';
-import { xpubAdapter } from './xpub.ts';
-import { btcpayAdapter } from './btcpay.ts';
-import { strikeAdapter } from './strike.ts';
-import { surgeAdapter } from './surge.ts';
-import { makeCcxtAdapter } from './_ccxt.ts';
-import { CCXT_MANIFEST } from './_ccxt-manifest.ts';
+import { blinkAdapter } from './blink/adapter.ts';
+import { xpubAdapter } from './xpub/adapter.ts';
+import { btcpayAdapter } from './btcpay/adapter.ts';
+import { strikeAdapter } from './strike/adapter.ts';
+import { surgeAdapter } from './surge/adapter.ts';
+import { makeCcxtAdapter } from './ccxt/adapter.ts';
+import { CCXT_MANIFEST } from './ccxt/manifest.ts';
 
 // CCXT-backed exchanges. Generated from CCXT introspection so the picker
 // reflects whatever ccxt@<pinned> supports without per-exchange code.

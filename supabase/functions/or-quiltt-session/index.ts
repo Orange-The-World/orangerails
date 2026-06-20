@@ -49,7 +49,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
-import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
+import { resolveQuilttConfigForPlatform } from '../_shared/connections/quiltt/config.ts';
 
 const QUILTT_AUTH_URL = 'https://auth.quiltt.io/v1/users/sessions';
 
