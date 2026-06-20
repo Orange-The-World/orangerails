@@ -10,6 +10,7 @@ import {
 
 type DailyRow = { day: string; rate: number };
 type Range = "1Y" | "5Y" | "ALL";
+type Quote = "USD" | "EUR" | "GBP" | "JPY";
 
 const RANGE_DAYS: Record<Range, number | null> = {
   "1Y": 365,
@@ -17,20 +18,31 @@ const RANGE_DAYS: Record<Range, number | null> = {
   ALL: null,
 };
 
-function formatPrice(n: number): string {
-  if (n >= 1000) return "$" + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
-  if (n >= 1) return "$" + n.toFixed(2);
-  return "$" + n.toFixed(4);
+const QUOTE_SYMBOL: Record<Quote, string> = {
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  JPY: "¥",
+};
+
+function formatPrice(n: number, q: Quote): string {
+  const sym = QUOTE_SYMBOL[q];
+  if (n >= 1000) return sym + n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (n >= 1) return sym + n.toFixed(2);
+  return sym + n.toFixed(4);
 }
 
 export default function BtcUsdChart() {
   const [rows, setRows] = useState<DailyRow[] | null>(null);
   const [range, setRange] = useState<Range>("ALL");
+  const [quote, setQuote] = useState<Quote>("USD");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/data/btc-usd-daily.json")
+    setRows(null);
+    setError(null);
+    fetch(`/data/btc-${quote.toLowerCase()}-daily.json`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -47,7 +59,7 @@ export default function BtcUsdChart() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [quote]);
 
   const view = useMemo(() => {
     if (!rows) return [];
@@ -66,33 +78,51 @@ export default function BtcUsdChart() {
 
   return (
     <div className="w-full">
-      <div className="flex items-baseline justify-between mb-3">
+      <div className="flex items-baseline justify-between mb-3 gap-3 flex-wrap">
         <div>
-          <div className="text-sm text-slate-500">BTC / USD</div>
+          <div className="text-sm text-slate-500">BTC / {quote}</div>
           {latest && (
             <div className="text-3xl font-bold text-slate-900">
-              {formatPrice(latest.rate)}
+              {formatPrice(latest.rate, quote)}
               <span className="ml-2 text-sm font-normal text-slate-500">
                 as of {latest.day}
               </span>
             </div>
           )}
         </div>
-        <div className="flex gap-1 text-xs">
-          {(Object.keys(RANGE_DAYS) as Range[]).map((r) => (
-            <button
-              key={r}
-              onClick={() => setRange(r)}
-              className={
-                "px-3 py-1 rounded-md border " +
-                (range === r
-                  ? "bg-orange text-white border-orange"
-                  : "border-slate-300 text-slate-600 hover:bg-slate-50")
-              }
-            >
-              {r}
-            </button>
-          ))}
+        <div className="flex flex-col gap-1 items-end">
+          <div className="flex gap-1 text-xs">
+            {(Object.keys(QUOTE_SYMBOL) as Quote[]).map((q) => (
+              <button
+                key={q}
+                onClick={() => setQuote(q)}
+                className={
+                  "px-3 py-1 rounded-md border " +
+                  (quote === q
+                    ? "bg-orange text-white border-orange"
+                    : "border-slate-300 text-slate-600 hover:bg-slate-50")
+                }
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-1 text-xs">
+            {(Object.keys(RANGE_DAYS) as Range[]).map((r) => (
+              <button
+                key={r}
+                onClick={() => setRange(r)}
+                className={
+                  "px-3 py-1 rounded-md border " +
+                  (range === r
+                    ? "bg-orange text-white border-orange"
+                    : "border-slate-300 text-slate-600 hover:bg-slate-50")
+                }
+              >
+                {r}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
       <div className="h-64 w-full">
@@ -112,15 +142,16 @@ export default function BtcUsdChart() {
             />
             <YAxis
               tick={{ fontSize: 11, fill: "#64748b" }}
-              tickFormatter={(v: number) =>
-                v >= 1000 ? `$${(v / 1000).toFixed(0)}k` : `$${v.toFixed(0)}`
-              }
-              width={55}
+              tickFormatter={(v: number) => {
+                const sym = QUOTE_SYMBOL[quote];
+                return v >= 1000 ? `${sym}${(v / 1000).toFixed(0)}k` : `${sym}${v.toFixed(0)}`;
+              }}
+              width={60}
               scale={range === "ALL" ? "log" : "auto"}
               domain={range === "ALL" ? [0.01, "auto"] : ["auto", "auto"]}
             />
             <Tooltip
-              formatter={(v: number) => formatPrice(v)}
+              formatter={(v: number) => formatPrice(v, quote)}
               labelFormatter={(d: string) => d}
               contentStyle={{ fontSize: 12, borderRadius: 6 }}
             />
