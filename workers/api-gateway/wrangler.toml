@@ -1,30 +1,28 @@
 name = "api-orangerails"
 main = "src/index.ts"
 compatibility_date = "2026-05-31"
-workers_dev = true
+workers_dev = false
 
 [vars]
 OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
+BB_ADAPTER_URL = ""
 
-# Staging deploys to a workers.dev URL for verification. The custom
-# domain `api-staging.orangerails.com` route is bound separately (one
-# time, via the CF dashboard or a scoped API call) — wrangler's auto
-# route binding requires a token with Zone scope on the orangerails.com
-# zone, and we keep the deploy token narrower than that.
 [env.staging]
 name = "api-orangerails-staging"
-workers_dev = true
+routes = [
+  { pattern = "api-staging.orangerails.com/*", zone_name = "orangerails.com" },
+]
 
 [env.staging.vars]
 OR_SUPABASE_URL = "https://gposxxmxenrdvewrprle.supabase.co"
+BB_ADAPTER_URL = ""
 
-# Production deploys to its workers.dev URL too. The api.orangerails.com
-# route is bound once in the CF dashboard pointing at this script name;
-# subsequent code deploys then ship to that route automatically. See
-# the Roadmap (Step 3 — DNS flip) for the one-time binding.
 [env.production]
 name = "api-orangerails-production"
-workers_dev = true
+routes = [
+  { pattern = "api.orangerails.com/*", zone_name = "orangerails.com" },
+]
 
 [env.production.vars]
 OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
+BB_ADAPTER_URL = ""

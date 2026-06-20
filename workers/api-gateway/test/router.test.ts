@@ -3,6 +3,7 @@ import worker from '../src/index';
 
 const ENV = {
   OR_SUPABASE_URL: 'https://upstream.example.com',
+  BB_ADAPTER_URL: 'https://adapter.example.com',
 };
 
 beforeEach(() => {
@@ -108,14 +109,23 @@ describe('legacy /functions passthrough', () => {
   });
 });
 
-describe('sync/blink removed', () => {
-  it('returns 404 , Blink sync was inlined into the Supabase function', async () => {
+describe('sync/blink', () => {
+  it('forwards to BB_ADAPTER_URL when set', async () => {
+    const calls = capture();
+    await worker.fetch(
+      new Request('https://api.orangerails.com/sync/blink', { method: 'POST', body: '{}' }),
+      ENV,
+    );
+    expect(calls[0].url).toBe('https://adapter.example.com/sync/blink');
+  });
+
+  it('returns 503 when adapter not configured', async () => {
     const calls = capture();
     const res = await worker.fetch(
       new Request('https://api.orangerails.com/sync/blink', { method: 'POST' }),
-      ENV,
+      { ...ENV, BB_ADAPTER_URL: '' },
     );
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(503);
     expect(calls).toHaveLength(0);
   });
 });

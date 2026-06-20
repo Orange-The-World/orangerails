@@ -1,5 +1,5 @@
 /**
- * api.orangerails.com , canonical API gateway.
+ * api.orangerails.com — canonical API gateway.
  *
  * Replaces the per-client hardcoded Supabase URL pattern with a single
  * canonical entry point. Clients only ever know about
@@ -13,18 +13,23 @@
  *   /functions/... transparent passthrough to the upstream Supabase project.
  *                  Migration courtesy so existing clients keep working while
  *                  they cut over. Dropped after sunset (see Roadmap).
+ *   /sync/blink    forwards to the Express adapter on maintainer infrastructure via the
+ *                  Cloudflare Tunnel hostname. OR-internal path used by the
+ *                  `sync-blink` Supabase function to talk to Blink.
  *   /health        lightweight liveness check served locally by the Worker.
- *                  Does NOT forward , the Worker being reachable is enough
+ *                  Does NOT forward — the Worker being reachable is enough
  *                  signal; maintainer infrastructure liveness is checked separately.
  *
  * Anything else returns 404. Closed by default.
  *
- * Wiki: Apps/🚂 Orange Rails/api.orangerails.com , Canonical Gateway/Proposal
+ * Wiki: Apps/🚂 Orange Rails/api.orangerails.com — Canonical Gateway/Proposal
  */
 
 export interface Env {
-  /** OR Supabase URL , e.g. https://lcdicqalreskibdfxkzb.supabase.co (prod) or the dev ref. Set per environment in wrangler.toml. */
+  /** OR Supabase URL — e.g. https://lcdicqalreskibdfxkzb.supabase.co (prod) or the dev ref. Set per environment in wrangler.toml. */
   OR_SUPABASE_URL: string;
+  /** Cloudflare Tunnel hostname pointing at maintainer infrastructure's Express adapter (Step 2 of the roadmap). Empty until Step 2 ships. */
+  BB_ADAPTER_URL: string;
 }
 
 type V1Route = {
@@ -52,7 +57,7 @@ const V1_ROUTES: Record<string, V1Route> = {
   'POST /v1/quiltt/sync':               { method: 'POST', fn: 'or-quiltt-sync' },
   'POST /v1/transactions/list':         { method: 'POST', fn: 'or-transactions-list' },
   'GET  /v1/providers':                 { method: 'GET',  fn: 'or-providers' },
-  // Truth-data routes , world-gateway has a sub-path per dataset.
+  // Truth-data routes — world-gateway has a sub-path per dataset.
   'GET  /v1/truth/precious-metals':           { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'precious-metals' },
   'GET  /v1/truth/inflation':                 { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'inflation' },
   'GET  /v1/truth/historical-money-prices':   { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'historical-money-prices' },
@@ -134,6 +139,17 @@ export default {
 
     if (url.pathname.startsWith('/functions/')) {
       const upstream = new URL(url.pathname + url.search, env.OR_SUPABASE_URL).toString();
+      return proxyToSupabase(upstream, request);
+    }
+
+    if (url.pathname === '/sync/blink') {
+      if (!env.BB_ADAPTER_URL) {
+        return new Response(JSON.stringify({ error: 'adapter_not_configured' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      const upstream = new URL('/sync/blink' + url.search, env.BB_ADAPTER_URL).toString();
       return proxyToSupabase(upstream, request);
     }
 

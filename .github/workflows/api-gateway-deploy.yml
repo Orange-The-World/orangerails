@@ -1,9 +1,11 @@
 name: Deploy api.orangerails.com Worker
 
-# Phase 3A: auto-deploy gated to manual-trigger only during OSS launch.
-# OLD MorningRevolution/orangerails continues serving prod via its own workflow.
-# Re-enable push triggers when Phase 3B (prod migration) is sequenced.
 on:
+  push:
+    branches: [dev, prod]
+    paths:
+      - 'workers/api-gateway/**'
+      - '.github/workflows/api-gateway-deploy.yml'
   workflow_dispatch:
     inputs:
       reason:
@@ -36,7 +38,7 @@ jobs:
 
       - name: Test
         working-directory: workers/api-gateway
-        run: bunx vitest run --config vitest.config.ts
+        run: bun test
 
       - name: Pick environment for this branch
         id: env
@@ -46,7 +48,7 @@ jobs:
           elif [ "${{ github.ref_name }}" = "dev" ]; then
             echo "env=staging" >> "$GITHUB_OUTPUT"
           else
-            echo "Unknown branch ${{ github.ref_name }} , skipping deploy"
+            echo "Unknown branch ${{ github.ref_name }} — skipping deploy"
             exit 0
           fi
 
