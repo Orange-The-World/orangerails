@@ -7,10 +7,12 @@ workers_dev = true
 OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
 
 # Staging deploys to a workers.dev URL for verification. The custom
-# domain `api-staging.orangerails.com` route is bound separately (one
-# time, via the CF dashboard or a scoped API call) — wrangler's auto
-# route binding requires a token with Zone scope on the orangerails.com
-# zone, and we keep the deploy token narrower than that.
+# domain `api.orangerails.dev` is bound separately (one time, via the
+# Cloudflare dashboard Custom Domains tab on this Worker, or a scoped
+# API call). Wrangler's auto route binding requires a token with Zone
+# scope on the orangerails.dev zone, and we keep the deploy token
+# narrower than that. The dev gateway then proxies to OR DEV Supabase
+# (gposxxmxenrdvewrprle) so dev traffic never touches prod data.
 [env.staging]
 name = "api-orangerails-staging"
 workers_dev = true
