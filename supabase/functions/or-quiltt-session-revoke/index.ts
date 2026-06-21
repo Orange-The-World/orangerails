@@ -60,10 +60,18 @@ Deno.serve(async (req: Request) => {
     };
 
     if (!body.widget_token || typeof body.widget_token !== "string") {
-      return jsonResponse({ error: "widget_token required", code: "body_missing_widget_token" }, 400, cors);
+      return jsonResponse(
+        { error: "widget_token required", code: "body_missing_widget_token" },
+        400,
+        cors,
+      );
     }
     if (!body.session_token || typeof body.session_token !== "string") {
-      return jsonResponse({ error: "session_token required", code: "body_missing_session_token" }, 400, cors);
+      return jsonResponse(
+        { error: "session_token required", code: "body_missing_session_token" },
+        400,
+        cors,
+      );
     }
 
     const service = createClient(
@@ -82,13 +90,21 @@ Deno.serve(async (req: Request) => {
       .eq("id", body.widget_token)
       .maybeSingle();
     if (session.error || !session.data) {
-      return jsonResponse({ error: "Invalid widget token", code: "widget_token_unknown" }, 401, cors);
+      return jsonResponse(
+        { error: "Invalid widget token", code: "widget_token_unknown" },
+        401,
+        cors,
+      );
     }
     if (session.data.used_at) {
       return jsonResponse({ error: "Invalid widget token", code: "widget_token_used" }, 401, cors);
     }
     if (new Date(session.data.expires_at as string) < new Date()) {
-      return jsonResponse({ error: "Invalid widget token", code: "widget_token_expired" }, 401, cors);
+      return jsonResponse(
+        { error: "Invalid widget token", code: "widget_token_expired" },
+        401,
+        cors,
+      );
     }
 
     // Binding check: verify the session_token belongs to this widget_token's
@@ -109,7 +125,11 @@ Deno.serve(async (req: Request) => {
       // Malformed JWT, fall through to bind check failure.
     }
     if (!jwtUserId) {
-      return jsonResponse({ error: "Session token not bound", code: "session_token_unparseable" }, 401, cors);
+      return jsonResponse(
+        { error: "Session token not bound", code: "session_token_unparseable" },
+        401,
+        cors,
+      );
     }
 
     const subLookup = await service
@@ -119,7 +139,11 @@ Deno.serve(async (req: Request) => {
       .eq("external_user_id", session.data.app_user_id)
       .maybeSingle();
     if (subLookup.error || !subLookup.data) {
-      return jsonResponse({ error: "Session token not bound", code: "subaccount_missing" }, 401, cors);
+      return jsonResponse(
+        { error: "Session token not bound", code: "subaccount_missing" },
+        401,
+        cors,
+      );
     }
     const mapLookup = await service
       .from("quiltt_profile_map")
@@ -127,10 +151,18 @@ Deno.serve(async (req: Request) => {
       .eq("subaccount_id", subLookup.data.id)
       .maybeSingle();
     if (mapLookup.error || !mapLookup.data) {
-      return jsonResponse({ error: "Session token not bound", code: "profile_map_missing" }, 401, cors);
+      return jsonResponse(
+        { error: "Session token not bound", code: "profile_map_missing" },
+        401,
+        cors,
+      );
     }
     if (mapLookup.data.quiltt_profile_id !== jwtUserId) {
-      return jsonResponse({ error: "Session token not bound", code: "session_token_foreign" }, 401, cors);
+      return jsonResponse(
+        { error: "Session token not bound", code: "session_token_foreign" },
+        401,
+        cors,
+      );
     }
 
     // DELETE auth.quiltt.io/v1/users/session, singular "session", per
@@ -155,10 +187,12 @@ Deno.serve(async (req: Request) => {
     // token back, and Supabase function logs are not user-consent-scoped.
     // Log status only.
     await revokeResp.text().catch(() => "<unreadable>");
-    console.error(
-      `[or-quiltt-session-revoke] Quiltt revoke failed: status=${revokeResp.status}`,
+    console.error(`[or-quiltt-session-revoke] Quiltt revoke failed: status=${revokeResp.status}`);
+    return jsonResponse(
+      { error: "Quiltt revoke failed", code: "quiltt_upstream_error" },
+      502,
+      cors,
     );
-    return jsonResponse({ error: "Quiltt revoke failed", code: "quiltt_upstream_error" }, 502, cors);
   } catch (err) {
     console.error("[or-quiltt-session-revoke] unexpected:", err);
     return jsonResponse({ error: "Internal error" }, 500, cors);
