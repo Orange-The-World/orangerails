@@ -21,7 +21,7 @@
 --      new key; OR's new hash matches; auth restored.
 --   5. Total the V2 tenant auth-fail window: redeploy duration (typically <2 min).
 
--- OR DEV (gposxxmxenrdvewrprle) does not have the `platforms` table — V2 only
+-- OR DEV (fzwmnzmtqidumdqjdddz) does not have the `platforms` table; V2 only
 -- talks to OR PROD, so the rotation is a no-op on DEV. Guard the UPDATE so
 -- the migration is idempotent + safe to apply via Mgmt API on either project.
 DO $$
