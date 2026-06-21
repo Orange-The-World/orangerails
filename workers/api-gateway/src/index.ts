@@ -28,38 +28,65 @@ export interface Env {
 }
 
 type V1Route = {
-  method: 'GET' | 'POST';
+  method: "GET" | "POST";
   fn: string;
   /** When set, the public path includes a trailing segment that maps to the upstream subpath. */
   upstreamSuffix?: (rest: string) => string;
 };
 
 const V1_ROUTES: Record<string, V1Route> = {
-  'POST /v1/platforms/provision':       { method: 'POST', fn: 'or-provision' },
-  'GET  /v1/platforms/display':         { method: 'GET',  fn: 'or-platform-display' },
-  'POST /v1/link/mint-token':           { method: 'POST', fn: 'or-link-mint-token' },
-  'POST /v1/link/complete':             { method: 'POST', fn: 'or-link-complete' },
-  'POST /v1/connections/create':        { method: 'POST', fn: 'or-connection-create' },
-  'POST /v1/connections/sync':          { method: 'POST', fn: 'or-sync' },
-  'GET  /v1/connections/list':          { method: 'GET',  fn: 'or-connection-list' },
-  'POST /v1/connections/delete':        { method: 'POST', fn: 'or-connection-delete' },
-  'POST /v1/wallets/discover':          { method: 'POST', fn: 'or-discover-wallets' },
-  'POST /v1/wallets/source-set':        { method: 'POST', fn: 'or-source-wallets-set' },
-  'POST /v1/quiltt/session':            { method: 'POST', fn: 'or-quiltt-session' },
-  'POST /v1/quiltt/session-via-widget': { method: 'POST', fn: 'or-quiltt-session-via-widget' },
-  'POST /v1/quiltt/accounts':           { method: 'POST', fn: 'or-quiltt-accounts' },
-  'POST /v1/quiltt/disconnect':         { method: 'POST', fn: 'or-quiltt-disconnect' },
-  'POST /v1/quiltt/sync':               { method: 'POST', fn: 'or-quiltt-sync' },
-  'POST /v1/transactions/list':         { method: 'POST', fn: 'or-transactions-list' },
-  'GET  /v1/providers':                 { method: 'GET',  fn: 'or-providers' },
+  "POST /v1/platforms/provision": { method: "POST", fn: "or-provision" },
+  "GET  /v1/platforms/display": { method: "GET", fn: "or-platform-display" },
+  "POST /v1/link/mint-token": { method: "POST", fn: "or-link-mint-token" },
+  "POST /v1/link/complete": { method: "POST", fn: "or-link-complete" },
+  "POST /v1/connections/create": { method: "POST", fn: "or-connection-create" },
+  "POST /v1/connections/sync": { method: "POST", fn: "or-sync" },
+  "GET  /v1/connections/list": { method: "GET", fn: "or-connection-list" },
+  "POST /v1/connections/delete": { method: "POST", fn: "or-connection-delete" },
+  "POST /v1/wallets/discover": { method: "POST", fn: "or-discover-wallets" },
+  "POST /v1/wallets/source-set": { method: "POST", fn: "or-source-wallets-set" },
+  "POST /v1/quiltt/session": { method: "POST", fn: "or-quiltt-session" },
+  "POST /v1/quiltt/session-via-widget": { method: "POST", fn: "or-quiltt-session-via-widget" },
+  "POST /v1/quiltt/session-revoke": { method: "POST", fn: "or-quiltt-session-revoke" },
+  "POST /v1/quiltt/accounts": { method: "POST", fn: "or-quiltt-accounts" },
+  "POST /v1/quiltt/disconnect": { method: "POST", fn: "or-quiltt-disconnect" },
+  "POST /v1/quiltt/sync": { method: "POST", fn: "or-quiltt-sync" },
+  "POST /v1/transactions/list": { method: "POST", fn: "or-transactions-list" },
+  "GET  /v1/providers": { method: "GET", fn: "or-providers" },
+  "GET  /v1/platform/config": { method: "GET", fn: "or-platform-bootstrap" },
+  "POST /v1/platform/config": { method: "POST", fn: "or-platform-bootstrap" },
   // Truth-data routes — world-gateway has a sub-path per dataset.
-  'GET  /v1/truth/precious-metals':           { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'precious-metals' },
-  'GET  /v1/truth/inflation':                 { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'inflation' },
-  'GET  /v1/truth/historical-money-prices':   { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'historical-money-prices' },
-  'GET  /v1/truth/bitcoin-network':           { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'bitcoin-network' },
-  'GET  /v1/truth/wages':                     { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'wages' },
-  'GET  /v1/truth/monetary-aggregates':       { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'monetary-aggregates' },
-  'GET  /v1/truth/commodity-prices':          { method: 'GET', fn: 'world-gateway', upstreamSuffix: () => 'commodity-prices' },
+  "GET  /v1/truth/precious-metals": {
+    method: "GET",
+    fn: "world-gateway",
+    upstreamSuffix: () => "precious-metals",
+  },
+  "GET  /v1/truth/inflation": {
+    method: "GET",
+    fn: "world-gateway",
+    upstreamSuffix: () => "inflation",
+  },
+  "GET  /v1/truth/historical-money-prices": {
+    method: "GET",
+    fn: "world-gateway",
+    upstreamSuffix: () => "historical-money-prices",
+  },
+  "GET  /v1/truth/bitcoin-network": {
+    method: "GET",
+    fn: "world-gateway",
+    upstreamSuffix: () => "bitcoin-network",
+  },
+  "GET  /v1/truth/wages": { method: "GET", fn: "world-gateway", upstreamSuffix: () => "wages" },
+  "GET  /v1/truth/monetary-aggregates": {
+    method: "GET",
+    fn: "world-gateway",
+    upstreamSuffix: () => "monetary-aggregates",
+  },
+  "GET  /v1/truth/commodity-prices": {
+    method: "GET",
+    fn: "world-gateway",
+    upstreamSuffix: () => "commodity-prices",
+  },
 };
 
 function lookupV1(method: string, pathname: string): V1Route | null {
@@ -71,24 +98,27 @@ function forwardHeaders(src: Headers): Headers {
   const out = new Headers();
   for (const [k, v] of src) {
     const lk = k.toLowerCase();
-    if (lk === 'host' || lk === 'cf-connecting-ip' || lk.startsWith('cf-') || lk === 'x-forwarded-host') continue;
+    if (
+      lk === "host" ||
+      lk === "cf-connecting-ip" ||
+      lk.startsWith("cf-") ||
+      lk === "x-forwarded-host"
+    )
+      continue;
     out.set(k, v);
   }
   return out;
 }
 
-async function proxyToSupabase(
-  upstreamUrl: string,
-  request: Request,
-): Promise<Response> {
-  const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
-  const init: RequestInit & { duplex?: 'half' } = {
+async function proxyToSupabase(upstreamUrl: string, request: Request): Promise<Response> {
+  const hasBody = request.method !== "GET" && request.method !== "HEAD";
+  const init: RequestInit & { duplex?: "half" } = {
     method: request.method,
     headers: forwardHeaders(request.headers),
     body: hasBody ? request.body : undefined,
-    redirect: 'manual',
+    redirect: "manual",
   };
-  if (hasBody) init.duplex = 'half';
+  if (hasBody) init.duplex = "half";
   const upstream = new Request(upstreamUrl, init);
   return fetch(upstream);
 }
@@ -98,33 +128,34 @@ export default {
     const url = new URL(request.url);
     const method = request.method.toUpperCase();
 
-    if (method === 'OPTIONS') {
+    if (method === "OPTIONS") {
       return new Response(null, {
         status: 204,
         headers: {
-          'access-control-allow-origin': '*',
-          'access-control-allow-methods': 'GET,POST,OPTIONS',
-          'access-control-allow-headers': 'authorization,content-type,x-platform-api-key,x-or-widget-token,x-region',
-          'access-control-max-age': '86400',
+          "access-control-allow-origin": "*",
+          "access-control-allow-methods": "GET,POST,OPTIONS",
+          "access-control-allow-headers":
+            "authorization,content-type,x-platform-api-key,x-or-api-key,x-or-widget-token,x-region",
+          "access-control-max-age": "86400",
         },
       });
     }
 
-    if (url.pathname === '/health') {
-      return new Response(JSON.stringify({ ok: true, service: 'api.orangerails.com' }), {
-        headers: { 'content-type': 'application/json' },
+    if (url.pathname === "/health") {
+      return new Response(JSON.stringify({ ok: true, service: "api.orangerails.com" }), {
+        headers: { "content-type": "application/json" },
       });
     }
 
-    if (url.pathname.startsWith('/v1/')) {
+    if (url.pathname.startsWith("/v1/")) {
       const route = lookupV1(method, url.pathname);
       if (!route) {
-        return new Response(JSON.stringify({ error: 'route_not_found', path: url.pathname }), {
+        return new Response(JSON.stringify({ error: "route_not_found", path: url.pathname }), {
           status: 404,
-          headers: { 'content-type': 'application/json' },
+          headers: { "content-type": "application/json" },
         });
       }
-      const suffix = route.upstreamSuffix ? `/${route.upstreamSuffix(url.pathname)}` : '';
+      const suffix = route.upstreamSuffix ? `/${route.upstreamSuffix(url.pathname)}` : "";
       const upstream = new URL(
         `/functions/v1/${route.fn}${suffix}${url.search}`,
         env.OR_SUPABASE_URL,
@@ -132,14 +163,14 @@ export default {
       return proxyToSupabase(upstream, request);
     }
 
-    if (url.pathname.startsWith('/functions/')) {
+    if (url.pathname.startsWith("/functions/")) {
       const upstream = new URL(url.pathname + url.search, env.OR_SUPABASE_URL).toString();
       return proxyToSupabase(upstream, request);
     }
 
-    return new Response(JSON.stringify({ error: 'not_found', path: url.pathname }), {
+    return new Response(JSON.stringify({ error: "not_found", path: url.pathname }), {
       status: 404,
-      headers: { 'content-type': 'application/json' },
+      headers: { "content-type": "application/json" },
     });
   },
 };
