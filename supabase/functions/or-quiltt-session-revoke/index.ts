@@ -7,9 +7,11 @@
  * and 20 per day. Every POST to https://auth.quiltt.io/v1/users/sessions
  * counts against that limit, even if the previously minted token is still
  * valid. A consumer app testing the bank-link flow can burn the daily cap
- * in an afternoon. Per Quiltt's documented API, revoked sessions DO NOT
- * count toward the limit, so this endpoint lets the consumer app release
- * a session it didn't end up using and put the slot back.
+ * in an afternoon. Per Quiltt's documented API (as of 2026-06-20), revoked
+ * sessions do not count toward the limit, so this endpoint lets the consumer
+ * app release a session it did not end up using and put the slot back. If
+ * Quiltt later changes that policy, this endpoint is still safe to call but
+ * the quota benefit no longer holds — confirm against Quiltt's current docs.
  *
  * Auth model: widget_token in the body. Same shape as the sister function
  * or-quiltt-session-via-widget. The widget_token proves the caller went
@@ -194,7 +196,14 @@ Deno.serve(async (req: Request) => {
       cors,
     );
   } catch (err) {
-    console.error("[or-quiltt-session-revoke] unexpected:", err);
+    // Log only the error name + message. A raw Error object can stringify
+    // into JSON.parse output that echoes part of the request body, which on
+    // this endpoint contains the session_token JWT.
+    const name = (err as { name?: unknown })?.name;
+    const message = (err as { message?: unknown })?.message;
+    console.error(
+      `[or-quiltt-session-revoke] unexpected: name=${typeof name === "string" ? name : "Error"} message=${typeof message === "string" ? message.slice(0, 200) : "<unavailable>"}`,
+    );
     return jsonResponse({ error: "Internal error" }, 500, cors);
   }
 });
