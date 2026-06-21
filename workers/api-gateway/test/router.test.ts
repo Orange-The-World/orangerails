@@ -67,6 +67,32 @@ describe('v1 path map', () => {
     expect(calls[0].url).toBe('https://upstream.example.com/functions/v1/or-sync');
   });
 
+  it('maps /v1/quiltt/session-revoke to or-quiltt-session-revoke', async () => {
+    const calls = capture();
+    await worker.fetch(
+      new Request('https://api.orangerails.com/v1/quiltt/session-revoke', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{"widget_token":"w","session_token":"s"}',
+      }),
+      ENV,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('https://upstream.example.com/functions/v1/or-quiltt-session-revoke');
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].bodyText).toBe('{"widget_token":"w","session_token":"s"}');
+  });
+
+  it('404 on GET /v1/quiltt/session-revoke (POST-only)', async () => {
+    const calls = capture();
+    const res = await worker.fetch(
+      new Request('https://api.orangerails.com/v1/quiltt/session-revoke'),
+      ENV,
+    );
+    expect(res.status).toBe(404);
+    expect(calls).toHaveLength(0);
+  });
+
   it('maps /v1/truth/bitcoin-network to world-gateway/bitcoin-network with query', async () => {
     const calls = capture();
     await worker.fetch(
