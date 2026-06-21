@@ -155,7 +155,7 @@ describe("legacy /functions passthrough", () => {
 });
 
 describe("sync/blink removed", () => {
-  it("returns 404 — Blink sync was inlined into the Supabase function", async () => {
+  it("returns 404 (Blink sync was inlined into the Supabase function)", async () => {
     const calls = capture();
     const res = await worker.fetch(
       new Request("https://api.orangerails.com/sync/blink", { method: "POST" }),
