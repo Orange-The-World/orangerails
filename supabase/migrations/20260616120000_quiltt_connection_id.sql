@@ -16,7 +16,7 @@
 -- updates the existing row instead of creating a duplicate.
 --
 -- Wrapped in a DO block guarded on table existence: the OR DEV Supabase
--- project (gposxxmxenrdvewrprle) is provisioned bare without the hub
+-- project (fzwmnzmtqidumdqjdddz) is provisioned bare without the hub
 -- foundation migrations applied, so this would otherwise fail CI. PROD
 -- (lcdicqalreskibdfxkzb) has the table and the column will land normally.
 
