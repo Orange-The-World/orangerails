@@ -40,8 +40,14 @@ interface InstitutionRow {
 // Deterministic brand color for a bank tile when no logo is returned.
 function tileColor(seed: string): string {
   const palette = [
-    "bg-indigo-500", "bg-blue-500", "bg-purple-500", "bg-emerald-500",
-    "bg-amber-500", "bg-rose-500", "bg-cyan-500", "bg-orange-500",
+    "bg-indigo-500",
+    "bg-blue-500",
+    "bg-purple-500",
+    "bg-emerald-500",
+    "bg-amber-500",
+    "bg-rose-500",
+    "bg-cyan-500",
+    "bg-orange-500",
   ];
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = ((h << 5) - h + seed.charCodeAt(i)) | 0;
@@ -95,11 +101,11 @@ function readFragmentParams(): FragmentParams {
   const sp = new URLSearchParams(hash);
   return {
     session_token: sp.get("session_token"),
-    connector_id:  sp.get("connector_id"),
+    connector_id: sp.get("connector_id"),
     platform_slug: sp.get("platform_slug"),
-    app_user_id:   sp.get("app_user_id"),
-    widget_token:  sp.get("widget_token"),
-    institution:   sp.get("institution"),
+    app_user_id: sp.get("app_user_id"),
+    widget_token: sp.get("widget_token"),
+    institution: sp.get("institution"),
   };
 }
 
@@ -219,31 +225,26 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     try {
       const supabaseUrl =
         (import.meta.env.VITE_SUPABASE_URL as string | undefined) ||
-        "https://gposxxmxenrdvewrprle.supabase.co";
-      const resp = await fetch(
-        `${supabaseUrl}/functions/v1/or-quiltt-link-complete`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            platform_slug:        params.platform_slug!,
-            app_user_id:          params.app_user_id!,
-            widget_token:         params.widget_token!,
-            quiltt_connection_id: quilttConnectionId ?? undefined,
-          }),
-        },
-      );
+        "https://fzwmnzmtqidumdqjdddz.supabase.co";
+      const resp = await fetch(`${supabaseUrl}/functions/v1/or-quiltt-link-complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          platform_slug: params.platform_slug!,
+          app_user_id: params.app_user_id!,
+          widget_token: params.widget_token!,
+          quiltt_connection_id: quilttConnectionId ?? undefined,
+        }),
+      });
       if (!resp.ok) {
         const text = await resp.text().catch(() => "");
-        throw new Error(
-          `or-quiltt-link-complete ${resp.status}: ${text.slice(0, 200)}`,
-        );
+        throw new Error(`or-quiltt-link-complete ${resp.status}: ${text.slice(0, 200)}`);
       }
       const completeJson = await resp.json().catch(() => ({}));
-      const orConnectionId = typeof completeJson?.connection_id === "string"
-        ? completeJson.connection_id : null;
-      const orSubaccountId = typeof completeJson?.subaccount_id === "string"
-        ? completeJson.subaccount_id : null;
+      const orConnectionId =
+        typeof completeJson?.connection_id === "string" ? completeJson.connection_id : null;
+      const orSubaccountId =
+        typeof completeJson?.subaccount_id === "string" ? completeJson.subaccount_id : null;
       setPhase("done");
       if (window.opener) {
         // Pass everything the integrating app needs to (a) find the OR
@@ -256,7 +257,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
             orConnectionId,
             orSubaccountId,
             platformSlug: params.platform_slug,
-            appUserId:    params.app_user_id,
+            appUserId: params.app_user_id,
           },
           "*",
         );
@@ -297,9 +298,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
           <CheckCircle2 className="h-5 w-5" />
           <strong>Bank connected!</strong>
         </div>
-        <p className="text-xs text-slate-500">
-          Returning you to your app…
-        </p>
+        <p className="text-xs text-slate-500">Returning you to your app…</p>
       </div>
     );
   }
@@ -336,9 +335,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
           <strong>Link failed.</strong>
         </div>
         {errorMsg && (
-          <pre className="overflow-x-auto rounded bg-muted/40 p-3 text-xs">
-            {errorMsg}
-          </pre>
+          <pre className="overflow-x-auto rounded bg-muted/40 p-3 text-xs">{errorMsg}</pre>
         )}
         <button
           type="button"
@@ -362,9 +359,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   return (
     <div className="flex items-center gap-3 text-sm text-slate-500">
       <Loader2 className="h-4 w-4 animate-spin" />
-      {selectedInstitution?.name
-        ? `Opening ${selectedInstitution.name}…`
-        : "Opening bank picker…"}
+      {selectedInstitution?.name ? `Opening ${selectedInstitution.name}…` : "Opening bank picker…"}
     </div>
   );
 }
@@ -460,9 +455,7 @@ function BankSearchStep({
                     {name.slice(0, 1).toUpperCase()}
                   </span>
                 )}
-                <span className="w-full truncate text-xs font-medium text-slate-900">
-                  {name}
-                </span>
+                <span className="w-full truncate text-xs font-medium text-slate-900">{name}</span>
               </button>
             );
           })}
@@ -480,14 +473,11 @@ function MissingParamsView() {
         <strong>Missing link parameters</strong>
       </div>
       <p className="text-sm text-muted-foreground">
-        This page expects to be opened by your integrating app with a Quiltt
-        session token in the URL fragment. If you reached here directly,
-        please start the link flow from inside your app.
+        This page expects to be opened by your integrating app with a Quiltt session token in the
+        URL fragment. If you reached here directly, please start the link flow from inside your app.
       </p>
       <details className="text-xs text-muted-foreground">
-        <summary className="cursor-pointer">
-          For integrators — expected fragment
-        </summary>
+        <summary className="cursor-pointer">For integrators: expected fragment</summary>
         <pre className="mt-2 overflow-x-auto rounded bg-muted/40 p-3 font-mono">{`#session_token=<jwt>
 &connector_id=<conn_...>
 &platform_slug=<slug>

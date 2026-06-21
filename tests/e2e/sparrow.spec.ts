@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page } from "@playwright/test";
 
 /**
  * Sparrow v0.1 smoke tests.
@@ -25,7 +25,7 @@ import { test, expect, type Page } from '@playwright/test';
  * Spec: see docs/Sparrow.md
  */
 
-const SHOT_DIR = 'tests/e2e/screenshots';
+const SHOT_DIR = "tests/e2e/screenshots";
 
 async function capture(page: Page, name: string): Promise<void> {
   await page.screenshot({
@@ -34,75 +34,68 @@ async function capture(page: Page, name: string): Promise<void> {
   });
 }
 
-test.describe.skip('Sparrow v0.1 , discovery + landing', () => {
-  test.skip('integrations redirects to providers', async ({ page }) => {
-    await page.goto('/integrations');
+test.describe.skip("Sparrow v0.1 , discovery + landing", () => {
+  test.skip("integrations redirects to providers", async ({ page }) => {
+    await page.goto("/integrations");
     await expect(page).toHaveURL(/\/providers$/);
-    await capture(page, '01-integrations-redirect');
+    await capture(page, "01-integrations-redirect");
   });
 
-  test('providers catalog includes the Sparrow manifest', async ({ request }) => {
+  test("providers catalog includes the Sparrow manifest", async ({ request }) => {
     // Hit the or-providers edge function directly to confirm Sparrow lives
     // in the catalog regardless of how the SPA renders it.
-    const baseUrl =
-      process.env.OR_SUPABASE_URL ?? 'https://gposxxmxenrdvewrprle.supabase.co';
+    const baseUrl = process.env.OR_SUPABASE_URL ?? "https://fzwmnzmtqidumdqjdddz.supabase.co";
     const res = await request.get(`${baseUrl}/functions/v1/or-providers`);
     expect(res.ok()).toBeTruthy();
     const body = await res.json();
-    const sparrow = (body.providers ?? []).find(
-      (p: { slug: string }) => p.slug === 'sparrow',
-    );
-    expect(sparrow, 'sparrow manifest must be in the catalog').toBeTruthy();
-    expect(sparrow.status).toBe('live');
-    expect(sparrow.category).toBe('on_chain_wallet');
-    expect(sparrow.connectUrl).toBe('/connect/sparrow');
+    const sparrow = (body.providers ?? []).find((p: { slug: string }) => p.slug === "sparrow");
+    expect(sparrow, "sparrow manifest must be in the catalog").toBeTruthy();
+    expect(sparrow.status).toBe("live");
+    expect(sparrow.category).toBe("on_chain_wallet");
+    expect(sparrow.connectUrl).toBe("/connect/sparrow");
   });
 
-  test('/providers shows Sparrow tile in the picker', async ({ page }) => {
-    await page.goto('/providers');
+  test("/providers shows Sparrow tile in the picker", async ({ page }) => {
+    await page.goto("/providers");
     const sparrowTile = page.locator('[data-slug="sparrow"]');
     await expect(sparrowTile).toBeVisible({ timeout: 10_000 });
-    await capture(page, '02-providers-with-sparrow');
+    await capture(page, "02-providers-with-sparrow");
   });
 
-  test('clicking the Sparrow tile shows preview + Stealth Sync CTA', async ({
-    page,
-  }) => {
-    await page.goto('/providers');
+  test("clicking the Sparrow tile shows preview + Stealth Sync CTA", async ({ page }) => {
+    await page.goto("/providers");
     const sparrowTile = page.locator('[data-slug="sparrow"]');
-    await sparrowTile.waitFor({ state: 'visible', timeout: 10_000 });
+    await sparrowTile.waitFor({ state: "visible", timeout: 10_000 });
     await sparrowTile.click();
 
-    const preview = page.locator('aside').filter({ hasText: 'Sparrow Wallet' });
+    const preview = page.locator("aside").filter({ hasText: "Sparrow Wallet" });
     await expect(preview).toBeVisible();
 
-    const cta = page.getByRole('link', { name: /open sparrow wallet setup/i });
+    const cta = page.getByRole("link", { name: /open sparrow wallet setup/i });
     await expect(cta).toBeVisible();
-    await expect(cta).toHaveAttribute('href', '/connect/sparrow');
-    await capture(page, '03-providers-sparrow-selected');
+    await expect(cta).toHaveAttribute("href", "/connect/sparrow");
+    await capture(page, "03-providers-sparrow-selected");
   });
 
-  test('/connect/sparrow renders the landing page sections', async ({ page }) => {
-    await page.goto('/connect/sparrow');
+  test("/connect/sparrow renders the landing page sections", async ({ page }) => {
+    await page.goto("/connect/sparrow");
 
-    await expect(
-      page.getByRole('heading', { name: /sparrow wallet/i, level: 1 }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: /sparrow wallet/i, level: 1 })).toBeVisible();
     await expect(page.getByText(/what v0\.1 ships, and what it doesn/i)).toBeVisible();
     await expect(page.getByText(/confirmed receives/i)).toBeVisible();
-    await expect(page.getByRole('heading', { name: /how to connect/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /how to connect/i })).toBeVisible();
     await expect(page.getByText(/open sparrow on your computer/i)).toBeVisible();
     await expect(page.getByText(/export your wallet descriptor/i)).toBeVisible();
     await expect(page.getByText(/launch stealth sync and paste/i)).toBeVisible();
     await expect(
       page.getByText(/your descriptor never leaves your browser in plaintext/i),
     ).toBeVisible();
-    await capture(page, '04-connect-sparrow-landing');
+    await capture(page, "04-connect-sparrow-landing");
   });
 
   test('"Launch Stealth Sync" button targets /connect/stealth', async ({ page }) => {
-    await page.goto('/connect/sparrow');
-    const launchButton = page.getByRole('button', {
+    await page.goto("/connect/sparrow");
+    const launchButton = page.getByRole("button", {
       name: /launch stealth sync/i,
     });
     await expect(launchButton).toBeVisible();
@@ -120,6 +113,6 @@ test.describe.skip('Sparrow v0.1 , discovery + landing', () => {
     });
     await launchButton.click();
     const opened = await openCallPromise;
-    expect(opened).toContain('/connect/stealth');
+    expect(opened).toContain("/connect/stealth");
   });
 });
