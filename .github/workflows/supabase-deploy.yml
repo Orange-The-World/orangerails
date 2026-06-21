@@ -63,10 +63,26 @@ jobs:
       - name: Pick Supabase target for this branch
         id: target
         run: |
+          # Two separate Supabase projects in the same testing org:
+          #   prod -> lcdicqalreskibdfxkzb (api.orangerails.com / orangerails.com)
+          #   dev  -> gposxxmxenrdvewrprle (api.orangerails.dev  / orangerails.dev)
+          # Until 2026-06-21 the dev path pointed at the prod project too, which
+          # meant a dev deploy would ship un-merged edge functions and migrations
+          # straight to production. Each branch now lands on its own Supabase
+          # project; promote dev -> prod through a PR to graduate changes.
           if [ "${{ github.ref_name }}" = "prod" ]; then
             echo "supabase_ref=lcdicqalreskibdfxkzb" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_name }}" = "dev" ]; then
-            echo "supabase_ref=lcdicqalreskibdfxkzb" >> "$GITHUB_OUTPUT"
+            echo "supabase_ref=gposxxmxenrdvewrprle" >> "$GITHUB_OUTPUT"
+          else
+            # Refuse to deploy from any non-prod, non-dev branch. The earlier
+            # "Pick Supabase project" step falls through to DEV creds for any
+            # other branch; without this guard, a workflow_dispatch from a
+            # feature branch would build a Pages bundle wired to DEV Supabase
+            # but skip the edge-function and migration deploy (empty ref),
+            # producing schema drift against whatever DEV currently runs.
+            echo "::error::Supabase deploys only run from 'prod' or 'dev' branches; got '${{ github.ref_name }}'"
+            exit 1
           fi
 
       - name: Setup Supabase CLI
