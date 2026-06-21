@@ -66,14 +66,22 @@ jobs:
           # Two separate Supabase projects in the same testing org:
           #   prod -> lcdicqalreskibdfxkzb (orangerails_prod, api.orangerails.com)
           #   dev  -> fzwmnzmtqidumdqjdddz (orangerails_dev,  api.orangerails.dev)
+          #
           # Until 2026-06-21 the dev path pointed at the prod project too, which
           # meant a dev deploy would ship un-merged edge functions and migrations
           # straight to production. Earlier on 2026-06-21 the dev path was first
-          # set to gposxxmxenrdvewrprle in error (a phantom project carried over
-          # from an old handoff); the correct dev project is fzwmnzmtqidumdqjdddz
-          # which the owner created as the orangerails_dev workspace. Each
-          # branch now lands on its own Supabase project; promote dev -> prod
-          # through a PR to graduate changes.
+          # set to gposxxmxenrdvewrprle, which is NOT this repo's dev project at
+          # all -- it is orange-world-prod, the production database for a sibling
+          # product (Orange Way) that lives in the same Supabase team. The
+          # owner had already caught this exact ref-confusion on 2026-06-18 and
+          # corrected it in the predecessor workflow pages-deploy.yml (see
+          # commit b55636e: "was pointing at OWM PROD by mistake, would clobber
+          # it on next dev push"); when pages-deploy.yml was replaced by this
+          # supabase-deploy.yml the wrong ref was reintroduced. The correct dev
+          # project is fzwmnzmtqidumdqjdddz, the orangerails_dev workspace.
+          # Each branch now lands on its own Supabase project; promote dev ->
+          # prod through a PR to graduate changes. NEVER let the dev arm here
+          # point at a project ref outside this repo's two Supabase projects.
           if [ "${{ github.ref_name }}" = "prod" ]; then
             echo "supabase_ref=lcdicqalreskibdfxkzb" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_name }}" = "dev" ]; then
