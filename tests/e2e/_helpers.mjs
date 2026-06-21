@@ -6,13 +6,14 @@
 // Optional env:
 //   OR_APP_URL         (default https://dev.orangerails.com)
 //   OR_SUPPORT_URL     (default https://support.orangerails.com)
-//   OR_API_BASE_URL    (default https://gposxxmxenrdvewrprle.supabase.co)
+//   OR_API_BASE_URL    (default https://fzwmnzmtqidumdqjdddz.supabase.co)
 //   OR_HEADLESS        (default '1')
 
-export const APP_URL = process.env.OR_APP_URL || 'https://dev.orangerails.com';
-export const SUPPORT_URL = process.env.OR_SUPPORT_URL || 'https://support.orangerails.com';
-export const API_BASE_URL = process.env.OR_API_BASE_URL || 'https://gposxxmxenrdvewrprle.supabase.co';
-export const HEADLESS = (process.env.OR_HEADLESS ?? '1') !== '0';
+export const APP_URL = process.env.OR_APP_URL || "https://dev.orangerails.com";
+export const SUPPORT_URL = process.env.OR_SUPPORT_URL || "https://support.orangerails.com";
+export const API_BASE_URL =
+  process.env.OR_API_BASE_URL || "https://fzwmnzmtqidumdqjdddz.supabase.co";
+export const HEADLESS = (process.env.OR_HEADLESS ?? "1") !== "0";
 
 export const STEP = (n, label) => console.log(`  → step ${n}: ${label}`);
 

@@ -12,13 +12,15 @@ OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
 # API call). Wrangler's auto route binding requires a token with Zone
 # scope on the orangerails.dev zone, and we keep the deploy token
 # narrower than that. The dev gateway then proxies to OR DEV Supabase
-# (gposxxmxenrdvewrprle) so dev traffic never touches prod data.
+# (fzwmnzmtqidumdqjdddz) so dev traffic never touches prod data.
+# Must match the dev arm of supabase-deploy.yml's "Pick Supabase target"
+# step; if you change one, change the other.
 [env.staging]
 name = "api-orangerails-staging"
 workers_dev = true
 
 [env.staging.vars]
-OR_SUPABASE_URL = "https://gposxxmxenrdvewrprle.supabase.co"
+OR_SUPABASE_URL = "https://fzwmnzmtqidumdqjdddz.supabase.co"
 
 # Production deploys to its workers.dev URL too. The api.orangerails.com
 # route is bound once in the CF dashboard pointing at this script name;
