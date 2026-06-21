@@ -47,6 +47,7 @@ const V1_ROUTES: Record<string, V1Route> = {
   'POST /v1/wallets/source-set':        { method: 'POST', fn: 'or-source-wallets-set' },
   'POST /v1/quiltt/session':            { method: 'POST', fn: 'or-quiltt-session' },
   'POST /v1/quiltt/session-via-widget': { method: 'POST', fn: 'or-quiltt-session-via-widget' },
+  'POST /v1/quiltt/session-revoke':     { method: 'POST', fn: 'or-quiltt-session-revoke' },
   'POST /v1/quiltt/accounts':           { method: 'POST', fn: 'or-quiltt-accounts' },
   'POST /v1/quiltt/disconnect':         { method: 'POST', fn: 'or-quiltt-disconnect' },
   'POST /v1/quiltt/sync':               { method: 'POST', fn: 'or-quiltt-sync' },

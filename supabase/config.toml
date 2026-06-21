@@ -113,3 +113,10 @@ verify_jwt = false
 
 [functions.or-quiltt-session-via-widget]
 verify_jwt = false
+
+# or-quiltt-session-revoke uses widget_token only (no headers). Same shape
+# as or-quiltt-session-via-widget. Public so consumers can release a Quiltt
+# session that was never bound to a successful bank link, freeing the
+# per-Profile rate-limit quota.
+[functions.or-quiltt-session-revoke]
+verify_jwt = false
