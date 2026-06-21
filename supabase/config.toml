@@ -117,3 +117,10 @@ verify_jwt = false
 # This endpoint is what every consumer calls before it has any other OR context.
 [functions.or-platform-bootstrap]
 verify_jwt = false
+
+# or-quiltt-session-revoke uses widget_token only (no headers). Same shape
+# as or-quiltt-session-via-widget. Public so consumers can release a Quiltt
+# session that was never bound to a successful bank link, freeing the
+# per-Profile rate-limit quota.
+[functions.or-quiltt-session-revoke]
+verify_jwt = false
