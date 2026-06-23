@@ -1,0 +1,15 @@
+# Cloudflare Pages redirect rules. Applied at edge before the SPA loads.
+#
+# docs.orangerails.com is referenced from the marketing site's nav,
+# footer, and several /docs pages as the integrator knowledge base.
+# The dedicated docs site is on the roadmap (Phase 4) but does not
+# exist yet, so the canonical docs content for now lives at
+# orangerails.com/docs/* inside the main SPA. These rules send every
+# request that lands on the docs.* host to the matching path on the
+# main host. Status 302 (NOT 301) is deliberate: 301 is cached
+# indefinitely by browsers and intermediaries, which would keep
+# routing visitors here even after the dedicated docs site replaces
+# this redirect. 302 keeps the redirect transitional.
+
+https://docs.orangerails.com/*    https://orangerails.com/docs/:splat       302
+https://docs.orangerails.dev/*    https://orangerails.dev/docs/:splat       302
