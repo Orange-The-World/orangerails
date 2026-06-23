@@ -54,12 +54,32 @@ jobs:
             echo "key=${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY_DEV }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Pick Stealth Sync allowlist for this branch
+        id: stealth_allow
+        run: |
+          # The OR widget at /connect/stealth validates the consuming
+          # app's window.opener.location.origin against this allowlist
+          # before accepting OR_STEALTH_INIT. Vite bakes this into the
+          # bundle at build time via import.meta.env, so any consumer
+          # origin must be on the list at build time. Public hostnames
+          # only; no secrets. Per the repo's pre-publish leak-scan rule
+          # the actual consumer subdomains live in GitHub Actions
+          # repository variables (see VITE_OR_STEALTH_ALLOWED_ORIGINS_*),
+          # not in this workflow file, so changing the integrator list
+          # does not require a code commit.
+          if [ "${{ github.ref_name }}" = "prod" ]; then
+            echo "value=${{ vars.VITE_OR_STEALTH_ALLOWED_ORIGINS_PROD }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ vars.VITE_OR_STEALTH_ALLOWED_ORIGINS_DEV }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build
         run: bun run build
         env:
           VITE_SUPABASE_PROJECT_ID: ${{ steps.sb.outputs.project_id }}
           VITE_SUPABASE_URL: ${{ steps.sb.outputs.url }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ steps.sb.outputs.key }}
+          VITE_OR_STEALTH_ALLOWED_ORIGINS: ${{ steps.stealth_allow.outputs.value }}
       - name: Pick Supabase target for this branch
         id: target
         run: |
