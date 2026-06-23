@@ -4,6 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
+    <!-- docs.orangerails.* host redirect. The dedicated docs site lives
+         on the Phase 4 roadmap; until then the marketing site's /docs/*
+         routes are the canonical content. We do the redirect here at
+         the top of <head> so it fires before any bundle loads or paint
+         happens, no SPA flash, no 404 page render. Inline; tiny; no
+         dependencies. Public hostnames only, no consumer brand text. -->
+    <script>
+      (function () {
+        try {
+          var h = location.hostname;
+          if (h === "docs.orangerails.com" || h === "docs.orangerails.dev") {
+            var target = h === "docs.orangerails.com"
+              ? "https://orangerails.com"
+              : "https://orangerails.dev";
+            location.replace(target + "/docs" + location.pathname + location.search + location.hash);
+          }
+        } catch (_) {}
+      })();
+    </script>
+
     <!-- Defaults overridden per-route by TanStack Router's head() + HeadContent.
          Pre-rendered marketing routes (scripts/prerender-plugin.ts) rewrite
          <title>, <meta description>, and <link rel=canonical> per route at
