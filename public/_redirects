@@ -11,5 +11,21 @@
 # routing visitors here even after the dedicated docs site replaces
 # this redirect. 302 keeps the redirect transitional.
 
+# Probe rule: if /redir-probe-2026 returns 302 to /docs/quickstart, the
+# parser is reading this file. If it returns 200 (SPA fallback), the
+# file is not being parsed at all and the docs.* rules below would
+# never fire either.
+/redir-probe-2026 /docs/quickstart 302
+
+# Domain-prefix forms. These should match for any visitor on the docs.*
+# host even though the host is attached to the same orangerails-prod /
+# orangerails-dev Pages project.
 https://docs.orangerails.com/* https://orangerails.com/docs/:splat 302
 https://docs.orangerails.dev/* https://orangerails.dev/docs/:splat 302
+
+# Fallback: path-only rule that fires on EVERY host attached to this
+# project. Adds a request-time check: anyone hitting /docs/<anything>
+# via the docs.* hosts will land on the same path under orangerails.com,
+# which is also where the marketing site already serves /docs/*. On the
+# main host this is a no-op (already at /docs/...). Disabled until we
+# know whether host-prefix rules work above; placeholder.
