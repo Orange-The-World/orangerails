@@ -16,16 +16,18 @@ function dntActive() {
   }
 }
 
+// Cookieless PostHog init, matching the Orange Way Me posture. Memory-
+// only persistence, no cookies, no person profiles, no session
+// recording, no autocapture. Each page load is a fresh anonymous
+// pageview. The AnalyticsNotice that ships alongside this is
+// informational, not a consent gate, since there is no identifier to
+// opt into. DNT users skip init entirely. Guard against double-init
+// when the notice mounts on a subsequent marketing-route render.
+let posthogInitialized = false;
 function initPostHogIfConsented() {
   if (typeof window === "undefined") return;
   if (dntActive()) return;
-  let consent: string | null = null;
-  try {
-    consent = window.localStorage.getItem(ANALYTICS_CONSENT_KEY);
-  } catch {
-    return;
-  }
-  if (consent !== "accept") return;
+  if (posthogInitialized) return;
   posthog.init("phc_ufrtHMjamZtq8ZhWA53ALx5KwSd3xKNbiDW9GH8UXNqn", {
     api_host: "https://eu.i.posthog.com",
     persistence: "memory",
@@ -35,6 +37,7 @@ function initPostHogIfConsented() {
     disable_session_recording: true,
     respect_dnt: true,
   });
+  posthogInitialized = true;
 }
 
 function NotFoundComponent() {
@@ -150,53 +153,118 @@ function isMarketingPathname(pathname: string): boolean {
   return true;
 }
 
+// Lifted from Orange Way Me (orange-way/src/routes/__root.tsx) so the
+// analytics notice is consistent across the consuming-app family.
+// Auto-dismisses when the user scrolls past 600px so it never becomes a
+// nag. PostHog is initialised opportunistically (no opt-in click
+// needed) because the deployment is cookieless and does not assign
+// stable identifiers; the notice is a heads-up, not a gate.
 function AnalyticsNotice() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const [decided, setDecided] = useState(() => {
-    if (typeof window === "undefined") return true;
-    if (dntActive()) return true;
-    try {
-      return window.localStorage.getItem(ANALYTICS_CONSENT_KEY) !== null;
-    } catch {
-      return true;
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (dntActive()) {
+      setShow(false);
+      return;
     }
-  });
-  if (!isMarketingPathname(pathname)) return null;
-  if (decided) return null;
-  const accept = () => {
+    if (!isMarketingPathname(pathname)) {
+      setShow(false);
+      return;
+    }
     try {
-      window.localStorage.setItem(ANALYTICS_CONSENT_KEY, "accept");
-    } catch {}
-    initPostHogIfConsented();
-    setDecided(true);
-  };
-  const decline = () => {
+      setShow(window.localStorage.getItem(ANALYTICS_CONSENT_KEY) !== "1");
+    } catch {
+      setShow(false);
+    }
+  }, [pathname]);
+  useEffect(() => {
+    if (!show) return;
+    if (typeof window === "undefined") return;
+    const onScroll = () => {
+      if (window.scrollY > 600) {
+        try {
+          window.localStorage.setItem(ANALYTICS_CONSENT_KEY, "1");
+        } catch {}
+        setShow(false);
+      }
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [show]);
+  // PostHog itself is initialised once at root mount, not here. The
+  // notice is independent UX: visitors who dismissed in a prior visit
+  // still get analytics, since cookieless mode has no identifier to
+  // opt out of beyond the DNT signal the init helper already honours.
+  if (!show) return null;
+  const dismiss = () => {
     try {
-      window.localStorage.setItem(ANALYTICS_CONSENT_KEY, "decline");
+      window.localStorage.setItem(ANALYTICS_CONSENT_KEY, "1");
     } catch {}
-    setDecided(true);
+    setShow(false);
   };
   return (
-    <div className="fixed bottom-4 left-4 right-4 z-50 mx-auto max-w-xl rounded-lg border border-border bg-card p-4 text-sm shadow-lg">
-      <p className="mb-3">
-        We use cookieless PostHog to count visits and improve the site. May we count yours? You can change your mind any time in the footer.
+    <div
+      style={{
+        position: "fixed",
+        left: 20,
+        bottom: 20,
+        zIndex: 9999,
+        maxWidth: 320,
+        padding: "14px 16px",
+        background: "#0F172A",
+        color: "#FAFAF9",
+        borderRadius: 14,
+        boxShadow: "0 12px 32px rgba(0,0,0,0.28), 0 2px 6px rgba(0,0,0,0.18)",
+        font: "12.5px/1.5 -apple-system, 'Plus Jakarta Sans', system-ui, sans-serif",
+        animation: "ornotin 260ms cubic-bezier(0.16,1,0.3,1)",
+      }}
+      role="region"
+      aria-label="Analytics notice"
+    >
+      <style>{`@keyframes ornotin{from{transform:translateY(16px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
+      <button
+        type="button"
+        onClick={dismiss}
+        aria-label="Close"
+        style={{
+          position: "absolute",
+          top: 6,
+          right: 8,
+          background: "transparent",
+          color: "#94A3B8",
+          border: 0,
+          fontSize: 18,
+          lineHeight: 1,
+          padding: "4px 6px",
+          cursor: "pointer",
+          borderRadius: 6,
+        }}
+      >
+        ×
+      </button>
+      <p style={{ margin: "0 0 10px 0", paddingRight: 18 }}>
+        Anonymous analytics,{" "}
+        <strong style={{ color: "#fff" }}>no tracking, no profiles, no cookies.</strong>{" "}
+        A session cookie is set only if you sign in, and is deleted when you sign out.
       </p>
-      <div className="flex gap-2 justify-end">
-        <button
-          type="button"
-          onClick={decline}
-          className="rounded border border-border px-3 py-1 text-sm hover:bg-muted"
-        >
-          No thanks
-        </button>
-        <button
-          type="button"
-          onClick={accept}
-          className="rounded bg-primary px-3 py-1 text-sm text-primary-foreground hover:opacity-90"
-        >
-          Accept
-        </button>
-      </div>
+      <button
+        type="button"
+        onClick={dismiss}
+        style={{
+          background: "#fb923c",
+          color: "#fff",
+          border: 0,
+          borderRadius: 8,
+          padding: "6px 14px",
+          font: "inherit",
+          fontWeight: 600,
+          fontSize: 12.5,
+          cursor: "pointer",
+        }}
+      >
+        Got it
+      </button>
     </div>
   );
 }
