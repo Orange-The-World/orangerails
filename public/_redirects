@@ -11,5 +11,5 @@
 # routing visitors here even after the dedicated docs site replaces
 # this redirect. 302 keeps the redirect transitional.
 
-https://docs.orangerails.com/*    https://orangerails.com/docs/:splat       302
-https://docs.orangerails.dev/*    https://orangerails.dev/docs/:splat       302
+https://docs.orangerails.com/* https://orangerails.com/docs/:splat 302
+https://docs.orangerails.dev/* https://orangerails.dev/docs/:splat 302
