@@ -672,17 +672,6 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
         >
           {submitting ? "Sealing and uploading…" : "Add wallet"}
         </button>
-
-        <dl className="mt-6 space-y-1 border-t border-border pt-3 text-[10px] text-muted-foreground">
-          <div>
-            <dt className="inline font-medium text-foreground">app: </dt>
-            <dd className="inline font-mono">{init.app_slug}</dd>
-          </div>
-          <div>
-            <dt className="inline font-medium text-foreground">user: </dt>
-            <dd className="inline font-mono">{init.app_user_id}</dd>
-          </div>
-        </dl>
       </form>
     </div>
   );
