@@ -21,6 +21,7 @@
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 // ─── AES-256-GCM helpers (kept inline for edge-fn isolation) ────────────────
 
@@ -46,7 +47,7 @@ async function decryptAes(ciphertextB64: string, key: CryptoKey): Promise<string
 
 // ─── Main handler ───────────────────────────────────────────────────────────
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
@@ -106,4 +107,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-discover-wallets] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
-});
+}, 'or-discover-wallets'));

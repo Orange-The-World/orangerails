@@ -40,6 +40,7 @@
 import { authenticateRequest } from '../_shared/platform-auth.ts';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 
@@ -59,7 +60,7 @@ interface QuilttAccount {
   balance: { current: number | null; available: number | null } | null;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') {
@@ -237,4 +238,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-quiltt-accounts] fatal:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-});
+}, 'or-quiltt-accounts'));

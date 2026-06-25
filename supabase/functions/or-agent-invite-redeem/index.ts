@@ -45,6 +45,7 @@
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { create as createJwt, getNumericDate } from 'https://deno.land/x/djwt@v3.0.2/mod.ts';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const ACCESS_TOKEN_TTL_SECONDS = 3600; // 1 hour, per Decision 2
 
@@ -70,7 +71,7 @@ function isBase64ish(s: string): boolean {
   return /^[A-Za-z0-9+/=_-]+$/.test(s) && s.length >= 40 && s.length <= 4096;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') {
@@ -221,4 +222,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-agent-invite-redeem] error:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-});
+}, 'or-agent-invite-redeem'));

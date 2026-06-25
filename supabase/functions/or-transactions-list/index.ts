@@ -14,6 +14,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const DEFAULT_LIMIT = 200;
 // Bumped from 200 → 1000. The prior cap surfaced as a "support ticket"
@@ -30,7 +31,7 @@ const MAX_LIMIT = 1000;
 // Supabase's 6 MB response cap.
 const MAX_RESPONSE_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
@@ -99,4 +100,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-transactions-list] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
-});
+}, 'or-transactions-list'));
