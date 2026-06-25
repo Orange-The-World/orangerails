@@ -50,7 +50,6 @@ What ships in this repository:
 - **API gateway.** A Cloudflare Worker that exposes a stable, versioned HTTP surface at `api.orangerails.com` and proxies to the backend.
 - **Edge functions.** Supabase Edge runtime that handles connect flows, sync orchestration, webhook receivers, and per-platform isolation.
 - **SDKs.** Typed clients for integrators, published from `packages/`.
-- **MCP server.** A Model Context Protocol surface in `mcp/` so AI agents can act on Orange Rails data with the user's keys, not the server's.
 - **Stealth Sync widget.** The drop-in connect widget that runs the in-browser key derivation and encrypts credentials before they leave the device.
 
 For the full reference, including the session-based zero-knowledge boundary, the hybrid post-quantum key exchange, and the BIP 158 compact block filter design for on-chain wallets, read [docs/OrangeRails-Architecture.md](./docs/OrangeRails-Architecture.md).
@@ -110,7 +109,6 @@ Specific contributor profiles the project needs right now:
 - **Backend engineers who write careful code.** The encryption boundary and the sync orchestration are the load-bearing surfaces. Work happens in `supabase/functions/`, `workers/api-gateway/`, and `packages/`.
 - **Cryptographers who can audit the zero-knowledge boundary.** Every claim about what the server cannot see must be verifiable in code. Audit the key derivation, the session token lifetime, the in-memory decryption path, and the wipe semantics.
 - **Bank and exchange integration developers.** New adapters follow a small, well-defined interface. A working adapter can be written in a day if you know the upstream API.
-- **MCP tool builders.** The `mcp/` directory exposes Orange Rails to AI agents. If you want to add tools, contribute prompt-safe schemas, or harden the agent-side authorization story, this is the surface.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for the developer certificate of origin (DCO) sign-off process and the code style guide.
 
@@ -145,7 +143,6 @@ Orange Rails was originally created by MorningRevolution and is now developed in
 - **BitBooks**: bookkeeping on a Bitcoin standard. First consuming app. [bitbooks.com](https://bitbooks.com)
 - **Orange Way (Manager + Books)**: personal-finance and bookkeeping apps in the same family. Consumer of the widget and the sync engine.
 - **ORBI**: Orange Rails Bitcoin Index, the price and rates dataset. Sibling repo at [`Orange-The-World/orbi`](https://github.com/Orange-The-World/orbi).
-- **ORCA**: the Orange Rails AI MCP layer. Lives in [`mcp/`](./mcp) inside this repo.
 - **Orange World**: public CC-BY 4.0 truth tables at [orangethe.world](https://orangethe.world). Sibling repo at [`Orange-The-World/orange-world`](https://github.com/Orange-The-World/orange-world).
 
 ---
