@@ -9,6 +9,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { create as createJwt, getNumericDate } from 'https://deno.land/x/djwt@v3.0.2/mod.ts';
 import { ed25519 } from 'jsr:@noble/curves@1.9.0/ed25519';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const ACCESS_TOKEN_TTL_SECONDS = 3600;
 const NONCE_WINDOW_SECONDS = 60;
@@ -48,7 +49,7 @@ function parseAndValidatePayload(payload: string, agentMemberId: string):
   return { ok: true, tsMs };
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') {
@@ -203,4 +204,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-agent-token-refresh] error:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-});
+}, 'or-agent-token-refresh'));

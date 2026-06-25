@@ -31,6 +31,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 interface CreateRequestBody {
   app_slug?: string;
@@ -70,7 +71,7 @@ const MAX_ENVELOPE_BYTES = 65_536;
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
@@ -222,6 +223,6 @@ Deno.serve(async (req: Request) => {
     console.error('[or-stealth-connection-create] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
-});
+}, 'or-stealth-connection-create'));
 
 export type { CreateRequestBody, CreateResponseBody };

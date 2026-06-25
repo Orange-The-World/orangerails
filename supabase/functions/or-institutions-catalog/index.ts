@@ -35,6 +35,7 @@
  */
 
 import { buildPublicCorsHeaders, jsonResponse } from '../_shared/http.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const QUILTT_AUTH_URL = 'https://auth.quiltt.io/v1/users/sessions';
 const QUILTT_REST_BASE = 'https://api.quiltt.io/v1';
@@ -123,7 +124,7 @@ async function searchQuilttInstitutions(
   return list as QuilttInstitutionApi[];
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildPublicCorsHeaders();
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'GET') {
@@ -216,4 +217,4 @@ Deno.serve(async (req: Request) => {
       { ...cors, 'cache-control': 'no-store' },
     );
   }
-});
+}, 'or-institutions-catalog'));

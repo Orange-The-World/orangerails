@@ -19,6 +19,7 @@
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { strikeDeleteSubscription, parseStrikeCredentials } from '../_shared/providers/strike/index.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 // ─── AES helpers (mirror or-sync's pattern; will share once a util module lands) ─
 
@@ -76,7 +77,7 @@ async function cleanupStrikeSubscription(
 
 // ─── Handler ─────────────────────────────────────────────────────────────
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
@@ -148,4 +149,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-connection-delete] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
-});
+}, 'or-connection-delete'));

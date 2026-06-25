@@ -21,6 +21,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 interface ListRequestBody {
   app_user_id?: string;
@@ -43,7 +44,7 @@ interface ListResponseBody {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
@@ -110,6 +111,6 @@ Deno.serve(async (req: Request) => {
     console.error('[or-stealth-connection-list] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
-});
+}, 'or-stealth-connection-list'));
 
 export type { ListRequestBody, ListResponseBody, ListedConnection };
