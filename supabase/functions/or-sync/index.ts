@@ -41,6 +41,7 @@ import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/
 import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import {
+import { wrapSentryHandler } from '../_shared/sentry.ts';
   getSinkAdapter,
   listSinkFormats,
   mergeSinkOutputs,
@@ -172,7 +173,7 @@ async function encryptAes(plaintext: string, key: CryptoKey): Promise<string> {
 
 // ─── Main handler ────────────────────────────────────────────────────────────
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
@@ -809,7 +810,7 @@ Deno.serve(async (req: Request) => {
           });
 
           newTxs = [...poll.transactions, ...drain.transactions];
-          // Polling cursor takes precedence (it's a real timestamp);
+          // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.
           next_cursor = poll.next_cursor ?? drain.next_cursor;
         } else if (sourceWallets && sourceWallets.length > 0) {

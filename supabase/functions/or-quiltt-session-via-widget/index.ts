@@ -40,6 +40,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const QUILTT_AUTH_URL = 'https://auth.quiltt.io/v1/users/sessions';
 
@@ -50,7 +51,7 @@ interface MintRespShape {
   expiresAt: string;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') {
@@ -128,7 +129,7 @@ Deno.serve(async (req: Request) => {
     //    This swaps the global QUILTT_API_KEY / QUILTT_CONNECTOR_ID_LINK
     //    reads for a platforms-row lookup. Backwards compatible: if the
     //    platform row's quiltt_api_key column is NULL, falls back to the
-    //    global env var (preserves V2's sandbox during the transition).
+    //    global env var (preserves V2's sandbox during the transition, 'or-quiltt-session-via-widget')).
     let quilttCfg;
     try {
       quilttCfg = await resolveQuilttConfigForPlatform(service, platform.data.id);

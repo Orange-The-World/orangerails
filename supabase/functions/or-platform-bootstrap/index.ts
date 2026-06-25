@@ -40,6 +40,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
@@ -67,7 +68,7 @@ function parsePrefixedKey(key: string): { slug: string; env: string } | null {
   return { slug: m[1], env: m[2] };
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
   if (req.method !== 'GET' && req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
@@ -173,4 +174,4 @@ Deno.serve(async (req: Request) => {
     rotated_at:       row.rotated_at,
     ttl_seconds:      row.bootstrap_ttl_seconds ?? 3600,
   }), { status: 200, headers: JSON_HEADERS });
-});
+}, 'or-platform-bootstrap'));

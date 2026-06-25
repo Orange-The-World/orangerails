@@ -26,6 +26,7 @@
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import sodium from 'https://esm.sh/libsodium-wrappers-sumo@0.7.13';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
@@ -56,7 +57,7 @@ interface PendingEvent {
   attempts:      number;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
   const callerToken = req.headers.get('X-Internal-Worker-Token');
@@ -144,7 +145,7 @@ Deno.serve(async (req: Request) => {
   }
 
   return jsonResponse({ processed, failed, skipped, batch: pending.length }, 200);
-});
+}, 'or-quiltt-sync'));
 
 // ─── event dispatch ──────────────────────────────────────────────────
 
