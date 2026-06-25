@@ -28,6 +28,7 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 interface RevokeBody {
   agent_member_id?: string;
@@ -38,7 +39,7 @@ function isUuid(s: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') {
@@ -129,4 +130,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-agent-revoke] error:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-});
+}, 'or-agent-revoke'));

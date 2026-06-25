@@ -46,6 +46,7 @@ import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
 import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const MAX_WALLETS_PER_CALL = 50;
 const MAX_ENCRYPTED_METADATA_LEN = 8192;
@@ -77,7 +78,7 @@ function makeServiceClient(): SupabaseClient {
   );
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405, cors);
@@ -184,7 +185,7 @@ Deno.serve(async (req: Request) => {
     //
     // Rejection rules:
     //   - missing token  -> 401 if REQUIRE_WIDGET_TOKEN=true, otherwise warn + proceed
-    //   - bad token      -> 401 always (don't leak whether the token existed)
+    //   - bad token      -> 401 always (don't leak whether the token existed, 'or-link-complete'))
     //   - expired        -> 401
     //   - already used   -> 401
     //   - wrong platform -> 401 (token issued for a different platform_id)

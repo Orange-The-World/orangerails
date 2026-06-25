@@ -69,6 +69,7 @@
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { jsonResponse } from '../_shared/http.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const MAX_ATTEMPTS = 5;
 const BATCH_SIZE = 50;
@@ -303,7 +304,7 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
   return result;
 }
 
-Deno.serve(async (_req: Request) => {
+Deno.serve(wrapSentryHandler(async (_req: Request) => {
   try {
     const serviceClient = makeServiceClient();
     const result = await dispatchBatch({ serviceClient });
@@ -312,4 +313,4 @@ Deno.serve(async (_req: Request) => {
     console.error('[or-webhook-dispatch] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500);
   }
-});
+}, 'or-webhook-dispatch'));
