@@ -1,22 +1,22 @@
 /**
  * BIP158 matcher loader.
  *
- * Loads the compiled Rust → WebAssembly module from `crates/or-bip158-wasm`
- * and exposes a clean async API to the rest of the widget. The WASM module
- * is built out-of-band by `cd crates/or-bip158-wasm && make`. Until that
- * build runs, the `or_bip158_wasm.js` file in this folder does not exist
- * and `loadBip158Matcher()` will throw a clear error pointing the developer
- * at the build command.
+ * Loads the compiled Rust to WebAssembly module from `crates/or-bip158-wasm`
+ * and exposes a clean async API to the rest of the widget. The artifacts
+ * (`or_bip158_wasm.js`, `or_bip158_wasm_bg.wasm`, and the matching `.d.ts`
+ * files) are committed to this directory so a fresh clone produces a
+ * working production build without a separate Rust toolchain step. Rebuild
+ * them with `cd crates/or-bip158-wasm && make` whenever the Rust source
+ * changes; the existing artifacts will be replaced in place.
  *
  * The loader keeps a module-level singleton: the WASM init runs at most
  * once per page load, even under concurrent callers.
+ *
+ * License note: this is the only AGPL-3.0-or-later component in the widget
+ * (see /LICENSE-NOTICE.md). The rest of the bundle stays Apache-2.0.
  */
 
-type MatchAny = (
-  filter: Uint8Array,
-  blockHash: Uint8Array,
-  scripts: Uint8Array[],
-) => boolean;
+type MatchAny = (filter: Uint8Array, blockHash: Uint8Array, scripts: Uint8Array[]) => boolean;
 
 export interface Bip158Matcher {
   matchAny: MatchAny;
@@ -44,24 +44,28 @@ export function loadBip158Matcher(): Promise<Bip158Matcher> {
 }
 
 async function doLoad(): Promise<Bip158Matcher> {
-  // We load the WASM module via a runtime-built path so that a fresh clone
-  // (where the WASM has not been built yet) can still build the rest of
-  // the app without Vite trying to statically resolve a missing file.
-  // Once the artifacts exist, this resolves to the wasm-pack output.
-  const modulePath = "./or_bip158_wasm.js";
+  // Vite resolves this dynamic import at build time and emits the
+  // wasm-pack output (./or_bip158_wasm.js plus the .wasm bytes) as a
+  // hashed chunk under /assets/. The artifacts live in this directory
+  // and are committed to the repo so a fresh clone can produce a
+  // working build without rebuilding the WASM crate first. Rebuild
+  // them with `cd crates/or-bip158-wasm && make` when the Rust source
+  // changes.
+  //
+  // Previously this used `await import(/* @vite-ignore */ modulePath)`
+  // with a runtime path so a clone with no artifacts could still build
+  // the rest of the app. The trade-off was that production deploys
+  // never bundled the shim, so the dynamic import resolved against the
+  // serving origin's static assets, hit the SPA fallback, and threw
+  // "Failed to fetch dynamically imported module". Letting Vite handle
+  // the import fixes production at the cost of failing the build fast
+  // when artifacts are missing locally, which is what we want anyway.
   let mod: {
     default: (input?: unknown) => Promise<unknown>;
-    match_any: (
-      filter: Uint8Array,
-      blockHash: Uint8Array,
-      scripts: Uint8Array[],
-    ) => boolean;
+    match_any: (filter: Uint8Array, blockHash: Uint8Array, scripts: Uint8Array[]) => boolean;
   };
   try {
-    // The /* @vite-ignore */ comment tells Vite not to try to resolve this
-    // dynamic import at build time. Resolution happens in the browser at
-    // runtime, after `make` has produced the artifacts.
-    mod = (await import(/* @vite-ignore */ modulePath)) as typeof mod;
+    mod = (await import("./or_bip158_wasm.js")) as typeof mod;
   } catch (err) {
     throw new Error(
       "BIP158 WebAssembly module not found. Build it first: " +
