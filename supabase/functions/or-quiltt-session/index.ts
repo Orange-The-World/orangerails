@@ -50,6 +50,7 @@
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
 import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const QUILTT_AUTH_URL = 'https://auth.quiltt.io/v1/users/sessions';
 
@@ -67,7 +68,7 @@ interface QuilttMintResponse {
   expiresAt: string;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') {
@@ -221,4 +222,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-quiltt-session] error:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-});
+}, 'or-quiltt-session'));

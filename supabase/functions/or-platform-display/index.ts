@@ -18,8 +18,9 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { buildPublicCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildPublicCorsHeaders();
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'GET' && req.method !== 'POST') {
@@ -70,4 +71,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-platform-display] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
-});
+}, 'or-platform-display'));

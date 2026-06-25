@@ -90,6 +90,7 @@ We tag beginner-friendly tickets with `good first issue`. If you're new and want
 - **No `any` types** without a comment explaining why.
 - **Function-level unit tests** for cryptographic code. Integration tests for adapter flows. Property-based tests welcome where applicable.
 - **No comments describing what the code does.** Code explains *what*; comments explain *why*. Inline comments are for non-obvious design decisions only.
+- **Edge functions must wrap `Deno.serve` with `wrapSentryHandler`.** New Supabase edge functions under `supabase/functions/<name>/index.ts` import `wrapSentryHandler` from `../_shared/sentry.ts` and wrap the handler: `Deno.serve(wrapSentryHandler(async (req) => { ... }, '<fn-name>'))`. Uncaught exceptions are then reported to the self-hosted GlitchTip at `pulse.orangerails.com` for triage. The helper is a no-op when `SENTRY_DSN` is unset (local dev).
 
 ---
 

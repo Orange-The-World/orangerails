@@ -23,6 +23,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 interface InboundWallet {
   external_wallet_id: string;
@@ -33,7 +34,7 @@ interface InboundWallet {
 const MAX_WALLETS_PER_CONNECTION = 50; // sanity cap; Blink today has 2 (BTC + USD)
 const MAX_ENCRYPTED_METADATA_LEN = 8192; // ~8 KB ciphertext per wallet
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
@@ -126,4 +127,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-source-wallets-set] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
-});
+}, 'or-source-wallets-set'));

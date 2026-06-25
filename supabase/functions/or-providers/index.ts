@@ -36,8 +36,9 @@
 
 import { buildPublicCorsHeaders, jsonResponse } from '../_shared/http.ts';
 import { listProviderManifests, listCategoryManifests } from '../_shared/providers/dispatch.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
-Deno.serve((req: Request) => {
+Deno.serve(wrapSentryHandler((req: Request) => {
   const cors = buildPublicCorsHeaders();
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'GET') {
@@ -69,4 +70,4 @@ Deno.serve((req: Request) => {
       'cache-control': 'public, max-age=300, s-maxage=600, stale-while-revalidate=60',
     },
   );
-});
+}, 'or-providers'));
