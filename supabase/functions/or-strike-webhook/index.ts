@@ -34,6 +34,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const CONN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -43,7 +44,7 @@ interface StrikeWebhookEvent {
   data?: { entityId?: unknown };
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { status: 200 });
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
@@ -123,7 +124,7 @@ Deno.serve(async (req: Request) => {
     console.error('[or-strike-webhook] fatal:', err);
     return new Response('internal error', { status: 500 });
   }
-});
+}, 'or-strike-webhook'));
 
 // ─── HMAC helpers ────────────────────────────────────────────────────────
 

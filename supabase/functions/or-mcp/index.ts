@@ -30,6 +30,7 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { buildCorsHeaders, readBoundedText } from '../_shared/http.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 interface JsonRpcRequest {
   jsonrpc?: string;
@@ -147,7 +148,7 @@ async function handleToolCall(
   throw new Error(`Unknown tool: ${toolName}`);
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') {
@@ -232,4 +233,4 @@ Deno.serve(async (req: Request) => {
 
   // Return as a Streamable HTTP SSE response
   return sseResponse(sseEvent(response) + 'event: done\ndata: {}\n\n', 200, cors);
-});
+}, 'or-mcp'));

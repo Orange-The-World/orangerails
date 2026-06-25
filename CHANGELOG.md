@@ -6,6 +6,13 @@ Per-session work continues to be logged in the per-workstream wiki Changelogs (`
 
 ---
 
+## 2026-06-25
+
+- All 38 Supabase edge functions now wrap `Deno.serve` with `wrapSentryHandler` from `supabase/functions/_shared/sentry.ts`. Uncaught exceptions are reported to the self-hosted GlitchTip at `pulse.orangerails.com` (Apache-2.0). The reporter is a fetch-based Sentry-wire-protocol client with zero npm dependencies (~165 lines); we avoided `@sentry/deno` to keep the per-function cold-start budget tight. The helper is a no-op when `SENTRY_DSN` is unset, so local dev is unaffected. Companion to the SPA and Worker Sentry wiring shipped earlier; this completes the three-surface observability sweep.
+- `pulse.orangerails.com` (self-hosted GlitchTip) is now in the error path for the SPA, the API gateway Worker, and edge functions. Disclosed here for integrators evaluating the OR data-flow posture.
+
+---
+
 ## 2026-06-16
 
 - `api.orangerails.com` is now the canonical entry point. Cloudflare Worker (`workers/api-gateway/`) proxies clean versioned paths (`/v1/...`) plus a legacy `/functions/v1/...` pass-through to the live OR Supabase project. V2 BitBooks, V3 Vault, Orange Way Manager, Orange Way Books all migrated to this URL today.

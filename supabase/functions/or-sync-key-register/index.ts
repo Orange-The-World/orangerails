@@ -40,6 +40,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const ALLOWED_OPK_ALGS = new Set([
   'libsodium-crypto_box_seal-v1',
@@ -63,7 +64,7 @@ interface RegisterBody {
   rotation_reason?: string;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') {
@@ -200,4 +201,4 @@ Deno.serve(async (req: Request) => {
     console.error('[or-sync-key-register] error:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-});
+}, 'or-sync-key-register'));

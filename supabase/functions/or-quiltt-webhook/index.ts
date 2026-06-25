@@ -53,6 +53,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const MAX_BODY = 256 * 1024;             // 256KB , generous for batched events
 const MAX_TS_SKEW_MS = 5 * 60 * 1000;    // ±5 minutes
@@ -73,7 +74,7 @@ interface QuilttBody {
   events?: unknown;
 }
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { status: 200 });
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
@@ -206,7 +207,7 @@ Deno.serve(async (req: Request) => {
     console.error('[or-quiltt-webhook] error:', e instanceof Error ? e.message : String(e));
     return new Response('internal error', { status: 500 });
   }
-});
+}, 'or-quiltt-webhook'));
 
 async function computeHmacB64(secret: string, payload: string): Promise<string> {
   const enc = new TextEncoder();
