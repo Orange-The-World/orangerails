@@ -1,8 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { useRole, type RoleState } from '@/hooks/useRole';
-import { AgentMembersSection } from "@/components/portal/AgentMembersSection";
-import { AuditLogSection } from "@/components/portal/AuditLogSection";
 import {
   fetchCustomer,
   fetchInvoices,
@@ -56,8 +54,6 @@ function PortalPage() {
             Back to admin
           </Link>
         </div>
-              <AgentMembersSection />
-        <AuditLogSection />
       </PortalShell>
     );
   }

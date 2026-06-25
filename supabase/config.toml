@@ -8,9 +8,9 @@ project_id = "fzwmnzmtqidumdqjdddz"
 # UNAUTHORIZED_NO_AUTH_HEADER before the function code can run and apply
 # its own auth check. See full audit at
 #
-# Functions NOT listed here (e.g. or-agent-invite-mint, or-agent-revoke,
-# or-mcp, sync-blink) intentionally require a real Supabase / shadow-user
-# JWT and benefit from the gateway pre-check (verify_jwt = true default).
+# Functions NOT listed here (e.g. sync-blink) intentionally require a real
+# Supabase / shadow-user JWT and benefit from the gateway pre-check
+# (verify_jwt = true default).
 
 # --- Public, no auth --------------------------------------------------
 [functions.or-providers]
@@ -70,14 +70,6 @@ verify_jwt = false
 
 # --- Widget-session token auth via body.widget_token ------------------
 [functions.or-link-complete]
-verify_jwt = false
-
-# --- Ed25519 signed-payload auth via body.signed_payload + signature --
-[functions.or-agent-token-refresh]
-verify_jwt = false
-
-# --- Single-use invitation token via body --------------------------------
-[functions.or-agent-invite-redeem]
 verify_jwt = false
 
 # --- Quiltt Phase 1: HMAC, platform API key, widget token, internal token ---
