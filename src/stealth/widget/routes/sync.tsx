@@ -16,12 +16,9 @@
  * Milestone 4 ships the filter producer + block source services.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 
-import {
-  parseDescriptor,
-  type ParsedDescriptor,
-} from '@/stealth/lib/derive';
+import { parseDescriptor, type ParsedDescriptor } from "@/stealth/lib/derive";
 import {
   runSync,
   liveFetchBlock as libLiveFetchBlock,
@@ -31,26 +28,27 @@ import {
   approximateHeightFromDate,
   type SyncProgressEvent,
   type WalletEnvelopePayload,
-} from '@/stealth/lib/sync';
+} from "@/stealth/lib/sync";
 import {
   mockFetchBlock,
   mockFetchFilter,
   mockFetchTip,
   mockNeverMatcher,
-} from '@/stealth/lib/mock-fixtures';
-import { unsealEnvelope } from '@/stealth/lib/seal';
+} from "@/stealth/lib/mock-fixtures";
+import { unsealEnvelope } from "@/stealth/lib/seal";
 import type {
   SealedEnvelope,
+  StealthAddCompleteMessage,
   StealthErrorCode,
   StealthErrorMessage,
   StealthInitMessage,
   StealthProgressMessage,
   StealthStage,
   StealthSyncCompleteMessage,
-} from '@/stealth/lib/postmessage';
-import { ProgressModal } from '../components/ProgressModal';
-import { useStealthInit } from '../StealthInitContext';
-import { proxyFetch } from '../lib/proxyFetch';
+} from "@/stealth/lib/postmessage";
+import { ProgressModal } from "../components/ProgressModal";
+import { useStealthInit } from "../StealthInitContext";
+import { proxyFetch } from "../lib/proxyFetch";
 
 interface AccessTokenInit extends StealthInitMessage {
   access_token?: string;
@@ -67,29 +65,27 @@ interface AccessTokenInit extends StealthInitMessage {
 
 const STEALTH_FILTER_BASE =
   (import.meta.env.VITE_OR_STEALTH_FILTER_BASE_URL as string | undefined) ??
-  'https://stealth.orangerails.com';
+  "https://stealth.orangerails.com";
 const BLOCK_SOURCE_BASE =
   (import.meta.env.VITE_OR_BLOCK_SOURCE_BASE_URL as string | undefined) ??
-  'https://blocks.orangerails.com';
+  "https://blocks.orangerails.com";
 
-function resolveFunctionUrl(
-  name: string,
-  proxyBaseUrl: string | undefined,
-): string {
+function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): string {
   if (proxyBaseUrl) {
-    return `${proxyBaseUrl.replace(/\/$/, '')}/${name}`;
+    return `${proxyBaseUrl.replace(/\/$/, "")}/${name}`;
   }
-  const base = (
-    (import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? ''
-  ).replace(/\/$/, '');
+  const base = ((import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? "").replace(
+    /\/$/,
+    "",
+  );
   if (base) return `${base}/${name}`;
   return `/functions/v1/${name}`;
 }
 
 function isMockMode(): boolean {
-  if (typeof window === 'undefined') return false;
+  if (typeof window === "undefined") return false;
   const params = new URLSearchParams(window.location.search);
-  return params.get('mock') === '1';
+  return params.get("mock") === "1";
 }
 
 // ── Live fetchers ──────────────────────────────────────────────────────
@@ -103,15 +99,29 @@ const liveFetchBlock = (hash: string) => libLiveFetchBlock(hash, BLOCK_SOURCE_BA
 
 // ── Component ──────────────────────────────────────────────────────────
 
-export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
+export function SyncRoute({
+  init: _initProp,
+  pendingAddComplete,
+}: {
+  init: StealthInitMessage;
+  /** When set, this sync run is the second half of a chained add+sync
+   *  inside a single popup. We post this ADD_COMPLETE message
+   *  immediately before SYNC_COMPLETE on success (or immediately before
+   *  the error postMessage on failure) so the host app's existing
+   *  receiver registers the wallet record and then processes the first
+   *  scan in one popup-open. The host sees the same wire-protocol
+   *  messages it would see if add and sync had been triggered
+   *  separately, in the same order. */
+  pendingAddComplete?: StealthAddCompleteMessage;
+}) {
   const { init, parent } = useStealthInit();
   const initWithToken = init as AccessTokenInit;
 
   const [progress, setProgress] = useState<SyncProgressEvent>({
-    stage: 'unlocking',
+    stage: "unlocking",
     percent: 0,
-    message: 'Vault unlocked',
-    detail: 'Your password never left this browser.',
+    message: "Vault unlocked",
+    detail: "Your password never left this browser.",
   });
   const [done, setDone] = useState<{ txCount: number; bytes: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -119,7 +129,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
   function postWidgetError(code: StealthErrorCode, message: string, retryable: boolean) {
     if (!parent) return;
     const msg: StealthErrorMessage = {
-      type: 'OR_STEALTH_ERROR',
+      type: "OR_STEALTH_ERROR",
       code,
       message,
       retryable,
@@ -127,14 +137,14 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
     try {
       parent.postMessage(msg, init.return_callback_origin);
     } catch (e) {
-      console.error('[stealth/sync] failed to post error:', e);
+      console.error("[stealth/sync] failed to post error:", e);
     }
   }
 
   function postWidgetProgress(ev: SyncProgressEvent) {
     if (!parent) return;
     const msg: StealthProgressMessage = {
-      type: 'OR_STEALTH_PROGRESS',
+      type: "OR_STEALTH_PROGRESS",
       stage: ev.stage,
       percent: ev.percent,
       message: ev.message,
@@ -154,7 +164,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
     (async () => {
       try {
         if (!init.connection_id) {
-          throw new Error('connection_id is required for mode=sync');
+          throw new Error("connection_id is required for mode=sync");
         }
 
         // 1. Fetch sealed envelope. Routes through parent postMessage proxy
@@ -167,13 +177,13 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         };
         let envOk = false;
         let envStatus = 0;
-        let envText = '';
+        let envText = "";
         let envBody: unknown = null;
         if (initWithToken.proxy_base_url && parent) {
           const r = await proxyFetch({
             parent,
             parentOrigin: init.return_callback_origin,
-            fn: 'or-stealth-envelope-fetch',
+            fn: "or-stealth-envelope-fetch",
             body: envFetchBody,
           });
           envOk = r.ok;
@@ -182,22 +192,22 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           envBody = r.parsed;
         } else {
           const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
+            "Content-Type": "application/json",
           };
           if (initWithToken.access_token) {
-            headers['Authorization'] = `Bearer ${initWithToken.access_token}`;
+            headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
           }
           const envResp = await fetch(
-            resolveFunctionUrl('or-stealth-envelope-fetch', initWithToken.proxy_base_url),
+            resolveFunctionUrl("or-stealth-envelope-fetch", initWithToken.proxy_base_url),
             {
-              method: 'POST',
+              method: "POST",
               headers,
               body: JSON.stringify(envFetchBody),
             },
           );
           envOk = envResp.ok;
           envStatus = envResp.status;
-          envText = await envResp.text().catch(() => '');
+          envText = await envResp.text().catch(() => "");
           envBody = envText ? JSON.parse(envText) : null;
         }
         if (!envOk) {
@@ -220,13 +230,10 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         const useMock = isMockMode();
         const birthdayHeight = useMock
           ? approximateHeightFromDate(envelopePayload.wallet_birthday)
-          : await liveResolveBirthdayHeight(
-              envelopePayload.wallet_birthday,
-              BLOCK_SOURCE_BASE,
-            );
+          : await liveResolveBirthdayHeight(envelopePayload.wallet_birthday, BLOCK_SOURCE_BASE);
 
         let descriptor: ParsedDescriptor | undefined;
-        if (envelopePayload.kind === 'descriptor_stealth') {
+        if (envelopePayload.kind === "descriptor_stealth") {
           descriptor = parseDescriptor(envelopePayload.descriptor);
         }
 
@@ -255,10 +262,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         //    not needed). Cuts the slow upload step entirely for those
         //    apps. SYNC_COMPLETE still fires below so the consumer
         //    persists locally.
-        if (
-          !initWithToken.skip_transaction_upload &&
-          result.sealedTransactions.length > 0
-        ) {
+        if (!initWithToken.skip_transaction_upload && result.sealedTransactions.length > 0) {
           const uploadBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
@@ -267,12 +271,12 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           };
           let uploadOk = false;
           let uploadStatus = 0;
-          let uploadText = '';
+          let uploadText = "";
           if (initWithToken.proxy_base_url && parent) {
             const r = await proxyFetch({
               parent,
               parentOrigin: init.return_callback_origin,
-              fn: 'or-stealth-transactions-store',
+              fn: "or-stealth-transactions-store",
               body: uploadBody,
             });
             uploadOk = r.ok;
@@ -280,32 +284,40 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
             uploadText = r.bodyText;
           } else {
             const headers: Record<string, string> = {
-              'Content-Type': 'application/json',
+              "Content-Type": "application/json",
             };
             if (initWithToken.access_token) {
-              headers['Authorization'] = `Bearer ${initWithToken.access_token}`;
+              headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
             }
             const uploadResp = await fetch(
-              resolveFunctionUrl('or-stealth-transactions-store', initWithToken.proxy_base_url),
+              resolveFunctionUrl("or-stealth-transactions-store", initWithToken.proxy_base_url),
               {
-                method: 'POST',
+                method: "POST",
                 headers,
                 body: JSON.stringify(uploadBody),
               },
             );
             uploadOk = uploadResp.ok;
             uploadStatus = uploadResp.status;
-            uploadText = await uploadResp.text().catch(() => '');
+            uploadText = await uploadResp.text().catch(() => "");
           }
           if (!uploadOk) {
             throw new Error(`Upload failed: ${uploadStatus} ${uploadText}`);
           }
         }
 
-        // 4. SYNC_COMPLETE.
+        // 4. SYNC_COMPLETE (preceded by the held ADD_COMPLETE when this
+        //    sync run is the second half of a chained add+sync).
         if (parent) {
+          if (pendingAddComplete) {
+            try {
+              parent.postMessage(pendingAddComplete, init.return_callback_origin);
+            } catch (e) {
+              console.error("[stealth/sync] failed to post chained add-complete:", e);
+            }
+          }
           const msg: StealthSyncCompleteMessage = {
-            type: 'OR_STEALTH_SYNC_COMPLETE',
+            type: "OR_STEALTH_SYNC_COMPLETE",
             connection_id: init.connection_id,
             sealed_transactions: result.sealedTransactions,
             last_block_scanned: result.lastBlockScanned,
@@ -316,7 +328,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           try {
             parent.postMessage(msg, init.return_callback_origin);
           } catch (e) {
-            console.error('[stealth/sync] failed to post complete:', e);
+            console.error("[stealth/sync] failed to post complete:", e);
           }
         }
 
@@ -324,9 +336,25 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         setDone({ txCount: result.txCount, bytes: result.bytesDownloaded });
       } catch (e) {
         if (cancelled) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        setError(msg);
-        postWidgetError('INTERNAL', msg, true);
+        const errMsg = e instanceof Error ? e.message : String(e);
+        // Post the held ADD_COMPLETE first so the host registers the
+        // wallet even on sync failure. The host can show the wallet
+        // with "needs sync" status; the user can retry sync later
+        // without redoing the add. Without this the popup would die on
+        // a sync error and the host would never learn that the add
+        // actually succeeded on the OR backend.
+        if (parent && pendingAddComplete) {
+          try {
+            parent.postMessage(pendingAddComplete, init.return_callback_origin);
+          } catch (postErr) {
+            console.error(
+              "[stealth/sync] failed to post chained add-complete on error path:",
+              postErr,
+            );
+          }
+        }
+        setError(errMsg);
+        postWidgetError("INTERNAL", errMsg, true);
       }
     })();
 
@@ -362,8 +390,8 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           <h1 className="text-lg font-semibold text-foreground">Sync complete</h1>
           <p className="mt-2 text-sm text-muted-foreground">
             {done.txCount === 0
-              ? 'Nothing new on chain since the last sync.'
-              : `Sealed and stored ${done.txCount} transaction${done.txCount === 1 ? '' : 's'}.`}
+              ? "Nothing new on chain since the last sync."
+              : `Sealed and stored ${done.txCount} transaction${done.txCount === 1 ? "" : "s"}.`}
           </p>
           <button
             type="button"
