@@ -102,16 +102,14 @@ function shapeForCompletion(parsed: ParsedDescriptor): {
  *    3. Same-origin /functions/v1/* , relies on a reverse proxy at the
  *       widget host.
  */
-function resolveFunctionUrl(
-  name: string,
-  proxyBaseUrl: string | undefined,
-): string {
+function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): string {
   if (proxyBaseUrl) {
     return `${proxyBaseUrl.replace(/\/$/, "")}/${name}`;
   }
-  const base = (
-    (import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? ""
-  ).replace(/\/$/, "");
+  const base = ((import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? "").replace(
+    /\/$/,
+    "",
+  );
   if (base) return `${base}/${name}`;
   return `/functions/v1/${name}`;
 }
@@ -128,7 +126,21 @@ interface AccessTokenInit extends StealthInitMessage {
   proxy_base_url?: string;
 }
 
-export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
+export function AddRoute({
+  init: _init,
+  onAddComplete,
+}: {
+  init: StealthInitMessage;
+  /** Optional: invoked when the backend create succeeds, with the new
+   *  connection_id and the prepared ADD_COMPLETE message the host app is
+   *  meant to receive. When provided, this route does NOT post
+   *  ADD_COMPLETE itself and does NOT show the "Wallet added , close"
+   *  view; App.tsx instead chains the popup into SyncRoute, which posts
+   *  ADD_COMPLETE alongside SYNC_COMPLETE at the end of the scan. The
+   *  host therefore sees both messages and a single popup-open covers
+   *  the add + first scan. */
+  onAddComplete?: (connection_id: string, pendingAddComplete: StealthAddCompleteMessage) => void;
+}) {
   const { init, parent } = useStealthInit();
   const initWithToken = init as AccessTokenInit;
 
@@ -148,9 +160,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   // first three derived addresses match their wallet, OR override after
   // the "No, different addresses" warning, before the submit button is
   // enabled. Reset whenever the input or chosen script type changes.
-  const [confirmState, setConfirmState] = useState<"none" | "yes" | "no">(
-    "none",
-  );
+  const [confirmState, setConfirmState] = useState<"none" | "yes" | "no">("none");
   const [overrideConfirm, setOverrideConfirm] = useState(false);
   const addressesConfirmed = confirmState === "yes";
 
@@ -197,9 +207,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
     if (!parsedForPreview) return null;
     if (parsedForPreview.kind !== "single") return null;
     const xpub = parsedForPreview.keys[0].xpub;
-    const t: ScriptType = picker.show
-      ? effectiveScriptType
-      : parsedForPreview.keys[0].scriptType;
+    const t: ScriptType = picker.show ? effectiveScriptType : parsedForPreview.keys[0].scriptType;
     try {
       return [0, 1, 2].map((i) => deriveAddress(xpub, 0, i, t));
     } catch {
@@ -276,10 +284,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
     // For ambiguous `xpub` / `tpub` single-key inputs, override the
     // detected script type with the user's pick. The auto-detection for
     // ypub / zpub / descriptors stays in charge.
-    if (
-      parsed.kind === "single" &&
-      pickerStateForInput(trimmed).show
-    ) {
+    if (parsed.kind === "single" && pickerStateForInput(trimmed).show) {
       parsed = {
         ...parsed,
         keys: [{ ...parsed.keys[0], scriptType: effectiveScriptType }],
@@ -345,10 +350,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
           headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
         }
         const resp = await fetch(
-          resolveFunctionUrl(
-            "or-stealth-connection-create",
-            initWithToken.proxy_base_url,
-          ),
+          resolveFunctionUrl("or-stealth-connection-create", initWithToken.proxy_base_url),
           {
             method: "POST",
             headers,
@@ -372,8 +374,9 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
         return;
       }
 
-      const json: { connection_id?: string; already_existed?: boolean } =
-        respText ? JSON.parse(respText) : {};
+      const json: { connection_id?: string; already_existed?: boolean } = respText
+        ? JSON.parse(respText)
+        : {};
       if (!json.connection_id) {
         const msg = "Edge function did not return a connection_id.";
         setError(msg);
@@ -392,6 +395,19 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
         label: cleanLabel,
         script_type: shape.scriptType,
       };
+      if (onAddComplete) {
+        // Chained add+sync: hold ADD_COMPLETE in App.tsx until the sync
+        // route finishes. Posting it here would cause many host apps'
+        // existing receivers to close the popup (typical "wallet added,
+        // we are done" handler) before the first scan can run. SyncRoute
+        // will post ADD_COMPLETE immediately before SYNC_COMPLETE so the
+        // host sees both back-to-back and the popup stays alive through
+        // the whole scan. The standalone "wallet added, close this
+        // window" view below is intentionally retained for the no-chain
+        // path where a host opted out by not passing onAddComplete.
+        onAddComplete(json.connection_id, complete);
+        return;
+      }
       if (parent) {
         try {
           parent.postMessage(complete, init.return_callback_origin);
@@ -439,26 +455,19 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
         onSubmit={onSubmit}
         className="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-sm"
       >
-        <h1 className="text-lg font-semibold text-foreground">
-          Stealth Sync , Add wallet
-        </h1>
+        <h1 className="text-lg font-semibold text-foreground">Stealth Sync , Add wallet</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Paste an extended public key or output descriptor. Everything stays
-          in your browser.
+          Paste an extended public key or output descriptor. Everything stays in your browser.
         </p>
 
         <div className="mt-3 rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
           <p>
             <span className="font-medium text-foreground">Transparency: </span>
-            your xpub is being sealed in your browser. We will only see opaque
-            bytes after this.
+            your xpub is being sealed in your browser. We will only see opaque bytes after this.
           </p>
         </div>
 
-        <label
-          className="mt-4 block text-xs font-medium text-foreground"
-          htmlFor="xpub-input"
-        >
+        <label className="mt-4 block text-xs font-medium text-foreground" htmlFor="xpub-input">
           Extended public key or output descriptor
         </label>
         <textarea
@@ -495,16 +504,13 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
               <option value="p2pkh">Oldest, classic (1...)</option>
             </select>
             <p className="mt-1 text-[10px] text-muted-foreground">
-              Most modern wallets exported from Sparrow with an xpub prefix
-              use bc1q addresses. Pick the type that matches your wallet.
+              Most modern wallets exported from Sparrow with an xpub prefix use bc1q addresses. Pick
+              the type that matches your wallet.
             </p>
           </>
         ) : null}
 
-        <label
-          className="mt-3 block text-xs font-medium text-foreground"
-          htmlFor="label-input"
-        >
+        <label className="mt-3 block text-xs font-medium text-foreground" htmlFor="label-input">
           Label
         </label>
         <input
@@ -517,10 +523,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
           className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
         />
 
-        <label
-          className="mt-3 block text-xs font-medium text-foreground"
-          htmlFor="birthday-input"
-        >
+        <label className="mt-3 block text-xs font-medium text-foreground" htmlFor="birthday-input">
           Wallet birthday
         </label>
         <input
@@ -532,8 +535,8 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
           className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
         />
         <p className="mt-1 text-[10px] text-muted-foreground">
-          We start scanning from this date. The default of one year ago keeps
-          syncs fast. Older wallets can edit this later to scan further back.
+          We start scanning from this date. The default of one year ago keeps syncs fast. Older
+          wallets can edit this later to scan further back.
         </p>
 
         <details className="mt-3 group">
@@ -541,10 +544,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
             Advanced settings
           </summary>
           <div className="mt-2">
-            <label
-              className="block text-xs font-medium text-foreground"
-              htmlFor="gap-input"
-            >
+            <label className="block text-xs font-medium text-foreground" htmlFor="gap-input">
               Gap limit
             </label>
             <input
@@ -553,45 +553,37 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
               min={1}
               max={1000}
               value={gapLimit}
-              onChange={(e) =>
-                setGapLimit(Number.parseInt(e.target.value, 10) || 0)
-              }
+              onChange={(e) => setGapLimit(Number.parseInt(e.target.value, 10) || 0)}
               className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
             />
             <p className="mt-1 text-[10px] text-muted-foreground">
-              How many empty addresses we scan before stopping. Default 20
-              works for almost every wallet (Sparrow, BlueWallet, Ledger,
-              Trezor). Only change this if your wallet generates addresses
-              with unusually large gaps.
+              How many empty addresses we scan before stopping. Default 20 works for almost every
+              wallet (Sparrow, BlueWallet, Ledger, Trezor). Only change this if your wallet
+              generates addresses with unusually large gaps.
             </p>
           </div>
         </details>
 
         {previewAddresses ? (
           <div className="mt-4 rounded-md border border-border bg-muted/20 p-3">
-            <p className="text-xs font-medium text-foreground">
-              Confirm this is the right wallet
-            </p>
+            <p className="text-xs font-medium text-foreground">Confirm this is the right wallet</p>
             <p className="mt-1 text-[11px] text-muted-foreground">
-              We derived these from your key. Open your wallet's "Receive"
-              tab and check the first few addresses match.
+              We derived these from your key. Open your wallet's "Receive" tab and check the first
+              few addresses match.
             </p>
             {masterFingerprint ? (
               <p className="mt-2 text-[11px] text-muted-foreground">
                 Master fingerprint:{" "}
-                <span className="font-mono text-foreground">
-                  {masterFingerprint}
-                </span>
+                <span className="font-mono text-foreground">{masterFingerprint}</span>
                 <span className="ml-1">
-                  , should match the fingerprint shown in your wallet's
-                  account or device-info screen.
+                  , should match the fingerprint shown in your wallet's account or device-info
+                  screen.
                 </span>
               </p>
             ) : (
               <p className="mt-2 text-[11px] text-muted-foreground italic">
-                No master fingerprint in this key (bare extended public
-                keys don't include one). Rely on the address preview to
-                confirm.
+                No master fingerprint in this key (bare extended public keys don't include one).
+                Rely on the address preview to confirm.
               </p>
             )}
             <ol className="mt-2 space-y-1 font-mono text-[11px] text-foreground">
@@ -634,9 +626,8 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
             {confirmState === "no" ? (
               <div className="mt-2 text-[11px] text-muted-foreground">
                 <p>
-                  Then this key may not be from the wallet you intended.
-                  Double-check what you copied or, for xpub keys, try a
-                  different wallet type above.
+                  Then this key may not be from the wallet you intended. Double-check what you
+                  copied or, for xpub keys, try a different wallet type above.
                 </p>
                 {!overrideConfirm ? (
                   <button
@@ -647,26 +638,19 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
                     Submit anyway
                   </button>
                 ) : (
-                  <p className="mt-1 italic">
-                    Override enabled. You can submit below.
-                  </p>
+                  <p className="mt-1 italic">Override enabled. You can submit below.</p>
                 )}
               </div>
             ) : null}
           </div>
         ) : null}
 
-        {error ? (
-          <p className="mt-3 text-xs text-destructive">{error}</p>
-        ) : null}
+        {error ? <p className="mt-3 text-xs text-destructive">{error}</p> : null}
 
         <button
           type="submit"
           disabled={
-            submitting ||
-            (previewAddresses !== null &&
-              !addressesConfirmed &&
-              !overrideConfirm)
+            submitting || (previewAddresses !== null && !addressesConfirmed && !overrideConfirm)
           }
           className="mt-4 inline-flex w-full items-center justify-center rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
         >
