@@ -14,17 +14,32 @@
  *                  Migration courtesy so existing clients keep working while
  *                  they cut over. Dropped after sunset (see Roadmap).
  *   /health        lightweight liveness check served locally by the Worker.
- *                  Does NOT forward — the Worker being reachable is enough
+ *                  Does NOT forward, the Worker being reachable is enough
  *                  signal; maintainer infrastructure liveness is checked separately.
  *
  * Anything else returns 404. Closed by default.
  *
- * Wiki: Apps/🚂 Orange Rails/api.orangerails.com — Canonical Gateway/Proposal
+ * Observability:
+ *   Wrapped with @sentry/cloudflare so any thrown exception inside the
+ *   fetch handler lands at pulse.orangerails.com (self-hosted GlitchTip,
+ *   Sentry wire-compatible). Until SENTRY_DSN is set on the worker's
+ *   environment, the wrapper is a no-op and the original handler runs
+ *   unchanged.
+ *
+ * Wiki: maintainer-only proposal doc for the canonical-gateway pattern.
  */
 
+import * as Sentry from "@sentry/cloudflare";
+
 export interface Env {
-  /** OR Supabase URL — e.g. https://lcdicqalreskibdfxkzb.supabase.co (prod) or the dev ref. Set per environment in wrangler.toml. */
+  /** OR Supabase URL, e.g. https://lcdicqalreskibdfxkzb.supabase.co (prod) or the dev ref. Set per environment in wrangler.toml. */
   OR_SUPABASE_URL: string;
+  /** Sentry-compatible DSN for the self-hosted GlitchTip project that catches Worker errors. Public client key by convention; safe to ship. */
+  SENTRY_DSN?: string;
+  /** Optional release identifier surfaced in Sentry events. Set in CI; defaults to "dev" when unset. */
+  SENTRY_RELEASE?: string;
+  /** Optional environment label surfaced in Sentry events. */
+  SENTRY_ENVIRONMENT?: string;
 }
 
 type V1Route = {
@@ -55,7 +70,7 @@ const V1_ROUTES: Record<string, V1Route> = {
   "GET  /v1/providers": { method: "GET", fn: "or-providers" },
   "GET  /v1/platform/config": { method: "GET", fn: "or-platform-bootstrap" },
   "POST /v1/platform/config": { method: "POST", fn: "or-platform-bootstrap" },
-  // Truth-data routes — world-gateway has a sub-path per dataset.
+  // Truth-data routes, world-gateway has a sub-path per dataset.
   "GET  /v1/truth/precious-metals": {
     method: "GET",
     fn: "world-gateway",
@@ -123,7 +138,7 @@ async function proxyToSupabase(upstreamUrl: string, request: Request): Promise<R
   return fetch(upstream);
 }
 
-export default {
+const handler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const method = request.method.toUpperCase();
@@ -174,3 +189,64 @@ export default {
     });
   },
 };
+
+/**
+ * Sentry-wrapped export. The withSentry helper from @sentry/cloudflare
+ * takes a function that returns the Sentry init options (it gets `env`
+ * so we can pull SENTRY_DSN from per-environment wrangler vars) plus
+ * the original handler. If SENTRY_DSN is empty or unset the wrapper is
+ * a no-op and the original handler runs unchanged, so the Worker keeps
+ * serving traffic even when the observability stack is down.
+ *
+ * tracesSampleRate is 0 (errors only) for the first pass to keep the
+ * worker CPU budget tight. The Worker is on Cloudflare's free plan
+ * limits; performance tracing can be enabled later if useful.
+ *
+ * The beforeSend hook here is light because the Worker does not see
+ * end-user vault material directly. It does pass through bearer-shaped
+ * authorization headers from clients, so we strip the request body
+ * (which may contain platform API keys in a POST), the authorization
+ * header, and any x-*-api-key shapes before the event leaves the edge.
+ */
+export default Sentry.withSentry(
+  (env: Env) => ({
+    // Empty DSN disables the SDK per @sentry/cloudflare v8 source
+    // (verified: src/init.ts no-ops when dsn is falsy). Keeps prod
+    // serving traffic when pulse.orangerails.com is unreachable.
+    dsn: env.SENTRY_DSN ?? "",
+    release: env.SENTRY_RELEASE ?? "dev",
+    environment: env.SENTRY_ENVIRONMENT ?? "production",
+    tracesSampleRate: 0,
+    sampleRate: 1,
+    // Defense in depth on IP capture even though v8 default is already
+    // false; pinning explicitly so a future SDK default flip cannot
+    // start sending IPs without us noticing.
+    sendDefaultPii: false,
+    beforeSend(event: Sentry.ErrorEvent) {
+      try {
+        if (event.request) {
+          if (event.request.url) {
+            event.request.url = event.request.url.split("#")[0].split("?")[0];
+          }
+          delete event.request.data;
+          delete event.request.cookies;
+          delete event.request.headers;
+          delete event.request.query_string;
+          // The CF Worker runtime passes the env bindings (SENTRY_DSN,
+          // OR_SUPABASE_URL, and any future secrets) on request-like
+          // shapes inside the SDK. A future Sentry minor that decides
+          // to attach env to event.request would silently leak our
+          // upstream secrets back to pulse. Strip it now so the leak
+          // never gets a chance.
+          delete (event.request as { env?: unknown }).env;
+        }
+        if (event.user) delete event.user.ip_address;
+        delete event.extra;
+      } catch {
+        return null;
+      }
+      return event;
+    },
+  }),
+  handler,
+);

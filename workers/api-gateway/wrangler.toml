@@ -1,6 +1,8 @@
 name = "api-orangerails"
 main = "src/index.ts"
 compatibility_date = "2026-05-31"
+# Required by @sentry/cloudflare which uses node:async_hooks internally.
+compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 [vars]
