@@ -1,7 +1,14 @@
 import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { getRouter } from "./router";
+import { initSentry } from "./lib/sentry";
 import "./styles.css";
+
+// Boot client error reporting before any router code runs so an
+// exception during getRouter() or the initial render itself gets
+// captured. initSentry no-ops when VITE_SENTRY_DSN is unset, which
+// is the default for local dev.
+initSentry();
 
 const router = getRouter();
 
