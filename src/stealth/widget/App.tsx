@@ -21,7 +21,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   STEALTH_PROTOCOL_VERSION,
-  type StealthAddCompleteMessage,
   type StealthInitMessage,
   type StealthReadyMessage,
   type StealthErrorMessage,
@@ -123,20 +122,6 @@ export function App() {
   const [init, setInit] = useState<StealthInitMessage | null>(null);
   const [parent, setParent] = useState<Window | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Captures a successful add so the same popup can chain into the sync
-  // route without bouncing back to the host app. The host sees a single
-  // popup that adds the xpub AND posts the first SYNC_COMPLETE, so
-  // newly-added wallets show transactions on the host immediately
-  // instead of sitting empty until the user later clicks Sync. The
-  // pendingAddComplete is the ADD_COMPLETE message the add route
-  // *would* have posted; SyncRoute posts it for us at the end of the
-  // scan so the host receives ADD_COMPLETE + SYNC_COMPLETE back-to-back.
-  // Host apps typically close the popup on ADD_COMPLETE, so posting it
-  // earlier would kill the scan before any block is fetched.
-  const [postAddSync, setPostAddSync] = useState<{
-    connection_id: string;
-    pendingAddComplete: StealthAddCompleteMessage;
-  } | null>(null);
   // Initial value: if there is no opener AND no parent frame (or we are on the
   // server where window is undefined), no postMessage INIT can ever arrive, so
   // we are in a direct-load situation from the start. Otherwise wait for the
@@ -277,39 +262,10 @@ export function App() {
     );
   }
 
-  // If add just completed, render sync in this same popup with the new
-  // connection_id grafted onto init. The host app's INIT carried mode='add'
-  // and no connection_id (because the connection did not exist yet); the
-  // synthesized init below carries mode='sync' and the connection_id we
-  // just learned, so SyncRoute mounts and runs the initial scan. The
-  // pendingAddComplete is handed to SyncRoute so it can post ADD_COMPLETE
-  // immediately before SYNC_COMPLETE at the end of the scan; that lets
-  // the host's existing receiver register the wallet and pick up the
-  // first batch of transactions in one popup-open.
-  if (postAddSync && init.mode === "add") {
-    const syncInit: StealthInitMessage = {
-      ...init,
-      mode: "sync",
-      connection_id: postAddSync.connection_id,
-    };
-    return (
-      <StealthInitProvider value={{ init: syncInit, parent }}>
-        <SyncRoute init={syncInit} pendingAddComplete={postAddSync.pendingAddComplete} />
-      </StealthInitProvider>
-    );
-  }
-
   const route = (() => {
     switch (init.mode) {
       case "add":
-        return (
-          <AddRoute
-            init={init}
-            onAddComplete={(connection_id, pendingAddComplete) =>
-              setPostAddSync({ connection_id, pendingAddComplete })
-            }
-          />
-        );
+        return <AddRoute init={init} />;
       case "sync":
         return <SyncRoute init={init} />;
       case "list":

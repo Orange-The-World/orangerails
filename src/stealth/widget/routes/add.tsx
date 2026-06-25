@@ -126,21 +126,7 @@ interface AccessTokenInit extends StealthInitMessage {
   proxy_base_url?: string;
 }
 
-export function AddRoute({
-  init: _init,
-  onAddComplete,
-}: {
-  init: StealthInitMessage;
-  /** Optional: invoked when the backend create succeeds, with the new
-   *  connection_id and the prepared ADD_COMPLETE message the host app is
-   *  meant to receive. When provided, this route does NOT post
-   *  ADD_COMPLETE itself and does NOT show the "Wallet added , close"
-   *  view; App.tsx instead chains the popup into SyncRoute, which posts
-   *  ADD_COMPLETE alongside SYNC_COMPLETE at the end of the scan. The
-   *  host therefore sees both messages and a single popup-open covers
-   *  the add + first scan. */
-  onAddComplete?: (connection_id: string, pendingAddComplete: StealthAddCompleteMessage) => void;
-}) {
+export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   const { init, parent } = useStealthInit();
   const initWithToken = init as AccessTokenInit;
 
@@ -395,19 +381,6 @@ export function AddRoute({
         label: cleanLabel,
         script_type: shape.scriptType,
       };
-      if (onAddComplete) {
-        // Chained add+sync: hold ADD_COMPLETE in App.tsx until the sync
-        // route finishes. Posting it here would cause many host apps'
-        // existing receivers to close the popup (typical "wallet added,
-        // we are done" handler) before the first scan can run. SyncRoute
-        // will post ADD_COMPLETE immediately before SYNC_COMPLETE so the
-        // host sees both back-to-back and the popup stays alive through
-        // the whole scan. The standalone "wallet added, close this
-        // window" view below is intentionally retained for the no-chain
-        // path where a host opted out by not passing onAddComplete.
-        onAddComplete(json.connection_id, complete);
-        return;
-      }
       if (parent) {
         try {
           parent.postMessage(complete, init.return_callback_origin);

@@ -38,7 +38,6 @@ import {
 import { unsealEnvelope } from "@/stealth/lib/seal";
 import type {
   SealedEnvelope,
-  StealthAddCompleteMessage,
   StealthErrorCode,
   StealthErrorMessage,
   StealthInitMessage,
@@ -99,21 +98,7 @@ const liveFetchBlock = (hash: string) => libLiveFetchBlock(hash, BLOCK_SOURCE_BA
 
 // ── Component ──────────────────────────────────────────────────────────
 
-export function SyncRoute({
-  init: _initProp,
-  pendingAddComplete,
-}: {
-  init: StealthInitMessage;
-  /** When set, this sync run is the second half of a chained add+sync
-   *  inside a single popup. We post this ADD_COMPLETE message
-   *  immediately before SYNC_COMPLETE on success (or immediately before
-   *  the error postMessage on failure) so the host app's existing
-   *  receiver registers the wallet record and then processes the first
-   *  scan in one popup-open. The host sees the same wire-protocol
-   *  messages it would see if add and sync had been triggered
-   *  separately, in the same order. */
-  pendingAddComplete?: StealthAddCompleteMessage;
-}) {
+export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
   const { init, parent } = useStealthInit();
   const initWithToken = init as AccessTokenInit;
 
@@ -306,16 +291,8 @@ export function SyncRoute({
           }
         }
 
-        // 4. SYNC_COMPLETE (preceded by the held ADD_COMPLETE when this
-        //    sync run is the second half of a chained add+sync).
+        // 4. SYNC_COMPLETE.
         if (parent) {
-          if (pendingAddComplete) {
-            try {
-              parent.postMessage(pendingAddComplete, init.return_callback_origin);
-            } catch (e) {
-              console.error("[stealth/sync] failed to post chained add-complete:", e);
-            }
-          }
           const msg: StealthSyncCompleteMessage = {
             type: "OR_STEALTH_SYNC_COMPLETE",
             connection_id: init.connection_id,
@@ -336,25 +313,9 @@ export function SyncRoute({
         setDone({ txCount: result.txCount, bytes: result.bytesDownloaded });
       } catch (e) {
         if (cancelled) return;
-        const errMsg = e instanceof Error ? e.message : String(e);
-        // Post the held ADD_COMPLETE first so the host registers the
-        // wallet even on sync failure. The host can show the wallet
-        // with "needs sync" status; the user can retry sync later
-        // without redoing the add. Without this the popup would die on
-        // a sync error and the host would never learn that the add
-        // actually succeeded on the OR backend.
-        if (parent && pendingAddComplete) {
-          try {
-            parent.postMessage(pendingAddComplete, init.return_callback_origin);
-          } catch (postErr) {
-            console.error(
-              "[stealth/sync] failed to post chained add-complete on error path:",
-              postErr,
-            );
-          }
-        }
-        setError(errMsg);
-        postWidgetError("INTERNAL", errMsg, true);
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(msg);
+        postWidgetError("INTERNAL", msg, true);
       }
     })();
 
