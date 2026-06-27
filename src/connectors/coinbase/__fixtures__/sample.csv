@@ -1,0 +1,12 @@
+"You can use this transaction report to inform your likely tax obligations. For final tax obligations, please consult your tax advisor."
+
+Transactions
+User,Test Account,0000aaaa
+
+Timestamp,Transaction Type,Asset,Quantity Transacted,Spot Price Currency,Spot Price at Transaction,Subtotal,Total (inclusive of fees and/or spread),Fees and/or Spread,Notes
+2024-09-24T13:21:51Z,Buy,BTC,0.01000000,USD,63000.00,630.00,635.00,5.00,Bought 0.01 BTC
+2024-10-01T09:00:00Z,Receive,BTC,0.00500000,USD,62000.00,,,,Received from external address
+2024-10-05T12:00:00Z,Sell,BTC,0.00250000,USD,64000.00,160.00,158.00,2.00,Sold 0.0025 BTC
+2024-10-10T08:00:00Z,Convert,ETH,1.00000000,USD,2500.00,2500.00,2490.00,10.00,Converted ETH to USDC
+2024-10-12T08:00:00Z,Staking Income,ETH,0.05000000,USD,2500.00,,,,Staking reward
+2024-10-15T08:00:00Z,Frobnicate,BTC,0.00100000,USD,60000.00,,,,unrecognized type row
