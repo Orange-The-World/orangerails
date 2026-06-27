@@ -55,3 +55,8 @@ dist/
 .next/
 test-results/
 supabase/.temp/
+
+# Reserved-term list for scripts/pre-publish-scan.sh: the internal naming /
+# reserved terms the scanner checks for. Kept out of git so the list is not
+# published in the public tree. See .reserved-terms.example.
+.reserved-terms
