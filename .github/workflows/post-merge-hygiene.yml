@@ -1,0 +1,121 @@
+name: Post-merge metadata hygiene
+
+# Scans every commit that just landed on a protected branch for non-public
+# references in:
+#   - commit message body (Co-authored-by trailers, body text)
+#   - author name + email
+#   - committer name + email
+#
+# This catches the class of stray reference a tree scan cannot see: GitHub auto-adds
+# Co-authored-by trailers to squash / rebase merge commits at merge time,
+# and the trailer email comes from each contributor's local git config. If a
+# contributor's user.email carries a Tailscale tail-net hostname or any other internal-only string, the merge commit silently carries it into public
+# history.
+#
+# Two pattern sources, kept separate on purpose:
+#   - A GENERIC structural pattern (tail-net hostnames, CGNAT CIDR) lives in
+#     this committed file. It names a CLASS of string, never a person, so it
+#     is safe to publish.
+#   - A reserved-term pattern (specific internal references) is read at
+#     runtime from the OR_RESERVED_TERMS repo secret, so this committed
+#     file does not publish the list itself. If the secret is unset the
+#     reserved-term half is skipped and the generic half still runs.
+#
+# Tree-content scanning is owned by repo-hygiene.yml (it runs
+# scripts/pre-publish-scan.sh on every PR + push). This workflow stays
+# focused on commit metadata so the tree scan does not run twice.
+
+on:
+  push:
+    branches: [dev, prod]
+
+# Least privilege: this job only reads the repo to inspect commit metadata.
+permissions:
+  contents: read
+
+jobs:
+  conventions-scan:
+    name: Commit metadata scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history of the just-pushed commits
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine range to scan
+        id: range
+        run: |
+          set -euo pipefail
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.event.after }}"
+          # On a brand-new branch creation, github.event.before is all zeros.
+          # Scan only the head commit then, to avoid scanning the entire repo
+          # history every time a new branch lands.
+          ZERO="0000000000000000000000000000000000000000"
+          if [ "$BEFORE" = "$ZERO" ]; then
+            echo "range=$AFTER -1" >> "$GITHUB_OUTPUT"
+          else
+            echo "range=$BEFORE..$AFTER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Scan author + committer + body for non-public references
+        env:
+          # GENERIC structural pattern : safe to commit (names a class, not a
+          # person): tail-net hostnames and the CGNAT /10 block Tailscale
+          # assigns. Bare ".local" is intentionally NOT here: it false-positives
+          # on .env.local / *.local.json. The specific internal *.local host is
+          # carried in the reserved-term list instead.
+          GENERIC_PATTERN: 'tail[a-z0-9]+\.ts\.net|\.tailnet\b|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          # Reserved-term pattern: specific internal references, sourced from a
+          # secret so this file never stores them; empty when the secret is unset
+          # (reserved-term half skipped, generic half runs).
+          # GitHub also masks the secret value in these public logs.
+          RESERVED_PATTERN: ${{ secrets.OR_RESERVED_TERMS }}
+          # Documentation strip-patterns: tokens that only appear in regex /
+          # network documentation, never an accidental match. A matching line is
+          # re-scanned with these stripped; if it then comes back clean it was
+          # describing the regex (e.g. "widened CIDR to 100.64.0.0/10"), not
+          # a stray reference. If it still matches, a real match co-exists with the docs.
+          DOC_STRIP_CGNAT: '100\.64\.0\.0/10'
+          DOC_STRIP_REGEX_ALT: '\([0-9]+(\|[0-9]+)+\)'
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          set -euo pipefail
+          echo "Scanning range: $RANGE"
+          PATTERN="$GENERIC_PATTERN"
+          if [ -n "${RESERVED_PATTERN:-}" ]; then
+            PATTERN="$PATTERN|$RESERVED_PATTERN"
+          else
+            echo "::notice::OR_RESERVED_TERMS secret not set : scanning generic structural patterns only."
+          fi
+          MATCHES=0
+          CURRENT_SHA="(unknown)"
+          while IFS= read -r line; do
+            # Each record starts with the commit SHA (see --format below).
+            # Track it so a match on a BODY line attributes to the right
+            # commit, not the first word of that body line.
+            if [[ "$line" =~ ^([0-9a-f]{40})\  ]]; then
+              CURRENT_SHA="${BASH_REMATCH[1]}"
+            fi
+            if echo "$line" | grep -nEi "$PATTERN" >/dev/null; then
+              # Strip documentation tokens and re-scan; a still-matching line
+              # has a real match co-existing with the docs.
+              cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+              if ! echo "$cleaned" | grep -nEi "$PATTERN" >/dev/null; then
+                echo "::notice::Allowlisted documentation line (CGNAT block or regex syntax)."
+                continue
+              fi
+              # Do NOT echo the matched content: Actions logs are world-readable
+              # on a public repo. Print only the commit SHA (already public in
+              # git history) so the maintainer can locate it.
+              echo "::error::Reserved internal term in commit ${CURRENT_SHA}'s metadata; a maintainer should clear it. (Matched text withheld from logs.)"
+              MATCHES=$((MATCHES + 1))
+            fi
+          done < <(git log $RANGE --format='%H AUTHOR %an <%ae> COMMITTER %cn <%ce>%n%B%n--END--')
+
+          if [ "$MATCHES" -gt 0 ]; then
+            echo "::error::Conventions-scan failed: $MATCHES line(s) carry non-public references."
+            exit 1
+          fi
+          echo "Conventions-scan clean: 0 lines carry non-public references."

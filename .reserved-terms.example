@@ -1,0 +1,28 @@
+# Reserved-term list : example / template.
+#
+# Copy this file to ".reserved-terms" (which is gitignored) and fill it
+# with the internal-only terms the pre-publish scan should flag if they ever
+# appear in the public tree: internal naming, earlier experiment / codename
+# references, non-public hostnames, and non-public contact strings. One ERE
+# (extended regex) term per line. Blank lines and lines starting with "#"
+# are ignored. The scanner ORs the terms together, case-insensitively.
+#
+# Why this is not committed: keeping the list in tracked source would
+# publish the very terms it exists to keep out of the public tree. Holding
+# it here (gitignored) or in the OR_RESERVED_TERMS CI secret lets the
+# check run without publishing the list. Outside contributors run the
+# scanner with this list empty and never see the internal terms.
+#
+# The entries below are PLACEHOLDERS, replace them.
+
+# Internal naming / reserved words (whole-word):
+\b(ProjectAlpha|ProjectBeta)\b
+
+# Earlier experiment / codename references:
+\b(LegacyExperimentName)\b
+
+# Non-public hostnames:
+internal-host\.example|build-host\.example|myhost\.local
+
+# Non-public domains:
+@(example-internal\.com|example-internal\.net)

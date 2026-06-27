@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-publish-scan.sh — leak check for the open-source Orange Rails repo.
+# pre-publish-scan.sh: naming-convention scan for the open-source Orange Rails repo.
 #
 # Runs a categorized grep over the source tree looking for content that
 # should never ship to a public repo: legacy brand names, internal
@@ -9,21 +9,46 @@
 #
 # Exit code:
 #   0  — tree is clean, safe to publish or merge
-#   1  — one or more categories reported a leak; review output, clean up,
+#   1  : one or more categories reported an issue; review output, clean up,
 #        re-run
 #
 # Run locally before pushing:   bash scripts/pre-publish-scan.sh
-# Runs in CI as a required check (see .github/workflows/leak-check.yml).
+# Runs in CI as a required check (see .github/workflows/repo-hygiene.yml).
 #
 # Updating the allowlist: if you introduce a brand or product reference
 # that is intentional and acceptable (for example a new sibling project),
-# add it to the EXEMPT_* lists below AND to the leak-check workflow in
+# add it to the EXEMPT_* lists below AND to the repo-hygiene workflow in
 # lock-step. PRs that change this script require a second reviewer.
 
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# ----------------------------------------------------------------------
+# Reserved-term list (sourced OUT of this committed file)
+# ----------------------------------------------------------------------
+#
+# The project keeps the public tree consistent with Orange Rails naming
+# conventions: no internal-only naming, no earlier experiment / codename
+# references, no non-public hostnames or contact strings. The list of such
+# reserved terms is NOT hardcoded here, because committing the list would
+# publish the very strings it exists to keep out of the public tree.
+# Instead it is provided at runtime as a regex alternation, from either
+# source, in this order:
+#
+#   1. The OR_RESERVED_TERMS environment variable (CI sources this from
+#      a repository secret: see .github/workflows/repo-hygiene.yml).
+#   2. A gitignored .reserved-terms file (one term per line; blank
+#      lines and #-comments ignored). See .reserved-terms.example.
+#
+# If neither is configured the reserved-term scan is SKIPPED with a notice
+# (the structural checks below still run). Outside contributors therefore
+# get a working scanner with zero exposure to the internal list.
+RESERVED_TERMS="${OR_RESERVED_TERMS:-}"
+if [[ -z "$RESERVED_TERMS" && -f .reserved-terms ]]; then
+  RESERVED_TERMS="$(grep -vE '^[[:space:]]*(#|$)' .reserved-terms | paste -sd'|' -)"
+fi
 
 # ----------------------------------------------------------------------
 # Path scope
@@ -66,8 +91,11 @@ EXCLUDE_FILES=(
 
 EXEMPT_GENERIC=(
   "scripts/pre-publish-scan.sh"
+  # The companion workflows carry the structural PATTERN as a literal (they
+  # are detectors). Exempt them the same way the scanner exempts itself.
+  ".github/workflows/post-merge-hygiene.yml"
   ".github/PULL_REQUEST_TEMPLATE.md"
-  ".github/workflows/leak-check.yml"
+  ".github/workflows/repo-hygiene.yml"
   "CONTRIBUTING.md"
   "CODE_OF_CONDUCT.md"
   # CHANGELOG can mention "originally created in the MorningRevolution org" as
@@ -77,7 +105,7 @@ EXEMPT_GENERIC=(
 
 # Migration filenames AND row content for first-customer seed identifiers.
 # Founder rule 2026-06-18: BitBooks and Orange Way ARE the first two customers,
-# and their slug/filename/seed-row mentions are legitimate, not leaks. Also
+# and their slug/filename/seed-row mentions are legitimate, not issues. Also
 # covers the per-customer sink adapter files (bitbooks-v2.{ts,yaml} etc.) and
 # platform-auth doc-comments listing customer examples.
 EXEMPT_MIGRATION_FILENAMES=(
@@ -230,7 +258,7 @@ EXEMPT_AUDIT_RE="$(join_pipe "${EXEMPT_AUDIT_BREADCRUMB_FILES[@]}")"
 # Header
 # ----------------------------------------------------------------------
 
-printf "\n\033[1m▎ Pre-publish leak scan — Orange Rails\033[0m\n"
+printf "\n\033[1m▎ Pre-publish convention scan: Orange Rails\033[0m\n"
 printf "  repo: %s\n\n" "$REPO_ROOT"
 
 # ----------------------------------------------------------------------
@@ -276,35 +304,30 @@ scan "Hardcoded BitBooks subdomains (should be env config, not literals)" \
      "" \
      "src/integrations/supabase/types|supabase/migrations/"
 
-scan "Other personal-project brands" \
-     "\\b(TESSA|COLE|ADUB|ADDLY)\\b|Petit Chou|petitchou|Heirloom Book" \
-     "" \
-     ""
+# ----------------------------------------------------------------------
+# Category 2: Reserved internal terms (sourced from the term list)
+# ----------------------------------------------------------------------
+#
+# Internal-only naming, earlier experiment / codename references, and
+# non-public contact strings are NOT hardcoded here (see the loader near
+# the top). They arrive via OR_RESERVED_TERMS / .reserved-terms so this
+# committed file never publishes the list. (Public figures intentionally
+# named in the README, e.g. cypherpunk-lineage references, are not
+# reserved terms and should not be added to the list.)
+
+printf "\n\033[1m2. Reserved internal terms\033[0m\n"
+
+if [[ -n "$RESERVED_TERMS" ]]; then
+  scan "Reserved internal terms" \
+       "$RESERVED_TERMS" \
+       "i" \
+       ""
+else
+  printf "  \033[33mskip\033[0m  Reserved-term list not configured (set OR_RESERVED_TERMS or add a gitignored .reserved-terms); skipping term scan.\n"
+fi
 
 # ----------------------------------------------------------------------
-# Category 2 — Personal names + PII
-# ----------------------------------------------------------------------
-
-printf "\n\033[1m2. Personal names + PII\033[0m\n"
-
-# "Tim May" is intentionally kept in README cypherpunk lineage.
-scan "Personal first names" \
-     "\\b(the maintainer|Daenon|Roark|Brandon|Ashar|tsaekoo|Abuelo)\\b" \
-     "" \
-     ""
-
-scan "External contact names" \
-     "Charles Taylor|Ruben Izmailyan" \
-     "" \
-     ""
-
-scan "Personal-domain emails" \
-     "@(bitbooks\\.com|abascal\\.ca|tryfaster\\.ca)" \
-     "" \
-     ""
-
-# ----------------------------------------------------------------------
-# Category 3 — Internal infrastructure leaks
+# Category 3: Internal infrastructure references
 # ----------------------------------------------------------------------
 
 printf "\n\033[1m3. Internal infrastructure\033[0m\n"
@@ -332,7 +355,7 @@ scan "Internal bb-support paths" \
 # blocks.orangerails.com (BIP158 block source) and stealth.orangerails.com
 # (BIP158 filter CDN) are admin-only infrastructure that's correctly
 # documented in caddy/, docs/Stealth-Sync.md, and scripts/README.md for
-# maintainer ops. They're not customer-facing leaks when scoped to those
+# maintainer ops. They're not customer-facing references when scoped to those
 # operator paths.
 scan "Admin-only orangerails subdomains in shipping code" \
      "\\b(blocks|stealth)\\.orangerails\\.com\\b" \
@@ -344,7 +367,7 @@ scan "Windows-style internal paths" \
      "" \
      ""
 
-scan "Home-path leaks" \
+scan "Home-path references" \
      "/home/(kiwi|cactus|claude|ubuntu)/" \
      "" \
      ""
@@ -380,10 +403,13 @@ scan "PERF-N performance-audit tags" \
      "" \
      ""
 
+# Migration files legitimately cite the PR that introduced them as
+# historical documentation (the migration is immutable; its comment
+# records why it exists). Exempt the migrations dir from the dead-PR check.
 scan "Dead PR references" \
      "PR #[0-9]+|V[23] PR\\b|OR PR #" \
      "" \
-     ""
+     "supabase/migrations/"
 
 # ----------------------------------------------------------------------
 # Category 5 — Operational dates in code comments
@@ -404,7 +430,7 @@ printf "\n"
 if [[ "$EXIT_CODE" -eq 0 ]]; then
   printf "\033[32m▎ Tree is clean. Safe to publish or merge.\033[0m\n\n"
 else
-  printf "\033[31m▎ Leaks found. Clean up the items above before publishing.\033[0m\n"
+  printf "\033[31m▎ Issues found. Clean up the items above before publishing.\033[0m\n"
   printf "  See \033[1mCONTRIBUTING.md\033[0m for the rules and exemption process.\n\n"
 fi
 
