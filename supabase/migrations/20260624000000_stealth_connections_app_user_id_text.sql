@@ -17,9 +17,19 @@
 -- the two stealth tables.
 --
 -- Existing rows: any prior UUID values cast cleanly to text via USING.
+--
+-- PostgreSQL blocks ALTER COLUMN TYPE when a policy depends on the column.
+-- Drop and recreate the policy around the ALTER (the body is identical).
+
+DROP POLICY IF EXISTS "Owners can read their stealth connections" ON public.stealth_connections;
 
 ALTER TABLE public.stealth_connections
   ALTER COLUMN app_user_id TYPE TEXT USING app_user_id::text;
+
+CREATE POLICY "Owners can read their stealth connections"
+  ON public.stealth_connections
+  FOR SELECT
+  USING (auth.uid()::text = app_user_id::text);
 
 COMMENT ON COLUMN public.stealth_connections.app_user_id IS
   'Consumer-app user/org identifier. Opaque to OR. Format is whatever the calling platform uses (CUID, UUID, ULID, ...). Scoped by (platform_id, app_user_id).';
