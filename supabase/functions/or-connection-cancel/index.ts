@@ -31,8 +31,8 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
-import {
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import {
   cancelPendingConnection,
   fetchScopedConnection,
   isValidUuid,
