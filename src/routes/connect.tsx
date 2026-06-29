@@ -52,12 +52,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Info } from "lucide-react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttInstitutions } from "@quiltt/react/hooks";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { deriveMEK, encryptString, importAesKey } from "@/lib/vault";
 import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
 
@@ -92,14 +87,18 @@ import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
 // is the only correct location.
 function __OR_readDeferCredKey(): boolean {
   if (typeof window === "undefined") return false;
-  const searchHit =
-    new URLSearchParams(window.location.search).get("defer_cred_key") === "1";
+  const searchHit = new URLSearchParams(window.location.search).get("defer_cred_key") === "1";
   const hashHit =
     new URLSearchParams(window.location.hash.replace(/^#/, "")).get("defer_cred_key") === "1";
   const result = searchHit || hashHit;
   // eslint-disable-next-line no-console
-  console.log("[OR-defer] module-load snapshot", { searchHit, hashHit, result,
-    search: window.location.search, hash: window.location.hash });
+  console.log("[OR-defer] module-load snapshot", {
+    searchHit,
+    hashHit,
+    result,
+    search: window.location.search,
+    hash: window.location.hash,
+  });
   return result;
 }
 export const __OR_INITIAL_DEFER_CRED_KEY: boolean = __OR_readDeferCredKey();
@@ -155,11 +154,7 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
   // Strip the fragment from the visible URL ASAP. We replace, not push,
   // so the back stack is untouched.
   try {
-    history.replaceState(
-      history.state,
-      "",
-      window.location.pathname + window.location.search,
-    );
+    history.replaceState(history.state, "", window.location.pathname + window.location.search);
   } catch {
     /* not fatal , the in-memory keys are what matter */
   }
@@ -203,9 +198,7 @@ async function requestHandoffKeysFromParent(
 ): Promise<HandoffKeys> {
   const opener = window.opener as Window | null;
   if (!opener || opener.closed) {
-    throw new Error(
-      "Lost connection to the host app , please close this window and try again.",
-    );
+    throw new Error("Lost connection to the host app , please close this window and try again.");
   }
 
   // The cred_key is the user's vault-unlock AES key. We refuse to send the
@@ -245,9 +238,7 @@ async function requestHandoffKeysFromParent(
       try {
         const bytes = base64ToBytes(credKeyB64);
         if (bytes.length !== 32) {
-          throw new Error(
-            "Host app returned a key of the wrong size (expected 32 bytes).",
-          );
+          throw new Error("Host app returned a key of the wrong size (expected 32 bytes).");
         }
         const credKey = await importAesKey(bytes.buffer as ArrayBuffer);
         cleanup();
@@ -738,14 +729,14 @@ async function callLinkComplete(payload: {
  * the user clicks a bank tile.
  */
 interface QuilttBundle {
-  subaccount_id:  string;
-  platform_slug:  string;
-  app_user_id:    string;
-  session_token:  string;
-  connector_id:   string;
-  profile_id:     string;
+  subaccount_id: string;
+  platform_slug: string;
+  app_user_id: string;
+  session_token: string;
+  connector_id: string;
+  profile_id: string;
   environment_id: string;
-  expires_at:     string;
+  expires_at: string;
 }
 
 /**
@@ -767,7 +758,11 @@ async function fetchQuilttBundleViaWidget(widgetToken: string): Promise<QuilttBu
   });
   const text = await res.text();
   let data: Record<string, unknown> = {};
-  try { data = JSON.parse(text) as Record<string, unknown>; } catch { /* ignore */ }
+  try {
+    data = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    /* ignore */
+  }
   if (!res.ok) {
     throw new Error(
       typeof data.error === "string" ? data.error : `Bank search unavailable (${res.status}).`,
@@ -824,10 +819,10 @@ async function navigateToClientSideManifest(
     // bank's login form.
     const fragmentParams: Record<string, string> = {
       session_token: bundle.session_token,
-      connector_id:  bundle.connector_id,
+      connector_id: bundle.connector_id,
       platform_slug: bundle.platform_slug,
-      app_user_id:   bundle.app_user_id,
-      widget_token:  widgetToken,
+      app_user_id: bundle.app_user_id,
+      widget_token: widgetToken,
     };
     if (search.institution) {
       fragmentParams.institution = search.institution;
@@ -899,9 +894,7 @@ function ConnectPageInner() {
   // Flow state. When the integrating app deep-links with ?provider=... we
   // start at the credential form; otherwise we open with the in-widget
   // provider picker so the host app never has to maintain its own list.
-  const [step, setStep] = useState<Step>(
-    search.provider ? "enter-credentials" : "pick-provider",
-  );
+  const [step, setStep] = useState<Step>(search.provider ? "enter-credentials" : "pick-provider");
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   // User-supplied connection label. Defaults to the platform's display
   // name (mirrors prior behavior); the user can override before clicking
@@ -915,6 +908,19 @@ function ConnectPageInner() {
   const [discovered, setDiscovered] = useState<DiscoveredWallet[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+
+  function friendlyError(err: unknown): string {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (
+      msg === "Failed to fetch" ||
+      msg.startsWith("NetworkError") ||
+      msg.includes("network error") ||
+      msg.includes("net::ERR_")
+    ) {
+      return "Connection failed. Please check your internet connection and try again.";
+    }
+    return msg;
+  }
   const [handoffKeys, setHandoffKeys] = useState<HandoffKeys | null>(null);
   // Catalog for the in-widget picker. Loaded lazily when no provider slug
   // arrived in the URL.
@@ -938,10 +944,7 @@ function ConnectPageInner() {
       // Deep-linked: resolve platform AND provider manifest in parallel
       // (existing fast path , keeps backward compat with V2 + integrators
       // that already pass ?provider=...).
-      Promise.all([
-        fetchPlatformDisplay(search.platform),
-        fetchProviderManifest(search.provider),
-      ])
+      Promise.all([fetchPlatformDisplay(search.platform), fetchProviderManifest(search.provider)])
         .then(([platformRes, manifestRes]) => {
           // Client-side-manifest providers (Quiltt, Sparrow) have a
           // dedicated route rather than the generic credential form.
@@ -951,8 +954,8 @@ function ConnectPageInner() {
           // integrator passing ?provider=quiltt lands on an empty
           // credentials form (no credentialFields).
           if (manifestRes.connectUrl) {
-            navigateToClientSideManifest(manifestRes, search, initialFragmentWidgetToken).catch((err) =>
-              setLoadError(err instanceof Error ? err.message : String(err)),
+            navigateToClientSideManifest(manifestRes, search, initialFragmentWidgetToken).catch(
+              (err) => setLoadError(err instanceof Error ? err.message : String(err)),
             );
             return;
           }
@@ -991,7 +994,7 @@ function ConnectPageInner() {
       setManifest(m);
       setStep("enter-credentials");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(friendlyError(err));
     } finally {
       setPickingProvider(false);
     }
@@ -1049,7 +1052,7 @@ function ConnectPageInner() {
       setSelectedIds(new Set(result.map((w) => w.external_wallet_id)));
       setStep("pick-wallets");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(friendlyError(err));
       setStep("enter-credentials");
     }
   }
@@ -1096,9 +1099,7 @@ function ConnectPageInner() {
           );
         } catch (err) {
           setError(
-            err instanceof Error
-              ? err.message
-              : "Could not get the unlock key from the host app.",
+            err instanceof Error ? err.message : "Could not get the unlock key from the host app.",
           );
           setStep("pick-wallets");
           return;
@@ -1110,9 +1111,7 @@ function ConnectPageInner() {
         // mount). Trim and fall back to platform name so an empty input
         // never produces an empty label.
         connectionLabel:
-          connectionLabel.trim().length > 0
-            ? connectionLabel.trim()
-            : platform.display_name,
+          connectionLabel.trim().length > 0 ? connectionLabel.trim() : platform.display_name,
         picks,
         handoff,
       });
@@ -1178,7 +1177,7 @@ function ConnectPageInner() {
       setStep("done");
       setTimeout(() => window.close(), 1200);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(friendlyError(err));
       setStep("pick-wallets");
     }
   }
@@ -1263,9 +1262,7 @@ function ConnectPageInner() {
           providerSlug={manifest.slug}
           fields={manifest.credentialFields}
           values={formValues}
-          onValueChange={(name, value) =>
-            setFormValues((prev) => ({ ...prev, [name]: value }))
-          }
+          onValueChange={(name, value) => setFormValues((prev) => ({ ...prev, [name]: value }))}
           connectionLabel={connectionLabel}
           onConnectionLabelChange={setConnectionLabel}
           showVaultPassword={initialDeferCredKey || search.defer_cred_key === "1"}
@@ -1402,8 +1399,8 @@ function EnterCredentialsStep({
                 </p>
                 <p className="mt-2">
                   <span className="font-medium">The past:</span> the only way to recover historical
-                  activity is the CSV export from Strike's dashboard. CSV upload from this screen
-                  is shipping next. Rows match on Strike's Reference column so anything that also
+                  activity is the CSV export from Strike's dashboard. CSV upload from this screen is
+                  shipping next. Rows match on Strike's Reference column so anything that also
                   arrives via webhook never double counts.
                 </p>
               </TooltipContent>
@@ -1476,8 +1473,8 @@ function EnterCredentialsStep({
         <div className="border-t border-slate-200 pt-4">
           <h3 className="text-sm font-semibold">Encrypt your credentials</h3>
           <p className="mt-1 text-xs text-slate-500">
-            Your vault password encrypts this data before it leaves your browser.
-            Orange Rails stores only ciphertext , you and only you can decrypt it.
+            Your vault password encrypts this data before it leaves your browser. Orange Rails
+            stores only ciphertext , you and only you can decrypt it.
           </p>
           <input
             id="vault-password"
@@ -1498,7 +1495,6 @@ function EnterCredentialsStep({
           OrangeRails stores only ciphertext , you and only you can decrypt it.
         </p>
       )}
-
 
       {error && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
@@ -1614,9 +1610,7 @@ function PickProviderStep({
   // exactly that bug , the spinner stuck at "Looking up banks…" forever
   // because the .then/.catch saw `cancelled=true` after the rerender.
   const [quilttBundle, setQuilttBundle] = useState<QuilttBundle | null>(null);
-  const [bundleFetchState, setBundleFetchState] = useState<
-    "idle" | "fetching" | "error"
-  >("idle");
+  const [bundleFetchState, setBundleFetchState] = useState<"idle" | "fetching" | "error">("idle");
   const [bundleError, setBundleError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
 
@@ -1659,9 +1653,7 @@ function PickProviderStep({
   if (providers.length === 0) {
     return (
       <div className="mt-6 py-6 text-center">
-        <p className="text-sm text-muted-foreground">
-          No providers are available right now.
-        </p>
+        <p className="text-sm text-muted-foreground">No providers are available right now.</p>
       </div>
     );
   }
@@ -1730,7 +1722,12 @@ function PickProviderStep({
           stroke="currentColor"
           aria-hidden
         >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M11 17a6 6 0 100-12 6 6 0 000 12z" />
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M21 21l-4.35-4.35M11 17a6 6 0 100-12 6 6 0 000 12z"
+          />
         </svg>
       </div>
 
@@ -1747,12 +1744,7 @@ function PickProviderStep({
             <div key={g.label ?? `group-${gi}`}>
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {g.entries.map((p) => (
-                  <ProviderTile
-                    key={p.slug}
-                    provider={p}
-                    busy={submitting}
-                    onPick={onPick}
-                  />
+                  <ProviderTile key={p.slug} provider={p} busy={submitting} onPick={onPick} />
                 ))}
               </div>
             </div>
@@ -1796,15 +1788,15 @@ function PickProviderStep({
 // distinct colored square so the grid pops (matches the Wave UX where
 // each bank has its own brand color).
 const TILE_PALETTE = [
-  "bg-orange-500",  // OrangeRails primary
-  "bg-blue-600",    // RBC-ish
+  "bg-orange-500", // OrangeRails primary
+  "bg-blue-600", // RBC-ish
   "bg-emerald-600", // TD-ish
-  "bg-rose-600",    // Scotiabank-ish
-  "bg-red-700",     // CIBC-ish
+  "bg-rose-600", // Scotiabank-ish
+  "bg-red-700", // CIBC-ish
   "bg-indigo-600",
-  "bg-amber-500",   // Tangerine-ish
-  "bg-slate-800",   // dark fallback
-  "bg-teal-600",    // Desjardins-ish
+  "bg-amber-500", // Tangerine-ish
+  "bg-slate-800", // dark fallback
+  "bg-teal-600", // Desjardins-ish
   "bg-purple-600",
   "bg-cyan-600",
   "bg-yellow-500",
@@ -1846,9 +1838,7 @@ function ProviderTile({
         {initial}
       </span>
       <div className="flex w-full items-center justify-center gap-1">
-        <span className="truncate text-xs font-medium text-slate-900">
-          {provider.displayName}
-        </span>
+        <span className="truncate text-xs font-medium text-slate-900">{provider.displayName}</span>
         {provider.status === "beta" && (
           <span className="shrink-0 rounded-sm bg-amber-100 px-1 py-px text-[8px] font-bold uppercase tracking-wide text-amber-700">
             β
@@ -1978,24 +1968,36 @@ function PickWalletsStep({
 // Co-branded shell , Plaid-hybrid pattern.
 // --------------------------------------------------------------------
 
-function Shell({ platform, provider, children }: { platform?: PlatformDisplay; provider?: string; children: React.ReactNode }) {
+function Shell({
+  platform,
+  provider,
+  children,
+}: {
+  platform?: PlatformDisplay;
+  provider?: string;
+  children: React.ReactNode;
+}) {
   // Two modes:
   // 1. Quiltt (bank) flow → minimal, no OR branding
   // 2. Bitcoin source flow → full OR branded experience
-  const isBank = provider === 'quiltt';
+  const isBank = provider === "quiltt";
 
   if (isBank) {
     return (
-      <div className="min-h-screen bg-white antialiased text-slate-900" style={{ colorScheme: "light" }}>
-        <div className="mx-auto w-full max-w-md p-4">
-          {children}
-        </div>
+      <div
+        className="min-h-screen bg-white antialiased text-slate-900"
+        style={{ colorScheme: "light" }}
+      >
+        <div className="mx-auto w-full max-w-md p-4">{children}</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 px-4 py-6 antialiased text-slate-900" style={{ colorScheme: "light" }}>
+    <div
+      className="min-h-screen bg-slate-50 px-4 py-6 antialiased text-slate-900"
+      style={{ colorScheme: "light" }}
+    >
       <div className="mx-auto w-full max-w-md">
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           {platform && (
@@ -2017,8 +2019,8 @@ function Shell({ platform, provider, children }: { platform?: PlatformDisplay; p
                 className="underline hover:text-slate-600"
               >
                 Terms
-              </a>
-              {" "}and{" "}
+              </a>{" "}
+              and{" "}
               <a
                 href="/privacy"
                 target="_blank"
@@ -2113,11 +2115,7 @@ function BankSearchPanel({
 
   return (
     <QuilttProvider token={bundle.session_token}>
-      <BankSearchResults
-        searchTerm={searchTerm}
-        bundle={bundle}
-        widgetToken={widgetToken}
-      />
+      <BankSearchResults searchTerm={searchTerm} bundle={bundle} widgetToken={widgetToken} />
     </QuilttProvider>
   );
 }
@@ -2138,9 +2136,7 @@ function BankSearchResults({
   bundle: QuilttBundle;
   widgetToken?: string;
 }) {
-  const { searchResults, isSearching, setSearchTerm } = useQuilttInstitutions(
-    bundle.connector_id,
-  );
+  const { searchResults, isSearching, setSearchTerm } = useQuilttInstitutions(bundle.connector_id);
 
   // Push the parent's search term into the hook's internal state.
   useEffect(() => {
@@ -2149,7 +2145,9 @@ function BankSearchResults({
 
   // Quiltt's InstitutionsData is loosely typed in @quiltt/core. We
   // narrow to what we actually use.
-  const institutions = (Array.isArray(searchResults) ? searchResults : []) as QuilttInstitutionRow[];
+  const institutions = (
+    Array.isArray(searchResults) ? searchResults : []
+  ) as QuilttInstitutionRow[];
 
   if (isSearching && institutions.length === 0) {
     return (
@@ -2166,10 +2164,10 @@ function BankSearchResults({
   function openBank(institutionId: string) {
     const fragment = new URLSearchParams({
       session_token: bundle.session_token,
-      connector_id:  bundle.connector_id,
+      connector_id: bundle.connector_id,
       platform_slug: bundle.platform_slug,
-      app_user_id:   bundle.app_user_id,
-      institution:   institutionId,
+      app_user_id: bundle.app_user_id,
+      institution: institutionId,
     });
     // /connect/quiltt's completeLinkOnOR call needs widget_token to hit
     // or-quiltt-link-complete. Pipe it through the fragment.
@@ -2212,9 +2210,7 @@ function BankSearchResults({
                   {name.slice(0, 1).toUpperCase()}
                 </span>
               )}
-              <span className="w-full truncate text-xs font-medium text-slate-900">
-                {name}
-              </span>
+              <span className="w-full truncate text-xs font-medium text-slate-900">{name}</span>
             </button>
           );
         })}
