@@ -43,10 +43,4 @@ $$;
 -- in the first place, so no REVOKE is needed here.
 
 COMMENT ON SCHEMA public IS
-  'Database tables for the agent-membership feature (agent_members, ' ||
-  'agent_invitation_tokens, audit_entries, consumed_refresh_nonces) and ' ||
-  'their helper functions remain in place after the feature was retired ' ||
-  'from the public repo on 2026-06-25. They are intentionally preserved to ' ||
-  'keep rollback trivial if the feature returns from internal validation. ' ||
-  'EXECUTE grants on the SECURITY DEFINER functions have been REVOKEd so ' ||
-  'they cannot be called by an authenticated JWT holder via PostgREST /rpc.';
+  'Database tables for the agent-membership feature (agent_members, agent_invitation_tokens, audit_entries, consumed_refresh_nonces) and their helper functions remain in place after the feature was retired from the public repo on 2026-06-25. They are intentionally preserved to keep rollback trivial if the feature returns from internal validation. EXECUTE grants on the SECURITY DEFINER functions have been REVOKEd so they cannot be called by an authenticated JWT holder via PostgREST /rpc.';
