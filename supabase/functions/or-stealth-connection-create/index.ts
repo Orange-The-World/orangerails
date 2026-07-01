@@ -162,10 +162,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         return jsonResponse({ error: 'Failed to check for existing connection' }, 500, cors);
       }
       if (existing) {
-        // Touch updated_at so callers can tell the user re-added their xpub.
+        // Fix 2026-07-01: re-adding an already-connected xpub previously
+        // only touched updated_at, silently discarding the newly
+        // submitted sealed envelope. A user re-adding to correct the
+        // wallet birthday saw the correction never take effect. Save the
+        // new envelope so a re-add actually updates what's stored.
         await ctx.serviceClient
           .from('stealth_connections')
-          .update({ updated_at: new Date().toISOString() })
+          .update({
+            sealed_envelope: body.sealed_envelope,
+            wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
+            updated_at: new Date().toISOString(),
+          })
           .eq('id', existing.id as string);
         const resp: CreateResponseBody = {
           connection_id: existing.id as string,
@@ -195,14 +203,36 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       // trip the unique partial index. In that case the row exists; look
       // it up and return it as already_existed.
       if (insErr && blindIndex !== null && /duplicate|unique|23505/i.test(insErr.message ?? '')) {
+        // Audit 2026-07-01 Critical #1: this lookup must be scoped by
+        // platform_id like the primary dedup path above. The unique
+        // index stealth_connections_dedup_idx has no platform_id
+        // component, so without this filter a race on one platform
+        // could resolve to a different platform's row sharing the same
+        // tuple. This branch used to be read-only (returned the winning
+        // row's id) so the missing scope was inert; turning it into a
+        // write made the scope load-bearing, per the 2026-05-16 rule
+        // above that every stealth_connections read/write must be bound
+        // to the calling platform.
         const { data: raceRow } = await ctx.serviceClient
           .from('stealth_connections')
           .select('id')
+          .eq('platform_id', callerPlatformId)
           .eq('app_user_id', body.app_user_id)
           .eq('app_slug', body.app_slug)
           .eq('blind_index_b64', blindIndex)
           .maybeSingle();
         if (raceRow) {
+          // Same reasoning as the primary dedup path above: save the
+          // newly submitted envelope rather than silently keeping
+          // whichever one won the race.
+          await ctx.serviceClient
+            .from('stealth_connections')
+            .update({
+              sealed_envelope: body.sealed_envelope,
+              wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', raceRow.id as string);
           const resp: CreateResponseBody = {
             connection_id: raceRow.id as string,
             already_existed: true,
