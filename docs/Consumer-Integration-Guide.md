@@ -176,6 +176,14 @@ Wordlist source must match between server and browser; OR uses the same 256 word
 
 ## Connecting a wallet through the Link widget
 
+> **Which flow do you want?** This section documents the plain `/connect`
+> Link widget (Quiltt-backed banks, Strike, BTCPay, anything where OR or
+> a provider holds a credential). If you are connecting a self-custodied
+> Bitcoin wallet (xpub or descriptor) with the BIP 158 client-side privacy
+> model instead, see [Stealth-Sync.md, Consumer integration: the exact
+> steps](Stealth-Sync.md#consumer-integration-the-exact-steps). Most apps
+> (`bitbooks-v2` included) integrate both.
+
 The Link widget is OR's hosted credential collection page. Plaid-hybrid co-branding: your app's name appears prominently, "Powered by OrangeRails" smaller. Provider-specific form fields (Blink: API key; xpub: extended public key + gap limit; BTCPay: server URL + API key; etc.) come from the [provider catalog](#provider-catalog-dynamic-discovery).
 
 ### Open the popup
