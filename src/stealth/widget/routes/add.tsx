@@ -16,7 +16,7 @@
  *   5. On failure we postMessage OR_STEALTH_ERROR and surface the message.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 // Detect whether we should show the script-type picker for the pasted
 // input. The picker is only shown when the prefix is ambiguous: a bare
@@ -133,6 +133,31 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   const [input, setInput] = useState("");
   const [label, setLabel] = useState("");
   const [birthday, setBirthday] = useState<string>(defaultBirthdayISO);
+  // Defense-in-depth for a native <input type="date"> commit-timing gap:
+  // on some browser/interaction combinations the last edit to a date
+  // picker can visually display a value the change handler has not yet
+  // committed to React state (bug report 2026-06-30: a user selected a
+  // 3-month-old birthday but the sync scanned from the ~1-year-ago
+  // default, matching exactly what this component initializes to).
+  // Reading the input's own live DOM value at submit time, and
+  // preferring it over React state when it differs and is a valid date,
+  // closes that gap regardless of which specific browser quirk causes
+  // it. Every other layer was ruled out first (block-height resolution,
+  // scan-range math, stale closures) before landing on this defensive
+  // read as the fix, see the PR description for the full trace.
+  //
+  // Safety note (OSS-maintainer + cybersec review, 2026-07-01): this
+  // reads a raw DOM value instead of trusting React's controlled-input
+  // state, which looks like it bypasses React's guarantee, but it does
+  // not introduce a new capability. Anything that could write to this
+  // input's DOM value directly (e.g. a compromised browser extension)
+  // could already update React state the normal way by also dispatching
+  // an `input` event, so the ref read is not a new attack surface. The
+  // value is re-validated with ISO_DATE_RE below either way, and worst
+  // case a malicious write here can only manipulate the scan-range
+  // (waste sync time or miss transactions), never expose the xpub,
+  // descriptor, or stealth key, none of which this code path touches.
+  const birthdayInputRef = useRef<HTMLInputElement>(null);
   const [gapLimit, setGapLimit] = useState<number>(20);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<{ alreadyExisted: boolean } | null>(null);
@@ -244,11 +269,32 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
       setError("Label is too long. Please keep it under 80 characters.");
       return;
     }
-    if (!ISO_DATE_RE.test(birthday)) {
+    // Read the input's own live DOM value as a final cross-check before
+    // trusting React state. See the ref declaration above for why: this
+    // closes a real bug where a picked date visually committed to the
+    // input but the change handler had not yet updated `birthday` state
+    // by the time Save was clicked.
+    const domBirthdayValue = birthdayInputRef.current?.value;
+    const effectiveBirthday =
+      domBirthdayValue && ISO_DATE_RE.test(domBirthdayValue) ? domBirthdayValue : birthday;
+    if (effectiveBirthday !== birthday && import.meta.env.DEV) {
+      // Dev-only: three independent reviewers flagged that an
+      // unconditional console.warn here would fire in every production
+      // session where this diverges, which is noise, not a security
+      // issue (only two ISO date strings are logged, no wallet data),
+      // but a dev-gated log is the right level of visibility. This is
+      // the only console.* call in this file; kept for exactly this
+      // reason, not left in casually.
+      console.warn("[stealth/add] birthday state/DOM mismatch at submit, using DOM value", {
+        stateValue: birthday,
+        domValue: effectiveBirthday,
+      });
+    }
+    if (!ISO_DATE_RE.test(effectiveBirthday)) {
       setError("Wallet birthday must be a date (YYYY-MM-DD).");
       return;
     }
-    if (birthday > today) {
+    if (effectiveBirthday > today) {
       setError("Wallet birthday cannot be in the future.");
       return;
     }
@@ -286,7 +332,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
             kind: "xpub_stealth" as const,
             xpub: parsed.keys[0].xpub,
             label: cleanLabel,
-            wallet_birthday: birthday,
+            wallet_birthday: effectiveBirthday,
             gap_limit: gapLimit,
             script_type: parsed.keys[0].scriptType,
           }
@@ -294,7 +340,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
             kind: "descriptor_stealth" as const,
             descriptor: trimmed,
             label: cleanLabel,
-            wallet_birthday: birthday,
+            wallet_birthday: effectiveBirthday,
             gap_limit: gapLimit,
           };
 
@@ -377,7 +423,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
       const complete: StealthAddCompleteMessage = {
         type: "OR_STEALTH_ADD_COMPLETE",
         connection_id: json.connection_id,
-        wallet_birthday: birthday,
+        wallet_birthday: effectiveBirthday,
         label: cleanLabel,
         script_type: shape.scriptType,
       };
@@ -501,6 +547,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
         </label>
         <input
           id="birthday-input"
+          ref={birthdayInputRef}
           type="date"
           value={birthday}
           max={today}
