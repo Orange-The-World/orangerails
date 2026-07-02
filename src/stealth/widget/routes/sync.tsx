@@ -291,7 +291,55 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           }
         }
 
-        // 4. SYNC_COMPLETE.
+        // 4. Persist the sync cursor, independent of transaction upload.
+        //    Consumer apps that set skip_transaction_upload (and any sync
+        //    that found zero new transactions) never reach
+        //    or-stealth-transactions-store, so without this call their
+        //    cursor never advanced and every sync rescanned the whole
+        //    birthday-to-tip window. Best-effort: a failure here must not
+        //    fail the sync, it only widens the next rescan window.
+        if (!useMock) {
+          const cursorBody = {
+            connection_id: init.connection_id,
+            app_user_id: init.app_user_id,
+            last_block_scanned: result.lastBlockScanned,
+          };
+          try {
+            if (initWithToken.proxy_base_url && parent) {
+              const r = await proxyFetch({
+                parent,
+                parentOrigin: init.return_callback_origin,
+                fn: "or-stealth-envelope-update",
+                body: cursorBody,
+              });
+              if (!r.ok) {
+                console.warn(`[stealth/sync] cursor update failed: ${r.status} ${r.bodyText}`);
+              }
+            } else {
+              const headers: Record<string, string> = {
+                "Content-Type": "application/json",
+              };
+              if (initWithToken.access_token) {
+                headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
+              }
+              const cursorResp = await fetch(
+                resolveFunctionUrl("or-stealth-envelope-update", initWithToken.proxy_base_url),
+                {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify(cursorBody),
+                },
+              );
+              if (!cursorResp.ok) {
+                console.warn(`[stealth/sync] cursor update failed: ${cursorResp.status}`);
+              }
+            }
+          } catch (e) {
+            console.warn("[stealth/sync] cursor update failed:", e);
+          }
+        }
+
+        // 5. SYNC_COMPLETE.
         if (parent) {
           const msg: StealthSyncCompleteMessage = {
             type: "OR_STEALTH_SYNC_COMPLETE",
