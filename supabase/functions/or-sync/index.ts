@@ -982,7 +982,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     console.error('[or-sync] fatal:', err);
     return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
   }
-});
+}));
 
 /**
  * Resolve a subaccount's `external_user_id` for sink-mode dispatch. In
