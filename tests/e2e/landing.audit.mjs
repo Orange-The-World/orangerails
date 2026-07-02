@@ -91,7 +91,7 @@ test('A8-A9: /docs page wires KB cards correctly', async () => {
     const hrefs = await page.evaluate(() =>
       Array.from(document.querySelectorAll('a[href]'))
         .map((a) => a.getAttribute('href') || '')
-        .filter((h) => /support\.orangerails\.com|wiki\.abascal\.ca/.test(h)),
+        .filter((h) => /support\.orangerails\.com/.test(h)),
     );
     if (hrefs.length < 8) {
       throw new Error(`Expected ≥8 doc card hrefs, got ${hrefs.length}: ${JSON.stringify(hrefs)}`);
