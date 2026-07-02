@@ -1,4 +1,4 @@
-# Stealth Sync , Architecture Overview
+# Stealth Sync: Architecture Overview
 
 **Audience:** developers integrating Stealth Sync into their own SaaS, BitBooks engineers maintaining the system, security researchers auditing the design.
 **Status:** developer reference. Source of truth for the build is `STEALTH-SYNC-MASTER-PLAN.md` v0.4.
@@ -327,7 +327,7 @@ window.addEventListener('message', (event) => {
       // Save connection_id in your DB. Close the popup.
       break;
     case 'OR_STEALTH_SYNC_COMPLETE':
-      // event.data.sealed_transactions[] , see "Sealed envelope schema" above
+      // event.data.sealed_transactions[]: see "Sealed envelope schema" above
       break;
     case 'OR_STEALTH_ERROR':
       // event.data.code, message, retryable
