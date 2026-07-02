@@ -355,4 +355,4 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     console.error("[or-link-complete] fatal:", err);
     return jsonResponse({ error: "Internal error", detail: String(err) }, 500, cors);
   }
-});
+}));

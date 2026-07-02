@@ -223,4 +223,4 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     console.error('[or-quiltt-session-via-widget] error:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-});
+}));
