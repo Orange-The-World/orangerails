@@ -17,6 +17,7 @@ const ALLOWED_ORIGINS: ReadonlySet<string> = new Set<string>([
   'https://orangerails.com',
   'https://dev.orangerails.com',
   'https://app.orangerails.com',
+  'https://connect.orangerails.com', // connection widget popup served at /connect
   'https://orangerails.dev',
   'http://localhost:3000',
   'http://localhost:5173',
