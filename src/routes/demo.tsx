@@ -144,6 +144,108 @@ function TransactionRow({ tx }: { tx: DemoTransaction }) {
   );
 }
 
+// Plain-English walkthrough. Consolidates the 8 SCRIPT stages into 6
+// reader-facing steps (building_txs folds into the fetch/parse step,
+// uploading folds into seal-and-store). If SCRIPT changes, revisit this list.
+const STEPS: Array<{ title: string; body: string }> = [
+  {
+    title: "Unlock",
+    body: "Your encrypted vault, the sealed store that holds your wallet details, opens in your browser with your password. The key is never sent to our servers.",
+  },
+  {
+    title: "Derive addresses",
+    body: "The wallet's public key is expanded into its receiving addresses, locally. Nothing is sent anywhere.",
+  },
+  {
+    title: "Download public filter files",
+    body: "Your browser fetches small summary files of recent Bitcoin blocks. They are the same public files for every user and every wallet, so the files themselves reveal nothing about your addresses. (See the caveat below on what traffic patterns can show.)",
+  },
+  {
+    title: "Match in your browser",
+    body: "The addresses are checked against those summaries on your own machine. This is the step other tools outsource to someone else's server. We never see it.",
+  },
+  {
+    title: "Fetch only matching blocks",
+    body: "Full blocks are downloaded only where a summary showed a possible match, then parsed locally to pull out the wallet's real transactions.",
+  },
+  {
+    title: "Seal and store",
+    body: "The results are encrypted in your browser before upload. What our server stores is sealed bytes it cannot open. Only your apps, with your key, can read them.",
+  },
+];
+
+const COMPARISONS: Array<{ title: string; how: string; cost: string }> = [
+  {
+    title: "Paste your xpub into a block explorer",
+    how: "The explorer's server expands your wallet and looks up every address for you.",
+    cost: "That one paste hands over your full balance, your entire history, and every future transaction, tied to your IP address. You are trusting them to never log it, forever.",
+  },
+  {
+    title: "Let a sync service hold your xpub",
+    how: "A server stores your wallet's public key and scans the chain on your behalf.",
+    cost: "Their database becomes a map of your finances. One breach, subpoena, or bad employee exposes everything, and you may never know it happened.",
+  },
+  {
+    title: "Stealth Sync",
+    how: "Your browser does the scan itself, using the same public files everyone downloads, and seals the results before they leave your machine.",
+    cost: "Our server stores sealed bytes it cannot open. Your addresses, balances, and history stay yours. Self-custody for your data, the same way your keys work.",
+  },
+];
+
+function ExplainerSection() {
+  return (
+    <div className="mx-auto max-w-2xl px-6 pb-20">
+      <h2 className="text-xl font-semibold text-foreground">What is actually happening</h2>
+      <p className="mt-2 text-sm text-muted-foreground">
+        The simulated sync, step by step, in plain English. For a real wallet this all runs in the
+        user's own browser.
+      </p>
+      <ol className="mt-4 space-y-3">
+        {STEPS.map((s, i) => (
+          <li key={s.title} className="flex gap-3">
+            <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
+              {i + 1}
+            </span>
+            <div>
+              <p className="text-sm font-medium text-foreground">{s.title}</p>
+              <p className="text-sm text-muted-foreground">{s.body}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      <h2 className="mt-12 text-xl font-semibold text-foreground">
+        Why not just look the wallet up somewhere?
+      </h2>
+      <p className="mt-2 text-sm text-muted-foreground">
+        Unless you run your own Bitcoin node, syncing a wallet usually means showing it to someone.
+        Here is the honest comparison.
+      </p>
+      <div className="mt-4 space-y-4">
+        {COMPARISONS.map((c, i) => (
+          <div
+            key={c.title}
+            className={
+              i === COMPARISONS.length - 1
+                ? "rounded-lg border-2 border-primary/40 bg-primary/5 p-4"
+                : "rounded-lg border border-border p-4"
+            }
+          >
+            <p className="text-sm font-semibold text-foreground">{c.title}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{c.how}</p>
+            <p className="mt-2 text-sm text-muted-foreground">{c.cost}</p>
+          </div>
+        ))}
+      </div>
+      <p className="mt-4 text-xs text-muted-foreground">
+        One honest caveat: like any website, our server could observe traffic patterns such as which
+        block ranges a browser fetches. It cannot see your addresses or your keys, and it does not
+        learn which transactions in those blocks are yours. The stored results stay sealed.
+      </p>
+    </div>
+  );
+}
+
 function DemoPage() {
   const [state, setState] = useState<DemoState>("landing");
   const { stage, percent, detail } = useDemoScript(state === "progress", () =>
@@ -238,6 +340,7 @@ function DemoPage() {
             </button>
           </div>
         )}
+        {state !== "progress" && <ExplainerSection />}
       </main>
       <Footer />
     </div>
