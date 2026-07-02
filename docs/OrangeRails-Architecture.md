@@ -122,9 +122,9 @@ Every app built on Zabo had two weeks to rebuild. Users lost access. This is the
 | **MX Technologies** | Yes | Yes | No | [[Whitepaper]](https://www.mx.com/assets/resources/whitepapers/security-whitepaper.pdf) |
 | **Yodlee** | Yes (HSM-wrapped) | Yes | No | [[Security FAQ]](https://developer.yodlee.com/resources/yodlee/faqs/docs/security) |
 | **Zabo** | Defunct | N/A | N/A | [[Shutdown notice]](https://www.exirio.com/zabo-is-being-acquired-by-coinbase/) |
-| **OrangeRails** | Ciphertext only | **No** | **Yes** | *(This document.)* |
+| **OrangeRails** | Ciphertext only | **No** | **Delivers it; brands it self-custody for your data** | *(This document.)* |
 
-**Zero** of nine surveyed major aggregators claim, or could claim, zero-knowledge. OrangeRails occupies an architecturally unoccupied position in the market.
+**Zero** of nine surveyed major aggregators claim, or could claim, zero-knowledge. OrangeRails delivers the property and brands it by what it gives the user, self-custody for your data, occupying an architecturally unoccupied position in the market.
 
 ### 3.2 The structural reason no one does this
 
