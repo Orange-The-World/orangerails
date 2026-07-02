@@ -1,9 +1,10 @@
 # OrangeRails Architecture
 
-**Zero-Knowledge Bitcoin Data Aggregation: The Definitive Technical and Strategic Reference**
+**Bitcoin Data Aggregation with Self-Custody for Your Data: The Definitive Technical and Strategic Reference**
 
-**Version:** 1.0
-**Last updated:** 2026-04-18
+**Version:** 1.1
+**Last updated:** 2026-07-02
+**Changed in 1.1:** product language moved from "zero-knowledge" to "self-custody for your data" / "client-sealed" (see the terminology note in Section 5); the term is retained only where it quotes or describes the wider industry. An earlier hosted convenience path that required transient server-side plaintext was decommissioned rather than shipped around.
 **Status:** Source of truth, design all components against this document
 **License:** The reference document itself is released under CC-BY-SA 4.0. Code implementations are Apache 2.0.
 
@@ -15,7 +16,7 @@
 2. [The Problem](#2-the-problem)
 3. [The Competitive Landscape](#3-the-competitive-landscape)
 4. [Client Demand, Verbatim Voices](#4-client-demand--verbatim-voices)
-5. [Session-Based Zero-Knowledge Architecture](#5-session-based-zero-knowledge-architecture)
+5. [Session-Based Architecture: Self-Custody for Your Data](#5-session-based-architecture-self-custody-for-your-data)
 6. [Why This Is Novel](#6-why-this-is-novel)
 7. [Trust Model and Threat Analysis](#7-trust-model-and-threat-analysis)
 8. [Regulatory and Legal Alignment](#8-regulatory-and-legal-alignment)
@@ -29,11 +30,11 @@
 
 ## 1. Executive Summary
 
-OrangeRails is an open-source, session-based zero-knowledge data aggregation service for Bitcoin-related accounts. It sits between end users and their Bitcoin service providers (wallets, exchanges, payment processors, mining pools, banks), aggregating transaction data and normalizing it into a single API shape that any application can consume.
+OrangeRails is an open-source, session-based data aggregation service for Bitcoin-related accounts, built on one principle: self-custody for your data. It sits between end users and their Bitcoin service providers (wallets, exchanges, payment processors, mining pools, banks), aggregating transaction data and normalizing it into a single API shape that any application can consume.
 
 **What makes OrangeRails structurally different from every existing data aggregator:**
 
-- **Session-based zero-knowledge encryption of user credentials.** API keys for Blink, Kraken, BTCPay, etc. are encrypted in the user's browser with a key derived from their vault password. OrangeRails stores ciphertext only. The server cannot decrypt credentials on its own, decryption keys are passed in-transit during active user sessions and never persisted.
+- **Client-sealed credentials.** API keys for Blink, Kraken, BTCPay, etc. are encrypted in the user's browser with a key derived from their vault password. OrangeRails stores ciphertext only. The server cannot decrypt credentials on its own, decryption keys are passed in-transit during active user sessions and never persisted.
 
 - **Bitcoin-first, Lightning-native.** Where competitors retrofit Bitcoin into multi-chain or multi-currency connectors, OrangeRails is architected around Bitcoin's transaction model, exchange-rate handling, and Lightning invoice lifecycle from the first line of code.
 
@@ -230,13 +231,31 @@ These are not edge voices. They are the public intellectual thought leaders of t
 
 ---
 
-## 5. Session-Based Zero-Knowledge Architecture
+## 5. Session-Based Architecture: Self-Custody for Your Data
 
 ### 5.1 The core insight
 
-The historical obstacle to zero-knowledge financial aggregation has been **background sync.** Users expect aggregators to poll banks overnight so balances are fresh when they open their app in the morning. This requires the server to hold keys material to decrypt credentials, which breaks zero-knowledge.
+The historical obstacle to self-custody financial aggregation has been **background sync.** Users expect aggregators to poll banks overnight so balances are fresh when they open their app in the morning. This requires the server to hold key material to decrypt credentials, which breaks the ciphertext-only guarantee.
 
-OrangeRails' architectural choice: **accept that sync happens during active user sessions, not during offline background operations.** In exchange, we earn true zero-knowledge on the most sensitive data in the system, the raw provider credentials themselves.
+OrangeRails' architectural choice: **accept that sync happens during active user sessions, not during offline background operations.** In exchange, we keep the strongest guarantee available on the most sensitive data in the system: the raw provider credentials exist server-side only as ciphertext sealed with user-derived keys.
+
+**A note on terminology.** "Zero-knowledge" names two different things.
+Zero-knowledge *proofs* (ZK-SNARKs and friends) are a cryptographic
+protocol family; OrangeRails does not use them. Zero-knowledge
+*architecture* is the password-manager sense of the word: the operator
+stores only ciphertext it cannot decrypt, with keys derived from secrets
+only the user holds. This document uses the term only in that second,
+industry sense, and only when describing the wider category; our own
+product language is "self-custody for your data" and "client-sealed",
+precisely to avoid the ambiguity.
+
+**And a note on what we removed.** An earlier hosted convenience path
+required the server to handle plaintext transiently. It was decommissioned
+in mid-2026 rather than shipped around: when convenience and the
+ciphertext-only guarantee conflict, the guarantee wins. The paths that
+remain are the client-sealed ones described here, plus Stealth Sync for
+on-chain wallet data (see docs/Stealth-Sync.md), where matching and
+sealing run entirely in the user's browser.
 
 This mirrors the design choice made by every successful zero-knowledge product (Bitwarden, 1Password, Proton, Signal, Tresorit, Tuta, Standard Notes). None of them support server-initiated operations on offline user data. OrangeRails is the first data aggregator to make the same architectural commitment.
 
@@ -597,7 +616,7 @@ Your browser decrypts the credentials in the moment of sync and passes the decry
 
 **Q: What if I lose my vault password?**
 
-Your data is permanently unrecoverable. This is the cost of true zero-knowledge, we cannot reset a password we never had. Write down your password, store it in a physical safe, or use a separate password manager. In the future we will offer optional escrow recovery via hardware keys, but password loss under the default configuration means data loss.
+Your data is permanently unrecoverable. This is the cost of self-custody for your data: we cannot reset a password we never had. Write down your password, store it in a physical safe, or use a separate password manager. In the future we will offer optional escrow recovery via hardware keys, but password loss under the default configuration means data loss.
 
 **Q: Why should I trust your implementation?**
 
