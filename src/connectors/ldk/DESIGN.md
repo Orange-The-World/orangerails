@@ -68,6 +68,12 @@ funds-adjacent denial-of-service. Composite key + RLS also makes GDPR / Law-25
 right-to-erasure executable per user. This is a **security gate**, not just a
 correctness one: it lands before any crypto/DB wiring merges.
 
+**RLS only bites if the caller is inside it.** The composite key + RLS are
+inert unless the edge function executes the SQL through a client that carries
+the caller's JWT (see §4.1). A `service_role` client bypasses RLS wholesale, so
+this gate and the auth contract in §4 are a single unit: neither is real
+without the other.
+
 ### 3.2 Persistence spec
 
 Agreed on all three, none are read-check-write.
@@ -127,8 +133,32 @@ after the write path:
 4. **Fail closed.** Any JWT verification error, missing claim, or RLS denial
    returns an error, never a silent fallthrough to an unscoped write.
 
+### 4.1 Execute as the caller, not `service_role` (MUST-FIX 1, teeth)
+
+The composite `(user_id, outpoint_bidx)` key and RLS in §3.1 protect nothing if
+the function runs the upsert with the platform `service_role` key — that key
+**bypasses RLS entirely**, so a single body-parsing or scoping bug becomes a
+cross-user write. The contract, therefore:
+
+- **The persist SQL runs through a request-scoped client bound to the caller's
+  JWT**, so `auth.uid()` inside RLS resolves to the token subject and the policy
+  is actually enforced on every row touched. **`service_role` (or any
+  RLS-bypassing client) must never touch the `channel_state` write path.**
+- **`user_id` is derived from the token, never the request body.** Even with the
+  JWT-bound client, no client-supplied `user_id` field is trusted or read; the
+  body carries only `outpoint_bidx`, `update_id`, and `sealed_blob`.
+- **Defense in depth stacks:** token-derived `user_id` (app layer) + JWT-bound
+  execution so RLS evaluates `auth.uid()` (DB layer). Either alone is a single
+  point of failure; both is the gate.
+
+**Trade-off (stated):** per-request JWT verification and a request-scoped client
+add a small latency cost on the persist path versus a long-lived service-role
+client. Acceptable — persist-before-ack is already a server round-trip on the
+critical path, so the auth cost is dominated by the durable write it guards.
+
 The current scaffold returns **501** on every call, so there is no live exposure;
-this contract is the spec the wiring implements.
+this contract is the spec the wiring implements, and Sr. Developer's
+reconciliation review runs on the wiring PR (self-scanned per the new process).
 
 ## 5. Restore trade-off — fresh-device recovery
 
@@ -163,7 +193,7 @@ answered here and traced at review against the implementation.
 - **(d) Recovery** — full fund recovery from seed alone with Orange Rails infra
   offline. Blind index on funding outpoint → cross-user collision impossible by
   construction; composite `(user_id, outpoint_bidx)` key + RLS enforces the same
-  isolation at the DB layer.
+  isolation at the DB layer, provided the persist path runs JWT-bound (§4.1).
 - **(e) Restore** — atomic compare-and-set (§3), persist-before-ack, stale
   monitor = hard refusal; fresh-device trade-off documented in §5.
   **PLAUSIBLE PASS** on the three pre-gate items; full gate opens when the
@@ -184,7 +214,8 @@ src/connectors/ldk/
   persist.ts         ← persist-before-ack + watermark classification  [stub]
   persist.test.ts    ← watermark/idempotency classification tests  [stub]
 supabase/functions/or-ldk-channel-state/
-  index.ts           ← edge function carrying the atomic SQL (§3) + auth contract (§4)  [stub]
+  index.ts           ← edge function carrying the atomic SQL (§3) + auth contract (§4);
+                       JWT-bound client, no service_role on the write path (§4.1)  [stub]
 ```
 
 ## 8. Open items for review (not blockers to this artifact)
