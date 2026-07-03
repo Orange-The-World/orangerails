@@ -5,12 +5,12 @@ consumed by any feature. The upcoming role-scoped-keys PR wires them in.
 
 **Files:**
 
-- `src/lib/pqc.ts` , hybrid X25519 + ML-KEM-768 KEM + ML-DSA-65 signer.
-- `src/lib/key-wrapping.ts` , per-recipient data-key wrapping strategy map.
-- `src/lib/signatures.ts` , signature strategy map + base64 helpers.
-- `src/lib/pqc-lifecycle.ts` , generate + MEK-wrap + publish to Supabase.
-- `src/context/VaultContext.tsx` , exposes `ensurePqcKeypairs(supabase, userId)`.
-- `supabase/migrations/20260420120000_pqc_keys.sql` , columns + table.
+- `src/lib/pqc.ts`: hybrid X25519 + ML-KEM-768 KEM + ML-DSA-65 signer.
+- `src/lib/key-wrapping.ts`: per-recipient data-key wrapping strategy map.
+- `src/lib/signatures.ts`: signature strategy map + base64 helpers.
+- `src/lib/pqc-lifecycle.ts`: generate + MEK-wrap + publish to Supabase.
+- `src/context/VaultContext.tsx`: exposes `ensurePqcKeypairs(supabase, userId)`.
+- `supabase/migrations/20260420120000_pqc_keys.sql`: columns + table.
 
 ---
 
@@ -26,9 +26,9 @@ security budgeting treats the 2030s as the relevant planning horizon.
 
 ### What Shor's algorithm breaks
 
-- **RSA** , integer factorization.
-- **ECDSA / ECDH** , elliptic-curve discrete log.
-- **Diffie-Hellman** , discrete log over ℤ/pℤ.
+- **RSA**: integer factorization.
+- **ECDSA / ECDH**: elliptic-curve discrete log.
+- **Diffie-Hellman**: discrete log over ℤ/pℤ.
 
 All three underlie most of today's key-exchange and signing. A CRQC
 reduces each from exponential to polynomial time, so today's 3072-bit
@@ -98,7 +98,7 @@ data-at-rest key wrapping, one layer below TLS.
 | **@noble/post-quantum** (this PR) | Pure TypeScript. Zero native bindings. ~50 KB gzipped total with @noble/curves. Works inside any standard Vite build without extra toolchain. Single-author (Paul Miller) with an established audit track record across the @noble/\* suite. | Single-implementation risk; we pin a regression test to catch silent behavioural changes. |
 | `liboqs-wasm`                     | Same underlying reference implementations; broad algorithm coverage.                                                                                                                                                                      | WASM glue, extra build plumbing, larger bundle, tighter coupling to Emscripten toolchain. |
 | `oqs-provider` (native)           | Production-grade.                                                                                                                                                                                                                         | Not usable in a browser/Edge runtime. Server-only.                                        |
-| Rolling our own                   | ,                                                                                                                                                                                                                                         | Do not do this.                                                                           |
+| Rolling our own                   |,                                                                                                                                                                                                                                         | Do not do this.                                                                           |
 
 The trade is in our favour: at the browser / Edge-function layer
 we want a small, inspectable, pure-TS library, and we want the same
@@ -106,19 +106,19 @@ module in both places. `@noble/post-quantum` gives us that.
 
 ### Audit status (as pinned in this PR)
 
-- **`@noble/curves` 2.2.0** , self-audited, April 2026. The earlier
+- **`@noble/curves` 2.2.0**: self-audited, April 2026. The earlier
   `@noble/curves` 1.6.0 release was independently audited by Cure53
   (September 2024); the report ships inside the installed package at
   `node_modules/@noble/curves/audit/2024-09-cure53-audit-nbl4.pdf` and
   is also linked from [cure53.de](https://cure53.de/audit-report_noble-crypto-libs.pdf).
   The X25519 code path we use dates to that audited 1.6.0 lineage with
   incremental changes since.
-- **`@noble/post-quantum` 0.6.1** , self-audited, April 2026. **No
+- **`@noble/post-quantum` 0.6.1**: self-audited, April 2026. **No
   independent third-party audit has been completed yet.** The package
   README states this explicitly. This is the single largest residual
   risk of the library choice. Mitigations: (a) we pin the exact version
   via `bun.lockb`, (b) hybrid mode means a break in ML-KEM-768 alone
-  does not collapse the construction , X25519 still has to fall too,
+  does not collapse the construction, X25519 still has to fall too,
   (c) we track upstream audit news and will re-pin when an independent
   audit lands.
 
@@ -148,7 +148,7 @@ minimize re-audit churn, which suits our pin-and-track strategy.
   AES-256 still provides 128-bit margin. The rest of the stack
   continues to use it.
 - TLS negotiation is untouched. Cloudflare and similar edge CDNs already offer
-  `X25519MLKEM768` hybrid TLS automatically , there is nothing for
+  `X25519MLKEM768` hybrid TLS automatically, there is nothing for
   this app to configure.
 - No existing flow calls the new PQC methods yet; this PR only ships
   the primitives and storage.
@@ -176,7 +176,7 @@ carry the forward-compatibility marker.
 
 - **Extended NIST ACVP coverage.** We already run 2 NIST ACVP AFT
   keygen vectors per algorithm (ML-KEM-768 and ML-DSA-65) against
-  `@noble/post-quantum`'s output directly , see
+  `@noble/post-quantum`'s output directly, see
   `src/lib/__tests__/fixtures/` and `pqc.test.ts`. A natural next
   step is to extend coverage to ACVP encapsulation and signing tests
   (more tcIds, wider input variety). For now the keygen KATs establish
