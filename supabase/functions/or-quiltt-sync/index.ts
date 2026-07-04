@@ -279,6 +279,20 @@ async function handleEvent(
       return `Quiltt GraphQL ${resp.status}: ${errBody.slice(0, 300)}`;
     }
     const json = await resp.json();
+
+    // GraphQL can return HTTP 200 with an `errors` array when a query
+    // partially or fully fails (bad connectionId, expired profile,
+    // schema mismatch, etc.). Without this check the error is silently
+    // dropped: json.data.transactions.nodes evaluates to [] and the
+    // inbox event is marked processed with zero rows — data loss with
+    // no signal. Surface the errors so bumpAttempts fires and the event
+    // stays visible for the next cron tick.
+    if (Array.isArray(json?.errors) && json.errors.length > 0) {
+      const summary = JSON.stringify(json.errors).slice(0, 400);
+      console.error(`[or-quiltt-sync] GraphQL errors for event ${ev.event_id}:`, summary);
+      return `Quiltt GraphQL errors: ${summary}`;
+    }
+
     const txs = json?.data?.transactions?.nodes ?? [];
     const pageInfo = json?.data?.transactions?.pageInfo;
 
