@@ -227,7 +227,7 @@ async function handleEvent(
       .order('created_at', { ascending: true })
       .limit(1)
       .maybeSingle();
-    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
+    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;;
     if (!legacy.data) return 'or-connection row not yet created';
     conn = legacy.data as { id: string };
   }
@@ -287,8 +287,12 @@ async function handleEvent(
     // inbox event is marked processed with zero rows — data loss with
     // no signal. Surface the errors so bumpAttempts fires and the event
     // stays visible for the next cron tick.
+    //
+    // Numeric sequences of 6+ digits are redacted before the summary is
+    // stored, consistent with the bank-data handling posture here.
     if (Array.isArray(json?.errors) && json.errors.length > 0) {
-      const summary = JSON.stringify(json.errors).slice(0, 400);
+      const raw = JSON.stringify(json.errors).slice(0, 800);
+      const summary = raw.replace(/\b\d{6,}\b/g, '[redacted]').slice(0, 400);
       console.error(`[or-quiltt-sync] GraphQL errors for event ${ev.event_id}:`, summary);
       return `Quiltt GraphQL errors: ${summary}`;
     }
