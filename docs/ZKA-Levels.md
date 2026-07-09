@@ -15,29 +15,52 @@ cannot be reviewed or audited, so it belongs here.
 
 ## The spirit: why any of this exists
 
-Orange Rails rests on one promise: **your financial data is yours, and our servers are
-designed so that they cannot read it.** Not that we choose not to look. The server stores
-sealed bytes and does not hold the key that opens them. That key stays on the user's device.
+Orange Rails rests on one promise: **your financial data is yours, and we hold as little of
+it, for as short a time, as the product allows.** Where we can be mathematically incapable
+of reading your data, we are, and we say so. Where we cannot, we say that too, in the same
+words, in this file. A claim a reader can check against this repository is worth more than
+a claim that sounds absolute and falls apart on first reading of the source.
 
-This is not a feature bolted onto the product. It is the product. Our users are people who
-self-custody their Bitcoin. They already decline to trust a company to hold their keys, and
-we are asking them to apply the same discipline to their financial data. That only earns
-trust if the claim is true and anyone can check it against this repository. A single place
-where the server can read plaintext financial content would remove the reason to use us.
+That means the promise is stated as a capability, and it differs by path:
 
-The design goal follows directly: **the server should not be able to assemble a financial
+* **Bitcoin and stealth paths: we are incapable of reading your data.** The key that opens
+  the sealed payload is derived on the user's device and never reaches us. The server holds
+  sealed bytes and no way to open them. This is zero knowledge in the strict sense.
+
+* **Bank and provider paths: session-scoped key custody, never at rest.** To pull data from
+  a bank we must present the bank a credential, so something must be able to open the stored
+  credential. Today the caller sends the key that opens it (`credentials_key`) in the sync
+  request. The sync function imports it, decrypts `connections.encrypted_credentials`, calls
+  the provider, and the key dies with the request. It is never persisted, never written to a
+  column, and never logged. But for the life of that request the server can read the
+  credential, and while it seals each fetched transaction it necessarily handles that
+  transaction in memory. **This is not zero knowledge, and we do not call it that.** It is
+  bounded custody, named openly, with the exits tracked below.
+
+Our users self-custody their Bitcoin. They already decline to trust a company with their
+keys, and we are asking them to apply the same discipline to their financial data. That
+discipline is only worth anything if we hold ourselves to it out loud, including where we
+currently fall short of it.
+
+The design goal that follows: **the server should not be able to assemble a financial
 profile of a user, even given full database access.** Amounts, balances, addresses,
-counterparties, and memos are sealed everywhere the server can reach.
+counterparties, and memos are sealed everywhere the server can reach them at rest.
 
 ## The one principle that does not bend
 
-**Content confidentiality applies at every level we ship.** The levels are not about how
-much of your money data the server can see. The levels describe only how much *metadata
-residue*, meaning the shape and timing around the sealed content and never the content
-itself, we accept in exchange for the product being usable.
+**Content confidentiality at rest applies at every level we ship.** Nothing the server
+stores contains readable financial content, on any path. The levels are not about how much
+of your money data the server can see in the database. The levels describe only how much
+*metadata residue*, meaning the shape and timing around the sealed content and never the
+content itself, we accept in exchange for the product being usable.
 
-Keep that distinction sharp: content is sealed at every level, and the levels negotiate
-metadata only.
+Two boundaries on that sentence, stated so nobody reads more into it than it says:
+
+* **At rest, not in flight.** On the bank path the server is the thing that fetches from the
+  provider and seals the result, so provider plaintext passes through server memory during a
+  sync request. The ladder below describes storage, not transit.
+* **The levels negotiate metadata, not content.** Content is sealed at every level. A level
+  never trades content confidentiality for convenience.
 
 ## The compromise, in plain English
 
@@ -64,14 +87,14 @@ Sealed content plus that thin, justified layer of functional plaintext is what w
 ## The ladder (a higher number means more private)
 
 **Level 1, maximal plaintext. The floor we reject.** The server reads both content and
-metadata. This is the conventional aggregator model used by mainstream personal finance
-apps. It is fast and straightforward, and it is not zero knowledge. We define it only so the
-contrast is explicit. We do not offer it.
+metadata, at rest. This is the conventional aggregator model used by mainstream personal
+finance apps. It is fast and straightforward, and it is not zero knowledge. We define it
+only so the contrast is explicit. We do not offer it.
 
-**Level 2, content sealed with minimal functional plaintext. Ships today. Our default.**
-Every piece of financial content is sealed. The only plaintext is the thin functional layer
-described above and itemized below. This is the deliberate compromise that makes the product
-usable on a real database without exposing what a transaction was.
+**Level 2, content sealed at rest with minimal functional plaintext. Ships today. Our
+default.** Every piece of financial content is sealed in storage. The only plaintext is the
+thin functional layer described above and itemized below. This is the deliberate compromise
+that makes the product usable on a real database without exposing what a transaction was.
 
 **Level 3, metadata concealed as well. The aspiration. Not built.** The residue goes away
 too: no plaintext date, and no server-visible per-row count or timing. This is where a user
@@ -81,6 +104,10 @@ document.
 
 Note on numbering: a higher number always means more private. More plaintext is never a
 higher level, because more plaintext is not more zero knowledge, it is server convenience.
+
+**The ladder measures storage, not key custody.** A path can be at Level 2 and still have a
+custodian in the sync loop. The Bitcoin path has none. The bank path does. Both store the
+same way. Do not read a level as a statement about who can open the credential.
 
 ## Why each plaintext field exists
 
@@ -122,15 +149,21 @@ content is never one of them. Each claim below is checkable against the migratio
 
 ## What the server sees at Level 2
 
-The server storing sealed rows sees: sealed bytes, an opaque `connection_id` and
-`app_user_id`, a plaintext `occurred_at`, `last_sync_at`, `status`, and a txid blind index.
-It does not receive the xpub, addresses, balances, or transaction details, and it does not
-hold the key that would open the sealed payload.
+**At rest**, the server storing sealed rows sees: sealed bytes, an opaque `connection_id`
+and `app_user_id`, a plaintext `occurred_at`, `last_sync_at`, `status`, and a txid blind
+index. It does not hold the key that would open the sealed payload.
 
-The residue we concede is that a connection had activity on a given day, and roughly how
-many rows it holds. That is timing and volume, never content. We disclose this to users in
-the same terms rather than hiding it. Anyone who will not accept that residue can self-host,
-in which case the server is their own machine.
+**During a bank sync request**, and only then, it additionally sees the credential it just
+opened with the caller-supplied key, and the provider's response as it seals each row. When
+the request ends, that is gone.
+
+**During a Bitcoin or stealth sync**, none of the above applies. There is no key to supply
+and nothing for the server to open.
+
+The residue we concede at rest is that a connection had activity on a given day, and roughly
+how many rows it holds. That is timing and volume, never content. We disclose this to users
+in the same terms rather than hiding it. Anyone who will not accept that residue, or the
+bank-path custody window, can self-host, in which case the server is their own machine.
 
 ## What we explored and rejected
 
@@ -138,6 +171,32 @@ Recorded so that these decisions are not relitigated without the reasoning.
 
 * **Rejected: Level 1 as our model.** Server-readable content is the industry default. It is
   convenient and it is not zero knowledge. Rejecting it is the point of the company.
+
+* **Rejected: server-held keys at rest.** No key that opens user content is persisted on our
+  servers, derived from anything our servers hold, or recoverable from a database dump. This
+  is the line that does not move, and it is the one we actually hold.
+
+* **Accepted and named: session-scoped custody on the bank path.** Something must be able to
+  open a bank credential in order to call a bank. Today the caller passes that key per
+  request and it lives only in the memory of that request. We did not reject this design, we
+  ship it, and calling it rejected in an earlier version of this document was simply wrong.
+  Four exits were examined and none removes the custodian while background sync exists:
+
+  1. **Client-driven sync.** The user's device decrypts locally, calls the provider, seals,
+     and uploads ciphertext. Truly zero knowledge. Cost: no sync while the app is closed,
+     and most providers block browser-origin calls and forbid shipping app secrets to a
+     client. Viable only where a provider issues per-user credentials with permissive CORS.
+  2. **Blind relay.** The client terminates TLS to the provider and our edge forwards opaque
+     bytes. We see ciphertext only. Real, heavy, and still requires the client to be online.
+  3. **Attested enclave.** The key lives only inside attested hardware the host cannot read.
+     Background sync survives. This trades "trust us" for "trust the attestation and the
+     silicon vendor." It is stronger. **It is not zero knowledge and must never be described
+     as such.**
+  4. **Provider tokenization or OAuth.** A revocable, scoped token replaces a raw credential.
+     This shrinks the blast radius and is worth doing on its own merits. Custody is unchanged.
+
+  The honest conclusion, until someone disproves it: **no design keeps background sync and
+  removes custody without adding a hardware trust root.**
 
 * **Rejected: sealing the transaction date at Level 2.** Sealing `occurred_at` would force
   the client to stream and decrypt a user's entire history to answer any date query. It does
@@ -148,36 +207,35 @@ Recorded so that these decisions are not relitigated without the reasoning.
   framing gave the most-plaintext option the highest number. The ladder was reordered so
   that a higher number means more private.
 
-* **Rejected: server-held keys.** A design in which the server holds a user's key in memory
-  for the duration of a session is a materially weaker guarantee, because during that window
-  the key is present on the server. It was rejected for the same reason as Level 1: the
-  promise is not traded for convenience. The supported path keeps the key on the user's
-  device.
-
 * **Deferred, not rejected: padding and cover traffic.** Concealing row count and sync
   timing requires dummy rows and fixed-rate traffic. That is a substantial effort, scoped
   out of V1, and it belongs to the Level 3 research below rather than to a build ticket.
 
 * **Kept as the escape hatch: self-hosting.** A user who will not accept even Level 2
-  residue can run Orange Rails themselves. This is why Level 2 is an honest default rather
-  than a trap. There is always a door to full control.
+  residue, or the bank-path custody window, can run Orange Rails themselves. This is why
+  Level 2 is an honest default rather than a trap. There is always a door to full control.
 
 ## Roadmap
 
 * **Today.** Level 2 is the default and the shipping reality for `encrypted_transactions`
-  and `stealth_transactions`.
+  and `stealth_transactions`. The Bitcoin and stealth paths carry no key custodian. The bank
+  path carries a session-scoped one.
 * **Near term.** Close the Level 2 rough edges. Move `wallet_birthday_plaintext` inside the
   sealed envelope for every app. Push dedup onto blind indexes everywhere a client-held key
   exists, which shrinks plaintext at no feature cost.
+* **Near term, custody.** Shrink the bank-path window rather than deny it exists. Prefer
+  revocable scoped provider tokens over raw credentials. Move any provider that issues
+  per-user credentials with permissive CORS onto client-driven sync, where the custodian
+  disappears entirely.
 * **Aspiration.** Level 3: remove the plaintext date and conceal count and timing, so the
   server holds sealed bytes and little else, without forcing self-hosting.
 * **Always available.** Self-hosting.
 
-## Open research question
+## Open research questions
 
-Can zero-knowledge proofs, or other techniques, reach Level 3 without wrecking the product?
-The hard part is the plaintext date: the server must answer "this connection's rows between
-date A and date B" efficiently without seeing the date. Candidate directions, none decided:
+**1. Can we reach Level 3 without wrecking the product?** The hard part is the plaintext
+date: the server must answer "this connection's rows between date A and date B" efficiently
+without seeing the date. Candidate directions, none decided:
 
 * **Client-side range and cursor logic**, with the timestamp sealed or coarsely bucketed.
   Month-level buckets leak considerably less than an exact date and may remain indexable.
@@ -196,9 +254,16 @@ date A and date B" efficiently without seeing the date. Candidate directions, no
 * **Padding and cover traffic.** Closes the count and timing side channel. Heavy, and
   deferred from V1.
 
-The bar: Level 3 must be real zero knowledge, not server convenience with extra steps.
+**2. Can background sync exist without a key custodian?** Something must open a credential
+while the user is offline. Every known exit either removes background sync (client-driven,
+blind relay) or moves the trust root into hardware (attested enclave). If a design exists
+that does neither, we have not found it, and we would very much like to be shown it.
+
+The bar for both questions: the answer must be real zero knowledge, not server convenience
+with extra steps, and not a trust root relabelled.
 
 ## Change control
 
 Any schema change that moves a table between levels requires maintainer approval and a
-security review before it lands.
+security review before it lands. Any change to who can open a key, on any path, requires the
+same and is described in this document in the same pull request.
