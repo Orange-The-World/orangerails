@@ -21,7 +21,7 @@ consumed by any feature. The upcoming role-scoped-keys PR wires them in.
 A **Cryptographically Relevant Quantum Computer (CRQC)** is one large
 enough to run Shor's algorithm against deployed key sizes. Current
 industry estimates from Global Risk Institute / NIST / NSA quantum
-working groups put the first CRQC in the **2035–2045** window. Conservative
+working groups put the first CRQC in the **2035-2045** window. Conservative
 security budgeting treats the 2030s as the relevant planning horizon.
 
 ### What Shor's algorithm breaks

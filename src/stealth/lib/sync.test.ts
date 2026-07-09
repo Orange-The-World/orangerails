@@ -395,6 +395,120 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
 // Content-Encoding, so the browser will not auto-decompress; the lib
 // runs the body through DecompressionStream('gzip') itself.
 
+describe('runSync height source and block ordering regressions', () => {
+  // Regression pair:
+  //  1. block_height must come from the FILTER match, not the block
+  //     record. Browsers hide X-Block-Height unless the block source
+  //     exposes it via Access-Control-Expose-Headers, so the block
+  //     record height can arrive as 0.
+  //  2. The concurrent filter fetch pushes hits in COMPLETION order.
+  //     Blocks must be processed by ascending height or the UTXO spend
+  //     tracker misses spends whose funding block was processed later.
+  it('uses the filter-derived height even when the block record height is 0', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'height regression',
+      wallet_birthday: '2021-01-15',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+    const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+    const ts = Math.floor(new Date('2024-06-01T12:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({
+      payToScript: targetScript,
+      amountSats: 1_000n,
+      timestamp: ts,
+    });
+    const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+    const blockHashHex = bytesToHex(blockHash);
+    const fakeFilter = new Uint8Array([0x01]);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 700_000,
+      lastBlockScanned: 700_000,
+      fetchTip: async () => 700_001,
+      fetchFilter: async (h) =>
+        h === 700_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
+      // Simulate the browser CORS reality: the block record carries
+      // height 0 because the header was invisible to the client.
+      fetchBlock: async () => ({ height: 0, blockHashHex, raw: blockBuild.raw }),
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.normalized).toHaveLength(1);
+    expect(result.normalized[0].block_height).toBe(700_001);
+    expect(result.sealedTransactions[0].block_height).toBe(700_001);
+  });
+
+  it('processes matched blocks by ascending height even when filters resolve out of order', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'order regression',
+      wallet_birthday: '2021-01-15',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+    const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+
+    const tsLow = Math.floor(new Date('2024-06-01T12:00:00Z').getTime() / 1000);
+    const tsHigh = Math.floor(new Date('2024-06-02T12:00:00Z').getTime() / 1000);
+    const lowBuild = buildFixtureBlock({
+      payToScript: targetScript,
+      amountSats: 1_000n,
+      timestamp: tsLow,
+    });
+    const highBuild = buildFixtureBlock({
+      payToScript: targetScript,
+      amountSats: 2_000n,
+      timestamp: tsHigh,
+    });
+    const lowHash = bytesToHex(reverseBytes(await dsha256Async(lowBuild.raw.subarray(0, 80))));
+    const highHash = bytesToHex(reverseBytes(await dsha256Async(highBuild.raw.subarray(0, 80))));
+    const fakeFilter = new Uint8Array([0x01]);
+
+    const fetchedOrder: string[] = [];
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 700_000,
+      lastBlockScanned: 700_000,
+      fetchTip: async () => 700_002,
+      // The LOWER height resolves LAST (40ms delay), so completion order
+      // is high-then-low. Without the ascending sort, the low block
+      // would be processed second.
+      fetchFilter: async (h) => {
+        if (h === 700_001) {
+          await new Promise((r) => setTimeout(r, 40));
+          return { height: h, blockHashHex: lowHash, filter: fakeFilter };
+        }
+        if (h === 700_002) {
+          return { height: h, blockHashHex: highHash, filter: fakeFilter };
+        }
+        return null;
+      },
+      fetchBlock: async (h) => {
+        fetchedOrder.push(h);
+        if (h === lowHash) return { height: 0, blockHashHex: lowHash, raw: lowBuild.raw };
+        return { height: 0, blockHashHex: highHash, raw: highBuild.raw };
+      },
+      matcher: { matchAny: () => true },
+    });
+
+    // Blocks fetched and processed low-height first, regardless of
+    // filter completion order.
+    expect(fetchedOrder).toEqual([lowHash, highHash]);
+    expect(result.normalized.map((t) => t.block_height)).toEqual([700_001, 700_002]);
+  });
+});
+
 describe('live fetchers', () => {
   afterEach(() => {
     vi.restoreAllMocks();
