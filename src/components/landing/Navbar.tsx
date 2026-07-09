@@ -13,7 +13,7 @@ type NavLink =
 const navLinks: NavLink[] = [
   { kind: "external", href: "https://orangerails.com/integrations", label: "Integrations" },
   { kind: "external", href: "https://orangerails.com/pricing", label: "Pricing" },
-  { kind: "external", href: "https://docs.orangerails.com", label: "Docs" },
+  { kind: "internal", to: "/docs", label: "Docs" },
   { kind: "external", href: "https://orangerails.com/open-source", label: "Open Source" },
 ];
 

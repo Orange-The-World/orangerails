@@ -9,7 +9,7 @@ const cols: { title: string; links: FooterLink[] }[] = [
       { label: "Connections", href: "https://orangerails.com/providers" },
       { label: "Connect a wallet", href: "https://app.orangerails.com/connect" },
       { label: "Pricing", href: "https://orangerails.com/pricing" },
-      { label: "Docs", href: "https://docs.orangerails.com" },
+      { label: "Docs", to: "/docs" },
     ],
   },
   {
@@ -26,7 +26,7 @@ const cols: { title: string; links: FooterLink[] }[] = [
     links: [
       { label: "Support", href: "https://support.orangerails.com" },
       { label: "Feedback", href: "https://support.orangerails.com/feedback" },
-      { label: "Docs", href: "https://docs.orangerails.com" },
+      { label: "Docs", to: "/docs" },
     ],
   },
   {
