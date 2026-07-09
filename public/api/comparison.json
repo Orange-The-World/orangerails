@@ -5,9 +5,8 @@
   "criteria": [
     { "label": "Open source",            "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } },
     { "label": "Bitcoin-first",          "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } },
-    { "label": "Zero-knowledge",         "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } },
     { "label": "Self-hostable",          "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } },
     { "label": "Published open spec",    "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } }
   ],
-  "summary": "OrangeRails is the only option in this category that is simultaneously open source, Bitcoin-first, zero-knowledge, self-hostable, and built around a published open spec."
+  "summary": "OrangeRails is open source, Bitcoin-first, self-hostable, and built around a published open spec."
 }
