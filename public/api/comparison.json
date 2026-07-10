@@ -5,9 +5,9 @@
   "criteria": [
     { "label": "Open source",            "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } },
     { "label": "Bitcoin-first",          "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } },
-    { "label": "Zero-knowledge",         "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } },
+    { "label": "Self-custody of your data (Bitcoin wallet sources)", "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false, "OrangeRails": true } },
     { "label": "Self-hostable",          "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } },
     { "label": "Published open spec",    "values": { "Plaid": false, "Mesh Connect": false, "Vezgo": false, "Koinly": false,       "OrangeRails": true } }
   ],
-  "summary": "OrangeRails is the only option in this category that is simultaneously open source, Bitcoin-first, zero-knowledge, self-hostable, and built around a published open spec."
+  "summary": "OrangeRails is the only option in this category that is simultaneously open source, Bitcoin-first, self-hostable, and built around a published open spec. On Bitcoin wallet sources your device seals your data before it ever leaves it, so we store ciphertext we cannot read: self-custody of your data. Bank connections are delegated to a licensed partner that holds the credential, so we never receive your bank login, and we do not claim self-custody of your data on that path."
 }
