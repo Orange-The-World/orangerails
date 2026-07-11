@@ -49,14 +49,26 @@ export type LNInvoice = {
 /** Options passed to any provider fetch call. */
 export type LNFetchOptions = {
   /**
-   * Fetch only invoices created after this ISO-8601 timestamp.
+   * Fetch only invoices settled after this ISO-8601 timestamp.
    * Providers that support server-side filtering pass it as a query param;
    * others filter client-side.
    */
   after?: string;
   /**
-   * Maximum number of records to return per call.
+   * Maximum number of records to return per page.
    * Defaults to the provider maximum when omitted.
    */
   limit?: number;
+  /**
+   * Hard cap on the number of pages the adapter will fetch before throwing.
+   *
+   * Protects against a backend that ignores the page parameter and returns
+   * the same full page on every request, which would spin the pagination
+   * loop without bound. When the cap is reached the adapter throws so the
+   * caller can decide whether to retry with a narrower window or alert.
+   *
+   * Omit to paginate until the provider signals exhaustion (a page shorter
+   * than the page size).
+   */
+  maxPages?: number;
 };
