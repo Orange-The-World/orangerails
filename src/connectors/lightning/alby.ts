@@ -38,6 +38,13 @@ type AlbyInvoicesResponse = {
 
 const ALBY_API_BASE = 'https://api.getalby.com';
 const DEFAULT_PAGE_SIZE = 100;
+/**
+ * Maximum pages fetched in a single fetchSettled call when the caller does
+ * not supply opts.maxPages. 20 pages x 100 items = 2,000 settled invoices,
+ * which is generous for any real Lightning wallet. Keeps the safety cap
+ * active in production even when no explicit override is passed.
+ */
+const DEFAULT_MAX_PAGES = 20;
 
 export type AlbyConfirmsClientOptions = {
   /** Alby OAuth bearer token for the user's account. */
@@ -84,6 +91,10 @@ export class AlbyConfirmsClient implements LNConfirmsClient {
     // Alby does not expose a server-side settle-time filter; we filter
     // client-side on settled_at when `after` is set.
     const pageSize = opts?.limit ?? DEFAULT_PAGE_SIZE;
+    // Resolve the cap before the loop so it is always active. Callers can
+    // pass opts.maxPages to override; DEFAULT_MAX_PAGES guards the case where
+    // none is supplied (e.g. the production ingest path).
+    const resolvedMaxPages = opts?.maxPages ?? DEFAULT_MAX_PAGES;
     const allInvoices: LNInvoice[] = [];
     let page = 1;
 
@@ -119,12 +130,12 @@ export class AlbyConfirmsClient implements LNConfirmsClient {
 
       // Safety cap: if the backend is ignoring the page parameter and
       // returning a full page on every request, we would loop without bound
-      // and exhaust the function's execution budget. When maxPages is set
-      // and we would need to fetch page N+1 beyond the cap, throw so the
-      // caller can alert or retry with a narrower window.
-      if (opts?.maxPages != null && page > opts.maxPages) {
+      // and exhaust the function's execution budget. resolvedMaxPages is
+      // always set (DEFAULT_MAX_PAGES when the caller omits maxPages) so this
+      // guard fires in production, not only in explicit test scenarios.
+      if (page > resolvedMaxPages) {
         throw new Error(
-          `AlbyConfirmsClient: pagination safety cap reached after ${opts.maxPages} page(s). ` +
+          `AlbyConfirmsClient: pagination safety cap reached after ${resolvedMaxPages} page(s). ` +
             'The backend may not be honoring the page parameter.',
         );
       }
