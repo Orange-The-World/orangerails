@@ -106,7 +106,7 @@ describe('AlbyConfirmsClient.fetchSettled - pagination safety cap', () => {
   });
 
   it('throws at the default cap when maxPages is omitted', async () => {
-    // Production path: caller passes no maxPages. The DEFAULT_MAX_PAGES (20)
+    // Production path: caller passes no maxPages. The DEFAULT_MAX_PAGES (1000)
     // must engage so a runaway backend does not spin forever.
     // Backend always returns a full page of 100 items.
     const fetchMock = vi
@@ -124,12 +124,12 @@ describe('AlbyConfirmsClient.fetchSettled - pagination safety cap', () => {
     try {
       await expect(
         client.fetchSettled(), // no maxPages: default must apply
-      ).rejects.toThrow(/pagination safety cap reached after 20 page/);
+      ).rejects.toThrow(/pagination safety cap reached after 1000 page/);
     } finally {
       globalThis.fetch = origFetch;
     }
 
-    // Must stop at exactly 20 fetches (the default cap).
-    expect(fetchMock).toHaveBeenCalledTimes(20);
+    // Must stop at exactly 1000 fetches (the default cap).
+    expect(fetchMock).toHaveBeenCalledTimes(1000);
   });
 });
