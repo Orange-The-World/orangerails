@@ -259,3 +259,79 @@ describe('ZeusConfirmsClient.fetchSettled - invariants', () => {
     }
   });
 });
+
+describe('ZeusConfirmsClient.fetchSettled - toMsat paid-over-invoiced precedence', () => {
+  /** Run a single raw invoice through fetchSettled and return its amount_msat. */
+  async function amountOf(raw: Record<string, unknown>): Promise<number> {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ invoices: [raw], last_index_offset: '1' }),
+    );
+    const client = new ZeusConfirmsClient({
+      apiBase: 'https://test.invalid',
+      macaroon: 'mac_test',
+    });
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const invoices = await client.fetchSettled();
+      return invoices[0].amount_msat;
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  }
+
+  const base = {
+    memo: null,
+    state: 'SETTLED',
+    settled: true,
+    creation_date: String(1706700000),
+    settle_date: String(1706745600),
+    expiry: '3600',
+  };
+
+  it('partial fields: paid satoshis outrank invoiced millisatoshis', async () => {
+    // The load-bearing case. Only amt_paid_sat is populated on the paid side,
+    // while value_msat carries a different invoiced amount. The paid amount
+    // (7 sats -> 7000 msat) must win over the invoiced 9000 msat. Under the
+    // old order value_msat outranked amt_paid_sat and this returned 9000.
+    expect(
+      await amountOf({ ...base, r_hash: 'paid_sat_vs_inv_msat', amt_paid_sat: '7', value_msat: '9000' }),
+    ).toBe(7000);
+  });
+
+  it('partial fields: paid millisatoshis outrank every invoiced field', async () => {
+    // amt_paid_msat present alongside both invoiced fields: paid msat wins and
+    // no conversion runs (4200 is not a whole-sat multiple).
+    expect(
+      await amountOf({
+        ...base,
+        r_hash: 'paid_msat_wins',
+        amt_paid_msat: '4200',
+        value_msat: '9000',
+        value: '9',
+      }),
+    ).toBe(4200);
+  });
+
+  it('partial fields: paid satoshis outrank invoiced satoshis', async () => {
+    // No msat field anywhere. Paid sats (5000 msat) beat invoiced sats.
+    expect(
+      await amountOf({ ...base, r_hash: 'paid_sat_vs_inv_sat', amt_paid_sat: '5', value: '9' }),
+    ).toBe(5000);
+  });
+
+  it('falls back to invoiced millisatoshis when no paid field is populated', async () => {
+    // amt_paid_msat and amt_paid_sat both zero/absent: the invoiced msat field
+    // is the highest-ranked populated candidate.
+    expect(
+      await amountOf({ ...base, r_hash: 'inv_msat_only', amt_paid_msat: '0', value_msat: '6000', value: '5' }),
+    ).toBe(6000);
+  });
+
+  it('falls back to invoiced satoshis when only the invoiced sat field is populated', async () => {
+    // Last resort in the chain: invoiced sats -> *1000.
+    expect(
+      await amountOf({ ...base, r_hash: 'inv_sat_only', value: '8' }),
+    ).toBe(8000);
+  });
+});
