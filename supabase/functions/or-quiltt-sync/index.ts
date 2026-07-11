@@ -147,7 +147,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   return jsonResponse({ processed, failed, skipped, batch: pending.length }, 200);
 }, 'or-quiltt-sync'));
 
-// --- event dispatch --------------------------------------------------
+// ─── event dispatch ──────────────────────────────────────────────────
 
 async function handleEvent(
   client: SupabaseClient,
@@ -202,7 +202,7 @@ async function handleEvent(
   // is subaccount_id.
   // Route the event to the OR connection row whose quiltt_connection_id
   // matches the webhook's connectionId. Falls back to a legacy NULL-id
-  // row only if no exact match exists -- keeps banks linked before the
+  // row only if no exact match exists — keeps banks linked before the
   // multi-connection migration working. If both fail, surface the
   // mismatch instead of silently writing to the wrong bank's bucket
   // (which was the pre-fix root cause of Mercury+TD collisions).
@@ -284,15 +284,25 @@ async function handleEvent(
     // partially or fully fails (bad connectionId, expired profile,
     // schema mismatch, etc.). Without this check the error is silently
     // dropped: json.data.transactions.nodes evaluates to [] and the
-    // inbox event is marked processed with zero rows -- data loss with
+    // inbox event is marked processed with zero rows — data loss with
     // no signal. Surface the errors so bumpAttempts fires and the event
     // stays visible for the next cron tick.
     //
-    // Numeric sequences of 6+ digits are redacted before the summary is
-    // stored, consistent with the bank-data handling posture here.
+    // Redaction posture: keep only the human-readable `message` from
+    // each error, never the whole error object. A GraphQL error also
+    // carries `locations`, `path`, and a provider-defined `extensions`
+    // blob; serializing all of it into a log and the last_error column
+    // is overly broad. Provider messages can additionally embed
+    // alphanumeric connection/profile identifiers (conn_..., prof_...)
+    // that a numeric-only filter would never catch, so we join the
+    // messages and still run the numeric redaction on top.
     if (Array.isArray(json?.errors) && json.errors.length > 0) {
-      const raw = JSON.stringify(json.errors).slice(0, 800);
-      const summary = raw.replace(/\b\d{6,}\b/g, '[redacted]').slice(0, 400);
+      const messages = json.errors
+        .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+        .filter((m: string) => m.length > 0)
+        .join('; ')
+        .slice(0, 800);
+      const summary = messages.replace(/\b\d{6,}\b/g, '[redacted]').slice(0, 400);
       console.error(`[or-quiltt-sync] GraphQL errors for event ${ev.event_id}:`, summary);
       return `Quiltt GraphQL errors: ${summary}`;
     }
@@ -345,7 +355,7 @@ async function handleEvent(
 
   // Outbound webhook fan-out. Mirrors or-sync's enqueue pattern: insert a
   // webhook_delivery row when newRows > 0, let or-webhook-dispatch pick it
-  // up on its own schedule. Best-effort -- failure here must not mark the
+  // up on its own schedule. Best-effort — failure here must not mark the
   // inbox event as failed; the user data is already landed.
   if (newRows > 0) {
     try {
@@ -381,7 +391,7 @@ async function handleEvent(
   return 'processed';
 }
 
-// --- helpers ---------------------------------------------------------
+// ─── helpers ─────────────────────────────────────────────────────────
 
 async function markProcessed(client: SupabaseClient, eventId: string) {
   await client
