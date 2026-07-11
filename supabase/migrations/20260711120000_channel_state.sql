@@ -19,9 +19,22 @@ create table if not exists public.channel_state (
     constraint channel_state_outpoint_bidx_hex64
     check (outpoint_bidx ~ '^[0-9a-f]{64}$'),
 
-  -- Sealed monitor blob. AES-GCM appends the auth tag to the ciphertext, so the
-  -- floor is a 12 byte IV plus a 16 byte tag plus at least one byte of payload,
-  -- decoded from the audited primitive's base64 on write.
+  -- Seal format version. The sealed primitive does not persist its algorithm
+  -- name, so the version is the only thing that says how to read the row. The
+  -- read path maps 1 to AES-256-GCM in exactly one place and rejects anything
+  -- else, so an unknown version fails closed instead of being guessed at. A
+  -- future algorithm becomes version 2, never a reinterpretation of old rows.
+  seal_version smallint not null default 1,
+
+  -- AES-GCM nonce, its own column because the primitive emits it as its own
+  -- field (iv_b64), not concatenated onto the ciphertext. Exactly 12 bytes.
+  sealed_iv bytea not null
+    constraint channel_state_sealed_iv_len
+    check (length(sealed_iv) = 12),
+
+  -- Sealed monitor blob, decoded from the primitive's ciphertext_b64 on write.
+  -- Web Crypto appends the 16 byte auth tag to the ciphertext, so the floor is
+  -- the tag plus at least one byte of payload. The IV is NOT in here.
   sealed_ct bytea not null
     constraint channel_state_sealed_ct_min_len
     check (length(sealed_ct) >= 17),
