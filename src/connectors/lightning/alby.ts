@@ -116,6 +116,18 @@ export class AlbyConfirmsClient implements LNConfirmsClient {
       if (batch.length < pageSize) break;
 
       page++;
+
+      // Safety cap: if the backend is ignoring the page parameter and
+      // returning a full page on every request, we would loop without bound
+      // and exhaust the function's execution budget. When maxPages is set
+      // and we would need to fetch page N+1 beyond the cap, throw so the
+      // caller can alert or retry with a narrower window.
+      if (opts?.maxPages != null && page > opts.maxPages) {
+        throw new Error(
+          `AlbyConfirmsClient: pagination safety cap reached after ${opts.maxPages} page(s). ` +
+            'The backend may not be honoring the page parameter.',
+        );
+      }
     }
 
     let invoices = allInvoices;
