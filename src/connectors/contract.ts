@@ -56,7 +56,7 @@ export type V3StagedRow = Record<string, string>;
  *
  * This is `LNInvoice` narrowed so the type system guarantees what the
  * confirms client (#105) enforces at runtime: `settled` is literally `true`
- * and `settled_at` is a non-null ISO-8601 string. Only invoices of this
+ * and `settled_at` is a non-empty ISO-8601 string. Only invoices of this
  * shape may enter the push contract. A pending or failed invoice
  * (`settled:false, settled_at:null`) has no place in the books and must be
  * rejected at the boundary, never silently dropped.
@@ -73,9 +73,13 @@ export type LNSettledInvoice = LNInvoice & {
  * throws on any non-settled record rather than admitting it, so a unit or
  * cursor bug upstream surfaces as a loud failure instead of a quietly
  * missing or bogus financial row.
+ *
+ * `settled_at` must be a non-empty string, not merely non-null: an upstream
+ * normalisation bug could otherwise stage `settled:true, settled_at:""` as a
+ * valid financial row, which the narrowed `LNSettledInvoice` type forbids.
  */
 export function assertLNSettledForContract(inv: LNInvoice): asserts inv is LNSettledInvoice {
-  if (inv.state.settled !== true || inv.state.settled_at === null) {
+  if (inv.state.settled !== true || typeof inv.state.settled_at !== 'string' || inv.state.settled_at.length === 0) {
     throw new Error(
       `Staged import: only terminal-settled invoices may enter the contract (payment_hash ${inv.payment_hash}).`,
     );
