@@ -87,20 +87,33 @@ function parseIntField(raw: string | number | null | undefined): number {
 }
 
 /**
- * Resolve the paid amount in millisatoshis.
+ * Resolve the amount in millisatoshis for a settled invoice.
  *
- * Invariant #3: verify the unit before converting. LND exposes a native
- * millisatoshi field (amt_paid_msat), so we consume it directly and never
- * convert. Only when the msat field is absent do we fall back to the
- * satoshi field and multiply by 1000, which is the single place a
- * sats-to-msat conversion happens and is documented as such.
+ * A settled invoice's real value is what was actually paid, which can diverge
+ * from what was invoiced: a zero-amount invoice carries no invoiced amount at
+ * all, an overpayment settles above it, and AMP splits settle at a paid amount
+ * the invoiced field does not reflect. So both paid fields rank ahead of both
+ * invoiced fields, in this order:
+ *   1. amt_paid_msat  (paid, native millisatoshis)
+ *   2. amt_paid_sat   (paid, satoshis -> *1000)
+ *   3. value_msat     (invoiced, native millisatoshis)
+ *   4. value          (invoiced, satoshis -> *1000)
+ *
+ * Within each pair the native millisatoshi field wins, so the single
+ * sats-to-msat conversion (Invariant #3: verify the unit before converting)
+ * only runs when no msat field is present. Each step is guarded on `> 0` so a
+ * zero or absent field falls through to the next candidate rather than
+ * masking a populated lower-ranked one.
  */
 function toMsat(raw: LndRawInvoice): number {
-  const paidMsat = parseIntField(raw.amt_paid_msat ?? raw.value_msat);
+  const paidMsat = parseIntField(raw.amt_paid_msat);
   if (paidMsat > 0) return paidMsat;
-  // Fallback: no native msat field present. Convert the satoshi field.
-  const paidSat = parseIntField(raw.amt_paid_sat ?? raw.value);
-  return paidSat * 1000;
+  const paidSat = parseIntField(raw.amt_paid_sat);
+  if (paidSat > 0) return paidSat * 1000;
+  const invoicedMsat = parseIntField(raw.value_msat);
+  if (invoicedMsat > 0) return invoicedMsat;
+  const invoicedSat = parseIntField(raw.value);
+  return invoicedSat * 1000;
 }
 
 function isSettled(raw: LndRawInvoice): boolean {
