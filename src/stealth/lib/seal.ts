@@ -13,6 +13,12 @@
  * envelope and a 32-byte key. HMAC-SHA-256 for the blind index, hex
  * output so it doubles as a JSON / SQL-friendly identifier.
  *
+ * The byte-oriented pair (sealBytes / unsealBytes) is the primitive.
+ * The object-oriented pair (sealEnvelope / unsealEnvelope) is a JSON
+ * wrapper over it. Callers holding an opaque blob, such as the LDK
+ * ChannelMonitor persister, use the byte pair directly. There is exactly
+ * one AES-GCM code path either way.
+ *
  * Master plan §13 (locked decisions, v0.3 patch).
  */
 
@@ -27,24 +33,24 @@ const ALGO = "AES-256-GCM" as const;
 const IV_LEN = 12; // bytes; the standard for AES-GCM
 const KEY_LEN = 32; // bytes; AES-256
 
-// ─── Public API ──────────────────────────────────────────────────────────
+// ─── Public API: bytes (the primitive) ───────────────────────────────────
 
 /**
- * Encrypt a JSON-serializable payload under a 32-byte key (passed as
- * standard base64). Returns a sealed envelope ready for transport or
- * persistence.
+ * Encrypt raw bytes under a 32-byte key (passed as standard base64).
+ * Returns a sealed envelope ready for transport or persistence. The GCM
+ * authentication tag is appended to the ciphertext by Web Crypto, so
+ * ciphertext_b64 covers both and there is no separate tag field.
  */
-export async function sealEnvelope(
-  payload: object,
+export async function sealBytes(
+  bytes: Uint8Array,
   keyB64: string,
 ): Promise<SealedEnvelope> {
   const key = await importAesKey(keyB64);
   const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
   const ciphertext = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv: toArrayBuffer(iv) },
     key,
-    toArrayBuffer(plaintext),
+    toArrayBuffer(bytes),
   );
   return {
     version: 1,
@@ -55,14 +61,14 @@ export async function sealEnvelope(
 }
 
 /**
- * Decrypt a sealed envelope under the given key. Throws if the key is
+ * Decrypt a sealed envelope back to raw bytes. Throws if the key is
  * wrong or the envelope is tampered with (Web Crypto throws on a GCM tag
- * mismatch). The caller chooses the type to expect.
+ * mismatch).
  */
-export async function unsealEnvelope<T = unknown>(
+export async function unsealBytes(
   env: SealedEnvelope,
   keyB64: string,
-): Promise<T> {
+): Promise<Uint8Array> {
   if (env.version !== 1) {
     throw new Error(`Sealed envelope version ${env.version} not supported`);
   }
@@ -77,6 +83,34 @@ export async function unsealEnvelope<T = unknown>(
     key,
     toArrayBuffer(ciphertext),
   );
+  return new Uint8Array(plaintext);
+}
+
+// ─── Public API: JSON (a wrapper over the primitive) ─────────────────────
+
+/**
+ * Encrypt a JSON-serializable payload under a 32-byte key (passed as
+ * standard base64). Returns a sealed envelope ready for transport or
+ * persistence.
+ */
+export async function sealEnvelope(
+  payload: object,
+  keyB64: string,
+): Promise<SealedEnvelope> {
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  return sealBytes(plaintext, keyB64);
+}
+
+/**
+ * Decrypt a sealed envelope under the given key. Throws if the key is
+ * wrong or the envelope is tampered with (Web Crypto throws on a GCM tag
+ * mismatch). The caller chooses the type to expect.
+ */
+export async function unsealEnvelope<T = unknown>(
+  env: SealedEnvelope,
+  keyB64: string,
+): Promise<T> {
+  const plaintext = await unsealBytes(env, keyB64);
   const text = new TextDecoder().decode(plaintext);
   return JSON.parse(text) as T;
 }
