@@ -17,7 +17,10 @@ import type { LNProviderName } from './types';
 /** Raw invoice object as Alby returns it. */
 type AlbyRawInvoice = {
   payment_hash: string;
-  /** Amount in satoshis. */
+  /**
+   * Amount in satoshis (VERIFIED: Alby REST API, GET /invoices, "amount" field).
+   * We convert to millisatoshis in toInvoice() below.
+   */
   amount: number;
   memo?: string | null;
   settled: boolean;
@@ -55,6 +58,8 @@ function toIsoOrNull(unix: number | null | undefined): string | null {
 function toInvoice(raw: AlbyRawInvoice): LNInvoice {
   return {
     payment_hash: raw.payment_hash,
+    // raw.amount is satoshis (see AlbyRawInvoice). Multiply by 1000 to
+    // produce millisatoshis as LNInvoice.amount_msat requires.
     amount_msat: raw.amount * 1000,
     description: raw.memo ?? null,
     created_at: unixToIso(raw.created_at),
@@ -75,36 +80,54 @@ export class AlbyConfirmsClient implements LNConfirmsClient {
   }
 
   async fetchSettled(opts?: LNFetchOptions): Promise<LNInvoice[]> {
-    const limit = opts?.limit ?? DEFAULT_PAGE_SIZE;
+    // Paginate through all pages so we never silently truncate money data.
+    // Alby does not expose a server-side settle-time filter; we filter
+    // client-side on settled_at when `after` is set.
+    const pageSize = opts?.limit ?? DEFAULT_PAGE_SIZE;
+    const allInvoices: LNInvoice[] = [];
+    let page = 1;
 
-    // Alby does not expose a server-side after-timestamp filter, so we
-    // request settled:true and filter on created_at client-side when `after`
-    // is set. The `items` cap keeps each request bounded.
-    const params = new URLSearchParams({
-      'q[settled]': 'true',
-      items: String(limit),
-    });
+    while (true) {
+      const params = new URLSearchParams({
+        'q[settled]': 'true',
+        items: String(pageSize),
+        page: String(page),
+      });
 
-    const url = `${this.apiBase}/invoices?${params.toString()}`;
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        Accept: 'application/json',
-      },
-    });
+      const url = `${this.apiBase}/invoices?${params.toString()}`;
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+          Accept: 'application/json',
+        },
+      });
 
-    if (!res.ok) {
-      throw new Error(
-        `AlbyConfirmsClient: request failed ${res.status} ${res.statusText}`,
-      );
+      if (!res.ok) {
+        throw new Error(
+          `AlbyConfirmsClient: request failed ${res.status} ${res.statusText}`,
+        );
+      }
+
+      const body = (await res.json()) as AlbyInvoicesResponse;
+      const batch = (body.invoices ?? []).map(toInvoice);
+      allInvoices.push(...batch);
+
+      // A page shorter than pageSize signals the result set is exhausted.
+      if (batch.length < pageSize) break;
+
+      page++;
     }
 
-    const body = (await res.json()) as AlbyInvoicesResponse;
-    let invoices = (body.invoices ?? []).map(toInvoice);
+    let invoices = allInvoices;
 
     if (opts?.after) {
+      // Cursor is settle time, NOT creation time. An invoice created before
+      // the cursor but settled after it must not be missed.
       const afterMs = new Date(opts.after).getTime();
-      invoices = invoices.filter((inv) => new Date(inv.created_at).getTime() > afterMs);
+      invoices = invoices.filter((inv) => {
+        if (!inv.state.settled_at) return false;
+        return new Date(inv.state.settled_at).getTime() > afterMs;
+      });
     }
 
     // Guard: only return what the API confirmed as settled.
