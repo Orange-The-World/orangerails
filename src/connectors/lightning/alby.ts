@@ -40,11 +40,12 @@ const ALBY_API_BASE = 'https://api.getalby.com';
 const DEFAULT_PAGE_SIZE = 100;
 /**
  * Maximum pages fetched in a single fetchSettled call when the caller does
- * not supply opts.maxPages. 20 pages x 100 items = 2,000 settled invoices,
- * which is generous for any real Lightning wallet. Keeps the safety cap
- * active in production even when no explicit override is passed.
+ * not supply opts.maxPages. Set high enough (100,000 invoices at the default
+ * page size) that no legitimate dataset ever reaches it. The cap exists only
+ * to stop an infinite loop when a backend ignores the page param; it must
+ * never fire for a real user's history, however large.
  */
-const DEFAULT_MAX_PAGES = 20;
+const DEFAULT_MAX_PAGES = 1000;
 
 export type AlbyConfirmsClientOptions = {
   /** Alby OAuth bearer token for the user's account. */
