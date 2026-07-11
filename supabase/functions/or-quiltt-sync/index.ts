@@ -293,16 +293,24 @@ async function handleEvent(
     // carries `locations`, `path`, and a provider-defined `extensions`
     // blob; serializing all of it into a log and the last_error column
     // is overly broad. Provider messages can additionally embed
-    // alphanumeric connection/profile identifiers (conn_..., prof_...)
-    // that a numeric-only filter would never catch, so we join the
-    // messages and still run the numeric redaction on top.
+    // alphanumeric connection/profile identifiers that a numeric-only
+    // filter would never catch. Quiltt IDs are mixed-case (for example
+    // conn_14TJiFDKRJlPiBHuukUIlXZ), so a lowercase-only pass would
+    // still leak the uppercase characters. We first redact any
+    // short-prefix underscore token case-insensitively, then run the
+    // numeric redaction on top. The prefix pass is intentionally
+    // prefix-agnostic: it does not depend on a hardcoded conn_/prof_
+    // list that could drift as Quiltt adds new ID types.
     if (Array.isArray(json?.errors) && json.errors.length > 0) {
       const messages = json.errors
         .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
         .filter((m: string) => m.length > 0)
         .join('; ')
         .slice(0, 800);
-      const summary = messages.replace(/\b\d{6,}\b/g, '[redacted]').slice(0, 400);
+      const summary = messages
+        .replace(/\b[a-z]{2,8}_[A-Za-z0-9]{6,}\b/gi, '[redacted-id]')
+        .replace(/\b\d{6,}\b/g, '[redacted]')
+        .slice(0, 400);
       console.error(`[or-quiltt-sync] GraphQL errors for event ${ev.event_id}:`, summary);
       return `Quiltt GraphQL errors: ${summary}`;
     }
