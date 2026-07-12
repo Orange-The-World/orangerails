@@ -42,7 +42,15 @@ create policy "Owners can update their channel state"
 alter table public.channel_state
   alter column seal_version drop default;
 
+-- State the rule where the next writer is actually standing. The reason for the
+-- missing default is otherwise only in this file and in a chat thread, and neither
+-- is visible from a psql session or a table definition. Metadata only, and setting
+-- a comment replaces it, so this is idempotent by construction.
+comment on column public.channel_state.seal_version is
+  'No default by design: every insert must set this explicitly. The seal version is the only record of how to read the ciphertext, so an unstated version must fail closed rather than silently claim version 1.';
+
 -- Undo:
+--   comment on column public.channel_state.seal_version is null;
 --   alter table public.channel_state alter column seal_version set default 1;
 --   drop policy if exists "Owners can update their channel state" on public.channel_state;
 --   drop policy if exists "Owners can insert their channel state" on public.channel_state;
