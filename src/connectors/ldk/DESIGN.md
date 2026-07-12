@@ -39,6 +39,25 @@ server-issued salt.
 client-supplied 32-byte key, HMAC-SHA-256 blind index, zero server-side key
 handling.
 
+### 2.1 Bytes-native seal, one audited core (MUST-FIX 2)
+
+The stealth seal entry point takes an object and JSON-serializes it. The LDK
+payload is not an object: a `ChannelMonitor` is a raw byte blob handed to us by
+the library. Round-tripping those bytes through base64-in-JSON bloats the sealed
+size and adds an encode/decode failure surface on the funds-critical path, so we
+do not do it.
+
+The wiring PR therefore exposes a bytes-native entry point alongside the object
+one, both delegating to the **same** audited AES-256-GCM / HMAC-SHA-256 core:
+
+```
+sealEnvelope(payload: object, keyB64)   // existing, unchanged
+sealBytes(bytes: Uint8Array, keyB64)    // new entry point, same primitive
+```
+
+Two entry points, one implementation under audit. A second copy of the seal is
+the outcome this rules out.
+
 ## 3. The stateful layer — the real divergence from Stealth Sync
 
 Stealth Sync's server is a dumb blob store. LDK is not: LDK's `Persister`
@@ -119,6 +138,45 @@ counterparties, or amounts leak. **This observable pattern is personal financial
 behavior metadata under GDPR / Law-25 and must be disclosed in the privacy
 policy before this ships to users** (tracked with Compliance; not a wiring
 blocker).
+
+### 3.3 The table is already live: the wiring PR ships zero DDL
+
+`channel_state` and the unique index the upsert binds to, on
+`(user_id, outpoint_bidx)`, already exist in the dev database. The wiring PR
+therefore does **not** create, alter, or index this table. It writes application
+code against a schema that is already there.
+
+Two consequences, both binding:
+
+- `ON CONFLICT (user_id, outpoint_bidx)` binds to the existing unique index and
+  is correct. A bare `ON CONFLICT (outpoint_bidx)` has no matching unique index,
+  so it fails at runtime, and it would collapse two users' channels onto one row.
+  It is never correct here.
+- Any `ALTER`, `CREATE INDEX`, or policy change is a **separate migration PR**
+  owned by the database steward. The wiring PR does not smuggle schema in.
+
+### 3.4 Retention: close-scoped, not wall-clock
+
+Deleting channel state on a flat timer against `updated_at` is a funds-loss bug,
+not a privacy feature: a healthy channel that simply sits quiet for the retention
+window would have its **latest** state deleted, and a Lightning node without its
+latest monitor cannot safely force-close. That design is rejected.
+
+Retention is scoped to channel close instead:
+
+- **Never delete the latest row of an open channel.** No exception.
+- The server cannot detect a close on its own: it holds only ciphertext plus a
+  blind index, which is the ZKA boundary working as designed. So **close is
+  signaled by the client** on an authenticated call, which stamps a `closed_at`
+  column on that row and nothing else.
+- The purge job acts **only** on rows carrying a `closed_at`, N days after that
+  timestamp. Rows without one are invisible to it.
+- N is a policy number, not an engineering one. The job reads it from config, so
+  it can move without a code change.
+
+Superseded state needs no separate cleanup: an update to the same channel
+collides on the blind index and overwrites in place (§3.2), so there is no
+history pile to sweep.
 
 ## 4. Auth contract — `or-ldk-channel-state` edge function
 
@@ -212,7 +270,7 @@ src/connectors/ldk/
   derive.ts          ← deriveOrLdkKey (HKDF, info='or-ldk-v1')  [stub]
   seal.ts            ← sealEnvelope/unsealEnvelope/blindIndex re-export plan  [stub]
   persist.ts         ← persist-before-ack + watermark classification  [stub]
-  persist.test.ts    ← watermark/idempotency classification tests  [stub]
+  persist.test.ts    ← watermark/idempotency classification tests  [real tests]
 supabase/functions/or-ldk-channel-state/
   index.ts           ← edge function carrying the atomic SQL (§3) + auth contract (§4);
                        JWT-bound client, no service_role on the write path (§4.1)  [stub]
@@ -223,3 +281,5 @@ supabase/functions/or-ldk-channel-state/
 1. Sr. Developer runs the reconciliation diff against `or-stealth-v1` at review.
 2. NWC is a **separate** connector project (protocol layer on top), sequenced
    after one node path ships. Not in this branch.
+3. The retention window in §3.4 is a policy number, still open. The purge job
+   reads it from config, so settling it does not require a code change.
