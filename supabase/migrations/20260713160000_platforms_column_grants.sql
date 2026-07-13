@@ -48,7 +48,10 @@ BEGIN
     END IF;
 
     -- 1. Clear the table level grants. A table level grant is what makes
-    --    every column of the row reachable.
+    --    every column of the row reachable. REVOKE ALL, not REVOKE SELECT:
+    --    these roles also hold INSERT, UPDATE and REFERENCES on every
+    --    column from the stock defaults, and a write grant left standing
+    --    stays harmless only while no permissive write policy exists.
     EXECUTE format('REVOKE ALL ON TABLE public.platforms FROM %I', role_name);
 
     -- 2. Re-grant SELECT on the display columns only. Read only: these
@@ -97,6 +100,17 @@ BEGIN
         RAISE EXCEPTION 'platforms.% must not be reachable by role %', server_col, role_name;
       END IF;
     END LOOP;
+
+    -- And no write privilege survives anywhere on the table, on any
+    -- column. has_any_column_privilege is the right probe here: it
+    -- answers true for a table level privilege and for a column level
+    -- one, so residue in either shape fails the migration rather than
+    -- sitting loaded behind some future permissive write policy.
+    IF has_any_column_privilege(role_name, 'public.platforms', 'INSERT')
+       OR has_any_column_privilege(role_name, 'public.platforms', 'UPDATE')
+    THEN
+      RAISE EXCEPTION 'role % still holds a write privilege on platforms, mutation is service_role only', role_name;
+    END IF;
 
     IF NOT has_column_privilege(role_name, 'public.platforms', 'slug', 'SELECT') THEN
       RAISE EXCEPTION 'role % lost SELECT on platforms.slug, the Link widget needs it', role_name;
