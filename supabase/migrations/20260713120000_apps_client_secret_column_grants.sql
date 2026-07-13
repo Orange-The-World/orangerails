@@ -24,8 +24,9 @@
 --               the same end state and never errors, never doubles.
 --   Safe on an already converged database: running this where the end
 --               state already holds is a no-op in effect.
---   Safe on a fresh rebuild: guarded on the table existing, so it is
---               inert if run out of order.
+--   Safe on a fresh rebuild: every statement, the COMMENT included, is
+--               guarded on the table existing, so the file is inert if it
+--               is ever run out of order.
 --
 -- service_role is deliberately untouched. The token exchange runs server
 -- side as service_role and must keep reading client_secret. The final
@@ -63,6 +64,8 @@ $$;
 
 -- ============================================================
 -- Assertions: this migration proves its own end state or it fails.
+-- The documenting COMMENT rides inside the same guard, so a database
+-- without public.apps skips the whole block instead of erroring on it.
 -- ============================================================
 
 DO $$
@@ -95,11 +98,13 @@ BEGIN
   THEN
     RAISE EXCEPTION 'service_role can no longer read apps.client_secret, the server side token exchange would break';
   END IF;
+
+  EXECUTE $comment$
+    COMMENT ON COLUMN public.apps.client_secret IS
+      'HMAC-SHA256 signing secret for the app. Server side only: anon and authenticated hold no privilege on this column, and none may be granted. Reachable by service_role only.'
+  $comment$;
 END
 $$;
-
-COMMENT ON COLUMN public.apps.client_secret IS
-  'HMAC-SHA256 signing secret for the app. Server side only: anon and authenticated hold no privilege on this column, and none may be granted. Reachable by service_role only.';
 
 -- ============================================================
 -- ROLLBACK (commented on purpose, run by hand only to undo this file)
