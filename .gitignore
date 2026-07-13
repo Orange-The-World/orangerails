@@ -55,3 +55,8 @@ dist/
 .next/
 test-results/
 supabase/.temp/
+
+
+# Local configuration for scripts/pre-publish-scan.sh.
+# See .reserved-terms.example.
+.reserved-terms
