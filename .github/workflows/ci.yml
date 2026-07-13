@@ -40,10 +40,19 @@ jobs:
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
-    # Runs against the already-deployed dev site by default. The pages-deploy
-    # workflow refreshes dev on every push to `dev`. PR runs exercise the
-    # PR's tests against the currently-deployed site; once a PR merges, the
-    # next workflow run will exercise the PR's own UI changes after deploy.
+    # Runs against the already-deployed dev site. Two separate things deploy
+    # that site, and neither of them is this workflow:
+    #   frontend      -> Cloudflare Pages, from its own git integration, on
+    #                    every push (branch dev is the production env of the
+    #                    orangerails-dev project; feature branches get previews).
+    #   edge functions -> supabase-deploy.yml, on every push to dev and prod.
+    # Migrations are NOT deployed by either: they are applied by hand (the DBA
+    # on dev, two party on prod) or by an explicit dispatch of supabase-deploy
+    # with apply_migrations checked.
+    #
+    # A PR run therefore exercises the PR's tests against the currently-deployed
+    # site; once the PR merges, the next run exercises the PR's own UI changes
+    # after deploy.
     needs: lint-and-build
     steps:
       - name: Checkout
