@@ -33,13 +33,13 @@
  *     caller. Never an email, never anything vault-derived.
  *   - `autocapture` off, session recording off, pageview capture off, feature
  *     flags off. We are not observing the UI, only counting four milestones.
- *   - `property_denylist` drops IP, URL, referrer, and page metadata at the
- *     SDK layer, and `sanitize_properties` then rebuilds each payload from an
- *     explicit allowlist, so an SDK default we did not anticipate cannot ride
- *     along on an event.
+ *   - Two independent filters, either one sufficient on its own: the SDK's
+ *     `property_denylist`, and our `sanitize_properties`, which rebuilds every
+ *     payload from an explicit allowlist and re-applies the denylist itself
+ *     rather than trusting the SDK to run them in a particular order.
  *
- * Data sent to a processor cannot be un-sent. That asymmetry is why the
- * checks here are redundant on purpose.
+ * Data sent to a processor cannot be un-sent. That asymmetry is why the checks
+ * here are redundant on purpose.
  *
  * Required hosting setup (not enforceable from this file)
  * ------------------------------------------------------
@@ -76,9 +76,9 @@ type EventMap = {
 type EventName = keyof EventMap;
 
 /**
- * Properties any event is allowed to carry, on top of the SDK's own `$`
- * internals that survive the denylist. Anything not named here is stripped by
- * `sanitize_properties` before the request is built.
+ * Properties any event is allowed to carry. Anything not named here, and not
+ * an SDK internal that survives the denylist, is stripped before the request
+ * is built.
  */
 const ALLOWED_PROPERTIES = new Set([
   "plan_type",
@@ -109,19 +109,22 @@ const PROPERTY_DENYLIST = [
   "$set_once",
 ];
 
+const DENIED = new Set(PROPERTY_DENYLIST);
+
 let initialized = false;
 
 /**
- * Rebuild the property bag from an allowlist. The denylist above is the SDK's
- * own mechanism and covers what we know about; this covers what we do not.
- * `$`-prefixed keys that survived the denylist are SDK internals (timestamp,
- * lib version, session id) and are kept.
+ * Rebuild the property bag from the allowlist, and re-apply the denylist here
+ * rather than assuming the SDK applies its own after us. `$`-prefixed keys
+ * that are not denied are SDK internals we want to keep (event timestamp, lib
+ * version, session id).
  */
 function allowlistProperties(
   properties: Record<string, unknown>,
 ): Record<string, unknown> {
   const clean: Record<string, unknown> = {};
   for (const key of Object.keys(properties)) {
+    if (DENIED.has(key)) continue;
     if (ALLOWED_PROPERTIES.has(key) || key.startsWith("$")) {
       clean[key] = properties[key];
     }
@@ -164,8 +167,9 @@ export function initAnalytics(): void {
     // visitor, which is more data than the funnel needs.
     person_profiles: "identified_only",
     property_denylist: PROPERTY_DENYLIST,
-    // Belt and braces: even if the SDK grows a new default property, it does
-    // not reach the request unless it is named in ALLOWED_PROPERTIES.
+    // Independent of the denylist above, and sufficient on its own: even if
+    // the SDK grows a new default property, it does not reach the request
+    // unless it is named in ALLOWED_PROPERTIES.
     sanitize_properties: (properties) => allowlistProperties(properties),
     // Session recording is already disabled; this is the fallback posture if
     // it is ever enabled by config, so the default is masked rather than open.
