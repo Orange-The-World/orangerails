@@ -78,7 +78,7 @@ describe("analytics", () => {
       expect(config?.api_host).toBe("https://eu.i.posthog.com");
     });
 
-    it("strips any property that is not on the contract", () => {
+    it("strips off-contract and denylisted properties without help from the SDK", () => {
       initAnalytics();
 
       const config = vi.mocked(posthog.init).mock.calls[0][1];
@@ -88,17 +88,19 @@ describe("analytics", () => {
       const cleaned = sanitize?.(
         {
           federation_count: 2,
-          // Nothing below is on the contract. None of it may survive.
+          // SDK internal we do want to keep.
+          $lib: "web",
+          // Nothing below is allowed to survive. The URL matters most: a
+          // route can carry an account id in the path.
           email: "someone@example.com",
           $current_url: "https://app.example.com/account/1234",
+          $ip: "203.0.113.7",
           account_balance: 100000,
         },
         "bb_first_sync",
       );
 
-      expect(cleaned).toEqual({ federation_count: 2, $current_url: "https://app.example.com/account/1234" });
-      expect(cleaned).not.toHaveProperty("email");
-      expect(cleaned).not.toHaveProperty("account_balance");
+      expect(cleaned).toEqual({ federation_count: 2, $lib: "web" });
     });
 
     it("emits only the contract properties on a signup", () => {
