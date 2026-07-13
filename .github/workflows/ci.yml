@@ -29,13 +29,41 @@ jobs:
 
       - name: Lint
         run: bun run lint
-        # Don't fail the whole CI on lint warnings yet — the codebase
+        # Don't fail the whole CI on lint warnings yet: the codebase
         # is young, warnings are noise, and a false-red CI trains
         # everyone to ignore the signal.
         continue-on-error: true
 
       - name: Build
         run: bun run build
+
+  test:
+    name: Test + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # This is a real gate. No continue-on-error. A broken unit suite
+      # turns the PR red, which is the whole reason the job exists.
+      - name: Test
+        run: bun run test
+
+      # Advisory on purpose, for now. tsc has a standing error backlog and
+      # flipping this to blocking in the same change would leave dev red for
+      # everyone. Printing the count on every run is what lets us burn it
+      # down and then remove this flag in a follow-up.
+      - name: Typecheck (advisory, ratchet target)
+        run: bunx tsc --noEmit
+        continue-on-error: true
 
   playwright:
     name: Playwright smoke
