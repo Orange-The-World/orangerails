@@ -1,5 +1,5 @@
 /**
- * Strike source adapter , https://strike.me Lightning + multi-currency wallet.
+ * Strike source adapter, https://strike.me Lightning + multi-currency wallet.
  *
  * Strike's Greenfield-style API lives at https://api.strike.me/v1 and
  * authenticates with a Bearer token (API key generated from the Strike
@@ -11,9 +11,12 @@
  * surface a single synthetic wallet entry that the user accepts in the
  * picker.
  *
- * ════════════════════════════════════════════════════════════════════════
+ * The external_wallet_id is the account's public handle (username), fetched
+ * from GET /v1/account during discovery. It is stable across reconnects and
+ * unique per Strike account, so connecting a second account produces a
+ * distinct wallet rather than colliding with the first.
+ *
  * Architecture: webhook-driven, never OData list scans
- * ════════════════════════════════════════════════════════════════════════
  *
  * Strike's api.strike.me sits behind Cloudflare's Bot Management. Empirical
  * testing on 2026-05-25 from multiple egress points (Supabase Edge AWS,
@@ -21,13 +24,14 @@
  * .NET SDK pattern, current OR) proved that Cloudflare challenges requests
  * by URL SHAPE, not TLS fingerprint or User-Agent:
  *
- *   GET /v1/balances                       → 200 OK, JSON               ✓
- *   GET /v1/invoices/{id}                  → 200 / 404, JSON            ✓
- *   GET /v1/invoices?$filter=...&$top=...  → 403, "Just a moment" HTML  ✗
+ *   GET /v1/balances                       200 OK, JSON               OK
+ *   GET /v1/account                        200 OK, JSON               OK
+ *   GET /v1/invoices/{id}                  200 / 404, JSON            OK
+ *   GET /v1/invoices?$filter=...&$top=...  403, "Just a moment" HTML  BLOCKED
  *
  * Cloudflare's WAF flags the OData `$`-prefixed query parameters as
  * injection-shaped traffic. No client-side fix (UA, cookies, TLS spoof)
- * changes this , only the URL shape matters.
+ * changes this, only the URL shape matters.
  *
  * Every other production Strike caller (cashubtc/nutshell, Marfusios's .NET
  * SDK, the BTCPay Server plugin, all 30+ community SDKs) hits ID-addressed
@@ -36,21 +40,21 @@
  * Discovery model: Strike webhooks tell us when something changed; we
  * follow up with `GET /v1/invoices/{id}` etc. for the actual data.
  *
- *   or-connection-confirm  → register Strike webhook subscription
- *   Strike → or-strike-webhook (verify HMAC, queue event)
- *   user clicks Sync       → drain queue with GET-by-id calls
+ *   or-connection-confirm  -> register Strike webhook subscription
+ *   Strike -> or-strike-webhook (verify HMAC, queue event)
+ *   user clicks Sync       -> drain queue with GET-by-id calls
  *
  *
  * What we emit per sync (post-PR2 when queue drain ships):
- *   PAID invoices       → direction='in', type='lightning'
- *   PENDING invoices    → same, status=PENDING (surfaces as in-flight)
- *   UNPAID invoices     → skipped (no value moved yet)
- *   CANCELLED invoices  → skipped (no money moved)
+ *   PAID invoices       -> direction='in', type='lightning'
+ *   PENDING invoices    -> same, status=PENDING (surfaces as in-flight)
+ *   UNPAID invoices     -> skipped (no value moved yet)
+ *   CANCELLED invoices  -> skipped (no money moved)
  *
  * NOT in v1 (deliberate scope cuts):
- *   - Payouts (`/v1/payouts`) , outgoing withdrawals to bank / external wallet
- *   - Deposits (`/v1/deposits`) , funding Strike from a bank
- *   - Currency exchanges (`/v1/currency-exchange-quotes`) , internal swaps
+ *   - Payouts (`/v1/payouts`) - outgoing withdrawals to bank / external wallet
+ *   - Deposits (`/v1/deposits`) - funding Strike from a bank
+ *   - Currency exchanges (`/v1/currency-exchange-quotes`) - internal swaps
  *
  * Test environment: Strike's sandbox is at https://api.dev.strike.me.
  * Merchants generate a read-only API key with the
@@ -66,7 +70,6 @@ import type {
 } from '../types.ts';
 
 const STRIKE_API = 'https://api.strike.me/v1';
-const SOURCE_WALLET_ID = 'strike';
 
 // ─── Types ───────────────────────────────────────────────────────────────
 
@@ -174,6 +177,19 @@ export interface StrikeSubscription {
   eventTypes: string[];
 }
 
+/**
+ * Strike account profile as returned by GET /v1/account.
+ * The `handle` is the account's public username: stable, unique per account,
+ * and safe to use as an opaque identifier (not a credential or financial datum).
+ */
+export interface StrikeAccountProfile {
+  handle: string;
+  currency?: string;
+  description?: string;
+  canReceive?: boolean;
+  isPartner?: boolean;
+}
+
 // ─── Credentials parsing ─────────────────────────────────────────────────
 
 export function parseStrikeCredentials(c: Record<string, unknown>): StrikeCredentials {
@@ -187,7 +203,7 @@ export function parseStrikeCredentials(c: Record<string, unknown>): StrikeCreden
 // ─── Low-level HTTP ──────────────────────────────────────────────────────
 
 /**
- * Strike API call. ID-addressed and POST-shaped paths only , list scans
+ * Strike API call. ID-addressed and POST-shaped paths only, list scans
  * with OData query parameters trigger Cloudflare's WAF and return a 403.
  *
  * No special headers needed. The 2026-05-22 User-Agent + Accept-Language
@@ -256,6 +272,19 @@ export async function strikeGetBalances(creds: StrikeCredentials): Promise<Strik
   return strikeGet<StrikeBalance[]>(creds, '/balances');
 }
 
+/**
+ * Fetch the account profile. Used during discovery to get the stable,
+ * unique per-account handle that becomes the external_wallet_id.
+ *
+ * Requires the partner.account.profile.read scope (already listed in
+ * the key generation instructions shown to users).
+ */
+export async function strikeGetAccountProfile(
+  creds: StrikeCredentials,
+): Promise<StrikeAccountProfile> {
+  return strikeGet<StrikeAccountProfile>(creds, '/account');
+}
+
 /** Fetch a single invoice by ID. Webhook handlers use this after invoice.updated events. */
 export async function strikeGetInvoiceById(
   creds: StrikeCredentials,
@@ -274,7 +303,7 @@ export async function strikeGetPaymentById(
 
 /**
  * Register a Strike webhook subscription. Called from or-connection-confirm
- * when a Strike connection moves from pending → active.
+ * when a Strike connection moves from pending to active.
  *
  * Strike docs: https://docs.strike.me/api/create-subscription
  *
@@ -357,6 +386,11 @@ export async function strikeGetExchangeQuoteById(
 }
 
 // ─── Normalization (used by webhook drain in PR 2) ────────────────────────
+//
+// Each normalize function accepts a sourceWalletId string: the external_wallet_id
+// stored on the source_wallet row for this connection (i.e. the account handle
+// returned by discover()). Webhook handlers should read this from the connection
+// record rather than using a hardcoded constant.
 
 /** Pack BTC-or-fiat amount into a NormalizedTransaction. */
 function packAmount(
@@ -369,7 +403,10 @@ function packAmount(
   return { amount, currency: currency.toUpperCase() };
 }
 
-export function normalizeInvoice(invoice: StrikeInvoice): NormalizedTransaction | null {
+export function normalizeInvoice(
+  invoice: StrikeInvoice,
+  sourceWalletId: string,
+): NormalizedTransaction | null {
   const amount = Number(invoice.amount?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
   if (invoice.state === 'UNPAID' || invoice.state === 'CANCELLED') return null;
@@ -388,13 +425,16 @@ export function normalizeInvoice(invoice: StrikeInvoice): NormalizedTransaction 
     counterparty: null,
     status: invoice.state,
     timestamp: new Date(ts).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: sourceWalletId,
     ...packAmount(amount, invoice.amount?.currency || 'USD'),
   };
 }
 
 /** Lightning-address receive (a payment landed on a static receive-request URL). */
-export function normalizeReceive(receive: StrikeReceive): NormalizedTransaction | null {
+export function normalizeReceive(
+  receive: StrikeReceive,
+  sourceWalletId: string,
+): NormalizedTransaction | null {
   const amount = Number(receive.amount?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
   if (receive.state !== 'COMPLETED') return null;
@@ -409,13 +449,16 @@ export function normalizeReceive(receive: StrikeReceive): NormalizedTransaction 
     counterparty: null,
     status: receive.state,
     timestamp: new Date(ts).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: sourceWalletId,
     ...packAmount(amount, receive.amount?.currency || 'USD'),
   };
 }
 
 /** Bank/wire deposit (fiat onramp). */
-export function normalizeDeposit(deposit: StrikeDeposit): NormalizedTransaction | null {
+export function normalizeDeposit(
+  deposit: StrikeDeposit,
+  sourceWalletId: string,
+): NormalizedTransaction | null {
   const amt = deposit.amountCredited ?? deposit.amountReceived;
   const amount = Number(amt?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
@@ -431,13 +474,16 @@ export function normalizeDeposit(deposit: StrikeDeposit): NormalizedTransaction 
     counterparty: null,
     status: deposit.state,
     timestamp: new Date(ts).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: sourceWalletId,
     ...packAmount(amount, amt?.currency || 'USD'),
   };
 }
 
 /** Bank/wire payout (fiat offramp). */
-export function normalizePayout(payout: StrikePayout): NormalizedTransaction | null {
+export function normalizePayout(
+  payout: StrikePayout,
+  sourceWalletId: string,
+): NormalizedTransaction | null {
   const amt = payout.totalAmount ?? payout.amount;
   const amount = Number(amt?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
@@ -453,13 +499,16 @@ export function normalizePayout(payout: StrikePayout): NormalizedTransaction | n
     counterparty: null,
     status: payout.state,
     timestamp: new Date(ts).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: sourceWalletId,
     ...packAmount(amount, amt?.currency || 'USD'),
   };
 }
 
-/** Outgoing Lightning payment (webhook-only , Strike exposes no list endpoint). */
-export function normalizePayment(payment: StrikePayment): NormalizedTransaction | null {
+/** Outgoing Lightning payment (webhook-only, Strike exposes no list endpoint). */
+export function normalizePayment(
+  payment: StrikePayment,
+  sourceWalletId: string,
+): NormalizedTransaction | null {
   const amount = Number(payment.totalAmount?.amount ?? payment.amount?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
   if (payment.state !== 'COMPLETED') return null;
@@ -474,19 +523,22 @@ export function normalizePayment(payment: StrikePayment): NormalizedTransaction 
     counterparty: null,
     status: payment.state,
     timestamp: ts ? new Date(ts).toISOString() : new Date().toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: sourceWalletId,
     ...packAmount(amount, payment.totalAmount?.currency || payment.amount?.currency || 'USD'),
   };
 }
 
 /**
- * Currency exchange , an internal swap from one balance to another.
+ * Currency exchange, an internal swap from one balance to another.
  * Emitted as an OUT debit from the source currency. The credit to the
- * target currency is reflected in the balance and doesn't need a
+ * target currency is reflected in the balance and does not need a
  * separate transaction; this is consistent with how exchange-style
  * transactions are sinked in the V2 yaml profile.
  */
-export function normalizeExchange(quote: StrikeCurrencyExchangeQuote): NormalizedTransaction | null {
+export function normalizeExchange(
+  quote: StrikeCurrencyExchangeQuote,
+  sourceWalletId: string,
+): NormalizedTransaction | null {
   const amount = Number(quote.sourceAmount?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
   if (quote.state && quote.state !== 'COMPLETED' && quote.state !== 'EXECUTED') return null;
@@ -496,11 +548,11 @@ export function normalizeExchange(quote: StrikeCurrencyExchangeQuote): Normalize
     adapter: 'strike',
     direction: 'out',
     type: 'trade',
-    description: `Exchange ${quote.sourceAmount.currency} → ${quote.targetAmount.currency}`,
+    description: `Exchange ${quote.sourceAmount.currency} to ${quote.targetAmount.currency}`,
     counterparty: null,
     status: quote.state ?? 'COMPLETED',
     timestamp: new Date(quote.created).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: sourceWalletId,
     ...packAmount(amount, quote.sourceAmount?.currency || 'USD'),
   };
 }
@@ -508,17 +560,21 @@ export function normalizeExchange(quote: StrikeCurrencyExchangeQuote): Normalize
 // ─── Adapter implementation ──────────────────────────────────────────────
 
 async function discover(_credentials: Record<string, unknown>): Promise<DiscoveredWallet[]> {
-  // Validate the key up front by calling /v1/balances (the lightest CF-safe
-  // endpoint). This proves the key works and gives the user immediate
-  // feedback if they pasted the wrong value.
   const creds = parseStrikeCredentials(_credentials);
-  await strikeGetBalances(creds); // throws if 401 / 403 / etc.
+
+  // Validate the key AND fetch the stable per-account handle in parallel.
+  // /balances proves the key is live (lightest CF-safe endpoint).
+  // /account gives us the unique handle that becomes the external_wallet_id.
+  const [, profile] = await Promise.all([
+    strikeGetBalances(creds),
+    strikeGetAccountProfile(creds),
+  ]);
 
   return [
     {
-      external_wallet_id: SOURCE_WALLET_ID,
+      external_wallet_id: profile.handle,
       currency: 'USD',
-      label: 'Strike account',
+      label: `Strike (${profile.handle})`,
     },
   ];
 }
@@ -547,7 +603,7 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
  */
 const STATES_TO_SYNC: StrikeInvoiceState[] = ['PAID', 'PENDING'];
 const PAGE_SIZE = 100;
-const MAX_PAGES_PER_STATE = 50; // 5000 invoices per state per sync , plenty
+const MAX_PAGES_PER_STATE = 50; // 5000 invoices per state per sync, plenty
 
 /** True if the error from a Strike list endpoint is a missing-scope 403. */
 function isScopeMissing(err: unknown): boolean {
@@ -590,12 +646,12 @@ async function paginateNewestFirst<T extends { created?: string }>(
 
 /**
  * Empirical CF rule (refined 2026-05-25 V3 ADR, then again later same day):
- * Cloudflare blocks ANY compound `$filter` clause , both `or` and `and`
+ * Cloudflare blocks ANY compound `$filter` clause, both `or` and `and`
  * triggers fail. The `datetime'<iso>'` literal appears to compound the issue.
  *
  * Workaround: only filter on `state eq '<S>'` (the simple case CF allows).
  * Page through newest-first via $orderby=created desc + $top + $skip. Stop
- * client-side once we've passed the cursor , no date in $filter at all.
+ * client-side once we've passed the cursor, no date in $filter at all.
  *
  * Cost: on each sync we re-traverse from newest until we hit the cursor.
  * For typical accounts (<5000 invoices, all newer than cursor returns in
@@ -628,7 +684,7 @@ async function fetchInvoicesByState(
         if (inv.created > sinceIso) {
           out.push(inv);
         } else {
-          // Hit our cursor , anything below this is already-synced data.
+          // Hit our cursor, anything below this is already-synced data.
           crossed = true;
           break;
         }
@@ -645,10 +701,16 @@ async function fetchInvoicesByState(
 
 async function syncByWallets(
   credentials: Record<string, unknown>,
-  _walletIds: string[],
+  walletIds: string[],
   cursor: string | null,
 ): Promise<SyncResult> {
   const creds = parseStrikeCredentials(credentials);
+
+  // Strike is single-wallet per account: one API key, one handle, one wallet.
+  // walletIds[0] is the external_wallet_id (handle) stored on the source_wallet
+  // row, set by discover(). Fall back to 'strike' only for legacy rows that
+  // pre-date this fix and have not yet been reconnected.
+  const sourceWalletId = walletIds[0] ?? 'strike';
 
   const transactions: NormalizedTransaction[] = [];
   let maxSeen = cursor ?? '';
@@ -656,12 +718,12 @@ async function syncByWallets(
     if (iso && iso > maxSeen) maxSeen = iso;
   };
 
-  // 1) Invoices , per-state (CF blocks compound `or`)
+  // 1) Invoices, per-state (CF blocks compound `or`)
   for (const state of STATES_TO_SYNC) {
     try {
       const batch = await fetchInvoicesByState(creds, state, cursor);
       for (const inv of batch) {
-        const norm = normalizeInvoice(inv);
+        const norm = normalizeInvoice(inv, sourceWalletId);
         if (norm) transactions.push(norm);
         trackMax(inv.created);
       }
@@ -678,13 +740,13 @@ async function syncByWallets(
       creds, '/receive-requests/receives', params, cursor,
     );
     for (const r of receives) {
-      const norm = normalizeReceive(r);
+      const norm = normalizeReceive(r, sourceWalletId);
       if (norm) transactions.push(norm);
       trackMax(r.created);
     }
   } catch (err) {
     if (isScopeMissing(err)) {
-      console.warn('[strike] receive-request scope missing , skipping. Add partner.receive-request.read.');
+      console.warn('[strike] receive-request scope missing, skipping. Add partner.receive-request.read.');
     }
   }
 
@@ -695,13 +757,13 @@ async function syncByWallets(
       creds, '/deposits', params, cursor,
     );
     for (const d of deposits) {
-      const norm = normalizeDeposit(d);
+      const norm = normalizeDeposit(d, sourceWalletId);
       if (norm) transactions.push(norm);
       trackMax(d.created);
     }
   } catch (err) {
     if (isScopeMissing(err)) {
-      console.warn('[strike] deposit scope missing , skipping. Add partner.deposit.read.');
+      console.warn('[strike] deposit scope missing, skipping. Add partner.deposit.read.');
     }
   }
 
@@ -712,13 +774,13 @@ async function syncByWallets(
       creds, '/payouts', params, cursor,
     );
     for (const p of payouts) {
-      const norm = normalizePayout(p);
+      const norm = normalizePayout(p, sourceWalletId);
       if (norm) transactions.push(norm);
       trackMax(p.created);
     }
   } catch (err) {
     if (isScopeMissing(err)) {
-      console.warn('[strike] payout scope missing , skipping. Add partner.payout.read.');
+      console.warn('[strike] payout scope missing, skipping. Add partner.payout.read.');
     }
   }
 
@@ -729,13 +791,13 @@ async function syncByWallets(
       creds, '/currency-exchange-quotes', params, cursor,
     );
     for (const q of quotes) {
-      const norm = normalizeExchange(q);
+      const norm = normalizeExchange(q, sourceWalletId);
       if (norm) transactions.push(norm);
       trackMax(q.created);
     }
   } catch (err) {
     if (isScopeMissing(err)) {
-      console.warn('[strike] currency-exchange-quote scope missing , skipping. Add partner.currency-exchange-quote.read.');
+      console.warn('[strike] currency-exchange-quote scope missing, skipping. Add partner.currency-exchange-quote.read.');
     }
   }
 
@@ -755,7 +817,10 @@ async function syncAccountWide(
   credentials: Record<string, unknown>,
   cursor: string | null,
 ): Promise<SyncResult> {
-  return syncByWallets(credentials, [SOURCE_WALLET_ID], cursor);
+  // Legacy path: connection has no source_wallets selection yet. Discover
+  // the account handle and pull from the single Strike wallet.
+  const wallets = await discover(credentials);
+  return syncByWallets(credentials, wallets.map(w => w.external_wallet_id), cursor);
 }
 
 export const strikeAdapter: ProviderAdapter = {
@@ -771,7 +836,7 @@ export const strikeAdapter: ProviderAdapter = {
       name: 'api_key',
       type: 'secret',
       label: 'Strike API key',
-      placeholder: 'token-…',
+      placeholder: 'token-...',
       helpLabel: 'Get one at dashboard.strike.me (API Key section)',
       helpHref: 'https://dashboard.strike.me/',
     },
