@@ -14,6 +14,22 @@ const FALLBACK_PALETTE = [
   "bg-fuchsia-500",
 ];
 
+/**
+ * Bundled logo assets for known providers. Values are root-relative
+ * public-folder paths served by Vite at runtime. Callers that pass an
+ * explicit `src` prop take precedence; anything without an entry here
+ * falls through to the colored-initials fallback automatically.
+ */
+export const PROVIDER_LOGO_SRCS: Record<string, string> = {
+  blink:   "/logos/blink.svg",
+  btcpay:  "/logos/btcpay.svg",
+  xpub:    "/logos/xpub.svg",
+  strike:  "/logos/strike.svg",
+  surge:   "/logos/surge.svg",
+  quiltt:  "/logos/quiltt.svg",
+  sparrow: "/logos/sparrow.svg",
+};
+
 function hashSlug(slug: string): number {
   let h = 0;
   for (let i = 0; i < slug.length; i += 1) {
@@ -51,10 +67,13 @@ export function ProviderLogo({
   const dim =
     size === "lg" ? "h-12 w-12 text-base" : size === "sm" ? "h-7 w-7 text-[10px]" : "h-9 w-9 text-xs";
 
-  if (src && !errored) {
+  // Explicit src prop wins; fall back to the bundled map for known slugs.
+  const resolvedSrc = src ?? PROVIDER_LOGO_SRCS[slug];
+
+  if (resolvedSrc && !errored) {
     return (
       <img
-        src={src}
+        src={resolvedSrc}
         alt=""
         loading="lazy"
         onError={() => setErrored(true)}
