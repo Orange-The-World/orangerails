@@ -21,7 +21,7 @@ const FALLBACK_PALETTE = [
  * falls through to the colored-initials fallback automatically.
  */
 export const PROVIDER_LOGO_SRCS: Record<string, string> = {
-  // Tier 1 -- PR #143
+  // Tier 1
   blink:          "/logos/blink.svg",
   btcpay:         "/logos/btcpay.svg",
   xpub:           "/logos/xpub.svg",
