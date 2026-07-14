@@ -1,8 +1,8 @@
 /**
- * xpub source adapter , watch-only on-chain Bitcoin wallet via extended public key.
+ * xpub source adapter -- watch-only on-chain Bitcoin wallet via extended public key.
  *
  * Listed as PLANNED in OrangeRails-Protocol.html §18 ("Mempool xpub"). The
- * appeal is no API key, no upstream account, no OAuth flow , paste the xpub
+ * appeal is no API key, no upstream account, no OAuth flow -- paste the xpub
  * and OR scans on-chain. Works for any wallet that exposes its xpub
  * (Sparrow, Specter, Electrum, hardware wallets, BlueWallet, etc.).
  *
@@ -11,10 +11,10 @@
  *   - ypub (BIP49, P2SH-P2WPKH wrapped segwit)
  *   - zpub (BIP84, P2WPKH native segwit)
  *
- * Not yet supported (v1 limitations , easy to add when a user needs them):
+ * Not yet supported (v1 limitations -- easy to add when a user needs them):
  *   - BIP86 P2TR (`xpub` with derivation hint, or descriptors)
  *   - Multisig (Ypub/Zpub uppercase = multisig variants)
- *   - Testnet (tpub/upub/vpub) , same code path, just version-bytes table
+ *   - Testnet (tpub/upub/vpub) -- same code path, just version-bytes table
  *
  * Address scanning follows BIP44 gap-limit semantics: derive addresses
  * sequentially on the receive (m/0/i) and change (m/1/i) chains; stop after
@@ -25,11 +25,11 @@
  * (https://mempool.space/docs/api/rest). No auth, generous unauthenticated
  * rate limits. We hit per-address `/api/address/{addr}/txs` which returns
  * the most recent ~50 confirmed txs + all current mempool txs. v1 makes no
- * effort to paginate older history , if a user has >50 confirmed txs at a
+ * effort to paginate older history -- if a user has >50 confirmed txs at a
  * single address (very rare for personal wallets) we miss the older ones
  * until v1.1 adds /chain/{txid} pagination.
  *
- * Cursor: unused in v1 , every sync re-scans all addresses. The consumer's
+ * Cursor: unused in v1 -- every sync re-scans all addresses. The consumer's
  * (connection_id, external_id) UNIQUE constraint dedups; OR's caller-side
  * idempotence makes this safe but wasteful. v1.1 will switch to
  * cursor = max block_height seen so we can short-circuit once a tx batch
@@ -52,13 +52,31 @@ import type {
 
 const MEMPOOL_API = 'https://mempool.space/api';
 const DEFAULT_GAP_LIMIT = 20;          // BIP44 standard
-const MAX_ADDRESSES_PER_CHAIN = 500;   // safety cap , protects us from a
+const MAX_ADDRESSES_PER_CHAIN = 500;   // safety cap -- protects us from a
                                         // misconfigured wallet with weird gaps
-const SOURCE_WALLET_ID = 'xpub';       // single logical wallet per connection
+
+/**
+ * Encode a Uint8Array as a lowercase hex string.
+ */
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Derive a stable, per-xpub wallet identifier.
+ *
+ * SHA-256 of the raw extended public key string, encoded as lowercase hex.
+ * The same xpub always produces the same hash; a different xpub produces a
+ * different hash. The identifier is opaque on the storage side -- no address
+ * derivation is possible from the stored value alone.
+ */
+function xpubWalletId(xpub: string): string {
+  return toHex(sha256(new TextEncoder().encode(xpub)));
+}
 
 type ScriptType = 'p2pkh' | 'p2sh-p2wpkh' | 'p2wpkh';
 
-// Version-byte → script-type table. The xpub format encodes the script type
+// Version-byte -> script-type table. The xpub format encodes the script type
 // in its 4-byte version prefix. We rewrite to xpub before handing to
 // HDKey.fromExtendedKey (which only knows xpub/xprv) and remember the
 // original script type for address derivation.
@@ -104,7 +122,7 @@ function normalizeExtendedPubkey(input: string): { canonicalXpub: string; script
   const cfg = VERSION_TABLE[prefix];
   if (!cfg) {
     throw new Error(
-      `[xpub] unsupported extended-pubkey prefix '${prefix}' , supported: xpub, ypub, zpub`,
+      `[xpub] unsupported extended-pubkey prefix '${prefix}' -- supported: xpub, ypub, zpub`,
     );
   }
 
@@ -177,7 +195,7 @@ async function fetchAddressTxs(address: string): Promise<MempoolTx[]> {
   const res = await fetch(`${MEMPOOL_API}/address/${address}/txs`);
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    // 404 means "address has never been seen" , treat as empty rather than error.
+    // 404 means "address has never been seen" -- treat as empty rather than error.
     if (res.status === 404) return [];
     throw new Error(`mempool.space ${res.status} for ${address}: ${detail.slice(0, 120)}`);
   }
@@ -247,8 +265,12 @@ async function scanChain(
  *     counterparty = first non-our vout address, or null if none (pure consolidation).
  *
  * type='onchain' always (this adapter only emits on-chain BTC).
+ *
+ * sourceWalletId is threaded in explicitly (matching the Blink reference pattern)
+ * rather than read from a module-level constant, so runFullScan can supply the
+ * correct per-connection identifier.
  */
-function normalizeXpubTx(tx: MempoolTx, ourAddrs: Set<string>): NormalizedTransaction | null {
+function normalizeXpubTx(tx: MempoolTx, ourAddrs: Set<string>, sourceWalletId: string): NormalizedTransaction | null {
   let ourIn = 0;
   let ourOut = 0;
   let firstExternalVinAddr: string | null = null;
@@ -292,7 +314,7 @@ function normalizeXpubTx(tx: MempoolTx, ourAddrs: Set<string>): NormalizedTransa
     counterparty = firstExternalVoutAddr; // null for pure consolidations (= fee-only spend)
   }
 
-  // Timestamp: confirmed → block_time; mempool → now (best-effort).
+  // Timestamp: confirmed -> block_time; mempool -> now (best-effort).
   const ts = tx.status.confirmed && tx.status.block_time
     ? new Date(tx.status.block_time * 1000).toISOString()
     : new Date().toISOString();
@@ -307,16 +329,16 @@ function normalizeXpubTx(tx: MempoolTx, ourAddrs: Set<string>): NormalizedTransa
     counterparty,
     status: tx.status.confirmed ? 'CONFIRMED' : 'PENDING',
     timestamp: ts,
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: sourceWalletId,
   };
 }
 
 // ─── Adapter implementation ──────────────────────────────────────────────
 
 async function discover(credentials: Record<string, unknown>): Promise<DiscoveredWallet[]> {
-  // xpub yields exactly one logical wallet , the wallet IS the xpub. We
+  // xpub yields exactly one logical wallet -- the wallet IS the xpub. We
   // still return a discovered wallet entry so the existing UI flow (pick
-  // wallets → save selection → sync) works unchanged. UIs MAY auto-select
+  // wallets -> save selection -> sync) works unchanged. UIs MAY auto-select
   // when `multiWallet === false` to skip the picker.
   const { xpub } = parseXpubCredentials(credentials);
   // Validate parseability now so an obviously-bad xpub fails at "discover"
@@ -324,7 +346,7 @@ async function discover(credentials: Record<string, unknown>): Promise<Discovere
   normalizeExtendedPubkey(xpub);
   return [
     {
-      external_wallet_id: SOURCE_WALLET_ID,
+      external_wallet_id: xpubWalletId(xpub),
       currency: 'BTC',
       label: 'Bitcoin (xpub)',
     },
@@ -350,18 +372,21 @@ async function syncAccountWide(
 }
 
 /**
- * Shared sync path , derive addresses, scan both chains, dedup txs, normalize.
+ * Shared sync path -- derive addresses, scan both chains, dedup txs, normalize.
  */
 async function runFullScan(credentials: Record<string, unknown>): Promise<SyncResult> {
   const { xpub: rawXpub, gap_limit } = parseXpubCredentials(credentials);
+  // Compute the stable per-connection wallet identifier up front so it can
+  // be threaded into every emitted transaction.
+  const walletId = xpubWalletId(rawXpub);
   const { canonicalXpub, scriptType } = normalizeExtendedPubkey(rawXpub);
 
   const hdRoot = HDKey.fromExtendedKey(canonicalXpub);
   if (hdRoot.privateKey) {
     // Defense: caller passed an xprv by mistake. We refuse to handle private
-    // keys , even though they'd technically work for derivation, accepting
+    // keys -- even though they'd technically work for derivation, accepting
     // them changes the trust model from "watch-only" to "keys-on-server".
-    throw new Error('[xpub] private extended key (xprv) not allowed , use the watch-only xpub');
+    throw new Error('[xpub] private extended key (xprv) not allowed -- use the watch-only xpub');
   }
 
   const [receiveResults, changeResults] = await Promise.all([
@@ -375,7 +400,7 @@ async function runFullScan(credentials: Record<string, unknown>): Promise<SyncRe
   ]);
 
   // Dedup tx by txid across both chains. A tx can hit multiple of our
-  // addresses (e.g., spend from receive #3, change to change #7) , we want
+  // addresses (e.g., spend from receive #3, change to change #7) -- we want
   // a single NormalizedTransaction per unique on-chain tx.
   const txByTxid = new Map<string, MempoolTx>();
   for (const txList of receiveResults.values()) {
@@ -387,14 +412,14 @@ async function runFullScan(credentials: Record<string, unknown>): Promise<SyncRe
 
   const transactions: NormalizedTransaction[] = [];
   for (const tx of txByTxid.values()) {
-    const norm = normalizeXpubTx(tx, ourAddrs);
+    const norm = normalizeXpubTx(tx, ourAddrs, walletId);
     if (norm) transactions.push(norm);
   }
 
   // Sort newest first (consistent with Blink path).
   transactions.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
 
-  // No cursor in v1 , every sync re-scans. Consumer's (connection_id,
+  // No cursor in v1 -- every sync re-scans. Consumer's (connection_id,
   // external_id) UNIQUE constraint provides dedup on the persistence side.
   return { transactions, next_cursor: null };
 }
@@ -413,7 +438,7 @@ export const xpubAdapter: ProviderAdapter = {
       name: 'xpub',
       type: 'string',
       label: 'Extended public key',
-      placeholder: 'xpub… / ypub… / zpub…',
+      placeholder: 'xpub... / ypub... / zpub...',
       multiline: true,
       // helpLabel renders inline under the textarea; helpHref activates
       // the orange "How to get your credentials" banner above the form.
