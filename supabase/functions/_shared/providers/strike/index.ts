@@ -514,9 +514,40 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
   const creds = parseStrikeCredentials(_credentials);
   await strikeGetBalances(creds); // throws if 401 / 403 / etc.
 
+  // /v1/balances returns currency totals but no account identifier. The only
+  // stable per-account key Strike exposes is issuerId, present on every
+  // invoice. We fetch the most recent invoice using $top=1 (no compound
+  // filter, so CF-safe) to extract it.
+  //
+  // This is a server-side call inside or-discover-wallets. Strike's invoice
+  // list is CORS-blocked from the browser, which is why the old discover()
+  // returned the synthetic constant 'strike'. Running server-side removes
+  // the CORS barrier entirely.
+  const page = await strikeGet<{ count?: number; items?: StrikeInvoice[] }>(
+    creds,
+    '/invoices?$top=1',
+  );
+  const firstInvoice = page.items?.[0];
+  if (!firstInvoice) {
+    // New accounts with no invoices yet have no discoverable identity.
+    // Per our policy: no readable identifier -> friendly error, create nothing.
+    throw new Error(
+      'No invoices found on this Strike account yet. ' +
+      'Please connect after your first invoice has been created.',
+    );
+  }
+  const { issuerId } = firstInvoice;
+  if (!issuerId) {
+    // issuerId should be present on every invoice but guard explicitly.
+    throw new Error(
+      'Strike did not return an account identifier on the latest invoice. ' +
+      'Please try again or contact support if this persists.',
+    );
+  }
+
   return [
     {
-      external_wallet_id: SOURCE_WALLET_ID,
+      external_wallet_id: issuerId,
       currency: 'USD',
       label: 'Strike account',
     },
