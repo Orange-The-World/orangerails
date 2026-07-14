@@ -418,7 +418,7 @@ export const xpubAdapter: ProviderAdapter = {
       // helpLabel renders inline under the textarea; helpHref activates
       // the orange "How to get your credentials" banner above the form.
       helpLabel: 'How to export your xpub',
-      helpHref: 'https://orangerails.com/docs/xpub-export',
+      helpHref: '/docs/xpub-export',
     },
     {
       name: 'gap_limit',
