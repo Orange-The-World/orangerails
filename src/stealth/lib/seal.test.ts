@@ -1,5 +1,5 @@
 /**
- * Sealed-envelope round-trip and blind-index tests.
+ * Sealed-envelope round-trip, key-guard, and blind-index tests.
  *
  * Runs under Vitest's node environment. Node 20 has Web Crypto as a
  * global (`globalThis.crypto`), so the same code paths run in tests as
@@ -8,13 +8,24 @@
 
 import { describe, expect, it } from "vitest";
 
-import { blindIndex, sealEnvelope, unsealEnvelope } from "./seal";
+import {
+  blindIndex,
+  sealEnvelope,
+  StealthKeyInvalidError,
+  StealthKeyMissingError,
+  unsealEnvelope,
+  type SealedEnvelope,
+} from "./seal";
 
-function randomKeyB64(): string {
-  const raw = crypto.getRandomValues(new Uint8Array(32));
+function keyOfBytes(n: number): string {
+  const raw = crypto.getRandomValues(new Uint8Array(n));
   let s = "";
   for (let i = 0; i < raw.length; i++) s += String.fromCharCode(raw[i]);
   return btoa(s);
+}
+
+function randomKeyB64(): string {
+  return keyOfBytes(32);
 }
 
 describe("sealEnvelope / unsealEnvelope", () => {
@@ -67,6 +78,91 @@ describe("sealEnvelope / unsealEnvelope", () => {
     for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
     const tampered = { ...env, ciphertext_b64: btoa(s) };
     await expect(unsealEnvelope(tampered, key)).rejects.toBeDefined();
+  });
+});
+
+/**
+ * A key that is absent must be a loud, typed refusal, never a lucky
+ * exception. These tests pin that: they must keep passing even if the
+ * base64 decode path is ever swapped for one that tolerates junk input.
+ */
+describe("key guard", () => {
+  // The runtime values a keyless caller can actually arrive with. The casts
+  // are the point: TypeScript's `string` is not a runtime fact when the value
+  // originates in a postMessage payload.
+  const missingKeys: Array<[string, string]> = [
+    ["undefined", undefined as unknown as string],
+    ["empty string", ""],
+  ];
+  const invalidKeys: Array<[string, string]> = [
+    ["31-byte key", keyOfBytes(31)],
+    ["33-byte key", keyOfBytes(33)],
+  ];
+
+  async function envelopeForTest(): Promise<SealedEnvelope> {
+    return sealEnvelope({ x: 1 }, randomKeyB64());
+  }
+
+  describe("sealEnvelope", () => {
+    for (const [label, key] of missingKeys) {
+      it(`throws StealthKeyMissingError for a ${label}`, async () => {
+        await expect(sealEnvelope({ x: 1 }, key)).rejects.toBeInstanceOf(
+          StealthKeyMissingError,
+        );
+      });
+    }
+    for (const [label, key] of invalidKeys) {
+      it(`throws StealthKeyInvalidError for a ${label}`, async () => {
+        await expect(sealEnvelope({ x: 1 }, key)).rejects.toBeInstanceOf(
+          StealthKeyInvalidError,
+        );
+      });
+    }
+    it("produces no envelope at all when the key is missing", async () => {
+      let result: SealedEnvelope | undefined;
+      try {
+        result = await sealEnvelope({ x: 1 }, undefined as unknown as string);
+      } catch {
+        // expected
+      }
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe("unsealEnvelope", () => {
+    for (const [label, key] of missingKeys) {
+      it(`throws StealthKeyMissingError for a ${label}`, async () => {
+        const env = await envelopeForTest();
+        await expect(unsealEnvelope(env, key)).rejects.toBeInstanceOf(
+          StealthKeyMissingError,
+        );
+      });
+    }
+    for (const [label, key] of invalidKeys) {
+      it(`throws StealthKeyInvalidError for a ${label}`, async () => {
+        const env = await envelopeForTest();
+        await expect(unsealEnvelope(env, key)).rejects.toBeInstanceOf(
+          StealthKeyInvalidError,
+        );
+      });
+    }
+  });
+
+  describe("blindIndex", () => {
+    for (const [label, key] of missingKeys) {
+      it(`throws StealthKeyMissingError for a ${label}`, async () => {
+        await expect(blindIndex("some-txid", key)).rejects.toBeInstanceOf(
+          StealthKeyMissingError,
+        );
+      });
+    }
+    for (const [label, key] of invalidKeys) {
+      it(`throws StealthKeyInvalidError for a ${label}`, async () => {
+        await expect(blindIndex("some-txid", key)).rejects.toBeInstanceOf(
+          StealthKeyInvalidError,
+        );
+      });
+    }
   });
 });
 
