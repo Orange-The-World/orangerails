@@ -21,13 +21,24 @@ const FALLBACK_PALETTE = [
  * falls through to the colored-initials fallback automatically.
  */
 export const PROVIDER_LOGO_SRCS: Record<string, string> = {
-  blink:   "/logos/blink.svg",
-  btcpay:  "/logos/btcpay.svg",
-  xpub:    "/logos/xpub.svg",
-  strike:  "/logos/strike.svg",
-  surge:   "/logos/surge.svg",
-  quiltt:  "/logos/quiltt.svg",
-  sparrow: "/logos/sparrow.svg",
+  blink:     "/logos/blink.svg",
+  btcpay:    "/logos/btcpay.svg",
+  xpub:      "/logos/xpub.svg",
+  strike:    "/logos/strike.svg",
+  surge:     "/logos/surge.svg",
+  quiltt:    "/logos/quiltt.svg",
+  sparrow:   "/logos/sparrow.svg",
+  // top-10 CCXT exchange logos
+  coinbase:  "/logos/coinbase.svg",
+  binance:   "/logos/binance.svg",
+  kraken:    "/logos/kraken.svg",
+  bybit:     "/logos/bybit.svg",
+  okx:       "/logos/okx.svg",
+  gemini:    "/logos/gemini.svg",
+  kucoin:    "/logos/kucoin.svg",
+  cryptocom: "/logos/cryptocom.svg",
+  bitstamp:  "/logos/bitstamp.svg",
+  bitfinex:  "/logos/bitfinex.svg",
 };
 
 function hashSlug(slug: string): number {
