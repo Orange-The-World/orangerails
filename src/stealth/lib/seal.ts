@@ -5,14 +5,18 @@
  * sealed with AES-256-GCM under the per-app key the consuming app sent
  * over postMessage. The server can store and shard sealed envelopes but
  * cannot read them. This file is the canonical browser-side seal/unseal
- * surface, plus the txid blind index the server needs to dedupe rows by
- * exact match without learning which transaction a row is.
+ * surface, plus the two blind indexes the server needs to dedupe rows by
+ * exact match without learning what any row is: one over a txid, one over
+ * a wallet's xpub or descriptor.
  *
  * Crypto choices match the V3 pattern: Web Crypto API directly, no
  * library dependency. AES-256-GCM with a fresh random 12-byte IV per
- * envelope and a 32-byte key. HMAC-SHA-256 for the blind index, under a
- * separately derived subkey, hex output so it doubles as a JSON / SQL
- * friendly identifier with no base64 case or padding foot-guns.
+ * envelope and a 32-byte key. HMAC-SHA-256 for both blind indexes, hex
+ * output so they double as JSON / SQL friendly identifiers with no base64
+ * case or padding foot-guns.
+ *
+ * The two indexes do NOT share a key derivation, and that asymmetry is
+ * deliberate. See computeTxidBlindIndex and computeConnectionBlindIndex.
  *
  * Key discipline: an absent key is a loud, typed refusal, never a lucky
  * exception. Every public entry point validates keyB64 explicitly before
@@ -89,6 +93,17 @@ export class StealthTxidInvalidError extends Error {
         `display byte order, 64 chars): ${detail}.`,
     );
     this.name = "StealthTxidInvalidError";
+  }
+}
+
+/** The caller passed an empty or non-string wallet identifier to index. */
+export class StealthConnectionInputInvalidError extends Error {
+  constructor(detail: string) {
+    super(
+      `computeConnectionBlindIndex: expected a non-empty xpub or output ` +
+        `descriptor string: ${detail}.`,
+    );
+    this.name = "StealthConnectionInputInvalidError";
   }
 }
 
@@ -179,6 +194,9 @@ export async function unsealEnvelope<T = unknown>(
  * disagreeing on case or byte order would otherwise produce two indexes for
  * one transaction, and dedupe would fail silently.
  *
+ * This function indexes txids and nothing else. To index the wallet itself
+ * (an xpub or an output descriptor), use computeConnectionBlindIndex.
+ *
  * Throws StealthTxidInvalidError for a non-canonical txid,
  * StealthKeyMissingError if keyB64 is absent or empty, and
  * StealthKeyInvalidError if it is not a 32-byte base64 key.
@@ -193,6 +211,58 @@ export async function computeTxidBlindIndex(
     "HMAC",
     hmacKey,
     toArrayBuffer(new TextEncoder().encode(txid)),
+  );
+  return hexEncode(new Uint8Array(sig));
+}
+
+/**
+ * Compute the blind index for a wallet identifier: the pasted xpub, ypub,
+ * zpub, or output descriptor, exactly as normalized by the caller. The
+ * server stores this on the connection row and uses it to recognize a
+ * wallet the user has already connected, without ever holding the xpub.
+ *
+ * Why this one is NOT derived through HKDF, when the txid index is. Two
+ * reasons, and both matter.
+ *
+ * 1. Compatibility, and it is one-way. Connection rows in production
+ *    already carry an index computed as HMAC-SHA-256 under the master key.
+ *    Changing the derivation would produce a different index for the same
+ *    xpub, so a user re-adding a wallet they already have would create a
+ *    second connection row instead of matching the first. Re-indexing the
+ *    existing rows requires the key, which lives in the user's browser, so
+ *    it is client-side lazy work that belongs with key rotation, not with a
+ *    hardening pass. Same reasoning that left the AES seal on the master.
+ *
+ * 2. The threat the split answers does not exist here. The txid index needs
+ *    a separate key because a txid is public and enumerable: a server that
+ *    could recompute the index would hash every txid in the block it already
+ *    knows and read the wallet off the table. An xpub is not enumerable, so
+ *    there is no candidate list to hash against, and the recompute attack
+ *    has nothing to stand on.
+ *
+ * When key rotation lands, this moves to its own HKDF subkey with
+ * info="or-stealth/connection-index/v1" and the existing rows get re-indexed
+ * in the browser on next unlock. Until then, do not change the derivation:
+ * silently orphaning live connections is worse than the property we would
+ * gain.
+ *
+ * Throws StealthConnectionInputInvalidError for an empty or non-string
+ * input, StealthKeyMissingError if keyB64 is absent or empty, and
+ * StealthKeyInvalidError if it is not a 32-byte base64 key.
+ */
+export async function computeConnectionBlindIndex(
+  walletIdentifier: string,
+  keyB64: string,
+): Promise<string> {
+  const input = requireConnectionInput(walletIdentifier);
+  const hmacKey = await importHmacKeyFromMaster(
+    "computeConnectionBlindIndex",
+    keyB64,
+  );
+  const sig = await crypto.subtle.sign(
+    "HMAC",
+    hmacKey,
+    toArrayBuffer(new TextEncoder().encode(input)),
   );
   return hexEncode(new Uint8Array(sig));
 }
@@ -226,6 +296,23 @@ function requireCanonicalTxid(txid: unknown): string {
     throw new StealthTxidInvalidError(`got ${txid.length} chars, not canonical`);
   }
   return txid;
+}
+
+/**
+ * The connection-input guard. The wallet identifier arrives from a text
+ * field the user pasted into, so it is validated as a string with content
+ * and is otherwise indexed exactly as the caller normalized it. Normalizing
+ * it here as well would let this file and the caller disagree, which is the
+ * silent-dedupe-failure mode all over again.
+ */
+function requireConnectionInput(input: unknown): string {
+  if (typeof input !== "string") {
+    throw new StealthConnectionInputInvalidError(`got ${typeof input}`);
+  }
+  if (input.length === 0) {
+    throw new StealthConnectionInputInvalidError("got an empty string");
+  }
+  return input;
 }
 
 /** Guard, decode, and length-check a key in one place. */
@@ -283,6 +370,29 @@ async function deriveBlindIndexKey(
   return crypto.subtle.importKey(
     "raw",
     derived,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+}
+
+/**
+ * Import the master key itself as an HMAC signing key. Used only by
+ * computeConnectionBlindIndex, and only for the compatibility reason
+ * documented there: the live connection rows were indexed this way. Do not
+ * reach for this from a new call site. New indexes derive a subkey.
+ *
+ * extractable=false and usages ["sign"] for the same reason as the derived
+ * subkey: no read-back, and no verify oracle.
+ */
+async function importHmacKeyFromMaster(
+  fn: string,
+  keyB64: unknown,
+): Promise<CryptoKey> {
+  const master = decodeKeyBytes(fn, keyB64);
+  return crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(master),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
