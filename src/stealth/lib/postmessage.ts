@@ -214,8 +214,12 @@ export interface SealedTransaction {
   occurred_at: string;
   /** Plaintext block height for resume on the next sync. */
   block_height: number;
-  /** HMAC of txid under the per-app key. Server cannot reverse. */
-  txid_blind_index_b64: string;
+  /**
+   * Lowercase hex HMAC-SHA-256 of txid under the per-app blind-index subkey.
+   * Server cannot reverse: the subkey is derived from the per-app stealth key
+   * (HKDF-SHA-256, info="or-stealth/blind-index/v1"), which the server never holds.
+   */
+  txid_blind_index_hex: string;
 }
 
 /**
