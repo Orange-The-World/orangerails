@@ -1,5 +1,5 @@
 /**
- * Strike webhook queue drain , provider-specific sync path.
+ * Strike webhook queue drain, provider-specific sync path.
  *
  * Strike is webhook-driven (see strike.ts header comment + the ADR at
  * On every user-initiated sync we:
@@ -48,6 +48,13 @@ export interface DrainConnection {
   id: string;
   strike_subscription_id: string | null;
   last_sync_cursor: string | null;
+  /**
+   * The external_wallet_id stored on source_wallets for this connection.
+   * Set during discover() to the account's immutable issuerId. Passed to
+   * each normalize* call so transactions carry the correct wallet tag.
+   * Callers must JOIN source_wallets on connection_id to populate this.
+   */
+  sourceWalletId: string;
 }
 
 export async function drainStrikeQueue(args: {
@@ -62,7 +69,7 @@ export async function drainStrikeQueue(args: {
   // ─── Step 1: ensure subscription registered ─────────────────────────────
   if (!conn.strike_subscription_id) {
     // Strike caps the `secret` field at 50 chars per
-    // docs.strike.me/api/create-subscription. 24 random bytes → 48 hex chars,
+    // docs.strike.me/api/create-subscription. 24 random bytes = 48 hex chars,
     // safely under the limit while still 192 bits of entropy.
     const secret = generateHexSecret(24);
     const webhookUrl = `${args.webhookBaseUrl}?conn=${conn.id}`;
@@ -123,31 +130,35 @@ export async function drainStrikeQueue(args: {
   for (const ev of events) {
     try {
       let norm: NormalizedTransaction | null = null;
+      // conn.sourceWalletId is the issuerId written by discover() when the
+      // connection was first made. Every transaction from this connection
+      // belongs to that wallet.
+      const wid = conn.sourceWalletId;
 
       if (ev.event_type.startsWith('invoice.')) {
         const inv = await strikeGetInvoiceById(creds, ev.entity_id);
-        norm = normalizeInvoice(inv);
+        norm = normalizeInvoice(inv, wid);
       } else if (ev.event_type.startsWith('payment.')) {
         // Outgoing Lightning send. No list endpoint, so webhooks are the
-        // ONLY discovery path for these , critical not to drop.
+        // ONLY discovery path for these, critical not to drop.
         const pay = await strikeGetPaymentById(creds, ev.entity_id);
-        norm = normalizePayment(pay);
+        norm = normalizePayment(pay, wid);
       } else if (ev.event_type.startsWith('receive-request.')) {
         // Lightning-address receive. entityId is the receive_id (not the
         // parent receive-request id) per Strike webhook contract.
         const rec = await strikeGetReceiveById(creds, ev.entity_id);
-        norm = normalizeReceive(rec);
+        norm = normalizeReceive(rec, wid);
       } else if (ev.event_type.startsWith('deposit.')) {
         const dep = await strikeGetDepositById(creds, ev.entity_id);
-        norm = normalizeDeposit(dep);
+        norm = normalizeDeposit(dep, wid);
       } else if (ev.event_type.startsWith('payout.')) {
         const po = await strikeGetPayoutById(creds, ev.entity_id);
-        norm = normalizePayout(po);
+        norm = normalizePayout(po, wid);
       } else if (ev.event_type.startsWith('currency-exchange-quote.')) {
         const q = await strikeGetExchangeQuoteById(creds, ev.entity_id);
-        norm = normalizeExchange(q);
+        norm = normalizeExchange(q, wid);
       } else {
-        // Unknown event type , log + skip + mark processed (don't loop).
+        // Unknown event type, log + skip + mark processed (don't loop).
         console.warn(`[strike-queue] unknown event_type=${ev.event_type} on ${ev.id}`);
       }
 
@@ -166,7 +177,7 @@ export async function drainStrikeQueue(args: {
       .update({ processed_at: new Date().toISOString() })
       .in('id', processedIds);
     if (markErr) {
-      // Marking the events processed failed , non-fatal, they'll just be
+      // Marking the events processed failed, non-fatal, they will just be
       // reprocessed on the next sync (idempotent thanks to the
       // transactions sink's UNIQUE (connection_id, external_id) constraint).
       console.error('[strike-queue] mark-processed failed:', markErr);
