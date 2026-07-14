@@ -29,13 +29,46 @@ jobs:
 
       - name: Lint
         run: bun run lint
-        # Don't fail the whole CI on lint warnings yet — the codebase
+        # Don't fail the whole CI on lint warnings yet: the codebase
         # is young, warnings are noise, and a false-red CI trains
         # everyone to ignore the signal.
         continue-on-error: true
 
       - name: Build
         run: bun run build
+
+  typecheck-and-test:
+    name: Typecheck + unit tests
+    runs-on: ubuntu-latest
+    # The only job that actually inspects THIS branch's code.
+    #
+    # `bun run build` is `vite build`, an esbuild transpile: it strips
+    # types without checking them, so a type-level guarantee (a field
+    # typed `never`, a narrowed union) compiles clean even when something
+    # violates it. `tsc --noEmit` is the check that gives those teeth.
+    #
+    # Playwright runs against the already-deployed site (see below), so it
+    # cannot exercise a PR's code either. `vitest run` is what exercises
+    # the runtime guards on the branch under review.
+    #
+    # Blocking on purpose. A check that cannot fail is decoration.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun run test
 
   playwright:
     name: Playwright smoke
@@ -52,7 +85,8 @@ jobs:
     #
     # A PR run therefore exercises the PR's tests against the currently-deployed
     # site; once the PR merges, the next run exercises the PR's own UI changes
-    # after deploy.
+    # after deploy. Treat it as a smoke test of what is live, not as evidence
+    # about the branch: that is what typecheck-and-test is for.
     needs: lint-and-build
     steps:
       - name: Checkout
