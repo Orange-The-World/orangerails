@@ -48,7 +48,7 @@ import type {
   SyncResult,
 } from '../types.ts';
 
-// ─── Constants ───────────────────────────────────────────────────────────
+// --- Constants -----------------------------------------------------------
 
 const MEMPOOL_API = 'https://mempool.space/api';
 const DEFAULT_GAP_LIMIT = 20;          // BIP44 standard
@@ -58,7 +58,7 @@ const SOURCE_WALLET_ID = 'xpub';       // single logical wallet per connection
 
 type ScriptType = 'p2pkh' | 'p2sh-p2wpkh' | 'p2wpkh';
 
-// Version-byte → script-type table. The xpub format encodes the script type
+// Version-byte to script-type table. The xpub format encodes the script type
 // in its 4-byte version prefix. We rewrite to xpub before handing to
 // HDKey.fromExtendedKey (which only knows xpub/xprv) and remember the
 // original script type for address derivation.
@@ -72,7 +72,7 @@ const VERSION_TABLE: Record<string, { version: Uint8Array; scriptType: ScriptTyp
 
 const b58check = base58check(sha256);
 
-// ─── Credential parsing ─────────────────────────────────────────────────
+// --- Credential parsing --------------------------------------------------
 
 interface XpubCredentials {
   /** Extended public key (xpub/ypub/zpub). */
@@ -92,7 +92,7 @@ function parseXpubCredentials(credentials: Record<string, unknown>): XpubCredent
   return { xpub, gap_limit };
 }
 
-// ─── Key + address derivation ───────────────────────────────────────────
+// --- Key + address derivation --------------------------------------------
 
 /**
  * Detect the prefix and return both the canonical xpub form (with BIP44
@@ -147,7 +147,7 @@ function deriveAddress(hdRoot: HDKey, chain: 0 | 1, index: number, scriptType: S
   return payment.address;
 }
 
-// ─── Mempool.space client ───────────────────────────────────────────────
+// --- Mempool.space client ------------------------------------------------
 
 interface MempoolVin {
   prevout?: {
@@ -229,7 +229,7 @@ async function scanChain(
   return out;
 }
 
-// ─── Tx normalization ───────────────────────────────────────────────────
+// --- Tx normalization -----------------------------------------------------
 
 /**
  * Compute our share of a tx's inputs and outputs, then emit a single
@@ -292,7 +292,7 @@ function normalizeXpubTx(tx: MempoolTx, ourAddrs: Set<string>): NormalizedTransa
     counterparty = firstExternalVoutAddr; // null for pure consolidations (= fee-only spend)
   }
 
-  // Timestamp: confirmed → block_time; mempool → now (best-effort).
+  // Timestamp: confirmed -> block_time; mempool -> now (best-effort).
   const ts = tx.status.confirmed && tx.status.block_time
     ? new Date(tx.status.block_time * 1000).toISOString()
     : new Date().toISOString();
@@ -311,12 +311,12 @@ function normalizeXpubTx(tx: MempoolTx, ourAddrs: Set<string>): NormalizedTransa
   };
 }
 
-// ─── Adapter implementation ──────────────────────────────────────────────
+// --- Adapter implementation -----------------------------------------------
 
 async function discover(credentials: Record<string, unknown>): Promise<DiscoveredWallet[]> {
   // xpub yields exactly one logical wallet , the wallet IS the xpub. We
   // still return a discovered wallet entry so the existing UI flow (pick
-  // wallets → save selection → sync) works unchanged. UIs MAY auto-select
+  // wallets -> save selection -> sync) works unchanged. UIs MAY auto-select
   // when `multiWallet === false` to skip the picker.
   const { xpub } = parseXpubCredentials(credentials);
   // Validate parseability now so an obviously-bad xpub fails at "discover"
@@ -413,12 +413,12 @@ export const xpubAdapter: ProviderAdapter = {
       name: 'xpub',
       type: 'string',
       label: 'Extended public key',
-      placeholder: 'xpub… / ypub… / zpub…',
+      placeholder: 'xpub... / ypub... / zpub...',
       multiline: true,
       // helpLabel renders inline under the textarea; helpHref activates
       // the orange "How to get your credentials" banner above the form.
       helpLabel: 'How to export your xpub',
-      helpHref: 'https://orangerails.com/docs/xpub-export',
+      helpHref: 'https://orangerails.dev/docs/xpub-export',
     },
     {
       name: 'gap_limit',
