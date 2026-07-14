@@ -135,6 +135,17 @@ function pickParentWindow(): Window | null {
   return null;
 }
 
+function ErrorCard({ message }: { message: string }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+      <div className="max-w-md rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center">
+        <h1 className="text-lg font-semibold text-destructive">Stealth Sync widget error</h1>
+        <p className="mt-2 text-sm text-muted-foreground">{message}</p>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const allowlist = useMemo(parseAllowedOrigins, []);
   const [init, setInit] = useState<StealthInitMessage | null>(null);
@@ -298,14 +309,7 @@ export function App() {
   }, [allowlist]);
 
   if (error) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background p-6">
-        <div className="max-w-md rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center">
-          <h1 className="text-lg font-semibold text-destructive">Stealth Sync widget error</h1>
-          <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-        </div>
-      </div>
-    );
+    return <ErrorCard message={error} />;
   }
 
   if (!init) {
@@ -329,29 +333,44 @@ export function App() {
     );
   }
 
+  // Every route below is a widget-mode route: it seals with a key. App mode is
+  // already refused at INIT, so this is unreachable today, and that is exactly
+  // why it is here. It carries the invariant into the type system (the route
+  // context takes a widget-mode init), so a future edit that admits app mode at
+  // INIT without shipping a keyless route stops here instead of calling the
+  // seal path with no key.
+  if (init.seal_mode === "app") {
+    return (
+      <ErrorCard
+        message={`Stealth Sync has no key in app mode, and mode '${init.mode}' has no keyless route yet.`}
+      />
+    );
+  }
+  const widgetInit = init;
+
   const route = (() => {
-    switch (init.mode) {
+    switch (widgetInit.mode) {
       case "add":
-        return <AddRoute init={init} />;
+        return <AddRoute init={widgetInit} />;
       case "sync":
-        return <SyncRoute init={init} />;
+        return <SyncRoute init={widgetInit} />;
       case "list":
-        return <ListRoute init={init} />;
+        return <ListRoute init={widgetInit} />;
       case "delete":
-        return <DeleteRoute init={init} />;
+        return <DeleteRoute init={widgetInit} />;
       default:
         return null;
     }
   })();
   if (route) {
-    return <StealthInitProvider value={{ init, parent }}>{route}</StealthInitProvider>;
+    return <StealthInitProvider value={{ init: widgetInit, parent }}>{route}</StealthInitProvider>;
   }
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
       <div className="max-w-md text-center">
         <h1 className="text-lg font-semibold text-foreground">Unknown mode</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Mode "{String(init.mode)}" is not supported by this widget.
+          Mode "{String(widgetInit.mode)}" is not supported by this widget.
         </p>
       </div>
     </div>
