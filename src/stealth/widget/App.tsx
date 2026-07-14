@@ -11,6 +11,9 @@
  *        - protocol_version
  *        - return_callback_origin against the allowlist (origins env)
  *        - event.origin matches return_callback_origin
+ *        - seal_mode determines key requirements:
+ *            widget mode (absent/'widget'): or_stealth_key_b64 required
+ *            app mode ('app'): or_stealth_key_b64 must be absent
  *   3. Once INIT is captured, render one of four route stubs based on
  *      init.mode: 'add' | 'sync' | 'list' | 'delete'.
  *
@@ -176,11 +179,14 @@ export function App() {
         return;
       }
 
-      // Validate required fields per the postmessage contract.
+      // Determine seal mode. Anything other than the explicit string 'app'
+      // resolves to widget mode, preserving backward compatibility.
+      const sealMode = data.seal_mode === "app" ? "app" : "widget";
+
+      // Validate required fields shared by both modes.
       if (
         typeof data.app_slug !== "string" ||
         typeof data.app_user_id !== "string" ||
-        typeof data.or_stealth_key_b64 !== "string" ||
         (data.mode !== "add" &&
           data.mode !== "sync" &&
           data.mode !== "list" &&
@@ -189,12 +195,40 @@ export function App() {
         setError("INIT message is missing required fields");
         postError(event.source as Window | null, event.origin, {
           code: "INTERNAL",
-          message:
-            "OR_STEALTH_INIT missing one of: app_slug, app_user_id, or_stealth_key_b64, mode.",
+          message: "OR_STEALTH_INIT missing one of: app_slug, app_user_id, mode.",
           retryable: false,
         });
         return;
       }
+
+      // Key enforcement: gated on seal mode.
+      if (sealMode === "app") {
+        // Defense in depth: app mode must not carry a key. The TypeScript type
+        // StealthInitAppMessage makes this structurally impossible at compile
+        // time. This guard catches any runtime bypass.
+        if (typeof data.or_stealth_key_b64 === "string") {
+          setError("seal_mode=app must not carry or_stealth_key_b64");
+          postError(event.source as Window | null, event.origin, {
+            code: "INTERNAL",
+            message:
+              "seal_mode='app' must not include or_stealth_key_b64. The widget receives no key in app mode.",
+            retryable: false,
+          });
+          return;
+        }
+      } else {
+        // Widget mode: key is required.
+        if (typeof data.or_stealth_key_b64 !== "string") {
+          setError("INIT message is missing or_stealth_key_b64");
+          postError(event.source as Window | null, event.origin, {
+            code: "INTERNAL",
+            message: "OR_STEALTH_INIT missing or_stealth_key_b64 (required in widget mode).",
+            retryable: false,
+          });
+          return;
+        }
+      }
+
       // sync / list / delete need an existing connection_id. Add does not.
       if (data.mode !== "add" && typeof data.connection_id !== "string") {
         setError("INIT mode requires a connection_id");
@@ -219,7 +253,7 @@ export function App() {
 
     // Direct-load fallback: if no INIT arrives within the grace window AND
     // we have no opener and no parent frame, render the friendly direct-load
-    // card instead of the indefinite "Loading…" placeholder.
+    // card instead of the indefinite "Loading..." placeholder.
     const graceTimer = window.setTimeout(() => {
       setAwaitingInit(false);
     }, DIRECT_LOAD_GRACE_MS);
@@ -255,7 +289,7 @@ export function App() {
         <div className="max-w-md text-center">
           <h1 className="text-lg font-semibold text-foreground">Stealth Sync</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            Waiting for the parent app to send OR_STEALTH_INIT…
+            Waiting for the parent app to send OR_STEALTH_INIT...
           </p>
         </div>
       </div>
