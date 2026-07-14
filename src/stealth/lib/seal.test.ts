@@ -9,10 +9,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  blindIndex,
+  computeTxidBlindIndex,
   sealEnvelope,
   StealthKeyInvalidError,
   StealthKeyMissingError,
+  StealthTxidInvalidError,
   unsealEnvelope,
   type SealedEnvelope,
 } from "./seal";
@@ -27,6 +28,12 @@ function keyOfBytes(n: number): string {
 function randomKeyB64(): string {
   return keyOfBytes(32);
 }
+
+/** A canonical txid: lowercase hex, display byte order, 64 chars. */
+const TXID_A =
+  "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b";
+const TXID_B =
+  "b1fea52486ce0c62bb442b530a3f0132b826c74e473d1f2c220bfa78111c5082";
 
 describe("sealEnvelope / unsealEnvelope", () => {
   it("round-trips a JSON-serializable payload", async () => {
@@ -148,45 +155,123 @@ describe("key guard", () => {
     }
   });
 
-  describe("blindIndex", () => {
+  describe("computeTxidBlindIndex", () => {
     for (const [label, key] of missingKeys) {
       it(`throws StealthKeyMissingError for a ${label}`, async () => {
-        await expect(blindIndex("some-txid", key)).rejects.toBeInstanceOf(
-          StealthKeyMissingError,
-        );
+        await expect(
+          computeTxidBlindIndex(TXID_A, key),
+        ).rejects.toBeInstanceOf(StealthKeyMissingError);
       });
     }
     for (const [label, key] of invalidKeys) {
       it(`throws StealthKeyInvalidError for a ${label}`, async () => {
-        await expect(blindIndex("some-txid", key)).rejects.toBeInstanceOf(
-          StealthKeyInvalidError,
-        );
+        await expect(
+          computeTxidBlindIndex(TXID_A, key),
+        ).rejects.toBeInstanceOf(StealthKeyInvalidError);
       });
     }
   });
 });
 
-describe("blindIndex", () => {
-  it("returns a stable hex string for the same input + key", async () => {
+describe("computeTxidBlindIndex", () => {
+  it("returns a stable 64-char hex string for the same txid + key", async () => {
     const key = randomKeyB64();
-    const a = await blindIndex("a1b2c3-txid", key);
-    const b = await blindIndex("a1b2c3-txid", key);
+    const a = await computeTxidBlindIndex(TXID_A, key);
+    const b = await computeTxidBlindIndex(TXID_A, key);
     expect(a).toBe(b);
     expect(a).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("differs across inputs", async () => {
+  it("differs across txids under one key", async () => {
     const key = randomKeyB64();
-    const a = await blindIndex("txid-one", key);
-    const b = await blindIndex("txid-two", key);
+    const a = await computeTxidBlindIndex(TXID_A, key);
+    const b = await computeTxidBlindIndex(TXID_B, key);
     expect(a).not.toBe(b);
   });
 
-  it("differs across keys for the same input", async () => {
+  /**
+   * The blind index is only blind because the subkey is per (user, app).
+   * If two users could ever produce the same index for the same txid, the
+   * server could correlate them, and the field would leak exactly what it
+   * exists to hide.
+   */
+  it("never collides across keys for the same txid", async () => {
     const k1 = randomKeyB64();
     const k2 = randomKeyB64();
-    const a = await blindIndex("same-txid", k1);
-    const b = await blindIndex("same-txid", k2);
+    const a = await computeTxidBlindIndex(TXID_A, k1);
+    const b = await computeTxidBlindIndex(TXID_A, k2);
     expect(a).not.toBe(b);
+  });
+
+  /**
+   * Domain separation, pinned. The index must NOT be the raw HMAC of the
+   * txid under the sealing key: that is one key doing two jobs, and it is
+   * the shape this change exists to remove. Computing the old construction
+   * here by hand and asserting the new one differs is what stops it from
+   * quietly coming back.
+   */
+  it("is not the raw HMAC under the sealing key itself", async () => {
+    const keyB64 = randomKeyB64();
+    const bin = atob(keyB64);
+    const raw = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) raw[i] = bin.charCodeAt(i);
+    const rawBuf = new ArrayBuffer(raw.length);
+    new Uint8Array(rawBuf).set(raw);
+
+    const sealingKeyAsHmac = await crypto.subtle.importKey(
+      "raw",
+      rawBuf,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign(
+      "HMAC",
+      sealingKeyAsHmac,
+      new TextEncoder().encode(TXID_A),
+    );
+    let oldConstruction = "";
+    const sigBytes = new Uint8Array(sig);
+    for (let i = 0; i < sigBytes.length; i++) {
+      oldConstruction += sigBytes[i].toString(16).padStart(2, "0");
+    }
+
+    const actual = await computeTxidBlindIndex(TXID_A, keyB64);
+    expect(actual).not.toBe(oldConstruction);
+  });
+
+  /**
+   * Refuse, do not normalize. An uppercase or byte-reversed txid that got
+   * quietly canonicalized here would produce the right index today and a
+   * different one the moment another call site chose differently, and the
+   * only symptom would be duplicate rows that look real.
+   */
+  describe("refuses a non-canonical txid", () => {
+    const badTxids: Array<[string, string]> = [
+      ["uppercase hex", TXID_A.toUpperCase()],
+      ["mixed case", TXID_A.slice(0, 63) + TXID_A.slice(63).toUpperCase()],
+      ["63 chars", TXID_A.slice(0, 63)],
+      ["65 chars", TXID_A + "a"],
+      ["non-hex chars", "z".repeat(64)],
+      ["empty string", ""],
+      ["0x-prefixed", "0x" + TXID_A.slice(2)],
+    ];
+
+    for (const [label, txid] of badTxids) {
+      it(`throws StealthTxidInvalidError for ${label}`, async () => {
+        await expect(
+          computeTxidBlindIndex(txid, randomKeyB64()),
+        ).rejects.toBeInstanceOf(StealthTxidInvalidError);
+      });
+    }
+
+    it("throws StealthTxidInvalidError for a non-string txid", async () => {
+      await expect(
+        computeTxidBlindIndex(
+          undefined as unknown as string,
+          randomKeyB64(),
+        ),
+      ).rejects.toBeInstanceOf(StealthTxidInvalidError);
+    });
   });
 });
