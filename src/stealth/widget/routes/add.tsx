@@ -43,12 +43,13 @@ import {
   type ParsedDescriptor,
   type ScriptType,
 } from "@/stealth/lib/derive";
-import { sealEnvelope, blindIndex } from "@/stealth/lib/seal";
+import { sealEnvelope, computeConnectionBlindIndex } from "@/stealth/lib/seal";
 import type {
   StealthAddCompleteMessage,
   StealthErrorCode,
   StealthErrorMessage,
   StealthInitMessage,
+  StealthInitWidgetMessage,
 } from "@/stealth/lib/postmessage";
 import { useStealthInit } from "../StealthInitContext";
 import { proxyFetch } from "../lib/proxyFetch";
@@ -114,7 +115,7 @@ function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): str
   return `/functions/v1/${name}`;
 }
 
-interface AccessTokenInit extends StealthInitMessage {
+interface AccessTokenInit extends StealthInitWidgetMessage {
   /** Optional Supabase JWT for direct-mode auth on the edge function POST.
    *  Reading this off the message is a forward-compatible carve-out;
    *  master plan §4.4 leaves this optional. */
@@ -347,7 +348,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
     setSubmitting(true);
     try {
       const sealed = await sealEnvelope(envelopePayload, init.or_stealth_key_b64);
-      const blind = await blindIndex(trimmed, init.or_stealth_key_b64);
+      const blind = await computeConnectionBlindIndex(trimmed, init.or_stealth_key_b64);
 
       const requestBody = {
         app_user_id: init.app_user_id,

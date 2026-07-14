@@ -14,6 +14,12 @@
  * The route accepts `?mock=1` on the popup URL to use fixture fetchers
  * instead of live ones; this lets us exercise the full path before
  * Milestone 4 ships the filter producer + block source services.
+ *
+ * This is a widget-mode route: it unseals the wallet envelope and seals the
+ * transactions, so it always holds a key. It is typed on
+ * StealthInitWidgetMessage rather than the StealthInitMessage union for that
+ * reason. An app-mode init carries no key and must never reach this file; the
+ * type is what enforces it, not the order the checks happen to run in.
  */
 
 import { useEffect, useState } from "react";
@@ -40,7 +46,7 @@ import type {
   SealedEnvelope,
   StealthErrorCode,
   StealthErrorMessage,
-  StealthInitMessage,
+  StealthInitWidgetMessage,
   StealthProgressMessage,
   StealthStage,
   StealthSyncCompleteMessage,
@@ -48,19 +54,6 @@ import type {
 import { ProgressModal } from "../components/ProgressModal";
 import { useStealthInit } from "../StealthInitContext";
 import { proxyFetch } from "../lib/proxyFetch";
-
-interface AccessTokenInit extends StealthInitMessage {
-  access_token?: string;
-  /** Consumer-app server-side proxy. See add.tsx for the contract. */
-  proxy_base_url?: string;
-  /** When true, skip the `or-stealth-transactions-store` upload step.
-   *  Used by consumer apps that treat their own DB as the source of
-   *  truth and do not need OR's encrypted backup of transactions
-   *  (e.g. V2 today). The widget still posts OR_STEALTH_SYNC_COMPLETE
-   *  back to the parent so the consumer can persist transactions
-   *  locally; only the OR-side upload is skipped. */
-  skip_transaction_upload?: boolean;
-}
 
 const STEALTH_FILTER_BASE =
   (import.meta.env.VITE_OR_STEALTH_FILTER_BASE_URL as string | undefined) ??
@@ -98,9 +91,8 @@ const liveFetchBlock = (hash: string) => libLiveFetchBlock(hash, BLOCK_SOURCE_BA
 
 // ── Component ──────────────────────────────────────────────────────────
 
-export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
+export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage }) {
   const { init, parent } = useStealthInit();
-  const initWithToken = init as AccessTokenInit;
 
   const [progress, setProgress] = useState<SyncProgressEvent>({
     stage: "unlocking",
@@ -164,7 +156,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         let envStatus = 0;
         let envText = "";
         let envBody: unknown = null;
-        if (initWithToken.proxy_base_url && parent) {
+        if (init.proxy_base_url && parent) {
           const r = await proxyFetch({
             parent,
             parentOrigin: init.return_callback_origin,
@@ -179,11 +171,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           const headers: Record<string, string> = {
             "Content-Type": "application/json",
           };
-          if (initWithToken.access_token) {
-            headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
+          if (init.access_token) {
+            headers["Authorization"] = `Bearer ${init.access_token}`;
           }
           const envResp = await fetch(
-            resolveFunctionUrl("or-stealth-envelope-fetch", initWithToken.proxy_base_url),
+            resolveFunctionUrl("or-stealth-envelope-fetch", init.proxy_base_url),
             {
               method: "POST",
               headers,
@@ -247,7 +239,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
         //    not needed). Cuts the slow upload step entirely for those
         //    apps. SYNC_COMPLETE still fires below so the consumer
         //    persists locally.
-        if (!initWithToken.skip_transaction_upload && result.sealedTransactions.length > 0) {
+        if (!init.skip_transaction_upload && result.sealedTransactions.length > 0) {
           const uploadBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
@@ -257,7 +249,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
           let uploadOk = false;
           let uploadStatus = 0;
           let uploadText = "";
-          if (initWithToken.proxy_base_url && parent) {
+          if (init.proxy_base_url && parent) {
             const r = await proxyFetch({
               parent,
               parentOrigin: init.return_callback_origin,
@@ -271,11 +263,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitMessage }) {
             const headers: Record<string, string> = {
               "Content-Type": "application/json",
             };
-            if (initWithToken.access_token) {
-              headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
+            if (init.access_token) {
+              headers["Authorization"] = `Bearer ${init.access_token}`;
             }
             const uploadResp = await fetch(
-              resolveFunctionUrl("or-stealth-transactions-store", initWithToken.proxy_base_url),
+              resolveFunctionUrl("or-stealth-transactions-store", init.proxy_base_url),
               {
                 method: "POST",
                 headers,

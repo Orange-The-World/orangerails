@@ -13,9 +13,17 @@
  *        - event.origin matches return_callback_origin
  *        - seal_mode determines key requirements:
  *            widget mode (absent/'widget'): or_stealth_key_b64 required
- *            app mode ('app'): or_stealth_key_b64 must be absent
+ *            app mode ('app'): or_stealth_key_b64 must be absent, AND the
+ *            INIT is refused outright until the app-mode routes exist
  *   3. Once INIT is captured, render one of four route stubs based on
  *      init.mode: 'add' | 'sync' | 'list' | 'delete'.
+ *
+ * Fail closed on purpose, not by accident: the four routes below are
+ * widget-mode routes, they seal with a key. An app-mode INIT carries no key,
+ * so admitting it here and letting it reach a route would call the seal path
+ * with an undefined key. That is refused at step 2 rather than relying on a
+ * base64 decoder to throw further down. Delete the refusal one route at a time,
+ * as each app-mode route lands with a real keyless path.
  *
  * This is a milestone-1 stub: each route renders a placeholder. Subsequent
  * milestones implement the real flows (BIP32 derive, BIP158 match, scan, etc.).
@@ -38,6 +46,13 @@ import { StealthInitProvider } from "./StealthInitContext";
 const DEFAULT_ALLOWED_ORIGINS = import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS ?? "";
 
 const DIRECT_LOAD_GRACE_MS = 1500;
+
+/**
+ * Modes that have a real app-mode (keyless) implementation. Empty today:
+ * every route in this widget is a widget-mode route that seals with a key.
+ * Add a mode here only when its keyless path exists and is tested.
+ */
+const APP_MODE_IMPLEMENTED_MODES: ReadonlySet<string> = new Set<string>();
 
 function parseAllowedOrigins(): ReadonlySet<string> {
   const raw =
@@ -118,6 +133,17 @@ function pickParentWindow(): Window | null {
   if (window.opener) return window.opener as Window;
   if (window.parent && window.parent !== window) return window.parent;
   return null;
+}
+
+function ErrorCard({ message }: { message: string }) {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+      <div className="max-w-md rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center">
+        <h1 className="text-lg font-semibold text-destructive">Stealth Sync widget error</h1>
+        <p className="mt-2 text-sm text-muted-foreground">{message}</p>
+      </div>
+    </div>
+  );
 }
 
 export function App() {
@@ -204,8 +230,9 @@ export function App() {
       // Key enforcement: gated on seal mode.
       if (sealMode === "app") {
         // Defense in depth: app mode must not carry a key. The TypeScript type
-        // StealthInitAppMessage makes this structurally impossible at compile
-        // time. This guard catches any runtime bypass.
+        // StealthInitAppMessage types or_stealth_key_b64 as `never`, and
+        // openStealthWidget refuses it at the sender. This guard catches any
+        // runtime bypass of both.
         if (typeof data.or_stealth_key_b64 === "string") {
           setError("seal_mode=app must not carry or_stealth_key_b64");
           postError(event.source as Window | null, event.origin, {
@@ -216,9 +243,26 @@ export function App() {
           });
           return;
         }
+
+        // Refuse an app-mode INIT for any mode whose keyless route does not
+        // exist yet. Every route below is a widget-mode route that seals with
+        // a key, so admitting this INIT would dispatch a keyless session into
+        // key-holding crypto. Refuse here, explicitly, before route dispatch.
+        if (!APP_MODE_IMPLEMENTED_MODES.has(data.mode)) {
+          setError(`seal_mode='app' is not implemented for mode '${data.mode}'`);
+          postError(event.source as Window | null, event.origin, {
+            code: "INTERNAL",
+            message: `seal_mode='app' is not implemented for mode '${data.mode}'. The widget refuses to run a key-holding route with no key.`,
+            retryable: false,
+          });
+          return;
+        }
       } else {
-        // Widget mode: key is required.
-        if (typeof data.or_stealth_key_b64 !== "string") {
+        // Widget mode: a real, non-empty key is required.
+        if (
+          typeof data.or_stealth_key_b64 !== "string" ||
+          data.or_stealth_key_b64.length === 0
+        ) {
           setError("INIT message is missing or_stealth_key_b64");
           postError(event.source as Window | null, event.origin, {
             code: "INTERNAL",
@@ -265,14 +309,7 @@ export function App() {
   }, [allowlist]);
 
   if (error) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background p-6">
-        <div className="max-w-md rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center">
-          <h1 className="text-lg font-semibold text-destructive">Stealth Sync widget error</h1>
-          <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-        </div>
-      </div>
-    );
+    return <ErrorCard message={error} />;
   }
 
   if (!init) {
@@ -296,29 +333,44 @@ export function App() {
     );
   }
 
+  // Every route below is a widget-mode route: it seals with a key. App mode is
+  // already refused at INIT, so this is unreachable today, and that is exactly
+  // why it is here. It carries the invariant into the type system (the route
+  // context takes a widget-mode init), so a future edit that admits app mode at
+  // INIT without shipping a keyless route stops here instead of calling the
+  // seal path with no key.
+  if (init.seal_mode === "app") {
+    return (
+      <ErrorCard
+        message={`Stealth Sync has no key in app mode, and mode '${init.mode}' has no keyless route yet.`}
+      />
+    );
+  }
+  const widgetInit = init;
+
   const route = (() => {
-    switch (init.mode) {
+    switch (widgetInit.mode) {
       case "add":
-        return <AddRoute init={init} />;
+        return <AddRoute init={widgetInit} />;
       case "sync":
-        return <SyncRoute init={init} />;
+        return <SyncRoute init={widgetInit} />;
       case "list":
-        return <ListRoute init={init} />;
+        return <ListRoute init={widgetInit} />;
       case "delete":
-        return <DeleteRoute init={init} />;
+        return <DeleteRoute init={widgetInit} />;
       default:
         return null;
     }
   })();
   if (route) {
-    return <StealthInitProvider value={{ init, parent }}>{route}</StealthInitProvider>;
+    return <StealthInitProvider value={{ init: widgetInit, parent }}>{route}</StealthInitProvider>;
   }
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
       <div className="max-w-md text-center">
         <h1 className="text-lg font-semibold text-foreground">Unknown mode</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Mode "{String(init.mode)}" is not supported by this widget.
+          Mode "{String(widgetInit.mode)}" is not supported by this widget.
         </p>
       </div>
     </div>
