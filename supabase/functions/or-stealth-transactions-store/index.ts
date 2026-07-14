@@ -5,8 +5,14 @@
  *
  * The widget popup calls this at the end of a sync. The server stores the
  * sealed records as opaque bytes and updates last_block_scanned / last_sync_at
- * on the parent stealth_connections row. The (connection_id, txid_blind_index_b64)
+ * on the parent stealth_connections row. The (connection_id, txid_blind_index_hex)
  * UNIQUE constraint provides idempotent dedup on retry.
+ *
+ * The blind index is lowercase hex (HMAC-SHA-256 under a subkey derived from
+ * the per-app stealth key, see src/stealth/lib/seal.ts). The server never holds
+ * that key: it can compare one index to another for exact-match dedup and can
+ * learn nothing else from the value. It is stored and compared as an opaque
+ * string; nothing here decodes it.
  *
  * POST body:
  *   connection_id:        string (uuid)
@@ -29,7 +35,8 @@ interface SealedTransactionInput {
   ciphertext_b64: string;
   occurred_at: string;
   block_height: number;
-  txid_blind_index_b64: string;
+  /** Lowercase hex, 64 chars. HMAC-SHA-256 output, not base64. */
+  txid_blind_index_hex: string;
 }
 
 interface TransactionsStoreRequestBody {
@@ -50,6 +57,11 @@ interface TransactionsStoreResponseBody {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// The blind index is the hex of an HMAC-SHA-256, so it is exactly 64 lowercase
+// hex chars. Checking the shape here keeps a malformed client from writing a
+// value the dedup constraint would treat as a distinct transaction forever.
+const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
+
 // Cap at 10k transactions per request and 16 KB per sealed record. A whole
 // 5-year wallet history with ~500 txs comes in well under that.
 const MAX_TX_PER_REQUEST = 10_000;
@@ -68,8 +80,8 @@ function isSealedTx(x: unknown): x is SealedTransactionInput {
     typeof o.block_height === 'number' &&
     Number.isInteger(o.block_height) &&
     (o.block_height as number) >= 0 &&
-    typeof o.txid_blind_index_b64 === 'string' &&
-    (o.txid_blind_index_b64 as string).length > 0
+    typeof o.txid_blind_index_hex === 'string' &&
+    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string)
   );
 }
 
@@ -166,10 +178,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     const total = body.sealed_transactions.length;
 
-    // ── Idempotent insert: ON CONFLICT (connection_id, txid_blind_index_b64) DO NOTHING ──
+    // ── Idempotent insert: ON CONFLICT (connection_id, txid_blind_index_hex) DO NOTHING ──
     // supabase-js exposes this through `upsert(..., { onConflict, ignoreDuplicates: true })`.
     // We then count what was actually stored vs what was already there by selecting
-    // the txid_blind_index_b64 set after.
+    // the txid_blind_index_hex set after.
     let inserted = 0;
     let skipped_duplicates = 0;
 
@@ -184,31 +196,31 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         },
         occurred_at: tx.occurred_at,
         block_height: tx.block_height,
-        txid_blind_index_b64: tx.txid_blind_index_b64,
+        txid_blind_index_hex: tx.txid_blind_index_hex,
       }));
 
       // Count duplicates BEFORE insert by checking which txid blind indexes
       // already exist for this connection. Cheaper than counting after when
       // total is bounded.
-      const blinds = body.sealed_transactions.map((t) => t.txid_blind_index_b64);
+      const blinds = body.sealed_transactions.map((t) => t.txid_blind_index_hex);
       const { data: pre, error: preErr } = await ctx.serviceClient
         .from('stealth_transactions')
-        .select('txid_blind_index_b64')
+        .select('txid_blind_index_hex')
         .eq('connection_id', body.connection_id)
-        .in('txid_blind_index_b64', blinds);
+        .in('txid_blind_index_hex', blinds);
       if (preErr) {
         console.error('[or-stealth-transactions-store] dedup pre-check failed:', preErr);
         return jsonResponse({ error: 'Failed to dedup-check transactions' }, 500, cors);
       }
-      const existing = new Set(((pre ?? []) as Array<{ txid_blind_index_b64: string }>).map((r) => r.txid_blind_index_b64));
-      const fresh = rows.filter((r) => !existing.has(r.txid_blind_index_b64 as string));
+      const existing = new Set(((pre ?? []) as Array<{ txid_blind_index_hex: string }>).map((r) => r.txid_blind_index_hex));
+      const fresh = rows.filter((r) => !existing.has(r.txid_blind_index_hex as string));
       skipped_duplicates = total - fresh.length;
 
       if (fresh.length > 0) {
         const { error: insErr } = await ctx.serviceClient
           .from('stealth_transactions')
           .upsert(fresh, {
-            onConflict: 'connection_id,txid_blind_index_b64',
+            onConflict: 'connection_id,txid_blind_index_hex',
             ignoreDuplicates: true,
           });
         if (insErr) {
