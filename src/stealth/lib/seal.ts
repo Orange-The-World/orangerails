@@ -5,13 +5,14 @@
  * sealed with AES-256-GCM under the per-app key the consuming app sent
  * over postMessage. The server can store and shard sealed envelopes but
  * cannot read them. This file is the canonical browser-side seal/unseal
- * surface, plus a blind-index helper for fields the server needs to look
- * up by exact match (txid, connection_id) without learning their values.
+ * surface, plus the txid blind index the server needs to dedupe rows by
+ * exact match without learning which transaction a row is.
  *
  * Crypto choices match the V3 pattern: Web Crypto API directly, no
  * library dependency. AES-256-GCM with a fresh random 12-byte IV per
- * envelope and a 32-byte key. HMAC-SHA-256 for the blind index, hex
- * output so it doubles as a JSON / SQL-friendly identifier.
+ * envelope and a 32-byte key. HMAC-SHA-256 for the blind index, under a
+ * separately derived subkey, hex output so it doubles as a JSON / SQL
+ * friendly identifier with no base64 case or padding foot-guns.
  *
  * Key discipline: an absent key is a loud, typed refusal, never a lucky
  * exception. Every public entry point validates keyB64 explicitly before
@@ -31,6 +32,22 @@ export interface SealedEnvelope {
 const ALGO = "AES-256-GCM" as const;
 const IV_LEN = 12; // bytes; the standard for AES-GCM
 const KEY_LEN = 32; // bytes; AES-256
+
+/**
+ * Domain separation label for the blind-index subkey. The sealing key and
+ * the blind-index key are derived for different purposes and must never be
+ * the same bytes: one decrypts, the other produces a value the server holds
+ * in an indexed column. Bump the version suffix if the derivation changes,
+ * and never reuse a label across primitives.
+ */
+const BLIND_INDEX_INFO = "or-stealth/blind-index/v1" as const;
+
+/**
+ * The canonical txid form: lowercase hex, display byte order, 64 chars.
+ * This is the form Bitcoin Core, every block explorer, and every filter
+ * API hand back, so it is what call sites already hold.
+ */
+const CANONICAL_TXID_RE = /^[0-9a-f]{64}$/;
 
 // ─── Errors ─────────────────────────────────────────────────────────────
 
@@ -54,6 +71,24 @@ export class StealthKeyInvalidError extends Error {
   constructor(fn: string, detail: string) {
     super(`${fn}: stealth key is invalid (${detail}).`);
     this.name = "StealthKeyInvalidError";
+  }
+}
+
+/**
+ * The caller passed something that is not a canonical txid.
+ *
+ * This is a refusal, not a normalization, on purpose. Silently upcasing,
+ * downcasing, or byte-reversing a caller's input is how two call sites end
+ * up producing two different indexes for the same transaction: no error is
+ * raised, dedupe just stops working and the duplicate rows look real.
+ */
+export class StealthTxidInvalidError extends Error {
+  constructor(detail: string) {
+    super(
+      `computeTxidBlindIndex: txid must be canonical (lowercase hex, ` +
+        `display byte order, 64 chars): ${detail}.`,
+    );
+    this.name = "StealthTxidInvalidError";
   }
 }
 
@@ -119,30 +154,45 @@ export async function unsealEnvelope<T = unknown>(
 }
 
 /**
- * Compute a blind index for a value under the given key. Hex-encoded
- * HMAC-SHA-256, deterministic for a given (value, key) pair. Use for
- * fields the server needs to look up by exact match without learning the
- * plaintext, e.g. transaction IDs.
+ * Compute the blind index for a transaction id: hex-encoded HMAC-SHA-256
+ * under a subkey derived from the per-app stealth key. Deterministic for a
+ * given (txid, key) pair, which is what lets the server dedupe rows by
+ * exact match without learning which transaction any row is.
  *
- * Throws StealthKeyMissingError if keyB64 is absent or empty, and
+ * The privacy claim, stated plainly because it is the whole point of the
+ * field: a txid is public and enumerable, and the server already holds the
+ * block height, so an index the server could recompute would let it hash
+ * every txid in that block and read the wallet straight off the table. The
+ * index is safe only because the subkey is derived from the per-app stealth
+ * key, which the server never holds, and which is distinct per (user, app).
+ * Two users therefore never produce the same index for the same txid, and
+ * the server can compare indexes to each other and to nothing else. If the
+ * subkey ever stops being per (user, app), this field stops being blind.
+ *
+ * The subkey is HKDF-SHA-256 from the master with
+ * info="or-stealth/blind-index/v1", so it is not the key that seals
+ * envelopes. One key doing both jobs is the classic way a side channel
+ * opens later.
+ *
+ * The input must be canonical (lowercase hex, display byte order, 64
+ * chars). A non-canonical txid is refused, never normalized: two call sites
+ * disagreeing on case or byte order would otherwise produce two indexes for
+ * one transaction, and dedupe would fail silently.
+ *
+ * Throws StealthTxidInvalidError for a non-canonical txid,
+ * StealthKeyMissingError if keyB64 is absent or empty, and
  * StealthKeyInvalidError if it is not a 32-byte base64 key.
  */
-export async function blindIndex(
-  value: string,
+export async function computeTxidBlindIndex(
+  txid: string,
   keyB64: string,
 ): Promise<string> {
-  const rawKey = decodeKeyBytes("blindIndex", keyB64);
-  const hmacKey = await crypto.subtle.importKey(
-    "raw",
-    toArrayBuffer(rawKey),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
+  requireCanonicalTxid(txid);
+  const hmacKey = await deriveBlindIndexKey("computeTxidBlindIndex", keyB64);
   const sig = await crypto.subtle.sign(
     "HMAC",
     hmacKey,
-    toArrayBuffer(new TextEncoder().encode(value)),
+    toArrayBuffer(new TextEncoder().encode(txid)),
   );
   return hexEncode(new Uint8Array(sig));
 }
@@ -164,6 +214,20 @@ function requireKeyB64(fn: string, keyB64: unknown): string {
   return keyB64;
 }
 
+/**
+ * The canonical-input guard. Same reasoning as requireKeyB64: the txid
+ * arrives from runtime scan data, so its type is a promise, not a fact.
+ */
+function requireCanonicalTxid(txid: unknown): string {
+  if (typeof txid !== "string") {
+    throw new StealthTxidInvalidError(`got ${typeof txid}`);
+  }
+  if (!CANONICAL_TXID_RE.test(txid)) {
+    throw new StealthTxidInvalidError(`got ${txid.length} chars, not canonical`);
+  }
+  return txid;
+}
+
 /** Guard, decode, and length-check a key in one place. */
 function decodeKeyBytes(fn: string, keyB64: unknown): Uint8Array {
   const validated = requireKeyB64(fn, keyB64);
@@ -180,6 +244,49 @@ function decodeKeyBytes(fn: string, keyB64: unknown): Uint8Array {
     );
   }
   return raw;
+}
+
+/**
+ * Derive the blind-index subkey from the per-app master key and import it
+ * for signing only.
+ *
+ * extractable=false and usages ["sign"] are both deliberate: the subkey
+ * cannot be read back out of the CryptoKey, and it cannot be used to
+ * verify. A verify capability would let a caller test a candidate index
+ * against a txid, which is exactly the oracle the blind index exists to
+ * deny.
+ */
+async function deriveBlindIndexKey(
+  fn: string,
+  keyB64: unknown,
+): Promise<CryptoKey> {
+  const master = decodeKeyBytes(fn, keyB64);
+  const hkdfKey = await crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(master),
+    "HKDF",
+    false,
+    ["deriveBits"],
+  );
+  const derived = await crypto.subtle.deriveBits(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new Uint8Array(0),
+      info: new TextEncoder().encode(BLIND_INDEX_INFO),
+    },
+    hkdfKey,
+    KEY_LEN * 8,
+  );
+  // Best-effort wipe of the master bytes we copied out of base64.
+  master.fill(0);
+  return crypto.subtle.importKey(
+    "raw",
+    derived,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
 }
 
 async function importAesKey(fn: string, keyB64: unknown): Promise<CryptoKey> {
