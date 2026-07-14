@@ -3,7 +3,7 @@
  *
  * This file is the canonical contract between any consuming app
  * (V2, V3, Orange Way, future third-party SaaS) and the OR Connect widget
- * popup at https://connect.orangerails.com/connect.
+ * popup at https://connect.orangerails.com/connect/stealth.
  *
  * The widget runs in the user's browser on the orangerails.com origin.
  * The consuming app runs on its own origin. Cross-window postMessage
@@ -20,18 +20,26 @@
  * - The widget never makes a network request that includes the key.
  *
  * Anyone can integrate Stealth Sync by:
- *   1. Opening a popup at https://connect.orangerails.com/connect
+ *   1. Opening a popup at https://connect.orangerails.com/connect/stealth
  *   2. Listening for OR_STEALTH_READY
  *   3. Sending OR_STEALTH_INIT with the per-app key
  *   4. Listening for OR_STEALTH_PROGRESS / OR_STEALTH_ADD_COMPLETE /
  *      OR_STEALTH_SYNC_COMPLETE / OR_STEALTH_ERROR
  *   5. Closing the popup
  *
+ * Note on routes: `/connect/stealth` is this widget. `/connect` is the
+ * older Link widget (provider credentials, bank connections) with a
+ * different key-handoff model. Do not open `/connect` for the xpub or
+ * descriptor flow.
+ *
  * Spec lives in STEALTH-SYNC-MASTER-PLAN.md §4.4.
  */
 
 export const STEALTH_PROTOCOL_VERSION = 1 as const;
 export const STEALTH_HKDF_INFO = 'or-stealth-v1' as const;
+
+/** Path the Stealth Sync widget is mounted at. See src/routes/connect/stealth.tsx. */
+export const STEALTH_WIDGET_PATH = '/connect/stealth' as const;
 
 // ─────────────────────────────────────────────────────────────────────
 // App → Widget messages
@@ -58,6 +66,21 @@ export interface StealthInitMessage {
   return_callback_origin: string;
   /** Locale tag, e.g. 'en-US', 'fr-CA'. Drives the transparency modal copy. */
   locale?: string;
+  /**
+   * Auth mode A (preferred for apps that already run a backend).
+   * When set, the widget does not call OR's edge functions directly.
+   * It posts OR_STEALTH_PROXY_REQUEST to the parent, and the parent makes
+   * the call server-side and attaches the platform API key there, so that
+   * key never reaches the browser. See routes/add.tsx and lib/proxyFetch.ts.
+   */
+  proxy_base_url?: string;
+  /**
+   * Auth mode B (direct). A Supabase JWT the widget sends as
+   * `Authorization: Bearer <token>` on the edge-function POST. Only used
+   * when `proxy_base_url` is absent. This is an access token for OR's API,
+   * never a key that can unseal anything.
+   */
+  access_token?: string;
   /** Optional: when true, the widget skips uploading sealed transactions
    *  to OR's `or-stealth-transactions-store` endpoint. Used by consumer
    *  apps that hold their own source-of-truth copy and do not need OR's
@@ -285,6 +308,9 @@ export async function deriveOrStealthKey(mek: CryptoKey): Promise<string> {
 /**
  * Open the OR Connect widget popup and return a typed message bus.
  * Consuming apps call this when the user clicks Add or Sync.
+ *
+ * The popup opens `/connect/stealth`, the Stealth Sync widget. It is a
+ * different page from `/connect`, which is the older Link widget.
  */
 export function openStealthWidget(opts: {
   base_url?: string;     // default 'https://connect.orangerails.com'
@@ -294,8 +320,16 @@ export function openStealthWidget(opts: {
   width?: number;        // default 480
   height?: number;       // default 720
 }): { close: () => void; popup: Window | null } {
-  const base = opts.base_url ?? 'https://connect.orangerails.com';
-  const url = `${base}/connect?mode=${opts.init.mode}&app=${opts.init.app_slug}`;
+  const base = (opts.base_url ?? 'https://connect.orangerails.com').replace(/\/$/, '');
+  // `parent_origin` lets the widget target OR_STEALTH_READY at this exact
+  // origin instead of broadcasting it with '*'. READY carries no secrets,
+  // but the opener already knows its own origin, so there is no reason to
+  // broadcast. See pickReadyTargetOrigin() in src/stealth/widget/App.tsx.
+  const url =
+    `${base}${STEALTH_WIDGET_PATH}` +
+    `?mode=${encodeURIComponent(opts.init.mode)}` +
+    `&app=${encodeURIComponent(opts.init.app_slug)}` +
+    `&parent_origin=${encodeURIComponent(opts.init.return_callback_origin)}`;
   const features = `width=${opts.width ?? 480},height=${opts.height ?? 720},menubar=no,toolbar=no,location=no,status=no`;
   const popup = window.open(url, 'or-stealth-widget', features);
 
