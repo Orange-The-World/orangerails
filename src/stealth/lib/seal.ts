@@ -216,6 +216,33 @@ export async function computeTxidBlindIndex(
 }
 
 /**
+ * TEMPORARY compatibility alias for computeTxidBlindIndex. Do not use it
+ * in new code, and do not add a second call site.
+ *
+ * It exists for exactly one reason: src/stealth/lib/sync.ts still imports
+ * `blindIndex` from this module and calls it in the sealing stage. That
+ * file is 1042 lines, and the tooling that maintains this repo replaces
+ * whole files rather than patching lines, so renaming two tokens inside it
+ * would mean reauthoring a Bitcoin block parser from a partial read. A
+ * compile error is cheap. A silently wrong block parser is not. So the
+ * alias absorbs the mismatch until sync.ts can be edited safely, and then
+ * it comes straight back out.
+ *
+ * It is an alias, not a reimplementation: same function object, so the
+ * HKDF subkey, the domain separation, and the canonical-txid guard all
+ * still apply. Nothing about the derivation changes.
+ *
+ * It is also not a footgun. Because it resolves to the txid index, a caller
+ * who reached for the vague old name to index a wallet identifier gets a
+ * loud StealthTxidInvalidError rather than a wrong-but-plausible value. The
+ * rename removed a naming ambiguity; the guard closes that ambiguity at
+ * runtime no matter which name the caller typed.
+ *
+ * @deprecated Import computeTxidBlindIndex directly.
+ */
+export const blindIndex = computeTxidBlindIndex;
+
+/**
  * Compute the blind index for a wallet identifier: the pasted xpub, ypub,
  * zpub, or output descriptor, exactly as normalized by the caller. The
  * server stores this on the connection row and uses it to recognize a
