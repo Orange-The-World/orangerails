@@ -11,6 +11,10 @@
  *   - ypub (BIP49, P2SH-P2WPKH wrapped segwit)
  *   - zpub (BIP84, P2WPKH native segwit)
  *
+ * Prefix handling and canonicalization live in ./canonical.ts, which is pure and
+ * separately tested, because the shared connector identity module needs the
+ * canonical key without needing this adapter's network client.
+ *
  * Not yet supported (v1 limitations , easy to add when a user needs them):
  *   - BIP86 P2TR (`xpub` with derivation hint, or descriptors)
  *   - Multisig (Ypub/Zpub uppercase = multisig variants)
@@ -38,8 +42,8 @@
 
 import { HDKey } from 'https://esm.sh/@scure/bip32@1.4.0';
 import * as btc from 'https://esm.sh/@scure/btc-signer@1.3.2';
-import { base58check } from 'https://esm.sh/@scure/base@1.1.7';
-import { sha256 } from 'https://esm.sh/@noble/hashes@1.4.0/sha256';
+
+import { normalizeExtendedPubkey, type ScriptType } from './canonical.ts';
 
 import type {
   ProviderAdapter,
@@ -55,22 +59,6 @@ const DEFAULT_GAP_LIMIT = 20;          // BIP44 standard
 const MAX_ADDRESSES_PER_CHAIN = 500;   // safety cap , protects us from a
                                         // misconfigured wallet with weird gaps
 const SOURCE_WALLET_ID = 'xpub';       // single logical wallet per connection
-
-type ScriptType = 'p2pkh' | 'p2sh-p2wpkh' | 'p2wpkh';
-
-// Version-byte → script-type table. The xpub format encodes the script type
-// in its 4-byte version prefix. We rewrite to xpub before handing to
-// HDKey.fromExtendedKey (which only knows xpub/xprv) and remember the
-// original script type for address derivation.
-//
-// Version bytes from SLIP-132 (https://github.com/satoshilabs/slips/blob/master/slip-0132.md).
-const VERSION_TABLE: Record<string, { version: Uint8Array; scriptType: ScriptType }> = {
-  xpub: { version: new Uint8Array([0x04, 0x88, 0xb2, 0x1e]), scriptType: 'p2pkh' },
-  ypub: { version: new Uint8Array([0x04, 0x9d, 0x7c, 0xb2]), scriptType: 'p2sh-p2wpkh' },
-  zpub: { version: new Uint8Array([0x04, 0xb2, 0x47, 0x46]), scriptType: 'p2wpkh' },
-};
-
-const b58check = base58check(sha256);
 
 // ─── Credential parsing ─────────────────────────────────────────────────
 
@@ -92,36 +80,7 @@ function parseXpubCredentials(credentials: Record<string, unknown>): XpubCredent
   return { xpub, gap_limit };
 }
 
-// ─── Key + address derivation ───────────────────────────────────────────
-
-/**
- * Detect the prefix and return both the canonical xpub form (with BIP44
- * version bytes, parseable by HDKey.fromExtendedKey) and the original
- * script type so we know which payment encoding to use for addresses.
- */
-function normalizeExtendedPubkey(input: string): { canonicalXpub: string; scriptType: ScriptType } {
-  const prefix = input.slice(0, 4);
-  const cfg = VERSION_TABLE[prefix];
-  if (!cfg) {
-    throw new Error(
-      `[xpub] unsupported extended-pubkey prefix '${prefix}' , supported: xpub, ypub, zpub`,
-    );
-  }
-
-  // Decode base58check, swap version bytes to xpub (BIP44), re-encode.
-  let decoded: Uint8Array;
-  try {
-    decoded = b58check.decode(input);
-  } catch (err) {
-    throw new Error(`[xpub] base58check decode failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (decoded.length !== 78) {
-    throw new Error(`[xpub] decoded extended key has wrong length ${decoded.length} (expected 78)`);
-  }
-  const rewritten = new Uint8Array(decoded);
-  rewritten.set(VERSION_TABLE.xpub.version, 0);
-  return { canonicalXpub: b58check.encode(rewritten), scriptType: cfg.scriptType };
-}
+// ─── Address derivation ─────────────────────────────────────────────────
 
 function deriveAddress(hdRoot: HDKey, chain: 0 | 1, index: number, scriptType: ScriptType): string {
   const child = hdRoot.deriveChild(chain).deriveChild(index);
