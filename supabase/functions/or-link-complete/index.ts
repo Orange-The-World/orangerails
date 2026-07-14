@@ -115,7 +115,7 @@ Deno.serve(
         );
       }
 
-      // Normalize wallet shape — accept either the new `wallets` array or the
+      // Normalize wallet shape -- accept either the new `wallets` array or the
       // legacy single-wallet (external_wallet_id + encrypted_metadata) fields.
       let wallets: InboundWallet[] = [];
       if (Array.isArray(body.wallets) && body.wallets.length > 0) {
@@ -166,6 +166,9 @@ Deno.serve(
       }
 
       // Rate limit: max 10 link-complete calls per platform per minute.
+      // Defaults to log-only mode (warning in console.error, request still
+      // allowed) so we can baseline real usage before enforcing. Set
+      // RATE_LIMIT_ENFORCE=true on the project to flip into 429 rejection.
       const limit = await checkPlatformRateLimit({
         supabase: serviceClient,
         key: platform.id,
@@ -181,9 +184,27 @@ Deno.serve(
       }
 
       // Audit 2026-05-16 High #3: verify the widget session token.
+      //
+      // The integrating app's backend calls or-link-mint-token with its
+      // platform API key; the response includes a UUID we look up here.
+      //
+      // Rejection rules:
+      //   - missing token  -> 401 if REQUIRE_WIDGET_TOKEN=true, otherwise warn + proceed
+      //   - bad token      -> 401 always (don't leak whether the token existed)
+      //   - expired        -> 401
+      //   - already used   -> 401
+      //   - wrong platform -> 401 (token issued for a different platform_id)
+      //   - wrong user     -> 401 (token issued for a different app_user_id)
+      //
+      // On success we atomically mark the token used so a replay fails.
       const requireToken =
         (Deno.env.get("REQUIRE_WIDGET_TOKEN") ?? "false").toLowerCase() === "true";
       if (body.widget_token) {
+        // Atomic claim: scope every guard into one UPDATE ... RETURNING row.
+        // Postgres serialises concurrent updates on the same row, so exactly
+        // one of the racing requests gets the row back; the other 401s.
+        // Replaces the TOCTOU SELECT-then-UPDATE pattern that let two parallel
+        // requests with the same token both succeed.
         const { data: claimed, error: claimErr } = await serviceClient
           .from("pending_widget_sessions")
           .update({ used_at: new Date().toISOString() })
@@ -208,6 +229,8 @@ Deno.serve(
           cors,
         );
       } else {
+        // Tokenless call during the rollout window. Log so we can see who
+        // still needs to integrate the mint step.
         console.warn(
           `[or-link-complete] TOKENLESS CALL platform=${platform.slug} app_user_id_len=${body.app_user_id?.length ?? 0}`,
         );
@@ -226,6 +249,12 @@ Deno.serve(
       if (existingSub) {
         subaccountId = existingSub.id as string;
       } else {
+        // Common integrator footgun: passing OR's internal subaccount UUID
+        // here instead of the platform's external user id. We can't tell
+        // from this side whether app_user_id is "wrong" or just "first
+        // touch from this user" -- but we can detect when the same platform
+        // already has a subaccount under a DIFFERENT external_user_id and
+        // log a structured warning so the integrator notices fast.
         const { count: platformSubaccountCount } = await serviceClient
           .from("subaccounts")
           .select("id", { count: "exact", head: true })
@@ -271,6 +300,18 @@ Deno.serve(
       const initialStatus = atomicConfirmRequired ? "pending" : "active";
 
       // 3. Dedup: check which wallets already exist under this (subaccount_id, provider_type).
+      //
+      // TOCTOU race: two concurrent connects can both pass this SELECT seeing no existing
+      // row, then both fall through to the INSERT below and produce a duplicate. The correct
+      // fix is to denormalise subaccount_id (and provider_type) onto source_wallets and add
+      // a unique index on (subaccount_id, provider_type, external_wallet_id), then replace
+      // this block with a single ON CONFLICT upsert. Migration required -- flagged to DBA.
+      // Do not ship this dedup without that database backstop.
+      //
+      // This dedup is also only safe once every provider adapter emits a truly per-account
+      // external_wallet_id. Do NOT merge before the Strike adapter fix (real issuerId) lands;
+      // see bitbooks#281 and the merge-order discussion in the Connectors workstream.
+      //
       // Query all connections for this (subaccount_id, provider_type).
       const { data: existingConns } = await serviceClient
         .from("connections")
@@ -401,6 +442,11 @@ Deno.serve(
           source_wallets: sourceWallets,
           // Backward-compat: keep a single id when only one wallet was created.
           source_wallet_id: sourceWallets.length === 1 ? sourceWallets[0].id : undefined,
+          // Diagnostic: integrators that wire app_user_id wrong end up
+          // creating a new subaccount on every connect. Surface the flag
+          // so the consumer can warn the user "this looks like a fresh
+          // setup -- was this intentional?" instead of silently piling up
+          // orphan subaccounts.
           subaccount_was_newly_created: subaccountWasNewlyCreated,
         },
         200,
