@@ -4,11 +4,10 @@
  * Two-layer account identity scheme (fleet standard):
  *
  * Layer 1 -- emitted id (the stable outward-facing identifier):
- *   128 bits of CSPRNG output (crypto.randomUUID). Minted once per
- *   connection at creation time. Derived from nothing. Zero information
- *   content. Cannot be reversed, confirmed, or correlated across accounts
- *   or organisations. Stable for the lifetime of the connection row:
- *   never update this column once set.
+ *   128 bits of CSPRNG output (crypto.randomUUID). Minted on first connect
+ *   for a new account; reused by the dedup step on reconnect. Derived from
+ *   nothing. Zero information content. Cannot be reversed, confirmed, or
+ *   correlated across accounts or organisations.
  *
  * Layer 2 -- fingerprint (internal only, NEVER emitted, logged, or returned):
  *   HMAC-SHA256(OR_ACCT_FINGERPRINT_KEY_V1,
@@ -102,11 +101,14 @@ export async function computeAccountFingerprint(
 /**
  * Mint a new account emitted id.
  *
- * 128 bits of CSPRNG output (UUIDv4). Minted once per connection at creation
- * time. Derived from nothing. Zero information content: cannot be reversed,
- * confirmed, or correlated across accounts or organisations even if the value
- * is observed. Stable for the lifetime of the connection row: never update
- * this column once set.
+ * 128 bits of CSPRNG output (UUIDv4). Minted on first connect for a new
+ * account; reused by the dedup step on reconnect. Derived from nothing.
+ * Zero information content: cannot be reversed, confirmed, or correlated
+ * across accounts or organisations even if the value is observed.
+ *
+ * Call this only when creating a connection row for an account not yet seen.
+ * When the dedup step finds an existing fingerprint match it must carry
+ * forward the existing row's account_emitted_id, never call this function.
  */
 export function generateAccountEmittedId(): string {
   return crypto.randomUUID();
