@@ -24,7 +24,7 @@
  * upstream and translates to canonical.
  */
 
-// ─── Canonical shapes ────────────────────────────────────────────────────
+// --- Canonical shapes ---------------------------------------------------
 
 /**
  * Internal canonical shape produced by source adapters.
@@ -68,15 +68,30 @@ export interface NormalizedTransaction {
 
 export interface DiscoveredWallet {
   /**
-   * Opaque provider-side wallet identifier. Stored plaintext in
-   * `source_wallets.external_wallet_id` and passed back to the adapter on
-   * subsequent sync calls.
+   * Opaque, cryptographically random wallet identifier (UUID v4). This is
+   * what is stored in `source_wallets.external_wallet_id` and passed back to
+   * the adapter on subsequent sync calls as `source_wallet_id`.
+   *
+   * This value MUST have zero derivable relationship to the underlying key
+   * material. An external observer holding the raw credential (e.g. an xpub)
+   * must learn nothing from seeing this value.
    */
   external_wallet_id: string;
   /** ISO 4217 code or 'BTC'. */
   currency: string;
   /** Optional human-readable label. UI may use this in the wallet picker. */
   label?: string;
+  /**
+   * Internal HMAC-SHA256 fingerprint of the underlying key material.
+   * Used by the persistence layer (or-source-wallets-set) for deduplication
+   * on reconnect: if a fingerprint already exists in source_wallets, the
+   * existing external_wallet_id is reused instead of inserting a new row.
+   *
+   * MUST NOT appear in any external API response body, edge-function log
+   * line, or error message. Only external_wallet_id is emitted to callers.
+   * Adapters that do not support keyed fingerprinting may omit this field.
+   */
+  wallet_fingerprint?: string;
 }
 
 export interface SyncResult {
@@ -90,7 +105,7 @@ export interface SyncResult {
   next_cursor: string | null;
 }
 
-// ─── Adapter contract ────────────────────────────────────────────────────
+// --- Adapter contract ---------------------------------------------------
 
 /**
  * Hint about the credential shape an adapter expects. Informational ,
