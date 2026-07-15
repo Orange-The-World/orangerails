@@ -514,10 +514,18 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
   const creds = parseStrikeCredentials(_credentials);
   await strikeGetBalances(creds); // throws if 401 / 403 / etc.
 
-  // /v1/balances returns currency totals but no account identifier. The only
-  // stable per-account key Strike exposes is issuerId, present on every
-  // invoice. We fetch the most recent invoice using $top=1 (no compound
-  // filter, so CF-safe) to extract it.
+  // /v1/balances returns currency totals but no account identifier. We use
+  // receiverId from a recent invoice as the stable per-account key.
+  //
+  // Why receiverId, not issuerId:
+  //   issuerId  = the account that CREATED the invoice = the integration/partner
+  //               context, SHARED across every account connected through the
+  //               same API integration. Two distinct Strike accounts will have
+  //               the SAME issuerId and would collide into one wallet.
+  //   receiverId = the RECIPIENT account = the connected customer's own Strike
+  //                account id. This is unique and stable per account.
+  // Verified 2026-07-15 against two live E2E keys: same issuerId, different
+  // receiverId. Reference: docs.strike.me/api/get-invoices.
   //
   // This is a server-side call inside or-discover-wallets. Strike's invoice
   // list is CORS-blocked from the browser, which is why the old discover()
@@ -536,9 +544,9 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
       'Please connect after your first invoice has been created.',
     );
   }
-  const { issuerId } = firstInvoice;
-  if (!issuerId) {
-    // issuerId should be present on every invoice but guard explicitly.
+  const { receiverId } = firstInvoice;
+  if (!receiverId) {
+    // receiverId should be present on every invoice but guard explicitly.
     throw new Error(
       'Strike did not return an account identifier on the latest invoice. ' +
       'Please try again or contact support if this persists.',
@@ -547,7 +555,7 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
 
   return [
     {
-      external_wallet_id: issuerId,
+      external_wallet_id: receiverId,
       currency: 'USD',
       label: 'Strike account',
     },
@@ -802,7 +810,7 @@ export const strikeAdapter: ProviderAdapter = {
       name: 'api_key',
       type: 'secret',
       label: 'Strike API key',
-      placeholder: 'token-…',
+      placeholder: 'token-...',
       helpLabel: 'Get one at dashboard.strike.me (API Key section)',
       helpHref: 'https://dashboard.strike.me/',
     },
