@@ -125,14 +125,15 @@ function normalizeExtendedPubkey(input: string): { canonicalXpub: string; script
 /**
  * Derive a stable, privacy-preserving wallet ID from any xpub/ypub/zpub.
  *
- * Algorithm: base58check-decode the key, drop the 4-byte version prefix,
- * SHA-256 the 74-byte key payload, return lowercase hex (64 chars).
+ * Algorithm: base58check-decode the key, SHA-256 all 78 bytes (including
+ * the 4-byte version prefix), return lowercase hex (64 chars).
  *
  * Properties:
  *   - Unique per key (SHA-256 collision resistance).
- *   - Stable across prefix variants: an xpub and ypub encoding of the same
- *     underlying key produce the same ID because the version bytes are
- *     discarded before hashing.
+ *   - Prefix-aware: xpub and zpub encodings of the same underlying key produce
+ *     different IDs because version bytes are included in the hash. This is
+ *     correct: they represent different wallet types (P2PKH vs P2WPKH) with
+ *     different address spaces and on-chain histories.
  *   - Non-reversible: the raw extended public key never appears in the output.
  */
 function xpubToWalletId(rawXpub: string): string {
@@ -149,8 +150,9 @@ function xpubToWalletId(rawXpub: string): string {
       `[xpub] decoded extended key has wrong length ${decoded.length} (expected 78)`,
     );
   }
-  // Drop the 4-byte version prefix; hash the 74-byte key payload.
-  const hash = sha256(decoded.slice(4));
+  // Hash all 78 bytes: version prefix included so xpub and zpub of the same
+  // underlying key yield different IDs (different wallet types, different histories).
+  const hash = sha256(decoded);
   return Array.from(hash)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
