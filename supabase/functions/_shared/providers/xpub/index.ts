@@ -39,6 +39,7 @@
 import { HDKey } from 'https://esm.sh/@scure/bip32@1.4.0';
 import * as btc from 'https://esm.sh/@scure/btc-signer@1.3.2';
 import { base58check } from 'https://esm.sh/@scure/base@1.1.7';
+import { hmac } from 'https://esm.sh/@noble/hashes@1.4.0/hmac';
 import { sha256 } from 'https://esm.sh/@noble/hashes@1.4.0/sha256';
 
 import type {
@@ -48,21 +49,14 @@ import type {
   SyncResult,
 } from '../types.ts';
 
-// --- Constants -----------------------------------------------------------
+// --- Constants ----------------------------------------------------------
 
 const MEMPOOL_API = 'https://mempool.space/api';
 const DEFAULT_GAP_LIMIT = 20;          // BIP44 standard
-const MAX_ADDRESSES_PER_CHAIN = 500;   // safety cap , protects us from a
-                                        // misconfigured wallet with weird gaps
+const MAX_ADDRESSES_PER_CHAIN = 500;   // safety cap
 
 type ScriptType = 'p2pkh' | 'p2sh-p2wpkh' | 'p2wpkh';
 
-// Version-byte -> script-type table. The xpub format encodes the script type
-// in its 4-byte version prefix. We rewrite to xpub before handing to
-// HDKey.fromExtendedKey (which only knows xpub/xprv) and remember the
-// original script type for address derivation.
-//
-// Version bytes from SLIP-132 (https://github.com/satoshilabs/slips/blob/master/slip-0132.md).
 const VERSION_TABLE: Record<string, { version: Uint8Array; scriptType: ScriptType }> = {
   xpub: { version: new Uint8Array([0x04, 0x88, 0xb2, 0x1e]), scriptType: 'p2pkh' },
   ypub: { version: new Uint8Array([0x04, 0x9d, 0x7c, 0xb2]), scriptType: 'p2sh-p2wpkh' },
@@ -71,12 +65,10 @@ const VERSION_TABLE: Record<string, { version: Uint8Array; scriptType: ScriptTyp
 
 const b58check = base58check(sha256);
 
-// --- Credential parsing --------------------------------------------------
+// --- Credential parsing -------------------------------------------------
 
 interface XpubCredentials {
-  /** Extended public key (xpub/ypub/zpub). */
   xpub: string;
-  /** Optional override for BIP44 gap limit. Defaults to 20. */
   gap_limit?: number;
 }
 
@@ -91,13 +83,8 @@ function parseXpubCredentials(credentials: Record<string, unknown>): XpubCredent
   return { xpub, gap_limit };
 }
 
-// --- Key canonicalization + wallet identity ------------------------------
+// --- Key canonicalization -----------------------------------------------
 
-/**
- * Detect the prefix and return both the canonical xpub form (with BIP44
- * version bytes, parseable by HDKey.fromExtendedKey) and the original
- * script type so we know which payment encoding to use for addresses.
- */
 function normalizeExtendedPubkey(input: string): { canonicalXpub: string; scriptType: ScriptType } {
   const prefix = input.slice(0, 4);
   const cfg = VERSION_TABLE[prefix];
@@ -106,8 +93,6 @@ function normalizeExtendedPubkey(input: string): { canonicalXpub: string; script
       `[xpub] unsupported extended-pubkey prefix '${prefix}' , supported: xpub, ypub, zpub`,
     );
   }
-
-  // Decode base58check, swap version bytes to xpub (BIP44), re-encode.
   let decoded: Uint8Array;
   try {
     decoded = b58check.decode(input);
@@ -122,46 +107,73 @@ function normalizeExtendedPubkey(input: string): { canonicalXpub: string; script
   return { canonicalXpub: b58check.encode(rewritten), scriptType: cfg.scriptType };
 }
 
-/**
- * Derive a stable, privacy-preserving wallet ID from any xpub/ypub/zpub.
- *
- * Algorithm: trim() the raw string, reject non-base58 characters, SHA-256
- * the UTF-8 bytes, return lowercase hex (64 chars).
- *
- * String-hash is chosen over binary-decode-then-hash because:
- *   1. No base58check decode is needed in the browser. TextEncoder works in
- *      Deno and in every browser, so the client computes the same ID without
- *      a b58 dependency on the client side.
- *   2. For valid extended public keys (pure ASCII base58), UTF-8 encoding is
- *      identical to ASCII, so both sides hash the same bytes.
- *   3. SLIP-132 variants ('xpub', 'ypub', 'zpub') differ in their string
- *      prefix, so they produce distinct IDs. This is correct: each prefix
- *      encodes a different script type and represents a distinct wallet.
- *
- * Guard: trim() is applied before hashing. A trailing space from a copy-paste
- * diverges client and server hashes silently without this step. Non-base58
- * characters are rejected so callers get a clear error message.
- *
- * Properties:
- *   - Unique per key-and-prefix (SHA-256 collision resistance).
- *   - Non-reversible: the raw extended public key never appears in the output.
- */
+// --- Wallet identity: fingerprint + opaque ID ---------------------------
+
 const BASE58_ALPHABET_RE = /^[1-9A-HJ-NP-Za-km-z]+$/;
 
-function xpubToWalletId(rawXpub: string): string {
+/**
+ * Compute an HMAC-SHA256 fingerprint for an xpub/ypub/zpub string.
+ *
+ * This is the INTERNAL wallet identity key. It is stored in
+ * source_wallets.wallet_fingerprint for dedup on reconnect and must
+ * NEVER appear in any external API response body, edge-function log
+ * line, or error message. Only the separately-generated opaque UUID
+ * (see generateOpaqueWalletId) is returned to callers.
+ *
+ * Algorithm: trim() the raw string, reject non-base58 chars,
+ * HMAC-SHA256 with the server secret loaded from WALLET_ID_HMAC_KEY
+ * (64 hex chars = 32 bytes). The keyed MAC ensures that even an
+ * attacker who holds the raw xpub cannot correlate users across
+ * servers or brute-force which fingerprint belongs to which key.
+ *
+ * Normalization matches Finding 1: trim() + base58 guard over the
+ * full input string (including prefix). SLIP-132 variants (xpub,
+ * ypub, zpub) produce distinct fingerprints because their prefixes
+ * differ, matching the prefix-aware hashing established in Finding 1.
+ */
+function xpubToWalletFingerprint(rawXpub: string): string {
   const key = rawXpub.trim();
   if (!BASE58_ALPHABET_RE.test(key)) {
     throw new Error(
       '[xpub] extended public key contains non-base58 characters: check for whitespace or copy-paste artifacts',
     );
   }
-  const hash = sha256(new TextEncoder().encode(key));
-  return Array.from(hash)
+  const keyHex = Deno.env.get('WALLET_ID_HMAC_KEY');
+  if (!keyHex) {
+    throw new Error('[xpub] WALLET_ID_HMAC_KEY environment variable is not set');
+  }
+  if (keyHex.length !== 64 || !/^[0-9a-fA-F]+$/.test(keyHex)) {
+    throw new Error(
+      '[xpub] WALLET_ID_HMAC_KEY must be 64 hex characters (32 bytes). Generate with: openssl rand -hex 32',
+    );
+  }
+  const keyBytes = Uint8Array.from(
+    { length: 32 },
+    (_, i) => parseInt(keyHex.slice(i * 2, i * 2 + 2), 16),
+  );
+  const mac = hmac(sha256, keyBytes, new TextEncoder().encode(key));
+  return Array.from(mac)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 }
 
-// --- Address derivation --------------------------------------------------
+/**
+ * Generate a cryptographically random opaque wallet ID.
+ *
+ * This UUID v4 is stored as source_wallets.external_wallet_id and is
+ * the value passed back to the adapter on subsequent sync calls as
+ * source_wallet_id. It has zero derivable relationship to the
+ * underlying xpub: an external observer holding the raw extended
+ * public key learns nothing from seeing this value.
+ *
+ * Deduplication on reconnect is handled by the persistence layer via
+ * wallet_fingerprint (from xpubToWalletFingerprint), not by this value.
+ */
+function generateOpaqueWalletId(): string {
+  return crypto.randomUUID();
+}
+
+// --- Address derivation -------------------------------------------------
 
 function deriveAddress(hdRoot: HDKey, chain: 0 | 1, index: number, scriptType: ScriptType): string {
   const child = hdRoot.deriveChild(chain).deriveChild(index);
@@ -187,57 +199,35 @@ function deriveAddress(hdRoot: HDKey, chain: 0 | 1, index: number, scriptType: S
   return payment.address;
 }
 
-// --- Mempool.space client ------------------------------------------------
+// --- Mempool.space client -----------------------------------------------
 
 interface MempoolVin {
-  prevout?: {
-    scriptpubkey_address?: string;
-    value: number;
-  };
+  prevout?: { scriptpubkey_address?: string; value: number; };
 }
-
 interface MempoolVout {
   scriptpubkey_address?: string;
   value: number;
 }
-
 interface MempoolTx {
   txid: string;
   vin: MempoolVin[];
   vout: MempoolVout[];
   fee: number;
-  status: {
-    confirmed: boolean;
-    block_height?: number;
-    block_time?: number;
-  };
+  status: { confirmed: boolean; block_height?: number; block_time?: number; };
 }
 
 async function fetchAddressTxs(address: string): Promise<MempoolTx[]> {
   const res = await fetch(`${MEMPOOL_API}/address/${address}/txs`);
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    // 404 means "address has never been seen" , treat as empty rather than error.
     if (res.status === 404) return [];
     throw new Error(`mempool.space ${res.status} for ${address}: ${detail.slice(0, 120)}`);
   }
   const json = await res.json();
-  if (!Array.isArray(json)) {
-    throw new Error(`mempool.space returned non-array for ${address}`);
-  }
+  if (!Array.isArray(json)) throw new Error(`mempool.space returned non-array for ${address}`);
   return json as MempoolTx[];
 }
 
-/**
- * BIP44-style gap-limit address scanner. Walks one chain (receive=0 or
- * change=1) batch-by-batch, fetching `gap_limit` addresses in parallel per
- * iteration. Stops when the most recent `gap_limit` consecutive addresses
- * are all empty.
- *
- * Returns the union of all addresses scanned (with their txs) so the caller
- * can build a unified address set for net-amount computation across the
- * combined receive + change chains.
- */
 async function scanChain(
   hdRoot: HDKey,
   chain: 0 | 1,
@@ -247,16 +237,13 @@ async function scanChain(
   const out = new Map<string, MempoolTx[]>();
   let lastUsedIdx = -1;
   let i = 0;
-
   while (i - lastUsedIdx <= gapLimit && i < MAX_ADDRESSES_PER_CHAIN) {
-    // Batch: derive `gapLimit` addresses, fetch all in parallel.
     const batchSize = Math.min(gapLimit, MAX_ADDRESSES_PER_CHAIN - i);
     const addrs: string[] = [];
     for (let k = 0; k < batchSize; k++) {
       addrs.push(deriveAddress(hdRoot, chain, i + k, scriptType));
     }
     const results = await Promise.all(addrs.map(a => fetchAddressTxs(a)));
-
     for (let k = 0; k < batchSize; k++) {
       const addr = addrs[k];
       const txs = results[k];
@@ -265,33 +252,11 @@ async function scanChain(
     }
     i += batchSize;
   }
-
   return out;
 }
 
-// --- Tx normalization ----------------------------------------------------
+// --- Tx normalization ---------------------------------------------------
 
-/**
- * Compute our share of a tx's inputs and outputs, then emit a single
- * NormalizedTransaction with the net per-tx direction + amount.
- *
- * Rules:
- *   - Pure incoming (we appear only in vouts): direction='in', amount = our_out
- *     counterparty = first non-our vin address (the sender, if known)
- *   - Pure outgoing (we appear only in vins): direction='out',
- *     amount = sum(non-our vouts) = what we paid out (excluding change-back-to-self)
- *     counterparty = first non-our vout address (the recipient)
- *   - Mixed (we're in both vins and vouts): consolidation/self-transfer with change.
- *     direction = 'out', amount = our_in - our_out (= what left our wallet net of change,
- *     which equals fee for pure consolidations, or fee + amount-sent for spend-with-change).
- *     counterparty = first non-our vout address, or null if none (pure consolidation).
- *
- * walletId: the external_wallet_id for this connection's source_wallet row.
- *   Pass null for legacy account-wide sync (pre-discovery connections) per
- *   the types contract.
- *
- * type='onchain' always (this adapter only emits on-chain BTC).
- */
 function normalizeXpubTx(
   tx: MempoolTx,
   ourAddrs: Set<string>,
@@ -305,23 +270,15 @@ function normalizeXpubTx(
   for (const vin of tx.vin) {
     const addr = vin.prevout?.scriptpubkey_address;
     const value = vin.prevout?.value ?? 0;
-    if (addr && ourAddrs.has(addr)) {
-      ourIn += value;
-    } else if (addr && !firstExternalVinAddr) {
-      firstExternalVinAddr = addr;
-    }
+    if (addr && ourAddrs.has(addr)) { ourIn += value; }
+    else if (addr && !firstExternalVinAddr) { firstExternalVinAddr = addr; }
   }
   for (const vout of tx.vout) {
     const addr = vout.scriptpubkey_address;
-    if (addr && ourAddrs.has(addr)) {
-      ourOut += vout.value;
-    } else if (addr && !firstExternalVoutAddr) {
-      firstExternalVoutAddr = addr;
-    }
+    if (addr && ourAddrs.has(addr)) { ourOut += vout.value; }
+    else if (addr && !firstExternalVoutAddr) { firstExternalVoutAddr = addr; }
   }
 
-  // Defense: tx involves none of our addresses (shouldn't happen given how we
-  // collected the tx, but guard anyway).
   if (ourIn === 0 && ourOut === 0) return null;
 
   let direction: 'in' | 'out';
@@ -329,18 +286,15 @@ function normalizeXpubTx(
   let counterparty: string | null;
 
   if (ourIn === 0) {
-    // Pure receive
     direction = 'in';
     amount_sats = ourOut;
     counterparty = firstExternalVinAddr;
   } else {
-    // Spend (with or without change). amount = what left our wallet net of change.
     direction = 'out';
     amount_sats = ourIn - ourOut;
-    counterparty = firstExternalVoutAddr; // null for pure consolidations (= fee-only spend)
+    counterparty = firstExternalVoutAddr;
   }
 
-  // Timestamp: confirmed -> block_time; mempool -> now (best-effort).
   const ts = tx.status.confirmed && tx.status.block_time
     ? new Date(tx.status.block_time * 1000).toISOString()
     : new Date().toISOString();
@@ -359,23 +313,17 @@ function normalizeXpubTx(
   };
 }
 
-// --- Adapter implementation ----------------------------------------------
+// --- Adapter implementation ---------------------------------------------
 
 async function discover(credentials: Record<string, unknown>): Promise<DiscoveredWallet[]> {
-  // xpub yields exactly one logical wallet , the wallet IS the xpub. We
-  // still return a discovered wallet entry so the existing UI flow (pick
-  // wallets -> save selection -> sync) works unchanged. UIs MAY auto-select
-  // when `multiWallet === false` to skip the picker.
   const { xpub } = parseXpubCredentials(credentials);
-  // Validate prefix and base58check integrity now so an obviously-bad key
-  // fails at "discover" time (clear UX) rather than at first sync.
-  normalizeExtendedPubkey(xpub);
-  // Derive a stable wallet ID from the key material without exposing the raw
-  // extended public key. See xpubToWalletId for the algorithm.
-  const walletId = xpubToWalletId(xpub);
+  normalizeExtendedPubkey(xpub);                   // validates prefix + decodability
+  const fingerprint = xpubToWalletFingerprint(xpub);
+  const opaqueId = generateOpaqueWalletId();
   return [
     {
-      external_wallet_id: walletId,
+      external_wallet_id: opaqueId,
+      wallet_fingerprint: fingerprint,
       currency: 'BTC',
       label: 'Bitcoin (xpub)',
     },
@@ -388,9 +336,6 @@ async function syncByWallets(
   _cursor: string | null,
 ): Promise<SyncResult> {
   if (walletIds.length === 0) return { transactions: [], next_cursor: null };
-  // xpub has only one logical wallet; ignore wallet selection beyond the
-  // existence check. Pass walletIds[0] so each NormalizedTransaction carries
-  // the correct source_wallet_id (matching external_wallet_id per types contract).
   return runFullScan(credentials, walletIds[0]);
 }
 
@@ -398,18 +343,9 @@ async function syncAccountWide(
   credentials: Record<string, unknown>,
   _cursor: string | null,
 ): Promise<SyncResult> {
-  // Legacy account-wide sync , source_wallet_id is null per the types
-  // contract ("wallet binding is unknown , pre-discovery connection").
   return runFullScan(credentials, null);
 }
 
-/**
- * Shared sync path , derive addresses, scan both chains, dedup txs, normalize.
- *
- * walletId is threaded through to NormalizedTransaction.source_wallet_id.
- * It is the hash emitted by discover() for scoped syncs, or null for legacy
- * account-wide syncs where the wallet binding is unknown.
- */
 async function runFullScan(
   credentials: Record<string, unknown>,
   walletId: string | null,
@@ -419,9 +355,6 @@ async function runFullScan(
 
   const hdRoot = HDKey.fromExtendedKey(canonicalXpub);
   if (hdRoot.privateKey) {
-    // Defense: caller passed an xprv by mistake. We refuse to handle private
-    // keys , even though they'd technically work for derivation, accepting
-    // them changes the trust model from "watch-only" to "keys-on-server".
     throw new Error('[xpub] private extended key (xprv) not allowed , use the watch-only xpub');
   }
 
@@ -430,21 +363,11 @@ async function runFullScan(
     scanChain(hdRoot, 1, gap_limit, scriptType),
   ]);
 
-  const ourAddrs = new Set<string>([
-    ...receiveResults.keys(),
-    ...changeResults.keys(),
-  ]);
+  const ourAddrs = new Set<string>([...receiveResults.keys(), ...changeResults.keys()]);
 
-  // Dedup tx by txid across both chains. A tx can hit multiple of our
-  // addresses (e.g., spend from receive #3, change to change #7) , we want
-  // a single NormalizedTransaction per unique on-chain tx.
   const txByTxid = new Map<string, MempoolTx>();
-  for (const txList of receiveResults.values()) {
-    for (const tx of txList) txByTxid.set(tx.txid, tx);
-  }
-  for (const txList of changeResults.values()) {
-    for (const tx of txList) txByTxid.set(tx.txid, tx);
-  }
+  for (const txList of receiveResults.values()) for (const tx of txList) txByTxid.set(tx.txid, tx);
+  for (const txList of changeResults.values()) for (const tx of txList) txByTxid.set(tx.txid, tx);
 
   const transactions: NormalizedTransaction[] = [];
   for (const tx of txByTxid.values()) {
@@ -452,11 +375,7 @@ async function runFullScan(
     if (norm) transactions.push(norm);
   }
 
-  // Sort newest first (consistent with Blink path).
   transactions.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
-
-  // No cursor in v1 , every sync re-scans. Consumer's (connection_id,
-  // external_id) UNIQUE constraint provides dedup on the persistence side.
   return { transactions, next_cursor: null };
 }
 
@@ -476,8 +395,6 @@ export const xpubAdapter: ProviderAdapter = {
       label: 'Extended public key',
       placeholder: 'xpub... / ypub... / zpub...',
       multiline: true,
-      // helpLabel renders inline under the textarea; helpHref activates
-      // the orange "How to get your credentials" banner above the form.
       helpLabel: 'How to export your xpub',
       helpHref: 'https://orangerails.com/docs/xpub-export',
     },
