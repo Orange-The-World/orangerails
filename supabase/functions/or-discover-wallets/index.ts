@@ -225,7 +225,7 @@ Deno.serve(
       return jsonResponse({ discovered_wallets: discovered }, 200, cors);
     } catch (err) {
       console.error("[or-discover-wallets] fatal:", err);
-      return jsonResponse({ error: "Internal error", detail: String(err) }, 500, cors);
+      return jsonResponse({ error: "Internal error" }, 500, cors);
     }
   }, "or-discover-wallets"),
 );
