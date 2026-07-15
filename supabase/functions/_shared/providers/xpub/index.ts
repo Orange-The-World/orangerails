@@ -48,17 +48,16 @@ import type {
   SyncResult,
 } from '../types.ts';
 
-// ─── Constants ───────────────────────────────────────────────────────────
+// --- Constants -----------------------------------------------------------
 
 const MEMPOOL_API = 'https://mempool.space/api';
 const DEFAULT_GAP_LIMIT = 20;          // BIP44 standard
 const MAX_ADDRESSES_PER_CHAIN = 500;   // safety cap , protects us from a
                                         // misconfigured wallet with weird gaps
-const SOURCE_WALLET_ID = 'xpub';       // single logical wallet per connection
 
 type ScriptType = 'p2pkh' | 'p2sh-p2wpkh' | 'p2wpkh';
 
-// Version-byte → script-type table. The xpub format encodes the script type
+// Version-byte -> script-type table. The xpub format encodes the script type
 // in its 4-byte version prefix. We rewrite to xpub before handing to
 // HDKey.fromExtendedKey (which only knows xpub/xprv) and remember the
 // original script type for address derivation.
@@ -72,7 +71,7 @@ const VERSION_TABLE: Record<string, { version: Uint8Array; scriptType: ScriptTyp
 
 const b58check = base58check(sha256);
 
-// ─── Credential parsing ─────────────────────────────────────────────────
+// --- Credential parsing --------------------------------------------------
 
 interface XpubCredentials {
   /** Extended public key (xpub/ypub/zpub). */
@@ -92,7 +91,7 @@ function parseXpubCredentials(credentials: Record<string, unknown>): XpubCredent
   return { xpub, gap_limit };
 }
 
-// ─── Key + address derivation ───────────────────────────────────────────
+// --- Key canonicalization + wallet identity ------------------------------
 
 /**
  * Detect the prefix and return both the canonical xpub form (with BIP44
@@ -123,6 +122,42 @@ function normalizeExtendedPubkey(input: string): { canonicalXpub: string; script
   return { canonicalXpub: b58check.encode(rewritten), scriptType: cfg.scriptType };
 }
 
+/**
+ * Derive a stable, privacy-preserving wallet ID from any xpub/ypub/zpub.
+ *
+ * Algorithm: base58check-decode the key, drop the 4-byte version prefix,
+ * SHA-256 the 74-byte key payload, return lowercase hex (64 chars).
+ *
+ * Properties:
+ *   - Unique per key (SHA-256 collision resistance).
+ *   - Stable across prefix variants: an xpub and ypub encoding of the same
+ *     underlying key produce the same ID because the version bytes are
+ *     discarded before hashing.
+ *   - Non-reversible: the raw extended public key never appears in the output.
+ */
+function xpubToWalletId(rawXpub: string): string {
+  let decoded: Uint8Array;
+  try {
+    decoded = b58check.decode(rawXpub);
+  } catch (err) {
+    throw new Error(
+      `[xpub] base58check decode failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (decoded.length !== 78) {
+    throw new Error(
+      `[xpub] decoded extended key has wrong length ${decoded.length} (expected 78)`,
+    );
+  }
+  // Drop the 4-byte version prefix; hash the 74-byte key payload.
+  const hash = sha256(decoded.slice(4));
+  return Array.from(hash)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+// --- Address derivation --------------------------------------------------
+
 function deriveAddress(hdRoot: HDKey, chain: 0 | 1, index: number, scriptType: ScriptType): string {
   const child = hdRoot.deriveChild(chain).deriveChild(index);
   if (!child.publicKey) {
@@ -147,7 +182,7 @@ function deriveAddress(hdRoot: HDKey, chain: 0 | 1, index: number, scriptType: S
   return payment.address;
 }
 
-// ─── Mempool.space client ───────────────────────────────────────────────
+// --- Mempool.space client ------------------------------------------------
 
 interface MempoolVin {
   prevout?: {
@@ -229,7 +264,7 @@ async function scanChain(
   return out;
 }
 
-// ─── Tx normalization ───────────────────────────────────────────────────
+// --- Tx normalization ----------------------------------------------------
 
 /**
  * Compute our share of a tx's inputs and outputs, then emit a single
@@ -246,9 +281,17 @@ async function scanChain(
  *     which equals fee for pure consolidations, or fee + amount-sent for spend-with-change).
  *     counterparty = first non-our vout address, or null if none (pure consolidation).
  *
+ * walletId: the external_wallet_id for this connection's source_wallet row.
+ *   Pass null for legacy account-wide sync (pre-discovery connections) per
+ *   the types contract.
+ *
  * type='onchain' always (this adapter only emits on-chain BTC).
  */
-function normalizeXpubTx(tx: MempoolTx, ourAddrs: Set<string>): NormalizedTransaction | null {
+function normalizeXpubTx(
+  tx: MempoolTx,
+  ourAddrs: Set<string>,
+  walletId: string | null,
+): NormalizedTransaction | null {
   let ourIn = 0;
   let ourOut = 0;
   let firstExternalVinAddr: string | null = null;
@@ -292,7 +335,7 @@ function normalizeXpubTx(tx: MempoolTx, ourAddrs: Set<string>): NormalizedTransa
     counterparty = firstExternalVoutAddr; // null for pure consolidations (= fee-only spend)
   }
 
-  // Timestamp: confirmed → block_time; mempool → now (best-effort).
+  // Timestamp: confirmed -> block_time; mempool -> now (best-effort).
   const ts = tx.status.confirmed && tx.status.block_time
     ? new Date(tx.status.block_time * 1000).toISOString()
     : new Date().toISOString();
@@ -307,24 +350,27 @@ function normalizeXpubTx(tx: MempoolTx, ourAddrs: Set<string>): NormalizedTransa
     counterparty,
     status: tx.status.confirmed ? 'CONFIRMED' : 'PENDING',
     timestamp: ts,
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: walletId,
   };
 }
 
-// ─── Adapter implementation ──────────────────────────────────────────────
+// --- Adapter implementation ----------------------------------------------
 
 async function discover(credentials: Record<string, unknown>): Promise<DiscoveredWallet[]> {
   // xpub yields exactly one logical wallet , the wallet IS the xpub. We
   // still return a discovered wallet entry so the existing UI flow (pick
-  // wallets → save selection → sync) works unchanged. UIs MAY auto-select
+  // wallets -> save selection -> sync) works unchanged. UIs MAY auto-select
   // when `multiWallet === false` to skip the picker.
   const { xpub } = parseXpubCredentials(credentials);
-  // Validate parseability now so an obviously-bad xpub fails at "discover"
-  // time (clear UX) rather than at first sync.
+  // Validate prefix and base58check integrity now so an obviously-bad key
+  // fails at "discover" time (clear UX) rather than at first sync.
   normalizeExtendedPubkey(xpub);
+  // Derive a stable wallet ID from the key material without exposing the raw
+  // extended public key. See xpubToWalletId for the algorithm.
+  const walletId = xpubToWalletId(xpub);
   return [
     {
-      external_wallet_id: SOURCE_WALLET_ID,
+      external_wallet_id: walletId,
       currency: 'BTC',
       label: 'Bitcoin (xpub)',
     },
@@ -338,21 +384,31 @@ async function syncByWallets(
 ): Promise<SyncResult> {
   if (walletIds.length === 0) return { transactions: [], next_cursor: null };
   // xpub has only one logical wallet; ignore wallet selection beyond the
-  // existence check (caller picked the single wallet we offered).
-  return runFullScan(credentials);
+  // existence check. Pass walletIds[0] so each NormalizedTransaction carries
+  // the correct source_wallet_id (matching external_wallet_id per types contract).
+  return runFullScan(credentials, walletIds[0]);
 }
 
 async function syncAccountWide(
   credentials: Record<string, unknown>,
   _cursor: string | null,
 ): Promise<SyncResult> {
-  return runFullScan(credentials);
+  // Legacy account-wide sync , source_wallet_id is null per the types
+  // contract ("wallet binding is unknown , pre-discovery connection").
+  return runFullScan(credentials, null);
 }
 
 /**
  * Shared sync path , derive addresses, scan both chains, dedup txs, normalize.
+ *
+ * walletId is threaded through to NormalizedTransaction.source_wallet_id.
+ * It is the hash emitted by discover() for scoped syncs, or null for legacy
+ * account-wide syncs where the wallet binding is unknown.
  */
-async function runFullScan(credentials: Record<string, unknown>): Promise<SyncResult> {
+async function runFullScan(
+  credentials: Record<string, unknown>,
+  walletId: string | null,
+): Promise<SyncResult> {
   const { xpub: rawXpub, gap_limit } = parseXpubCredentials(credentials);
   const { canonicalXpub, scriptType } = normalizeExtendedPubkey(rawXpub);
 
@@ -387,7 +443,7 @@ async function runFullScan(credentials: Record<string, unknown>): Promise<SyncRe
 
   const transactions: NormalizedTransaction[] = [];
   for (const tx of txByTxid.values()) {
-    const norm = normalizeXpubTx(tx, ourAddrs);
+    const norm = normalizeXpubTx(tx, ourAddrs, walletId);
     if (norm) transactions.push(norm);
   }
 
@@ -413,7 +469,7 @@ export const xpubAdapter: ProviderAdapter = {
       name: 'xpub',
       type: 'string',
       label: 'Extended public key',
-      placeholder: 'xpub… / ypub… / zpub…',
+      placeholder: 'xpub... / ypub... / zpub...',
       multiline: true,
       // helpLabel renders inline under the textarea; helpHref activates
       // the orange "How to get your credentials" banner above the form.
