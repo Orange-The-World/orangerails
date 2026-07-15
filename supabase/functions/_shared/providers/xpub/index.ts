@@ -125,34 +125,37 @@ function normalizeExtendedPubkey(input: string): { canonicalXpub: string; script
 /**
  * Derive a stable, privacy-preserving wallet ID from any xpub/ypub/zpub.
  *
- * Algorithm: base58check-decode the key, SHA-256 all 78 bytes (including
- * the 4-byte version prefix), return lowercase hex (64 chars).
+ * Algorithm: trim() the raw string, reject non-base58 characters, SHA-256
+ * the UTF-8 bytes, return lowercase hex (64 chars).
+ *
+ * String-hash is chosen over binary-decode-then-hash because:
+ *   1. No base58check decode is needed in the browser. TextEncoder works in
+ *      Deno and in every browser, so the client computes the same ID without
+ *      a b58 dependency on the client side.
+ *   2. For valid extended public keys (pure ASCII base58), UTF-8 encoding is
+ *      identical to ASCII, so both sides hash the same bytes.
+ *   3. SLIP-132 variants ('xpub', 'ypub', 'zpub') differ in their string
+ *      prefix, so they produce distinct IDs. This is correct: each prefix
+ *      encodes a different script type and represents a distinct wallet.
+ *
+ * Guard: trim() is applied before hashing. A trailing space from a copy-paste
+ * diverges client and server hashes silently without this step. Non-base58
+ * characters are rejected so callers get a clear error message.
  *
  * Properties:
- *   - Unique per key (SHA-256 collision resistance).
- *   - Prefix-aware: xpub and zpub encodings of the same underlying key produce
- *     different IDs because version bytes are included in the hash. This is
- *     correct: they represent different wallet types (P2PKH vs P2WPKH) with
- *     different address spaces and on-chain histories.
+ *   - Unique per key-and-prefix (SHA-256 collision resistance).
  *   - Non-reversible: the raw extended public key never appears in the output.
  */
+const BASE58_ALPHABET_RE = /^[1-9A-HJ-NP-Za-km-z]+$/;
+
 function xpubToWalletId(rawXpub: string): string {
-  let decoded: Uint8Array;
-  try {
-    decoded = b58check.decode(rawXpub);
-  } catch (err) {
+  const key = rawXpub.trim();
+  if (!BASE58_ALPHABET_RE.test(key)) {
     throw new Error(
-      `[xpub] base58check decode failed: ${err instanceof Error ? err.message : String(err)}`,
+      '[xpub] extended public key contains non-base58 characters: check for whitespace or copy-paste artifacts',
     );
   }
-  if (decoded.length !== 78) {
-    throw new Error(
-      `[xpub] decoded extended key has wrong length ${decoded.length} (expected 78)`,
-    );
-  }
-  // Hash all 78 bytes: version prefix included so xpub and zpub of the same
-  // underlying key yield different IDs (different wallet types, different histories).
-  const hash = sha256(decoded);
+  const hash = sha256(new TextEncoder().encode(key));
   return Array.from(hash)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
