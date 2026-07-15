@@ -130,6 +130,15 @@ const BASE58_ALPHABET_RE = /^[1-9A-HJ-NP-Za-km-z]+$/;
  * full input string (including prefix). SLIP-132 variants (xpub,
  * ypub, zpub) produce distinct fingerprints because their prefixes
  * differ, matching the prefix-aware hashing established in Finding 1.
+ *
+ * KEY STABILITY: WALLET_ID_HMAC_KEY must be treated as a permanent
+ * server secret. Rotating it silently breaks dedup: the same xpub
+ * yields a new fingerprint, the unique index on source_wallets does
+ * not catch the collision (that constraint covers external_wallet_id,
+ * the opaque UUID, not wallet_fingerprint), and a duplicate wallet row
+ * is created for the reconnected user. Any future key rotation requires
+ * re-fingerprinting every existing source_wallets.wallet_fingerprint
+ * row in a coordinated migration before the new key goes live.
  */
 function xpubToWalletFingerprint(rawXpub: string): string {
   const key = rawXpub.trim();
