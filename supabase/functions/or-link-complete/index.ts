@@ -1,5 +1,5 @@
 /**
- * or-link-complete — end of the /connect Link widget round trip.
+ * or-link-complete -- end of the /connect Link widget round trip.
  *
  * Called by the unauthenticated /connect widget after the end user has
  * pasted their provider API key and picked which discovered wallets to
@@ -22,6 +22,7 @@
  *   provider_type:          string  'blink' for now
  *   encrypted_label:        string  base64 AES-256-GCM ciphertext (connection-level label)
  *   encrypted_credentials:  string  base64 AES-256-GCM ciphertext (provider API key)
+ *   canonical_account_key:  string  optional, provider-level account id for fingerprinting
  *   wallets: Array<{
  *     external_wallet_id:    string   opaque provider wallet ID
  *     encrypted_metadata:    string   base64 AES-256-GCM ciphertext (currency/label)
@@ -47,6 +48,11 @@ import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http
 import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
 import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
 import { wrapSentryHandler } from "../_shared/sentry.ts";
+import {
+  computeAccountFingerprint,
+  generateAccountEmittedId,
+  guardAccountFingerprintKey,
+} from "../_shared/account-fingerprint.ts";
 
 const MAX_WALLETS_PER_CALL = 50;
 const MAX_ENCRYPTED_METADATA_LEN = 8192;
@@ -64,6 +70,9 @@ interface LinkCompleteBody {
   encrypted_credentials?: string;
   // Audit 2026-05-16 High #3: short-lived session token from or-link-mint-token.
   widget_token?: string;
+  // Optional stable provider-level account id for fingerprinting. When
+  // absent, the sorted external_wallet_id values are used as a fallback.
+  canonical_account_key?: string;
   // New multi-wallet shape
   wallets?: InboundWallet[];
   // Legacy single-wallet shape
@@ -77,6 +86,12 @@ function makeServiceClient(): SupabaseClient {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
   );
 }
+
+// Startup guard: throws AccountFingerprintKeyMissingError at boot if
+// OR_ACCT_FINGERPRINT_KEY_V1 is empty or missing. A misconfigured deploy
+// fails loudly here rather than silently creating connection rows with no
+// account identity.
+guardAccountFingerprintKey();
 
 Deno.serve(
   wrapSentryHandler(async (req: Request) => {
@@ -98,7 +113,7 @@ Deno.serve(
         typeof body.app_user_id !== "string" ||
         body.app_user_id.length > 256
       ) {
-        return jsonResponse({ error: "app_user_id required (string, ≤256 chars)" }, 400, cors);
+        return jsonResponse({ error: "app_user_id required (string, <=256 chars)" }, 400, cors);
       }
       if (!body.provider_type || !getProvider(body.provider_type)) {
         return jsonResponse(
@@ -109,13 +124,13 @@ Deno.serve(
       }
       if (!body.encrypted_credentials || body.encrypted_credentials.length > 65536) {
         return jsonResponse(
-          { error: "encrypted_credentials required (base64, ≤64 KB)" },
+          { error: "encrypted_credentials required (base64, <=64 KB)" },
           400,
           cors,
         );
       }
 
-      // Normalize wallet shape — accept either the new `wallets` array or the
+      // Normalize wallet shape -- accept either the new `wallets` array or the
       // legacy single-wallet (external_wallet_id + encrypted_metadata) fields.
       let wallets: InboundWallet[] = [];
       if (Array.isArray(body.wallets) && body.wallets.length > 0) {
@@ -152,6 +167,16 @@ Deno.serve(
           return jsonResponse({ error: "encrypted_metadata too large" }, 413, cors);
         }
       }
+
+      // Derive canonical account key for fingerprinting. The caller may supply
+      // an explicit value (e.g. a provider-level account id such as a Blink
+      // username or Strike issuer id). If absent, fall back to the sorted,
+      // pipe-delimited external_wallet_id values, which are already stable,
+      // non-sensitive provider identifiers.
+      const canonicalAccountKey =
+        body.canonical_account_key && body.canonical_account_key.length > 0
+          ? body.canonical_account_key
+          : wallets.map((w) => w.external_wallet_id!).sort().join("|");
 
       const serviceClient = makeServiceClient();
 
@@ -200,7 +225,7 @@ Deno.serve(
       const requireToken =
         (Deno.env.get("REQUIRE_WIDGET_TOKEN") ?? "false").toLowerCase() === "true";
       if (body.widget_token) {
-        // Atomic claim: scope every guard into one UPDATE … RETURNING row.
+        // Atomic claim: scope every guard into one UPDATE ... RETURNING row.
         // Postgres serialises concurrent updates on the same row, so exactly
         // one of the racing requests gets the row back; the other 401s.
         // Replaces the TOCTOU SELECT-then-UPDATE pattern that let two parallel
@@ -224,7 +249,7 @@ Deno.serve(
         }
       } else if (requireToken) {
         return jsonResponse(
-          { error: "widget_token required — call or-link-mint-token first" },
+          { error: "widget_token required -- call or-link-mint-token first" },
           401,
           cors,
         );
@@ -252,7 +277,7 @@ Deno.serve(
         // Common integrator footgun: passing OR's internal subaccount UUID
         // here instead of the platform's external user id. We can't tell
         // from this side whether app_user_id is "wrong" or just "first
-        // touch from this user" — but we can detect when the same platform
+        // touch from this user" -- but we can detect when the same platform
         // already has a subaccount under a DIFFERENT external_user_id and
         // log a structured warning so the integrator notices fast.
         const { count: platformSubaccountCount } = await serviceClient
@@ -263,7 +288,7 @@ Deno.serve(
         if ((platformSubaccountCount ?? 0) > 0) {
           console.warn(
             "[or-link-complete] minting new subaccount under platform_slug=%s with " +
-              "app_user_id=%s — this platform already has %d other subaccount(s). " +
+              "app_user_id=%s -- this platform already has %d other subaccount(s). " +
               "Common cause: the integrator passed OR's subaccount_id (UUID) as " +
               "app_user_id instead of their own user-id. See Consumer-Integration-Guide.md " +
               "section 'Wire-format gotchas: app_user_id is your platform's user-id, " +
@@ -287,6 +312,16 @@ Deno.serve(
         subaccountWasNewlyCreated = true;
       }
 
+      // Mint the account emitted id (random, derived from nothing, stable
+      // forever) and compute the fingerprint (internal only: the fingerprint
+      // must never appear in any response body, log line, or error message).
+      const accountEmittedId = generateAccountEmittedId();
+      const accountFingerprint = await computeAccountFingerprint(
+        subaccountId,
+        body.provider_type as string,
+        canonicalAccountKey,
+      );
+
       // 3. Insert the encrypted connection.
       //
       // Atomic connect flow (audit 2026-05-21 finding N6): when
@@ -308,6 +343,8 @@ Deno.serve(
           encrypted_credentials: body.encrypted_credentials,
           credentials_key_version: 1,
           status: initialStatus,
+          account_fingerprint: accountFingerprint,
+          account_emitted_id: accountEmittedId,
         })
         .select("id")
         .single();
@@ -350,7 +387,7 @@ Deno.serve(
           // Diagnostic: integrators that wire app_user_id wrong end up
           // creating a new subaccount on every connect. Surface the flag
           // so the consumer can warn the user "this looks like a fresh
-          // setup — was this intentional?" instead of silently piling up
+          // setup -- was this intentional?" instead of silently piling up
           // orphan subaccounts.
           subaccount_was_newly_created: subaccountWasNewlyCreated,
         },
