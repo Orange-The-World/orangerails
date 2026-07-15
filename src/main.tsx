@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { getRouter } from "./router";
 import { initSentry } from "./lib/sentry";
+import { initAnalytics } from "./lib/analytics";
 import "./styles.css";
 
 // Boot client error reporting before any router code runs so an
@@ -9,6 +10,11 @@ import "./styles.css";
 // captured. initSentry no-ops when VITE_SENTRY_DSN is unset, which
 // is the default for local dev.
 initSentry();
+
+// Product analytics. Also a no-op unless VITE_POSTHOG_KEY is set in the
+// hosting environment, which it is not today: the code path is here so it can
+// be reviewed, not because anything is being sent.
+initAnalytics();
 
 const router = getRouter();
 
