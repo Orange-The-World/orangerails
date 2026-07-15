@@ -66,7 +66,6 @@ import type {
 } from '../types.ts';
 
 const STRIKE_API = 'https://api.strike.me/v1';
-const SOURCE_WALLET_ID = 'strike';
 
 // ─── Types ───────────────────────────────────────────────────────────────
 
@@ -356,7 +355,14 @@ export async function strikeGetExchangeQuoteById(
   return strikeGet<StrikeCurrencyExchangeQuote>(creds, `/currency-exchange-quotes/${encodeURIComponent(quoteId)}`);
 }
 
-// ─── Normalization (used by webhook drain in PR 2) ────────────────────────
+// ─── Normalization ────────────────────────────────────────────────────────
+//
+// Every normalize function accepts an explicit `accountId` (the receiverId
+// read during discover()) instead of a module-level constant. This is the
+// Blink pattern: the runtime caller threads the wallet's own id through so
+// each transaction is bound to the specific connected account, not a shared
+// provider slug. accountId is null for legacy pre-discovery connections
+// (syncAccountWide path) where no source_wallets row exists yet.
 
 /** Pack BTC-or-fiat amount into a NormalizedTransaction. */
 function packAmount(
@@ -369,7 +375,10 @@ function packAmount(
   return { amount, currency: currency.toUpperCase() };
 }
 
-export function normalizeInvoice(invoice: StrikeInvoice): NormalizedTransaction | null {
+export function normalizeInvoice(
+  invoice: StrikeInvoice,
+  accountId: string | null,
+): NormalizedTransaction | null {
   const amount = Number(invoice.amount?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
   if (invoice.state === 'UNPAID' || invoice.state === 'CANCELLED') return null;
@@ -388,13 +397,16 @@ export function normalizeInvoice(invoice: StrikeInvoice): NormalizedTransaction 
     counterparty: null,
     status: invoice.state,
     timestamp: new Date(ts).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: accountId,
     ...packAmount(amount, invoice.amount?.currency || 'USD'),
   };
 }
 
 /** Lightning-address receive (a payment landed on a static receive-request URL). */
-export function normalizeReceive(receive: StrikeReceive): NormalizedTransaction | null {
+export function normalizeReceive(
+  receive: StrikeReceive,
+  accountId: string | null,
+): NormalizedTransaction | null {
   const amount = Number(receive.amount?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
   if (receive.state !== 'COMPLETED') return null;
@@ -409,13 +421,16 @@ export function normalizeReceive(receive: StrikeReceive): NormalizedTransaction 
     counterparty: null,
     status: receive.state,
     timestamp: new Date(ts).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: accountId,
     ...packAmount(amount, receive.amount?.currency || 'USD'),
   };
 }
 
 /** Bank/wire deposit (fiat onramp). */
-export function normalizeDeposit(deposit: StrikeDeposit): NormalizedTransaction | null {
+export function normalizeDeposit(
+  deposit: StrikeDeposit,
+  accountId: string | null,
+): NormalizedTransaction | null {
   const amt = deposit.amountCredited ?? deposit.amountReceived;
   const amount = Number(amt?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
@@ -431,13 +446,16 @@ export function normalizeDeposit(deposit: StrikeDeposit): NormalizedTransaction 
     counterparty: null,
     status: deposit.state,
     timestamp: new Date(ts).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: accountId,
     ...packAmount(amount, amt?.currency || 'USD'),
   };
 }
 
 /** Bank/wire payout (fiat offramp). */
-export function normalizePayout(payout: StrikePayout): NormalizedTransaction | null {
+export function normalizePayout(
+  payout: StrikePayout,
+  accountId: string | null,
+): NormalizedTransaction | null {
   const amt = payout.totalAmount ?? payout.amount;
   const amount = Number(amt?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
@@ -453,13 +471,16 @@ export function normalizePayout(payout: StrikePayout): NormalizedTransaction | n
     counterparty: null,
     status: payout.state,
     timestamp: new Date(ts).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: accountId,
     ...packAmount(amount, amt?.currency || 'USD'),
   };
 }
 
 /** Outgoing Lightning payment (webhook-only , Strike exposes no list endpoint). */
-export function normalizePayment(payment: StrikePayment): NormalizedTransaction | null {
+export function normalizePayment(
+  payment: StrikePayment,
+  accountId: string | null,
+): NormalizedTransaction | null {
   const amount = Number(payment.totalAmount?.amount ?? payment.amount?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
   if (payment.state !== 'COMPLETED') return null;
@@ -474,7 +495,7 @@ export function normalizePayment(payment: StrikePayment): NormalizedTransaction 
     counterparty: null,
     status: payment.state,
     timestamp: ts ? new Date(ts).toISOString() : new Date().toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: accountId,
     ...packAmount(amount, payment.totalAmount?.currency || payment.amount?.currency || 'USD'),
   };
 }
@@ -486,7 +507,10 @@ export function normalizePayment(payment: StrikePayment): NormalizedTransaction 
  * separate transaction; this is consistent with how exchange-style
  * transactions are sinked in the V2 yaml profile.
  */
-export function normalizeExchange(quote: StrikeCurrencyExchangeQuote): NormalizedTransaction | null {
+export function normalizeExchange(
+  quote: StrikeCurrencyExchangeQuote,
+  accountId: string | null,
+): NormalizedTransaction | null {
   const amount = Number(quote.sourceAmount?.amount);
   if (!isFinite(amount) || amount <= 0) return null;
   if (quote.state && quote.state !== 'COMPLETED' && quote.state !== 'EXECUTED') return null;
@@ -500,7 +524,7 @@ export function normalizeExchange(quote: StrikeCurrencyExchangeQuote): Normalize
     counterparty: null,
     status: quote.state ?? 'COMPLETED',
     timestamp: new Date(quote.created).toISOString(),
-    source_wallet_id: SOURCE_WALLET_ID,
+    source_wallet_id: accountId,
     ...packAmount(amount, quote.sourceAmount?.currency || 'USD'),
   };
 }
@@ -515,7 +539,7 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
   await strikeGetBalances(creds); // throws if 401 / 403 / etc.
 
   // /v1/balances returns currency totals but no account identifier. We use
-  // receiverId from a recent invoice as the stable per-account key.
+  // receiverId from recent invoices as the stable per-account key.
   //
   // Why receiverId, not issuerId:
   //   issuerId  = the account that CREATED the invoice = the integration/partner
@@ -527,30 +551,50 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
   // Verified 2026-07-15 against two live E2E keys: same issuerId, different
   // receiverId. Reference: docs.strike.me/api/get-invoices.
   //
+  // We fetch 3 invoices and assert receiverId is constant across all of them
+  // before trusting it. A bare $top query (no $filter, no $orderby) is
+  // Cloudflare-safe since the WAF only triggers on compound $filter clauses.
+  //
   // This is a server-side call inside or-discover-wallets. Strike's invoice
   // list is CORS-blocked from the browser, which is why the old discover()
   // returned the synthetic constant 'strike'. Running server-side removes
   // the CORS barrier entirely.
   const page = await strikeGet<{ count?: number; items?: StrikeInvoice[] }>(
     creds,
-    '/invoices?$top=1',
+    '/invoices?$top=3',
   );
-  const firstInvoice = page.items?.[0];
-  if (!firstInvoice) {
+  const invoices = page.items ?? [];
+
+  if (invoices.length === 0) {
     // New accounts with no invoices yet have no discoverable identity.
-    // Per our policy: no readable identifier -> friendly error, create nothing.
+    // Per our policy: no readable identifier -> clear error, create nothing.
+    // Wording from founder (message 2982 in #Connectors):
     throw new Error(
-      'No invoices found on this Strike account yet. ' +
-      'Please connect after your first invoice has been created.',
+      "A Strike account with no transactions yet doesn't send us anything that identifies it, " +
+      "so we can't connect it safely. Please make a test payment first, then try connecting again.",
     );
   }
-  const { receiverId } = firstInvoice;
+
+  const receiverId = invoices[0].receiverId;
   if (!receiverId) {
     // receiverId should be present on every invoice but guard explicitly.
     throw new Error(
       'Strike did not return an account identifier on the latest invoice. ' +
       'Please try again or contact support if this persists.',
     );
+  }
+
+  // Assert constancy across all returned invoices. If they diverge something
+  // unexpected is happening on Strike's side and we must not guess which id
+  // is correct.
+  for (const inv of invoices) {
+    if (inv.receiverId && inv.receiverId !== receiverId) {
+      throw new Error(
+        `[strike] receiverId inconsistency across invoices ` +
+        `(saw ${receiverId} and ${inv.receiverId}). ` +
+        'Please contact support.',
+      );
+    }
   }
 
   return [
@@ -684,10 +728,15 @@ async function fetchInvoicesByState(
 
 async function syncByWallets(
   credentials: Record<string, unknown>,
-  _walletIds: string[],
+  walletIds: string[],
   cursor: string | null,
 ): Promise<SyncResult> {
   const creds = parseStrikeCredentials(credentials);
+
+  // Thread the stored receiverId (external_wallet_id) through to every
+  // normalized transaction so consumers can route per-account. Null for
+  // legacy connections that pre-date discovery and have no source_wallets row.
+  const accountId = walletIds[0] ?? null;
 
   const transactions: NormalizedTransaction[] = [];
   let maxSeen = cursor ?? '';
@@ -700,7 +749,7 @@ async function syncByWallets(
     try {
       const batch = await fetchInvoicesByState(creds, state, cursor);
       for (const inv of batch) {
-        const norm = normalizeInvoice(inv);
+        const norm = normalizeInvoice(inv, accountId);
         if (norm) transactions.push(norm);
         trackMax(inv.created);
       }
@@ -717,7 +766,7 @@ async function syncByWallets(
       creds, '/receive-requests/receives', params, cursor,
     );
     for (const r of receives) {
-      const norm = normalizeReceive(r);
+      const norm = normalizeReceive(r, accountId);
       if (norm) transactions.push(norm);
       trackMax(r.created);
     }
@@ -734,7 +783,7 @@ async function syncByWallets(
       creds, '/deposits', params, cursor,
     );
     for (const d of deposits) {
-      const norm = normalizeDeposit(d);
+      const norm = normalizeDeposit(d, accountId);
       if (norm) transactions.push(norm);
       trackMax(d.created);
     }
@@ -751,7 +800,7 @@ async function syncByWallets(
       creds, '/payouts', params, cursor,
     );
     for (const p of payouts) {
-      const norm = normalizePayout(p);
+      const norm = normalizePayout(p, accountId);
       if (norm) transactions.push(norm);
       trackMax(p.created);
     }
@@ -768,7 +817,7 @@ async function syncByWallets(
       creds, '/currency-exchange-quotes', params, cursor,
     );
     for (const q of quotes) {
-      const norm = normalizeExchange(q);
+      const norm = normalizeExchange(q, accountId);
       if (norm) transactions.push(norm);
       trackMax(q.created);
     }
@@ -794,7 +843,10 @@ async function syncAccountWide(
   credentials: Record<string, unknown>,
   cursor: string | null,
 ): Promise<SyncResult> {
-  return syncByWallets(credentials, [SOURCE_WALLET_ID], cursor);
+  // Legacy connections have no source_wallets rows; pass empty walletIds so
+  // accountId resolves to null, marking these as pre-discovery transactions.
+  // Downstream consumers treat source_wallet_id=null as wallet unknown.
+  return syncByWallets(credentials, [], cursor);
 }
 
 export const strikeAdapter: ProviderAdapter = {
