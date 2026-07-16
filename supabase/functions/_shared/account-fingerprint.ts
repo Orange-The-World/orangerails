@@ -84,8 +84,6 @@ export async function computeAccountFingerprint(
 ): Promise<string> {
   const rawKey = Deno.env.get(ENV_KEY_NAME) ?? "";
   if (!rawKey) {
-    // Should have been caught at startup; fail loudly here too so there is
-    // no silent fallback path under any code ordering.
     throw new AccountFingerprintKeyMissingError();
   }
 
