@@ -338,15 +338,13 @@ Deno.serve(
       //   canonical_account_key \x00 currency)
       //
       // Computed after subaccount resolution so subaccount_id is bound into
-      // each fingerprint. This prevents cross-subaccount matching even if two
+      // each fingerprint, preventing cross-subaccount matching even if two
       // users share a provider account. Null for legacy callers that omit
       // currency, or for calls without a canonical_account_key.
       // Internal only: must never appear in any response, log, or error.
       //
-      // TOCTOU note: two concurrent connects can both pass the dedup SELECT
-      // seeing no existing row, then both insert and produce a duplicate.
-      // The correct backstop is a unique index on
-      // (connection_id, wallet_fingerprint) in source_wallets -- flagged to DBA.
+      // KMS stub: wallet fingerprints share OR_ACCT_FINGERPRINT_KEY_V1 for now.
+      // A dedicated wallet-fingerprint KMS key is pending Miguel's go-ahead.
       const accountKeyForFp =
         body.canonical_account_key && body.canonical_account_key.length > 0
           ? body.canonical_account_key
@@ -464,19 +462,28 @@ Deno.serve(
         );
       }
 
-      // 5. Mint the account emitted id and compute the account fingerprint.
-      //
-      // On a full first-connect or partial reconnect (some wallets new), we
-      // create a fresh connection for the new wallets. The account emitted id
-      // is minted once and never updated for the lifetime of the connection row.
+      // 5. Partial reconnect or first connect: mint a new connection for the
+      // wallets that do not yet exist on disk. A full reconnect was handled
+      // above and returned early.
+
+      // Mint the account emitted id (random, derived from nothing, stable
+      // forever) and compute the account fingerprint (internal only: must
+      // never appear in any response body, log line, or error message).
       const accountEmittedId = generateAccountEmittedId();
       const accountFingerprint = await computeAccountFingerprint(
         subaccountId,
-        body.provider_type as string,
+        body.provider_type!,
         canonicalAccountKey,
       );
 
-      // 6. Insert the encrypted connection.
+      // Insert the encrypted connection.
+      //
+      // Atomic connect flow (audit 2026-05-21 finding N6): when
+      // ATOMIC_CONFIRM_REQUIRED=true the consumer must call
+      // or-connection-confirm after its own local persist succeeds;
+      // until then the row sits as 'pending' and is janitored after
+      // 10 minutes if never confirmed. Default false preserves backward
+      // compatibility with V3/OW which haven't migrated yet.
       const { data: createdConn, error: insConnErr } = await serviceClient
         .from("connections")
         .insert({
@@ -497,43 +504,117 @@ Deno.serve(
       }
       const connectionId = createdConn.id as string;
 
-      // 7. Insert one source_wallet per new wallet.
+      // 6. Insert source_wallets for new wallets only.
       //
-      // wallet_fingerprint is the server-computed HMAC stored for future
-      // reconnect dedup. Null for legacy callers that did not supply currency.
-      const swRows = newWallets.map((w) => ({
-        connection_id: connectionId,
-        external_wallet_id: w.external_wallet_id!,
-        is_synced: true,
-        encrypted_metadata: w.encrypted_metadata!,
-        encrypted_metadata_key_version: 1,
-        wallet_fingerprint: resolvedFpMap.get(w) ?? null,
-      }));
+      // Split into two batches so a TOCTOU conflict on a fingerprinted wallet
+      // does not cause a batch rollback that drops a genuinely new null-
+      // fingerprint wallet in the same call.
+      //
+      // 6a. Null-fingerprint (legacy) wallets: insert normally. The partial
+      // unique index (uq_source_wallets_wallet_fingerprint WHERE wallet_fingerprint
+      // IS NOT NULL) does not cover NULLs, so these can never conflict.
+      const nullFpWallets = newWallets.filter((w) => resolvedFpMap.get(w) === null);
+      const fpWallets = newWallets.filter((w) => resolvedFpMap.get(w) !== null);
 
-      const { data: createdSws, error: insSwErr } = await serviceClient
-        .from("source_wallets")
-        .insert(swRows)
-        .select("id, external_wallet_id");
-      if (insSwErr || !createdSws || createdSws.length === 0) {
-        console.error("[or-link-complete] source_wallet insert failed:", insSwErr);
-        return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+      let nullFpInserted: Array<{ id: string; external_wallet_id: string }> = [];
+      if (nullFpWallets.length > 0) {
+        const nullRows = nullFpWallets.map((w) => ({
+          connection_id: connectionId,
+          external_wallet_id: w.external_wallet_id!,
+          is_synced: true,
+          encrypted_metadata: w.encrypted_metadata!,
+          encrypted_metadata_key_version: 1,
+          wallet_fingerprint: null,
+        }));
+        const { data: nullData, error: nullErr } = await serviceClient
+          .from("source_wallets")
+          .insert(nullRows)
+          .select("id, external_wallet_id");
+        if (nullErr || !nullData || nullData.length === 0) {
+          console.error("[or-link-complete] legacy wallet insert failed:", nullErr);
+          return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+        }
+        nullFpInserted = nullData.map((r) => ({
+          id: r.id as string,
+          external_wallet_id: r.external_wallet_id as string,
+        }));
       }
 
-      const newWalletRows = createdSws.map((row) => ({
-        id: row.id as string,
-        external_wallet_id: row.external_wallet_id as string,
-      }));
+      // 6b. Fingerprinted wallets: insert with ON CONFLICT (wallet_fingerprint)
+      // DO NOTHING, wired against the partial unique index from PR #165.
+      //
+      // If two concurrent connects both pass the dedup SELECT (step 4) and both
+      // try to insert the same fingerprint, the unique index rejects the second
+      // insert atomically. ignoreDuplicates: true means only newly inserted rows
+      // are returned; conflicted rows are re-read by fingerprint below so the
+      // correct existing row id is returned to the caller.
+      let fpInserted: Array<{ id: string; external_wallet_id: string }> = [];
+      if (fpWallets.length > 0) {
+        const fpRows = fpWallets.map((w) => ({
+          connection_id: connectionId,
+          external_wallet_id: w.external_wallet_id!,
+          is_synced: true,
+          encrypted_metadata: w.encrypted_metadata!,
+          encrypted_metadata_key_version: 1,
+          wallet_fingerprint: resolvedFpMap.get(w)!,
+        }));
+        const { data: fpData, error: fpErr } = await serviceClient
+          .from("source_wallets")
+          .insert(fpRows, { onConflict: "wallet_fingerprint", ignoreDuplicates: true })
+          .select("id, external_wallet_id, wallet_fingerprint");
+        if (fpErr) {
+          console.error("[or-link-complete] fingerprinted wallet insert failed:", fpErr);
+          return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+        }
 
-      // Combine new + pre-existing wallets (partial reconnect path).
-      const allSourceWallets = [...newWalletRows, ...existingWalletRows];
+        // Re-read any fingerprinted wallets that were silently deduped (not
+        // returned because ignoreDuplicates: true skips them) to get the
+        // pre-existing row id for the response.
+        const insertedFpSet = new Set(
+          (fpData ?? [])
+            .map((r) => r.wallet_fingerprint as string | null)
+            .filter((fp): fp is string => fp !== null),
+        );
+        const allRequestedFps = fpWallets.map((w) => resolvedFpMap.get(w) as string);
+        const conflictedFps = allRequestedFps.filter((fp) => !insertedFpSet.has(fp));
+
+        let recoveredRows: Array<{ id: string; external_wallet_id: string }> = [];
+        if (conflictedFps.length > 0) {
+          const { data: reread } = await serviceClient
+            .from("source_wallets")
+            .select("id, external_wallet_id")
+            .in("wallet_fingerprint", conflictedFps);
+          recoveredRows = (reread ?? []).map((r) => ({
+            id: r.id as string,
+            external_wallet_id: r.external_wallet_id as string,
+          }));
+        }
+
+        fpInserted = [
+          ...(fpData ?? []).map((r) => ({
+            id: r.id as string,
+            external_wallet_id: r.external_wallet_id as string,
+          })),
+          ...recoveredRows,
+        ];
+      }
+
+      // Partial reconnect: merge pre-existing wallets (from step 4 dedup) with
+      // newly inserted and TOCTOU-recovered ones.
+      const sourceWallets = [...existingWalletRows, ...nullFpInserted, ...fpInserted];
+
+      if (sourceWallets.length === 0) {
+        console.error("[or-link-complete] no source wallets after insert");
+        return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+      }
 
       return jsonResponse(
         {
           subaccount_id: subaccountId,
           connection_id: connectionId,
-          source_wallets: allSourceWallets,
+          source_wallets: sourceWallets,
           // Backward-compat: keep a single id when only one wallet was created.
-          source_wallet_id: allSourceWallets.length === 1 ? allSourceWallets[0].id : undefined,
+          source_wallet_id: sourceWallets.length === 1 ? sourceWallets[0].id : undefined,
           // Diagnostic: integrators that wire app_user_id wrong end up
           // creating a new subaccount on every connect. Surface the flag
           // so the consumer can warn the user "this looks like a fresh
@@ -546,7 +627,7 @@ Deno.serve(
       );
     } catch (err) {
       console.error("[or-link-complete] fatal:", err);
-      return jsonResponse({ error: "Internal error", detail: String(err) }, 500, cors);
+      return jsonResponse({ error: "Internal error" }, 500, cors);
     }
   }),
 );
