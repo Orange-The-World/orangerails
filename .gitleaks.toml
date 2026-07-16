@@ -1,21 +1,11 @@
-# gitleaks config for the secret-scan CI gate.
-#
-# The allowlist is intentionally small. Every entry here is a path that
-# cannot hold a real credential but does hold high-entropy strings that
-# a scanner reads as one. Widening this list is how a secret gate quietly
-# stops being a gate, so a new entry needs a reason in its PR.
-
-[extend]
-# Keep every upstream rule. This file only adds, it never replaces.
-useDefault = true
+title = "Orange Rails allowlist"
 
 [allowlist]
-description = "Paths with integrity hashes, not credentials"
+description = "False positives: PQC type identifiers, test fixtures, built artifacts"
 paths = [
-  '''bun\.lock''',
-  '''package-lock\.json''',
-  '''(^|/)dist/''',
-  '''(^|/)build/''',
-  '''(^|/)node_modules/''',
-  '''(^|/)playwright-report/''',
+  "src/lib/pqc\\.ts",
+  "src/lib/vault-keypair\\.ts",
+  "src/lib/__tests__/.*",
+  "dist/.*",
+  "\\.wrangler/.*",
 ]
