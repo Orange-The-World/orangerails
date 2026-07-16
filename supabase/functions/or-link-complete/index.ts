@@ -58,6 +58,7 @@
  */
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { toByteaHex } from "../_shared/bytea.ts";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
 import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
@@ -96,15 +97,6 @@ interface LinkCompleteBody {
   // Legacy single-wallet shape
   external_wallet_id?: string;
   encrypted_metadata?: string;
-}
-
-/**
- * Encode a MAC for the BYTEA column. PostgREST speaks BYTEA as a hex string with
- * a leading \x, both writing and reading, so fingerprints are compared in this
- * form rather than as raw bytes.
- */
-function toByteaHex(bytes: Uint8Array): string {
-  return "\\x" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function makeServiceClient(): SupabaseClient {
@@ -424,11 +416,19 @@ Deno.serve(
       // the legacy tokenless path, and the partial unique index on
       // wallet_fingerprint (WHERE wallet_fingerprint IS NOT NULL) is what keeps
       // an un-fingerprinted row legal.
+      // Keyed by external_wallet_id, holding the fingerprint already encoded for
+      // the wire. computeWalletFingerprint returns raw bytes, and raw bytes must
+      // never reach the client: a Uint8Array serialises to JSON as an array or an
+      // object, which the BYTEA column accepts and stores as something other than
+      // the 32 bytes meant. It would then be wrong and self-consistent, deduping
+      // happily against the wrong value with nothing raised. So encoding happens
+      // here, once, on the way out of the MAC, and everything downstream compares
+      // the same wire form that PostgREST reads back.
       const fingerprintByExternalId = new Map<string, string>();
       for (const w of wallets) {
         const d = discoveredByExternalId.get(w.external_wallet_id!);
         if (!d) continue;
-        const mac = await computeWalletFingerprint(
+        const mac: Uint8Array = await computeWalletFingerprint(
           subaccountId,
           d.providerType,
           d.accountKey,
