@@ -125,7 +125,7 @@ jobs:
           fi
 
       - name: Setup Supabase CLI
-        uses: supabase/setup-cli@v2
+        uses: supabase/setup-cli@v3
         with:
           version: latest
 
@@ -225,7 +225,7 @@ jobs:
             -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             --data-binary "@$PAYLOAD" | jq -r '.[].version' | sort -u)
-          echo "── already applied versions on ${SUPABASE_REF} ──"
+          echo "-- already applied versions on ${SUPABASE_REF} --"
           echo "$APPLIED" | tail -10
           echo
 
@@ -237,7 +237,7 @@ jobs:
             if echo "$APPLIED" | grep -qx "$VERSION"; then
               continue
             fi
-            echo "── applying ${BASENAME} ──"
+            echo "-- applying ${BASENAME} --"
 
             SQL_PAYLOAD=$(mktemp); chmod 600 "$SQL_PAYLOAD"
             jq -Rs --arg q "$(cat "$FILE")" '{query:$q}' < /dev/null > "$SQL_PAYLOAD"
@@ -249,11 +249,11 @@ jobs:
             rm -f "$SQL_PAYLOAD"
 
             if [[ ! "$CODE" =~ ^2 ]]; then
-              echo "  ✗ FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
+              echo "  x FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
               rm -f /tmp/mig.resp
               exit 1
             fi
-            echo "  ✓ SQL applied (HTTP $CODE)"
+            echo "  ok SQL applied (HTTP $CODE)"
 
             # Record in schema_migrations
             REC=$(mktemp); chmod 600 "$REC"
@@ -269,4 +269,4 @@ jobs:
           done
 
           echo
-          echo "── ${APPLIED_COUNT} migration(s) applied this run ──"
+          echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
