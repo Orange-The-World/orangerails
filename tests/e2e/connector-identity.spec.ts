@@ -4,7 +4,7 @@
  * Validates that server-side discovery correctly isolates Strike accounts:
  * each account now produces a distinct UUID wallet
  * identifier instead of the shared slug 'strike' that caused all accounts to
- * merge into a single source_wallets row (bitbooks#281).
+ * merge into a single source_wallets row.
  *
  * Test path: Playwright request context calls or-discover-wallets in
  * raw-credentials mode, exactly the network call the connect widget makes
