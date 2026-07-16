@@ -6,19 +6,26 @@
  * identifier instead of the shared slug 'strike' that caused all accounts to
  * merge into a single source_wallets row.
  *
- * Test path: Playwright request context calls or-discover-wallets in
- * raw-credentials mode, exactly the network call the connect widget makes
- * after the server-side discovery wiring. No browser window required; the identity
- * logic under test lives entirely in the edge function + Strike adapter.
+ * Test path: Playwright request context calls or-discover-wallets and
+ * or-link-complete over HTTP, the same network calls the connect widget makes.
+ * No browser window is opened.
  *
- * Cases runnable in this PR:
- *   1  Strike account A          -> exactly 1 wallet, UUID v4
- *   2  Strike account B          -> 1 wallet, UUID v4, wallet_fingerprint absent
+ * SCOPE, and read this before trusting a green run: this suite proves the EDGE
+ * FUNCTION contract and nothing above it. It never loads src/routes/connect.tsx,
+ * so whatever the widget does with these responses before postMessage'ing them
+ * to the integrating app is invisible here. A pass means the API behaved, not
+ * that the integrator received what it expects.
+ *
+ * Cases:
+ *   1  Strike account A   -> one wallet per active currency, UUID v4
+ *   2  Strike account B   -> UUID v4, no merge with A, fingerprint absent
+ *   3  Reconnect A        -> same rows, same stored ids, no duplicates
  *   5  No-id / zero-invoice provider -> error, no orphan wallet
  *
- * Cases stubbed (test.skip) pending dependencies:
- *   3  Reconnect A -> no duplicate source_wallet row  [needs reconnect dedup]
- *   4  BTC+USD Strike account -> 2 wallets            [needs per-currency adapter]
+ * Case 4 (BTC+USD -> 2 wallets) is gone, not skipped. It was stubbed pending
+ * the per-currency adapter, which shipped; Case 1 now asserts exactly what it
+ * would have, against the account that actually holds both currencies. A
+ * permanently skipped test reports nothing while looking like coverage.
  *
  * Required env vars (all optional at call time; suite skips when absent):
  *   ACCOUNT_A                   Strike API key for account A
@@ -129,6 +136,67 @@ async function callDiscover(
   return { status: resp.status(), body };
 }
 
+/** One wallet as or-link-complete returns it. */
+type LinkedWallet = { id: string; external_wallet_id: string };
+
+/**
+ * Call or-link-complete with the wallets a discover call just produced.
+ *
+ * The widget_token MUST be the same one passed to the discover call that
+ * produced these wallets: or-link-complete reads the account key back from
+ * discovery_sessions keyed on that token, and without a matching row it cannot
+ * fingerprint the wallets and silently skips dedup. A token is single-use here
+ * (unlike discover), so each link-complete needs its own freshly minted one.
+ *
+ * encrypted_metadata / encrypted_label / encrypted_credentials are stored
+ * opaquely and never decrypted server-side, so any well-formed ciphertext is
+ * accepted. We send real AES-GCM output rather than a literal to keep the
+ * request shaped exactly like the widget's.
+ */
+async function callLinkComplete(
+  request: APIRequestContext,
+  wallets: Array<{ external_wallet_id: string }>,
+  widgetToken: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const resp = await request.post(`${FN}/or-link-complete`, {
+    headers: { 'Content-Type': 'application/json' },
+    data: {
+      platform_slug:         PLATFORM_SLUG,
+      app_user_id:           APP_USER_ID,
+      provider_type:         'strike',
+      encrypted_label:       aesEncrypt('e2e connection').ciphertextB64,
+      encrypted_credentials: aesEncrypt(JSON.stringify({ api_key: STRIKE_KEY_A })).ciphertextB64,
+      wallets: wallets.map((w) => ({
+        external_wallet_id: w.external_wallet_id,
+        encrypted_metadata: aesEncrypt(JSON.stringify({ currency: 'BTC' })).ciphertextB64,
+      })),
+      widget_token: widgetToken,
+    },
+  });
+  let body: Record<string, unknown> = {};
+  try { body = await resp.json(); } catch { /* ignore parse errors on error responses */ }
+  return { status: resp.status(), body };
+}
+
+/** Discover with key A, then link those wallets. Returns the persisted rows. */
+async function discoverAndLink(
+  request: APIRequestContext,
+  strikeApiKey: string,
+): Promise<LinkedWallet[]> {
+  const token = await mintToken(request);
+  const { status: dStatus, body: dBody } = await callDiscover(request, strikeApiKey, token);
+  expect(dStatus, 'discover must return 200 before linking').toBe(200);
+  const discovered = dBody.discovered_wallets as Array<{ external_wallet_id: string }>;
+  expect(Array.isArray(discovered), 'discover must return an array').toBe(true);
+  expect(discovered.length, 'discover must return at least one wallet to link').toBeGreaterThan(0);
+
+  const { status: lStatus, body: lBody } = await callLinkComplete(request, discovered, token);
+  expect(lStatus, `or-link-complete must return 200, got ${lStatus}`).toBe(200);
+  const linked = lBody.source_wallets as LinkedWallet[];
+  expect(Array.isArray(linked), 'source_wallets must be an array').toBe(true);
+  return linked;
+}
+
 // --- Suite -------------------------------------------------------------------
 
 test.describe('Connector identity -- Strike account isolation', () => {
@@ -154,7 +222,7 @@ test.describe('Connector identity -- Strike account isolation', () => {
 
   // -- Case 1 -----------------------------------------------------------------
   test(
-    'Case 1: Strike account A -> exactly 1 wallet, UUID v4 format',
+    'Case 1: Strike account A -> one wallet per active currency, UUID v4 format',
     async ({ request }) => {
       const { status, body } = await callDiscover(request, STRIKE_KEY_A, sharedToken);
       console.log(`[e2e:case1] status=${status}`, JSON.stringify(body));
@@ -167,25 +235,41 @@ test.describe('Connector identity -- Strike account isolation', () => {
         label?: string;
       }> | undefined;
       expect(Array.isArray(wallets), 'discovered_wallets must be an array').toBe(true);
-      expect(
-        wallets!.length,
-        'Strike account A must yield exactly 1 wallet (one account, one identity)',
-      ).toBe(1);
 
-      const w = wallets![0];
-      // Server-side discovery changed external_wallet_id from the shared slug
-      // ('strike') to a per-call UUID v4. Assert the UUID shape.
+      // The adapter emits one wallet per ACTIVE currency (non-zero balance OR
+      // transaction history), so a Strike account is not "one account, one
+      // wallet". The earlier toBe(1) here predates that and asserted the
+      // pre-per-currency shape: it went red against correct code the first time
+      // the suite genuinely ran, which is the only reason we know it was stale.
+      //
+      // Account A holds both BTC and USD, so both must come back. This is
+      // deliberately not an exact-set assertion: a currency the account starts
+      // using later is correct behaviour and must not turn this red. What must
+      // never happen is collapsing back to a single wallet, which is the bug
+      // this case exists to catch.
+      const currencies = wallets!.map((w) => w.currency);
+      expect(currencies, 'account A must yield a BTC wallet').toContain('BTC');
+      expect(currencies, 'account A must yield a USD wallet').toContain('USD');
       expect(
-        w.external_wallet_id,
-        'external_wallet_id must be a UUID v4 (not the old slug)',
-      ).toMatch(UUID_V4);
+        new Set(currencies).size,
+        'each active currency must map to exactly one wallet, never two',
+      ).toBe(currencies.length);
 
-      // wallet_fingerprint is the INTERNAL HMAC of the Strike receiverId.
-      // It must never appear in an API response (Auditor gate 4).
-      expect(
-        (w as Record<string, unknown>).wallet_fingerprint,
-        'wallet_fingerprint must not leak into the discover response',
-      ).toBeUndefined();
+      for (const w of wallets!) {
+        // Server-side discovery changed external_wallet_id from the shared slug
+        // ('strike') to a per-call UUID v4. Assert the UUID shape.
+        expect(
+          w.external_wallet_id,
+          `external_wallet_id for ${w.currency} must be a UUID v4 (not the old slug)`,
+        ).toMatch(UUID_V4);
+
+        // wallet_fingerprint is the INTERNAL HMAC of the Strike receiverId.
+        // It must never appear in an API response (Auditor gate 4).
+        expect(
+          (w as Record<string, unknown>).wallet_fingerprint,
+          'wallet_fingerprint must not leak into the discover response',
+        ).toBeUndefined();
+      }
     },
   );
 
@@ -233,45 +317,65 @@ test.describe('Connector identity -- Strike account isolation', () => {
     },
   );
 
-  // -- Case 3 (stub) ----------------------------------------------------------
-  test.skip(
-    'Case 3: reconnect Strike account A -> no duplicate source_wallet row created',
-    async () => {
-      // Enable once the wallet_fingerprint reconnect dedup lands.
-      //
-      // When enabled:
-      //   1. Call or-link-complete with Strike key A -> note source_wallet row W1
-      //   2. Delete the connection (or-connection-delete)
-      //   3. Call or-link-complete with Strike key A again -> connection C2
-      //   4. Query source_wallets WHERE connection_id = C2
-      //   5. Assert the existing W1 external_wallet_id is reused (fingerprint match),
-      //      not a fresh UUID row.
-      //
-      // The dedup logic: or-source-wallets-set looks for an existing row
-      // WHERE wallet_fingerprint = HMAC(key, receiverId), and if found
-      // carries forward its external_wallet_id instead of inserting a new one.
+  // -- Case 3 -----------------------------------------------------------------
+  //
+  // The reconnect dedup is the one behaviour with no live evidence behind it.
+  // Cases 1, 2, 4 and 5 exercise or-discover-wallets, but dedup does not live
+  // there: it lives in or-link-complete, which nothing in this suite called
+  // until now. The previous stub named or-source-wallets-set, which does not
+  // own this logic, so enabling it as written would have proved nothing.
+  //
+  // What makes reconnect a real test rather than a repeat of Case 1: Strike
+  // mints a fresh random external_wallet_id on EVERY discover call, so the
+  // second connect arrives carrying ids the database has never seen. Only the
+  // wallet_fingerprint (equal across both calls, since it is an HMAC over the
+  // stable receiverId and currency) can match them to the existing rows. If
+  // dedup is broken, the second connect inserts a duplicate set and the row
+  // count doubles.
+  //
+  // HONEST LIMIT, so a green tick here is not over-read: this asserts the API
+  // contract only. The suite drives the edge functions over HTTP and never
+  // loads the widget, so anything the browser does with this response is
+  // outside what this case can see.
+  test(
+    'Case 3: reconnect Strike account A -> same rows, no duplicates',
+    async ({ request }) => {
+      const first = await discoverAndLink(request, STRIKE_KEY_A);
+      console.log('[e2e:case3] first connect', JSON.stringify(first));
+      expect(first.length, 'first connect must persist at least one wallet').toBeGreaterThan(0);
+
+      // Reconnect: a fresh token, a fresh discover, therefore brand new
+      // external_wallet_ids on the wire for wallets we already hold.
+      const second = await discoverAndLink(request, STRIKE_KEY_A);
+      console.log('[e2e:case3] reconnect', JSON.stringify(second));
+
+      expect(
+        second.length,
+        'reconnect must return the same number of wallets, not a duplicated set',
+      ).toBe(first.length);
+
+      // Assertion 1: the same source_wallets rows. This is the anchor the
+      // integrating app stores, so a new id here means a duplicate wallet
+      // appearing in the customer's books, which is the original bug.
+      expect(
+        [...second.map((w) => w.id)].sort(),
+        'reconnect must return the SAME source_wallets row ids (dedup by fingerprint)',
+      ).toEqual([...first.map((w) => w.id)].sort());
+
+      // Assertion 2: the same external_wallet_ids. or-link-complete returns the
+      // STORED id on a fingerprint match, never the ephemeral one just minted.
+      // Without this, a future change could start handing back the fresh id and
+      // every reconnect would look new to the integrator, with nothing red.
+      expect(
+        [...second.map((w) => w.external_wallet_id)].sort(),
+        'reconnect must return the STORED external_wallet_id, not the freshly minted one',
+      ).toEqual([...first.map((w) => w.external_wallet_id)].sort());
     },
   );
 
-  // -- Case 4 (stub) ----------------------------------------------------------
-  test.skip(
-    'Case 4: BTC+USD Strike account -> 2 wallets, one per currency',
-    async () => {
-      // Enable once the per-currency Strike adapter ships.
-      //
-      // When enabled:
-      //   const { status, body } = await callDiscover(request, STRIKE_KEY_B, token);
-      //   expect(status).toBe(200);
-      //   const wallets = body.discovered_wallets as DiscoveredWallet[];
-      //   expect(wallets).toHaveLength(2);
-      //   const currencies = wallets.map(w => w.currency).sort();
-      //   expect(currencies).toEqual(['BTC', 'USD']);
-      //   wallets.forEach(w => expect(w.external_wallet_id).toMatch(UUID_V4));
-      //
-      // Dependency: the Strike adapter must split multi-currency balances
-      // into separate DiscoveredWallet entries (one per non-zero balance).
-    },
-  );
+  // Case 4 (BTC+USD -> 2 wallets) was removed rather than enabled: it targeted
+  // account B, which holds only BTC, and Case 1 now makes its assertion against
+  // account A, which holds both. See the module header.
 
   // -- Case 5 -----------------------------------------------------------------
   test(
