@@ -12,22 +12,21 @@
  * logic under test lives entirely in the edge function + Strike adapter.
  *
  * Cases runnable in this PR:
- *   1  Strike account A (STRIKE_KEY_BITBOOKS)    -> exactly 1 wallet, UUID v4
- *   2  Strike account B (STRIKE_KEY_PERSONAL_MX) -> 1 wallet, UUID v4,
- *                                                   wallet_fingerprint absent
- *   5  No-id / zero-invoice provider             -> error, no orphan wallet
+ *   1  Strike account A          -> exactly 1 wallet, UUID v4
+ *   2  Strike account B          -> 1 wallet, UUID v4, wallet_fingerprint absent
+ *   5  No-id / zero-invoice provider -> error, no orphan wallet
  *
  * Cases stubbed (test.skip) pending dependencies:
  *   3  Reconnect A -> no duplicate source_wallet row  [needs #153]
  *   4  BTC+USD Strike account -> 2 wallets            [needs per-currency adapter]
  *
  * Required env vars (all optional at call time; suite skips when absent):
- *   STRIKE_KEY_BITBOOKS         Strike API key for account A
- *   STRIKE_KEY_PERSONAL_MX      Strike API key for account B
+ *   ACCOUNT_A                   Strike API key for account A
+ *   ACCOUNT_B                   Strike API key for account B
  *   OR_TEST_PLATFORM_API_KEY    X-Platform-API-Key for minting widget tokens on dev
  *   OR_TEST_PLATFORM_SLUG       Platform slug matching platforms.slug in dev Supabase
+ *   OR_API_BASE_URL             Supabase project URL (required; no default)
  *   OR_TEST_APP_USER_ID         App user ID for the test session (default: e2e-identity-test)
- *   OR_API_BASE_URL             Supabase project URL (default: dev project)
  */
 
 import { test, expect, type APIRequestContext } from '@playwright/test';
@@ -35,12 +34,11 @@ import { createCipheriv, randomBytes } from 'node:crypto';
 
 // --- Environment -------------------------------------------------------------
 
-const OR_API =
-  process.env.OR_API_BASE_URL ?? 'https://fzwmnzmtqidumdqjdddz.supabase.co';
+const OR_API = process.env.OR_API_BASE_URL ?? '';
 const FN = `${OR_API}/functions/v1`;
 
-const STRIKE_KEY_A      = process.env.STRIKE_KEY_BITBOOKS ?? '';
-const STRIKE_KEY_B      = process.env.STRIKE_KEY_PERSONAL_MX ?? '';
+const STRIKE_KEY_A      = process.env.ACCOUNT_A ?? '';
+const STRIKE_KEY_B      = process.env.ACCOUNT_B ?? '';
 const PLATFORM_API_KEY  = process.env.OR_TEST_PLATFORM_API_KEY ?? '';
 const PLATFORM_SLUG     = process.env.OR_TEST_PLATFORM_SLUG ?? '';
 const APP_USER_ID       = process.env.OR_TEST_APP_USER_ID ?? 'e2e-identity-test';
@@ -137,8 +135,8 @@ test.describe('Connector identity -- Strike account isolation', () => {
   // Skip the entire suite when required secrets are not present.
   // In CI these are repository secrets; locally set them in .env.test.
   test.skip(
-    !STRIKE_KEY_A || !STRIKE_KEY_B || !PLATFORM_API_KEY || !PLATFORM_SLUG,
-    'Requires STRIKE_KEY_BITBOOKS, STRIKE_KEY_PERSONAL_MX, ' +
+    !OR_API || !STRIKE_KEY_A || !STRIKE_KEY_B || !PLATFORM_API_KEY || !PLATFORM_SLUG,
+    'Requires OR_API_BASE_URL, ACCOUNT_A, ACCOUNT_B, ' +
     'OR_TEST_PLATFORM_API_KEY, OR_TEST_PLATFORM_SLUG env vars.',
   );
 
@@ -154,9 +152,9 @@ test.describe('Connector identity -- Strike account isolation', () => {
     sharedToken = await mintToken(request);
   });
 
-  // ── Case 1 ─────────────────────────────────────────────────────────────
+  // -- Case 1 -----------------------------------------------------------------
   test(
-    'Case 1: Strike account A (Bitbooks) -> exactly 1 wallet, UUID v4 format',
+    'Case 1: Strike account A -> exactly 1 wallet, UUID v4 format',
     async ({ request }) => {
       const { status, body } = await callDiscover(request, STRIKE_KEY_A, sharedToken);
       console.log(`[e2e:case1] status=${status}`, JSON.stringify(body));
@@ -191,9 +189,9 @@ test.describe('Connector identity -- Strike account isolation', () => {
     },
   );
 
-  // ── Case 2 ─────────────────────────────────────────────────────────────
+  // -- Case 2 -----------------------------------------------------------------
   test(
-    'Case 2: Strike account B (Personal MX) -> 1 wallet, UUID v4, no merge with A',
+    'Case 2: Strike account B -> 1 wallet, UUID v4, no merge with A',
     async ({ request }) => {
       const { status, body } = await callDiscover(request, STRIKE_KEY_B, sharedToken);
       console.log(`[e2e:case2] status=${status}`, JSON.stringify(body));
@@ -229,16 +227,13 @@ test.describe('Connector identity -- Strike account isolation', () => {
 
       // NOTE: external_wallet_id is a fresh random UUID on EVERY discoverWallets()
       // call (minted, not stored). The "no merge" guarantee lives one layer deeper:
-      // or-source-wallets-set uses the HMAC wallet_fingerprint (Strike receiverId
-      // keyed with OR_ACCT_FINGERPRINT_KEY_V1) to dedup rows. Two different Strike
-      // accounts have different receiverIds -> different fingerprints -> distinct
-      // source_wallet rows on save. The CTO's concurrent data-level proof validates
-      // the fingerprint and DB dedup. This spec validates the API contract: both
-      // accounts return a correctly formed UUID, not the shared slug.
+      // or-source-wallets-set uses the HMAC wallet_fingerprint to dedup rows.
+      // Two different Strike accounts have different receiverIds -> different
+      // fingerprints -> distinct source_wallet rows on save.
     },
   );
 
-  // ── Case 3 (stub) ──────────────────────────────────────────────────────
+  // -- Case 3 (stub) ----------------------------------------------------------
   test.skip(
     'Case 3: reconnect Strike account A -> no duplicate source_wallet row created',
     async () => {
@@ -258,14 +253,14 @@ test.describe('Connector identity -- Strike account isolation', () => {
     },
   );
 
-  // ── Case 4 (stub) ──────────────────────────────────────────────────────
+  // -- Case 4 (stub) ----------------------------------------------------------
   test.skip(
     'Case 4: BTC+USD Strike account -> 2 wallets, one per currency',
     async () => {
       // Enable once the per-currency Strike adapter ships.
       //
       // When enabled:
-      //   const { status, body } = await callDiscover(request, STRIKE_KEY_PERSONAL_MX, token);
+      //   const { status, body } = await callDiscover(request, STRIKE_KEY_B, token);
       //   expect(status).toBe(200);
       //   const wallets = body.discovered_wallets as DiscoveredWallet[];
       //   expect(wallets).toHaveLength(2);
@@ -278,7 +273,7 @@ test.describe('Connector identity -- Strike account isolation', () => {
     },
   );
 
-  // ── Case 5 ─────────────────────────────────────────────────────────────
+  // -- Case 5 -----------------------------------------------------------------
   test(
     'Case 5: no-id / invalid Strike key -> error response, no orphan wallet',
     async ({ request }) => {
