@@ -136,8 +136,18 @@ async function callDiscover(
   return { status: resp.status(), body };
 }
 
-/** One wallet as or-link-complete returns it. */
-type LinkedWallet = { id: string; external_wallet_id: string };
+/**
+ * One wallet as or-link-complete returns it.
+ *
+ * external_wallet_id is the STORED id (stable across reconnects).
+ * submitted_external_wallet_id is the id the caller sent on THIS request. The
+ * two are equal on a first connect and differ on a reconnect.
+ */
+type LinkedWallet = {
+  id: string;
+  external_wallet_id: string;
+  submitted_external_wallet_id: string;
+};
 
 /**
  * Call or-link-complete with the wallets a discover call just produced.
@@ -178,11 +188,15 @@ async function callLinkComplete(
   return { status: resp.status(), body };
 }
 
-/** Discover with key A, then link those wallets. Returns the persisted rows. */
+/**
+ * Discover, then link those wallets. Returns the persisted rows AND the
+ * ephemeral ids we sent, which the caller needs to check the echo: they are
+ * minted fresh per discovery and exist nowhere else after this call.
+ */
 async function discoverAndLink(
   request: APIRequestContext,
   strikeApiKey: string,
-): Promise<LinkedWallet[]> {
+): Promise<{ linked: LinkedWallet[]; sent: string[] }> {
   const token = await mintToken(request);
   const { status: dStatus, body: dBody } = await callDiscover(request, strikeApiKey, token);
   expect(dStatus, 'discover must return 200 before linking').toBe(200);
@@ -194,7 +208,7 @@ async function discoverAndLink(
   expect(lStatus, `or-link-complete must return 200, got ${lStatus}`).toBe(200);
   const linked = lBody.source_wallets as LinkedWallet[];
   expect(Array.isArray(linked), 'source_wallets must be an array').toBe(true);
-  return linked;
+  return { linked, sent: discovered.map((w) => w.external_wallet_id) };
 }
 
 // --- Suite -------------------------------------------------------------------
@@ -340,14 +354,14 @@ test.describe('Connector identity -- Strike account isolation', () => {
   test(
     'Case 3: reconnect Strike account A -> same rows, no duplicates',
     async ({ request }) => {
-      const first = await discoverAndLink(request, STRIKE_KEY_A);
+      const { linked: first } = await discoverAndLink(request, STRIKE_KEY_A);
       console.log('[e2e:case3] first connect', JSON.stringify(first));
       expect(first.length, 'first connect must persist at least one wallet').toBeGreaterThan(0);
 
       // Reconnect: a fresh token, a fresh discover, therefore brand new
       // external_wallet_ids on the wire for wallets we already hold.
-      const second = await discoverAndLink(request, STRIKE_KEY_A);
-      console.log('[e2e:case3] reconnect', JSON.stringify(second));
+      const { linked: second, sent: secondSent } = await discoverAndLink(request, STRIKE_KEY_A);
+      console.log('[e2e:case3] reconnect', JSON.stringify(second), 'sent', JSON.stringify(secondSent));
 
       expect(
         second.length,
@@ -370,6 +384,29 @@ test.describe('Connector identity -- Strike account isolation', () => {
         [...second.map((w) => w.external_wallet_id)].sort(),
         'reconnect must return the STORED external_wallet_id, not the freshly minted one',
       ).toEqual([...first.map((w) => w.external_wallet_id)].sort());
+
+      // Assertion 3: every wallet echoes back the id WE sent on this call.
+      //
+      // This is the pin under the caller's ability to correlate the response to
+      // its own request. Assertions 1 and 2 prove the stored ids are stable,
+      // which is precisely what makes them useless for correlation: the caller
+      // holds this wallet's currency and label keyed by the ephemeral id, and on
+      // a reconnect the stored id matches none of them. Without the echo the
+      // caller cannot tell which returned wallet is which, and the failure is
+      // silent, because a lookup that misses just yields nothing.
+      const sentSecond = second.map((w) => w.submitted_external_wallet_id).sort();
+      expect(
+        sentSecond,
+        'every returned wallet must echo the external_wallet_id sent in THIS request',
+      ).toEqual([...secondSent].sort());
+
+      // And the proof that reconnect is genuinely the interesting case: the ids
+      // we sent the second time are all new, so the echo is doing real work
+      // rather than trivially agreeing with the stored id.
+      expect(
+        sentSecond,
+        'reconnect must be exercising fresh ids, or this case proves nothing',
+      ).not.toEqual([...second.map((w) => w.external_wallet_id)].sort());
     },
   );
 

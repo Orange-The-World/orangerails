@@ -752,7 +752,11 @@ async function callLinkComplete(payload: {
 }): Promise<{
   subaccount_id: string;
   connection_id: string;
-  source_wallets: Array<{ id: string; external_wallet_id: string }>;
+  source_wallets: Array<{
+    id: string;
+    external_wallet_id: string;
+    submitted_external_wallet_id: string;
+  }>;
 }> {
   const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
   if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
@@ -778,7 +782,11 @@ async function callLinkComplete(payload: {
   return data as {
     subaccount_id: string;
     connection_id: string;
-    source_wallets: Array<{ id: string; external_wallet_id: string }>;
+    source_wallets: Array<{
+      id: string;
+      external_wallet_id: string;
+      submitted_external_wallet_id: string;
+    }>;
   };
 }
 
@@ -1222,14 +1230,36 @@ function ConnectPageInner() {
       // currency + label for each wallet so the integrating app can
       // render them without re-decrypting.
       const enrichedSourceWallets = result.source_wallets.map((sw) => {
+        // Match on submitted_external_wallet_id, NOT external_wallet_id.
+        //
+        // walletCiphertexts is keyed by the id THIS discovery minted, and the
+        // adapter mints a fresh one every call. On a reconnect the server
+        // returns the STORED id instead, so matching on external_wallet_id finds
+        // nothing and every wallet goes out with a blank currency and label.
+        // submitted_external_wallet_id is the server echoing our own id back, so
+        // it matches on both first connect and reconnect.
         const meta = locked.walletCiphertexts.find(
-          (w) => w.external_wallet_id === sw.external_wallet_id,
+          (w) => w.external_wallet_id === sw.submitted_external_wallet_id,
         );
+
+        // Unreachable: the server echoes an id we sent, and every id we sent came
+        // from walletCiphertexts. If it does happen the correlation is broken and
+        // the integrating app is about to book a wallet with no currency on it,
+        // so say so instead of shipping an empty string. The previous `?? ""`
+        // here is exactly how the reconnect bug stayed invisible: nothing threw,
+        // nothing logged, and the blank went out looking like data.
+        if (!meta) {
+          throw new Error(
+            `Could not match wallet ${sw.id} back to its metadata. ` +
+              "Refusing to report a wallet with no currency.",
+          );
+        }
+
         return {
           id: sw.id,
           external_wallet_id: sw.external_wallet_id,
-          currency: meta?.currency ?? "",
-          label: meta?.label ?? "",
+          currency: meta.currency,
+          label: meta.label,
         };
       });
 
