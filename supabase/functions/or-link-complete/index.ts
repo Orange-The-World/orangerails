@@ -7,6 +7,23 @@
  * credential, and creates one source_wallet per picked entry. Returns
  * the array of source_wallet_ids so the integrating app can persist them.
  *
+ * Reconnect dedup (#153): connecting the same provider account twice must
+ * reuse the existing source_wallet rows, not pile up duplicates. It cannot
+ * dedup on external_wallet_id, because the adapter mints that as a fresh
+ * opaque UUID on every discovery: the same wallet looks brand new each time.
+ * So dedup keys on wallet_fingerprint, a MAC over the provider's real
+ * per-account key. That key never travels through the client. or-discover-wallets
+ * records it server-side in discovery_sessions, and this function reads it back
+ * by (widget session, external_wallet_id) when the user commits.
+ *
+ * A legacy tokenless caller has no widget session, so it has no recorded account
+ * key, so its wallets cannot be fingerprinted and do not take part in dedup:
+ * they insert exactly as they always have. An un-fingerprinted row stays legal
+ * because Postgres treats NULLs as distinct in a unique index, so the plain
+ * unique index on source_wallets.wallet_fingerprint tolerates unlimited NULL
+ * fingerprints. That property, not any index predicate, is what the legacy path
+ * rests on.
+ *
  * Auth: widget_token (the integrating app's backend calls or-link-mint-token
  * server-to-server BEFORE opening the widget URL; the widget passes the
  * token back here for verification). Audit 2026-05-16 High #3.
@@ -22,7 +39,6 @@
  *   provider_type:          string  'blink' for now
  *   encrypted_label:        string  base64 AES-256-GCM ciphertext (connection-level label)
  *   encrypted_credentials:  string  base64 AES-256-GCM ciphertext (provider API key)
- *   canonical_account_key:  string  optional, provider-level account id for fingerprinting
  *   wallets: Array<{
  *     external_wallet_id:    string   opaque provider wallet ID
  *     encrypted_metadata:    string   base64 AES-256-GCM ciphertext (currency/label)
@@ -44,12 +60,14 @@
  */
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { toByteaHex } from "../_shared/bytea.ts";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
 import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
 import { wrapSentryHandler } from "../_shared/sentry.ts";
 import {
   computeAccountFingerprint,
+  computeWalletFingerprint,
   generateAccountEmittedId,
   guardAccountFingerprintKey,
 } from "../_shared/account-fingerprint.ts";
@@ -69,10 +87,13 @@ interface LinkCompleteBody {
   encrypted_label?: string;
   encrypted_credentials?: string;
   // Audit 2026-05-16 High #3: short-lived session token from or-link-mint-token.
+  // Doubles as the discovery_sessions.widget_session_id we read the server-side
+  // account key back by: it is the pending_widget_sessions row id.
   widget_token?: string;
-  // Optional stable provider-level account id for fingerprinting. When
-  // absent, the sorted external_wallet_id values are used as a fallback.
-  canonical_account_key?: string;
+  // NOTE: canonical_account_key is deliberately absent. The account key must be
+  // read server-side from discovery_sessions, where or-discover-wallets recorded
+  // it, and must never be supplied by the caller. Do not reintroduce a
+  // client-supplied account key.
   // New multi-wallet shape
   wallets?: InboundWallet[];
   // Legacy single-wallet shape
@@ -168,16 +189,6 @@ Deno.serve(
         }
       }
 
-      // Derive canonical account key for fingerprinting. The caller may supply
-      // an explicit value (e.g. a provider-level account id such as a Blink
-      // username or Strike issuer id). If absent, fall back to the sorted,
-      // pipe-delimited external_wallet_id values, which are already stable,
-      // non-sensitive provider identifiers.
-      const canonicalAccountKey =
-        body.canonical_account_key && body.canonical_account_key.length > 0
-          ? body.canonical_account_key
-          : wallets.map((w) => w.external_wallet_id!).sort().join("|");
-
       const serviceClient = makeServiceClient();
 
       // 1. Resolve platform by slug.
@@ -261,7 +272,85 @@ Deno.serve(
         );
       }
 
-      // 2. Provision (or look up) the subaccount.
+      // 2. Read the server-side account identity for the picked wallets.
+      //
+      // or-discover-wallets recorded (provider_type, account_key, currency) per
+      // discovered wallet under this widget session, keyed by the opaque
+      // external_wallet_id it handed the client. That table is the only
+      // trustworthy source for the account key: it is service-role only, and the
+      // key is stripped from the discovery response so the client never holds it.
+      //
+      // A tokenless legacy call has no widget session and therefore no rows. That
+      // is not an error: it means we cannot fingerprint those wallets, so dedup
+      // is skipped for them and they insert as they always have.
+      const discoveredByExternalId = new Map<
+        string,
+        { accountKey: string; currency: string; providerType: string }
+      >();
+      if (body.widget_token) {
+        const { data: discovered, error: discErr } = await serviceClient
+          .from("discovery_sessions")
+          .select("external_wallet_id, provider_type, account_key, currency")
+          .eq("widget_session_id", body.widget_token)
+          .in("external_wallet_id", wallets.map((w) => w.external_wallet_id!))
+          .gt("expires_at", new Date().toISOString());
+        if (discErr) {
+          // Fail closed. Continuing here would silently skip dedup on a flow
+          // that is supposed to have it, which is the duplicate bug #153 exists
+          // to kill. The message is swallowed: it can carry the account key.
+          console.error("[or-link-complete] discovery_sessions read failed:", discErr.message);
+          return jsonResponse({ error: "Failed to resolve wallet identity" }, 500, cors);
+        }
+        for (const row of discovered ?? []) {
+          discoveredByExternalId.set(row.external_wallet_id as string, {
+            accountKey: row.account_key as string,
+            currency: row.currency as string,
+            providerType: row.provider_type as string,
+          });
+        }
+      }
+
+      // The recorded provider_type is server-side truth; body.provider_type is
+      // whatever the caller claimed. If they disagree, something is wrong and a
+      // fingerprint built on the claim would be meaningless, so refuse rather
+      // than guess which one is right.
+      for (const [externalWalletId, d] of discoveredByExternalId) {
+        if (d.providerType !== body.provider_type) {
+          console.error(
+            "[or-link-complete] provider_type mismatch for external_wallet_id=%s: " +
+              "session recorded %s, request claimed %s",
+            externalWalletId,
+            d.providerType,
+            body.provider_type,
+          );
+          return jsonResponse({ error: "provider_type does not match the widget session" }, 400, cors);
+        }
+      }
+
+      // One API key is one provider account, so every wallet discovered under
+      // this session must carry the same account key. More than one distinct key
+      // means the session is mixing accounts, which a single connection row
+      // cannot represent: fail rather than pick one and fingerprint the rest
+      // against the wrong account.
+      const distinctAccountKeys = new Set([...discoveredByExternalId.values()].map((d) => d.accountKey));
+      if (distinctAccountKeys.size > 1) {
+        console.error(
+          "[or-link-complete] widget session spans %d distinct account keys",
+          distinctAccountKeys.size,
+        );
+        return jsonResponse({ error: "Wallet selection spans multiple accounts" }, 400, cors);
+      }
+
+      // Canonical account key for the CONNECTION fingerprint. Prefer the
+      // server-recorded key. With no discovery rows (legacy tokenless call) keep
+      // the historical fallback of the sorted external_wallet_id values, so this
+      // change does not alter behaviour on that path.
+      const canonicalAccountKey =
+        distinctAccountKeys.size === 1
+          ? [...distinctAccountKeys][0]
+          : wallets.map((w) => w.external_wallet_id!).sort().join("|");
+
+      // 3. Provision (or look up) the subaccount.
       let subaccountId: string;
       let subaccountWasNewlyCreated = false;
       const { data: existingSub } = await serviceClient
@@ -312,18 +401,6 @@ Deno.serve(
         subaccountWasNewlyCreated = true;
       }
 
-      // Mint the account emitted id (random, derived from nothing, stable
-      // forever) and compute the fingerprint (internal only: the fingerprint
-      // must never appear in any response body, log line, or error message).
-      const accountEmittedId = generateAccountEmittedId();
-      const accountFingerprint = await computeAccountFingerprint(
-        subaccountId,
-        body.provider_type as string,
-        canonicalAccountKey,
-      );
-
-      // 3. Insert the encrypted connection.
-      //
       // Atomic connect flow (audit 2026-05-21 finding N6): when
       // ATOMIC_CONFIRM_REQUIRED=true the consumer must call
       // or-connection-confirm after its own local persist succeeds;
@@ -333,6 +410,128 @@ Deno.serve(
       const atomicConfirmRequired =
         (Deno.env.get("ATOMIC_CONFIRM_REQUIRED") ?? "false").toLowerCase() === "true";
       const initialStatus = atomicConfirmRequired ? "pending" : "active";
+
+      // 4. Fingerprint each picked wallet.
+      //
+      // A wallet with no discovery row has no server-side account key, so it
+      // cannot be fingerprinted and simply does not take part in dedup. That is
+      // the legacy tokenless path, and it stays legal because Postgres treats
+      // NULLs as distinct in a unique index: the plain unique index on
+      // wallet_fingerprint tolerates unlimited NULL fingerprints. Migration
+      // 20260716140000 dropped the old WHERE wallet_fingerprint IS NOT NULL
+      // predicate precisely because it was never what made these rows legal, and
+      // a bare ON CONFLICT target cannot infer a partial index. Do not re-add it.
+      // Keyed by external_wallet_id, holding the fingerprint already encoded for
+      // the wire. computeWalletFingerprint returns raw bytes, and raw bytes must
+      // never reach the client: a Uint8Array serialises to JSON as an array or an
+      // object, which the BYTEA column accepts and stores as something other than
+      // the 32 bytes meant. It would then be wrong and self-consistent, deduping
+      // happily against the wrong value with nothing raised. So encoding happens
+      // here, once, on the way out of the MAC, and everything downstream compares
+      // the same wire form that PostgREST reads back.
+      const fingerprintByExternalId = new Map<string, string>();
+      for (const w of wallets) {
+        const d = discoveredByExternalId.get(w.external_wallet_id!);
+        if (!d) continue;
+        const mac: Uint8Array = await computeWalletFingerprint(
+          subaccountId,
+          d.providerType,
+          d.accountKey,
+          d.currency,
+        );
+        fingerprintByExternalId.set(w.external_wallet_id!, toByteaHex(mac));
+      }
+
+      // 5. Which of these wallets do we already hold?
+      //
+      // subaccount_id is baked into the fingerprint, so a lookup by fingerprint
+      // alone can only ever match this subaccount's own rows: no extra scoping
+      // is needed, and none is added, because a redundant filter here would read
+      // as if the fingerprint were not already scoped.
+      const existingByFingerprint = new Map<
+        string,
+        { id: string; externalWalletId: string; connectionId: string }
+      >();
+      const fingerprintHexes = [...fingerprintByExternalId.values()];
+      if (fingerprintHexes.length > 0) {
+        const { data: existingSws, error: exErr } = await serviceClient
+          .from("source_wallets")
+          .select("id, external_wallet_id, connection_id, wallet_fingerprint")
+          .in("wallet_fingerprint", fingerprintHexes);
+        if (exErr) {
+          console.error("[or-link-complete] wallet dedup lookup failed:", exErr.message);
+          return jsonResponse({ error: "Failed to resolve existing wallets" }, 500, cors);
+        }
+        for (const sw of existingSws ?? []) {
+          existingByFingerprint.set(sw.wallet_fingerprint as string, {
+            id: sw.id as string,
+            externalWalletId: sw.external_wallet_id as string,
+            connectionId: sw.connection_id as string,
+          });
+        }
+      }
+
+      const isKnown = (w: InboundWallet): boolean => {
+        const fp = fingerprintByExternalId.get(w.external_wallet_id!);
+        return fp !== undefined && existingByFingerprint.has(fp);
+      };
+      const rowFor = (w: InboundWallet) =>
+        existingByFingerprint.get(fingerprintByExternalId.get(w.external_wallet_id!)!)!;
+      const knownWallets = wallets.filter(isKnown);
+      const newWallets = wallets.filter((w) => !isKnown(w));
+
+      // 5a. Full reconnect: we already hold every wallet the user picked. Refresh
+      // the credential on the connection(s) they live under and hand back their
+      // existing ids. Minting a second connection here is precisely the duplicate
+      // this change exists to prevent. account_emitted_id is deliberately not
+      // touched: it is stable for the lifetime of the connection row.
+      if (newWallets.length === 0 && knownWallets.length > 0) {
+        const reconnectConnIds = [...new Set(knownWallets.map((w) => rowFor(w).connectionId))];
+        for (const connId of reconnectConnIds) {
+          const { error: updErr } = await serviceClient
+            .from("connections")
+            .update({
+              encrypted_label: body.encrypted_label ?? null,
+              encrypted_credentials: body.encrypted_credentials,
+              credentials_key_version: 1,
+              status: initialStatus,
+            })
+            .eq("id", connId);
+          if (updErr) {
+            console.error("[or-link-complete] reconnect credential refresh failed:", updErr.message);
+            return jsonResponse({ error: "Failed to refresh connection" }, 500, cors);
+          }
+        }
+
+        const reconnected = knownWallets.map((w) => ({
+          id: rowFor(w).id,
+          external_wallet_id: rowFor(w).externalWalletId,
+        }));
+        return jsonResponse(
+          {
+            subaccount_id: subaccountId,
+            connection_id: reconnectConnIds[0],
+            source_wallets: reconnected,
+            source_wallet_id: reconnected.length === 1 ? reconnected[0].id : undefined,
+            subaccount_was_newly_created: subaccountWasNewlyCreated,
+          },
+          200,
+          cors,
+        );
+      }
+
+      // 5b. First connect, or a partial reconnect where some picked wallets are
+      // new. Mint a connection to carry the new wallets.
+      //
+      // Mint the account emitted id (random, derived from nothing, stable
+      // forever) and compute the fingerprint (internal only: the fingerprint
+      // must never appear in any response body, log line, or error message).
+      const accountEmittedId = generateAccountEmittedId();
+      const accountFingerprint = await computeAccountFingerprint(
+        subaccountId,
+        body.provider_type as string,
+        canonicalAccountKey,
+      );
 
       const { data: createdConn, error: insConnErr } = await serviceClient
         .from("connections")
@@ -354,28 +553,151 @@ Deno.serve(
       }
       const connectionId = createdConn.id as string;
 
-      // 4. Insert one source_wallet per picked entry.
-      const swRows = wallets.map((w) => ({
-        connection_id: connectionId,
-        external_wallet_id: w.external_wallet_id!,
-        is_synced: true,
-        encrypted_metadata: w.encrypted_metadata!,
-        encrypted_metadata_key_version: 1,
-      }));
+      // 6. Insert the new wallets, in two batches.
+      //
+      // Fingerprinted and un-fingerprinted wallets go in separate statements so
+      // that losing the unique-index race on a fingerprinted wallet cannot roll
+      // back an un-fingerprinted wallet that was never in contention.
+      const toRow = (w: InboundWallet) => {
+        const fp = fingerprintByExternalId.get(w.external_wallet_id!) ?? null;
+        return {
+          connection_id: connectionId,
+          external_wallet_id: w.external_wallet_id!,
+          is_synced: true,
+          encrypted_metadata: w.encrypted_metadata!,
+          encrypted_metadata_key_version: 1,
+          wallet_fingerprint: fp,
+          // Tracks which key version computed the MAC, so a future key rotation
+          // can tell re-fingerprinted rows from stale ones. v1 is the only key.
+          wallet_fingerprint_key_version: fp === null ? null : 1,
+        };
+      };
+      const sourceWallets: Array<{ id: string; external_wallet_id: string }> = [];
 
-      const { data: createdSws, error: insSwErr } = await serviceClient
-        .from("source_wallets")
-        .insert(swRows)
-        .select("id, external_wallet_id");
-      if (insSwErr || !createdSws || createdSws.length === 0) {
-        console.error("[or-link-complete] source_wallet insert failed:", insSwErr);
-        return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+      const plainRows = newWallets
+        .filter((w) => !fingerprintByExternalId.has(w.external_wallet_id!))
+        .map(toRow);
+      if (plainRows.length > 0) {
+        const { data: created, error: err } = await serviceClient
+          .from("source_wallets")
+          .insert(plainRows)
+          .select("id, external_wallet_id");
+        if (err || !created) {
+          console.error("[or-link-complete] source_wallet insert failed:", err);
+          return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+        }
+        for (const row of created) {
+          sourceWallets.push({
+            id: row.id as string,
+            external_wallet_id: row.external_wallet_id as string,
+          });
+        }
       }
 
-      const sourceWallets = createdSws.map((row) => ({
-        id: row.id as string,
-        external_wallet_id: row.external_wallet_id as string,
-      }));
+      const fingerprintedWallets = newWallets.filter((w) =>
+        fingerprintByExternalId.has(w.external_wallet_id!)
+      );
+      if (fingerprintedWallets.length > 0) {
+        // ON CONFLICT DO NOTHING against uq_source_wallets_wallet_fingerprint.
+        //
+        // The lookup above answers "do we already hold this wallet?", but a
+        // concurrent connect can insert the same wallet between that read and
+        // this write. The unique index is the backstop that makes the race
+        // impossible to lose silently; naming it as the conflict target is what
+        // turns losing the race into a dropped row rather than a raised error.
+        //
+        // The conflict target is wallet_fingerprint ALONE, and this REQUIRES the
+        // index to be total rather than partial. That is not a style choice and
+        // it is the trap here, so do not "tidy" either side of it:
+        //
+        //   A bare ON CONFLICT target cannot infer a PARTIAL index. Postgres
+        //   matches the arbiter at PLAN time and needs the clause to carry an
+        //   index predicate implying the index's own; with none supplied it
+        //   skips every partial index and raises 42P10. Being plan-time, that
+        //   fires on EVERY call carrying a fingerprint, not just a real race.
+        //   The feature would be dead, not flaky.
+        //
+        //   And the statement cannot be fixed to suit a partial index: this goes
+        //   through PostgREST, whose on_conflict takes a column list with no
+        //   syntax for a predicate, so ON CONFLICT (wallet_fingerprint) WHERE
+        //   wallet_fingerprint IS NOT NULL is unreachable from here. The index
+        //   had to meet the client, which is what migration 20260716140000 does
+        //   by dropping the predicate.
+        //
+        // Dropping it is safe because the predicate was never what made
+        // un-fingerprinted rows legal: Postgres treats NULLs as distinct in a
+        // unique index, so a plain unique index on a nullable column already
+        // tolerates unlimited NULL rows.
+        //
+        // Not (subaccount_id, provider_type, wallet_fingerprint) either: those
+        // are already inside the MAC, and a composite target matches no index.
+        const { data: created, error: err } = await serviceClient
+          .from("source_wallets")
+          .upsert(fingerprintedWallets.map(toRow), {
+            onConflict: "wallet_fingerprint",
+            ignoreDuplicates: true,
+          })
+          .select("id, external_wallet_id");
+        if (err) {
+          console.error("[or-link-complete] source_wallet upsert failed:", err);
+          return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+        }
+        for (const row of created ?? []) {
+          sourceWallets.push({
+            id: row.id as string,
+            external_wallet_id: row.external_wallet_id as string,
+          });
+        }
+
+        // A row dropped by ON CONFLICT is not returned, so anything missing from
+        // the result is a wallet the other request won. Read those back by
+        // fingerprint and hand the caller the winner's ids: it is the same
+        // wallet, and the winner's row is the one that exists. Note the winner's
+        // external_wallet_id differs from ours, because the adapter mints a
+        // fresh opaque UUID on every discovery. That is precisely why dedup keys
+        // on the fingerprint and not on that id.
+        const insertedIds = new Set((created ?? []).map((r) => r.external_wallet_id as string));
+        const lost = fingerprintedWallets.filter((w) => !insertedIds.has(w.external_wallet_id!));
+        if (lost.length > 0) {
+          const { data: raced, error: reErr } = await serviceClient
+            .from("source_wallets")
+            .select("id, external_wallet_id")
+            .in(
+              "wallet_fingerprint",
+              lost.map((w) => fingerprintByExternalId.get(w.external_wallet_id!)!),
+            );
+          // Coming up short means a row neither inserted nor exists, which should
+          // be impossible: fail rather than hand back a partial set the caller
+          // would record as the whole selection. A retry heals it.
+          if (reErr || !raced || raced.length !== lost.length) {
+            console.error(
+              "[or-link-complete] conflict re-read resolved %d of %d; failing so the caller " +
+                "retries rather than persisting a partial selection",
+              raced?.length ?? 0,
+              lost.length,
+            );
+            return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+          }
+          for (const row of raced) {
+            sourceWallets.push({
+              id: row.id as string,
+              external_wallet_id: row.external_wallet_id as string,
+            });
+          }
+        }
+      }
+
+      // A partial reconnect returns the wallets it already held alongside the
+      // ones it just created, so the caller always gets back every wallet it
+      // picked, whether or not this call is what created it.
+      for (const w of knownWallets) {
+        sourceWallets.push({ id: rowFor(w).id, external_wallet_id: rowFor(w).externalWalletId });
+      }
+
+      if (sourceWallets.length === 0) {
+        console.error("[or-link-complete] no source wallets resolved for a non-empty selection");
+        return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+      }
 
       return jsonResponse(
         {
