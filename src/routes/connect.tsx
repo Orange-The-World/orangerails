@@ -109,6 +109,10 @@ const LINK_WIDGET_LOCK_SALT_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 interface HandoffKeys {
   credKey: CryptoKey;
   txnKey: CryptoKey;
+  // Base64 of the raw 32-byte cred_key (ORK). Held in memory only, same
+  // lifetime as credKey. Needed to pass credentials_key to or-discover-wallets
+  // raw-credentials mode (#157), which imports it and decrypts in memory only.
+  credKeyB64: string;
 }
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -179,7 +183,7 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
   } else {
     txnKey = credKey;
   }
-  return { credKey, txnKey };
+  return { credKey, txnKey, credKeyB64: credB64 };
 }
 
 /**
@@ -242,7 +246,7 @@ async function requestHandoffKeysFromParent(
         }
         const credKey = await importAesKey(bytes.buffer as ArrayBuffer);
         cleanup();
-        resolve({ credKey, txnKey: credKey });
+        resolve({ credKey, txnKey: credKey, credKeyB64 });
       } catch (err) {
         cleanup();
         reject(err);
@@ -406,6 +410,65 @@ function syntheticDiscovery(
       label: manifest.displayName,
     },
   ];
+}
+
+/**
+ * Server-side wallet discovery via or-discover-wallets in raw-credentials
+ * mode (#157). This replaces the browser slug fabricator (syntheticDiscovery)
+ * so the connector returns the provider's REAL per-account, per-currency
+ * wallet(s) instead of the provider slug ('strike', an exchange slug, ...),
+ * which is the fix for the multi-account collision (bitbooks#281).
+ *
+ * The widget encrypts the credential form with the ORK and sends the
+ * ciphertext plus the ORK (credentials_key); the edge function decrypts in
+ * memory only, calls the adapter's discoverWallets() live, and NEVER persists
+ * anything. The response shape { external_wallet_id, currency, label } already
+ * matches DiscoveredWallet, so there is no mapping layer.
+ */
+async function serverDiscover(
+  manifest: ProviderManifest,
+  formValues: Record<string, string>,
+  handoff: HandoffKeys,
+  search: ConnectSearch,
+  widgetToken: string,
+): Promise<DiscoveredWallet[]> {
+  const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+  if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
+  if (!search.platform || !search.app_user_id || !widgetToken) {
+    throw new Error("Server discovery requires platform, app_user_id and widget_token.");
+  }
+  const encrypted_credentials = await encryptString(JSON.stringify(formValues), handoff.credKey);
+  const res = await fetch(`${base}/functions/v1/or-discover-wallets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      platform_slug: search.platform,
+      app_user_id: search.app_user_id,
+      provider_type: manifest.slug,
+      encrypted_credentials,
+      credentials_key: handoff.credKeyB64,
+      widget_token: widgetToken,
+    }),
+  });
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    /* ignore , handled by the !res.ok / shape checks below */
+  }
+  if (!res.ok) {
+    throw new Error(
+      typeof data.error === "string"
+        ? data.error
+        : `Could not discover wallets (status ${res.status}).`,
+    );
+  }
+  const wallets = data.discovered_wallets;
+  if (!Array.isArray(wallets)) {
+    throw new Error("Discovery returned an unexpected response.");
+  }
+  return wallets as DiscoveredWallet[];
 }
 
 // ---- Blink ---------------------------------------------------------
@@ -1039,10 +1102,32 @@ function ConnectPageInner() {
     setError(null);
     setStep("discovering");
     try {
-      // Use the provider-specific override when one exists; otherwise fall
-      // back to a synthetic single-wallet entry (the OR adapter does the
-      // real per-asset enumeration server-side at first sync).
-      const discover = CLIENT_DISCOVERY_OVERRIDES[manifest.slug] ?? syntheticDiscovery(manifest);
+      // Discovery precedence:
+      //  1. A client-side override (Blink/xpub/BTCPay compute the real
+      //     per-account id in-browser) always wins.
+      //  2. Otherwise call the server (or-discover-wallets, #157) so the
+      //     adapter returns the provider's REAL per-account, per-currency
+      //     wallet(s) instead of the fabricated slug. This is the fix for
+      //     the multi-account collision (bitbooks#281).
+      //  3. Only if the cred_key handoff and a widget_token are not both
+      //     available here do we fall back to the synthetic single-wallet
+      //     entry (today's behaviour), so nothing regresses.
+      //
+      // FOLLOW-UP: the deferred-cred-key flow (defer_cred_key=1) has no key
+      // at this step, so it takes the synthetic fallback for now. Moving
+      // discovery to after the key handoff for that flow is tracked separately.
+      const override = CLIENT_DISCOVERY_OVERRIDES[manifest.slug];
+      const hk = handoffKeys;
+      // Standard integrations pass widget_token in the URL fragment (#widget_token=),
+      // which readHandoffKeysFromFragment strips early, so search.widget_token is
+      // empty for them. Fall back to the snapshotted fragment token so server
+      // discovery runs for the documented handoff flow, not just query-string tokens.
+      const widgetToken = search.widget_token ?? initialFragmentWidgetToken;
+      const discover = override
+        ? override
+        : hk && widgetToken
+          ? (values: Record<string, string>) => serverDiscover(manifest, values, hk, search, widgetToken)
+          : syntheticDiscovery(manifest);
       const result = await discover(formValues);
       if (result.length === 0) {
         throw new Error("That account has no wallets to track yet.");
