@@ -24,6 +24,9 @@
  *
  * Response (both modes):
  *   { discovered_wallets: [{ external_wallet_id, currency, label? }] }
+ *
+ * wallet_fingerprint (internal HMAC dedup key) is stripped before the response
+ * leaves the server. It must never appear in any external API response body.
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -174,7 +177,10 @@ Deno.serve(
 
         const discovered = await adapter.discoverWallets(credentials);
 
-        return jsonResponse({ discovered_wallets: discovered }, 200, cors);
+        // Strip wallet_fingerprint (internal HMAC dedup key) before returning to the
+        // client. It must never appear in any external API response body (Auditor gate 4).
+        const stripped = discovered.map(({ wallet_fingerprint: _fp, ...rest }) => rest);
+        return jsonResponse({ discovered_wallets: stripped }, 200, cors);
       }
 
       // -----------------------------------------------------------------------
@@ -222,7 +228,10 @@ Deno.serve(
 
       const discovered = await adapter.discoverWallets(credentials);
 
-      return jsonResponse({ discovered_wallets: discovered }, 200, cors);
+      // Strip wallet_fingerprint (internal HMAC dedup key) before returning to the
+      // client. It must never appear in any external API response body (Auditor gate 4).
+      const stripped = discovered.map(({ wallet_fingerprint: _fp, ...rest }) => rest);
+      return jsonResponse({ discovered_wallets: stripped }, 200, cors);
     } catch (err) {
       console.error("[or-discover-wallets] fatal:", err);
       return jsonResponse({ error: "Internal error" }, 500, cors);
