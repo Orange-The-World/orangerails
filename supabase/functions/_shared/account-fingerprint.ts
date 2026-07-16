@@ -27,13 +27,22 @@
  */
 
 const ENV_KEY_NAME = "OR_ACCT_FINGERPRINT_KEY_V1";
+
+/**
+ * Domain separator for the account fingerprint scheme.
+ * Exported so tests can assert directly that it differs from WALLET_DOMAIN_SEPARATOR.
+ */
 export const DOMAIN_SEPARATOR = "orangerails/acct/v1";
 
 /**
+ * Domain separator for the wallet fingerprint scheme.
+ *
  * The wallet fingerprint shares ENV_KEY_NAME with the account fingerprint, so
- * the domain separator is what keeps the two schemes apart. Under one key, a
- * shared domain is what would let a message built for one column be mistaken
+ * the domain separator is the only guard keeping the two schemes apart. Under
+ * one key, equal domains would let a message built for one column be mistaken
  * for the other, so these two strings must never be equal.
+ *
+ * Exported so tests can assert the invariant directly on the constants.
  */
 export const WALLET_DOMAIN_SEPARATOR = "orangerails/wallet/v1";
 
@@ -61,18 +70,29 @@ export function guardAccountFingerprintKey(): void {
 }
 
 /**
- * Validate a single fingerprint field. Both conditions are required on every
- * field that forms part of the NUL-joined HMAC message:
- *   - empty: semantically absent, not a meaningful key component.
- *   - NUL byte: makes the NUL-join split ambiguous, allowing two different
- *     input tuples to assemble into byte-identical messages and collide.
+ * Validate fingerprint fields: reject empty values and NUL bytes.
+ *
+ * A NUL inside a field makes the NUL-joined HMAC message ambiguous: two
+ * different inputs can assemble to the same byte string and dedup onto each
+ * other. An empty field is also rejected because it signals the caller did
+ * not populate it correctly.
+ *
+ * Both computeAccountFingerprint and computeWalletFingerprint call this before
+ * assembling the message, so the invariant is enforced at one site.
  */
-function validateFingerprintField(name: string, value: string): void {
-  if (!value) {
-    throw new Error(`[account-fingerprint] fingerprint field ${name} is empty`);
-  }
-  if (value.includes("\x00")) {
-    throw new Error(`[account-fingerprint] fingerprint field ${name} contains a NUL byte`);
+function validateFingerprintFields(
+  label: string,
+  fields: Record<string, string>,
+): void {
+  for (const [name, value] of Object.entries(fields)) {
+    if (!value) {
+      throw new Error(`[account-fingerprint] ${label} field ${name} is empty`);
+    }
+    if (value.includes("\x00")) {
+      throw new Error(
+        `[account-fingerprint] ${label} field ${name} contains a NUL byte`,
+      );
+    }
   }
 }
 
@@ -85,8 +105,8 @@ function validateFingerprintField(name: string, value: string): void {
  * )
  *
  * NUL bytes (\x00) separate the fields so that different field lengths cannot
- * produce the same concatenated message. None of the three fields (UUID,
- * provider slug, wallet/account id) ever contain NUL bytes.
+ * produce the same concatenated message. All three fields are validated to
+ * contain no NUL bytes before the message is assembled.
  *
  * Returns lowercase hex, 64 chars (32 bytes). INTERNAL ONLY. Must never appear
  * in any API response body, log line, or error message.
@@ -106,9 +126,11 @@ export async function computeAccountFingerprint(
     throw new AccountFingerprintKeyMissingError();
   }
 
-  validateFingerprintField("subaccountId", subaccountId);
-  validateFingerprintField("providerType", providerType);
-  validateFingerprintField("canonicalAccountKey", canonicalAccountKey);
+  validateFingerprintFields("account fingerprint", {
+    subaccountId,
+    providerType,
+    canonicalAccountKey,
+  });
 
   const enc = new TextEncoder();
   const message = [DOMAIN_SEPARATOR, subaccountId, providerType, canonicalAccountKey].join("\x00");
@@ -178,10 +200,12 @@ export async function computeWalletFingerprint(
   // the fields are validated rather than assumed well formed. A NUL inside a
   // field would make the split ambiguous, and an ambiguous message means two
   // different accounts can assemble identically and dedup onto each other.
-  validateFingerprintField("subaccountId", subaccountId);
-  validateFingerprintField("providerType", providerType);
-  validateFingerprintField("canonicalAccountKey", canonicalAccountKey);
-  validateFingerprintField("currency", currency);
+  validateFingerprintFields("wallet fingerprint", {
+    subaccountId,
+    providerType,
+    canonicalAccountKey,
+    currency,
+  });
 
   const enc = new TextEncoder();
   const message = [
