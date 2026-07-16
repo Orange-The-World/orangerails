@@ -27,7 +27,7 @@
  */
 
 const ENV_KEY_NAME = "OR_ACCT_FINGERPRINT_KEY_V1";
-const DOMAIN_SEPARATOR = "orangerails/acct/v1";
+export const DOMAIN_SEPARATOR = "orangerails/acct/v1";
 
 /**
  * The wallet fingerprint shares ENV_KEY_NAME with the account fingerprint, so
@@ -35,7 +35,7 @@ const DOMAIN_SEPARATOR = "orangerails/acct/v1";
  * shared domain is what would let a message built for one column be mistaken
  * for the other, so these two strings must never be equal.
  */
-const WALLET_DOMAIN_SEPARATOR = "orangerails/wallet/v1";
+export const WALLET_DOMAIN_SEPARATOR = "orangerails/wallet/v1";
 
 export class AccountFingerprintKeyMissingError extends Error {
   constructor() {
@@ -57,6 +57,22 @@ export function guardAccountFingerprintKey(): void {
   const val = Deno.env.get(ENV_KEY_NAME) ?? "";
   if (!val) {
     throw new AccountFingerprintKeyMissingError();
+  }
+}
+
+/**
+ * Validate a single fingerprint field. Both conditions are required on every
+ * field that forms part of the NUL-joined HMAC message:
+ *   - empty: semantically absent, not a meaningful key component.
+ *   - NUL byte: makes the NUL-join split ambiguous, allowing two different
+ *     input tuples to assemble into byte-identical messages and collide.
+ */
+function validateFingerprintField(name: string, value: string): void {
+  if (!value) {
+    throw new Error(`[account-fingerprint] fingerprint field ${name} is empty`);
+  }
+  if (value.includes("\x00")) {
+    throw new Error(`[account-fingerprint] fingerprint field ${name} contains a NUL byte`);
   }
 }
 
@@ -89,6 +105,10 @@ export async function computeAccountFingerprint(
     // no silent fallback path under any code ordering.
     throw new AccountFingerprintKeyMissingError();
   }
+
+  validateFingerprintField("subaccountId", subaccountId);
+  validateFingerprintField("providerType", providerType);
+  validateFingerprintField("canonicalAccountKey", canonicalAccountKey);
 
   const enc = new TextEncoder();
   const message = [DOMAIN_SEPARATOR, subaccountId, providerType, canonicalAccountKey].join("\x00");
@@ -158,15 +178,10 @@ export async function computeWalletFingerprint(
   // the fields are validated rather than assumed well formed. A NUL inside a
   // field would make the split ambiguous, and an ambiguous message means two
   // different accounts can assemble identically and dedup onto each other.
-  const fields = { subaccountId, providerType, canonicalAccountKey, currency };
-  for (const [name, value] of Object.entries(fields)) {
-    if (!value) {
-      throw new Error(`[account-fingerprint] wallet fingerprint field ${name} is empty`);
-    }
-    if (value.includes("\x00")) {
-      throw new Error(`[account-fingerprint] wallet fingerprint field ${name} contains a NUL byte`);
-    }
-  }
+  validateFingerprintField("subaccountId", subaccountId);
+  validateFingerprintField("providerType", providerType);
+  validateFingerprintField("canonicalAccountKey", canonicalAccountKey);
+  validateFingerprintField("currency", currency);
 
   const enc = new TextEncoder();
   const message = [
