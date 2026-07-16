@@ -51,10 +51,20 @@
  * Response 200:
  *   {
  *     subaccount_id, connection_id,
- *     source_wallets: [{ id, external_wallet_id }, ...],
+ *     source_wallets: [{ id, external_wallet_id, submitted_external_wallet_id }, ...],
  *     // Backward-compat: if exactly one wallet was created, also return source_wallet_id.
  *     source_wallet_id?: string
  *   }
+ *
+ * The two ids on a returned wallet are NOT interchangeable:
+ *   external_wallet_id            the STORED id, stable across reconnects. Dedup
+ *                                 on this one.
+ *   submitted_external_wallet_id  the id the caller sent in THIS request. Equal
+ *                                 to the above on a first connect, different on a
+ *                                 reconnect, because the adapter mints a fresh
+ *                                 opaque id per discovery and we return the
+ *                                 stored one. Correlate our response back to your
+ *                                 request on this one, never on external_wallet_id.
  *
  * Response 404 if platform_slug unknown; 400 on missing fields.
  */
@@ -503,9 +513,15 @@ Deno.serve(
           }
         }
 
+        // The pure-reconnect path: every picked wallet is one we already hold,
+        // so EVERY row here comes back under its stored id while the caller only
+        // knows the id it just minted. This is the path where the two ids always
+        // disagree, and echoing the submitted one is what makes the response
+        // correlatable at all.
         const reconnected = knownWallets.map((w) => ({
           id: rowFor(w).id,
           external_wallet_id: rowFor(w).externalWalletId,
+          submitted_external_wallet_id: w.external_wallet_id!,
         }));
         return jsonResponse(
           {
@@ -572,7 +588,25 @@ Deno.serve(
           wallet_fingerprint_key_version: fp === null ? null : 1,
         };
       };
-      const sourceWallets: Array<{ id: string; external_wallet_id: string }> = [];
+      // Every returned wallet carries BOTH ids, and they are not the same thing:
+      //
+      //   external_wallet_id            the STORED id. Stable across reconnects,
+      //                                 and what the integrating app dedups on.
+      //   submitted_external_wallet_id  the id the CALLER sent us in this request.
+      //
+      // On a first connect they are equal. On a reconnect they are not, because
+      // the adapter mints a fresh opaque id on every discovery and we hand back
+      // the stored one. The caller therefore cannot match our response to the
+      // request it just made using external_wallet_id alone, and the widget has
+      // to: it holds this wallet's currency and label keyed by the id it sent,
+      // and it cannot read them back out of encrypted_metadata. Echoing the
+      // submitted id is what lets it correlate the two without weakening
+      // external_wallet_id's meaning.
+      const sourceWallets: Array<{
+        id: string;
+        external_wallet_id: string;
+        submitted_external_wallet_id: string;
+      }> = [];
 
       const plainRows = newWallets
         .filter((w) => !fingerprintByExternalId.has(w.external_wallet_id!))
@@ -587,9 +621,11 @@ Deno.serve(
           return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
         }
         for (const row of created) {
+          // A row we just inserted stores the id we were sent, so the two agree.
           sourceWallets.push({
             id: row.id as string,
             external_wallet_id: row.external_wallet_id as string,
+            submitted_external_wallet_id: row.external_wallet_id as string,
           });
         }
       }
@@ -643,9 +679,11 @@ Deno.serve(
           return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
         }
         for (const row of created ?? []) {
+          // Ours won the insert, so the stored id is the one we were sent.
           sourceWallets.push({
             id: row.id as string,
             external_wallet_id: row.external_wallet_id as string,
+            submitted_external_wallet_id: row.external_wallet_id as string,
           });
         }
 
@@ -659,9 +697,22 @@ Deno.serve(
         const insertedIds = new Set((created ?? []).map((r) => r.external_wallet_id as string));
         const lost = fingerprintedWallets.filter((w) => !insertedIds.has(w.external_wallet_id!));
         if (lost.length > 0) {
+          // The winner's row cannot tell us which of OUR ids it corresponds to,
+          // so the fingerprint is the only link back: it is equal across both
+          // requests by construction, which is the whole reason it is the dedup
+          // key. Select it and invert the map. Same wire form as the dedup
+          // lookup above: the hex PostgREST reads back is what fingerprintBy-
+          // ExternalId already holds.
+          const submittedByFingerprint = new Map<string, string>();
+          for (const w of lost) {
+            submittedByFingerprint.set(
+              fingerprintByExternalId.get(w.external_wallet_id!)!,
+              w.external_wallet_id!,
+            );
+          }
           const { data: raced, error: reErr } = await serviceClient
             .from("source_wallets")
-            .select("id, external_wallet_id")
+            .select("id, external_wallet_id, wallet_fingerprint")
             .in(
               "wallet_fingerprint",
               lost.map((w) => fingerprintByExternalId.get(w.external_wallet_id!)!),
@@ -679,9 +730,23 @@ Deno.serve(
             return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
           }
           for (const row of raced) {
+            const submitted = submittedByFingerprint.get(row.wallet_fingerprint as string);
+            // Impossible: we selected these rows BY those fingerprints. If it
+            // happens the inversion above is wrong, and returning the row with a
+            // guessed id would hand the caller a wallet it cannot correlate,
+            // which is the silent-blank failure this field exists to remove.
+            // Fail loudly instead.
+            if (submitted === undefined) {
+              console.error(
+                "[or-link-complete] conflict re-read returned a row whose fingerprint " +
+                  "matches no submitted wallet; refusing to guess the correlation",
+              );
+              return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+            }
             sourceWallets.push({
               id: row.id as string,
               external_wallet_id: row.external_wallet_id as string,
+              submitted_external_wallet_id: submitted,
             });
           }
         }
@@ -691,7 +756,14 @@ Deno.serve(
       // ones it just created, so the caller always gets back every wallet it
       // picked, whether or not this call is what created it.
       for (const w of knownWallets) {
-        sourceWallets.push({ id: rowFor(w).id, external_wallet_id: rowFor(w).externalWalletId });
+        // w IS the submitted wallet, so its id is what the caller sent. The
+        // stored id comes from the row we matched it to, and on a reconnect the
+        // two differ.
+        sourceWallets.push({
+          id: rowFor(w).id,
+          external_wallet_id: rowFor(w).externalWalletId,
+          submitted_external_wallet_id: w.external_wallet_id!,
+        });
       }
 
       if (sourceWallets.length === 0) {
