@@ -69,7 +69,9 @@ const b58check = base58check(sha256);
 
 interface XpubCredentials {
   xpub: string;
-  gap_limit?: number;
+  // Always populated by parseXpubCredentials (clamped input or DEFAULT_GAP_LIMIT),
+  // so it is non-optional: scanChain and every other caller can rely on a number.
+  gap_limit: number;
 }
 
 function parseXpubCredentials(credentials: Record<string, unknown>): XpubCredentials {
