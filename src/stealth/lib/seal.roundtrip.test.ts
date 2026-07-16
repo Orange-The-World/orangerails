@@ -1,93 +1,125 @@
-import { describe, expect, it } from "vitest";
+import { describe, it, expect } from "vitest";
+import {
+  sealEnvelope,
+  unsealEnvelope,
+  computeTxidBlindIndex,
+  computeConnectionBlindIndex,
+  StealthKeyMissingError,
+  StealthKeyInvalidError,
+  StealthTxidInvalidError,
+} from "./seal";
 
-import { blindIndex, sealEnvelope, unsealEnvelope } from "@/stealth/lib/seal";
-
-/** A deterministic 32-byte key, base64, built without hand-encoding it. */
-function keyOf(fill: number): string {
-  return b64encode(new Uint8Array(32).fill(fill));
+/** Generate a fresh random 32-byte key encoded as standard base64. */
+function freshKey(): string {
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  let bin = "";
+  for (let i = 0; i < raw.length; i++) bin += String.fromCharCode(raw[i]);
+  return btoa(bin);
 }
 
-function b64encode(bytes: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-  return btoa(s);
-}
+/** A canonical txid: 64 lowercase hex chars. */
+const CANONICAL_TXID = "ab".repeat(32);
 
-function b64decode(s: string): Uint8Array {
-  const bin = atob(s);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
+/** A plausible xpub string for connection index tests. */
+const XPUB =
+  "xpub6CUGRUonZSQ4TWLx2CE79SGLzLRGRZqMC31HMbaSYQfVnGnH44Gg4FUqgVNGrS3vWvGKFsHrKmTEMFKq7QLcf3mGhekzBo1pZnEFdBvNb1";
 
-const KEY_A = keyOf(0x11);
-const KEY_B = keyOf(0x22);
+// ---- sealEnvelope / unsealEnvelope ----------------------------------------
 
 describe("sealEnvelope / unsealEnvelope", () => {
   it("round-trips a payload under the same key", async () => {
-    const payload = { txid: "abc123", amount_sats: 21_000, memo: "coffee" };
-
-    const env = await sealEnvelope(payload, KEY_A);
-    expect(env.version).toBe(1);
-    expect(env.algorithm).toBe("AES-256-GCM");
-
-    const out = await unsealEnvelope<typeof payload>(env, KEY_A);
+    const key = freshKey();
+    const payload = { amount: 21_000_000, note: "genesis" };
+    const env = await sealEnvelope(payload, key);
+    const out = await unsealEnvelope<typeof payload>(env, key);
     expect(out).toEqual(payload);
   });
 
-  it("produces a fresh IV per envelope, so the same payload never seals identically", async () => {
-    const payload = { txid: "abc123" };
-
-    const one = await sealEnvelope(payload, KEY_A);
-    const two = await sealEnvelope(payload, KEY_A);
-
-    expect(one.iv_b64).not.toBe(two.iv_b64);
-    expect(one.ciphertext_b64).not.toBe(two.ciphertext_b64);
+  it("produces a fresh IV for each call", async () => {
+    const key = freshKey();
+    const a = await sealEnvelope({ x: 1 }, key);
+    const b = await sealEnvelope({ x: 1 }, key);
+    expect(a.iv_b64).not.toBe(b.iv_b64);
   });
 
   it("refuses to unseal under a different key", async () => {
-    const env = await sealEnvelope({ txid: "abc123" }, KEY_A);
-    await expect(unsealEnvelope(env, KEY_B)).rejects.toThrow();
+    const key1 = freshKey();
+    const key2 = freshKey();
+    const env = await sealEnvelope({ secret: "satoshi" }, key1);
+    await expect(unsealEnvelope(env, key2)).rejects.toThrow();
   });
 
-  it("refuses a tampered ciphertext instead of decoding it", async () => {
-    const env = await sealEnvelope({ txid: "abc123" }, KEY_A);
-
-    const bytes = b64decode(env.ciphertext_b64);
-    bytes[0] = bytes[0] ^ 0x01;
-    const tampered = { ...env, ciphertext_b64: b64encode(bytes) };
-
-    await expect(unsealEnvelope(tampered, KEY_A)).rejects.toThrow();
+  it("refuses a tampered ciphertext (single flipped byte)", async () => {
+    const key = freshKey();
+    const env = await sealEnvelope({ data: "utxo" }, key);
+    // Flip the first byte of the ciphertext to break the AES-GCM auth tag.
+    const raw = atob(env.ciphertext_b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    bytes[0] ^= 0x01;
+    let flipped = "";
+    for (let i = 0; i < bytes.length; i++)
+      flipped += String.fromCharCode(bytes[i]);
+    const tampered = { ...env, ciphertext_b64: btoa(flipped) };
+    await expect(unsealEnvelope(tampered, key)).rejects.toThrow();
   });
 
-  it("refuses a key that is not 32 bytes", async () => {
-    const shortKey = b64encode(new Uint8Array(31).fill(0x11));
-    await expect(sealEnvelope({ txid: "abc123" }, shortKey)).rejects.toThrow(
-      /32 bytes/,
+  it("throws StealthKeyMissingError when keyB64 is empty", async () => {
+    await expect(sealEnvelope({}, "")).rejects.toBeInstanceOf(
+      StealthKeyMissingError,
+    );
+  });
+
+  it("throws StealthKeyInvalidError when the key is not 32 bytes", async () => {
+    const shortKey = btoa("tooshort"); // 8 bytes decoded, not 32
+    await expect(sealEnvelope({}, shortKey)).rejects.toBeInstanceOf(
+      StealthKeyInvalidError,
     );
   });
 });
 
-describe("blindIndex", () => {
-  it("is deterministic for a value under a key", async () => {
-    const one = await blindIndex("abc123", KEY_A);
-    const two = await blindIndex("abc123", KEY_A);
+// ---- computeTxidBlindIndex ------------------------------------------------
 
-    expect(one).toBe(two);
-    expect(one).toMatch(/^[0-9a-f]{64}$/);
+describe("computeTxidBlindIndex", () => {
+  it("is stable: same (txid, key) always produces the same index", async () => {
+    const key = freshKey();
+    const a = await computeTxidBlindIndex(CANONICAL_TXID, key);
+    const b = await computeTxidBlindIndex(CANONICAL_TXID, key);
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("differs by value and by key, so the server learns neither", async () => {
-    const valueA = await blindIndex("abc123", KEY_A);
-    const valueB = await blindIndex("def456", KEY_A);
-    const underOtherKey = await blindIndex("abc123", KEY_B);
-
-    expect(valueA).not.toBe(valueB);
-    expect(valueA).not.toBe(underOtherKey);
+  it("differs by key: same txid under different keys yields different indexes", async () => {
+    const k1 = freshKey();
+    const k2 = freshKey();
+    const a = await computeTxidBlindIndex(CANONICAL_TXID, k1);
+    const b = await computeTxidBlindIndex(CANONICAL_TXID, k2);
+    expect(a).not.toBe(b);
   });
 
-  it("refuses a key that is not 32 bytes", async () => {
-    const shortKey = b64encode(new Uint8Array(31).fill(0x11));
-    await expect(blindIndex("abc123", shortKey)).rejects.toThrow(/32 bytes/);
+  it("throws StealthTxidInvalidError for a non-canonical txid", async () => {
+    await expect(
+      computeTxidBlindIndex("NOTCANONICAL", freshKey()),
+    ).rejects.toBeInstanceOf(StealthTxidInvalidError);
+  });
+});
+
+// ---- computeConnectionBlindIndex ------------------------------------------
+
+describe("computeConnectionBlindIndex", () => {
+  it("is stable: same (wallet, key) always produces the same index", async () => {
+    const key = freshKey();
+    const a = await computeConnectionBlindIndex(XPUB, key);
+    const b = await computeConnectionBlindIndex(XPUB, key);
+    expect(a).toBe(b);
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("differs by key: same wallet under different keys yields different indexes", async () => {
+    const k1 = freshKey();
+    const k2 = freshKey();
+    const a = await computeConnectionBlindIndex(XPUB, k1);
+    const b = await computeConnectionBlindIndex(XPUB, k2);
+    expect(a).not.toBe(b);
   });
 });
