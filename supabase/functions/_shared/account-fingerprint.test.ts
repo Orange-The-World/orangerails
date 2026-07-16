@@ -1,14 +1,14 @@
 /**
- * Deno tests for computeWalletFingerprint.
+ * Deno tests for computeAccountFingerprint and computeWalletFingerprint.
  *
  * Run with:
  *   deno test --allow-env supabase/functions/_shared/account-fingerprint.test.ts
  *
  * The fingerprint is a dedup key, so a collision is not cosmetic: two inputs
- * that produce the same value would make two unrelated wallets dedup onto each
- * other. These tests pin the things that would cause that, and the return type,
- * which is easy to get wrong because the sibling function returns hex and this
- * column is BYTEA.
+ * that produce the same value would make two unrelated wallets (or accounts)
+ * dedup onto each other. These tests pin the things that would cause that, and
+ * the return type, which is easy to get wrong because the sibling function
+ * returns hex and the wallet column is BYTEA.
  */
 
 import { assert, assertEquals, assertNotEquals, assertRejects } from
@@ -25,6 +25,21 @@ Deno.env.set(ENV_KEY_NAME, 'test-key-not-a-real-secret');
 
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+
+// ---------- separator invariant (synchronous -- no crypto needed) ----------
+
+Deno.test('WALLET_DOMAIN_SEPARATOR and DOMAIN_SEPARATOR are not equal', () => {
+  // Both fingerprint schemes share one HMAC key (OR_ACCT_FINGERPRINT_KEY_V1).
+  // The domain separator is the only guard that keeps a wallet-scheme message
+  // from being mistaken for an account-scheme message (or vice versa). Pin the
+  // constants directly so this test fails the moment they are equalised, before
+  // any message bytes need to be compared. The cross-scheme output test below
+  // does NOT pin this invariant in isolation: when the separators differ AND
+  // the field count differs, the outputs differ for two independent reasons.
+  assertNotEquals(WALLET_DOMAIN_SEPARATOR, DOMAIN_SEPARATOR);
+});
+
+// ---------- wallet fingerprint ----------
 
 Deno.test('returns raw bytes, not hex: 32 bytes of HMAC-SHA256 output', async () => {
   // The trap this pins: source_wallets.wallet_fingerprint is BYTEA, while
@@ -75,36 +90,31 @@ Deno.test('NUL separation makes field splits unambiguous', async () => {
   assertNotEquals(hex(first), hex(second));
 });
 
-Deno.test('the wallet domain separator keeps it distinct from the account scheme', async () => {
-  // The two schemes share the same HMAC key. The domain separator string is
-  // the only structural guarantee that a wallet fingerprint can never equal an
-  // account fingerprint for the same fields. Assert the separator strings are
-  // unequal directly: that is the invariant this test exists to pin. The HMAC
-  // comparison below confirms it propagates to output, but comparing HMAC
-  // outputs alone would pass even if the separators were made equal (the field
-  // counts differ), so the string check here is the real guard.
-  assertNotEquals(WALLET_DOMAIN_SEPARATOR, DOMAIN_SEPARATOR);
+Deno.test('wallet and account outputs differ for the same core inputs', async () => {
+  // Both HMACs are computed under the same key. This confirms the outputs differ,
+  // which follows from both the distinct domain separators AND the different field
+  // count (5 vs 4). It does NOT pin the separator invariant in isolation -- the
+  // synchronous constant test above does that.
   const wallet = await computeWalletFingerprint('sub-1', 'strike', 'acct-1', 'BTC');
   const account = await computeAccountFingerprint('sub-1', 'strike', 'acct-1');
   assertNotEquals(hex(wallet), account);
 });
 
-Deno.test('rejects a NUL byte inside a field', async () => {
-  // All four data fields are validated before signing: a NUL in any field
-  // would make the NUL-join split ambiguous, letting two different input
-  // tuples assemble into byte-identical messages.
+Deno.test('wallet: rejects a NUL byte in any field', async () => {
+  // All four fields are validated. A NUL in any position makes the NUL-joined
+  // message ambiguous: two different inputs can assemble identically.
   await assertRejects(
-    () => computeWalletFingerprint('sub\x001', 'strike', 'acct-1', 'BTC'),
+    () => computeWalletFingerprint('sub\x00bad', 'strike', 'acct-1', 'BTC'),
     Error,
     'NUL byte',
   );
   await assertRejects(
-    () => computeWalletFingerprint('sub-1', 'str\x00ike', 'acct-1', 'BTC'),
+    () => computeWalletFingerprint('sub-1', 'strike\x00bad', 'acct-1', 'BTC'),
     Error,
     'NUL byte',
   );
   await assertRejects(
-    () => computeWalletFingerprint('sub-1', 'strike', 'acct\x00strike', 'BTC'),
+    () => computeWalletFingerprint('sub-1', 'strike', 'acct\x00bad', 'BTC'),
     Error,
     'NUL byte',
   );
@@ -115,14 +125,14 @@ Deno.test('rejects a NUL byte inside a field', async () => {
   );
 });
 
-Deno.test('rejects an empty field', async () => {
+Deno.test('wallet: rejects an empty field', async () => {
   await assertRejects(() => computeWalletFingerprint('', 'strike', 'acct-1', 'BTC'), Error, 'empty');
   await assertRejects(() => computeWalletFingerprint('sub-1', '', 'acct-1', 'BTC'), Error, 'empty');
   await assertRejects(() => computeWalletFingerprint('sub-1', 'strike', '', 'BTC'), Error, 'empty');
   await assertRejects(() => computeWalletFingerprint('sub-1', 'strike', 'acct-1', ''), Error, 'empty');
 });
 
-Deno.test('fails loudly when the key is missing rather than falling back', async () => {
+Deno.test('wallet: fails loudly when the key is missing rather than falling back', async () => {
   const previous = Deno.env.get(ENV_KEY_NAME);
   Deno.env.delete(ENV_KEY_NAME);
   try {
@@ -130,4 +140,33 @@ Deno.test('fails loudly when the key is missing rather than falling back', async
   } finally {
     if (previous !== undefined) Deno.env.set(ENV_KEY_NAME, previous);
   }
+});
+
+// ---------- account fingerprint ----------
+
+Deno.test('account: rejects a NUL byte in any field', async () => {
+  // canonical_account_key can arrive from a provider API response; all three
+  // fields are validated so a NUL cannot make the account-path message
+  // structurally ambiguous with any other fingerprint.
+  await assertRejects(
+    () => computeAccountFingerprint('sub\x00bad', 'strike', 'acct-1'),
+    Error,
+    'NUL byte',
+  );
+  await assertRejects(
+    () => computeAccountFingerprint('sub-1', 'strike\x00bad', 'acct-1'),
+    Error,
+    'NUL byte',
+  );
+  await assertRejects(
+    () => computeAccountFingerprint('sub-1', 'strike', 'acct\x00bad'),
+    Error,
+    'NUL byte',
+  );
+});
+
+Deno.test('account: rejects an empty field', async () => {
+  await assertRejects(() => computeAccountFingerprint('', 'strike', 'acct-1'), Error, 'empty');
+  await assertRejects(() => computeAccountFingerprint('sub-1', '', 'acct-1'), Error, 'empty');
+  await assertRejects(() => computeAccountFingerprint('sub-1', 'strike', ''), Error, 'empty');
 });
