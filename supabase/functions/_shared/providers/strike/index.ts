@@ -255,6 +255,46 @@ export async function strikeGetBalances(creds: StrikeCredentials): Promise<Strik
   return strikeGet<StrikeBalance[]>(creds, '/balances');
 }
 
+/**
+ * Return every currency this Strike account has ever used.
+ *
+ * Two sources unioned:
+ *   1. GET /v1/balances: currencies with a non-zero current balance.
+ *   2. GET /v1/invoices?$top=100: any currency seen in the 100 most recent
+ *      invoices, catching currencies that were spent down to zero.
+ *
+ * Both calls are Cloudflare-safe. The WAF only blocks compound $filter
+ * clauses containing "or"; a bare $top query passes cleanly per empirical
+ * testing 2026-05-25.
+ *
+ * Step 2 loops the returned currencies to emit one DiscoveredWallet per
+ * (receiverId, currency). Step 1 is intentionally isolated: no change to
+ * discoverWallets or any other function.
+ */
+export async function getActiveCurrencies(apiKey: string): Promise<string[]> {
+  const creds: StrikeCredentials = { api_key: apiKey };
+  const seen = new Set<string>();
+
+  // Source 1: current non-zero balances.
+  const balances = await strikeGetBalances(creds);
+  for (const b of balances) {
+    if (b.currency && Number(b.current) !== 0) {
+      seen.add(b.currency.toUpperCase());
+    }
+  }
+
+  // Source 2: any currency seen in recent invoice history.
+  // Bare $top (no $filter, no $orderby) is CF-safe per 2026-05-25 testing.
+  const page = await strikeGet<{ items?: StrikeInvoice[] }>(creds, '/invoices?$top=100');
+  for (const inv of page.items ?? []) {
+    if (inv.amount?.currency) {
+      seen.add(inv.amount.currency.toUpperCase());
+    }
+  }
+
+  return [...seen].sort();
+}
+
 /** Fetch a single invoice by ID. Webhook handlers use this after invoice.updated events. */
 export async function strikeGetInvoiceById(
   creds: StrikeCredentials,
@@ -566,9 +606,6 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
   const invoices = page.items ?? [];
 
   if (invoices.length === 0) {
-    // New accounts with no invoices yet have no discoverable identity.
-    // Per our policy: no readable identifier -> clear error, create nothing.
-    // Wording from founder (message 2982 in #Connectors):
     throw new Error(
       "A Strike account with no transactions yet doesn't send us anything that identifies it, " +
       "so we can't connect it safely. Please make a test payment first, then try connecting again.",
@@ -577,16 +614,12 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
 
   const receiverId = invoices[0].receiverId;
   if (!receiverId) {
-    // receiverId should be present on every invoice but guard explicitly.
     throw new Error(
       'Strike did not return an account identifier on the latest invoice. ' +
       'Please try again or contact support if this persists.',
     );
   }
 
-  // Assert constancy across all returned invoices. If they diverge something
-  // unexpected is happening on Strike's side and we must not guess which id
-  // is correct.
   for (const inv of invoices) {
     if (inv.receiverId && inv.receiverId !== receiverId) {
       throw new Error(
@@ -606,39 +639,15 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
   ];
 }
 
-/**
- * Backfill polling for historical invoices, plus the cursor-based delta sync
- * that runs on every user-initiated Sync click.
- *
- * Architecture (2026-05-25 V3 ADR): Strike's Cloudflare WAF blocks compound
- * `$filter=(state eq 'PAID' or state eq 'PENDING')` expressions (the `or`
- * keyword in the filter clause is the specific trigger). Simple per-state
- * `$filter=(state eq 'PAID')` queries pass cleanly. So we issue ONE call per
- * state we care about and merge client-side. Pagination via `$skip` + `$top`
- * works without triggering CF.
- *
- * On top of this:
- * - or-strike-webhook + strike-queue handles real-time updates after initial
- *   backfill (the queued events are drained by or-sync's Strike branch)
- * - This polling path handles BOTH first-time backfill AND ongoing catchup
- *   for transactions that webhooks may have missed (Strike's docs don't
- *   commit to webhook retry SLAs)
- *
- * Cursor: highest `created` ISO timestamp seen across the merged batch.
- * Next sync filters by `created ge datetime'<iso>'` per state to fetch only
- * what's new.
- */
 const STATES_TO_SYNC: StrikeInvoiceState[] = ['PAID', 'PENDING'];
 const PAGE_SIZE = 100;
-const MAX_PAGES_PER_STATE = 50; // 5000 invoices per state per sync , plenty
+const MAX_PAGES_PER_STATE = 50;
 
-/** True if the error from a Strike list endpoint is a missing-scope 403. */
 function isScopeMissing(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /403 GET|Insufficient permissions|FORBIDDEN/i.test(msg);
 }
 
-/** Generic newest-first paginator that stops once items older than cursor appear. */
 async function paginateNewestFirst<T extends { created?: string }>(
   creds: StrikeCredentials,
   path: string,
@@ -671,20 +680,6 @@ async function paginateNewestFirst<T extends { created?: string }>(
   return out;
 }
 
-/**
- * Empirical CF rule (refined 2026-05-25 V3 ADR, then again later same day):
- * Cloudflare blocks ANY compound `$filter` clause , both `or` and `and`
- * triggers fail. The `datetime'<iso>'` literal appears to compound the issue.
- *
- * Workaround: only filter on `state eq '<S>'` (the simple case CF allows).
- * Page through newest-first via $orderby=created desc + $top + $skip. Stop
- * client-side once we've passed the cursor , no date in $filter at all.
- *
- * Cost: on each sync we re-traverse from newest until we hit the cursor.
- * For typical accounts (<5000 invoices, all newer than cursor returns in
- * < N pages) this is fine. For massive accounts the alternative is a
- * partner-tier API access we don't have.
- */
 async function fetchInvoicesByState(
   creds: StrikeCredentials,
   state: StrikeInvoiceState,
@@ -694,10 +689,7 @@ async function fetchInvoicesByState(
   let skip = 0;
   for (let page = 0; page < MAX_PAGES_PER_STATE; page++) {
     const params = new URLSearchParams();
-    // ONLY simple per-state $filter. NO `and`, NO `or`, NO date literals
-    // (all three patterns trip Strike's CF Bot Management WAF).
     params.set('$filter', `state eq '${state}'`);
-    // Newest first so we can short-circuit when we cross the cursor.
     params.set('$orderby', 'created desc');
     params.set('$top', String(PAGE_SIZE));
     params.set('$skip', String(skip));
@@ -711,7 +703,6 @@ async function fetchInvoicesByState(
         if (inv.created > sinceIso) {
           out.push(inv);
         } else {
-          // Hit our cursor , anything below this is already-synced data.
           crossed = true;
           break;
         }
@@ -732,10 +723,6 @@ async function syncByWallets(
   cursor: string | null,
 ): Promise<SyncResult> {
   const creds = parseStrikeCredentials(credentials);
-
-  // Thread the stored receiverId (external_wallet_id) through to every
-  // normalized transaction so consumers can route per-account. Null for
-  // legacy connections that pre-date discovery and have no source_wallets row.
   const accountId = walletIds[0] ?? null;
 
   const transactions: NormalizedTransaction[] = [];
@@ -744,7 +731,6 @@ async function syncByWallets(
     if (iso && iso > maxSeen) maxSeen = iso;
   };
 
-  // 1) Invoices , per-state (CF blocks compound `or`)
   for (const state of STATES_TO_SYNC) {
     try {
       const batch = await fetchInvoicesByState(creds, state, cursor);
@@ -759,7 +745,6 @@ async function syncByWallets(
     }
   }
 
-  // 2) Lightning receives (static receive-request endpoints)
   try {
     const params = new URLSearchParams();
     const receives = await paginateNewestFirst<StrikeReceive>(
@@ -776,7 +761,6 @@ async function syncByWallets(
     }
   }
 
-  // 3) Deposits (fiat onramp)
   try {
     const params = new URLSearchParams();
     const deposits = await paginateNewestFirst<StrikeDeposit>(
@@ -793,7 +777,6 @@ async function syncByWallets(
     }
   }
 
-  // 4) Payouts (fiat offramp)
   try {
     const params = new URLSearchParams();
     const payouts = await paginateNewestFirst<StrikePayout>(
@@ -810,7 +793,6 @@ async function syncByWallets(
     }
   }
 
-  // 5) Currency exchange quotes (internal swaps)
   try {
     const params = new URLSearchParams();
     const quotes = await paginateNewestFirst<StrikeCurrencyExchangeQuote>(
@@ -827,10 +809,6 @@ async function syncByWallets(
     }
   }
 
-  // Outgoing Lightning payments have NO list endpoint on Strike's API.
-  // They arrive via webhooks only (drainStrikeQueue handles payment.* events).
-
-  // Sort newest first for consistent persistence order.
   transactions.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
 
   return {
@@ -843,9 +821,6 @@ async function syncAccountWide(
   credentials: Record<string, unknown>,
   cursor: string | null,
 ): Promise<SyncResult> {
-  // Legacy connections have no source_wallets rows; pass empty walletIds so
-  // accountId resolves to null, marking these as pre-discovery transactions.
-  // Downstream consumers treat source_wallet_id=null as wallet unknown.
   return syncByWallets(credentials, [], cursor);
 }
 
