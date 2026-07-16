@@ -86,6 +86,9 @@ Deno.test('discover: BTC + USD account yields two wallets, one per currency', as
       // The adapter must NOT emit a fingerprint: it lacks the subaccount context
       // needed for the standard fingerprint. That work lives in the write path.
       assertEquals(w.wallet_fingerprint, undefined);
+      // account_key is the receiverId, carried server-side only for the write
+      // path. or-discover-wallets records it and strips it before responding.
+      assertEquals(w.account_key, 'acct-btc-usd');
     }
   } finally {
     restore();

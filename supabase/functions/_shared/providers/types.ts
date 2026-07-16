@@ -92,6 +92,20 @@ export interface DiscoveredWallet {
    * Adapters that do not support keyed fingerprinting may omit this field.
    */
   wallet_fingerprint?: string;
+  /**
+   * The provider's real, stable per-account key for this wallet (e.g. a Strike
+   * receiverId). Account-identifying, so it is INTERNAL server-side only: like
+   * wallet_fingerprint it MUST NOT appear in any external API response body,
+   * log line, or error message.
+   *
+   * or-discover-wallets records it in the discovery_sessions table (keyed by
+   * the widget session and external_wallet_id) and strips it from the client
+   * response. The write path (or-link-complete) reads it back from that table
+   * to compute the internal dedup fingerprint, so the key never reaches the
+   * browser or integrator. Adapters whose account key is not available at
+   * discovery time may omit this field (dedup then falls back to no fingerprint).
+   */
+  account_key?: string;
 }
 
 export interface SyncResult {

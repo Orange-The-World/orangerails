@@ -729,13 +729,18 @@ async function discover(_credentials: Record<string, unknown>): Promise<Discover
   // fingerprint is a keyed HMAC over (subaccount_id, provider, account_key,
   // currency); the adapter only receives credentials, not the subaccount
   // context, so it cannot build the standard fingerprint. That work lives in
-  // the write path (or-link-complete), which has the subaccount and looks up
-  // (receiverId, currency) from the server-side discovery session. receiverId
-  // is validated above and stays server-side; it never leaves in this response.
+  // the write path (or-link-complete), which has the subaccount.
+  //
+  // account_key is the Strike receiverId: the real, stable per-account key.
+  // It is INTERNAL server-side only. or-discover-wallets records it in the
+  // discovery_sessions table and strips it before responding, so it never
+  // reaches the browser or integrator; or-link-complete reads it back to
+  // compute the fingerprint.
   return currencies.map((currency) => ({
     external_wallet_id: crypto.randomUUID(),
     currency,
     label: `Strike ${currency}`,
+    account_key: receiverId,
   }));
 }
 

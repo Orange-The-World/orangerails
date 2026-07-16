@@ -154,7 +154,7 @@ Deno.serve(
         // are harmless: no rows are written and the wallet list is identical.
         const { data: session, error: sessionErr } = await serviceClient
           .from("pending_widget_sessions")
-          .select("id")
+          .select("id, expires_at")
           .eq("id", widgetToken)
           .is("used_at", null)
           .gt("expires_at", new Date().toISOString())
@@ -177,9 +177,40 @@ Deno.serve(
 
         const discovered = await adapter.discoverWallets(credentials);
 
-        // Strip wallet_fingerprint (internal HMAC dedup key) before returning to the
-        // client. It must never appear in any external API response body (Auditor gate 4).
-        const stripped = discovered.map(({ wallet_fingerprint: _fp, ...rest }) => rest);
+        // Record the account_key -> external_wallet_id map server-side so the
+        // write path can compute the dedup fingerprint without the real account
+        // key ever crossing to the client. One row per discovered wallet that
+        // carries an account_key; rows cascade-delete with the widget session.
+        // external_wallet_id is a fresh random UUID per discovery, so repeated
+        // or parallel discover calls write independent, harmless rows.
+        const sessionRows = discovered
+          .filter((w) => typeof w.account_key === "string" && w.account_key.length > 0)
+          .map((w) => ({
+            widget_session_id: widgetToken,
+            external_wallet_id: w.external_wallet_id,
+            provider_type: providerType,
+            account_key: w.account_key,
+            currency: w.currency,
+            expires_at: session.expires_at,
+          }));
+        if (sessionRows.length > 0) {
+          const { error: insErr } = await serviceClient
+            .from("discovery_sessions")
+            .insert(sessionRows);
+          if (insErr) {
+            // Without the session rows the write path cannot dedup this
+            // discovery, so fail loudly rather than silently degrade.
+            console.error("[or-discover-wallets] discovery_sessions insert failed:", insErr.message);
+            return jsonResponse({ error: "Could not record discovery session" }, 500, cors);
+          }
+        }
+
+        // Strip the internal-only fields (wallet_fingerprint dedup key and the
+        // real account_key) before returning. Neither may appear in any external
+        // API response body (Auditor gate 4).
+        const stripped = discovered.map(
+          ({ wallet_fingerprint: _fp, account_key: _ak, ...rest }) => rest,
+        );
         return jsonResponse({ discovered_wallets: stripped }, 200, cors);
       }
 
@@ -228,9 +259,14 @@ Deno.serve(
 
       const discovered = await adapter.discoverWallets(credentials);
 
-      // Strip wallet_fingerprint (internal HMAC dedup key) before returning to the
-      // client. It must never appear in any external API response body (Auditor gate 4).
-      const stripped = discovered.map(({ wallet_fingerprint: _fp, ...rest }) => rest);
+      // Connection mode does not run the widget link flow (no widget session to
+      // key a discovery_sessions row on), so it records no server-side map. It
+      // still strips the internal-only fields (wallet_fingerprint dedup key and
+      // the real account_key) before returning: neither may appear in any
+      // external API response body (Auditor gate 4).
+      const stripped = discovered.map(
+        ({ wallet_fingerprint: _fp, account_key: _ak, ...rest }) => rest,
+      );
       return jsonResponse({ discovered_wallets: stripped }, 200, cors);
     } catch (err) {
       console.error("[or-discover-wallets] fatal:", err);
