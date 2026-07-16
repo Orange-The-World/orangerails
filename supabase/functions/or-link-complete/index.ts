@@ -396,7 +396,7 @@ Deno.serve(
       );
     } catch (err) {
       console.error("[or-link-complete] fatal:", err);
-      return jsonResponse({ error: "Internal error", detail: String(err) }, 500, cors);
+      return jsonResponse({ error: "Internal error" }, 500, cors);
     }
   }),
 );
