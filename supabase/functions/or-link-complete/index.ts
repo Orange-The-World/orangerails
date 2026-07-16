@@ -19,13 +19,13 @@
  * POST body (preferred, multi-wallet):
  *   platform_slug:          string  e.g. 'bitbooks-v2'
  *   app_user_id:            string  the integrating app's user ID
- *   provider_type:          string  'blink' for now
+ *   provider_type:          string  'strike', 'blink', etc.
  *   encrypted_label:        string  base64 AES-256-GCM ciphertext (connection-level label)
  *   encrypted_credentials:  string  base64 AES-256-GCM ciphertext (provider API key)
  *   canonical_account_key:  string  optional, provider-level account id for fingerprinting
  *   wallets: Array<{
  *     external_wallet_id:    string   opaque provider wallet ID (may be random after #157)
- *     wallet_fingerprint:    string   stable per-wallet identifier for reconnect dedup (#158)
+ *     currency:              string   plaintext currency code for server-side fingerprint (#153)
  *     encrypted_metadata:    string   base64 AES-256-GCM ciphertext (currency/label)
  *   }>
  *
@@ -51,6 +51,7 @@ import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
 import { wrapSentryHandler } from "../_shared/sentry.ts";
 import {
   computeAccountFingerprint,
+  computeWalletFingerprint,
   generateAccountEmittedId,
   guardAccountFingerprintKey,
 } from "../_shared/account-fingerprint.ts";
@@ -60,10 +61,11 @@ const MAX_ENCRYPTED_METADATA_LEN = 8192;
 
 interface InboundWallet {
   external_wallet_id?: string;
-  // Stable per-wallet identifier used for reconnect dedup. Added in #158.
-  // When absent (legacy callers), dedup falls through and the wallet is
-  // treated as new. Required from new widget clients (post #157 raw-creds mode).
-  wallet_fingerprint?: string;
+  // Plaintext currency code (e.g. "BTC", "USDC") used for server-side
+  // wallet_fingerprint computation (#153). Required from new widget clients
+  // (post #163 multi-wallet mode). Legacy callers that omit it produce a
+  // null fingerprint and fall through to new-wallet creation on reconnect.
+  currency?: string;
   encrypted_metadata?: string;
 }
 
@@ -76,7 +78,7 @@ interface LinkCompleteBody {
   // Audit 2026-05-16 High #3: short-lived session token from or-link-mint-token.
   widget_token?: string;
   // Optional stable provider-level account id for fingerprinting. When
-  // absent, the sorted wallet_fingerprint values are used as a fallback.
+  // absent, the sorted external_wallet_id values are used as a fallback.
   canonical_account_key?: string;
   // New multi-wallet shape
   wallets?: InboundWallet[];
@@ -176,17 +178,12 @@ Deno.serve(
       // Derive canonical account key for fingerprinting. The caller may supply
       // an explicit value (e.g. a provider-level account id such as a Blink
       // username or Strike issuer id). If absent, fall back to the sorted,
-      // pipe-delimited wallet_fingerprint values (stable per-wallet identifiers).
-      // If no fingerprints are present either, fall back to external_wallet_ids.
-      const walletFingerprints = wallets
-        .map((w) => w.wallet_fingerprint)
-        .filter((f): f is string => typeof f === "string" && f.length > 0);
+      // pipe-delimited external_wallet_id values, which are already stable,
+      // non-sensitive provider identifiers.
       const canonicalAccountKey =
         body.canonical_account_key && body.canonical_account_key.length > 0
           ? body.canonical_account_key
-          : walletFingerprints.length > 0
-            ? [...walletFingerprints].sort().join("|")
-            : wallets.map((w) => w.external_wallet_id!).sort().join("|");
+          : wallets.map((w) => w.external_wallet_id!).sort().join("|");
 
       const serviceClient = makeServiceClient();
 
@@ -322,7 +319,7 @@ Deno.serve(
         subaccountWasNewlyCreated = true;
       }
 
-      // Compute initialStatus early (needed in both the dedup and the insert paths).
+      // Compute initialStatus early (needed in both the dedup and insert paths).
       //
       // Atomic connect flow (audit 2026-05-21 finding N6): when
       // ATOMIC_CONFIRM_REQUIRED=true the consumer must call
@@ -334,90 +331,116 @@ Deno.serve(
         (Deno.env.get("ATOMIC_CONFIRM_REQUIRED") ?? "false").toLowerCase() === "true";
       const initialStatus = atomicConfirmRequired ? "pending" : "active";
 
-      // 3. Dedup: check which wallets already exist under this (subaccount_id, provider_type).
+      // 3. Compute server-side wallet fingerprints.
       //
-      // Keyed on wallet_fingerprint (#158), NOT external_wallet_id. After #157 landed,
-      // or-discover-wallets emits a random external_wallet_id in raw-creds mode, so matching
-      // on that field would never find the existing row on reconnect and would duplicate on
-      // every reconnect. wallet_fingerprint is the stable per-wallet identifier the client
-      // derives from the underlying provider wallet identity and passes back here.
+      // fingerprint = HMAC-SHA256(OR_ACCT_FINGERPRINT_KEY_V1,
+      //   "orangerails/wallet/v1" \x00 subaccount_id \x00 provider_type \x00
+      //   canonical_account_key \x00 currency)
       //
-      // TOCTOU race: two concurrent connects can both pass this SELECT seeing no existing
-      // row, then both fall through to the INSERT below and produce a duplicate. The correct
-      // fix is to add a unique index on (subaccount_id, provider_type, wallet_fingerprint),
-      // then replace this block with a single ON CONFLICT upsert. Migration required --
-      // flagged to DBA. Do not ship this dedup without that database backstop.
+      // Computed after subaccount resolution so subaccount_id is bound into
+      // each fingerprint. This prevents cross-subaccount matching even if two
+      // users share a provider account. Null for legacy callers that omit
+      // currency, or for calls without a canonical_account_key.
+      // Internal only: must never appear in any response, log, or error.
       //
-      // Query all connections for this (subaccount_id, provider_type), including
-      // account_emitted_id so we can carry it forward on a full reconnect.
-      const { data: existingConns } = await serviceClient
-        .from("connections")
-        .select("id, account_emitted_id")
-        .eq("subaccount_id", subaccountId)
-        .eq("provider_type", body.provider_type!);
-
-      const existingConnIds: string[] = existingConns?.map((c) => c.id as string) ?? [];
-
-      // Index connection metadata so we can look up account_emitted_id by connection id.
-      const connEmittedIdMap = new Map<string, string | null>();
-      for (const c of existingConns ?? []) {
-        connEmittedIdMap.set(c.id as string, (c.account_emitted_id as string | null) ?? null);
+      // TOCTOU note: two concurrent connects can both pass the dedup SELECT
+      // seeing no existing row, then both insert and produce a duplicate.
+      // The correct backstop is a unique index on
+      // (connection_id, wallet_fingerprint) in source_wallets -- flagged to DBA.
+      const accountKeyForFp =
+        body.canonical_account_key && body.canonical_account_key.length > 0
+          ? body.canonical_account_key
+          : null;
+      const resolvedFpMap = new Map<InboundWallet, string | null>();
+      for (const w of wallets) {
+        if (w.currency && accountKeyForFp) {
+          resolvedFpMap.set(
+            w,
+            await computeWalletFingerprint(
+              subaccountId,
+              body.provider_type!,
+              accountKeyForFp,
+              w.currency,
+            ),
+          );
+        } else {
+          resolvedFpMap.set(w, null);
+        }
       }
+      const resolvedFingerprints = wallets
+        .map((w) => resolvedFpMap.get(w)!)
+        .filter((fp): fp is string => fp !== null);
 
-      // Batch-check which wallets already exist under any of those connections.
-      // Match on wallet_fingerprint, not external_wallet_id.
+      // 4. Dedup: check which wallets already exist under this subaccount.
+      //
+      // Keyed on server-computed wallet_fingerprint, NOT external_wallet_id.
+      // After #157 landed, or-discover-wallets emits a random external_wallet_id
+      // in raw-creds mode, so matching on that field would never find the
+      // existing row on reconnect. wallet_fingerprint is stable for the lifetime
+      // of the (subaccount, provider, account_key, currency) tuple.
       const existingSwByFingerprint = new Map<string, { id: string; connection_id: string }>();
-      if (existingConnIds.length > 0 && walletFingerprints.length > 0) {
-        const { data: existingSws } = await serviceClient
-          .from("source_wallets")
-          .select("id, connection_id, wallet_fingerprint")
-          .in("connection_id", existingConnIds)
-          .in("wallet_fingerprint", walletFingerprints);
-        for (const sw of existingSws ?? []) {
-          if (sw.wallet_fingerprint) {
-            existingSwByFingerprint.set(sw.wallet_fingerprint as string, {
-              id: sw.id as string,
-              connection_id: sw.connection_id as string,
-            });
+      if (resolvedFingerprints.length > 0) {
+        const { data: existingConns } = await serviceClient
+          .from("connections")
+          .select("id")
+          .eq("subaccount_id", subaccountId)
+          .eq("provider_type", body.provider_type!);
+        const existingConnIds = existingConns?.map((c) => c.id as string) ?? [];
+
+        if (existingConnIds.length > 0) {
+          const { data: existingSws } = await serviceClient
+            .from("source_wallets")
+            .select("id, connection_id, wallet_fingerprint")
+            .in("connection_id", existingConnIds)
+            .in("wallet_fingerprint", resolvedFingerprints);
+          for (const sw of existingSws ?? []) {
+            if (sw.wallet_fingerprint) {
+              existingSwByFingerprint.set(sw.wallet_fingerprint as string, {
+                id: sw.id as string,
+                connection_id: sw.connection_id as string,
+              });
+            }
           }
         }
       }
 
-      // Wallets without a fingerprint are always treated as new (no dedup possible).
-      const newWalletsToCreate = wallets.filter(
-        (w) =>
-          !w.wallet_fingerprint || !existingSwByFingerprint.has(w.wallet_fingerprint),
-      );
-      const existingSourceWallets = wallets
-        .filter((w) => w.wallet_fingerprint && existingSwByFingerprint.has(w.wallet_fingerprint))
+      // Split wallets into those that need to be created vs those already on disk.
+      const newWallets = wallets.filter((w) => {
+        const fp = resolvedFpMap.get(w);
+        return !fp || !existingSwByFingerprint.has(fp);
+      });
+      const existingWalletRows = wallets
+        .filter((w) => {
+          const fp = resolvedFpMap.get(w);
+          return fp !== null && fp !== undefined && existingSwByFingerprint.has(fp!);
+        })
         .map((w) => {
-          const sw = existingSwByFingerprint.get(w.wallet_fingerprint!)!;
+          const fp = resolvedFpMap.get(w)!;
+          const sw = existingSwByFingerprint.get(fp)!;
           return { id: sw.id, external_wallet_id: w.external_wallet_id! };
         });
 
-      // Full reconnect: all wallets already exist. Update credentials and return
-      // existing IDs without inserting any new rows.
-      if (newWalletsToCreate.length === 0 && existingSourceWallets.length > 0) {
-        // Collect unique connection IDs across all existing wallets and update
-        // each one (in case the API key was rotated or the label changed).
-        // Also SELECT back account_emitted_id to carry it forward -- never mint a new one.
+      // Full reconnect: all wallets already exist by fingerprint. Refresh
+      // credentials on the existing connection(s) and return existing IDs
+      // without inserting any new rows.
+      if (newWallets.length === 0 && existingWalletRows.length > 0) {
         const reconnectConnIds = new Set(
           wallets
-            .filter((w) => w.wallet_fingerprint && existingSwByFingerprint.has(w.wallet_fingerprint))
-            .map((w) => existingSwByFingerprint.get(w.wallet_fingerprint!)!.connection_id),
+            .filter((w) => {
+              const fp = resolvedFpMap.get(w);
+              return fp && existingSwByFingerprint.has(fp);
+            })
+            .map((w) => existingSwByFingerprint.get(resolvedFpMap.get(w)!)!.connection_id),
         );
-        let carriedAccountEmittedId: string | null = null;
         for (const connId of reconnectConnIds) {
-          const { data: updatedConn, error: updConnErr } = await serviceClient
+          const { error: updConnErr } = await serviceClient
             .from("connections")
             .update({
               encrypted_credentials: body.encrypted_credentials,
               encrypted_label: body.encrypted_label ?? null,
               status: initialStatus,
             })
-            .eq("id", connId)
-            .select("account_emitted_id")
-            .maybeSingle();
+            .eq("id", connId);
           if (updConnErr) {
             console.error(
               "[or-link-complete] connection credential update failed:",
@@ -425,21 +448,15 @@ Deno.serve(
             );
             // Non-fatal: the wallet data is intact; only credentials refresh failed.
           }
-          // Carry the first non-null account_emitted_id we get back.
-          if (!carriedAccountEmittedId && updatedConn?.account_emitted_id) {
-            carriedAccountEmittedId = updatedConn.account_emitted_id as string;
-          }
         }
         const reconnectConnId = [...reconnectConnIds][0];
         return jsonResponse(
           {
             subaccount_id: subaccountId,
             connection_id: reconnectConnId,
-            source_wallets: existingSourceWallets,
+            source_wallets: existingWalletRows,
             source_wallet_id:
-              existingSourceWallets.length === 1 ? existingSourceWallets[0].id : undefined,
-            // Carry forward the stable account identity. Never mint a new one on reconnect.
-            account_emitted_id: carriedAccountEmittedId ?? undefined,
+              existingWalletRows.length === 1 ? existingWalletRows[0].id : undefined,
             subaccount_was_newly_created: subaccountWasNewlyCreated,
           },
           200,
@@ -447,9 +464,11 @@ Deno.serve(
         );
       }
 
-      // At least one wallet is new: create a fresh connection for the new wallets only.
-
-      // Mint a new stable account identity for this connection.
+      // 5. Mint the account emitted id and compute the account fingerprint.
+      //
+      // On a full first-connect or partial reconnect (some wallets new), we
+      // create a fresh connection for the new wallets. The account emitted id
+      // is minted once and never updated for the lifetime of the connection row.
       const accountEmittedId = generateAccountEmittedId();
       const accountFingerprint = await computeAccountFingerprint(
         subaccountId,
@@ -457,7 +476,7 @@ Deno.serve(
         canonicalAccountKey,
       );
 
-      // 4. Insert the encrypted connection (for new wallets only).
+      // 6. Insert the encrypted connection.
       const { data: createdConn, error: insConnErr } = await serviceClient
         .from("connections")
         .insert({
@@ -478,15 +497,17 @@ Deno.serve(
       }
       const connectionId = createdConn.id as string;
 
-      // 5. Insert one source_wallet per new wallet entry.
-      // Include wallet_fingerprint so future reconnects can match on it.
-      const swRows = newWalletsToCreate.map((w) => ({
+      // 7. Insert one source_wallet per new wallet.
+      //
+      // wallet_fingerprint is the server-computed HMAC stored for future
+      // reconnect dedup. Null for legacy callers that did not supply currency.
+      const swRows = newWallets.map((w) => ({
         connection_id: connectionId,
         external_wallet_id: w.external_wallet_id!,
-        wallet_fingerprint: w.wallet_fingerprint ?? null,
         is_synced: true,
         encrypted_metadata: w.encrypted_metadata!,
         encrypted_metadata_key_version: 1,
+        wallet_fingerprint: resolvedFpMap.get(w) ?? null,
       }));
 
       const { data: createdSws, error: insSwErr } = await serviceClient
@@ -498,23 +519,21 @@ Deno.serve(
         return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
       }
 
-      const newSourceWallets = createdSws.map((row) => ({
+      const newWalletRows = createdSws.map((row) => ({
         id: row.id as string,
         external_wallet_id: row.external_wallet_id as string,
       }));
 
-      // Combine newly created and pre-existing wallets in the response.
-      const sourceWallets = [...existingSourceWallets, ...newSourceWallets];
+      // Combine new + pre-existing wallets (partial reconnect path).
+      const allSourceWallets = [...newWalletRows, ...existingWalletRows];
 
       return jsonResponse(
         {
           subaccount_id: subaccountId,
           connection_id: connectionId,
-          source_wallets: sourceWallets,
+          source_wallets: allSourceWallets,
           // Backward-compat: keep a single id when only one wallet was created.
-          source_wallet_id: sourceWallets.length === 1 ? sourceWallets[0].id : undefined,
-          // Fresh account identity for this new connection.
-          account_emitted_id: accountEmittedId,
+          source_wallet_id: allSourceWallets.length === 1 ? allSourceWallets[0].id : undefined,
           // Diagnostic: integrators that wire app_user_id wrong end up
           // creating a new subaccount on every connect. Surface the flag
           // so the consumer can warn the user "this looks like a fresh
