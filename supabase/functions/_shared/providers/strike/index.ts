@@ -5,11 +5,11 @@
  * authenticates with a Bearer token (API key generated from the Strike
  * Dashboard at https://dashboard.strike.me, API Key section).
  *
- * One Strike account = one OR source_wallet. There's no multi-wallet
- * concept on the upstream side (Strike accounts hold balances in BTC +
- * USD + EUR + USDT + GBP + AUD under a single account identity), so we
- * surface a single synthetic wallet entry that the user accepts in the
- * picker.
+ * One Strike account = N OR source_wallets, one per active currency. Strike
+ * holds balances in BTC + USD + EUR + USDT + GBP + AUD under a single account
+ * identity. discoverWallets() returns one wallet per currency that has a
+ * non-zero balance OR appears in recent invoice history. A BTC+USD account
+ * yields 2 wallets; a USD-only account yields 1.
  *
  * ════════════════════════════════════════════════════════════════════════
  * Architecture: webhook-driven, never OData list scans
@@ -21,9 +21,9 @@
  * .NET SDK pattern, current OR) proved that Cloudflare challenges requests
  * by URL SHAPE, not TLS fingerprint or User-Agent:
  *
- *   GET /v1/balances                       → 200 OK, JSON               ✓
- *   GET /v1/invoices/{id}                  → 200 / 404, JSON            ✓
- *   GET /v1/invoices?$filter=...&$top=...  → 403, "Just a moment" HTML  ✗
+ *   GET /v1/balances                       -> 200 OK, JSON               OK
+ *   GET /v1/invoices/{id}                  -> 200 / 404, JSON            OK
+ *   GET /v1/invoices?$filter=...&$top=...  -> 403, "Just a moment" HTML  BLOCKED
  *
  * Cloudflare's WAF flags the OData `$`-prefixed query parameters as
  * injection-shaped traffic. No client-side fix (UA, cookies, TLS spoof)
@@ -36,16 +36,16 @@
  * Discovery model: Strike webhooks tell us when something changed; we
  * follow up with `GET /v1/invoices/{id}` etc. for the actual data.
  *
- *   or-connection-confirm  → register Strike webhook subscription
- *   Strike → or-strike-webhook (verify HMAC, queue event)
- *   user clicks Sync       → drain queue with GET-by-id calls
+ *   or-connection-confirm  -> register Strike webhook subscription
+ *   Strike -> or-strike-webhook (verify HMAC, queue event)
+ *   user clicks Sync       -> drain queue with GET-by-id calls
  *
  *
  * What we emit per sync (post-PR2 when queue drain ships):
- *   PAID invoices       → direction='in', type='lightning'
- *   PENDING invoices    → same, status=PENDING (surfaces as in-flight)
- *   UNPAID invoices     → skipped (no value moved yet)
- *   CANCELLED invoices  → skipped (no money moved)
+ *   PAID invoices       -> direction='in', type='lightning'
+ *   PENDING invoices    -> same, status=PENDING (surfaces as in-flight)
+ *   UNPAID invoices     -> skipped (no value moved yet)
+ *   CANCELLED invoices  -> skipped (no money moved)
  *
  * NOT in v1 (deliberate scope cuts):
  *   - Payouts (`/v1/payouts`) , outgoing withdrawals to bank / external wallet
@@ -267,9 +267,9 @@ export async function strikeGetBalances(creds: StrikeCredentials): Promise<Strik
  * clauses containing "or"; a bare $top query passes cleanly per empirical
  * testing 2026-05-25.
  *
- * Step 2 loops the returned currencies to emit one DiscoveredWallet per
- * (receiverId, currency). Step 1 is intentionally isolated: no change to
- * discoverWallets or any other function.
+ * discoverWallets() loops the returned currencies to emit one DiscoveredWallet
+ * per (receiverId, currency). This helper is intentionally isolated: it makes
+ * no assumption about the adapter state and can be tested independently.
  */
 export async function getActiveCurrencies(apiKey: string): Promise<string[]> {
   const creds: StrikeCredentials = { api_key: apiKey };
@@ -313,7 +313,7 @@ export async function strikeGetPaymentById(
 
 /**
  * Register a Strike webhook subscription. Called from or-connection-confirm
- * when a Strike connection moves from pending → active.
+ * when a Strike connection moves from pending to active.
  *
  * Strike docs: https://docs.strike.me/api/create-subscription
  *
@@ -560,7 +560,7 @@ export function normalizeExchange(
     adapter: 'strike',
     direction: 'out',
     type: 'trade',
-    description: `Exchange ${quote.sourceAmount.currency} → ${quote.targetAmount.currency}`,
+    description: `Exchange ${quote.sourceAmount.currency} to ${quote.targetAmount.currency}`,
     counterparty: null,
     status: quote.state ?? 'COMPLETED',
     timestamp: new Date(quote.created).toISOString(),
@@ -571,77 +571,10 @@ export function normalizeExchange(
 
 // ─── Adapter implementation ──────────────────────────────────────────────
 
-async function discover(_credentials: Record<string, unknown>): Promise<DiscoveredWallet[]> {
-  // Validate the key up front by calling /v1/balances (the lightest CF-safe
-  // endpoint). This proves the key works and gives the user immediate
-  // feedback if they pasted the wrong value.
-  const creds = parseStrikeCredentials(_credentials);
-  await strikeGetBalances(creds); // throws if 401 / 403 / etc.
-
-  // /v1/balances returns currency totals but no account identifier. We use
-  // receiverId from recent invoices as the stable per-account key.
-  //
-  // Why receiverId, not issuerId:
-  //   issuerId  = the account that CREATED the invoice = the integration/partner
-  //               context, SHARED across every account connected through the
-  //               same API integration. Two distinct Strike accounts will have
-  //               the SAME issuerId and would collide into one wallet.
-  //   receiverId = the RECIPIENT account = the connected customer's own Strike
-  //                account id. This is unique and stable per account.
-  // Verified 2026-07-15 against two live E2E keys: same issuerId, different
-  // receiverId. Reference: docs.strike.me/api/get-invoices.
-  //
-  // We fetch 3 invoices and assert receiverId is constant across all of them
-  // before trusting it. A bare $top query (no $filter, no $orderby) is
-  // Cloudflare-safe since the WAF only triggers on compound $filter clauses.
-  //
-  // This is a server-side call inside or-discover-wallets. Strike's invoice
-  // list is CORS-blocked from the browser, which is why the old discover()
-  // returned the synthetic constant 'strike'. Running server-side removes
-  // the CORS barrier entirely.
-  const page = await strikeGet<{ count?: number; items?: StrikeInvoice[] }>(
-    creds,
-    '/invoices?$top=3',
-  );
-  const invoices = page.items ?? [];
-
-  if (invoices.length === 0) {
-    throw new Error(
-      "A Strike account with no transactions yet doesn't send us anything that identifies it, " +
-      "so we can't connect it safely. Please make a test payment first, then try connecting again.",
-    );
-  }
-
-  const receiverId = invoices[0].receiverId;
-  if (!receiverId) {
-    throw new Error(
-      'Strike did not return an account identifier on the latest invoice. ' +
-      'Please try again or contact support if this persists.',
-    );
-  }
-
-  for (const inv of invoices) {
-    if (inv.receiverId && inv.receiverId !== receiverId) {
-      throw new Error(
-        `[strike] receiverId inconsistency across invoices ` +
-        `(saw ${receiverId} and ${inv.receiverId}). ` +
-        'Please contact support.',
-      );
-    }
-  }
-
-  return [
-    {
-      external_wallet_id: receiverId,
-      currency: 'USD',
-      label: 'Strike account',
-    },
-  ];
-}
+const PAGE_SIZE = 100;
+const MAX_PAGES_PER_STATE = 50; // 5000 invoices per state per sync , plenty
 
 const STATES_TO_SYNC: StrikeInvoiceState[] = ['PAID', 'PENDING'];
-const PAGE_SIZE = 100;
-const MAX_PAGES_PER_STATE = 50;
 
 function isScopeMissing(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -717,12 +650,105 @@ async function fetchInvoicesByState(
   return out;
 }
 
+async function discover(_credentials: Record<string, unknown>): Promise<DiscoveredWallet[]> {
+  // Validate the key up front by calling /v1/balances (the lightest CF-safe
+  // endpoint). This proves the key works and gives the user immediate
+  // feedback if they pasted the wrong value.
+  const creds = parseStrikeCredentials(_credentials);
+  await strikeGetBalances(creds); // throws if 401 / 403 / etc.
+
+  // /v1/balances returns currency totals but no account identifier. We use
+  // receiverId from recent invoices as the stable per-account key.
+  //
+  // Why receiverId, not issuerId:
+  //   issuerId  = the account that CREATED the invoice = the integration/partner
+  //               context, SHARED across every account connected through the
+  //               same API integration. Two distinct Strike accounts will have
+  //               the SAME issuerId and would collide into one wallet.
+  //   receiverId = the RECIPIENT account = the connected customer's own Strike
+  //                account id. This is unique and stable per account.
+  // Verified 2026-07-15 against two live E2E keys: same issuerId, different
+  // receiverId. Reference: docs.strike.me/api/get-invoices.
+  //
+  // We fetch 3 invoices and assert receiverId is constant across all of them
+  // before trusting it. A bare $top query (no $filter, no $orderby) is
+  // Cloudflare-safe since the WAF only triggers on compound $filter clauses.
+  //
+  // This is a server-side call inside or-discover-wallets. Strike's invoice
+  // list is CORS-blocked from the browser, which is why the old discover()
+  // returned the synthetic constant 'strike'. Running server-side removes
+  // the CORS barrier entirely.
+  const page = await strikeGet<{ count?: number; items?: StrikeInvoice[] }>(
+    creds,
+    '/invoices?$top=3',
+  );
+  const invoices = page.items ?? [];
+
+  if (invoices.length === 0) {
+    throw new Error(
+      "A Strike account with no transactions yet doesn't send us anything that identifies it, " +
+      "so we can't connect it safely. Please make a test payment first, then try connecting again.",
+    );
+  }
+
+  const receiverId = invoices[0].receiverId;
+  if (!receiverId) {
+    throw new Error(
+      'Strike did not return an account identifier on the latest invoice. ' +
+      'Please try again or contact support if this persists.',
+    );
+  }
+
+  for (const inv of invoices) {
+    if (inv.receiverId && inv.receiverId !== receiverId) {
+      throw new Error(
+        `[strike] receiverId inconsistency across invoices ` +
+        `(saw ${receiverId} and ${inv.receiverId}). ` +
+        'Please contact support.',
+      );
+    }
+  }
+
+  // Get all active currencies for this account (union of non-zero balance
+  // OR any currency in recent invoice history). Both sources are CF-safe.
+  const currencies = await getActiveCurrencies(creds.api_key);
+
+  // Safety net: if getActiveCurrencies returns empty (e.g. all balances zero
+  // and $top=100 invoices returns none), default to USD so the user always
+  // gets at least one wallet to connect. In practice this cannot happen on
+  // an account that has passed the invoice check above.
+  if (currencies.length === 0) {
+    currencies.push('USD');
+  }
+
+  // Emit one wallet per active currency. external_wallet_id is a fresh random
+  // UUID (opaque, zero derivable relation to the underlying key), per the
+  // DiscoveredWallet contract.
+  //
+  // The adapter deliberately does NOT compute wallet_fingerprint. The dedup
+  // fingerprint is a keyed HMAC over (subaccount_id, provider, account_key,
+  // currency); the adapter only receives credentials, not the subaccount
+  // context, so it cannot build the standard fingerprint. That work lives in
+  // the write path (or-link-complete), which has the subaccount and looks up
+  // (receiverId, currency) from the server-side discovery session. receiverId
+  // is validated above and stays server-side; it never leaves in this response.
+  return currencies.map((currency) => ({
+    external_wallet_id: crypto.randomUUID(),
+    currency,
+    label: `Strike ${currency}`,
+  }));
+}
+
 async function syncByWallets(
   credentials: Record<string, unknown>,
   walletIds: string[],
   cursor: string | null,
 ): Promise<SyncResult> {
   const creds = parseStrikeCredentials(credentials);
+
+  // Thread the stored receiverId (external_wallet_id) through to every
+  // normalized transaction so consumers can route per-account. Null for
+  // legacy connections that pre-date discovery and have no source_wallets row.
   const accountId = walletIds[0] ?? null;
 
   const transactions: NormalizedTransaction[] = [];
@@ -731,6 +757,7 @@ async function syncByWallets(
     if (iso && iso > maxSeen) maxSeen = iso;
   };
 
+  // 1) Invoices , per-state (CF blocks compound `or`)
   for (const state of STATES_TO_SYNC) {
     try {
       const batch = await fetchInvoicesByState(creds, state, cursor);
@@ -745,6 +772,7 @@ async function syncByWallets(
     }
   }
 
+  // 2) Lightning receives (static receive-request endpoints)
   try {
     const params = new URLSearchParams();
     const receives = await paginateNewestFirst<StrikeReceive>(
@@ -761,6 +789,7 @@ async function syncByWallets(
     }
   }
 
+  // 3) Deposits (fiat onramp)
   try {
     const params = new URLSearchParams();
     const deposits = await paginateNewestFirst<StrikeDeposit>(
@@ -777,6 +806,7 @@ async function syncByWallets(
     }
   }
 
+  // 4) Payouts (fiat offramp)
   try {
     const params = new URLSearchParams();
     const payouts = await paginateNewestFirst<StrikePayout>(
@@ -793,6 +823,7 @@ async function syncByWallets(
     }
   }
 
+  // 5) Currency exchange quotes (internal swaps)
   try {
     const params = new URLSearchParams();
     const quotes = await paginateNewestFirst<StrikeCurrencyExchangeQuote>(
@@ -809,6 +840,10 @@ async function syncByWallets(
     }
   }
 
+  // Outgoing Lightning payments have NO list endpoint on Strike's API.
+  // They arrive via webhooks only (drainStrikeQueue handles payment.* events).
+
+  // Sort newest first for consistent persistence order.
   transactions.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
 
   return {
@@ -821,6 +856,9 @@ async function syncAccountWide(
   credentials: Record<string, unknown>,
   cursor: string | null,
 ): Promise<SyncResult> {
+  // Legacy connections have no source_wallets rows; pass empty walletIds so
+  // accountId resolves to null, marking these as pre-discovery transactions.
+  // Downstream consumers treat source_wallet_id=null as wallet unknown.
   return syncByWallets(credentials, [], cursor);
 }
 
@@ -831,7 +869,7 @@ export const strikeAdapter: ProviderAdapter = {
   category: 'lightning_wallet',
   tags: ['lightning', 'us', 'eu', 'fiat-on-ramp', 'custodial'],
   popularity: 88,
-  multiWallet: false,
+  multiWallet: true,
   credentialFields: [
     {
       name: 'api_key',
