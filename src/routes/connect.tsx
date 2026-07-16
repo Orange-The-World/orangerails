@@ -430,10 +430,11 @@ async function serverDiscover(
   formValues: Record<string, string>,
   handoff: HandoffKeys,
   search: ConnectSearch,
+  widgetToken: string,
 ): Promise<DiscoveredWallet[]> {
   const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
   if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
-  if (!search.platform || !search.app_user_id || !search.widget_token) {
+  if (!search.platform || !search.app_user_id || !widgetToken) {
     throw new Error("Server discovery requires platform, app_user_id and widget_token.");
   }
   const encrypted_credentials = await encryptString(JSON.stringify(formValues), handoff.credKey);
@@ -446,7 +447,7 @@ async function serverDiscover(
       provider_type: manifest.slug,
       encrypted_credentials,
       credentials_key: handoff.credKeyB64,
-      widget_token: search.widget_token,
+      widget_token: widgetToken,
     }),
   });
   const text = await res.text();
@@ -1117,10 +1118,15 @@ function ConnectPageInner() {
       // discovery to after the key handoff for that flow is tracked separately.
       const override = CLIENT_DISCOVERY_OVERRIDES[manifest.slug];
       const hk = handoffKeys;
+      // Standard integrations pass widget_token in the URL fragment (#widget_token=),
+      // which readHandoffKeysFromFragment strips early, so search.widget_token is
+      // empty for them. Fall back to the snapshotted fragment token so server
+      // discovery runs for the documented handoff flow, not just query-string tokens.
+      const widgetToken = search.widget_token ?? initialFragmentWidgetToken;
       const discover = override
         ? override
-        : hk && search.widget_token
-          ? (values: Record<string, string>) => serverDiscover(manifest, values, hk, search)
+        : hk && widgetToken
+          ? (values: Record<string, string>) => serverDiscover(manifest, values, hk, search, widgetToken)
           : syntheticDiscovery(manifest);
       const result = await discover(formValues);
       if (result.length === 0) {
