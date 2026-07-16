@@ -1,14 +1,14 @@
 /**
  * Connector-identity acceptance spec -- Strike account isolation.
  *
- * Validates that PR #159 (SHA 9ddc58fd2f) correctly isolates Strike accounts
- * via server-side discovery: each account now produces a distinct UUID wallet
+ * Validates that server-side discovery correctly isolates Strike accounts:
+ * each account now produces a distinct UUID wallet
  * identifier instead of the shared slug 'strike' that caused all accounts to
  * merge into a single source_wallets row (bitbooks#281).
  *
  * Test path: Playwright request context calls or-discover-wallets in
  * raw-credentials mode, exactly the network call the connect widget makes
- * after the Step 1 wiring (PR #159). No browser window required; the identity
+ * after the server-side discovery wiring. No browser window required; the identity
  * logic under test lives entirely in the edge function + Strike adapter.
  *
  * Cases runnable in this PR:
@@ -17,7 +17,7 @@
  *   5  No-id / zero-invoice provider -> error, no orphan wallet
  *
  * Cases stubbed (test.skip) pending dependencies:
- *   3  Reconnect A -> no duplicate source_wallet row  [needs #153]
+ *   3  Reconnect A -> no duplicate source_wallet row  [needs reconnect dedup]
  *   4  BTC+USD Strike account -> 2 wallets            [needs per-currency adapter]
  *
  * Required env vars (all optional at call time; suite skips when absent):
@@ -173,7 +173,7 @@ test.describe('Connector identity -- Strike account isolation', () => {
       ).toBe(1);
 
       const w = wallets![0];
-      // The fix in PR #159 changed external_wallet_id from the shared slug
+      // Server-side discovery changed external_wallet_id from the shared slug
       // ('strike') to a per-call UUID v4. Assert the UUID shape.
       expect(
         w.external_wallet_id,
@@ -216,7 +216,7 @@ test.describe('Connector identity -- Strike account isolation', () => {
 
       // The old broken value that collapsed every Strike account into one
       // source_wallet. If this appears, syntheticDiscovery is still the
-      // default path and PR #159's wiring did not take effect.
+      // default path and the server-side discovery wiring did not take effect.
       expect(extId, 'must not be the legacy slug that caused account merging').not.toBe('strike');
 
       // wallet_fingerprint is the INTERNAL identity key; must not leak.
@@ -237,7 +237,7 @@ test.describe('Connector identity -- Strike account isolation', () => {
   test.skip(
     'Case 3: reconnect Strike account A -> no duplicate source_wallet row created',
     async () => {
-      // Enable once #153 (wallet_fingerprint dedup in or-source-wallets-set) lands.
+      // Enable once the wallet_fingerprint reconnect dedup lands.
       //
       // When enabled:
       //   1. Call or-link-complete with Strike key A -> note source_wallet row W1
