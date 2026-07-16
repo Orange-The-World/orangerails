@@ -1,4 +1,4 @@
-title = "BitBooks allowlist"
+title = "Orange Rails allowlist"
 
 [allowlist]
 description = "False positives: PQC type identifiers, test fixtures, built artifacts"
@@ -7,6 +7,5 @@ paths = [
   "src/lib/vault-keypair\\.ts",
   "src/lib/__tests__/.*",
   "dist/.*",
-  "\\.next/.*",
   "\\.wrangler/.*",
 ]
