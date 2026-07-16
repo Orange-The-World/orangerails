@@ -3,19 +3,25 @@
  *
  * Why this file exists
  * --------------------
- * Until this lands, no product event is emitted anywhere in the app, so every
- * funnel number in the metric spec is a guess: there is no denominator for
- * activation, no clock for time-to-first-report, and no baseline for
- * free-to-paid. This module is the single place those four events can be
- * emitted from.
+ * Nothing in the app emits a product event today, so there is no place a
+ * funnel event could be counted from even if we agreed on one. This module is
+ * that place: the single, narrow surface analytics may ever leave through.
+ *
+ * What it does NOT do, yet
+ * ------------------------
+ * It defines no events. The event map and the property allowlist below are
+ * intentionally empty, pending a product funnel spec written for this product.
+ * Empty is enforced, not aspirational: with no entry in the map the compiler
+ * rejects every event name, and with no entry in the allowlist the sanitizer
+ * strips every named property. The module cannot emit until both are added.
  *
  * Configuration
  * -------------
  * Reads `VITE_POSTHOG_KEY` and `VITE_POSTHOG_HOST` from the Vite build
  * environment. When the key is unset (the default, and the default for local
  * dev), `initAnalytics()` returns immediately, the SDK is never initialised,
- * and every emitter below is a no-op. Nothing leaves the browser. Turning
- * analytics on is therefore a hosting action, not a code change.
+ * and nothing leaves the browser. Turning analytics on is therefore a hosting
+ * action, not a code change.
  *
  * The project key is a PostHog-convention public client key, embedded in
  * browser bundles by design, and is not a secret. It is still not committed
@@ -32,7 +38,7 @@
  *   - `distinct_id` is an opaque, account-scoped pseudonym supplied by the
  *     caller. Never an email, never anything vault-derived.
  *   - `autocapture` off, session recording off, pageview capture off, feature
- *     flags off. We are not observing the UI, only counting four milestones.
+ *     flags off. We are not observing the UI.
  *   - Two independent filters, either one sufficient on its own: the SDK's
  *     `property_denylist`, and our `sanitize_properties`, which rebuilds every
  *     payload from an explicit allowlist and re-applies the denylist itself
@@ -50,42 +56,25 @@
  */
 import posthog from "posthog-js";
 
-/** Plans a user can upgrade from. Enum, never an arbitrary string. */
-export type PlanFrom = "free";
-
-/** Plans a user can upgrade to. Extend as plans are added. */
-export type PlanTo = "pro";
-
 /**
- * The complete event surface. There is deliberately no generic
- * `capture(name, props)` export: a generic escape hatch is how unreviewed
- * properties end up in a third-party store. If an event is not in this map,
- * the app cannot send it.
+ * The complete event surface: currently empty, so `keyof EventMap` is `never`
+ * and no call to `capture()` compiles.
+ *
+ * There is deliberately no generic `capture(name, props)` taking a plain
+ * string. A generic escape hatch is how unreviewed properties reach a
+ * third-party store. Adding an event means adding it here and to
+ * ALLOWED_PROPERTIES, which is the moment it gets reviewed.
  */
-type EventMap = {
-  /** Email confirmed or first login. */
-  bb_signup: { plan_type: "free" };
-  /** First successful bank sync. This is activation; account creation is not. */
-  bb_first_sync: { federation_count: number };
-  /** Report file downloaded or emailed. Rendering it in the UI does not count. */
-  bb_report_exported: { federation_count: number };
-  /** Free to paid upgrade. */
-  bb_plan_upgraded: { plan_to: PlanTo; plan_from?: PlanFrom };
-};
+type EventMap = Record<never, never>;
 
 type EventName = keyof EventMap;
 
 /**
- * Properties any event is allowed to carry. Anything not named here, and not
- * an SDK internal that survives the denylist, is stripped before the request
- * is built.
+ * Properties any event is allowed to carry. Empty until a funnel spec names
+ * them. Anything not listed here, and not an SDK internal that survives the
+ * denylist, is stripped before the request is built.
  */
-const ALLOWED_PROPERTIES = new Set([
-  "plan_type",
-  "plan_to",
-  "plan_from",
-  "federation_count",
-]);
+const ALLOWED_PROPERTIES = new Set<string>();
 
 /**
  * SDK-attached properties we never want to send. The URL and referrer families
@@ -151,7 +140,7 @@ export function initAnalytics(): void {
 
   posthog.init(key, {
     api_host: host,
-    // We count four milestones. We do not watch the user.
+    // We count milestones. We do not watch the user.
     autocapture: false,
     capture_pageview: false,
     capture_pageleave: false,
@@ -164,7 +153,7 @@ export function initAnalytics(): void {
     persistence: "localStorage",
     // Identity is supplied explicitly by the caller via identifyUser().
     // Anonymous auto-identification would create a person profile for every
-    // visitor, which is more data than the funnel needs.
+    // visitor, which is more data than any funnel needs.
     person_profiles: "identified_only",
     property_denylist: PROPERTY_DENYLIST,
     // Independent of the denylist above, and sufficient on its own: even if
@@ -204,33 +193,20 @@ export function resetAnalytics(): void {
 }
 
 /**
- * Emit one of the four contract events. Typed so an unknown event name or an
- * off-contract property is a build error, not a privacy incident found later
- * in a PostHog dashboard.
+ * Emit a contract event. Typed against EventMap, so an unknown event name or
+ * an off-contract property is a build error rather than a privacy incident
+ * found later in a dashboard.
+ *
+ * EventMap is empty today, which makes every call to this function a compile
+ * error. That is the intended state until a funnel spec exists: the seam is
+ * here and reviewed, with nothing yet permitted through it.
  */
-function capture<E extends EventName>(event: E, properties: EventMap[E]): void {
+export function capture<E extends EventName>(
+  event: E,
+  properties: EventMap[E],
+): void {
   if (!initialized) return;
   posthog.capture(event, properties);
-}
-
-/** Email confirmed or first login. */
-export function trackSignup(): void {
-  capture("bb_signup", { plan_type: "free" });
-}
-
-/** First successful bank sync. This is the activation moment. */
-export function trackFirstSync(federationCount: number): void {
-  capture("bb_first_sync", { federation_count: federationCount });
-}
-
-/** Report file downloaded or emailed. Not fired when a report is merely rendered. */
-export function trackReportExported(federationCount: number): void {
-  capture("bb_report_exported", { federation_count: federationCount });
-}
-
-/** Free to paid upgrade. */
-export function trackPlanUpgraded(planTo: PlanTo, planFrom?: PlanFrom): void {
-  capture("bb_plan_upgraded", { plan_to: planTo, plan_from: planFrom });
 }
 
 /** Test seam only: lets a test observe the dark-by-default guarantee. */
