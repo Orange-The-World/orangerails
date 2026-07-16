@@ -13,7 +13,12 @@
 
 import { assert, assertEquals, assertNotEquals, assertRejects } from
   'https://deno.land/std@0.224.0/assert/mod.ts';
-import { computeAccountFingerprint, computeWalletFingerprint } from './account-fingerprint.ts';
+import {
+  computeAccountFingerprint,
+  computeWalletFingerprint,
+  DOMAIN_SEPARATOR,
+  WALLET_DOMAIN_SEPARATOR,
+} from './account-fingerprint.ts';
 
 const ENV_KEY_NAME = 'OR_ACCT_FINGERPRINT_KEY_V1';
 Deno.env.set(ENV_KEY_NAME, 'test-key-not-a-real-secret');
@@ -71,19 +76,40 @@ Deno.test('NUL separation makes field splits unambiguous', async () => {
 });
 
 Deno.test('the wallet domain separator keeps it distinct from the account scheme', async () => {
-  // Both fingerprints are HMACs under the SAME env key, so the domain separator
-  // is the only thing keeping the two schemes apart. This is the test that fails
-  // if someone ever makes the two separators equal.
+  // The two schemes share the same HMAC key. The domain separator string is
+  // the only structural guarantee that a wallet fingerprint can never equal an
+  // account fingerprint for the same fields. Assert the separator strings are
+  // unequal directly: that is the invariant this test exists to pin. The HMAC
+  // comparison below confirms it propagates to output, but comparing HMAC
+  // outputs alone would pass even if the separators were made equal (the field
+  // counts differ), so the string check here is the real guard.
+  assertNotEquals(WALLET_DOMAIN_SEPARATOR, DOMAIN_SEPARATOR);
   const wallet = await computeWalletFingerprint('sub-1', 'strike', 'acct-1', 'BTC');
   const account = await computeAccountFingerprint('sub-1', 'strike', 'acct-1');
   assertNotEquals(hex(wallet), account);
 });
 
 Deno.test('rejects a NUL byte inside a field', async () => {
-  // account_key and currency come from a provider API response, so the fields
-  // are validated rather than trusted: a NUL would make the split ambiguous.
+  // All four data fields are validated before signing: a NUL in any field
+  // would make the NUL-join split ambiguous, letting two different input
+  // tuples assemble into byte-identical messages.
+  await assertRejects(
+    () => computeWalletFingerprint('sub\x001', 'strike', 'acct-1', 'BTC'),
+    Error,
+    'NUL byte',
+  );
+  await assertRejects(
+    () => computeWalletFingerprint('sub-1', 'str\x00ike', 'acct-1', 'BTC'),
+    Error,
+    'NUL byte',
+  );
   await assertRejects(
     () => computeWalletFingerprint('sub-1', 'strike', 'acct\x00strike', 'BTC'),
+    Error,
+    'NUL byte',
+  );
+  await assertRejects(
+    () => computeWalletFingerprint('sub-1', 'strike', 'acct-1', 'BT\x00C'),
     Error,
     'NUL byte',
   );
