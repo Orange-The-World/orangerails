@@ -1,5 +1,5 @@
 /**
- * Account fingerprint and emitted-id generation.
+ * Account and wallet fingerprint and emitted-id generation.
  *
  * Two-layer account identity scheme (fleet standard):
  *
@@ -10,24 +10,31 @@
  *   or organisations. Stable for the lifetime of the connection row:
  *   never update this column once set.
  *
- * Layer 2 -- fingerprint (internal only, NEVER emitted, logged, or returned):
+ * Layer 2 -- account fingerprint (internal only, NEVER emitted, logged, or returned):
  *   HMAC-SHA256(OR_ACCT_FINGERPRINT_KEY_V1,
  *     "orangerails/acct/v1" NUL subaccount_id NUL provider_type NUL canonical_account_key)
  *   Used only to answer "have we seen this account before?" (dedup).
  *   Keyed so no offline oracle or cross-system join is possible without
  *   the key.
  *
+ * Layer 3 -- wallet fingerprint (internal only, NEVER emitted, logged, or returned):
+ *   HMAC-SHA256(OR_ACCT_FINGERPRINT_KEY_V1,
+ *     "orangerails/wallet/v1" NUL subaccount_id NUL provider_type NUL account_key NUL currency)
+ *   Used only to answer "have we seen this wallet before?" (reconnect dedup).
+ *   Computed server-side in or-link-complete so a compromised widget cannot
+ *   forge or cross-account-match fingerprints.
+ *
  * IMPORTANT: OR_ACCT_FINGERPRINT_KEY_V1 is a PERMANENT key for version v1.
- * Rotating it silently breaks dedup: the same account produces a new
- * fingerprint and a duplicate connection row is created instead of finding
- * the existing one. Any rotation MUST be preceded by a coordinated
- * re-fingerprinting migration that rewrites every existing fingerprint row
- * under the new key before the old key is retired. Never rotate without
- * that migration in place first.
+ * Rotating it silently breaks dedup: the same account or wallet produces a new
+ * fingerprint and a duplicate row is created instead of finding the existing one.
+ * Any rotation MUST be preceded by a coordinated re-fingerprinting migration that
+ * rewrites every existing fingerprint row under the new key before the old key is
+ * retired. Never rotate without that migration in place first.
  */
 
 const ENV_KEY_NAME = "OR_ACCT_FINGERPRINT_KEY_V1";
-const DOMAIN_SEPARATOR = "orangerails/acct/v1";
+const ACCT_DOMAIN_SEPARATOR = "orangerails/acct/v1";
+const WALLET_DOMAIN_SEPARATOR = "orangerails/wallet/v1";
 
 export class AccountFingerprintKeyMissingError extends Error {
   constructor() {
@@ -83,7 +90,64 @@ export async function computeAccountFingerprint(
   }
 
   const enc = new TextEncoder();
-  const message = [DOMAIN_SEPARATOR, subaccountId, providerType, canonicalAccountKey].join("\x00");
+  const message = [ACCT_DOMAIN_SEPARATOR, subaccountId, providerType, canonicalAccountKey].join(
+    "\x00",
+  );
+
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(rawKey),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
+  return Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Compute the HMAC-SHA256 fingerprint for a single wallet.
+ *
+ * fingerprint = HMAC-SHA256(
+ *   OR_ACCT_FINGERPRINT_KEY_V1,
+ *   "orangerails/wallet/v1" \x00 subaccount_id \x00 provider_type \x00
+ *   account_key \x00 currency
+ * )
+ *
+ * NUL bytes separate the fields so that different field lengths cannot
+ * produce the same concatenated message. Computed server-side in
+ * or-link-complete so a compromised widget cannot forge or cross-account-match
+ * fingerprints. Stable for the lifetime of the
+ * (subaccount, provider, account, currency) tuple.
+ *
+ * Returns lowercase hex, 64 chars (32 bytes). INTERNAL ONLY. Must never
+ * appear in any API response body, log line, or error message.
+ *
+ * Shares OR_ACCT_FINGERPRINT_KEY_V1 and the same rotation policy as
+ * computeAccountFingerprint. See module header.
+ */
+export async function computeWalletFingerprint(
+  subaccountId: string,
+  providerType: string,
+  accountKey: string,
+  currency: string,
+): Promise<string> {
+  const rawKey = Deno.env.get(ENV_KEY_NAME) ?? "";
+  if (!rawKey) {
+    throw new AccountFingerprintKeyMissingError();
+  }
+
+  const enc = new TextEncoder();
+  const message = [
+    WALLET_DOMAIN_SEPARATOR,
+    subaccountId,
+    providerType,
+    accountKey,
+    currency,
+  ].join("\x00");
 
   const cryptoKey = await crypto.subtle.importKey(
     "raw",
