@@ -13,14 +13,19 @@
  *          or-link-mint-token, validated the same way or-link-complete does).
  *    Body: { platform_slug, app_user_id, provider_type,
  *            encrypted_credentials, credentials_key, widget_token }
- *    No connection_id required. No DB rows written.
+ *    No connection_id required. Writes one discovery_sessions row per
+ *    discovered wallet (the internal external_wallet_id -> account_key map,
+ *    service-role only, stripped from the response); no other DB rows.
  *    Token is validated (platform_id + app_user_id + expiry + used_at IS NULL)
  *    but NOT consumed -- used_at is left null so the same token can
  *    authenticate the subsequent or-link-complete call. Single-use
  *    enforcement remains in or-link-complete only.
  *
  * In both modes the adapter's discoverWallets() is called with decrypted
- * credentials in memory. The server never persists discovered wallet data.
+ * credentials in memory; the credentials themselves are never persisted. Raw
+ * mode does record the internal account_key -> external_wallet_id map in
+ * discovery_sessions (server-side only) so the write path can dedup; that map
+ * and the wallet_fingerprint are stripped before any client response.
  *
  * Response (both modes):
  *   { discovered_wallets: [{ external_wallet_id, currency, label? }] }
