@@ -27,11 +27,13 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Lint
+      - name: Lint (advisory, not a gate)
         run: bun run lint
-        # Don't fail the whole CI on lint warnings yet -- the codebase
-        # is young, warnings are noise, and a false-red CI trains
-        # everyone to ignore the signal.
+        # The linter currently reports errors (not warnings) -- run 29531126957
+        # logged 8,873 prettier/prettier errors. continue-on-error: true means
+        # this step cannot fail today and must not be read as a passing gate.
+        # A ratchet to drive the error count to zero, lane by lane, is tracked
+        # separately and will remove this flag when each lane is clean.
         continue-on-error: true
 
       - name: Build
