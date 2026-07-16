@@ -58,10 +58,14 @@
 -- ============================================================
 
 -- Step 1: the new, inferable arbiter. Plain unique index, no predicate.
--- This is also the FIRST time this tree declares a single-column unique index
--- on wallet_fingerprint. The live dev database carries an equivalent partial
--- index that no migration here creates, so without this file the index the
--- write path depends on would never reach another environment.
+--
+-- Provenance of the index this supersedes: it is declared by migration
+-- 20260716120000_source_wallets_wallet_fingerprint_unique.sql, which creates
+-- uq_source_wallets_wallet_fingerprint as a PARTIAL unique index. That
+-- declaration is not drift and its uniqueness intent is correct. The only
+-- thing wrong with it is that a bare conflict target cannot infer a partial
+-- index, and a bare target is all the client can emit. So this file supersedes
+-- a properly declared index; it is not regularising an undeclared object.
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS
   uq_source_wallets_wallet_fingerprint_v2
   ON public.source_wallets (wallet_fingerprint);
