@@ -18,9 +18,11 @@
  *
  * A legacy tokenless caller has no widget session, so it has no recorded account
  * key, so its wallets cannot be fingerprinted and do not take part in dedup:
- * they insert exactly as they always have. The partial unique index on
- * source_wallets.wallet_fingerprint (WHERE wallet_fingerprint IS NOT NULL) is
- * what keeps an un-fingerprinted row legal.
+ * they insert exactly as they always have. An un-fingerprinted row stays legal
+ * because Postgres treats NULLs as distinct in a unique index, so the plain
+ * unique index on source_wallets.wallet_fingerprint tolerates unlimited NULL
+ * fingerprints. That property, not any index predicate, is what the legacy path
+ * rests on.
  *
  * Auth: widget_token (the integrating app's backend calls or-link-mint-token
  * server-to-server BEFORE opening the widget URL; the widget passes the
@@ -413,9 +415,12 @@ Deno.serve(
       //
       // A wallet with no discovery row has no server-side account key, so it
       // cannot be fingerprinted and simply does not take part in dedup. That is
-      // the legacy tokenless path, and the partial unique index on
-      // wallet_fingerprint (WHERE wallet_fingerprint IS NOT NULL) is what keeps
-      // an un-fingerprinted row legal.
+      // the legacy tokenless path, and it stays legal because Postgres treats
+      // NULLs as distinct in a unique index: the plain unique index on
+      // wallet_fingerprint tolerates unlimited NULL fingerprints. Migration
+      // 20260716140000 dropped the old WHERE wallet_fingerprint IS NOT NULL
+      // predicate precisely because it was never what made these rows legal, and
+      // a bare ON CONFLICT target cannot infer a partial index. Do not re-add it.
       // Keyed by external_wallet_id, holding the fingerprint already encoded for
       // the wire. computeWalletFingerprint returns raw bytes, and raw bytes must
       // never reach the client: a Uint8Array serialises to JSON as an array or an
@@ -601,11 +606,31 @@ Deno.serve(
         // impossible to lose silently; naming it as the conflict target is what
         // turns losing the race into a dropped row rather than a raised error.
         //
-        // The conflict target is wallet_fingerprint ALONE, matching the live
-        // partial index exactly. It is not (subaccount_id, provider_type,
-        // wallet_fingerprint): those fields are already inside the MAC, and a
-        // composite target would not match any index, so Postgres would reject
-        // it outright.
+        // The conflict target is wallet_fingerprint ALONE, and this REQUIRES the
+        // index to be total rather than partial. That is not a style choice and
+        // it is the trap here, so do not "tidy" either side of it:
+        //
+        //   A bare ON CONFLICT target cannot infer a PARTIAL index. Postgres
+        //   matches the arbiter at PLAN time and needs the clause to carry an
+        //   index predicate implying the index's own; with none supplied it
+        //   skips every partial index and raises 42P10. Being plan-time, that
+        //   fires on EVERY call carrying a fingerprint, not just a real race.
+        //   The feature would be dead, not flaky.
+        //
+        //   And the statement cannot be fixed to suit a partial index: this goes
+        //   through PostgREST, whose on_conflict takes a column list with no
+        //   syntax for a predicate, so ON CONFLICT (wallet_fingerprint) WHERE
+        //   wallet_fingerprint IS NOT NULL is unreachable from here. The index
+        //   had to meet the client, which is what migration 20260716140000 does
+        //   by dropping the predicate.
+        //
+        // Dropping it is safe because the predicate was never what made
+        // un-fingerprinted rows legal: Postgres treats NULLs as distinct in a
+        // unique index, so a plain unique index on a nullable column already
+        // tolerates unlimited NULL rows.
+        //
+        // Not (subaccount_id, provider_type, wallet_fingerprint) either: those
+        // are already inside the MAC, and a composite target matches no index.
         const { data: created, error: err } = await serviceClient
           .from("source_wallets")
           .upsert(fingerprintedWallets.map(toRow), {
