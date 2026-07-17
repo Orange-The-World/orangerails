@@ -5,19 +5,44 @@
 -- used ONLY to answer "have we seen this account before?" across
 -- session and device boundaries. Never emitted to clients.
 --
--- ZKA status: Auditor CLEARED 2026-07-15. wallet_fingerprint is
--- a non-reversible HMAC-SHA256 output. No plaintext key material
--- is stored in this column. Key (K_v) lives in KMS, GenerateMac
--- only, non-exportable. See: Knowledge > Connector fingerprint
--- key K_v (Auditor artifact) for the full checklist.
+-- Scheme (as implemented in
+-- supabase/functions/_shared/account-fingerprint.ts,
+-- computeWalletFingerprint, the only writer of this column):
+--
+--   wallet_fingerprint = HMAC-SHA256(
+--     key  = env var OR_ACCT_FINGERPRINT_KEY_V1,
+--     msg  = "orangerails/wallet/v1" NUL subaccount_id NUL
+--            provider_type NUL canonical_account_key NUL currency
+--   )
+--
+-- where NUL is the byte 0x00. The result is stored as the raw 32
+-- bytes, not hex: this column is BYTEA, unlike
+-- connections.account_fingerprint, which is text hex.
+--
+-- The domain separator "orangerails/wallet/v1" is load-bearing.
+-- This scheme and the connections.account_fingerprint scheme share
+-- one key, so the domain separator is the only guard keeping the
+-- two apart. They must never be equal.
+--
+-- currency is part of the message on purpose. A provider can expose
+-- one wallet per currency under a single account key; without
+-- currency every one of them fingerprints identically and they
+-- dedup onto each other.
+--
+-- ZKA status: wallet_fingerprint stores a non-reversible
+-- HMAC-SHA256 output. No plaintext key material and no user key
+-- material is stored in this column, and the value is never
+-- emitted to a client, an API response, or a log line.
+-- OR_ACCT_FINGERPRINT_KEY_V1 is a server-side operational key, not
+-- a user key.
 --
 -- Backfill: NONE. Existing rows stay NULL.
 -- Postgres unique indexes tolerate multiple NULLs (NULL != NULL
 -- in SQL), so the index is safe immediately with existing rows.
 -- wallet_fingerprint is written on first reconnect per user
--- (lazy re-keying). Existing dedup on the legacy constraint
+-- (lazy population). Existing dedup on the legacy constraint
 -- UNIQUE (connection_id, external_wallet_id) continues to work
--- unchanged until all rows have been re-keyed.
+-- unchanged until all rows carry a fingerprint.
 --
 -- Undo analysis: the columns themselves are removable by
 -- DROP COLUMN, but doing so after any row carries fingerprint
@@ -51,11 +76,16 @@ CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS
 
 -- Column comments (visible in Supabase dashboard and pg_catalog)
 COMMENT ON COLUMN public.source_wallets.wallet_fingerprint IS
-  'HMAC-SHA256(K_v, "orangerails/acct/v1" || tenant_id || provider || canonical_account_key). '
-  'Internal dedup only. Never emitted to any client or API response. '
-  'Key held in AWS KMS (GenerateMac only, non-exportable, no offline oracle). '
+  'HMAC-SHA256 over the message "orangerails/wallet/v1" NUL subaccount_id NUL provider_type NUL canonical_account_key NUL currency, where NUL is the byte 0x00. '
+  'Key is the env var OR_ACCT_FINGERPRINT_KEY_V1, imported sign-only via WebCrypto. Raw 32 bytes, not hex. '
+  'Computed by computeWalletFingerprint in supabase/functions/_shared/account-fingerprint.ts, the only writer of this column. '
+  'The domain separator "orangerails/wallet/v1" is load-bearing: this scheme shares its key with connections.account_fingerprint ("orangerails/acct/v1"), so the separator is the only guard keeping the two apart. '
+  'currency is part of the message on purpose: one account key can expose one wallet per currency, and without it they all fingerprint identically. '
+  'Internal dedup only. Never emitted to any client, API response, or log line. '
   'NULL for rows created before this migration; populated lazily on reconnect.';
 
 COMMENT ON COLUMN public.source_wallets.wallet_fingerprint_key_version IS
-  'Key version (v) used to compute wallet_fingerprint. '
-  'Supports lazy re-keying on K_v rotation without a big-bang migration.';
+  'Which version of OR_ACCT_FINGERPRINT_KEY_V1 wallet_fingerprint was computed under. '
+  'v1 is permanent. Rotating the key changes every fingerprint, so the same wallet reconnects as a new one and duplicates instead of deduping. '
+  'Any rotation must be preceded by a coordinated re-fingerprinting migration that rewrites every existing row under the new key before the old key is retired. '
+  'This column records the version a row was computed under; it does not by itself make rotation safe. See the module header of account-fingerprint.ts for the rotation policy.';
