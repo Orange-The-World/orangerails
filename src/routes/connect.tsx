@@ -1223,7 +1223,15 @@ function ConnectPageInner() {
         // integrating app's backend minted before opening this popup. The
         // edge function ignores tokenless requests during the rollout
         // window (warning only) and rejects them once the env flag flips.
-        widget_token: search.widget_token,
+        //
+        // Same fallback as the discovery call above, and for the same reason:
+        // the documented handoff puts widget_token in the URL fragment so it
+        // never reaches our server logs, and readHandoffKeysFromFragment strips
+        // the fragment early, so search.widget_token is empty for those callers.
+        // Reading only the query string here sent undefined and the server
+        // answered "widget_token required", which is why a fragment integrator
+        // could discover its wallets and then fail on the very last call.
+        widget_token: search.widget_token ?? initialFragmentWidgetToken ?? undefined,
       });
 
       // Compose the postMessage payload, attaching the user-facing
