@@ -220,8 +220,8 @@ The widget closes itself ~1.2s after posting. If the user cancels, you get `{ ty
 
 Per `source_wallet`, create one of your local wallet rows with:
 - A foreign key to your "OR connection" row (which holds the salt + verifier)
-- `sourceWalletId = source_wallet.id` (OR's source_wallets.id, used as the cross-system anchor)
-- `externalId = source_wallet.external_wallet_id` (the upstream provider's stable ID for this wallet)
+- `sourceWalletId = source_wallet.id` (OR's source_wallets.id: the stable cross-system anchor, key all dedup and lookups on this)
+- `externalId = source_wallet.external_wallet_id` (the provider's own id for this wallet; stable only for providers that emit a stable one, and some emit a fresh opaque id on every discovery, so store it if useful but never dedup or match on it, use `source_wallet.id` above)
 - Whatever name / metadata the user chooses (the widget sends a default label)
 
 Reference: V2 [`app/api/organizations/[organizationId]/orange-rails/connect-wallet/route.ts`](https://github.com/DeeJanuz/bitbooks/blob/feat/orange-rails-integration/app/api/organizations/%5BorganizationId%5D/orange-rails/connect-wallet/route.ts).
