@@ -36,13 +36,25 @@
 -- OR_ACCT_FINGERPRINT_KEY_V1 is a server-side operational key, not
 -- a user key.
 --
--- Backfill: NONE. Existing rows stay NULL.
+-- Backfill: NONE, and nothing backfills later either. Existing
+-- rows stay NULL for the life of the row.
 -- Postgres unique indexes tolerate multiple NULLs (NULL != NULL
 -- in SQL), so the index is safe immediately with existing rows.
--- wallet_fingerprint is written on first reconnect per user
--- (lazy population). Existing dedup on the legacy constraint
--- UNIQUE (connection_id, external_wallet_id) continues to work
--- unchanged until all rows carry a fingerprint.
+--
+-- A row is fingerprinted only when it is written through a widget
+-- session that recorded the provider account key server-side. The
+-- legacy tokenless path has no widget session, so it has no account
+-- key, so it cannot fingerprint: it writes NULL today and will keep
+-- writing NULL until REQUIRE_WIDGET_TOKEN is true everywhere. NULL
+-- is therefore an ongoing state, not a pre-migration artifact that
+-- drains away.
+--
+-- Nothing fills a NULL in later. The dedup upsert conflicts on
+-- wallet_fingerprint alone, and a NULL never matches a conflict
+-- target, so a reconnect inserts a fingerprinted row beside the NULL
+-- one rather than updating it. Dedup for un-fingerprinted rows rests
+-- on the legacy constraint UNIQUE (connection_id, external_wallet_id),
+-- which continues to work unchanged.
 --
 -- Undo analysis: the columns themselves are removable by
 -- DROP COLUMN, but doing so after any row carries fingerprint
@@ -82,7 +94,7 @@ COMMENT ON COLUMN public.source_wallets.wallet_fingerprint IS
   'The domain separator "orangerails/wallet/v1" is load-bearing: this scheme shares its key with connections.account_fingerprint ("orangerails/acct/v1"), so the separator is the only guard keeping the two apart. '
   'currency is part of the message on purpose: one account key can expose one wallet per currency, and without it they all fingerprint identically. '
   'Internal dedup only. Never emitted to any client, API response, or log line. '
-  'NULL for rows created before this migration; populated lazily on reconnect.';
+  'NULL for any row written without a widget session, including every row that predates this migration. Nothing backfills it: the dedup upsert conflicts on wallet_fingerprint alone and a NULL never matches a conflict target, so a reconnect inserts a fingerprinted row beside the NULL one rather than filling it in.';
 
 COMMENT ON COLUMN public.source_wallets.wallet_fingerprint_key_version IS
   'Which version of OR_ACCT_FINGERPRINT_KEY_V1 wallet_fingerprint was computed under. '
