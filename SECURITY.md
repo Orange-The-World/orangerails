@@ -127,9 +127,12 @@ This is identical to what the industry ships today:
 
 **ML-DSA-65 (FIPS 204) -- post-quantum signatures**
 
-Audit log entries will be signed with ML-DSA-65 (previously Dilithium). This
-allows verifying authenticity even after a CRQC exists, because ML-DSA is
-based on Module-LWE -- a problem Shor's algorithm does not solve.
+ML-DSA-65 (previously Dilithium) is wired into the schema and the per-user
+keypair lifecycle. Its primary application within the audit-log surface is
+deferred while that surface is rebuilt in an internal validation
+environment. It allows verifying authenticity even after a CRQC exists,
+because ML-DSA is based on Module-LWE -- a problem Shor's algorithm does
+not solve.
 
 ---
 
@@ -166,7 +169,12 @@ based on Module-LWE -- a problem Shor's algorithm does not solve.
 
 - Wrap the same AES data key for multiple recipients via their hybrid KEM
   public keys -- each role decrypts only what their role permits
-- ML-DSA-65 signatures attached to data mutations for audit log integrity
+
+### Deferred
+
+- ML-DSA-65 signatures attached to data mutations for audit log integrity.
+  Deferred while the audit log surface is rebuilt in an internal validation
+  environment. Returns alongside that work.
 
 ### Future
 

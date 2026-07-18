@@ -25,7 +25,7 @@
  */
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import sodium from 'https://esm.sh/libsodium-wrappers-sumo@0.7.13';
+import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
@@ -74,8 +74,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     Deno.env.get('SUPABASE_URL')!,
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
   );
-
-  await sodium.ready;
 
   let processed = 0;
   let failed    = 0;
@@ -172,7 +170,7 @@ async function handleEvent(
     // No opt-in. Defer until user opens app (or-sync will drain).
     return 'skipped';
   }
-  if (sub.opk_alg !== 'libsodium-crypto_box_seal-v1') {
+  if (sub.opk_alg !== OPK_SEAL_ALG) {
     return `unsupported opk_alg: ${sub.opk_alg}`;
   }
 
@@ -185,7 +183,12 @@ async function handleEvent(
   if (mapErr || !map) return `profile map missing: ${mapErr?.message}`;
 
   const basic = btoa(`${map.quiltt_profile_id}:${apiKey}`);
-  const recipientPub = sodium.from_base64(sub.opk_public, sodium.base64_variants.ORIGINAL);
+  let recipientPub: Uint8Array;
+  try {
+    recipientPub = await decodeOpkPublicKey(sub.opk_public);
+  } catch (e) {
+    return `invalid opk_public: ${e instanceof Error ? e.message : String(e)}`;
+  }
 
   // Pull transactions paginated. We need the connection id from the
   // event payload to scope the pull.
@@ -279,6 +282,42 @@ async function handleEvent(
       return `Quiltt GraphQL ${resp.status}: ${errBody.slice(0, 300)}`;
     }
     const json = await resp.json();
+
+    // GraphQL can return HTTP 200 with an `errors` array when a query
+    // partially or fully fails (bad connectionId, expired profile,
+    // schema mismatch, etc.). Without this check the error is silently
+    // dropped: json.data.transactions.nodes evaluates to [] and the
+    // inbox event is marked processed with zero rows — data loss with
+    // no signal. Surface the errors so bumpAttempts fires and the event
+    // stays visible for the next cron tick.
+    //
+    // Redaction posture: keep only the human-readable `message` from
+    // each error, never the whole error object. A GraphQL error also
+    // carries `locations`, `path`, and a provider-defined `extensions`
+    // blob; serializing all of it into a log and the last_error column
+    // is overly broad. Provider messages can additionally embed
+    // alphanumeric connection/profile identifiers that a numeric-only
+    // filter would never catch. Quiltt IDs are mixed-case (for example
+    // conn_14TJiFDKRJlPiBHuukUIlXZ), so a lowercase-only pass would
+    // still leak the uppercase characters. We first redact any
+    // short-prefix underscore token case-insensitively, then run the
+    // numeric redaction on top. The prefix pass is intentionally
+    // prefix-agnostic: it does not depend on a hardcoded conn_/prof_
+    // list that could drift as Quiltt adds new ID types.
+    if (Array.isArray(json?.errors) && json.errors.length > 0) {
+      const messages = json.errors
+        .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+        .filter((m: string) => m.length > 0)
+        .join('; ')
+        .slice(0, 800);
+      const summary = messages
+        .replace(/\b[a-z]{2,8}_[A-Za-z0-9]{6,}\b/gi, '[redacted-id]')
+        .replace(/\b\d{6,}\b/g, '[redacted]')
+        .slice(0, 400);
+      console.error(`[or-quiltt-sync] GraphQL errors for event ${ev.event_id}:`, summary);
+      return `Quiltt GraphQL errors: ${summary}`;
+    }
+
     const txs = json?.data?.transactions?.nodes ?? [];
     const pageInfo = json?.data?.transactions?.pageInfo;
 
@@ -291,11 +330,7 @@ async function handleEvent(
         upstream_status: tx.status,
         account_id:    tx.account?.id,
       });
-      const sealed = sodium.crypto_box_seal(
-        sodium.from_string(cleartext),
-        recipientPub,
-      );
-      const sealedB64 = sodium.to_base64(sealed, sodium.base64_variants.ORIGINAL);
+      const sealedB64 = await sealToOpk(cleartext, recipientPub);
 
       const insert = await client
         .from('encrypted_transactions')
@@ -307,7 +342,7 @@ async function handleEvent(
             payload_key_version: 1,
             occurred_at:         tx.date,
             sealed_under:        'opk',
-            sealed_alg:          'libsodium-crypto_box_seal-v1',
+            sealed_alg:          OPK_SEAL_ALG,
           },
           { onConflict: 'connection_id,external_id', ignoreDuplicates: true },
         );

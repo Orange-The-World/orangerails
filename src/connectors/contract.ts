@@ -1,5 +1,5 @@
 /**
- * Orange Rails → BitBooks push contract.
+ * Orange Rails to BitBooks push contract.
  *
  * This file defines the JSON shape every OR connector emits and V3 ingests.
  * It is the canonical handoff format between OR (source-specific import
@@ -32,6 +32,8 @@
  *   ciphertext + plaintext orchestration metadata.
  */
 
+import type { LNInvoice } from './lightning';
+
 export const STAGED_IMPORT_CONTRACT_VERSION = 1;
 
 /**
@@ -44,10 +46,45 @@ export const STAGED_IMPORT_CONTRACT_VERSION = 1;
  *                      account_name, line_description, wallet_currency,
  *                      debit, credit }
  *
- * Keys MUST match the column header (lowercased, spaces → underscores) so
+ * Keys MUST match the column header (lowercased, spaces to underscores) so
  * V3's reuse of `parseCsv*` validation rules works without translation.
  */
 export type V3StagedRow = Record<string, string>;
+
+/**
+ * A Lightning invoice that has crossed the settled boundary.
+ *
+ * This is `LNInvoice` narrowed so the type system guarantees what the
+ * confirms client (#105) enforces at runtime: `settled` is literally `true`
+ * and `settled_at` is a non-empty ISO-8601 string. Only invoices of this
+ * shape may enter the push contract. A pending or failed invoice
+ * (`settled:false, settled_at:null`) has no place in the books and must be
+ * rejected at the boundary, never silently dropped.
+ */
+export type LNSettledInvoice = LNInvoice & {
+  state: { settled: true; settled_at: string };
+};
+
+/**
+ * Fail-closed guard for the settled boundary.
+ *
+ * Carries the #105 ingest-boundary invariant into the contract: a connector
+ * filling `staged.lightning` must run every invoice through this first. It
+ * throws on any non-settled record rather than admitting it, so a unit or
+ * cursor bug upstream surfaces as a loud failure instead of a quietly
+ * missing or bogus financial row.
+ *
+ * `settled_at` must be a non-empty string, not merely non-null: an upstream
+ * normalisation bug could otherwise stage `settled:true, settled_at:""` as a
+ * valid financial row, which the narrowed `LNSettledInvoice` type forbids.
+ */
+export function assertLNSettledForContract(inv: LNInvoice): asserts inv is LNSettledInvoice {
+  if (inv.state.settled !== true || typeof inv.state.settled_at !== 'string' || inv.state.settled_at.length === 0) {
+    throw new Error(
+      `Staged import: only terminal-settled invoices may enter the contract (payment_hash ${inv.payment_hash}).`,
+    );
+  }
+}
 
 export type StagedImportPayload = {
   contractVersion: typeof STAGED_IMPORT_CONTRACT_VERSION;
@@ -94,13 +131,23 @@ export type StagedImportPayload = {
   /**
    * The actual rows V3 will import. Each entity array is optional , a
    * connector may emit only contacts, only accounts, etc. V3 applies them
-   * in the order: accounts → contacts → journal entries. (JE rows depend
+   * in the order: accounts to contacts to journal entries. (JE rows depend
    * on account codes existing; contacts have no dependencies.)
+   *
+   * `lightning` is the settled-invoice staging input from the LN confirms
+   * client. It is NOT a V3StagedRow array: settled invoices are carried in
+   * their canonical provider-agnostic shape and mapped to journal-entry rows
+   * by the V3 wizard, which is where the fiat rate and the incoming/outgoing
+   * direction are supplied (with user override). The connector cannot build
+   * a balanced journal entry on its own, so it stages the raw settled facts
+   * and lets V3 finish the mapping. Every element MUST have passed
+   * `assertLNSettledForContract`.
    */
   staged: {
     accounts?: V3StagedRow[];
     contacts?: V3StagedRow[];
     journalEntries?: V3StagedRow[];
+    lightning?: LNSettledInvoice[];
   };
 
   /**
@@ -153,6 +200,17 @@ export function assertStagedImportPayload(value: unknown): asserts value is Stag
     const arr = staged[key];
     if (arr !== undefined && !Array.isArray(arr)) {
       throw new Error(`Staged import: staged.${key} must be an array if present.`);
+    }
+  }
+  const lightning = staged.lightning;
+  if (lightning !== undefined) {
+    if (!Array.isArray(lightning)) {
+      throw new Error('Staged import: staged.lightning must be an array if present.');
+    }
+    // Enforce the settled boundary here so an unsettled record cannot be
+    // admitted through the upload path, not just the connector build path.
+    for (const inv of lightning) {
+      assertLNSettledForContract(inv as LNInvoice);
     }
   }
 }

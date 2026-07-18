@@ -8,7 +8,7 @@
 --
 -- The new raw key was generated on maintainer infrastructure 2026-06-16 by
 -- /tmp/rotate-v2-or-key.sh — 32 random bytes hex-encoded. Stored in
--- Proton Pass vault "10 AI AGENT - JARVIS" as V2_OR_PLATFORM_API_KEY and
+-- the maintainer's password vault as V2_OR_PLATFORM_API_KEY and
 -- shared with the maintainer via the same channel for the maintainer to deploy.
 --
 -- Cutover plan (coordinated to minimise prod auth window):

@@ -14,6 +14,53 @@ const FALLBACK_PALETTE = [
   "bg-fuchsia-500",
 ];
 
+/**
+ * Bundled logo assets for known providers. Values are root-relative
+ * public-folder paths served by Vite at runtime. Callers that pass an
+ * explicit `src` prop take precedence; anything without an entry here
+ * falls through to the colored-initials fallback automatically.
+ */
+export const PROVIDER_LOGO_SRCS: Record<string, string> = {
+  // Tier 1
+  blink:          "/logos/blink.svg",
+  btcpay:         "/logos/btcpay.svg",
+  xpub:           "/logos/xpub.svg",
+  strike:         "/logos/strike.svg",
+  surge:          "/logos/surge.svg",
+  quiltt:         "/logos/quiltt.svg",
+  sparrow:        "/logos/sparrow.svg",
+  // CCXT batch 2 -- top 40 by popularity (29 with brand marks, 11 use colored-initials fallback)
+  coinbase:       "/logos/coinbase.svg",
+  binance:        "/logos/binance.svg",
+  kraken:         "/logos/kraken.svg",
+  bybit:          "/logos/bybit.svg",
+  okx:            "/logos/okx.svg",
+  gemini:         "/logos/gemini.svg",
+  kucoin:         "/logos/kucoin.svg",
+  cryptocom:      "/logos/cryptocom.svg",
+  bitstamp:       "/logos/bitstamp.svg",
+  bitfinex:       "/logos/bitfinex.svg",
+  bitget:         "/logos/bitget.svg",
+  gate:           "/logos/gate.svg",
+  htx:            "/logos/htx.svg",
+  mexc:           "/logos/mexc.svg",
+  upbit:          "/logos/upbit.svg",
+  bingx:          "/logos/bingx.svg",
+  bitflyer:       "/logos/bitflyer.svg",
+  bithumb:        "/logos/bithumb.svg",
+  coincheck:      "/logos/coincheck.svg",
+  hitbtc:         "/logos/hitbtc.svg",
+  luno:           "/logos/luno.svg",
+  poloniex:       "/logos/poloniex.svg",
+  btcmarkets:     "/logos/btcmarkets.svg",
+  whitebit:       "/logos/whitebit.svg",
+  alpaca:         "/logos/alpaca.svg",
+  bitcoincom:     "/logos/bitcoincom.svg",
+  binanceus:      "/logos/binanceus.svg",
+  binancecoinm:   "/logos/binancecoinm.svg",
+  binanceusdm:    "/logos/binanceusdm.svg",
+};
+
 function hashSlug(slug: string): number {
   let h = 0;
   for (let i = 0; i < slug.length; i += 1) {
@@ -51,10 +98,13 @@ export function ProviderLogo({
   const dim =
     size === "lg" ? "h-12 w-12 text-base" : size === "sm" ? "h-7 w-7 text-[10px]" : "h-9 w-9 text-xs";
 
-  if (src && !errored) {
+  // Explicit src prop wins; fall back to the bundled map for known slugs.
+  const resolvedSrc = src ?? PROVIDER_LOGO_SRCS[slug];
+
+  if (resolvedSrc && !errored) {
     return (
       <img
-        src={src}
+        src={resolvedSrc}
         alt=""
         loading="lazy"
         onError={() => setErrored(true)}

@@ -41,13 +41,7 @@
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
-
-const ALLOWED_OPK_ALGS = new Set([
-  'libsodium-crypto_box_seal-v1',
-]);
-
-// X25519 public key is 32 bytes → base64 length = 44 chars (with one '=' pad).
-const MAX_OPK_PUBLIC_LEN = 128;
+import { ALLOWED_OPK_ALGS, MAX_OPK_PUBLIC_LEN } from '../_shared/opk-seal.ts';
 
 interface RegisterBody {
   app_user_id?: string;

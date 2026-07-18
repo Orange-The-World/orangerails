@@ -1,12 +1,19 @@
 name: Deploy to Cloudflare Pages
 
 on:
+  push:
+    branches: [dev, prod]
   workflow_dispatch:
     inputs:
       reason:
         description: 'Why are you redeploying? (e.g. cancelled deploy, asset cache bust)'
         required: false
         type: string
+      apply_migrations:
+        description: 'Also APPLY pending DB migrations to this branch project. Off by default. Pushes can never turn this on.'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: pages-${{ github.ref }}
@@ -91,17 +98,17 @@ jobs:
           # meant a dev deploy would ship un-merged edge functions and migrations
           # straight to production. Earlier on 2026-06-21 the dev path was first
           # set to gposxxmxenrdvewrprle, which is NOT this repo's dev project at
-          # all -- it is orange-world-prod, the production database for a sibling
-          # product (Orange Way) that lives in the same Supabase team. The
-          # owner had already caught this exact ref-confusion on 2026-06-18 and
-          # corrected it in the predecessor workflow pages-deploy.yml (see
-          # commit b55636e: "was pointing at OWM PROD by mistake, would clobber
-          # it on next dev push"); when pages-deploy.yml was replaced by this
-          # supabase-deploy.yml the wrong ref was reintroduced. The correct dev
-          # project is fzwmnzmtqidumdqjdddz, the orangerails_dev workspace.
-          # Each branch now lands on its own Supabase project; promote dev ->
-          # prod through a PR to graduate changes. NEVER let the dev arm here
-          # point at a project ref outside this repo's two Supabase projects.
+          # all: it is orange-world-prod, the production database for a sibling
+          # product that lives in the same Supabase team. The owner had already
+          # caught this exact ref-confusion on 2026-06-18 and corrected it in the
+          # predecessor workflow pages-deploy.yml (see commit b55636e: "was
+          # pointing at OWM PROD by mistake, would clobber it on next dev push");
+          # when pages-deploy.yml was replaced by this supabase-deploy.yml the
+          # wrong ref was reintroduced. The correct dev project is
+          # fzwmnzmtqidumdqjdddz, the orangerails_dev workspace. Each branch now
+          # lands on its own Supabase project; promote dev -> prod through a PR to
+          # graduate changes. NEVER let the dev arm here point at a project ref
+          # outside this repo's two Supabase projects.
           if [ "${{ github.ref_name }}" = "prod" ]; then
             echo "supabase_ref=lcdicqalreskibdfxkzb" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_name }}" = "dev" ]; then
@@ -141,14 +148,64 @@ jobs:
             sleep 15
           done
 
+      - name: Report pending DB migrations (read-only, never applies)
+        # Runs on every deploy so schema drift is visible instead of silent.
+        # Applying is a separate, opt-in step below.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ steps.target.outputs.supabase_ref }}
+        run: |
+          set -euo pipefail
+          MIG_DIR="supabase/migrations"
+          if [ ! -d "$MIG_DIR" ]; then
+            echo "no migrations directory; nothing pending"
+            exit 0
+          fi
+
+          PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
+          trap 'rm -f "$PAYLOAD"' EXIT
+          jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
+          APPLIED=$(curl -sS -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary "@$PAYLOAD" | jq -r '.[].version' | sort -u)
+
+          PENDING=0
+          for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
+            BASENAME=$(basename "$FILE")
+            VERSION="${BASENAME%%_*}"
+            if echo "$APPLIED" | grep -qx "$VERSION"; then
+              continue
+            fi
+            echo "PENDING on ${SUPABASE_REF}: ${BASENAME}"
+            PENDING=$((PENDING + 1))
+          done
+
+          echo
+          echo "${PENDING} migration(s) pending on ${SUPABASE_REF}."
+          if [ "$PENDING" -gt 0 ]; then
+            echo "Nothing was applied. Schema changes are applied by hand:"
+            echo "  dev  -> the DBA applies and verifies."
+            echo "  prod -> two party, the founder plus the CTO."
+            echo "To apply from CI instead, re-run this workflow via workflow_dispatch"
+            echo "with apply_migrations = true."
+          fi
+
       - name: Apply pending DB migrations via Management API
+        # Only ever runs on an explicit workflow_dispatch with apply_migrations
+        # checked. A push CANNOT reach this step: `inputs` is null on a push
+        # event, so the condition is false. Deploying code and changing a schema
+        # are different acts with different blast radii, and merging a PR must
+        # never be the thing that silently rewrites a database.
+        #
         # The Supabase CLI's `db push` requires a linked project + DB
         # password we don't have in CI. The Management API SQL endpoint
         # (POST /v1/projects/{ref}/database/query) does NOT need the DB
-        # password — it auths with SUPABASE_ACCESS_TOKEN — so we use it
+        # password, it auths with SUPABASE_ACCESS_TOKEN, so we use it
         # directly. We track applied versions in
         # supabase_migrations.schema_migrations the same way `supabase db
         # push` would, so manual recovery via the CLI later stays clean.
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_migrations }}
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ steps.target.outputs.supabase_ref }}
