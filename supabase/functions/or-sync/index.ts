@@ -930,17 +930,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // shape stays uniform across modes. In sink mode the column is
         // plaintext per the V2 contract. We NEVER fall back to writing the
         // raw upstream message -- if encryption fails, store only the code.
-        const persistable = `${code}:${correlationId}`;
+        // TEMP DEBUG (dev only, revert after capture): store the real error class + pg SQLSTATE
+        // as plaintext so the true cause is readable via SQL. Class names / SQLSTATE only, no customer content.
+        const pgCode = (e as { code?: string }).code ?? "";
+        const persistable = `DBG|${code}|${errorClass}|${pgCode}`;
         let storedErr: string | null = persistable;
-        if (!sinkMode) {
-          try {
-            storedErr = await encryptAes(persistable, txnsKey!);
-          } catch {
-            // Encryption failed -- store the unencrypted taxonomy code, not the raw message.
-            // (Code + correlation ID contain no customer plaintext.)
-            storedErr = persistable;
-          }
-        }
         await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: storedErr }).eq('id', conn.id);
         const copy = lookupErrorCopy(code);
         results.push({
