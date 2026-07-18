@@ -930,10 +930,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // shape stays uniform across modes. In sink mode the column is
         // plaintext per the V2 contract. We NEVER fall back to writing the
         // raw upstream message -- if encryption fails, store only the code.
-        // TEMP DEBUG (dev only, revert after capture): store the real error class + pg SQLSTATE
-        // as plaintext so the true cause is readable via SQL. Class names / SQLSTATE only, no customer content.
+        // TEMP DEBUG (dev only, revert): make the true cause readable via SQL. Class + SQLSTATE are
+        // always value-free. The pg message is captured ONLY for 23502, whose message names the column
+        // with no row values. RangeError lands as dbg:RangeError| with no code, which is the signal.
         const pgCode = (e as { code?: string }).code ?? "";
-        const persistable = `DBG|${code}|${errorClass}|${pgCode}`;
+        const pgMsg = pgCode === "23502" ? String((e as { message?: string }).message ?? "").slice(0, 160) : "";
+        const persistable = `dbg:${errorClass}|${pgCode}|${pgMsg}`;
         let storedErr: string | null = persistable;
         await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: storedErr }).eq('id', conn.id);
         const copy = lookupErrorCopy(code);
