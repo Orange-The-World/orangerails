@@ -204,23 +204,46 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'credentials_key required' }, 400, cors);
     }
 
-    // Resolve sink format: platforms.sink_format wins over body.format.
-    // Server-side resolution defends against a buggy or malicious caller
-    // asking for a sink shape that isn't theirs. body.format kept as a
-    // backwards-compat fallback for callers (V2) that pre-date the
-    // multi-tenant column. Once every platform row has sink_format
-    // populated, the body field can be deprecated.
-    let resolvedFormat: string | null = null;
-    try {
-      resolvedFormat = await resolveSinkFormatForPlatform(
-        auth.serviceClient,
-        auth.platformId,
-        bodyFormat ?? null,
-      );
-    } catch (resolveErr) {
-      console.error('[or-sync] sink_format resolve failed:', resolveErr);
-      // Fall back to body.format on resolution failure rather than break.
-      resolvedFormat = bodyFormat ?? null;
+    // Resolve sink format. platforms.sink_format is intended to win over
+    // body.format so a caller cannot request a sink shape that isn't theirs,
+    // with body.format kept as a backwards-compat fallback for callers (V2)
+    // that pre-date the multi-tenant column.
+    //
+    // Rolled out dark. The flag OR_SYNC_SINK_FORMAT_ENFORCE is OFF by default,
+    // so behavior is unchanged here: body.format is used. We still run the
+    // resolution and log, per platform, when the server-resolved format WOULD
+    // differ from the body.format actually sent. That turns an otherwise
+    // unmeasurable question (no store records the body.format each platform
+    // sends) into an observed fact, with zero behavior change, before the flag
+    // is turned on later (a separate, prod, two-party change).
+    //
+    // platformId only exists on a platform-mode context, so the resolution is
+    // guarded to that mode. Direct-mode callers keep the body.format fallback.
+    const enforceSinkFormat = Deno.env.get('OR_SYNC_SINK_FORMAT_ENFORCE') === '1';
+    let resolvedFormat: string | null = bodyFormat ?? null;
+    if (ctx.mode === 'platform') {
+      try {
+        const serverFormat = await resolveSinkFormatForPlatform(
+          ctx.serviceClient,
+          ctx.platformId,
+          bodyFormat ?? null,
+        );
+        if (serverFormat !== (bodyFormat ?? null)) {
+          // Format names and the platform id only. No user data, no secrets.
+          console.log(
+            `[or-sync] sink_format-observe platform=${ctx.platformId} ` +
+            `would_change=1 body_format=${bodyFormat ?? 'null'} ` +
+            `server_format=${serverFormat ?? 'null'} enforced=${enforceSinkFormat ? '1' : '0'}`,
+          );
+        }
+        if (enforceSinkFormat) {
+          resolvedFormat = serverFormat;
+        }
+      } catch (resolveErr) {
+        console.error('[or-sync] sink_format resolve failed:', resolveErr);
+        // Fall back to body.format on resolution failure rather than break.
+        resolvedFormat = bodyFormat ?? null;
+      }
     }
     const format = resolvedFormat;
 
