@@ -186,7 +186,7 @@ export async function buildQuickBooksStagedPayload(input: QuickBooksStagingInput
         allContacts.push(...contacts);
         for (const err of e) errors.push(`${f.name}: ${err.message}`);
       } else if (detected === 'JOURNAL') {
-        const { entries, errors: e } = await parseJournal(f.bytes, f.name);
+        const { journalEntries: entries, errors: e } = await parseJournal(f.bytes, f.name);
         allJournals.push(...entries);
         for (const err of e) errors.push(`${f.name}: ${err.message}`);
       } else {
