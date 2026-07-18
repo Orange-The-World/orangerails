@@ -931,10 +931,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // plaintext per the V2 contract. We NEVER fall back to writing the
         // raw upstream message -- if encryption fails, store only the code.
         // TEMP DEBUG (dev only, revert): make the true cause readable via SQL. Class + SQLSTATE are
-        // value-free; the pg message is captured ONLY for 23502, whose message names the column with no
-        // row values (other SQLSTATEs embed values, so they stay code-only).
+        // value-free. The message is captured only where the message itself cannot carry customer data:
+        //   - database errors: ONLY SQLSTATE 23502, whose message names the column and no row values
+        //     (other SQLSTATEs embed the offending row values, so they stay code-only).
+        //   - non-database throws: an allowlist of classes whose message is a property name and a type.
+        //     SyntaxError is deliberately NOT on it: a V8 JSON.parse failure quotes the raw upstream
+        //     response body verbatim, which is customer data.
+        const MESSAGE_SAFE_CLASSES = ['TypeError', 'RangeError'];
         const pgCode = (e as { code?: string }).code ?? '';
-        const safeDetail = pgCode === '23502' ? String((e as { message?: string }).message ?? '').slice(0, 160) : '';
+        const captureMessage = pgCode === '23502' || (!pgCode && MESSAGE_SAFE_CLASSES.includes(errorClass));
+        const safeDetail = captureMessage ? String((e as { message?: string }).message ?? '').slice(0, 160) : '';
         const persistable = ['DBG', code, errorClass, pgCode, safeDetail].filter(Boolean).join('|');
         let storedErr: string | null = persistable;
         await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: storedErr }).eq('id', conn.id);
