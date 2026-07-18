@@ -5,6 +5,7 @@ import { PostHogProvider } from "posthog-js/react";
 
 import appCss from "../styles.css?url";
 import { VaultProvider } from "@/context/VaultContext";
+import { registerRefSuperProperty } from "@/lib/analytics";
 
 const ANALYTICS_CONSENT_KEY = "or-analytics-consent";
 
@@ -117,6 +118,9 @@ function RootComponent() {
     // phc_ keys are PostHog "Project API Keys" , write-only, public-safe.
 initPostHogIfConsented();
     posthog.register({ app: "orangerails", brand: "orange-rails" });
+    // Must run here: the landing URL, and therefore any ?ref=, is gone by
+    // the time a lazy route module such as /signup loads.
+    registerRefSuperProperty();
   }, []);
 
   return (
@@ -268,4 +272,3 @@ function AnalyticsNotice() {
     </div>
   );
 }
-
