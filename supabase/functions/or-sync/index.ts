@@ -920,6 +920,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // Map to a fixed taxonomy; emit only the code + a correlation id.
         const raw = e instanceof Error ? e.message : String(e);
         const errorClass = e instanceof Error ? e.constructor.name : typeof e;
+        // DEV breadcrumb -- revert after diagnosis (CTO 2026-07-18)
+        console.log('[or-sync] breadcrumb', (e as Error)?.name, (e instanceof Error ? e.stack?.split('\n')[0] : String(e)));
         const code = classifyUpstreamError(raw);
         const correlationId = randomCorrelationId();
         const fp = await errorFingerprint(raw, errorClass);
