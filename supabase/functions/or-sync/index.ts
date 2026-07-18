@@ -240,7 +240,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           resolvedFormat = serverFormat;
         }
       } catch (resolveErr) {
-        console.error('[or-sync] sink_format resolve failed:', resolveErr);
+        // Log the error CLASS only, never the error object. Now that the
+        // resolution actually executes, this catch can receive a Postgres
+        // error whose message may embed row values. Those must never reach
+        // the edge log in plaintext, the same control the sync error path
+        // upstream applies.
+        console.error(
+          '[or-sync] sink_format resolve failed, class=' +
+            (resolveErr instanceof Error ? resolveErr.constructor.name : typeof resolveErr),
+        );
         // Fall back to body.format on resolution failure rather than break.
         resolvedFormat = bodyFormat ?? null;
       }
