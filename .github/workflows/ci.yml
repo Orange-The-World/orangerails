@@ -39,6 +39,32 @@ jobs:
       - name: Build
         run: bun run build
 
+  typecheck-and-unit-tests:
+    name: Typecheck + unit tests
+    runs-on: ubuntu-latest
+    # Runs against the checked-out branch, not the deployed site.
+    # tsc --noEmit catches type errors that esbuild silently strips.
+    # vitest exercises runtime behaviour the type system cannot express.
+    # Neither step has continue-on-error: a check that cannot fail is
+    # decoration, not a gate.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun run test
+
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
