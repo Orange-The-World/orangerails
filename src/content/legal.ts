@@ -37,11 +37,11 @@ export interface LegalValues {
 }
 
 export const LEGAL_VALUES: LegalValues = {
-  companyLegalName: "[COMPANY LEGAL NAME]",
-  jurisdiction: "[JURISDICTION]",
-  contactEmail: "[CONTACT EMAIL]",
-  effectiveDate: "[EFFECTIVE DATE]",
-  retentionDays: "[N]",
+  companyLegalName: "Orange Rails",
+  jurisdiction: "Ontario, Canada",
+  contactEmail: "hello@orangerails.com",
+  effectiveDate: "2026-07-18",
+  retentionDays: "90",
 };
 
 /** Maps a bracket tag as written in the prose to its LegalValues key. */
