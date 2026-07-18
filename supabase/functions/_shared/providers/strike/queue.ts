@@ -44,6 +44,30 @@ import type { NormalizedTransaction, SyncResult } from '../types.ts';
 
 const DRAIN_BATCH = 100;
 
+/**
+ * Map a Strike subscription-create failure to a distinct, actionable plaintext
+ * marker stored in connections.encrypted_last_error. Pure and side-effect free
+ * so the mapping is unit-tested independently. Strike API errors arrive as
+ * `Strike <status> POST /subscriptions: <detail>` (see strikePost in index.ts),
+ * so the status drives the class. The scope marker string is unchanged for
+ * backward compatibility with existing consumers.
+ */
+export function strikeSubscriptionErrorMarker(message: string): string {
+  if (/403|FORBIDDEN|Insufficient permissions/i.test(message)) {
+    return 'STRIKE_SCOPE_MISSING_partner.webhooks.manage';
+  }
+  if (/\b401\b|Unauthorized/i.test(message)) {
+    return 'STRIKE_KEY_INVALID';
+  }
+  if (/\b400\b|Bad Request/i.test(message)) {
+    return 'STRIKE_SUBSCRIPTION_REJECTED';
+  }
+  if (/\b429\b|rate.?limit/i.test(message)) {
+    return 'STRIKE_RATE_LIMITED';
+  }
+  return 'STRIKE_SUBSCRIPTION_FAILED';
+}
+
 export interface DrainConnection {
   id: string;
   strike_subscription_id: string | null;
@@ -92,25 +116,28 @@ export async function drainStrikeQueue(args: {
       console.log(`[strike-queue] registered subscription ${sub.id} for connection ${conn.id}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // Surface the actionable customer-facing case: Strike API key
-      // missing the partner.webhooks.manage scope. The customer needs to
-      // regenerate the key from the API Key section on dashboard.strike.me.
-      if (/403|FORBIDDEN|Insufficient permissions/i.test(message)) {
+      // Persist an actionable marker on EVERY subscription-failure branch, not
+      // just the scope case. The old code console.error'd non-scope failures
+      // into the void, leaving the connection with no readable cause and
+      // forcing a server-log dig on the next failure. strikeSubscriptionErrorMarker
+      // maps the error to a distinct plaintext marker the consumer maps to a CTA.
+      const marker = strikeSubscriptionErrorMarker(message);
+      if (marker === 'STRIKE_SCOPE_MISSING_partner.webhooks.manage') {
         console.error(
           `[strike-queue] connection ${conn.id} key is missing the ` +
           `partner.webhooks.manage scope; webhooks cannot be registered. ` +
           `Customer must regenerate the key from the API Key section on dashboard.strike.me ` +
           `with that scope enabled. Detail: ${message.slice(0, 200)}`,
         );
-        // Mark the connection as needing attention so the consumer can
-        // surface a clear "regenerate your Strike key" CTA.
-        await args.serviceClient
-          .from('connections')
-          .update({ encrypted_last_error: 'STRIKE_SCOPE_MISSING_partner.webhooks.manage' })
-          .eq('id', conn.id);
       } else {
-        console.error(`[strike-queue] subscription registration failed for ${conn.id}:`, err);
+        console.error(
+          `[strike-queue] subscription registration failed for ${conn.id} -> ${marker}: ${message.slice(0, 200)}`,
+        );
       }
+      await args.serviceClient
+        .from('connections')
+        .update({ encrypted_last_error: marker })
+        .eq('id', conn.id);
       return { transactions: [], next_cursor: conn.last_sync_cursor };
     }
   }
