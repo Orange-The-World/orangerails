@@ -27,11 +27,13 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Lint
+      - name: Lint (advisory, not a gate)
         run: bun run lint
-        # Don't fail the whole CI on lint warnings yet — the codebase
-        # is young, warnings are noise, and a false-red CI trains
-        # everyone to ignore the signal.
+        # The linter currently reports errors (not warnings) -- run 29531126957
+        # logged 8,873 prettier/prettier errors. continue-on-error: true means
+        # this step cannot fail today and must not be read as a passing gate.
+        # A ratchet to drive the error count to zero, lane by lane, is tracked
+        # separately and will remove this flag when each lane is clean.
         continue-on-error: true
 
       - name: Build
@@ -40,10 +42,19 @@ jobs:
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
-    # Runs against the already-deployed dev site by default. The pages-deploy
-    # workflow refreshes dev on every push to `dev`. PR runs exercise the
-    # PR's tests against the currently-deployed site; once a PR merges, the
-    # next workflow run will exercise the PR's own UI changes after deploy.
+    # Runs against the already-deployed dev site. Two separate things deploy
+    # that site, and neither of them is this workflow:
+    #   frontend      -> Cloudflare Pages, from its own git integration, on
+    #                    every push (branch dev is the production env of the
+    #                    orangerails-dev project; feature branches get previews).
+    #   edge functions -> supabase-deploy.yml, on every push to dev and prod.
+    # Migrations are NOT deployed by either: they are applied by hand (the DBA
+    # on dev, two party on prod) or by an explicit dispatch of supabase-deploy
+    # with apply_migrations checked.
+    #
+    # A PR run therefore exercises the PR's tests against the currently-deployed
+    # site; once the PR merges, the next run exercises the PR's own UI changes
+    # after deploy.
     needs: lint-and-build
     steps:
       - name: Checkout
@@ -60,10 +71,43 @@ jobs:
       - name: Install Playwright browsers
         run: bunx playwright install --with-deps chromium
 
+      # Gate: all five secrets required by connector-identity.spec.ts must be
+      # present before Playwright starts. If any are missing, the suite's
+      # test.skip() guard would fire, all cases would skip, and the job would
+      # exit 0 -- a green tick that proves nothing. Failing loudly here
+      # instead, so a misconfigured CI is never mistaken for a passing suite.
+      - name: Require connector-identity secrets
+        env:
+          OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
+          ACCOUNT_A: ${{ secrets.ACCOUNT_A }}
+          ACCOUNT_B: ${{ secrets.ACCOUNT_B }}
+          OR_TEST_PLATFORM_API_KEY: ${{ secrets.OR_TEST_PLATFORM_API_KEY }}
+          OR_TEST_PLATFORM_SLUG: ${{ secrets.OR_TEST_PLATFORM_SLUG }}
+        run: |
+          missing=""
+          [ -z "$OR_API_BASE_URL" ]          && missing="$missing OR_API_BASE_URL"
+          [ -z "$ACCOUNT_A" ]                && missing="$missing ACCOUNT_A"
+          [ -z "$ACCOUNT_B" ]                && missing="$missing ACCOUNT_B"
+          [ -z "$OR_TEST_PLATFORM_API_KEY" ] && missing="$missing OR_TEST_PLATFORM_API_KEY"
+          [ -z "$OR_TEST_PLATFORM_SLUG" ]    && missing="$missing OR_TEST_PLATFORM_SLUG"
+          if [ -n "$missing" ]; then
+            echo "ERROR: connector-identity suite cannot run: missing secrets$missing"
+            echo "A skipped suite must not report pass. Fix the repo secrets and retry."
+            exit 1
+          fi
+
       - name: Run Playwright
         env:
           PLAYWRIGHT_BASE_URL: ${{ vars.PLAYWRIGHT_BASE_URL || 'https://orangerails.dev' }}
-        run: bunx playwright test
+          OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
+          ACCOUNT_A: ${{ secrets.ACCOUNT_A }}
+          ACCOUNT_B: ${{ secrets.ACCOUNT_B }}
+          OR_TEST_PLATFORM_API_KEY: ${{ secrets.OR_TEST_PLATFORM_API_KEY }}
+          OR_TEST_PLATFORM_SLUG: ${{ secrets.OR_TEST_PLATFORM_SLUG }}
+        # --forbid-only: fail if any test.only() was left in a committed spec.
+        # Same failure shape as the skip problem: .only() causes all other
+        # tests to skip and the job exits 0. --forbid-only makes that loud too.
+        run: bunx playwright test --forbid-only
 
       - name: Upload Playwright report
         if: always()

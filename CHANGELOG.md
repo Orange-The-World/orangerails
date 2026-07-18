@@ -8,6 +8,8 @@ Per-session work continues to be logged in the per-workstream wiki Changelogs (`
 
 ## 2026-06-25
 
+- Experimental MCP server retired from this repo. The CLI shim (PR #48), the five Supabase edge functions (or-mcp, or-agent-invite-mint, or-agent-invite-redeem, or-agent-token-refresh, or-agent-revoke), the /mcp SPA route, and the portal Agent Members + Audit Log sections are all gone. The feature was never validated for production use, was never published to npm, and the install instructions in the portal UI pointed at a package that did not exist. Moved to internal validation; a mature MCP will return as a hosted product or as Apache 2.0 code depending on what serves users best. Database tables (agent_members, agent_invitation_tokens, audit_entries, consumed_refresh_nonces) intentionally left in place; rollback is trivial if the feature returns.
+
 - All 38 Supabase edge functions now wrap `Deno.serve` with `wrapSentryHandler` from `supabase/functions/_shared/sentry.ts`. Uncaught exceptions are reported to the self-hosted GlitchTip at `pulse.orangerails.com` (Apache-2.0). The reporter is a fetch-based Sentry-wire-protocol client with zero npm dependencies (~165 lines); we avoided `@sentry/deno` to keep the per-function cold-start budget tight. The helper is a no-op when `SENTRY_DSN` is unset, so local dev is unaffected. Companion to the SPA and Worker Sentry wiring shipped earlier; this completes the three-surface observability sweep.
 - `pulse.orangerails.com` (self-hosted GlitchTip) is now in the error path for the SPA, the API gateway Worker, and edge functions. Disclosed here for integrators evaluating the OR data-flow posture.
 

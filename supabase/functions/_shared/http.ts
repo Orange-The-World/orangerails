@@ -1,9 +1,9 @@
 // Shared HTTP helpers for Supabase Edge Functions
 
 // Custom headers for OR's auth modes:
-//   x-platform-api-key: Plaid-style platform API key for SaaS integrators
-const ALLOWED_HEADERS = 'authorization, x-client-info, apikey, content-type, x-platform-api-key';
-const ALLOWED_METHODS = 'GET, POST, OPTIONS';
+//   x-platform-api-key , Plaid-style platform API key for SaaS integrators
+const ALLOWED_HEADERS = "authorization, x-client-info, apikey, content-type, x-platform-api-key";
+const ALLOWED_METHODS = "GET, POST, OPTIONS";
 const MAX_BODY_BYTES = 1_000_000; // 1 MB
 
 // Static CORS allow-list. Covers only Orange Rails-owned origins and local
@@ -14,20 +14,20 @@ const MAX_BODY_BYTES = 1_000_000; // 1 MB
 //
 // Add entries by exact origin match (no trailing slash, no wildcards).
 const ALLOWED_ORIGINS: ReadonlySet<string> = new Set<string>([
-  'https://orangerails.com',
-  'https://dev.orangerails.com',
-  'https://app.orangerails.com',
-  'https://connect.orangerails.com', // connection widget popup served at /connect
-  'https://orangerails.dev',
-  'http://localhost:3000',
-  'http://localhost:5173',
-  'http://localhost:5174',
-  'http://localhost:5180',
-  'http://localhost:5181',
+  "https://orangerails.com",
+  "https://dev.orangerails.com",
+  "https://app.orangerails.com",
+  "https://connect.orangerails.com", // /connect Link widget popup
+  "https://orangerails.dev",
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:5180",
+  "http://localhost:5181",
 ]);
 
 export function buildCorsHeaders(req: Request): Record<string, string> {
-  const origin = req.headers.get('Origin');
+  const origin = req.headers.get("Origin");
   // Audit 2026-05-16 finding #6: do not fall back to '*' for unknown
   // origins. Browsers reject cross-origin responses without an explicit
   // Allow-Origin match; server-to-server callers don't enforce CORS so
@@ -35,12 +35,12 @@ export function buildCorsHeaders(req: Request): Record<string, string> {
   // public endpoint with no auth (or-providers, or-platform-display);
   // those handlers should call buildPublicCorsHeaders explicitly.
   const headers: Record<string, string> = {
-    'Access-Control-Allow-Headers': ALLOWED_HEADERS,
-    'Access-Control-Allow-Methods': ALLOWED_METHODS,
-    'Vary': 'Origin',
+    "Access-Control-Allow-Headers": ALLOWED_HEADERS,
+    "Access-Control-Allow-Methods": ALLOWED_METHODS,
+    Vary: "Origin",
   };
   if (origin && ALLOWED_ORIGINS.has(origin)) {
-    headers['Access-Control-Allow-Origin'] = origin;
+    headers["Access-Control-Allow-Origin"] = origin;
   }
   return headers;
 }
@@ -52,9 +52,9 @@ export function buildCorsHeaders(req: Request): Record<string, string> {
  */
 export function buildPublicCorsHeaders(): Record<string, string> {
   return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': ALLOWED_HEADERS,
-    'Access-Control-Allow-Methods': ALLOWED_METHODS,
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": ALLOWED_HEADERS,
+    "Access-Control-Allow-Methods": ALLOWED_METHODS,
   };
 }
 
@@ -66,7 +66,7 @@ export function jsonResponse(
   return new Response(JSON.stringify(body), {
     status,
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       ...extraHeaders,
     },
   });
@@ -80,12 +80,12 @@ export async function readBoundedText(
   req: Request,
   maxBytes: number = MAX_BODY_BYTES,
 ): Promise<string | null> {
-  const contentLength = req.headers.get('content-length');
+  const contentLength = req.headers.get("content-length");
   if (contentLength && Number(contentLength) > maxBytes) {
     return null;
   }
 
-  if (!req.body) return '';
+  if (!req.body) return "";
 
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -97,7 +97,11 @@ export async function readBoundedText(
     if (value) {
       total += value.byteLength;
       if (total > maxBytes) {
-        try { await reader.cancel(); } catch { /* ignore */ }
+        try {
+          await reader.cancel();
+        } catch {
+          /* ignore */
+        }
         return null;
       }
       chunks.push(value);

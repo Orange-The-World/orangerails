@@ -3,7 +3,7 @@
  *
  * This file is the canonical contract between any consuming app
  * (V2, V3, Orange Way, future third-party SaaS) and the OR Connect widget
- * popup at https://connect.orangerails.com/connect.
+ * popup at https://connect.orangerails.com/connect/stealth.
  *
  * The widget runs in the user's browser on the orangerails.com origin.
  * The consuming app runs on its own origin. Cross-window postMessage
@@ -19,13 +19,31 @@
  *   for the duration of the popup session.
  * - The widget never makes a network request that includes the key.
  *
+ * seal_mode='app' (new):
+ * - The consuming app is the authoritative sealing store.
+ * - The widget receives NO key: or_stealth_key_b64 is typed `never` on
+ *   StealthInitAppMessage, refused by the sender in openStealthWidget, and
+ *   rejected again at runtime by the widget if it somehow arrives.
+ * - The widget scans and returns plaintext provenance records
+ *   (StealthTransactionProvenance) for the app to seal under its own key.
+ * - The widget does not seal or POST any envelope.
+ * - The app-mode ROUTES are follow-on work. Until they land, the widget
+ *   rejects seal_mode='app' at INIT with an explicit not-implemented error
+ *   rather than letting a keyless init fall into widget-mode crypto.
+ *
  * Anyone can integrate Stealth Sync by:
- *   1. Opening a popup at https://connect.orangerails.com/connect
+ *   1. Opening a popup at https://connect.orangerails.com/connect/stealth
  *   2. Listening for OR_STEALTH_READY
- *   3. Sending OR_STEALTH_INIT with the per-app key
+ *   3. Sending OR_STEALTH_INIT with the per-app key (widget mode)
+ *      or without any key (app mode)
  *   4. Listening for OR_STEALTH_PROGRESS / OR_STEALTH_ADD_COMPLETE /
  *      OR_STEALTH_SYNC_COMPLETE / OR_STEALTH_ERROR
  *   5. Closing the popup
+ *
+ * Note on routes: `/connect/stealth` is this widget. `/connect` is the
+ * older Link widget (provider credentials, bank connections) with a
+ * different key-handoff model. Do not open `/connect` for the xpub or
+ * descriptor flow.
  *
  * Spec lives in STEALTH-SYNC-MASTER-PLAN.md §4.4.
  */
@@ -33,14 +51,44 @@
 export const STEALTH_PROTOCOL_VERSION = 1 as const;
 export const STEALTH_HKDF_INFO = 'or-stealth-v1' as const;
 
+/** Path the Stealth Sync widget is mounted at. See src/routes/connect/stealth.tsx. */
+export const STEALTH_WIDGET_PATH = '/connect/stealth' as const;
+
+/**
+ * Thrown by openStealthWidget when an app-mode init carries key material.
+ * App mode means the key never leaves the consuming app's origin, so this
+ * is refused at the sender, before the popup exists and before any
+ * postMessage crosses to the widget origin.
+ */
+export class StealthKeyLeakError extends Error {
+  constructor() {
+    super(
+      "seal_mode='app' must not carry or_stealth_key_b64: in app mode the key " +
+        "never leaves the consuming app's origin.",
+    );
+    this.name = 'StealthKeyLeakError';
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // App → Widget messages
 // ─────────────────────────────────────────────────────────────────────
 
 export type StealthMode = 'add' | 'sync' | 'list' | 'delete';
 
-export interface StealthInitMessage {
+/**
+ * Widget mode (default, backward-compatible).
+ *
+ * or_stealth_key_b64 is required. The widget seals envelopes and
+ * transactions on behalf of the user and stores ciphertext at OR's
+ * origin. The server holds ciphertext only; it cannot unseal anything.
+ *
+ * Narrow on: seal_mode === 'widget' or seal_mode absent.
+ */
+export interface StealthInitWidgetMessage {
   type: 'OR_STEALTH_INIT';
+  /** Absent or 'widget' both resolve to widget mode. */
+  seal_mode?: 'widget';
   protocol_version: typeof STEALTH_PROTOCOL_VERSION;
   app_slug: 'v2' | 'v3' | 'ow' | string;
   app_user_id: string;
@@ -52,12 +100,28 @@ export interface StealthInitMessage {
    * HKDF-SHA-256(input=appMEK, salt='', info='or-stealth-v1', length=32).
    * The widget treats this as a non-extractable CryptoKey internally
    * and never sends it to orangerails.com's server.
+   * Required in widget mode. Typed `never` in app mode.
    */
   or_stealth_key_b64: string;
   /** Where the widget posts replies. Must match window.opener.location.origin. */
   return_callback_origin: string;
   /** Locale tag, e.g. 'en-US', 'fr-CA'. Drives the transparency modal copy. */
   locale?: string;
+  /**
+   * Auth mode A (preferred for apps that already run a backend).
+   * When set, the widget does not call OR's edge functions directly.
+   * It posts OR_STEALTH_PROXY_REQUEST to the parent, and the parent makes
+   * the call server-side and attaches the platform API key there, so that
+   * key never reaches the browser. See routes/add.tsx and lib/proxyFetch.ts.
+   */
+  proxy_base_url?: string;
+  /**
+   * Auth mode B (direct). A Supabase JWT the widget sends as
+   * `Authorization: Bearer <token>` on the edge-function POST. Only used
+   * when `proxy_base_url` is absent. This is an access token for OR's API,
+   * never a key that can unseal anything.
+   */
+  access_token?: string;
   /** Optional: when true, the widget skips uploading sealed transactions
    *  to OR's `or-stealth-transactions-store` endpoint. Used by consumer
    *  apps that hold their own source-of-truth copy and do not need OR's
@@ -66,6 +130,62 @@ export interface StealthInitMessage {
    *  are skipped. */
   skip_transaction_upload?: boolean;
 }
+
+/**
+ * App mode. The consuming app is the authoritative sealing store.
+ *
+ * The widget receives NO key. `or_stealth_key_b64?: never` is deliberate and
+ * stronger than omitting the field: omission is only enforced by excess-property
+ * checking, which TypeScript applies to fresh object literals and NOT to spreads.
+ * Typing it `never` makes `{ ...widgetInit, seal_mode: 'app' as const }` a compile
+ * error too, so the key is unrepresentable on this variant by any construction.
+ * Sending it anyway is refused by openStealthWidget at the sender and rejected
+ * again by the widget at runtime with code INTERNAL.
+ *
+ * The widget scans and validates the xpub/descriptor, then returns
+ * StealthTransactionProvenance records for the app to seal under its own
+ * key. The widget does not seal or POST any envelope to OR's origin.
+ *
+ * Narrow on: seal_mode === 'app'.
+ */
+export interface StealthInitAppMessage {
+  type: 'OR_STEALTH_INIT';
+  /** Required discriminant for app mode. */
+  seal_mode: 'app';
+  protocol_version: typeof STEALTH_PROTOCOL_VERSION;
+  app_slug: 'v2' | 'v3' | 'ow' | string;
+  app_user_id: string;
+  mode: StealthMode;
+  /** Required for sync, list, delete. Omitted for add. */
+  connection_id?: string;
+  /**
+   * Unrepresentable in app mode. The widget receives no key: there is no
+   * value of type `never`, so this field can never be populated, not by a
+   * literal and not by a spread.
+   */
+  or_stealth_key_b64?: never;
+  /** Where the widget posts replies. Must match window.opener.location.origin. */
+  return_callback_origin: string;
+  /** Locale tag, e.g. 'en-US', 'fr-CA'. Drives the transparency modal copy. */
+  locale?: string;
+  /** Auth mode A: parent-proxy round trip. See StealthInitWidgetMessage. */
+  proxy_base_url?: string;
+  /** Auth mode B: direct Supabase JWT. See StealthInitWidgetMessage. */
+  access_token?: string;
+}
+
+/**
+ * Discriminated union for OR_STEALTH_INIT.
+ *
+ * Narrow by seal_mode:
+ *   seal_mode === 'app'                 -> StealthInitAppMessage (no key)
+ *   seal_mode === 'widget' or absent    -> StealthInitWidgetMessage (key required)
+ *
+ * The 'app' variant cannot carry or_stealth_key_b64: the field is typed `never`,
+ * so it is unrepresentable through literals and spreads alike.
+ * The 'widget' variant requires or_stealth_key_b64.
+ */
+export type StealthInitMessage = StealthInitWidgetMessage | StealthInitAppMessage;
 
 // ─────────────────────────────────────────────────────────────────────
 // Widget → App messages
@@ -113,7 +233,7 @@ export interface StealthAddCompleteMessage {
     | 'multisig-descriptor';
 }
 
-/** A sealed transaction record. The widget builds these client-side. */
+/** A sealed transaction record. The widget builds these in widget mode only. */
 export interface SealedTransaction {
   version: 1;
   algorithm: 'AES-256-GCM';
@@ -123,12 +243,45 @@ export interface SealedTransaction {
   occurred_at: string;
   /** Plaintext block height for resume on the next sync. */
   block_height: number;
-  /** HMAC of txid under the per-app key. Server cannot reverse. */
-  txid_blind_index_b64: string;
+  /**
+   * Lowercase hex HMAC-SHA-256 of txid under the per-app blind-index subkey.
+   * Server cannot reverse: the subkey is derived from the per-app stealth key
+   * (HKDF-SHA-256, info="or-stealth/blind-index/v1"), which the server never holds.
+   */
+  txid_blind_index_hex: string;
 }
 
-export interface StealthSyncCompleteMessage {
+/**
+ * Plaintext transaction provenance returned in app mode (seal_mode='app').
+ *
+ * The widget has no key in app mode and cannot seal anything. It returns
+ * the raw scan result for the consuming app to seal under its own key.
+ *
+ * `sealed?: never` is deliberate: the app is the sealing authority, and a
+ * record on this type must be unrepresentable with a sealed payload attached,
+ * through spreads as well as literals.
+ */
+export interface StealthTransactionProvenance {
+  /** Raw txid. The app should treat this as sensitive and seal it. */
+  txid: string;
+  /** ISO-8601 timestamp. */
+  occurred_at: string;
+  /** Block height for resume on the next sync. */
+  block_height: number;
+  // No blind index: the app derives its own under its own key.
+  /** Unrepresentable: the widget holds no key and seals nothing in app mode. */
+  sealed?: never;
+}
+
+/**
+ * Widget mode sync result. The widget sealed the transactions and returns
+ * the envelopes. sealed_transactions is present and required.
+ * Narrow on: seal_mode === 'widget' or absent.
+ */
+export interface StealthSyncCompleteWidgetMessage {
   type: 'OR_STEALTH_SYNC_COMPLETE';
+  /** Absent or 'widget' both resolve to widget mode. */
+  seal_mode?: 'widget';
   connection_id: string;
   sealed_transactions: SealedTransaction[];
   last_block_scanned: number;
@@ -138,6 +291,41 @@ export interface StealthSyncCompleteMessage {
   /** Wall-clock seconds from INIT to this message. */
   duration_seconds: number;
 }
+
+/**
+ * App mode sync result. The widget returns plaintext provenance records
+ * for the app to seal. sealed_transactions is typed `never`, so it is
+ * unrepresentable here through spreads as well as literals.
+ * Narrow on: seal_mode === 'app'.
+ */
+export interface StealthSyncCompleteAppMessage {
+  type: 'OR_STEALTH_SYNC_COMPLETE';
+  /** Required discriminant for app mode. */
+  seal_mode: 'app';
+  connection_id: string;
+  /** Plaintext provenance records. The app seals them under its own key. */
+  transactions: StealthTransactionProvenance[];
+  /** Unrepresentable: the widget holds no key and seals nothing in app mode. */
+  sealed_transactions?: never;
+  last_block_scanned: number;
+  tx_count: number;
+  /** Useful for the consuming app to show "downloaded X MB". */
+  bytes_downloaded: number;
+  /** Wall-clock seconds from INIT to this message. */
+  duration_seconds: number;
+}
+
+/**
+ * Discriminated union for OR_STEALTH_SYNC_COMPLETE.
+ *
+ * Narrow by seal_mode:
+ *   seal_mode === 'app'                 -> StealthSyncCompleteAppMessage
+ *                                          (transactions: StealthTransactionProvenance[],
+ *                                           sealed_transactions: never, sealed: never)
+ *   seal_mode === 'widget' or absent    -> StealthSyncCompleteWidgetMessage
+ *                                          (sealed_transactions: SealedTransaction[])
+ */
+export type StealthSyncCompleteMessage = StealthSyncCompleteWidgetMessage | StealthSyncCompleteAppMessage;
 
 export interface StealthListResultMessage {
   type: 'OR_STEALTH_LIST_RESULT';
@@ -283,8 +471,41 @@ export async function deriveOrStealthKey(mek: CryptoKey): Promise<string> {
 }
 
 /**
+ * Sender-side key discipline for app mode.
+ *
+ * The widget's runtime guard is defense in depth, but it runs after the key
+ * has already crossed into the widget origin's memory. App mode means the key
+ * never leaves the consuming app's origin, so the lock belongs on this door:
+ * refuse loudly here, and hand back a copy with the field stripped so nothing
+ * can ride along on a mutated object.
+ *
+ * Exported for tests and for apps that build their own popup plumbing.
+ */
+export function assertNoKeyInAppMode(init: StealthInitMessage): StealthInitMessage {
+  if (init.seal_mode !== 'app') return init;
+
+  const candidate = init as Record<string, unknown>;
+  const key = candidate.or_stealth_key_b64;
+  if (typeof key === 'string' && key.length > 0) {
+    throw new StealthKeyLeakError();
+  }
+
+  // Strip the field entirely, even when it held a non-string or empty value.
+  // What is not in the object cannot be posted across the origin boundary.
+  const scrubbed: Record<string, unknown> = { ...candidate };
+  delete scrubbed.or_stealth_key_b64;
+  return scrubbed as unknown as StealthInitAppMessage;
+}
+
+/**
  * Open the OR Connect widget popup and return a typed message bus.
  * Consuming apps call this when the user clicks Add or Sync.
+ *
+ * The popup opens `/connect/stealth`, the Stealth Sync widget. It is a
+ * different page from `/connect`, which is the older Link widget.
+ *
+ * Throws StealthKeyLeakError, before the popup is opened, if an app-mode init
+ * carries key material.
  */
 export function openStealthWidget(opts: {
   base_url?: string;     // default 'https://connect.orangerails.com'
@@ -294,8 +515,20 @@ export function openStealthWidget(opts: {
   width?: number;        // default 480
   height?: number;       // default 720
 }): { close: () => void; popup: Window | null } {
-  const base = opts.base_url ?? 'https://connect.orangerails.com';
-  const url = `${base}/connect?mode=${opts.init.mode}&app=${opts.init.app_slug}`;
+  // Refuse before anything is opened or posted. In app mode this returns an
+  // init with no key field at all; in widget mode it returns the init as-is.
+  const init = assertNoKeyInAppMode(opts.init);
+
+  const base = (opts.base_url ?? 'https://connect.orangerails.com').replace(/\/$/, '');
+  // `parent_origin` lets the widget target OR_STEALTH_READY at this exact
+  // origin instead of broadcasting it with '*'. READY carries no secrets,
+  // but the opener already knows its own origin, so there is no reason to
+  // broadcast. See pickReadyTargetOrigin() in src/stealth/widget/App.tsx.
+  const url =
+    `${base}${STEALTH_WIDGET_PATH}` +
+    `?mode=${encodeURIComponent(init.mode)}` +
+    `&app=${encodeURIComponent(init.app_slug)}` +
+    `&parent_origin=${encodeURIComponent(init.return_callback_origin)}`;
   const features = `width=${opts.width ?? 480},height=${opts.height ?? 720},menubar=no,toolbar=no,location=no,status=no`;
   const popup = window.open(url, 'or-stealth-widget', features);
 
@@ -303,7 +536,7 @@ export function openStealthWidget(opts: {
     if (e.origin !== base) return;
     const msg = e.data as StealthMessageFromWidget;
     if (msg?.type === 'OR_STEALTH_READY') {
-      popup?.postMessage(opts.init, base);
+      popup?.postMessage(init, base);
       return;
     }
     opts.on_message(msg);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-publish-scan.sh — leak check for the open-source Orange Rails repo.
+# pre-publish-scan.sh: naming-convention scan for the open-source Orange Rails repo.
 #
 # Runs a categorized grep over the source tree looking for content that
 # should never ship to a public repo: legacy brand names, internal
@@ -9,21 +9,46 @@
 #
 # Exit code:
 #   0  — tree is clean, safe to publish or merge
-#   1  — one or more categories reported a leak; review output, clean up,
+#   1  : one or more categories reported an issue; review output, clean up,
 #        re-run
 #
 # Run locally before pushing:   bash scripts/pre-publish-scan.sh
-# Runs in CI as a required check (see .github/workflows/leak-check.yml).
+# Runs in CI as a required check (see .github/workflows/repo-hygiene.yml).
 #
 # Updating the allowlist: if you introduce a brand or product reference
 # that is intentional and acceptable (for example a new sibling project),
-# add it to the EXEMPT_* lists below AND to the leak-check workflow in
+# add it to the EXEMPT_* lists below AND to the repo-hygiene workflow in
 # lock-step. PRs that change this script require a second reviewer.
 
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# ----------------------------------------------------------------------
+# Reserved-term list (sourced OUT of this committed file)
+# ----------------------------------------------------------------------
+#
+# The project keeps the public tree consistent with Orange Rails naming
+# conventions: no internal-only naming, no earlier experiment / codename
+# references, no non-public hostnames or contact strings. The list of such
+# reserved terms is NOT hardcoded here, because committing the list would
+# publish the very strings it exists to keep out of the public tree.
+# Instead it is provided at runtime as a regex alternation, from either
+# source, in this order:
+#
+#   1. The OR_RESERVED_TERMS environment variable (CI sources this from
+#      a repository secret: see .github/workflows/repo-hygiene.yml).
+#   2. A gitignored .reserved-terms file (one term per line; blank
+#      lines and #-comments ignored). See .reserved-terms.example.
+#
+# If neither is configured the reserved-term scan is SKIPPED with a notice
+# (the structural checks below still run). Outside contributors therefore
+# get a working scanner with zero exposure to the internal list.
+RESERVED_TERMS="${OR_RESERVED_TERMS:-}"
+if [[ -z "$RESERVED_TERMS" && -f .reserved-terms ]]; then
+  RESERVED_TERMS="$(grep -vE '^[[:space:]]*(#|$)' .reserved-terms | paste -sd'|' -)"
+fi
 
 # ----------------------------------------------------------------------
 # Path scope
@@ -66,8 +91,11 @@ EXCLUDE_FILES=(
 
 EXEMPT_GENERIC=(
   "scripts/pre-publish-scan.sh"
+  # The companion workflows carry the structural PATTERN as a literal (they
+  # are detectors). Exempt them the same way the scanner exempts itself.
+  ".github/workflows/post-merge-hygiene.yml"
   ".github/PULL_REQUEST_TEMPLATE.md"
-  ".github/workflows/leak-check.yml"
+  ".github/workflows/repo-hygiene.yml"
   "CONTRIBUTING.md"
   "CODE_OF_CONDUCT.md"
   # CHANGELOG can mention "originally created in the MorningRevolution org" as
@@ -77,7 +105,7 @@ EXEMPT_GENERIC=(
 
 # Migration filenames AND row content for first-customer seed identifiers.
 # Founder rule 2026-06-18: BitBooks and Orange Way ARE the first two customers,
-# and their slug/filename/seed-row mentions are legitimate, not leaks. Also
+# and their slug/filename/seed-row mentions are legitimate, not issues. Also
 # covers the per-customer sink adapter files (bitbooks-v2.{ts,yaml} etc.) and
 # platform-auth doc-comments listing customer examples.
 EXEMPT_MIGRATION_FILENAMES=(
@@ -170,14 +198,15 @@ scan() {
   local flags="$3"
   local extra_exempt="$4"
 
+  # Build grep options as an array so an optional case-insensitive flag is
+  # passed as a real option (-i), never interpolated as part of the pattern.
+  # (A bare "$flags" arg made grep read "i" as the pattern and the real
+  # pattern as a filename, so the case-insensitive scans never actually ran.)
+  local gopts=(-rnE)
+  [[ "$flags" == *i* ]] && gopts+=(-i)
   local raw
-  if [[ -n "$flags" ]]; then
-    raw=$(grep -rnE $flags "$pattern" . \
-            "${EXCLUDE_DIRS[@]}" "${EXCLUDE_FILES[@]}" 2>/dev/null || true)
-  else
-    raw=$(grep -rnE "$pattern" . \
-            "${EXCLUDE_DIRS[@]}" "${EXCLUDE_FILES[@]}" 2>/dev/null || true)
-  fi
+  raw=$(grep "${gopts[@]}" "$pattern" . \
+          "${EXCLUDE_DIRS[@]}" "${EXCLUDE_FILES[@]}" 2>/dev/null || true)
 
   if [[ -z "$raw" ]]; then
     printf "  \033[32m✓\033[0m  %s\n" "$name"
@@ -214,6 +243,38 @@ scan() {
   EXIT_CODE=1
 }
 
+# ----------------------------------------------------------------------
+# Scanner self-test (canary)
+# ----------------------------------------------------------------------
+#
+# Proves the match mechanism actually fires before any real scan runs. A
+# green run must MEAN the scanner matched, not that it silently no-op'd.
+# Routes a seeded known-bad token through the exact scan() code path: if
+# scan() does not flag the canary, the matching mechanism is broken and
+# results are not trustworthy, so we hard-fail. (This is what would have
+# auto-caught the earlier flags-as-pattern bug.)
+self_test() {
+  local canary="ORHYGIENECANARY$$"
+  local cf="./.orhygiene-canary-$$.txt"
+  printf '%s\n' "$canary" > "$cf"
+  local saved=$EXIT_CODE
+  EXIT_CODE=0
+  # Capture the scan's findings and assert the canary TOKEN ITSELF appears.
+  # Asserting only that the scan flagged something (exit != 0) would
+  # false-pass the original bug class: a broken matcher (e.g. one that treats
+  # "i" as the pattern) flags unrelated lines and trips a non-zero exit
+  # without ever matching the canary. Matching the token is what proves the
+  # term scan actually fired.
+  local out
+  out=$(scan "canary self-test" "$canary" "i" "" 2>&1)
+  rm -f "$cf"
+  EXIT_CODE=$saved
+  if ! printf '%s' "$out" | grep -q "$canary"; then
+    printf "\033[31m▎ Scanner self-test FAILED: match mechanism broken; results not trustworthy.\033[0m\n"
+    exit 2
+  fi
+}
+
 join_pipe() {
   local IFS="|"
   printf '%s' "$*"
@@ -230,8 +291,11 @@ EXEMPT_AUDIT_RE="$(join_pipe "${EXEMPT_AUDIT_BREADCRUMB_FILES[@]}")"
 # Header
 # ----------------------------------------------------------------------
 
-printf "\n\033[1m▎ Pre-publish leak scan — Orange Rails\033[0m\n"
+printf "\n\033[1m▎ Pre-publish convention scan: Orange Rails\033[0m\n"
 printf "  repo: %s\n\n" "$REPO_ROOT"
+
+# Prove the matching mechanism works before trusting any result below.
+self_test
 
 # ----------------------------------------------------------------------
 # Category 1 — Sister-product brand references
@@ -254,12 +318,9 @@ scan "BitBooks internal product variants" \
 # Galoy/GaloyMoney/Blink are public Apache-2.0 OSS projects in the OR
 # ecosystem (Blink is a Lightning provider OR ships an adapter for; Galoy
 # is its upstream platform). They're credited the same way as BTCPay
-# Server and LND. Only Cala (Galoy's ledger sub-project that was an
-# internal V3 Vault evaluation) is scrubbed.
-scan "Cala ledger (internal V3 evaluation)" \
-     "\\bCala\\b" \
-     "" \
-     ""
+# Server and LND, so they are NOT flagged. The one retired codename in
+# that space is handled like every other reserved term, via the out-of-tree
+# reserved-term list, not as a committed literal here.
 
 scan "Lovable builder platform" \
      "\\bLovable\\b|lovable\\.app|\\.lovable" \
@@ -271,83 +332,73 @@ scan "V3 Vault / standalone V[23] product noun" \
      "" \
      ""
 
-scan "Hardcoded BitBooks subdomains (should be env config, not literals)" \
-     "\\b(v[0-9]+dev|v[0-9]+|app|v3dev|vault|admin|support|dashboard)\\.bitbooks\\.com\\b" \
-     "" \
-     "src/integrations/supabase/types|supabase/migrations/"
+# ----------------------------------------------------------------------
+# Category 2: Reserved internal terms (sourced from the term list)
+# ----------------------------------------------------------------------
+#
+# Internal-only naming, earlier experiment / codename references, and
+# non-public contact strings are NOT hardcoded here (see the loader near
+# the top). They arrive via OR_RESERVED_TERMS / .reserved-terms so this
+# committed file never publishes the list. (Public figures intentionally
+# named in the README, e.g. cypherpunk-lineage references, are not
+# reserved terms and should not be added to the list.)
 
-scan "Other personal-project brands" \
-     "\\b(a prior internal name|COLE|a prior internal name|a prior internal name)\\b|a prior internal name|petitchou|a prior internal name" \
-     "" \
-     ""
+printf "\n\033[1m2. Reserved internal terms\033[0m\n"
+
+if [[ -n "$RESERVED_TERMS" ]]; then
+  scan "Reserved internal terms" \
+       "$RESERVED_TERMS" \
+       "i" \
+       ""
+elif [[ "${REQUIRE_RESERVED_TERMS:-}" == "true" ]]; then
+  # On a real run (push to dev/prod, same-repo PR) the list MUST be present;
+  # a missing list means the guard is not actually running, so fail hard
+  # rather than print skip and end green. CI sets this on push events.
+  printf "  \033[31m✗\033[0m  Reserved-term list REQUIRED on this run but not configured (scan not trustworthy)\n"
+  EXIT_CODE=1
+else
+  # Fork PRs and local runs legitimately lack the secret: soft-skip the
+  # reserved-term pass; the structural checks still run.
+  printf "  \033[33mskip\033[0m  Reserved-term list not configured (fork/local); reserved-term scan skipped.\n"
+fi
 
 # ----------------------------------------------------------------------
-# Category 2 — Personal names + PII
+# Category 3: Internal infrastructure (generic structural patterns only)
 # ----------------------------------------------------------------------
+#
+# This category commits ONLY GENERIC STRUCTURAL patterns: shapes that
+# describe a CLASS of internal reference (any Tailscale tail-net hostname,
+# any address in the CGNAT range), never a specific host, domain, path, or
+# user. Specific infrastructure literals (private wiki domains, exact
+# hostnames, home / service paths, workstation usernames, internal
+# subdomains) are treated like every other reserved term: they live in the
+# out-of-tree reserved-term list (OR_RESERVED_TERMS / .reserved-terms) and
+# are caught by the reserved-term scan above, so this committed file
+# publishes no specific infrastructure value.
 
-printf "\n\033[1m2. Personal names + PII\033[0m\n"
+printf "\n\033[1m3. Internal infrastructure (generic structural)\033[0m\n"
 
-# "Tim May" is intentionally kept in README cypherpunk lineage.
-scan "Personal first names" \
-     "\\b(the maintainer|a contributor|a contributor|a contributor|a contributor|a contributor|a contributor)\\b" \
+# Any Tailscale tail-net hostname shape. Names the class, not a host.
+scan "Tailscale tail-net hostname shape" \
+     "\\btail[a-z0-9]+\\.ts\\.net\\b" \
      "" \
      ""
 
-scan "External contact names" \
-     "a contributor|a contributor" \
+# The CGNAT /10 block Tailscale assigns (100.64.0.0 to 100.127.255.255).
+# Names the address class, not a specific host.
+scan "CGNAT-range address" \
+     "\\b100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.[0-9]+\\.[0-9]+\\b" \
      "" \
      ""
 
-scan "Personal-domain emails" \
-     "@(bitbooks\\.com|abascal\\.ca|tryfaster\\.ca)" \
-     "" \
-     ""
-
-# ----------------------------------------------------------------------
-# Category 3 — Internal infrastructure leaks
-# ----------------------------------------------------------------------
-
-printf "\n\033[1m3. Internal infrastructure\033[0m\n"
-
-scan "Internal hostnames" \
-     "\\b(jarvis-hosted|bb-support|Jarvis-hosted)\\b|kiwi@jarvis|ubuntu@100\\." \
-     "" \
-     ""
-
-scan "Internal wiki URLs" \
-     "wiki\\.(abascal\\.ca|bitbooks\\.com)" \
-     "" \
-     ""
-
-scan "Tailscale internal IPs" \
-     "\\b100\\.(91|94)\\.[0-9]+\\.[0-9]+\\b" \
-     "" \
-     ""
-
-scan "Internal bb-support paths" \
-     "/opt/bb-support|/mnt/vault/\\.a prior internal name" \
-     "" \
-     ""
-
-# blocks.orangerails.com (BIP158 block source) and stealth.orangerails.com
-# (BIP158 filter CDN) are admin-only infrastructure that's correctly
-# documented in caddy/, docs/Stealth-Sync.md, and scripts/README.md for
-# maintainer ops. They're not customer-facing leaks when scoped to those
-# operator paths.
+# blocks.orangerails.com and stealth.orangerails.com are admin-only infra on
+# the PUBLIC product domain, documented in caddy/, docs/Stealth-Sync.md, and
+# scripts/README.md for maintainer ops. The check keeps them out of shipping
+# code; the operator doc paths are exempt.
 scan "Admin-only orangerails subdomains in shipping code" \
      "\\b(blocks|stealth)\\.orangerails\\.com\\b" \
      "" \
      "$EXEMPT_PROTOCOL_RE|$EXEMPT_CRYPTO_RE|^./caddy/|docs/Stealth-Sync\\.md|scripts/README\\.md|src/stealth/lib/mock-fixtures|^./CHANGELOG\\.md"
-
-scan "Windows-style internal paths" \
-     "C:\\\\CLAUDE|C:\\\\Users\\\\micro" \
-     "" \
-     ""
-
-scan "Home-path leaks" \
-     "/home/(kiwi|cactus|claude|ubuntu)/" \
-     "" \
-     ""
 
 # ----------------------------------------------------------------------
 # Category 4 — Internal milestone tags + dead PR references
@@ -380,10 +431,13 @@ scan "PERF-N performance-audit tags" \
      "" \
      ""
 
+# Migration files legitimately cite the PR that introduced them as
+# historical documentation (the migration is immutable; its comment
+# records why it exists). Exempt the migrations dir from the dead-PR check.
 scan "Dead PR references" \
      "PR #[0-9]+|V[23] PR\\b|OR PR #" \
      "" \
-     ""
+     "supabase/migrations/"
 
 # ----------------------------------------------------------------------
 # Category 5 — Operational dates in code comments
@@ -404,7 +458,7 @@ printf "\n"
 if [[ "$EXIT_CODE" -eq 0 ]]; then
   printf "\033[32m▎ Tree is clean. Safe to publish or merge.\033[0m\n\n"
 else
-  printf "\033[31m▎ Leaks found. Clean up the items above before publishing.\033[0m\n"
+  printf "\033[31m▎ Issues found. Clean up the items above before publishing.\033[0m\n"
   printf "  See \033[1mCONTRIBUTING.md\033[0m for the rules and exemption process.\n\n"
 fi
 

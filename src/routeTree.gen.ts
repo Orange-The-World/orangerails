@@ -13,7 +13,6 @@ import { Route as UnlockRouteImport } from './routes/unlock'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as RecoverRouteImport } from './routes/recover'
 import { Route as PortalRouteImport } from './routes/portal'
-import { Route as McpRouteImport } from './routes/mcp'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as DocsRouteImport } from './routes/docs'
 import { Route as DemoRouteImport } from './routes/demo'
@@ -45,11 +44,6 @@ const RecoverRoute = RecoverRouteImport.update({
 const PortalRoute = PortalRouteImport.update({
   id: '/portal',
   path: '/portal',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const McpRoute = McpRouteImport.update({
-  id: '/mcp',
-  path: '/mcp',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -120,7 +114,6 @@ export interface FileRoutesByFullPath {
   '/demo': typeof DemoRoute
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
-  '/mcp': typeof McpRoute
   '/portal': typeof PortalRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
@@ -138,7 +131,6 @@ export interface FileRoutesByTo {
   '/demo': typeof DemoRoute
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
-  '/mcp': typeof McpRoute
   '/portal': typeof PortalRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
@@ -158,7 +150,6 @@ export interface FileRoutesById {
   '/demo': typeof DemoRoute
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
-  '/mcp': typeof McpRoute
   '/portal': typeof PortalRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
@@ -179,7 +170,6 @@ export interface FileRouteTypes {
     | '/demo'
     | '/docs'
     | '/login'
-    | '/mcp'
     | '/portal'
     | '/recover'
     | '/signup'
@@ -197,7 +187,6 @@ export interface FileRouteTypes {
     | '/demo'
     | '/docs'
     | '/login'
-    | '/mcp'
     | '/portal'
     | '/recover'
     | '/signup'
@@ -216,7 +205,6 @@ export interface FileRouteTypes {
     | '/demo'
     | '/docs'
     | '/login'
-    | '/mcp'
     | '/portal'
     | '/recover'
     | '/signup'
@@ -236,7 +224,6 @@ export interface RootRouteChildren {
   DemoRoute: typeof DemoRoute
   DocsRoute: typeof DocsRouteWithChildren
   LoginRoute: typeof LoginRoute
-  McpRoute: typeof McpRoute
   PortalRoute: typeof PortalRoute
   RecoverRoute: typeof RecoverRoute
   SignupRoute: typeof SignupRoute
@@ -271,13 +258,6 @@ declare module '@tanstack/react-router' {
       path: '/portal'
       fullPath: '/portal'
       preLoaderRoute: typeof PortalRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/mcp': {
-      id: '/mcp'
-      path: '/mcp'
-      fullPath: '/mcp'
-      preLoaderRoute: typeof McpRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -411,7 +391,6 @@ const rootRouteChildren: RootRouteChildren = {
   DemoRoute: DemoRoute,
   DocsRoute: DocsRouteWithChildren,
   LoginRoute: LoginRoute,
-  McpRoute: McpRoute,
   PortalRoute: PortalRoute,
   RecoverRoute: RecoverRoute,
   SignupRoute: SignupRoute,
