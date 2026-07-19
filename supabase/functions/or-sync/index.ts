@@ -829,6 +829,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
           // 2) Real-time: drain any webhook-queued events. Side effect:
           //    registers a Strike webhook subscription on first call.
+          //
+          // walletIds is REQUIRED by DrainArgs and was never passed. queue.ts does
+          // `args.walletIds[0]` unguarded, so every Strike sync threw
+          // `TypeError: Cannot read properties of undefined (reading '0')` here, before any
+          // store call. That is why zero rows have ever landed in encrypted_transactions and
+          // why last_sync_at is still NULL on every Strike connection: the throw happens
+          // upstream of both. The generic taxonomy bucket hid it, because the message matched
+          // no classifier pattern.
+          //
+          // Passing the REAL ids from source_wallets, not an empty array. An empty-array guard
+          // would stop the crash and then silently write accountId = null onto transactions
+          // that have a correct value available (d3cb9a01 has 2 is_synced rows), which trades a
+          // loud honest failure for quiet data corruption. These are the same ids the
+          // wallet-scoped path computes below, which is exactly what the parameter's own doc
+          // comment in queue.ts says it is for.
+          const strikeWalletIds = (sourceWallets ?? []).map(
+            (w: { external_wallet_id: string }) => w.external_wallet_id,
+          );
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
             connection: {
@@ -837,6 +855,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               last_sync_cursor: conn.last_sync_cursor ?? null,
             },
             credentials,
+            walletIds: strikeWalletIds,
             webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
           });
 
@@ -961,19 +980,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // shape stays uniform across modes. In sink mode the column is
         // plaintext per the V2 contract. We NEVER fall back to writing the
         // raw upstream message -- if encryption fails, store only the code.
-        // TEMP DEBUG (dev only, revert): make the true cause readable via SQL. Class + SQLSTATE are
-        // value-free. The message is captured only where the message itself cannot carry customer data:
-        //   - database errors: ONLY SQLSTATE 23502, whose message names the column and no row values
-        //     (other SQLSTATEs embed the offending row values, so they stay code-only).
-        //   - non-database throws: an allowlist of classes whose message is a property name and a type.
-        //     SyntaxError is deliberately NOT on it: a V8 JSON.parse failure quotes the raw upstream
-        //     response body verbatim, which is customer data.
-        const MESSAGE_SAFE_CLASSES = ['TypeError', 'RangeError'];
-        const pgCode = (e as { code?: string }).code ?? '';
-        const captureMessage = pgCode === '23502' || (!pgCode && MESSAGE_SAFE_CLASSES.includes(errorClass));
-        const safeDetail = captureMessage ? String((e as { message?: string }).message ?? '').slice(0, 160) : '';
-        const persistable = ['DBG', code, errorClass, pgCode, safeDetail].filter(Boolean).join('|');
+        const persistable = `${code}:${correlationId}`;
         let storedErr: string | null = persistable;
+        if (!sinkMode) {
+          try {
+            storedErr = await encryptAes(persistable, txnsKey!);
+          } catch {
+            // Encryption failed -- store the unencrypted taxonomy code, not the raw message.
+            // (Code + correlation ID contain no customer plaintext.)
+            storedErr = persistable;
+          }
+        }
         await ctx.serviceClient.from('connections').update({ status: 'error', encrypted_last_error: storedErr }).eq('id', conn.id);
         const copy = lookupErrorCopy(code);
         results.push({
