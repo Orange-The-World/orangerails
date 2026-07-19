@@ -798,6 +798,36 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
           // 2) Real-time: drain any webhook-queued events. Side effect:
           //    registers a Strike webhook subscription on first call.
+          //
+          // walletIds is REQUIRED by DrainArgs and was never passed. queue.ts does
+          // `args.walletIds[0]` unguarded, so every Strike sync threw
+          // `TypeError: Cannot read properties of undefined (reading '0')` here, before any
+          // store call. That is why zero rows have ever landed in encrypted_transactions and
+          // why last_sync_at is still NULL on every Strike connection: the throw happens
+          // upstream of both. The generic taxonomy bucket hid it, because the message matched
+          // no classifier pattern.
+          //
+          // Passing the REAL ids from source_wallets, not an empty array. An empty-array guard
+          // would stop the crash and then silently write accountId = null onto transactions
+          // that have a correct value available, which trades a loud honest failure for quiet
+          // data corruption. These are the same ids the wallet-scoped path computes below,
+          // which is what the parameter's own doc comment in queue.ts says it is for.
+          //
+          // KNOWN LIMITATION, deliberately not fixed here. queue.ts:96 still takes
+          // `walletIds[0]`, so a connection with more than one synced wallet has every drained
+          // transaction stamped with whichever id sorts first. This fixes the crash; it does not
+          // fix attribution.
+          //
+          // It is not fixable in or-sync at all. Strike's external_wallet_id is a
+          // crypto.randomUUID() (strike/index.ts:740), not the receiverId, and a connection's
+          // BTC and USD wallets are the same Strike account sharing one account_key. The only
+          // field that distinguishes them is currency, which lives in encrypted_metadata that
+          // the server cannot read. The server structurally cannot attribute a Strike
+          // transaction to the right wallet. That is ZKA working as designed, not a defect, and
+          // correcting it needs an architecture decision rather than a code change here.
+          const strikeWalletIds = (sourceWallets ?? []).map(
+            (w: { external_wallet_id: string }) => w.external_wallet_id,
+          );
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
             connection: {
@@ -806,6 +836,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               last_sync_cursor: conn.last_sync_cursor ?? null,
             },
             credentials,
+            walletIds: strikeWalletIds,
             webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
           });
 
