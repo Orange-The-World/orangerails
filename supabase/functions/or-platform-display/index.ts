@@ -69,6 +69,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     );
   } catch (err) {
     console.error('[or-platform-display] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-platform-display'));

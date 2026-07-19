@@ -101,6 +101,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse({ connections: enriched }, 200, cors);
   } catch (err) {
     console.error('[or-connection-list] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-connection-list'));
