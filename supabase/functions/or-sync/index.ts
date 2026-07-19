@@ -840,10 +840,22 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           //
           // Passing the REAL ids from source_wallets, not an empty array. An empty-array guard
           // would stop the crash and then silently write accountId = null onto transactions
-          // that have a correct value available (d3cb9a01 has 2 is_synced rows), which trades a
-          // loud honest failure for quiet data corruption. These are the same ids the
-          // wallet-scoped path computes below, which is exactly what the parameter's own doc
-          // comment in queue.ts says it is for.
+          // that have a correct value available, which trades a loud honest failure for quiet
+          // data corruption. These are the same ids the wallet-scoped path computes below,
+          // which is what the parameter's own doc comment in queue.ts says it is for.
+          //
+          // KNOWN LIMITATION, deliberately not fixed here. queue.ts:96 still takes
+          // `walletIds[0]`, so a connection with more than one synced wallet has every drained
+          // transaction stamped with whichever id sorts first. This fixes the crash; it does not
+          // fix attribution.
+          //
+          // It is not fixable in or-sync at all. Strike's external_wallet_id is a
+          // crypto.randomUUID() (strike/index.ts:740), not the receiverId, and a connection's
+          // BTC and USD wallets are the same Strike account sharing one account_key. The only
+          // field that distinguishes them is currency, which lives in encrypted_metadata that
+          // the server cannot read. The server structurally cannot attribute a Strike
+          // transaction to the right wallet. That is ZKA working as designed, not a defect, and
+          // correcting it needs an architecture decision rather than a code change here.
           const strikeWalletIds = (sourceWallets ?? []).map(
             (w: { external_wallet_id: string }) => w.external_wallet_id,
           );
