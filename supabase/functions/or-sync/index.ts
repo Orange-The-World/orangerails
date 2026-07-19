@@ -770,7 +770,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .from('source_wallets')
           .select('external_wallet_id, is_synced')
           .eq('connection_id', conn.id)
-          .eq('is_synced', true);
+          .eq('is_synced', true)
+          // Deterministic order so walletIds[0] is stable across syncs. Both
+          // currency wallets are inserted in one batch at discovery, so they
+          // share an identical created_at; created_at alone leaves the order
+          // unspecified and [0] could still flip between syncs. The
+          // external_wallet_id (a unique UUID) tiebreaker fully determines the
+          // order; created_at stays first for the "oldest wallet wins" intent.
+          .order('created_at', { ascending: true })
+          .order('external_wallet_id', { ascending: true });
 
         if (swErr) throw swErr;
 
@@ -789,10 +797,21 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           const supabaseUrl = Deno.env.get('SUPABASE_URL');
           if (!supabaseUrl) throw new Error('SUPABASE_URL not set');
 
+          // The real per-wallet ids from source_wallets, used by BOTH the
+          // polling and the drain path below. Passing the 'strike' literal to
+          // the poll stamped every polled transaction with source_wallet_id =
+          // 'strike', which matches no source_wallets row on the consumer, so
+          // all rows imported as unmapped and none reached the register. See
+          // the drain block below for the full walletIds reasoning and the
+          // known [0] attribution limit; it applies equally to the poll now.
+          const strikeWalletIds = (sourceWallets ?? []).map(
+            (w: { external_wallet_id: string }) => w.external_wallet_id,
+          );
+
           // 1) Polling: historical + ongoing per-state list scan
           const poll = await adapter.syncByWallets(
             credentials,
-            ['strike'],
+            strikeWalletIds,
             conn.last_sync_cursor ?? null,
           );
 
@@ -825,9 +844,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // the server cannot read. The server structurally cannot attribute a Strike
           // transaction to the right wallet. That is ZKA working as designed, not a defect, and
           // correcting it needs an architecture decision rather than a code change here.
-          const strikeWalletIds = (sourceWallets ?? []).map(
-            (w: { external_wallet_id: string }) => w.external_wallet_id,
-          );
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
             connection: {
