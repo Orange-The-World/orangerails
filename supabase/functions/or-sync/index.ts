@@ -802,10 +802,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .select('external_wallet_id, is_synced')
           .eq('connection_id', conn.id)
           .eq('is_synced', true)
-          // Deterministic order so walletIds[0] is stable across syncs. Without
-          // it Postgres may return the wallets in a different order each run,
-          // and every transaction would appear to jump between wallets.
-          .order('created_at', { ascending: true });
+          // Deterministic order so walletIds[0] is stable across syncs. Both
+          // currency wallets are inserted in one batch at discovery, so they
+          // share an identical created_at; created_at alone leaves the order
+          // unspecified and [0] could still flip between syncs. The
+          // external_wallet_id (a unique UUID) tiebreaker fully determines the
+          // order; created_at stays first for the "oldest wallet wins" intent.
+          .order('created_at', { ascending: true })
+          .order('external_wallet_id', { ascending: true });
 
         if (swErr) throw swErr;
 
