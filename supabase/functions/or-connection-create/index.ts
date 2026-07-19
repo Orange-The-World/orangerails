@@ -79,6 +79,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse({ connection_id: created.id as string }, 200, cors);
   } catch (err) {
     console.error('[or-connection-create] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-connection-create'));

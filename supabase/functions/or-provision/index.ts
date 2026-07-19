@@ -71,6 +71,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse({ subaccount_id: created.id as string, created: true }, 200, cors);
   } catch (err) {
     console.error('[or-provision] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-provision'));

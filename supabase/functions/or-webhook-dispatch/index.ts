@@ -311,6 +311,6 @@ Deno.serve(wrapSentryHandler(async (_req: Request) => {
     return jsonResponse(result, 200);
   } catch (err) {
     console.error('[or-webhook-dispatch] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500);
+    return jsonResponse({ error: 'Internal error' }, 500);
   }
 }, 'or-webhook-dispatch'));
