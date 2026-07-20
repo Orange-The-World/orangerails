@@ -15,6 +15,7 @@ import { Route as RecoverRouteImport } from './routes/recover'
 import { Route as PortalRouteImport } from './routes/portal'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as DocsRouteImport } from './routes/docs'
+import { Route as DemoRouteImport } from './routes/demo'
 import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as AdminRouteImport } from './routes/admin'
@@ -54,6 +55,11 @@ const LoginRoute = LoginRouteImport.update({
 const DocsRoute = DocsRouteImport.update({
   id: '/docs',
   path: '/docs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DemoRoute = DemoRouteImport.update({
+  id: '/demo',
+  path: '/demo',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ConnectRoute = ConnectRouteImport.update({
@@ -112,6 +118,7 @@ export interface FileRoutesByFullPath {
   '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
+  '/demo': typeof DemoRoute
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
   '/portal': typeof PortalRoute
@@ -129,6 +136,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
+  '/demo': typeof DemoRoute
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
   '/portal': typeof PortalRoute
@@ -148,6 +156,7 @@ export interface FileRoutesById {
   '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
+  '/demo': typeof DemoRoute
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
   '/portal': typeof PortalRoute
@@ -168,6 +177,7 @@ export interface FileRouteTypes {
     | '/admin'
     | '/app'
     | '/connect'
+    | '/demo'
     | '/docs'
     | '/login'
     | '/portal'
@@ -185,6 +195,7 @@ export interface FileRouteTypes {
     | '/'
     | '/app'
     | '/connect'
+    | '/demo'
     | '/docs'
     | '/login'
     | '/portal'
@@ -203,6 +214,7 @@ export interface FileRouteTypes {
     | '/admin'
     | '/app'
     | '/connect'
+    | '/demo'
     | '/docs'
     | '/login'
     | '/portal'
@@ -222,6 +234,7 @@ export interface RootRouteChildren {
   AdminRoute: typeof AdminRouteWithChildren
   AppRoute: typeof AppRoute
   ConnectRoute: typeof ConnectRouteWithChildren
+  DemoRoute: typeof DemoRoute
   DocsRoute: typeof DocsRouteWithChildren
   LoginRoute: typeof LoginRoute
   PortalRoute: typeof PortalRoute
@@ -272,6 +285,13 @@ declare module '@tanstack/react-router' {
       path: '/docs'
       fullPath: '/docs'
       preLoaderRoute: typeof DocsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/demo': {
+      id: '/demo'
+      path: '/demo'
+      fullPath: '/demo'
+      preLoaderRoute: typeof DemoRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/connect': {
@@ -389,6 +409,7 @@ const rootRouteChildren: RootRouteChildren = {
   AdminRoute: AdminRouteWithChildren,
   AppRoute: AppRoute,
   ConnectRoute: ConnectRouteWithChildren,
+  DemoRoute: DemoRoute,
   DocsRoute: DocsRouteWithChildren,
   LoginRoute: LoginRoute,
   PortalRoute: PortalRoute,

@@ -23,9 +23,12 @@
 https://docs.orangerails.com/* https://orangerails.com/docs/:splat 302
 https://docs.orangerails.dev/* https://orangerails.dev/docs/:splat 302
 
-# Fallback: path-only rule that fires on EVERY host attached to this
-# project. Adds a request-time check: anyone hitting /docs/<anything>
-# via the docs.* hosts will land on the same path under orangerails.com,
-# which is also where the marketing site already serves /docs/*. On the
-# main host this is a no-op (already at /docs/...). Disabled until we
-# know whether host-prefix rules work above; placeholder.
+# SPA deep-link fallback. MUST be the last rule so the specific rules
+# above match first. Cloudflare Pages serves any real static asset
+# (JS/CSS/images, index.html) before consulting _redirects, so this
+# only fires for paths with no physical file: client-router routes
+# like /docs, /docs/xpub-export, /app, /login. The 200 (rewrite, not
+# redirect) serves index.html at the requested URL and lets the
+# in-app router take over. Without this, those routes 404 on direct
+# load / hard refresh even though their source is deployed.
+/* /index.html 200
