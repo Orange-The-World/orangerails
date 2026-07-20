@@ -90,16 +90,10 @@ function __OR_readDeferCredKey(): boolean {
   const searchHit = new URLSearchParams(window.location.search).get("defer_cred_key") === "1";
   const hashHit =
     new URLSearchParams(window.location.hash.replace(/^#/, "")).get("defer_cred_key") === "1";
-  const result = searchHit || hashHit;
-  // eslint-disable-next-line no-console
-  console.log("[OR-defer] module-load snapshot", {
-    searchHit,
-    hashHit,
-    result,
-    search: window.location.search,
-    hash: window.location.hash,
-  });
-  return result;
+  // Do not log the query string or the fragment here. Both can carry
+  // handoff material that must not be echoed anywhere, and a module-load
+  // diagnostic is not worth that exposure.
+  return searchHit || hashHit;
 }
 export const __OR_INITIAL_DEFER_CRED_KEY: boolean = __OR_readDeferCredKey();
 
