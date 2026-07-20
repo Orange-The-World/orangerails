@@ -29,6 +29,11 @@
  * verify_jwt = false in supabase/config.toml , this endpoint is the
  * first call a consumer makes, before it knows its own platform JWT.
  *
+ * The Quiltt vendor secret is deliberately NOT in this response. Every
+ * Quiltt call OR makes is server side (or-quiltt-session and
+ * _shared/quiltt-config.ts read the key straight from the platforms
+ * row), so the consumer never needs it and we do not ship it.
+ *
  * See also:
  *   supabase/functions/_shared/platform-auth.ts ,   the shared auth helper
  *                                                  every other or-* function uses;
@@ -105,7 +110,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     .select(`
       id, slug, env, status, rotated_at, bootstrap_ttl_seconds,
       widget_url, webhook_secret, app_profile_slug,
-      quiltt_api_key, quiltt_api_key_id,
       quiltt_connector_id_link, quiltt_connector_id_reconnect,
       quiltt_catalog_profile_id
     `)
@@ -165,8 +169,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     app_profile_slug: row.app_profile_slug ?? row.slug,
     webhook_secret:   row.webhook_secret,
     quiltt: {
-      api_key:                   row.quiltt_api_key,
-      api_key_id:                row.quiltt_api_key_id,
       connector_id_link:         row.quiltt_connector_id_link,
       connector_id_reconnect:    row.quiltt_connector_id_reconnect,
       catalog_profile_id:        row.quiltt_catalog_profile_id,
