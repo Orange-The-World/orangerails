@@ -770,7 +770,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .from('source_wallets')
           .select('external_wallet_id, is_synced')
           .eq('connection_id', conn.id)
-          .eq('is_synced', true);
+          .eq('is_synced', true)
+          // Deterministic order so walletIds[0] is stable across syncs. Both
+          // currency wallets are inserted in one batch at discovery, so they
+          // share an identical created_at; created_at alone leaves the order
+          // unspecified and [0] could still flip between syncs. The
+          // external_wallet_id (a unique UUID) tiebreaker fully determines the
+          // order; created_at stays first for the "oldest wallet wins" intent.
+          .order('created_at', { ascending: true })
+          .order('external_wallet_id', { ascending: true });
 
         if (swErr) throw swErr;
 
@@ -789,15 +797,53 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           const supabaseUrl = Deno.env.get('SUPABASE_URL');
           if (!supabaseUrl) throw new Error('SUPABASE_URL not set');
 
+          // The real per-wallet ids from source_wallets, used by BOTH the
+          // polling and the drain path below. Passing the 'strike' literal to
+          // the poll stamped every polled transaction with source_wallet_id =
+          // 'strike', which matches no source_wallets row on the consumer, so
+          // all rows imported as unmapped and none reached the register. See
+          // the drain block below for the full walletIds reasoning and the
+          // known [0] attribution limit; it applies equally to the poll now.
+          const strikeWalletIds = (sourceWallets ?? []).map(
+            (w: { external_wallet_id: string }) => w.external_wallet_id,
+          );
+
           // 1) Polling: historical + ongoing per-state list scan
           const poll = await adapter.syncByWallets(
             credentials,
-            ['strike'],
+            strikeWalletIds,
             conn.last_sync_cursor ?? null,
           );
 
           // 2) Real-time: drain any webhook-queued events. Side effect:
           //    registers a Strike webhook subscription on first call.
+          //
+          // walletIds is REQUIRED by DrainArgs and was never passed. queue.ts does
+          // `args.walletIds[0]` unguarded, so every Strike sync threw
+          // `TypeError: Cannot read properties of undefined (reading '0')` here, before any
+          // store call. That is why zero rows have ever landed in encrypted_transactions and
+          // why last_sync_at is still NULL on every Strike connection: the throw happens
+          // upstream of both. The generic taxonomy bucket hid it, because the message matched
+          // no classifier pattern.
+          //
+          // Passing the REAL ids from source_wallets, not an empty array. An empty-array guard
+          // would stop the crash and then silently write accountId = null onto transactions
+          // that have a correct value available, which trades a loud honest failure for quiet
+          // data corruption. These are the same ids the wallet-scoped path computes below,
+          // which is what the parameter's own doc comment in queue.ts says it is for.
+          //
+          // KNOWN LIMITATION, deliberately not fixed here. queue.ts:96 still takes
+          // `walletIds[0]`, so a connection with more than one synced wallet has every drained
+          // transaction stamped with whichever id sorts first. This fixes the crash; it does not
+          // fix attribution.
+          //
+          // It is not fixable in or-sync at all. Strike's external_wallet_id is a
+          // crypto.randomUUID() (strike/index.ts:740), not the receiverId, and a connection's
+          // BTC and USD wallets are the same Strike account sharing one account_key. The only
+          // field that distinguishes them is currency, which lives in encrypted_metadata that
+          // the server cannot read. The server structurally cannot attribute a Strike
+          // transaction to the right wallet. That is ZKA working as designed, not a defect, and
+          // correcting it needs an architecture decision rather than a code change here.
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
             connection: {
@@ -806,6 +852,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               last_sync_cursor: conn.last_sync_cursor ?? null,
             },
             credentials,
+            walletIds: strikeWalletIds,
             webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
           });
 
@@ -980,7 +1027,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   } catch (err) {
     console.error('[or-sync] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }));
 
