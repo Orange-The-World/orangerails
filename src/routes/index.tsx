@@ -15,6 +15,12 @@ export const Route = createFileRoute("/")({
   beforeLoad: ({ search }) => {
     const target = resolveRootRedirect(search);
     if (target.to === "/connect") {
+      // /connect's validateSearch keeps only its declared keys (platform,
+      // app_user_id, provider, return_to, widget_token, defer_cred_key,
+      // institution), so any other param sent to "/" is dropped here. That
+      // key list is a compatibility contract with integrators whose code we
+      // cannot see: adding a key is safe, removing one breaks a caller
+      // silently.
       throw redirect({ to: "/connect", search: target.search });
     }
     throw redirect({ to: "/docs" });
