@@ -22,6 +22,12 @@
  * the consumer picks up the new config on the next refetch with no
  * code change or env-var edit.
  *
+ * The quiltt block deliberately carries only non-secret identifiers
+ * (api_key_id, connector ids, catalog profile id). The Quiltt secret key
+ * is never returned: the widget obtains a scoped Quiltt session token
+ * from the or-quiltt-session* functions, which mint it server-side from
+ * the key and never hand the key to the client.
+ *
  * Auth: hash the inbound key with SHA-256, look up by api_key_hash.
  * Same algorithm platform-auth.ts uses for every other or-* function,
  * so existing keys (V2's hex64 included) work without rotation.
@@ -105,7 +111,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     .select(`
       id, slug, env, status, rotated_at, bootstrap_ttl_seconds,
       widget_url, webhook_secret, app_profile_slug,
-      quiltt_api_key, quiltt_api_key_id,
+      quiltt_api_key_id,
       quiltt_connector_id_link, quiltt_connector_id_reconnect,
       quiltt_catalog_profile_id
     `)
@@ -165,7 +171,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     app_profile_slug: row.app_profile_slug ?? row.slug,
     webhook_secret:   row.webhook_secret,
     quiltt: {
-      api_key:                   row.quiltt_api_key,
       api_key_id:                row.quiltt_api_key_id,
       connector_id_link:         row.quiltt_connector_id_link,
       connector_id_reconnect:    row.quiltt_connector_id_reconnect,
