@@ -1,11 +1,11 @@
 /**
  * /connect/sparrow , Sparrow Wallet landing screen.
  *
- * The customer arrives here after picking "Sparrow Wallet" on /providers
- * or from a direct link in our docs. The page explains in plain English
- * what a wallet descriptor is, where in Sparrow to find it, what v0.1
- * actually delivers (and does not deliver), and launches the Stealth
- * Sync widget when the customer is ready to paste.
+ * The customer arrives here from a direct link in our docs or from a
+ * marketing page. The page explains in plain English what a wallet
+ * descriptor is, where in Sparrow to find it, what v0.1 actually
+ * delivers (and does not deliver), and launches the Stealth Sync
+ * widget when the customer is ready to paste.
  *
  * Source of truth: docs/Sparrow.md
  *
@@ -16,9 +16,8 @@
  * cannot carry that context.
  */
 
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import {
-  ArrowLeft,
   ArrowRight,
   CheckCircle2,
   Copy,
@@ -79,15 +78,7 @@ function SparrowConnectPage() {
         <section className="relative overflow-hidden border-b border-border/60">
           <div className="pointer-events-none absolute inset-0 grid-bg opacity-50 [mask-image:radial-gradient(ellipse_at_top,black,transparent_70%)]" />
           <div className="relative mx-auto max-w-4xl px-6 py-16">
-            <Link
-              to="/providers"
-              className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              All connections
-            </Link>
-
-            <div className="mt-6 flex items-start gap-4">
+            <div className="flex items-start gap-4">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-primary-soft font-mono text-lg font-semibold text-primary ring-1 ring-primary/15">
                 SW
               </div>
@@ -120,14 +111,6 @@ function SparrowConnectPage() {
                 Launch Stealth Sync
                 <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
               </button>
-              <a
-                href="/docs/sparrow"
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex h-11 items-center gap-1.5 rounded-md border border-border bg-background px-5 text-sm font-medium transition-colors hover:bg-muted"
-              >
-                Read the full spec
-              </a>
             </div>
           </div>
         </section>
@@ -295,19 +278,6 @@ function SparrowConnectPage() {
                   same privacy boundary.
                 </p>
               </div>
-            </div>
-
-            <div className="mt-10 text-center">
-              <a
-                href="/docs/sparrow"
-                target="_blank"
-                rel="noreferrer"
-                className="group inline-flex items-center gap-1.5 text-sm font-medium text-primary"
-              >
-                Read the full spec, including how we compare to Koinly,
-                CoinTracker, and BTCPay
-                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-              </a>
             </div>
           </div>
         </section>

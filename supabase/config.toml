@@ -62,6 +62,9 @@ verify_jwt = false
 [functions.or-stealth-transactions-store]
 verify_jwt = false
 
+[functions.or-strike-webhook]
+verify_jwt = false
+
 [functions.or-sync]
 verify_jwt = false
 

@@ -36,6 +36,14 @@ jobs:
         # separately and will remove this flag when each lane is clean.
         continue-on-error: true
 
+      - name: Public-auth declaration check
+        # A real gate, deliberately WITHOUT continue-on-error, unlike the lint step above.
+        # Asserts supabase/functions/public-auth.json and supabase/config.toml agree in both
+        # directions: nothing is exposed without declaring its own auth, and nothing declares
+        # itself public while the gateway check is still on. See the script header for why this
+        # is a declaration rather than a code scan.
+        run: node scripts/check-public-auth.mjs
+
       - name: Build
         run: bun run build
 
