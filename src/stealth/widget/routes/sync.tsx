@@ -290,7 +290,12 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    cursor never advanced and every sync rescanned the whole
         //    birthday-to-tip window. Best-effort: a failure here must not
         //    fail the sync, it only widens the next rescan window.
-        if (!useMock) {
+        //
+        //    Guard: only write if the cursor actually advanced. runSync
+        //    returns the previous cursor unchanged when fromHeight > tip
+        //    (short-circuit path). Persisting that value would falsely mark
+        //    the wallet as synced to a height it never scanned.
+        if (!useMock && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
