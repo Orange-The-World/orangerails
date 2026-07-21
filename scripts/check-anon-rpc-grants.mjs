@@ -20,14 +20,26 @@
  *   4. Re-widening the schema default (ALTER DEFAULT PRIVILEGES ... GRANT EXECUTE ON
  *      FUNCTIONS TO anon) and a blanket GRANT ON ALL FUNCTIONS IN SCHEMA public are refused
  *      outright. Neither is allowlistable: they are the condition this gate exists to end.
+ *      The opposite statement, ALTER DEFAULT PRIVILEGES ... REVOKE, is the durable fix and
+ *      passes on purpose.
  *
- * WHAT IT DOES NOT CHECK, and no one should assume otherwise. This reads our SQL, not the
- * live database. A grant typed by hand into a SQL console never reaches a migration and this
- * gate will not see it. Catching that needs a live read of pg_proc.proacl on both projects,
- * which needs a database credential CI does not hold, so it stays a periodic check by the
- * database steward. This gate covers drift arriving through the repo, which is every change
- * we make on purpose. Saying so plainly matters: a control that appears to cover more than
- * it does is what stops anyone from looking at the rest.
+ * WHAT IT DOES NOT CHECK, and no one should assume otherwise. Two blind spots, both real.
+ *
+ * First, this reads our SQL, not the live database. A grant typed by hand into a SQL console
+ * never reaches a migration and this gate will not see it. Catching that needs a live read of
+ * pg_proc.proacl on both projects, which needs a database credential CI does not hold, so it
+ * stays a periodic check by the database steward.
+ *
+ * Second, and this is the one that bites on day one: the grants we are actually fighting here
+ * are inherited from the schema's default privileges, not written by any migration. There is
+ * no GRANT statement in the repo to fold. So this gate can report a clean source scan and an
+ * empty allowlist at the same moment that functions in `public` are anon-executable on the
+ * live database, with no bug in the parser. Say it plainly: THIS GATE PROVES NO MIGRATION
+ * WIDENS THE SURFACE. IT DOES NOT PROVE THE SURFACE IS NARROW. Narrowing it is the default
+ * privileges change plus the steward's live sweep; this gate is what stops it widening again.
+ *
+ * Both limits are written here rather than only in the pull request, because a control that
+ * appears to cover more than it does is what stops anyone from looking at the rest.
  *
  * Rejected alternative: inferring intent from function bodies. The public-auth gate in this
  * same repo tried detection before declaration and produced six false negatives, because the
@@ -147,7 +159,9 @@ export function scan(files) {
       if (isDefaultPrivs) {
         const schema = /\bIN\s+SCHEMA\s+([a-z_][a-z0-9_]*)/i.exec(stmt);
         if (!schema || schema[1].toLowerCase() !== GUARDED_SCHEMA) continue;
-        if (!/\bGRANT\b/i.test(stmt)) continue; // a REVOKE of the default is the fix, not the fault
+        // A REVOKE of the schema default is the durable fix, so it passes. Only the widening
+        // direction is refused, and REVOKE GRANT OPTION FOR is read as the revoke it is.
+        if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b(?:(?!\bREVOKE\b).)*\bGRANT\b/i.test(stmt)) continue;
         if (includesAnon(tailAfter(stmt, "TO"))) {
           hard.push(
             `${file.name}: ALTER DEFAULT PRIVILEGES grants EXECUTE on future ${GUARDED_SCHEMA} ` +
@@ -231,8 +245,26 @@ const CASES = [
     expect: 0,
   },
   {
+    name: "revoking the schema default FOR ROLE also passes",
+    files: [{ name: "a.sql", sql: "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM anon;" }],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    name: "REVOKE GRANT OPTION FOR is read as a revoke, not a grant",
+    files: [{ name: "a.sql", sql: "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE GRANT OPTION FOR EXECUTE ON FUNCTIONS FROM anon;" }],
+    allowlist: {},
+    expect: 0,
+  },
+  {
     name: "granting the schema default back is refused outright",
     files: [{ name: "a.sql", sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon;" }],
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    name: "granting the schema default back FOR ROLE is refused too",
+    files: [{ name: "a.sql", sql: "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon;" }],
     allowlist: {},
     expect: 1,
   },
@@ -367,5 +399,6 @@ if (process.argv.includes("--selftest")) {
   console.log(
     `anon RPC grant OK: ${files.length} migration(s) scanned, ` +
     `${granted.size} declared anon-executable ${GUARDED_SCHEMA} function(s), allowlist agrees. ` +
-    `Source scan only: a grant made outside a migration is not visible here.`);
+    `Source scan only: a grant made outside a migration is not visible here. This proves no ` +
+    `migration widens the surface, not that the surface is narrow.`);
 }
