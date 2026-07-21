@@ -55,7 +55,7 @@ const STAGE_COPY: Record<StealthStage, StageCopy> = {
   },
   fetching_blocks: {
     message: 'Fetching blocks where your wallet appears',
-    detail: '{n} blocks need to be downloaded.',
+    detail: 'We fetch only the blocks your wallet appears in. Our node can see which blocks those are, but not your addresses, amounts, or which specific transaction within them is yours.',
     shortLabel: 'Fetch the blocks that match',
   },
   building_txs: {
