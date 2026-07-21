@@ -106,7 +106,10 @@ jobs:
 
       - name: Run Playwright
         env:
-          PLAYWRIGHT_BASE_URL: ${{ vars.PLAYWRIGHT_BASE_URL || 'https://orangerails.dev' }}
+          # The app is dev.orangerails.com (Cloudflare Pages project orangerails-dev).
+          # orangerails.dev is the marketing site and does not serve the routes the
+          # specs assert on, so it must not be the target here.
+          PLAYWRIGHT_BASE_URL: https://dev.orangerails.com
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
           ACCOUNT_A: ${{ secrets.ACCOUNT_A }}
           ACCOUNT_B: ${{ secrets.ACCOUNT_B }}
