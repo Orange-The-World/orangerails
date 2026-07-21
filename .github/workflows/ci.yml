@@ -47,6 +47,29 @@ jobs:
       - name: Build
         run: bun run build
 
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The project is managed with Bun (bun.lock, bunfig.toml).
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The root vitest suite (vitest.config.ts). It was not run in CI on pull
+      # requests, so a regression could merge unseen. This job runs it and
+      # fails the check on any failure (no continue-on-error). Promote it to a
+      # required check on dev once the suite is green.
+      - name: Run unit tests
+        run: bun run test
+
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
