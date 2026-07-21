@@ -656,6 +656,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
 
   // ── fetching_blocks + building_txs ───────────────────────────────────
+  hits.sort((a, b) => a.height - b.height);
   emit(opts, progress('fetching_blocks', 0, `${hits.length} blocks to fetch.`));
 
   // UTXO tracking , keyed by `${prev_txid}:${vout_idx}`. Populated as we
@@ -740,7 +741,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         }
         normalized.push({
           txid: tx.txid,
-          block_height: block.height,
+          block_height: hits[i].height,
           occurred_at: occurredAt,
           direction: 'out',
           amount_sats: Number(netOut),
@@ -762,7 +763,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         // RECEIVE only , pure incoming, no inputs of ours were spent.
         normalized.push({
           txid: tx.txid,
-          block_height: block.height,
+          block_height: hits[i].height,
           occurred_at: occurredAt,
           direction: 'in',
           amount_sats: Number(receivedAmount),
