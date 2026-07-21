@@ -14,17 +14,17 @@ jobs:
   unit:
     name: Unit tests
     runs-on: ubuntu-latest
-    # WHY THIS EXISTS. Until 2026-07-21 nothing in CI ran this repository's unit
-    # tests. The only vitest invocation lived in api-gateway-deploy.yml, fires on
+    # WHY THIS EXISTS. Nothing in CI ran this repository's unit tests. The only
+    # vitest invocation lived in api-gateway-deploy.yml, fires on
     # workflow_dispatch only, and is scoped to workers/api-gateway. The root
     # vitest.config.ts (include: src/**/*.test.ts) covers 255 tests across 27
     # files and was never executed by automation on any branch.
     #
-    # The cost of that: PR #220 merged to dev green while reintroducing two
-    # regressions that these tests catch, one of which stamps transactions with
-    # block_height 0. Every green tick on this repo meant "it builds and the
-    # smoke test passed" and never "the tests pass". It was caught by a person
-    # running the suite by hand.
+    # The cost of that: a change merged to dev with every check green while
+    # reintroducing two regressions these tests catch, one of which records
+    # transactions with a block height of 0 instead of the real height. A green
+    # result here meant "it builds and the smoke test passed" and never "the
+    # tests pass". The regressions were found by running the suite by hand.
     #
     # The suite takes about 1.2 seconds. Cost was never the reason it was absent.
     steps:
