@@ -22,6 +22,10 @@
  *   - Verifies the agent_member is active
  *   - Calls or-agent-revoke
  *   - Asserts the four post-revoke properties above
+ *
+ * RETIRED 2026-06-25: mint_agent_invitation and revoke_agent_member had
+ * authenticated EXECUTE revoked. The entire suite depends on these RPCs;
+ * hard-skipped below until rewritten to use a non-retired path.
  */
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
@@ -32,7 +36,10 @@ const URL = process.env.ORANGERAILS_TEST_SUPABASE_URL;
 const SERVICE_KEY = process.env.ORANGERAILS_TEST_SUPABASE_SERVICE_KEY;
 const ANON_KEY = process.env.ORANGERAILS_TEST_SUPABASE_ANON_KEY;
 const haveCreds = Boolean(URL && SERVICE_KEY && ANON_KEY);
-const d = haveCreds ? describe : describe.skip;
+// Hard-skip: entire suite depends on agent-membership RPCs retired 2026-06-25.
+// Change to (haveCreds ? describe : describe.skip) once the setup and test
+// bodies no longer call mint_agent_invitation or revoke_agent_member.
+const d = describe.skip;
 
 function bytesToBase64(b: Uint8Array): string {
   return Buffer.from(b).toString('base64');
@@ -197,7 +204,7 @@ d('CR-06 , revocation chaos', () => {
     expect((body.error ?? '').toLowerCase()).toMatch(/not found|revoked|not activated/);
   });
 
-  test('after revocation, audit_entries still show the agent\'s historical actions', async () => {
+  test("after revocation, audit_entries still show the agent's historical actions", async () => {
     // The agent's invite_redeemed entry should still exist
     const { data, error } = await admin
       .from('audit_entries')
