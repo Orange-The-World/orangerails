@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * CI gate: our SQL may not leave the `anon` role able to EXECUTE a function in the `public`
- * schema unless that function is on a checked-in allowlist with a written reason.
+ * CI gate: our SQL may not leave the `anon` role, or the PUBLIC pseudo-role, able to EXECUTE
+ * a function in the `public` schema unless that function is on a checked-in allowlist with a
+ * written reason.
  *
  * WHY THIS EXISTS. On this project every function created in `public` is born executable by
  * `anon`, because the schema's default privileges grant it on creation. That is a project
@@ -14,14 +15,19 @@
  *   1. Migrations are replayed in filename order and GRANT / REVOKE are folded into an END
  *      STATE. What is compared against the allowlist is what our SQL finally declares, not
  *      every statement we ever wrote, so a grant that a later migration takes away is fine.
- *   2. Anything left executable by `anon` or by `PUBLIC` must have an allowlist entry.
+ *   2. Anything left executable by `anon` or by `PUBLIC` must have an allowlist entry. Both
+ *      grantees are tracked separately, because Postgres stores them as separate access
+ *      entries: a REVOKE ... FROM PUBLIC does NOT take away a grant made directly TO anon,
+ *      and the fold must not pretend it does.
  *   3. An allowlist entry with no matching grant also fails, so the list cannot rot into a
  *      record of things we used to do.
  *   4. Re-widening the schema default (ALTER DEFAULT PRIVILEGES ... GRANT EXECUTE ON
- *      FUNCTIONS TO anon) and a blanket GRANT ON ALL FUNCTIONS IN SCHEMA public are refused
- *      outright. Neither is allowlistable: they are the condition this gate exists to end.
- *      The opposite statement, ALTER DEFAULT PRIVILEGES ... REVOKE, is the durable fix and
- *      passes on purpose.
+ *      FUNCTIONS TO anon or TO PUBLIC) and a blanket GRANT ON ALL FUNCTIONS IN SCHEMA public
+ *      are refused outright. Neither is allowlistable: they are the condition this gate
+ *      exists to end. The opposite statement, ALTER DEFAULT PRIVILEGES ... REVOKE, is the
+ *      durable fix and passes on purpose.
+ *   5. ALL and ALL PRIVILEGES count as EXECUTE, because REVOKE ALL ON FUNCTION x FROM PUBLIC
+ *      is the ordinary spelling of the very revoke this gate is here to keep in place.
  *
  * WHAT IT DOES NOT CHECK, and no one should assume otherwise. Two blind spots, both real.
  *
@@ -54,6 +60,9 @@ import { join } from "node:path";
 const MIGRATIONS_DIR = "supabase/migrations";
 const ALLOWLIST = "supabase/anon-executable-rpcs.json";
 const GUARDED_SCHEMA = "public";
+
+/** The grantees this gate cares about. PUBLIC is wider than anon, never narrower. */
+const RISKY_GRANTEES = ["anon", "public"];
 
 /**
  * Split SQL into statements, discarding line comments, block comments, single-quoted string
@@ -117,10 +126,16 @@ function tailAfter(stmt, keyword) {
   return end === -1 ? null : stmt.slice(end);
 }
 
-/** True when a grantee list includes `anon` or the PUBLIC pseudo-role. */
-function includesAnon(list) {
-  if (!list) return false;
-  return /(^|[\s,(])(anon|public)(\s|,|\)|$)/i.test(list.replace(/"/g, ""));
+/**
+ * Which risky grantees a grantee list names. Returns a subset of RISKY_GRANTEES, in that
+ * order, so messages read the same way every time. `anon` and `PUBLIC` are deliberately kept
+ * apart rather than collapsed into one flag, because a revoke naming one leaves the other.
+ */
+function riskyGrantees(list) {
+  if (!list) return [];
+  const clean = list.replace(/"/g, "");
+  return RISKY_GRANTEES.filter(
+    (role) => new RegExp(`(^|[\\s,(])${role}(\\s|,|\\)|$)`, "i").test(clean));
 }
 
 /** Normalised key for a function target: public.name or public.name(argtype,argtype). */
@@ -139,9 +154,18 @@ function functionKey(rawName, rawArgs) {
 
 const bareName = (key) => key.split("(")[0];
 
+/** Drop the named grantees from an entry, and the entry itself once nothing is left. */
+function removeGrantees(granted, key, grantees) {
+  const entry = granted.get(key);
+  if (!entry) return;
+  for (const role of grantees) entry.delete(role);
+  if (entry.size === 0) granted.delete(key);
+}
+
 /**
  * Fold a set of migrations into the end state their SQL declares.
- * `files` is an ordered array of { name, sql }. Returns { granted, hard }.
+ * `files` is an ordered array of { name, sql }.
+ * Returns { granted, hard } where granted maps a function key to a Map of grantee -> file.
  */
 export function scan(files) {
   const granted = new Map();
@@ -153,20 +177,26 @@ export function scan(files) {
   for (const file of files) {
     for (const stmt of statements(file.sql)) {
       const isDefaultPrivs = /^ALTER\s+DEFAULT\s+PRIVILEGES\b/i.test(stmt);
-      const hasExecute = /\bEXECUTE\b/i.test(stmt);
+      // ALL and ALL PRIVILEGES include EXECUTE. REVOKE ALL ON FUNCTION x FROM PUBLIC is the
+      // ordinary spelling of this revoke, and reading only the literal word EXECUTE missed it.
+      const hasExecute = /\bEXECUTE\b/i.test(stmt) || /\bALL\s+(?:PRIVILEGES\s+)?ON\b/i.test(stmt);
       if (!hasExecute) continue;
 
       if (isDefaultPrivs) {
+        // Stay in this gate's lane: default privileges on TABLES or SEQUENCES are somebody
+        // else's argument. Only the function-shaped ones are ours.
+        if (!/\bON\s+(?:FUNCTIONS|ROUTINES)\b/i.test(stmt)) continue;
         const schema = /\bIN\s+SCHEMA\s+([a-z_][a-z0-9_]*)/i.exec(stmt);
         if (!schema || schema[1].toLowerCase() !== GUARDED_SCHEMA) continue;
         // A REVOKE of the schema default is the durable fix, so it passes. Only the widening
         // direction is refused, and REVOKE GRANT OPTION FOR is read as the revoke it is.
         if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b(?:(?!\bREVOKE\b).)*\bGRANT\b/i.test(stmt)) continue;
-        if (includesAnon(tailAfter(stmt, "TO"))) {
+        const grantees = riskyGrantees(tailAfter(stmt, "TO"));
+        if (grantees.length) {
           hard.push(
             `${file.name}: ALTER DEFAULT PRIVILEGES grants EXECUTE on future ${GUARDED_SCHEMA} ` +
-            `functions to anon. Every RPC shipped after this is born public. This is not ` +
-            `allowlistable. Grant anon on the one function that needs it instead.`);
+            `functions to ${grantees.join(", ")}. Every RPC shipped after this is born ` +
+            `public. This is not allowlistable. Grant the one function that needs it instead.`);
         }
         continue;
       }
@@ -175,8 +205,8 @@ export function scan(files) {
       const isRevoke = /^REVOKE\b/i.test(stmt);
       if (!isGrant && !isRevoke) continue;
 
-      const targets = includesAnon(tailAfter(stmt, isGrant ? "TO" : "FROM"));
-      if (!targets) continue;
+      const grantees = riskyGrantees(tailAfter(stmt, isGrant ? "TO" : "FROM"));
+      if (!grantees.length) continue;
 
       const blanket = blanketRe.exec(stmt);
       if (blanket) {
@@ -184,10 +214,10 @@ export function scan(files) {
         if (isGrant) {
           hard.push(
             `${file.name}: blanket GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ${GUARDED_SCHEMA} ` +
-            `to anon. This hands out every RPC at once, including ones written later. Not ` +
-            `allowlistable: name the single function that needs it.`);
+            `to ${grantees.join(", ")}. This hands out every RPC at once, including ones ` +
+            `written later. Not allowlistable: name the single function that needs it.`);
         } else {
-          granted.clear();
+          for (const key of [...granted.keys()]) removeGrantees(granted, key, grantees);
         }
         continue;
       }
@@ -198,12 +228,18 @@ export function scan(files) {
       if (!key.startsWith(`${GUARDED_SCHEMA}.`)) continue; // other schemas are out of scope here
 
       if (isGrant) {
-        granted.set(key, file.name);
+        const entry = granted.get(key) ?? new Map();
+        for (const role of grantees) entry.set(role, file.name);
+        granted.set(key, entry);
       } else {
-        // Revoking is the safe direction, so match broadly: an unsignatured REVOKE clears
-        // every overload, and a signatured one also clears an unsignatured GRANT.
+        // Match the function broadly, because revoking is the safe direction: an unsignatured
+        // REVOKE clears every overload, and a signatured one also clears an unsignatured
+        // GRANT. Match the GRANTEE narrowly, because it is not safe: revoking from PUBLIC
+        // leaves a grant made directly to anon exactly where it was.
         for (const existing of [...granted.keys()]) {
-          if (existing === key || bareName(existing) === bareName(key)) granted.delete(existing);
+          if (existing === key || bareName(existing) === bareName(key)) {
+            removeGrantees(granted, existing, grantees);
+          }
         }
       }
     }
@@ -217,19 +253,23 @@ export function compare(granted, hard, allowlist) {
   const fail = [...hard];
   const listed = new Set(Object.keys(allowlist ?? {}));
 
-  for (const [key, file] of granted) {
+  for (const [key, entry] of granted) {
     if (!listed.has(key)) {
+      const who = [...entry.keys()].join(" and ");
+      const where = [...new Set(entry.values())].join(", ");
       fail.push(
-        `${key}: granted EXECUTE to anon in ${file} but not declared in ${ALLOWLIST}. An RPC ` +
-        `callable without a signed-in user is a public endpoint. If that is intended, add the ` +
-        `key "${key}" with a one line reason. If it is not, revoke the grant.`);
+        `${key}: granted EXECUTE to ${who} in ${where} but not declared in ${ALLOWLIST}. An ` +
+        `RPC callable without a signed-in user is a public endpoint. If that is intended, add ` +
+        `the key "${key}" with a one line reason. If it is not, revoke the grant, naming ` +
+        `every grantee it was given to.`);
     }
   }
   for (const key of listed) {
     if (!granted.has(key)) {
       fail.push(
-        `${key}: declared in ${ALLOWLIST} but no migration grants it to anon. Remove the entry ` +
-        `so the list stays a record of what is true today, not of what used to be.`);
+        `${key}: declared in ${ALLOWLIST} but no migration grants it to anon or PUBLIC. ` +
+        `Remove the entry so the list stays a record of what is true today, not of what used ` +
+        `to be.`);
     }
   }
   return fail;
@@ -269,6 +309,18 @@ const CASES = [
     expect: 1,
   },
   {
+    name: "granting the schema default to PUBLIC is refused too",
+    files: [{ name: "a.sql", sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO PUBLIC;" }],
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    name: "default privileges on TABLES are not this gate's business",
+    files: [{ name: "a.sql", sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon;" }],
+    allowlist: {},
+    expect: 0,
+  },
+  {
     name: "another schema is out of scope",
     files: [{ name: "a.sql", sql: "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA client_platform TO postgres, service_role, authenticated, anon;" }],
     allowlist: {},
@@ -277,6 +329,12 @@ const CASES = [
   {
     name: "blanket grant across public is refused outright",
     files: [{ name: "a.sql", sql: "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO anon;" }],
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    name: "blanket grant across public to PUBLIC is refused outright",
+    files: [{ name: "a.sql", sql: "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO PUBLIC;" }],
     allowlist: {},
     expect: 1,
   },
@@ -327,6 +385,49 @@ const CASES = [
     ],
     allowlist: {},
     expect: 0,
+  },
+  {
+    name: "REVOKE FROM PUBLIC cancels a grant made TO PUBLIC",
+    files: [
+      { name: "a.sql", sql: "GRANT EXECUTE ON FUNCTION public.foo(uuid) TO PUBLIC;" },
+      { name: "b.sql", sql: "REVOKE EXECUTE ON FUNCTION public.foo(uuid) FROM PUBLIC;" },
+    ],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    name: "REVOKE FROM PUBLIC does NOT cancel a grant made TO anon",
+    files: [
+      { name: "a.sql", sql: "GRANT EXECUTE ON FUNCTION public.foo(uuid) TO anon;" },
+      { name: "b.sql", sql: "REVOKE EXECUTE ON FUNCTION public.foo(uuid) FROM PUBLIC;" },
+    ],
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    name: "a revoke naming both grantees clears both",
+    files: [
+      { name: "a.sql", sql: "GRANT EXECUTE ON FUNCTION public.foo(uuid) TO anon;" },
+      { name: "b.sql", sql: "GRANT EXECUTE ON FUNCTION public.foo(uuid) TO PUBLIC;" },
+      { name: "c.sql", sql: "REVOKE EXECUTE ON FUNCTION public.foo(uuid) FROM anon, PUBLIC;" },
+    ],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    name: "REVOKE ALL PRIVILEGES counts as revoking EXECUTE",
+    files: [
+      { name: "a.sql", sql: "GRANT EXECUTE ON FUNCTION public.foo(uuid) TO PUBLIC;" },
+      { name: "b.sql", sql: "REVOKE ALL PRIVILEGES ON FUNCTION public.foo(uuid) FROM PUBLIC;" },
+    ],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    name: "GRANT ALL ON FUNCTION is a grant of EXECUTE",
+    files: [{ name: "a.sql", sql: "GRANT ALL ON FUNCTION public.foo(uuid) TO anon;" }],
+    allowlist: {},
+    expect: 1,
   },
   {
     name: "a stale allowlist entry fails",
@@ -398,7 +499,8 @@ if (process.argv.includes("--selftest")) {
   }
   console.log(
     `anon RPC grant OK: ${files.length} migration(s) scanned, ` +
-    `${granted.size} declared anon-executable ${GUARDED_SCHEMA} function(s), allowlist agrees. ` +
-    `Source scan only: a grant made outside a migration is not visible here. This proves no ` +
-    `migration widens the surface, not that the surface is narrow.`);
+    `${granted.size} declared anon-executable or PUBLIC-executable ${GUARDED_SCHEMA} ` +
+    `function(s), allowlist agrees. Source scan only: a grant made outside a migration is ` +
+    `not visible here. This proves no migration widens the surface, not that the surface is ` +
+    `narrow.`);
 }
