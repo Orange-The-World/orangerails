@@ -2,6 +2,7 @@
 // ORBI Point-in-Time Rate API v1
 // Authored: ORBI agent, 2026-07-22
 // Updated: Dev 1, 2026-07-22 -- DBA index corrections: product param, authority/status/superseded filters
+// Updated: Dev 1, 2026-07-22 -- Auditor fixes: gateway config, env flag gate
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -56,6 +57,9 @@ interface RateItem {
 }
 
 Deno.serve(async (req: Request) => {
+  // ----- Feature flag -----
+  if (!Deno.env.get('ORBI_RATE_API_ENABLED')) return errResponse(503, 'not_enabled', 'endpoint not active')
+
   // ----- Auth -----
   const authHeader = req.headers.get('Authorization') ?? req.headers.get('x-api-key') ?? ''
   if (!authHeader) return errResponse(401, 'missing_key', 'Authorization header required')
