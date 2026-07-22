@@ -6,7 +6,7 @@
 // Updated: Dev 1, 2026-07-22 -- Surface DB errors as 500; do not mask as fill_type:gap
 // Updated: Dev 1, 2026-07-22 -- CTO fix: rate-limit bucket by 16-char prefix (unique per key), not 8-char orbi_sk_
 // Updated: Dev 1, 2026-07-22 -- ORBI fix: rate-limit bucket by consumer_id (unique per consumer, format-independent)
-// Updated: Dev 1, 2026-07-22 -- Codex P2: flag gate, key-err split, body validation, UTC enforcement, hasOwn, usage-log await
+// Updated: Dev 2, 2026-07-22 -- P2 fixes: flag gate, keyErr 5xx, body validation, UTC timestamp, hasOwn, await usage log
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -24,9 +24,6 @@ const VALID_PRODUCTS: Record<string, { granularity: string }> = {
   'ORBI-D': { granularity: '1d' },
   'ORBI-D-authority': { granularity: '1d' },
 }
-
-// ISO-8601 UTC timestamp regex: requires Z suffix, rejects bare dates and offset timestamps.
-const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z$/
 
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
 const rlMap = new Map<string, { count: number; windowStart: number }>()
@@ -63,9 +60,14 @@ interface RateItem {
   product?: string
 }
 
+// ISO-8601 UTC pattern: requires explicit Z or numeric offset.
+// Rejects ambiguous local-time strings like "03/15/2024" or "2026-07-01T12:00:00"
+// that would resolve to the wrong point-in-time rate.
+const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
+
 Deno.serve(async (req: Request) => {
   // ----- Feature flag -----
-  // Require explicit "true"; "false", "0", unset, or any other value disables the endpoint.
+  // Require explicit "true"; "false", "0", or unset all disable the endpoint.
   if (Deno.env.get('ORBI_RATE_API_ENABLED') !== 'true') return errResponse(503, 'not_enabled', 'endpoint not active')
 
   // ----- Auth -----
@@ -83,7 +85,8 @@ Deno.serve(async (req: Request) => {
     .is('revoked_at', null)
     .single()
 
-  // Distinguish a DB/network failure (5xx) from an unknown or revoked key (401).
+  // DB-level error is an outage or misconfiguration, not an auth failure.
+  // Return 500 so callers can distinguish unavailability from a bad key.
   if (keyErr) return errResponse(500, 'server_error', 'Database error during key lookup')
   if (!keyRow) return errResponse(401, 'invalid_key', 'API key invalid or revoked')
 
@@ -110,9 +113,9 @@ Deno.serve(async (req: Request) => {
       items = [{ asset, fiat, at, product }]
     } else if (req.method === 'POST') {
       const body = await req.json()
-      // Reject null, primitives, and bare arrays-of-primitives; body must be an object or array of objects.
+      // Reject null, primitives, and other non-object bodies before iterating.
       if (body === null || typeof body !== 'object') {
-        return errResponse(400, 'bad_json', 'Body must be an object or array of objects')
+        return errResponse(400, 'bad_body', 'Request body must be an object or array')
       }
       items = Array.isArray(body) ? body : [body]
     } else {
@@ -126,19 +129,15 @@ Deno.serve(async (req: Request) => {
   if (items.length > BATCH_LIMIT) return errResponse(400, 'batch_too_large', `Max batch is ${BATCH_LIMIT}`)
 
   for (const item of items) {
-    // Reject null elements and non-objects inside a batch array to avoid TypeError on field access.
-    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
-      return errResponse(400, 'bad_json', 'Each item must be a non-null object')
-    }
-    if (!item.asset || !item.fiat || !item.at) {
+    // Guard against null or primitive elements inside an array body.
+    if (item === null || typeof item !== 'object' || !item.asset || !item.fiat || !item.at) {
       return errResponse(400, 'bad_params', 'Each item requires asset, fiat, at')
     }
-    // Enforce ISO-8601 UTC: Z suffix required. Bare dates (03/15/2024) and offset timestamps (+05:00) return 400.
-    if (typeof item.at !== 'string' || !ISO_UTC_RE.test(item.at) || isNaN(new Date(item.at).getTime())) {
-      return errResponse(400, 'bad_timestamp', `Timestamp must be ISO-8601 UTC with Z suffix: ${item.at}`)
+    if (!ISO_UTC_RE.test(item.at) || isNaN(new Date(item.at).getTime())) {
+      return errResponse(400, 'bad_timestamp', `Timestamp must be ISO-8601 UTC (e.g. 2026-07-01T12:00:00Z): ${item.at}`)
     }
     const product = item.product ?? 'ORBI-M'
-    // Use Object.hasOwn to prevent inherited prototype properties (e.g. "toString") from bypassing this check.
+    // Object.hasOwn prevents inherited props (e.g. "toString") from bypassing the 400.
     if (!Object.hasOwn(VALID_PRODUCTS, product)) {
       return errResponse(400, 'bad_product', `product must be one of: ${Object.keys(VALID_PRODUCTS).join(', ')}`)
     }
@@ -215,8 +214,9 @@ Deno.serve(async (req: Request) => {
     })
   }
 
-  // Await usage log so metering actually writes; DB failure stays non-fatal.
-  try { await supabase.from('orbi_usage_log').insert(usageLogs) } catch { /* non-fatal */ }
+  // Await so metering actually writes; failure is non-fatal and must not block the response.
+  const { error: logErr } = await supabase.from('orbi_usage_log').insert(usageLogs)
+  if (logErr) console.error('usage-log insert failed:', logErr.message)
 
   return Response.json(items.length === 1 ? results[0] : { results, count: results.length })
 })
