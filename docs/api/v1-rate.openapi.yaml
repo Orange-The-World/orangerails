@@ -14,12 +14,16 @@ info:
     Callers requesting a pair outside the chosen product's coverage will receive fill_type=gap.
     Always check fill_type before using a rate value.
 
+    Authentication: pass either an Authorization: Bearer <key> header or an x-api-key: <key>
+    header. Both are equivalent; the key is the raw API key issued to your consumer account.
+
 servers:
   - url: https://<orbi-prod-project-ref>.supabase.co/functions/v1
     description: ORBI production (flag-gated; replace project ref)
 
 security:
   - BearerAuth: []
+  - ApiKeyAuth: []
 
 paths:
   /v1-rate:
@@ -95,6 +99,12 @@ components:
     BearerAuth:
       type: http
       scheme: bearer
+      description: Pass your API key as a Bearer token in the Authorization header.
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Pass your API key directly in the x-api-key header (alternative to BearerAuth).
 
   schemas:
     RateRequest:
