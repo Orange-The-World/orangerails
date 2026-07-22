@@ -799,7 +799,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // until the user opts in by re-running discovery from the UI.
         const { data: sourceWallets, error: swErr } = await ctx.serviceClient
           .from('source_wallets')
-          .select('external_wallet_id, is_synced')
+          .select('external_wallet_id, is_synced, currency')
           .eq('connection_id', conn.id)
           .eq('is_synced', true)
           // Deterministic order so walletIds[0] is stable across syncs. Both
@@ -875,6 +875,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // the server cannot read. The server structurally cannot attribute a Strike
           // transaction to the right wallet. That is ZKA working as designed, not a defect, and
           // correcting it needs an architecture decision rather than a code change here.
+          const walletsByCurrency = new Map(
+            (sourceWallets ?? []).map((w) => [w.currency, w]),
+          );
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
             connection: {
@@ -884,9 +887,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             },
             credentials,
             walletIds: strikeWalletIds,
+            walletsByCurrency,
             webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
           });
-
           newTxs = [...poll.transactions, ...drain.transactions];
           // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.

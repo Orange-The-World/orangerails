@@ -80,20 +80,15 @@ export async function drainStrikeQueue(args: {
   credentials: Record<string, unknown>;
   webhookBaseUrl: string;
   /**
-   * The external_wallet_id values from source_wallets for this connection.
-   * walletIds[0] is the Strike receiverId stored during discover(). Passed
-   * to every normalize call so webhook-sourced transactions carry the same
-   * per-account identifier as polling-sourced transactions.
+   * Map of uppercased ISO currency code to external_wallet_id for this
+   * connection. Built from source_wallets rows selected with currency.
+   * Used to resolve each transaction to the correct per-currency wallet.
+   * Null lookups fall back to null source_wallet_id (legacy connections).
    */
-  walletIds: string[];
+  walletsByCurrency: Map<string, string>;
 }): Promise<SyncResult> {
   const creds = parseStrikeCredentials(args.credentials);
   const conn = args.connection;
-
-  // The receiverId stored in source_wallets.external_wallet_id. Null for
-  // legacy connections that predate discover() (they have no source_wallets
-  // row), in which case source_wallet_id will be null on these transactions.
-  const accountId = args.walletIds[0] ?? null;
 
   // ─── Step 1: ensure subscription registered ─────────────────────────────
   if (!conn.strike_subscription_id) {
@@ -165,26 +160,26 @@ export async function drainStrikeQueue(args: {
 
       if (ev.event_type.startsWith('invoice.')) {
         const inv = await strikeGetInvoiceById(creds, ev.entity_id);
-        norm = normalizeInvoice(inv, accountId);
+        norm = normalizeInvoice(inv, args.walletsByCurrency.get((inv.amount?.currency ?? '').toUpperCase()) ?? null);
       } else if (ev.event_type.startsWith('payment.')) {
         // Outgoing Lightning send. No list endpoint, so webhooks are the
         // ONLY discovery path for these , critical not to drop.
         const pay = await strikeGetPaymentById(creds, ev.entity_id);
-        norm = normalizePayment(pay, accountId);
+        norm = normalizePayment(pay, args.walletsByCurrency.get((pay.totalAmount?.currency || pay.amount?.currency || '').toUpperCase()) ?? null);
       } else if (ev.event_type.startsWith('receive-request.')) {
         // Lightning-address receive. entityId is the receive_id (not the
         // parent receive-request id) per Strike webhook contract.
         const rec = await strikeGetReceiveById(creds, ev.entity_id);
-        norm = normalizeReceive(rec, accountId);
+        norm = normalizeReceive(rec, args.walletsByCurrency.get((rec.amount?.currency ?? '').toUpperCase()) ?? null);
       } else if (ev.event_type.startsWith('deposit.')) {
         const dep = await strikeGetDepositById(creds, ev.entity_id);
-        norm = normalizeDeposit(dep, accountId);
+        norm = normalizeDeposit(dep, args.walletsByCurrency.get(((dep.amountCredited ?? dep.amountReceived)?.currency ?? '').toUpperCase()) ?? null);
       } else if (ev.event_type.startsWith('payout.')) {
         const po = await strikeGetPayoutById(creds, ev.entity_id);
-        norm = normalizePayout(po, accountId);
+        norm = normalizePayout(po, args.walletsByCurrency.get(((po.totalAmount ?? po.amount)?.currency ?? '').toUpperCase()) ?? null);
       } else if (ev.event_type.startsWith('currency-exchange-quote.')) {
         const q = await strikeGetExchangeQuoteById(creds, ev.entity_id);
-        norm = normalizeExchange(q, accountId);
+        norm = normalizeExchange(q, args.walletsByCurrency.get((q.sourceAmount?.currency ?? '').toUpperCase()) ?? null);
       } else {
         // Unknown event type , log + skip + mark processed (don't loop).
         console.warn(`[strike-queue] unknown event_type=${ev.event_type} on ${ev.id}`);
