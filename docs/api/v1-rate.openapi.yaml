@@ -6,6 +6,14 @@ info:
     Returns the ORBI-verified exchange rate for a given asset, fiat, and UTC timestamp.
     Replaces CoinGecko historical-price lookups. Multi-consumer, keyed, metered.
 
+    Products and coverage:
+      ORBI-M (default): 1-minute bars. Pairs: BTC, USDC, USDT, DAI, EURC, PYUSD vs any fiat.
+      ORBI-D: 1-day bars. Pairs: BTC, USD, EURC.
+      ORBI-D-authority: 1-day central-bank fiat pairs. Pairs: USD, EUR, GBP, AUD.
+
+    Callers requesting a pair outside the chosen product's coverage will receive fill_type=gap.
+    Always check fill_type before using a rate value.
+
 servers:
   - url: https://<orbi-prod-project-ref>.supabase.co/functions/v1
     description: ORBI production (flag-gated; replace project ref)
@@ -32,6 +40,18 @@ paths:
           required: true
           description: UTC timestamp, ISO-8601
           schema: { type: string, format: date-time, example: "2024-03-15T14:32:00Z" }
+        - name: product
+          in: query
+          required: false
+          description: >
+            Rate product to query. Defaults to ORBI-M (1-minute crypto bars).
+            Use ORBI-D for 1-day crypto/fiat bars.
+            Use ORBI-D-authority for 1-day central-bank fiat pairs.
+            Omitting this for a fiat-to-fiat pair or a pair not covered by ORBI-M will return fill_type=gap.
+          schema:
+            type: string
+            enum: [ORBI-M, ORBI-D, ORBI-D-authority]
+            default: ORBI-M
       responses:
         "200":
           description: Resolved rate
@@ -84,13 +104,24 @@ components:
         asset: { type: string, example: BTC }
         fiat: { type: string, example: USD }
         at: { type: string, format: date-time, example: "2024-03-15T14:32:00Z" }
+        product:
+          type: string
+          enum: [ORBI-M, ORBI-D, ORBI-D-authority]
+          default: ORBI-M
+          description: >
+            Rate product to query. Defaults to ORBI-M (1-minute crypto bars).
+            Each item in a batch may specify a different product.
 
     RateResult:
       type: object
-      required: [asset, fiat, requested_at, resolved_at, fill_type]
+      required: [asset, fiat, product, requested_at, resolved_at, fill_type]
       properties:
         asset: { type: string }
         fiat: { type: string }
+        product:
+          type: string
+          enum: [ORBI-M, ORBI-D, ORBI-D-authority]
+          description: The product that was queried.
         requested_at: { type: string, format: date-time }
         resolved_at: { type: string, format: date-time }
         rate: { type: number, nullable: true }
@@ -101,8 +132,8 @@ components:
           type: string
           enum: [exact, forward_fill, gap]
           description: >
-            exact: a rate existed at this exact UTC minute.
-            forward_fill: nearest prior minute used; resolved_at shows which.
+            exact: a rate existed at this exact UTC minute (or day for ORBI-D products).
+            forward_fill: nearest prior bucket used; resolved_at shows which.
             gap: no data for this pair before this timestamp; rate is null.
 
     BatchResult:
