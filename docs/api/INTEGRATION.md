@@ -1,4 +1,4 @@
-# ORBI Rate API v1 — Integration Guide
+# ORBI Rate API v1 -- Integration Guide
 
 ## Quick start
 
@@ -76,7 +76,7 @@ Header: `Authorization: Bearer <key>` or `x-api-key: <key>`. One key per consume
 
 ## Rate limits
 
-60 requests/minute per key. Exceeded: HTTP 429 + `Retry-After: N` header (seconds until reset). Use POST batch for bulk lookups.
+60 requests/minute **per consumer** (the rate-limit bucket is `consumer_id`, not the key string or key prefix). If one consumer holds multiple keys, all keys share one bucket. Exceeded: HTTP 429 + `Retry-After: N` header (seconds until reset). Use POST batch for bulk lookups.
 
 ## Batch limit
 
@@ -127,8 +127,10 @@ python3 -c "import secrets; k='orbi_sk_' + secrets.token_hex(32); print(k)"
 python3 -c "import hashlib, sys; k=sys.argv[1]; print(hashlib.sha256(k.encode()).hexdigest())" "orbi_sk_<hex>"
 
 # 3. Insert (DBA applies to orbi-prod)
+#    key_prefix = first 16 chars of the generated key (e.g. "orbi_sk_ab3x9k2p")
+#    These 16 chars are unique per minted key (8-char fixed prefix + 8 random chars).
 INSERT INTO orbi_api_keys (consumer_id, consumer_name, key_hash, key_prefix, created_by)
-VALUES ('bitbooks', 'BitBooks V2', '<sha256_hex>', '<first8chars>', 'dba');
+VALUES ('bitbooks', 'BitBooks V2', '<sha256_hex>', 'orbi_sk_ab3x9k2p', 'dba');
 
 # 4. Share ONLY the raw key with the consumer. Never the hash.
 ```
