@@ -5,6 +5,7 @@
 // Updated: Dev 1, 2026-07-22 -- Auditor fixes: gateway config, env flag gate
 // Updated: Dev 1, 2026-07-22 -- Surface DB errors as 500; do not mask as fill_type:gap
 // Updated: Dev 1, 2026-07-22 -- CTO fix: rate-limit bucket by 16-char prefix (unique per key), not 8-char orbi_sk_
+// Updated: Dev 1, 2026-07-22 -- ORBI fix: rate-limit bucket by consumer_id (unique per consumer, format-independent)
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -25,14 +26,6 @@ const VALID_PRODUCTS: Record<string, { granularity: string }> = {
 
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
 const rlMap = new Map<string, { count: number; windowStart: number }>()
-
-// rlKey derives a per-key rate-limit bucket from the raw API key.
-// We use the first 16 chars: "orbi_sk_" (8 fixed) + 8 chars of the random segment.
-// The 8-char fixed prefix alone ("orbi_sk_") would bucket ALL consumers together.
-// 16 chars guarantees uniqueness per minted key (matches DBA 16-char dev mint).
-function rlKey(rawKey: string): string {
-  return rawKey.slice(0, 16)
-}
 
 function checkRateLimit(bucket: string): { allowed: boolean; retryAfter?: number } {
   const now = Date.now()
@@ -87,8 +80,9 @@ Deno.serve(async (req: Request) => {
 
   if (keyErr || !keyRow) return errResponse(401, 'invalid_key', 'API key invalid or revoked')
 
-  // ----- Rate limit (per-key, 16-char prefix bucket) -----
-  const rl = checkRateLimit(rlKey(rawKey))
+  // ----- Rate limit (per consumer) -----
+  // Bucket by consumer_id: always unique per consumer, format-independent.
+  const rl = checkRateLimit(keyRow.consumer_id)
   if (!rl.allowed) {
     return new Response(
       JSON.stringify({ error: 'rate_limited', message: 'Too many requests' }),
