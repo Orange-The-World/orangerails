@@ -3,9 +3,9 @@
 ## Endpoint
 
 `POST /functions/v1/v1-rate`
-`GET  /functions/v1/v1-rate?asset=BTC&fiat=USD&at=<ISO-8601>&product=ORBI-M`
+`GET  /functions/v1/v1-rate?asset=BTC&fiat=USD&at=<ISO-8601 UTC>&product=ORBI-M`
 
-Requires `ORBI_RATE_API_ENABLED=true` in function environment (feature flag). Returns 503 when disabled.
+Requires `ORBI_RATE_API_ENABLED=true` in function environment (feature flag). Returns 503 when disabled or when the value is anything other than `"true"`.
 
 ---
 
@@ -19,7 +19,7 @@ Authorization: Bearer orbi_sk_<random>
 
 Or as `x-api-key: orbi_sk_<random>`.
 
-The function hashes the raw key with SHA-256 and looks it up in `orbi_api_keys.key_hash`. A revoked or unknown key returns 401.
+The function hashes the raw key with SHA-256 and looks it up in `orbi_api_keys.key_hash`. A revoked or unknown key returns 401. A database failure during lookup returns 500.
 
 ---
 
@@ -53,12 +53,10 @@ await db.from('orbi_api_keys').insert({ key_hash: keyHash, key_prefix: keyPrefix
 
 ## Rate limiting
 
-- **60 requests per minute per key** (configurable via `RATE_LIMIT_RPM` env var)
+- **60 requests per minute per consumer** (configurable via `RATE_LIMIT_RPM` env var)
 - Sliding window, in-memory (resets on function cold start)
-- Bucket key: first 16 chars of the presented raw key (`rawKey.slice(0, 16)`)
+- Bucket key: `consumer_id` from `orbi_api_keys` -- unique per consumer, format-independent
 - Returns 429 with `Retry-After` header (seconds) when exceeded
-
-The rate limiter derives its bucket key directly from the presented key, not from the DB-stored `key_prefix`, so it is correct even if existing DB rows carry the old 8-char prefix.
 
 ---
 
@@ -70,7 +68,7 @@ The rate limiter derives its bucket key directly from the presented key, not fro
 GET /functions/v1/v1-rate?asset=BTC&fiat=USD&at=2026-07-01T12:00:00Z&product=ORBI-M
 ```
 
-Parameters: `asset` (required), `fiat` (required), `at` (required ISO-8601), `product` (optional, default `ORBI-M`).
+Parameters: `asset` (required), `fiat` (required), `at` (required, ISO-8601 UTC with `Z` suffix), `product` (optional, default `ORBI-M`).
 
 ### POST (batch, up to 50 items)
 
@@ -82,6 +80,8 @@ Parameters: `asset` (required), `fiat` (required), `at` (required ISO-8601), `pr
 ```
 
 A single-item object (not array) is also accepted.
+
+**Timestamp format:** `at` must be ISO-8601 UTC with a `Z` suffix (e.g. `2026-07-01T12:00:00Z`). Bare dates (`2026-07-01`) and offset timestamps (`2026-07-01T12:00:00+05:00`) return 400.
 
 ---
 
@@ -127,11 +127,12 @@ Batch response wraps in `{ results: [...], count: N }`.
 | 401 | `missing_key` | No Authorization header |
 | 401 | `invalid_key` | Key not found or revoked |
 | 400 | `bad_params` | Missing required parameters |
-| 400 | `bad_timestamp` | Invalid ISO-8601 value for `at` |
+| 400 | `bad_json` | Malformed JSON or non-object body/item |
+| 400 | `bad_timestamp` | `at` is not ISO-8601 UTC with Z suffix |
 | 400 | `bad_product` | Unknown product name |
 | 400 | `batch_too_large` | More than 50 items in POST body |
 | 400 | `empty_batch` | Empty array in POST body |
 | 405 | `method_not_allowed` | Only GET and POST accepted |
-| 429 | `rate_limited` | Per-key RPM limit exceeded; see Retry-After |
-| 500 | `server_error` | Database error |
-| 503 | `not_enabled` | Feature flag off |
+| 429 | `rate_limited` | Per-consumer RPM limit exceeded; see Retry-After |
+| 500 | `server_error` | Database error (key lookup or rate query) |
+| 503 | `not_enabled` | Feature flag off or not set to "true" |
