@@ -68,7 +68,7 @@ POST example mixing products in one batch:
 
 ## Data currency note
 
-As of 2026-07-22, the ORBI feed is approximately 4 days behind real time (latest confirmed bucket: 2026-07-18 03:14 UTC). A "latest rate" call for today will resolve to a row from several days ago with `fill_type: forward_fill`. This is a known data-lag issue tracked separately from this API. Callers should check `resolved_at` and flag any result where the gap between `requested_at` and `resolved_at` exceeds their tolerance.
+The ORBI feed is approximately 4 days behind real time. A "latest rate" call for today will resolve to a row from several days ago with `fill_type: forward_fill`. This is a known data-lag issue tracked separately from this API. Callers should check `resolved_at` and flag any result where the gap between `requested_at` and `resolved_at` exceeds their tolerance.
 
 ## Auth
 
