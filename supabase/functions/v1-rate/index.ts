@@ -4,6 +4,7 @@
 // Updated: Dev 1, 2026-07-22 -- DBA index corrections: product param, authority/status/superseded filters
 // Updated: Dev 1, 2026-07-22 -- Auditor fixes: gateway config, env flag gate
 // Updated: Dev 1, 2026-07-22 -- Surface DB errors as 500; do not mask as fill_type:gap
+// Updated: Dev 1, 2026-07-22 -- CTO fix: rate-limit bucket by 16-char prefix (unique per key), not 8-char orbi_sk_
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -25,12 +26,20 @@ const VALID_PRODUCTS: Record<string, { granularity: string }> = {
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
 const rlMap = new Map<string, { count: number; windowStart: number }>()
 
-function checkRateLimit(keyPrefix: string): { allowed: boolean; retryAfter?: number } {
+// rlKey derives a per-key rate-limit bucket from the raw API key.
+// We use the first 16 chars: "orbi_sk_" (8 fixed) + 8 chars of the random segment.
+// The 8-char fixed prefix alone ("orbi_sk_") would bucket ALL consumers together.
+// 16 chars guarantees uniqueness per minted key (matches DBA 16-char dev mint).
+function rlKey(rawKey: string): string {
+  return rawKey.slice(0, 16)
+}
+
+function checkRateLimit(bucket: string): { allowed: boolean; retryAfter?: number } {
   const now = Date.now()
   const windowMs = 60_000
-  const entry = rlMap.get(keyPrefix)
+  const entry = rlMap.get(bucket)
   if (!entry || now - entry.windowStart > windowMs) {
-    rlMap.set(keyPrefix, { count: 1, windowStart: now })
+    rlMap.set(bucket, { count: 1, windowStart: now })
     return { allowed: true }
   }
   if (entry.count >= RATE_LIMIT_RPM) {
@@ -78,8 +87,8 @@ Deno.serve(async (req: Request) => {
 
   if (keyErr || !keyRow) return errResponse(401, 'invalid_key', 'API key invalid or revoked')
 
-  // ----- Rate limit -----
-  const rl = checkRateLimit(keyRow.key_prefix)
+  // ----- Rate limit (per-key, 16-char prefix bucket) -----
+  const rl = checkRateLimit(rlKey(rawKey))
   if (!rl.allowed) {
     return new Response(
       JSON.stringify({ error: 'rate_limited', message: 'Too many requests' }),
