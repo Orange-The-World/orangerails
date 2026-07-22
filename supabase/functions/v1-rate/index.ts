@@ -7,6 +7,7 @@
 // Updated: Dev 1, 2026-07-22 -- CTO fix: rate-limit bucket by 16-char prefix (unique per key), not 8-char orbi_sk_
 // Updated: Dev 1, 2026-07-22 -- ORBI fix: rate-limit bucket by consumer_id (unique per consumer, format-independent)
 // Updated: Dev 2, 2026-07-22 -- P2 fixes: flag gate, keyErr 5xx, body validation, UTC timestamp, hasOwn, await usage log
+// Updated: Dev 1, 2026-07-22 -- ISO_UTC_RE: Z suffix only (spec says offset timestamps return 400)
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -60,10 +61,11 @@ interface RateItem {
   product?: string
 }
 
-// ISO-8601 UTC pattern: requires explicit Z or numeric offset.
-// Rejects ambiguous local-time strings like "03/15/2024" or "2026-07-01T12:00:00"
-// that would resolve to the wrong point-in-time rate.
-const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
+// ISO-8601 UTC: requires Z suffix only.
+// Offset timestamps (e.g. 2026-07-01T12:00:00+05:00) return 400; callers must
+// normalize to UTC before calling. Bare dates and local-time strings without a
+// timezone marker are also rejected.
+const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 
 Deno.serve(async (req: Request) => {
   // ----- Feature flag -----
@@ -134,7 +136,7 @@ Deno.serve(async (req: Request) => {
       return errResponse(400, 'bad_params', 'Each item requires asset, fiat, at')
     }
     if (!ISO_UTC_RE.test(item.at) || isNaN(new Date(item.at).getTime())) {
-      return errResponse(400, 'bad_timestamp', `Timestamp must be ISO-8601 UTC (e.g. 2026-07-01T12:00:00Z): ${item.at}`)
+      return errResponse(400, 'bad_timestamp', `Timestamp must be ISO-8601 UTC with Z suffix (e.g. 2026-07-01T12:00:00Z): ${item.at}`)
     }
     const product = item.product ?? 'ORBI-M'
     // Object.hasOwn prevents inherited props (e.g. "toString") from bypassing the 400.
