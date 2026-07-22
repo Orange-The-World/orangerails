@@ -2,6 +2,7 @@
 --   ALTER TABLE public.source_wallets DROP CONSTRAINT IF EXISTS source_wallets_server_discovery_no_metadata_ck;
 --   ALTER TABLE public.source_wallets DROP CONSTRAINT IF EXISTS source_wallets_discovery_source_ck;
 --   ALTER TABLE public.source_wallets DROP COLUMN IF EXISTS discovery_source;
+--   ALTER TABLE public.source_wallets ALTER COLUMN encrypted_metadata SET NOT NULL;
 
 -- Add discovery_source column to label how a source_wallet row was created.
 --   'client' = the user's browser discovered and submitted this wallet via the Link widget.
@@ -12,6 +13,12 @@
 -- because the server cannot produce ZKA-compliant ciphertext (it does not hold the
 -- user key). This constraint is enforced at the DB layer so no code path can
 -- accidentally write plaintext content into a field that must stay opaque to the server.
+
+-- Step 1: allow NULL encrypted_metadata so server-discovered rows can omit ciphertext.
+-- This must run BEFORE the CHECK constraint below, which requires NULL for server rows.
+-- The column may already be nullable (no-op if so).
+ALTER TABLE public.source_wallets
+  ALTER COLUMN encrypted_metadata DROP NOT NULL;
 
 DO $$
 BEGIN
