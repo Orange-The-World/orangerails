@@ -1,0 +1,186 @@
+openapi: "3.1.0"
+info:
+  title: ORBI Point-in-Time Rate API
+  version: "1.0.0"
+  description: >
+    Returns the ORBI-verified exchange rate for a given asset, fiat, and UTC timestamp.
+    Replaces CoinGecko historical-price lookups. Multi-consumer, keyed, metered.
+
+    Products and coverage:
+      ORBI-M (default): 1-minute bars. Pairs: BTC, USDC, USDT, DAI, EURC, PYUSD vs any fiat.
+      ORBI-D: 1-day bars. Pairs: BTC, USD, EURC.
+      ORBI-D-authority: 1-day central-bank fiat pairs. Pairs: USD, EUR, GBP, AUD.
+
+    Callers requesting a pair outside the chosen product's coverage will receive fill_type=gap.
+    Always check fill_type before using a rate value.
+
+    Authentication: pass either an Authorization: Bearer <key> header or an x-api-key: <key>
+    header. Both are equivalent; the key is the raw API key issued to your consumer account.
+
+servers:
+  - url: https://<orbi-prod-project-ref>.supabase.co/functions/v1
+    description: ORBI production (flag-gated; replace project ref)
+
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+
+paths:
+  /v1-rate:
+    get:
+      summary: Single rate lookup
+      operationId: getSingleRate
+      parameters:
+        - name: asset
+          in: query
+          required: true
+          schema: { type: string, example: BTC }
+        - name: fiat
+          in: query
+          required: true
+          schema: { type: string, example: USD }
+        - name: at
+          in: query
+          required: true
+          description: UTC timestamp, ISO-8601
+          schema: { type: string, format: date-time, example: "2024-03-15T14:32:00Z" }
+        - name: product
+          in: query
+          required: false
+          description: >
+            Rate product to query. Defaults to ORBI-M (1-minute crypto bars).
+            Use ORBI-D for 1-day crypto/fiat bars.
+            Use ORBI-D-authority for 1-day central-bank fiat pairs.
+            Omitting this for a fiat-to-fiat pair or a pair not covered by ORBI-M will return fill_type=gap.
+          schema:
+            type: string
+            enum: [ORBI-M, ORBI-D, ORBI-D-authority]
+            default: ORBI-M
+      responses:
+        "200":
+          description: Resolved rate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RateResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+    post:
+      summary: Batch rate lookup (up to 50 items)
+      operationId: batchRates
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/RateRequest"
+                - type: array
+                  items: { $ref: "#/components/schemas/RateRequest" }
+                  maxItems: 50
+      responses:
+        "200":
+          description: Resolved rate(s)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RateResult"
+                  - $ref: "#/components/schemas/BatchResult"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Pass your API key as a Bearer token in the Authorization header.
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Pass your API key directly in the x-api-key header (alternative to BearerAuth).
+
+  schemas:
+    RateRequest:
+      type: object
+      required: [asset, fiat, at]
+      properties:
+        asset: { type: string, example: BTC }
+        fiat: { type: string, example: USD }
+        at: { type: string, format: date-time, example: "2024-03-15T14:32:00Z" }
+        product:
+          type: string
+          enum: [ORBI-M, ORBI-D, ORBI-D-authority]
+          default: ORBI-M
+          description: >
+            Rate product to query. Defaults to ORBI-M (1-minute crypto bars).
+            Each item in a batch may specify a different product.
+
+    RateResult:
+      type: object
+      required: [asset, fiat, product, requested_at, resolved_at, fill_type]
+      properties:
+        asset: { type: string }
+        fiat: { type: string }
+        product:
+          type: string
+          enum: [ORBI-M, ORBI-D, ORBI-D-authority]
+          description: The product that was queried.
+        requested_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+        rate: { type: number, nullable: true }
+        provenance: { type: string, nullable: true }
+        tier: { type: string, nullable: true }
+        source_authority: { type: string, nullable: true }
+        fill_type:
+          type: string
+          enum: [exact, forward_fill, gap]
+          description: >
+            exact: a rate existed at this exact UTC minute (or day for ORBI-D products).
+            forward_fill: nearest prior bucket used; resolved_at shows which.
+            gap: no data for this pair before this timestamp; rate is null.
+
+    BatchResult:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/RateResult" }
+        count: { type: integer }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid parameters
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServerError:
+      description: Internal error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

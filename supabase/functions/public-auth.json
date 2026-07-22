@@ -5,6 +5,7 @@
     "and that it does its own authentication. Adding one expands the public attack surface.",
     "Review a diff to this file as a security decision, not a config tweak.",
     "Modes: hmac = verifies a signature itself. platform-api-key = checks a platform key header.",
+    "orbi-api-key = checks against orbi_api_keys table (SHA-256 hash, revoked_at IS NULL).",
     "none = intentionally public, no auth at all.",
     "CI (scripts/check-public-auth.mjs) asserts this file and config.toml agree in both directions."
   ],
@@ -39,6 +40,7 @@
     "or-strike-webhook": "hmac",
     "or-sync": "platform-api-key",
     "or-sync-key-register": "platform-api-key",
-    "or-transactions-list": "platform-api-key"
+    "or-transactions-list": "platform-api-key",
+    "v1-rate": "orbi-api-key"
   }
 }
