@@ -1,6 +1,7 @@
 // supabase/functions/v1-rate/index.ts
 // ORBI Point-in-Time Rate API v1
 // Authored: ORBI agent, 2026-07-22
+// Updated: Dev 1, 2026-07-22 -- DBA index corrections: product param, authority/status/superseded filters
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -8,6 +9,16 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const RATE_LIMIT_RPM = parseInt(Deno.env.get('RATE_LIMIT_RPM') ?? '60')
 const BATCH_LIMIT = parseInt(Deno.env.get('BATCH_LIMIT') ?? '50')
+
+// Product registry: each product maps 1:1 to a granularity.
+// ORBI-M   = 1-minute bars, crypto pairs (BTC, USDC, USDT, DAI, EURC, PYUSD)
+// ORBI-D   = 1-day bars, crypto + major fiat (BTC, USD, EURC)
+// ORBI-D-authority = 1-day central-bank fiat pairs (USD, EUR, GBP, AUD)
+const VALID_PRODUCTS: Record<string, { granularity: string }> = {
+  'ORBI-M': { granularity: '1m' },
+  'ORBI-D': { granularity: '1d' },
+  'ORBI-D-authority': { granularity: '1d' },
+}
 
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
 const rlMap = new Map<string, { count: number; windowStart: number }>()
@@ -41,6 +52,7 @@ interface RateItem {
   asset: string
   fiat: string
   at: string
+  product?: string
 }
 
 Deno.serve(async (req: Request) => {
@@ -78,8 +90,9 @@ Deno.serve(async (req: Request) => {
       const asset = u.searchParams.get('asset')
       const fiat = u.searchParams.get('fiat')
       const at = u.searchParams.get('at')
+      const product = u.searchParams.get('product') ?? 'ORBI-M'
       if (!asset || !fiat || !at) return errResponse(400, 'bad_params', 'asset, fiat, at required')
-      items = [{ asset, fiat, at }]
+      items = [{ asset, fiat, at, product }]
     } else if (req.method === 'POST') {
       const body = await req.json()
       items = Array.isArray(body) ? body : [body]
@@ -100,6 +113,10 @@ Deno.serve(async (req: Request) => {
     if (isNaN(new Date(item.at).getTime())) {
       return errResponse(400, 'bad_timestamp', `Invalid ISO-8601 timestamp: ${item.at}`)
     }
+    const product = item.product ?? 'ORBI-M'
+    if (!(product in VALID_PRODUCTS)) {
+      return errResponse(400, 'bad_product', `product must be one of: ${Object.keys(VALID_PRODUCTS).join(', ')}`)
+    }
   }
 
   // ----- Resolve rates -----
@@ -107,20 +124,33 @@ Deno.serve(async (req: Request) => {
   const usageLogs = []
 
   for (const item of items) {
+    const product = item.product ?? 'ORBI-M'
+    const { granularity } = VALID_PRODUCTS[product]
+
+    // Truncate timestamp to the bucket boundary for this granularity
     const ts = new Date(item.at)
-    ts.setSeconds(0, 0)
+    if (granularity === '1m') {
+      ts.setSeconds(0, 0)
+    } else {
+      // 1d: truncate to UTC midnight
+      ts.setUTCHours(0, 0, 0, 0)
+    }
     const bucketTs = ts.toISOString()
 
-    // UNKNOWN: confirm whether a `product` filter is required here.
-    // The index idx_rates_lookup covers (source_currency, target_currency, granularity, product, bucket_ts DESC).
-    // If multiple product values exist for granularity='1m', add: .eq('product', 'ORBI-1m')
-    // @DBA: please confirm the product value for 1m rows before this ships.
+    // All five equality filters are required to fire idx_rates_lookup end-to-end:
+    //   (source_currency, target_currency, granularity, product, bucket_ts DESC)
+    // source_authority='ORBI', status='CONFIRMED', superseded_by_id IS NULL
+    // ensure we return only current, authoritative rows.
     const { data: row } = await supabase
       .from('exchange_rates')
       .select('bucket_ts, rate, provenance, tier, source_authority')
       .eq('source_currency', item.asset.toUpperCase())
       .eq('target_currency', item.fiat.toUpperCase())
-      .eq('granularity', '1m')
+      .eq('granularity', granularity)
+      .eq('product', product)
+      .eq('source_authority', 'ORBI')
+      .eq('status', 'CONFIRMED')
+      .is('superseded_by_id', null)
       .lte('bucket_ts', bucketTs)
       .order('bucket_ts', { ascending: false })
       .limit(1)
@@ -132,6 +162,7 @@ Deno.serve(async (req: Request) => {
     results.push({
       asset: item.asset.toUpperCase(),
       fiat: item.fiat.toUpperCase(),
+      product,
       requested_at: item.at,
       resolved_at: resolvedTs,
       rate: row?.rate ?? null,
