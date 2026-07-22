@@ -3,6 +3,7 @@
 // Authored: ORBI agent, 2026-07-22
 // Updated: Dev 1, 2026-07-22 -- DBA index corrections: product param, authority/status/superseded filters
 // Updated: Dev 1, 2026-07-22 -- Auditor fixes: gateway config, env flag gate
+// Updated: Dev 1, 2026-07-22 -- Surface DB errors as 500; do not mask as fill_type:gap
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -145,7 +146,7 @@ Deno.serve(async (req: Request) => {
     //   (source_currency, target_currency, granularity, product, bucket_ts DESC)
     // source_authority='ORBI', status='CONFIRMED', superseded_by_id IS NULL
     // ensure we return only current, authoritative rows.
-    const { data: row } = await supabase
+    const { data: row, error: rateErr } = await supabase
       .from('exchange_rates')
       .select('bucket_ts, rate, provenance, tier, source_authority')
       .eq('source_currency', item.asset.toUpperCase())
@@ -159,6 +160,12 @@ Deno.serve(async (req: Request) => {
       .order('bucket_ts', { ascending: false })
       .limit(1)
       .maybeSingle()
+
+    // A query error means the database is unavailable or misconfigured.
+    // Return 500 so callers can distinguish DB-down from legitimate no-data.
+    if (rateErr) {
+      return errResponse(500, 'server_error', 'Database error fetching exchange rate')
+    }
 
     const resolvedTs = row ? new Date(row.bucket_ts).toISOString() : bucketTs
     const fillType = !row ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
