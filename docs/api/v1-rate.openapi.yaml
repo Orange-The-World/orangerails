@@ -134,7 +134,16 @@ components:
           description: The product that was queried.
         requested_at: { type: string, format: date-time }
         resolved_at: { type: string, format: date-time }
-        rate: { type: number, nullable: true }
+        rate:
+          type: string
+          nullable: true
+          example: "67234.12345678"
+          description: >
+            Exchange rate as a decimal string with full numeric(20,8) precision.
+            Returned as a string, not a JSON number, so no digits are lost to
+            float64 rounding on either side of the wire. Parse it with a
+            decimal/BigDecimal type, never a native float. null on a gap
+            (fill_type = gap).
         provenance: { type: string, nullable: true }
         tier: { type: string, nullable: true }
         source_authority: { type: string, nullable: true }

@@ -172,9 +172,17 @@ Deno.serve(async (req: Request) => {
     //   (source_currency, target_currency, granularity, product, bucket_ts DESC)
     // source_authority='ORBI', status='CONFIRMED', superseded_by_id IS NULL
     // ensure we return only current, authoritative rows.
+    // rate is numeric(20,8). Select it as `rate::text` so PostgREST emits it
+    // as a JSON string, not a bare JSON number. A bare number is parsed by
+    // supabase-js through a float64 before our code ever sees it, which
+    // silently truncates high-magnitude rates (e.g. a value needing more than
+    // 15-16 significant digits). Keeping it a string preserves every digit end
+    // to end. Do NOT drop the ::text cast, and do NOT wrap row.rate in
+    // String(...) instead: by that point the value is already the lossy float.
+    // PostgREST select syntax has no AS; a bare cast keeps the field name `rate`.
     const { data: row, error: rateErr } = await supabase
       .from('exchange_rates')
-      .select('bucket_ts, rate, provenance, tier, source_authority')
+      .select('bucket_ts, rate::text, provenance, tier, source_authority')
       .eq('source_currency', item.asset.toUpperCase())
       .eq('target_currency', item.fiat.toUpperCase())
       .eq('granularity', granularity)
