@@ -1,0 +1,4 @@
+{
+  "note": "Functions in the public schema that our migrations deliberately leave executable by the anon role, meaning callable with no signed-in user. Empty is the correct state. Adding a key here is a security decision, not a formatting fix: it says the function is safe to expose to the open internet, because anon carries no auth.uid() and no RLS identity. The key format is printed by scripts/check-anon-rpc-grants.mjs when the check fails, so paste the key it gives you rather than guessing. The value is the reason, one line, in plain English.",
+  "functions": {}
+}

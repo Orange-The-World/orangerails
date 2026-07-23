@@ -44,6 +44,30 @@ jobs:
         # is a declaration rather than a code scan.
         run: node scripts/check-public-auth.mjs
 
+      - name: Anon RPC grant self-test
+        # The parser IS the control, so it is tested here rather than trusted. Runs before the
+        # check itself so a broken parser fails as a broken parser, not as a silent pass over
+        # every migration.
+        run: node scripts/check-anon-rpc-grants.mjs --selftest
+
+      - name: Anon RPC grant check
+        # A real gate, no continue-on-error. Replays the migrations in order and fails if any
+        # function in the public schema is left executable by anon without being declared in
+        # supabase/anon-executable-rpcs.json with a reason. Source scan only: a grant typed
+        # straight into a SQL console never reaches a migration and is not visible here. See
+        # the script header for that boundary in full.
+        run: node scripts/check-anon-rpc-grants.mjs
+
+      - name: Anon ACL snapshot self-test
+        # The other half of the same control, and the half that reads a real database rather
+        # than our SQL. No credential lives in CI, so the check itself runs against a catalog
+        # snapshot outside this workflow. What runs here is its parser test, because a parser
+        # nobody exercises reports green whether it works or not. It pins the two cases a role
+        # name match gets wrong: an empty grantee (=X/postgres), which is how Postgres writes
+        # PUBLIC, and a NULL acl, which means the built in default stands and PUBLIC holds
+        # EXECUTE. Needs nothing but node, so it is unconditional.
+        run: node scripts/check-anon-acl-snapshot.mjs --selftest
+
       - name: Build
         run: bun run build
 
