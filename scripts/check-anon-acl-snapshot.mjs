@@ -36,12 +36,21 @@
  *
  * In the text shape the object name is everything before the first `{`, and a line
  * whose ACL column is empty or the word NULL is read as a NULL acl, which for a
- * function is the open case above, not a clean one.
+ * function is the open case above, not a clean one. The text shape carries no `kind`
+ * column, so every row in it is read as a function. A snapshot that includes tables
+ * should be emitted in the JSON shape with `kind` set per row, or a table whose acl
+ * is NULL is reported as an open function.
  *
- * ALLOWLIST. Shared with the source gate: `supabase/anon-executable-rpcs.json`. An
- * object listed there may be reached by the unauthenticated surface on purpose. A
- * stale entry is not an error here, because a snapshot is a point in time and the
- * source gate already owns that check.
+ * ALLOWLIST. Same file as the source gate, `supabase/anon-executable-rpcs.json`, but
+ * a DIFFERENT KEY. The source gate reads `functions` and holds that list to our SQL:
+ * an entry there with no matching GRANT in a migration fails as stale. Almost nothing
+ * this check finds was written by a migration, so declaring those objects under
+ * `functions` would turn the build red on the source gate rather than quiet this one.
+ * They belong under `snapshot_objects`, which only this file reads. Both lists are
+ * accepted here, because a function our SQL deliberately grants to anon is expected to
+ * show up in the catalog as well and should not have to be declared twice. A stale
+ * entry is not an error here: a snapshot is a point in time, and the source gate
+ * already owns exactness for its own list.
  *
  * Run `node scripts/check-anon-acl-snapshot.mjs --selftest` to exercise the parser,
  * and `node scripts/check-anon-acl-snapshot.mjs <snapshot-file>` to check a snapshot.
@@ -50,6 +59,10 @@
 import { readFileSync, existsSync } from "node:fs";
 
 const ALLOWLIST = "supabase/anon-executable-rpcs.json";
+
+/** The key in that file that belongs to this check. Named in every failure message, so
+ *  nobody is sent to the source gate's list by our own error text. */
+const SNAPSHOT_KEY = "snapshot_objects";
 
 /** Grantees that mean "reachable without a signed in user", plus the one that means
  *  "reachable by any signed in user". Both are findings: the first is the anonymous
@@ -60,6 +73,16 @@ const RISKY = new Set(["PUBLIC", "anon", "authenticated"]);
 /** Privilege letters we care about. X is EXECUTE on a function. r/w/a/d are the table
  *  side, carried because relacl snapshots go through the same parser. */
 const PRIV_NAMES = { r: "SELECT", w: "UPDATE", a: "INSERT", d: "DELETE", X: "EXECUTE" };
+
+/**
+ * Merge the two lists in the allowlist file into the one set this check honours.
+ * `parsed` is the whole parsed JSON. A file missing either key is read without error,
+ * because this script also runs against files written before the split.
+ */
+export function allowlistFrom(parsed) {
+  const file = parsed ?? {};
+  return { ...(file.functions ?? {}), ...(file[SNAPSHOT_KEY] ?? {}) };
+}
 
 /**
  * Split a Postgres ACL array literal into its items. Items may be quoted, and a quoted
@@ -121,7 +144,7 @@ export function checkRow(row, allowed) {
       findings.push(
         `${object}: acl is NULL, so no GRANT or REVOKE has ever touched this function ` +
         `and the built in default stands: PUBLIC holds EXECUTE. Revoke it, or add ` +
-        `"${object}" to ${ALLOWLIST} with a one line reason.`);
+        `"${object}" to the ${SNAPSHOT_KEY} list in ${ALLOWLIST} with a one line reason.`);
     }
     return findings;
   }
@@ -139,7 +162,7 @@ export function checkRow(row, allowed) {
       `${object}: ${who} holds ${describe(parsed.privileges)} (acl item \`${item}\`). ` +
       `Revoke it, naming that grantee: a REVOKE FROM anon does not touch a PUBLIC ` +
       `grant and the reverse is equally true. If the access is intended, add ` +
-      `"${object}" to ${ALLOWLIST} with a one line reason.`);
+      `"${object}" to the ${SNAPSHOT_KEY} list in ${ALLOWLIST} with a one line reason.`);
   }
   return findings;
 }
@@ -270,6 +293,31 @@ const CASES = [
     allowlist: {},
     expect: 1,
   },
+  {
+    name: "an object declared only under snapshot_objects passes",
+    rows: [{ object: "public.foo(uuid)", acl: "{authenticated=X/postgres}" }],
+    allowlist: allowlistFrom({ functions: {}, snapshot_objects: { "public.foo(uuid)": "reason" } }),
+    expect: 0,
+  },
+  {
+    name: "both lists are honoured, and an object in neither still fails",
+    rows: [
+      { object: "public.foo(uuid)", acl: "{anon=X/postgres}" },
+      { object: "public.bar(uuid)", acl: "{authenticated=X/postgres}" },
+      { object: "public.baz(uuid)", acl: "{authenticated=X/postgres}" },
+    ],
+    allowlist: allowlistFrom({
+      functions: { "public.foo(uuid)": "reason" },
+      snapshot_objects: { "public.bar(uuid)": "reason" },
+    }),
+    expect: 1,
+  },
+  {
+    name: "an allowlist file with no snapshot_objects key is read without error",
+    rows: [{ object: "public.foo(uuid)", acl: "{anon=X/postgres}" }],
+    allowlist: allowlistFrom({ functions: { "public.foo(uuid)": "reason" } }),
+    expect: 0,
+  },
 ];
 
 function selftest() {
@@ -309,7 +357,7 @@ if (args.includes("--selftest")) {
     process.exit(1);
   }
   const allowlist = existsSync(ALLOWLIST)
-    ? (JSON.parse(readFileSync(ALLOWLIST, "utf8")).functions ?? {})
+    ? allowlistFrom(JSON.parse(readFileSync(ALLOWLIST, "utf8")))
     : {};
   const rows = parseSnapshot(readFileSync(file, "utf8"));
   const fail = checkSnapshot(rows, allowlist);
