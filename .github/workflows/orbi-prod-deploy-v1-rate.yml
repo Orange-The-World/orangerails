@@ -1,0 +1,78 @@
+name: Deploy v1-rate to orbi-prod (dark, manual only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you deploying? (e.g. initial dark deploy, patch)"
+        required: true
+        type: string
+
+# Only one deploy to this project at a time. Never cancel in-progress:
+# a partial function deploy is worse than waiting.
+concurrency:
+  group: orbi-prod-v1-rate
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy v1-rate to orbi-prod
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v2
+        with:
+          version: latest
+
+      - name: Guard: project ref must be set
+        env:
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_ID_ORBI_PROD }}
+        run: |
+          if [ -z "$PROJECT_REF" ]; then
+            echo "ERROR: SUPABASE_PROJECT_ID_ORBI_PROD Actions Variable is empty or unset."
+            echo "Set it in Settings > Secrets and variables > Actions > Variables, then re-run."
+            exit 1
+          fi
+          echo "Project ref verified."
+
+      - name: Deploy v1-rate function (v1-rate only, dark)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          # Deploy v1-rate ONLY to orbi-prod. Never use --all or omit --function-slug
+          # on this project: other functions in supabase/functions/ belong to
+          # orange-rails and must not be deployed here.
+          #
+          # ORBI_RATE_API_ENABLED is intentionally NOT set here.
+          # Dark is the default. Flag-on is a two-party step done outside CI
+          # (founder + CTO) after Stage 2 dark verification passes.
+          #
+          # The project ref comes from an Actions Variable (SUPABASE_PROJECT_ID_ORBI_PROD),
+          # set by the CTO. It is not a secret and is not hardcoded in this file.
+          for attempt in 1 2 3; do
+            if supabase functions deploy v1-rate \
+                --project-ref ${{ vars.SUPABASE_PROJECT_ID_ORBI_PROD }}; then
+              echo "v1-rate deployed to orbi-prod on attempt $attempt"
+              break
+            fi
+            if [ $attempt -eq 3 ]; then
+              echo "Deploy failed after 3 attempts"
+              exit 1
+            fi
+            echo "Attempt $attempt failed; sleeping 15s and retrying"
+            sleep 15
+          done
+
+      - name: Confirm deploy (read back function list)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          echo "Functions currently deployed on orbi-prod:"
+          supabase functions list \
+            --project-ref ${{ vars.SUPABASE_PROJECT_ID_ORBI_PROD }}
