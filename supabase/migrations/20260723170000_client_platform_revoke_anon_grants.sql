@@ -46,7 +46,9 @@
 --
 -- SAFETY: idempotent, transactional, and self-proving. The assertion block asserts
 -- BOTH directions in the same transaction and ABORTS on failure:
---   (a) the hole is closed  -- anon cannot reach api_keys / audit_log / members
+--   (a) the hole is closed  -- anon cannot reach ANY of the 7 revoked tables, each
+--                              pinned by name, because this block is the only proof
+--                              that runs at apply time
 --   (b) nothing broke       -- anon KEEPS public pricing; authenticated KEEPS the
 --                              membership helpers every RLS policy here depends on.
 --
@@ -89,6 +91,11 @@ REVOKE EXECUTE ON FUNCTION client_platform.is_member_of(uuid) FROM anon, PUBLIC;
 REVOKE EXECUTE ON FUNCTION client_platform.has_role(uuid, text) FROM anon, PUBLIC;
 
 -- 5. Prove it, in this transaction, or abort.
+--    (a) covers all 7 tables step 2 must close, each named. The schema holds 8
+--    tables and every one of them carries an anon SELECT entry; api_plans is
+--    deliberately re-granted at step 3, so 7 must end with none. Named, not
+--    counted: a count passes silently when a table is added, swapped or dropped.
+--    The 2 sequences in this schema carry no anon entry and are out of scope.
 DO $$
 BEGIN
   -- (a) the hole is closed
@@ -100,6 +107,18 @@ BEGIN
   END IF;
   IF has_table_privilege('anon', 'client_platform.organization_members', 'SELECT') THEN
     RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.organization_members';
+  END IF;
+  IF has_table_privilege('anon', 'client_platform.api_usage', 'SELECT') THEN
+    RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.api_usage';
+  END IF;
+  IF has_table_privilege('anon', 'client_platform.applications', 'SELECT') THEN
+    RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.applications';
+  END IF;
+  IF has_table_privilege('anon', 'client_platform.organization_entitlements', 'SELECT') THEN
+    RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.organization_entitlements';
+  END IF;
+  IF has_table_privilege('anon', 'client_platform.organizations', 'SELECT') THEN
+    RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.organizations';
   END IF;
 
   -- (b) nothing broke
