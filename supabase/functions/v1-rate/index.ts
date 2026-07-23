@@ -8,6 +8,7 @@
 // Updated: Dev 1, 2026-07-22 -- ORBI fix: rate-limit bucket by consumer_id (unique per consumer, format-independent)
 // Updated: Dev 2, 2026-07-22 -- P2 fixes: flag gate, keyErr 5xx, body validation, UTC timestamp, hasOwn, await usage log
 // Updated: Dev 1, 2026-07-22 -- ISO_UTC_RE: Z suffix only (spec says offset timestamps return 400)
+// Updated: Security, 2026-07-23 -- key lookup uses maybeSingle so a bad or revoked key returns 401, not 500
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -80,12 +81,16 @@ Deno.serve(async (req: Request) => {
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
   const keyHash = await hashKey(rawKey)
 
+  // maybeSingle, not single: with single(), PostgREST reports zero matching rows
+  // as an error, so an unknown or revoked key would land in the keyErr branch and
+  // return 500. maybeSingle leaves keyErr for genuine database faults and returns
+  // a null row for "no such key", which is the 401 below.
   const { data: keyRow, error: keyErr } = await supabase
     .from('orbi_api_keys')
     .select('consumer_id, key_prefix')
     .eq('key_hash', keyHash)
     .is('revoked_at', null)
-    .single()
+    .maybeSingle()
 
   // DB-level error is an outage or misconfiguration, not an auth failure.
   // Return 500 so callers can distinguish unavailability from a bad key.
