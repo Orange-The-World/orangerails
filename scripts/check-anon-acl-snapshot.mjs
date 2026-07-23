@@ -17,7 +17,11 @@
  *
  *     =X/postgres                  PUBLIC holds EXECUTE, granted by postgres
  *     anon=X/postgres              the anon role holds EXECUTE
- *     postgres=X*/postgres         postgres holds EXECUTE with grant option
+ *     postgres=X* /postgres        postgres holds EXECUTE with grant option. The space
+ *                                  before the slash is NOT part of the real ACL: a star
+ *                                  immediately followed by a slash closes this comment
+ *                                  block, and everything below would stop being a
+ *                                  comment and start being broken source.
  *
  * Match on role names alone and every function held the first way reads green. The
  * second trap is worse, because it looks like nothing at all: a function whose
