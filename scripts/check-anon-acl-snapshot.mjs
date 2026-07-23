@@ -29,16 +29,32 @@
  * for a function is EXECUTE to PUBLIC. The emptiest looking row is an open one.
  *
  * INPUT. CI holds no database credential, so this does not connect to anything. It
- * reads a snapshot file refreshed by the database steward. Either shape is accepted:
+ * reads a snapshot file refreshed by the database steward. Three shapes are accepted:
  *
- *   JSON   [ { "object": "public.foo(uuid)", "kind": "function", "acl": "{=X/postgres}" } ]
- *   text   public.foo(uuid)  {=X/postgres}          (one object per line)
+ *   emitted JSON
+ *     { "snapshot_objects": { "ref_sha256": "<digest>",
+ *                             "rows": [ { "identity": "public.foo(uuid)",
+ *                                         "acl": ["=X/postgres"], "keeper": false } ] },
+ *       "generated_at": "2026-07-23T00:00:00Z" }
+ *
+ *   flat JSON   [ { "object": "public.foo(uuid)", "kind": "function", "acl": "{=X/postgres}" } ]
+ *   text        public.foo(uuid)  {=X/postgres}          (one object per line)
+ *
+ * The emitted shape is the one the steward's tool writes: rows live under
+ * `snapshot_objects.rows`, each row names its object as `identity`, and `acl` is a
+ * JSON array of aclitems rather than an array literal string. `generated_at` sits
+ * outside the compared object so freshness never dirties a diff, and no raw project
+ * ref is emitted, only `ref_sha256`.
+ *
+ * A JSON file matching NONE of these is an error, never an empty row list. The
+ * emitter refuses to write an empty `rows`, and this side has to refuse to pass on
+ * one, or a shape drift on either half turns the gate green while checking nothing.
  *
  * In the text shape the object name is everything before the first `{`, and a line
  * whose ACL column is empty or the word NULL is read as a NULL acl, which for a
  * function is the open case above, not a clean one. The text shape carries no `kind`
  * column, so every row in it is read as a function. A snapshot that includes tables
- * should be emitted in the JSON shape with `kind` set per row, or a table whose acl
+ * should be emitted in a JSON shape with `kind` set per row, or a table whose acl
  * is NULL is reported as an open function.
  *
  * ALLOWLIST. Same file as the source gate, `supabase/anon-executable-rpcs.json`, but
@@ -61,7 +77,9 @@ import { readFileSync, existsSync } from "node:fs";
 const ALLOWLIST = "supabase/anon-executable-rpcs.json";
 
 /** The key in that file that belongs to this check. Named in every failure message, so
- *  nobody is sent to the source gate's list by our own error text. */
+ *  nobody is sent to the source gate's list by our own error text. The snapshot file
+ *  happens to use the same word for its top level wrapper. Different files, same
+ *  intent, and neither is read from the other. */
 const SNAPSHOT_KEY = "snapshot_objects";
 
 /** Grantees that mean "reachable without a signed in user", plus the one that means
@@ -87,9 +105,16 @@ export function allowlistFrom(parsed) {
 /**
  * Split a Postgres ACL array literal into its items. Items may be quoted, and a quoted
  * item may contain a comma, so this is a scan rather than a split on ",".
+ *
+ * An `acl` that is already a JSON array is taken item for item. That case matters:
+ * an EMPTY array means the object has an ACL and it grants nobody anything, which is
+ * clean. A NULL acl means no GRANT or REVOKE ever ran, which leaves the built in
+ * default in place, and for a function that default is EXECUTE to PUBLIC. Collapsing
+ * the two would report the safest possible row as the most open one.
  */
 export function aclItems(raw) {
   if (raw === null || raw === undefined) return null;
+  if (Array.isArray(raw)) return raw.map((s) => String(s).trim()).filter(Boolean);
   const text = String(raw).trim();
   if (text === "" || text.toUpperCase() === "NULL") return null;
   const inner = text.replace(/^\{/, "").replace(/\}$/, "");
@@ -129,13 +154,25 @@ const describe = (privs) =>
 
 /**
  * Check one snapshot row. Returns an array of finding strings.
- * A row is { object, kind, acl }. kind defaults to "function".
+ * A row names its object as `identity` (emitted shape) or `object` (flat shape),
+ * carries an `acl`, and may carry a `kind`, which defaults to "function".
  */
 export function checkRow(row, allowed) {
-  const object = String(row.object ?? "").trim();
+  const object = String(row.identity ?? row.object ?? "").trim();
   const kind = (row.kind ?? "function").toLowerCase();
-  const items = aclItems(row.acl);
   const findings = [];
+
+  if (!object) {
+    // Without a name there is nothing to look up, and the allowlist lookup would key
+    // on the empty string, so every unnamed row would pass. Report it instead.
+    findings.push(
+      "a snapshot row carries no `identity` and no `object`, so it cannot be named " +
+      "or allowlisted. The snapshot is malformed, fix the emitter rather than this " +
+      "row.");
+    return findings;
+  }
+
+  const items = aclItems(row.acl);
 
   if (items === null) {
     // NULL acl means the object still carries the built in default. For a function
@@ -167,21 +204,33 @@ export function checkRow(row, allowed) {
   return findings;
 }
 
-/** Check a whole snapshot. `rows` is an array of { object, kind, acl }. */
+/** Check a whole snapshot. `rows` is an array of rows as described on checkRow. */
 export function checkSnapshot(rows, allowlist) {
   const allowed = new Set(Object.keys(allowlist ?? {}));
   return rows.flatMap((row) => checkRow(row, allowed));
 }
 
 /**
- * Read a snapshot file in either accepted shape. Text lines are split at the first
- * `{`, so an object name containing a space or a signature survives intact.
+ * Read a snapshot file in any accepted shape. Text lines are split at the first `{`,
+ * so an object name containing a space or a signature survives intact.
+ *
+ * A JSON object with no rows array anywhere it is looked for THROWS. Returning an
+ * empty list there is the failure mode this whole file exists to prevent: the check
+ * would print a clean result having examined nothing.
  */
 export function parseSnapshot(text) {
   const trimmed = text.trim();
-  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+  if (trimmed.startsWith("[")) return JSON.parse(trimmed);
+  if (trimmed.startsWith("{")) {
     const parsed = JSON.parse(trimmed);
-    return Array.isArray(parsed) ? parsed : (parsed.rows ?? []);
+    const rows = parsed?.[SNAPSHOT_KEY]?.rows ?? parsed?.rows;
+    if (!Array.isArray(rows)) {
+      throw new Error(
+        `snapshot JSON carries no rows array. Expected \`${SNAPSHOT_KEY}.rows\` (the ` +
+        `emitted shape) or a top level \`rows\`. Refusing to report a clean result ` +
+        `on a file this check cannot read.`);
+    }
+    return rows;
   }
   return trimmed
     .split("\n")
@@ -318,6 +367,67 @@ const CASES = [
     allowlist: allowlistFrom({ functions: { "public.foo(uuid)": "reason" } }),
     expect: 0,
   },
+  {
+    name: "the emitted shape is read, rows and all",
+    rows: parseSnapshot(JSON.stringify({
+      snapshot_objects: {
+        ref_sha256: "0".repeat(64),
+        rows: [
+          { identity: "public.foo(uuid)", acl: ["=X/postgres"], keeper: false },
+          { identity: "public.bar(uuid)", acl: ["postgres=X/postgres"], keeper: false },
+        ],
+      },
+      generated_at: "2026-07-23T00:00:00Z",
+    })),
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    name: "a keeper row is compared like any other, not skipped",
+    rows: parseSnapshot(JSON.stringify({
+      snapshot_objects: {
+        ref_sha256: "0".repeat(64),
+        rows: [{ identity: "public.is_staff()", acl: ["anon=X/postgres"], keeper: true }],
+      },
+      generated_at: "2026-07-23T00:00:00Z",
+    })),
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    name: "an acl JSON array is parsed item for item",
+    rows: [{ identity: "public.foo(uuid)", acl: ["postgres=X/postgres", "anon=X/postgres"] }],
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    name: "an EMPTY acl array grants nobody anything and is clean",
+    rows: [{ identity: "public.foo(uuid)", kind: "function", acl: [] }],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    name: "a row with no identity and no object is a finding, not a skip",
+    rows: [{ acl: ["=X/postgres"] }],
+    allowlist: {},
+    expect: 1,
+  },
+];
+
+/** Cases that must THROW out of parseSnapshot rather than yield an empty list. */
+const THROW_CASES = [
+  {
+    name: "a JSON object with no rows anywhere throws",
+    text: JSON.stringify({ generated_at: "2026-07-23T00:00:00Z" }),
+  },
+  {
+    name: "the wrapper present but rows missing throws",
+    text: JSON.stringify({ snapshot_objects: { ref_sha256: "0".repeat(64) } }),
+  },
+  {
+    name: "rows present but not an array throws",
+    text: JSON.stringify({ snapshot_objects: { rows: "none" } }),
+  },
 ];
 
 function selftest() {
@@ -329,11 +439,20 @@ function selftest() {
       console.error(`  FAIL ${c.name}: expected ${c.expect} finding(s), got ${got}`);
     }
   }
+  for (const c of THROW_CASES) {
+    let threw = false;
+    try { parseSnapshot(c.text); } catch { threw = true; }
+    if (!threw) {
+      failed += 1;
+      console.error(`  FAIL ${c.name}: parseSnapshot returned instead of throwing.`);
+    }
+  }
+  const total = CASES.length + THROW_CASES.length;
   if (failed) {
-    console.error(`anon-acl self-test FAILED: ${failed} of ${CASES.length} case(s).`);
+    console.error(`anon-acl self-test FAILED: ${failed} of ${total} case(s).`);
     process.exit(1);
   }
-  console.log(`anon-acl self-test OK: ${CASES.length} parser cases pass.`);
+  console.log(`anon-acl self-test OK: ${total} parser cases pass.`);
 }
 
 /* ----------------------------------------------------------------------- main ------ */
@@ -359,7 +478,24 @@ if (args.includes("--selftest")) {
   const allowlist = existsSync(ALLOWLIST)
     ? allowlistFrom(JSON.parse(readFileSync(ALLOWLIST, "utf8")))
     : {};
-  const rows = parseSnapshot(readFileSync(file, "utf8"));
+
+  let rows;
+  try {
+    rows = parseSnapshot(readFileSync(file, "utf8"));
+  } catch (err) {
+    console.error(`UNREADABLE: ${file}\n  ${err.message}`);
+    process.exit(1);
+  }
+
+  // The emitter aborts rather than write an empty rows list. This side has to refuse
+  // to pass on one, or a truncated or filtered snapshot reads as a clean database.
+  if (rows.length === 0) {
+    console.error(
+      `EMPTY: ${file} carries no objects. A snapshot with nothing in it is not a ` +
+      `clean result, it is a snapshot that failed to capture. Re-run the emitter.`);
+    process.exit(1);
+  }
+
   const fail = checkSnapshot(rows, allowlist);
   if (fail.length) {
     console.error(`live ACL snapshot check FAILED, ${fail.length} finding(s):\n`);
