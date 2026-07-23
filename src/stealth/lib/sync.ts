@@ -655,6 +655,12 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('fetching_filters', 100));
   emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
 
+  // The concurrent filter fetch above pushes hits in COMPLETION order,
+  // not chain order. The UTXO tracker below is order-sensitive: a spend
+  // processed before the receive that funded it is silently missed.
+  // Process blocks strictly by ascending height.
+  hits.sort((a, b) => a.height - b.height);
+
   // ── fetching_blocks + building_txs ───────────────────────────────────
   emit(opts, progress('fetching_blocks', 0, `${hits.length} blocks to fetch.`));
 
@@ -680,6 +686,11 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   for (let i = 0; i < hits.length; i++) {
     const block = await opts.fetchBlock(hits[i].blockHashHex);
     bytesDownloaded += block.raw.length;
+    // Height comes from the filter match, not the block record: the
+    // X-Block-Height response header is invisible to browsers unless the
+    // block source exposes it via Access-Control-Expose-Headers, so the
+    // block record height can silently arrive as 0.
+    const blockHeight = hits[i].height;
     const header = parseBlockHeader(block.raw);
     const occurredAt = isoDateFromUnix(header.timestamp);
 
@@ -740,7 +751,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         }
         normalized.push({
           txid: tx.txid,
-          block_height: block.height,
+          block_height: blockHeight,
           occurred_at: occurredAt,
           direction: 'out',
           amount_sats: Number(netOut),
@@ -762,7 +773,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         // RECEIVE only , pure incoming, no inputs of ours were spent.
         normalized.push({
           txid: tx.txid,
-          block_height: block.height,
+          block_height: blockHeight,
           occurred_at: occurredAt,
           direction: 'in',
           amount_sats: Number(receivedAmount),
