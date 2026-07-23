@@ -114,6 +114,9 @@ const V1_ROUTES: Record<string, V1Route> = {
   // ORBI rate API: separate Supabase project from OR's own.
   // Authorization and x-api-key headers pass through unchanged so
   // v1-rate can handle per-consumer key lookup and metering.
+  // x-api-key is intentionally absent from the CORS preflight allowlist:
+  // server-to-server callers (the expected consumers for key metering)
+  // are not CORS-bound. Browser callers must use the authorization header.
   // Do NOT inject any OR Supabase anon or service key here.
   "GET  /v1/rate": { method: "GET", fn: "v1-rate", target: "orbi" },
   "POST /v1/rate": { method: "POST", fn: "v1-rate", target: "orbi" },
@@ -165,7 +168,7 @@ const handler = {
           "access-control-allow-origin": "*",
           "access-control-allow-methods": "GET,POST,OPTIONS",
           "access-control-allow-headers":
-            "authorization,content-type,x-platform-api-key,x-or-api-key,x-or-widget-token,x-region,x-api-key",
+            "authorization,content-type,x-platform-api-key,x-or-api-key,x-or-widget-token,x-region",
           "access-control-max-age": "86400",
         },
       });
