@@ -18,15 +18,15 @@ info:
     header. Both are equivalent; the key is the raw API key issued to your consumer account.
 
 servers:
-  - url: https://<orbi-prod-project-ref>.supabase.co/functions/v1
-    description: ORBI production (flag-gated; replace project ref)
+  - url: https://api.orangerails.com/v1
+    description: ORBI rate API via Orange Rails canonical gateway
 
 security:
   - BearerAuth: []
   - ApiKeyAuth: []
 
 paths:
-  /v1-rate:
+  /rate:
     get:
       summary: Single rate lookup
       operationId: getSingleRate
