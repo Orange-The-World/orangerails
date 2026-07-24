@@ -1,53 +1,19 @@
--- Source-of-truth for orbi_api_keys + orbi_usage_log. Created in the dev
--- dashboard with no committed migration; this reproduces live dev schema.
--- Idempotent: IF NOT EXISTS guards make re-running a no-op on dev.
--- Forward-only: down = DROP TABLE which destroys key material and usage
--- history; rollback is restore-from-backup (documented in runbook).
+-- SUPERSEDED and intentionally neutralized to an inert no-op.
+--
+-- Canonical create migration for public.orbi_api_keys and
+-- public.orbi_usage_log is 20260722000001_orbi_rate_api.sql. That file
+-- carries the full guards: key_hash format CHECK, fill_type CHECK, and
+-- REVOKE ALL ... FROM anon, authenticated, public.
+--
+-- This file previously reproduced live dev schema but WITHOUT those two
+-- CHECKs and without REVOKE FROM public. It only ever ran as a no-op on
+-- dev because 20260722000001 (older timestamp) created the tables first.
+-- To remove the latent weaker-CREATE if migration order ever changes, its
+-- body is stripped to nothing.
+--
+-- The dev ledger row 20260724180000 is retained on purpose: it records that
+-- this version was applied, and rewriting applied history is worse hygiene
+-- than an inert, documented no-op. Fresh apply: this file creates nothing;
+-- 20260722000001 is the sole, fully-constrained creator of both tables.
 BEGIN;
-
-CREATE TABLE IF NOT EXISTS public.orbi_api_keys (
-  id uuid NOT NULL DEFAULT gen_random_uuid(),
-  consumer_id text NOT NULL,
-  consumer_name text NOT NULL,
-  key_hash text NOT NULL,
-  key_prefix text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  created_by text NOT NULL,
-  revoked_at timestamptz,
-  CONSTRAINT orbi_api_keys_pkey PRIMARY KEY (id)
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS orbi_api_keys_key_hash_uk
-  ON public.orbi_api_keys (key_hash);
-
-CREATE INDEX IF NOT EXISTS orbi_api_keys_consumer_idx
-  ON public.orbi_api_keys (consumer_id)
-  WHERE revoked_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS public.orbi_usage_log (
-  id bigint GENERATED ALWAYS AS IDENTITY,
-  consumer_id text NOT NULL,
-  key_prefix text NOT NULL,
-  asset text NOT NULL,
-  fiat text NOT NULL,
-  requested_at timestamptz,
-  served_at timestamptz NOT NULL DEFAULT now(),
-  fill_type text NOT NULL,
-  batch_size integer NOT NULL,
-  http_status integer NOT NULL,
-  CONSTRAINT orbi_usage_log_pkey PRIMARY KEY (id)
-);
-
-CREATE INDEX IF NOT EXISTS orbi_usage_log_consumer_served_idx
-  ON public.orbi_usage_log (consumer_id, served_at DESC);
-
--- RLS on with zero policies: hard-deny for anon and authenticated,
--- service_role bypasses. Correct posture for key material.
--- orbi_api_keys stores key_hash only (not plaintext key).
-ALTER TABLE public.orbi_api_keys  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.orbi_usage_log ENABLE ROW LEVEL SECURITY;
-
-REVOKE ALL ON public.orbi_api_keys  FROM anon, authenticated;
-REVOKE ALL ON public.orbi_usage_log FROM anon, authenticated;
-
 COMMIT;
