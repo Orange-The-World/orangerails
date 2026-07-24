@@ -41,6 +41,8 @@ import {
   strikeGetReceiveById,
 } from './index.ts';
 import type { NormalizedTransaction, SyncResult } from '../types.ts';
+import { computeWalletFingerprint } from '../../account-fingerprint.ts';
+import { toByteaHex } from '../../bytea.ts';
 
 const DRAIN_BATCH = 100;
 
@@ -74,26 +76,59 @@ export interface DrainConnection {
   last_sync_cursor: string | null;
 }
 
+/**
+ * Resolve the source_wallet_id for a Strike invoice at drain time.
+ *
+ * Computes wallet_fingerprint = HMAC-SHA256(key, domain || subaccountId ||
+ * providerType || receiverId || currency) then looks up in walletsByFingerprintHex.
+ * Returns null on no-match: the transaction holds unattributed and heals on
+ * natural re-sync. No mis-file to a wrong wallet is possible because the
+ * fingerprint is scoped to the exact (account, currency) pair.
+ *
+ * receiverId is the canonical_account_key from the Strike invoice response.
+ * INTERNAL ONLY: never log or surface receiverId outside this call.
+ */
+export async function resolveInvoiceWallet(
+  subaccountId: string,
+  providerType: 'strike',
+  receiverId: string,
+  currency: string,
+  walletsByFingerprintHex: Map<string, string>,
+): Promise<string | null> {
+  if (!receiverId || !currency) return null;
+  const fp = await computeWalletFingerprint(subaccountId, providerType, receiverId, currency);
+  return walletsByFingerprintHex.get(toByteaHex(fp)) ?? null;
+}
+
 export async function drainStrikeQueue(args: {
   serviceClient: SupabaseClient;
   connection: DrainConnection;
   credentials: Record<string, unknown>;
   webhookBaseUrl: string;
   /**
-   * Map of uppercased ISO currency code to external_wallet_id for this
-   * connection. Built from source_wallets rows selected with currency.
-   * Used to resolve each transaction to the correct per-currency wallet.
-   * Null lookups fall back to null source_wallet_id (legacy connections).
+   * Map of wallet_fingerprint bytea-hex string (\x + lowercase hex) to
+   * external_wallet_id for this connection. Built from source_wallets rows
+   * selected with wallet_fingerprint. Used to attribute invoice transactions
+   * to the correct per-currency wallet at drain time by recomputing the
+   * fingerprint from the Strike invoice response (subaccountId + "strike" +
+   * inv.receiverId + inv.amount.currency). A no-match returns null: held
+   * unattributed, heals on natural re-sync. No mis-file to a wrong wallet.
    */
-  walletsByCurrency: Map<string, string>;
+  walletsByFingerprintHex: Map<string, string>;
+  /**
+   * Subaccount ID owning this connection. Required to compute wallet
+   * fingerprints: HMAC(key, domain || subaccountId || providerType ||
+   * receiverId || currency).
+   */
+  subaccountId: string;
 }): Promise<SyncResult> {
   const creds = parseStrikeCredentials(args.credentials);
   const conn = args.connection;
 
-  // ─── Step 1: ensure subscription registered ─────────────────────────────
+  // Step 1: ensure subscription registered
   if (!conn.strike_subscription_id) {
     // Strike caps the `secret` field at 50 chars per
-    // docs.strike.me/api/create-subscription. 24 random bytes → 48 hex chars,
+    // docs.strike.me/api/create-subscription. 24 random bytes -> 48 hex chars,
     // safely under the limit while still 192 bits of entropy.
     const secret = generateHexSecret(24);
     const webhookUrl = `${args.webhookBaseUrl}?conn=${conn.id}`;
@@ -137,7 +172,7 @@ export async function drainStrikeQueue(args: {
     }
   }
 
-  // ─── Step 2: drain pending events ──────────────────────────────────────
+  // Step 2: drain pending events
   const { data: events, error: fetchErr } = await args.serviceClient
     .from('strike_webhook_events')
     .select('id, event_type, entity_id')
@@ -160,26 +195,42 @@ export async function drainStrikeQueue(args: {
 
       if (ev.event_type.startsWith('invoice.')) {
         const inv = await strikeGetInvoiceById(creds, ev.entity_id);
-        norm = normalizeInvoice(inv, args.walletsByCurrency.get((inv.amount?.currency ?? '').toUpperCase()) ?? null);
+        const invCurrency = (inv.amount?.currency ?? '').toUpperCase();
+        const invReceiverId = inv.receiverId ?? '';
+        const invWalletId = await resolveInvoiceWallet(
+          args.subaccountId, 'strike', invReceiverId, invCurrency, args.walletsByFingerprintHex,
+        );
+        if (invWalletId === null) {
+          console.warn(
+            `[strike-queue] event ${ev.id}: invoice fingerprint no-match` +
+            ` (currency=${invCurrency}, receiverId present=${!!invReceiverId}); held unattributed`,
+          );
+        }
+        norm = normalizeInvoice(inv, invWalletId);
       } else if (ev.event_type.startsWith('payment.')) {
         // Outgoing Lightning send. No list endpoint, so webhooks are the
         // ONLY discovery path for these , critical not to drop.
+        // receiverId is not present in payment responses; cannot compute fingerprint.
         const pay = await strikeGetPaymentById(creds, ev.entity_id);
-        norm = normalizePayment(pay, args.walletsByCurrency.get((pay.totalAmount?.currency || pay.amount?.currency || '').toUpperCase()) ?? null);
+        norm = normalizePayment(pay, null);
       } else if (ev.event_type.startsWith('receive-request.')) {
         // Lightning-address receive. entityId is the receive_id (not the
         // parent receive-request id) per Strike webhook contract.
+        // receiverId is not present in receive responses; cannot compute fingerprint.
         const rec = await strikeGetReceiveById(creds, ev.entity_id);
-        norm = normalizeReceive(rec, args.walletsByCurrency.get((rec.amount?.currency ?? '').toUpperCase()) ?? null);
+        norm = normalizeReceive(rec, null);
       } else if (ev.event_type.startsWith('deposit.')) {
+        // receiverId is not present in deposit responses; cannot compute fingerprint.
         const dep = await strikeGetDepositById(creds, ev.entity_id);
-        norm = normalizeDeposit(dep, args.walletsByCurrency.get(((dep.amountCredited ?? dep.amountReceived)?.currency ?? '').toUpperCase()) ?? null);
+        norm = normalizeDeposit(dep, null);
       } else if (ev.event_type.startsWith('payout.')) {
+        // receiverId is not present in payout responses; cannot compute fingerprint.
         const po = await strikeGetPayoutById(creds, ev.entity_id);
-        norm = normalizePayout(po, args.walletsByCurrency.get(((po.totalAmount ?? po.amount)?.currency ?? '').toUpperCase()) ?? null);
+        norm = normalizePayout(po, null);
       } else if (ev.event_type.startsWith('currency-exchange-quote.')) {
+        // receiverId is not present in exchange responses; cannot compute fingerprint.
         const q = await strikeGetExchangeQuoteById(creds, ev.entity_id);
-        norm = normalizeExchange(q, args.walletsByCurrency.get((q.sourceAmount?.currency ?? '').toUpperCase()) ?? null);
+        norm = normalizeExchange(q, null);
       } else {
         // Unknown event type , log + skip + mark processed (don't loop).
         console.warn(`[strike-queue] unknown event_type=${ev.event_type} on ${ev.id}`);
