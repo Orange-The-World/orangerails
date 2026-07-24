@@ -10,7 +10,7 @@
  * Run with:
  *   deno test supabase/functions/_shared/providers/strike/queue.test.ts
  */
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import { assertEquals, assertNotEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { strikeSubscriptionErrorMarker } from './queue.ts';
 
 Deno.test('403 / insufficient permissions -> scope marker (unchanged, backward compatible)', () => {
@@ -69,4 +69,51 @@ Deno.test('every branch yields a distinct, non-empty marker (no silent-void fail
   ].map(strikeSubscriptionErrorMarker);
   assertEquals(new Set(markers).size, 5, 'all five failure classes map to distinct markers');
   for (const m of markers) assertEquals(m.length > 0, true, 'no branch returns an empty marker');
+});
+
+// Wallet fingerprint attribution tests
+
+import { resolveInvoiceWallet } from './queue.ts';
+import { computeWalletFingerprint } from '../../account-fingerprint.ts';
+import { toByteaHex } from '../../bytea.ts';
+
+const TEST_FINGERPRINT_KEY = 'test-32-byte-key-exactly-ok-yes!';
+
+Deno.test('BTC and USD invoices on one account route to their two distinct wallets', async () => {
+  Deno.env.set('OR_ACCT_FINGERPRINT_KEY_V1', TEST_FINGERPRINT_KEY);
+  const subaccountId = 'sub-test-123';
+  const receiverId = 'strike-merchant-abc';
+
+  const btcFp = await computeWalletFingerprint(subaccountId, 'strike', receiverId, 'BTC');
+  const usdFp = await computeWalletFingerprint(subaccountId, 'strike', receiverId, 'USD');
+
+  const walletsMap = new Map<string, string>([
+    [toByteaHex(btcFp), 'wallet-id-btc-001'],
+    [toByteaHex(usdFp), 'wallet-id-usd-001'],
+  ]);
+
+  const btcResult = await resolveInvoiceWallet(subaccountId, 'strike', receiverId, 'BTC', walletsMap);
+  const usdResult = await resolveInvoiceWallet(subaccountId, 'strike', receiverId, 'USD', walletsMap);
+
+  assertEquals(btcResult, 'wallet-id-btc-001', 'BTC invoice must route to the BTC wallet');
+  assertEquals(usdResult, 'wallet-id-usd-001', 'USD invoice must route to the USD wallet');
+  assertNotEquals(btcResult, usdResult, 'BTC and USD invoices must not share a wallet');
+});
+
+Deno.test('fingerprint no-match holds transaction unattributed, cannot mis-file to wrong wallet', async () => {
+  Deno.env.set('OR_ACCT_FINGERPRINT_KEY_V1', TEST_FINGERPRINT_KEY);
+  const subaccountId = 'sub-test-123';
+  const receiverId = 'strike-merchant-abc';
+
+  // Map only has a USD wallet entry
+  const usdFp = await computeWalletFingerprint(subaccountId, 'strike', receiverId, 'USD');
+  const walletsMap = new Map<string, string>([[toByteaHex(usdFp), 'wallet-id-usd-001']]);
+
+  // EUR has no registered wallet: must be null, not mis-filed to USD
+  const eurResult = await resolveInvoiceWallet(subaccountId, 'strike', receiverId, 'EUR', walletsMap);
+  assertEquals(eurResult, null, 'no-match must return null, never the wrong wallet');
+
+  // BTC also not registered: must also be null
+  const btcResult = await resolveInvoiceWallet(subaccountId, 'strike', receiverId, 'BTC', walletsMap);
+  assertEquals(btcResult, null, 'no-match must return null, never the USD wallet');
 });
