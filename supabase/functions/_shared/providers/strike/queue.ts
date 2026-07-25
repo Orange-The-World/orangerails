@@ -121,6 +121,14 @@ export async function drainStrikeQueue(args: {
    * receiverId || currency).
    */
   subaccountId: string;
+  /**
+   * Map of currency code (uppercase, e.g. 'BTC', 'USD') to external_wallet_id
+   * for this connection. Used to attribute non-invoice transactions (payments,
+   * receives, deposits, payouts, exchanges) by currency. These event types do
+   * not carry a receiverId so the fingerprint path cannot be used.
+   * A no-match returns null: held unattributed, heals on natural re-sync.
+   */
+  walletsByCurrency: Map<string, string>;
 }): Promise<SyncResult> {
   const creds = parseStrikeCredentials(args.credentials);
   const conn = args.connection;
@@ -210,27 +218,32 @@ export async function drainStrikeQueue(args: {
       } else if (ev.event_type.startsWith('payment.')) {
         // Outgoing Lightning send. No list endpoint, so webhooks are the
         // ONLY discovery path for these , critical not to drop.
-        // receiverId is not present in payment responses; cannot compute fingerprint.
+        // receiverId is not present in payment responses; fall back to currency.
         const pay = await strikeGetPaymentById(creds, ev.entity_id);
-        norm = normalizePayment(pay, null);
+        const payCurrency = (pay.totalAmount?.currency || pay.amount?.currency || '').toUpperCase();
+        norm = normalizePayment(pay, args.walletsByCurrency.get(payCurrency) ?? null);
       } else if (ev.event_type.startsWith('receive-request.')) {
         // Lightning-address receive. entityId is the receive_id (not the
         // parent receive-request id) per Strike webhook contract.
-        // receiverId is not present in receive responses; cannot compute fingerprint.
+        // receiverId is not present in receive responses; fall back to currency.
         const rec = await strikeGetReceiveById(creds, ev.entity_id);
-        norm = normalizeReceive(rec, null);
+        const recCurrency = (rec.amount?.currency || '').toUpperCase();
+        norm = normalizeReceive(rec, args.walletsByCurrency.get(recCurrency) ?? null);
       } else if (ev.event_type.startsWith('deposit.')) {
-        // receiverId is not present in deposit responses; cannot compute fingerprint.
+        // receiverId is not present in deposit responses; fall back to currency.
         const dep = await strikeGetDepositById(creds, ev.entity_id);
-        norm = normalizeDeposit(dep, null);
+        const depCurrency = ((dep.amountCredited ?? dep.amountReceived)?.currency || '').toUpperCase();
+        norm = normalizeDeposit(dep, args.walletsByCurrency.get(depCurrency) ?? null);
       } else if (ev.event_type.startsWith('payout.')) {
-        // receiverId is not present in payout responses; cannot compute fingerprint.
+        // receiverId is not present in payout responses; fall back to currency.
         const po = await strikeGetPayoutById(creds, ev.entity_id);
-        norm = normalizePayout(po, null);
+        const poCurrency = ((po.totalAmount ?? po.amount)?.currency || '').toUpperCase();
+        norm = normalizePayout(po, args.walletsByCurrency.get(poCurrency) ?? null);
       } else if (ev.event_type.startsWith('currency-exchange-quote.')) {
-        // receiverId is not present in exchange responses; cannot compute fingerprint.
+        // receiverId is not present in exchange responses; fall back to source currency.
         const q = await strikeGetExchangeQuoteById(creds, ev.entity_id);
-        norm = normalizeExchange(q, null);
+        const exchCurrency = (q.sourceAmount?.currency || '').toUpperCase();
+        norm = normalizeExchange(q, args.walletsByCurrency.get(exchCurrency) ?? null);
       } else {
         // Unknown event type , log + skip + mark processed (don't loop).
         console.warn(`[strike-queue] unknown event_type=${ev.event_type} on ${ev.id}`);
