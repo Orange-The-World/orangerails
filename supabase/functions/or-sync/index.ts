@@ -823,8 +823,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           //      Cloudflare so we iterate states; simple `eq` is fine.
           //   2. Webhook queue drain (drainStrikeQueue) -- near-real-time
           //      updates for events received since last sync.
-          // Both paths merge into newTxs. Idempotent on the consumer side
-          // via UNIQUE (connection_id, external_id) so duplicates are no-ops.
+          // Both paths merge into newTxs. The two paths CAN emit the same
+          // transaction id, and that is not a no-op -- see the dedupe below.
           const supabaseUrl = Deno.env.get('SUPABASE_URL');
           if (!supabaseUrl) throw new Error('SUPABASE_URL not set');
 
