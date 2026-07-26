@@ -1083,6 +1083,89 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 }));
 
 /**
+ * Merge the Strike poll batch and the Strike webhook-drain batch into the one
+ * array handed to the single `encrypted_transactions` upsert.
+ *
+ * ─── 1. Why this dedupes. DO NOT REMOVE. ─────────────────────────────────
+ *
+ * That upsert is ONE statement with onConflict 'connection_id,external_id' and
+ * ignoreDuplicates:false, i.e. ON CONFLICT DO UPDATE. Postgres raises SQLSTATE
+ * 21000 ("ON CONFLICT DO UPDATE command cannot affect row a second time") when
+ * a single command proposes the same conflict key twice, and the ENTIRE batch
+ * aborts. `connection_id` is loop-invariant inside the per-connection loop, so
+ * keying this map on `tx.id` alone is exactly the upsert's conflict key.
+ *
+ * Duplicates are routine, by two independent routes:
+ *   - STRIKE_DEFAULT_EVENT_TYPES subscribes to BOTH invoice.created and
+ *     invoice.updated. Both queue rows survive (the queue is UNIQUE on
+ *     strike_event_id, not on the invoice id), the drain does a GET-by-id at
+ *     drain time so both resolve to the same current invoice, and
+ *     normalizeInvoice returns the same `id: invoice.invoiceId` for each.
+ *   - The poll can independently return an object the drain just emitted. The
+ *     id namespaces are shared on purpose: `receive:`, `deposit:`, `payout:`
+ *     and `exchange:` are produced by the same normalizers on both paths.
+ *
+ * Why an abort is unrecoverable rather than a retry: drainStrikeQueue has
+ * ALREADY written processed_at on every event in the batch before it returned,
+ * so those events never re-drain, and `throw upsertErr` aborts the connection
+ * without advancing the cursor. Invoices self-heal on the next poll. payment.*
+ * does NOT -- Strike exposes no list endpoint for outgoing Lightning payments,
+ * so the webhook queue is their only discovery path. A payment lost to an
+ * aborted batch is lost PERMANENTLY.
+ *
+ * ─── 2. Why the drain wins, and why the fallback is GUARDED. ─────────────
+ *
+ * The drain's GET-by-id is the fresher read, so the drain record wins wholesale
+ * for every field. But its source_wallet_id is null far more often than the
+ * poll's: queue.ts passes null UNCONDITIONALLY for receive-request.*, deposit.*,
+ * payout.* and currency-exchange-quote.* (those Strike responses carry no
+ * receiverId, so no fingerprint is computable), and null for invoice.* whenever
+ * the fingerprint misses. Taking the drain record wholesale would therefore
+ * overwrite a correct poll attribution with null -- and it would not self-heal,
+ * because next_cursor advances past the object and the drain event is already
+ * processed_at-marked. That null would be permanent.
+ *
+ * So we restore the poll's source_wallet_id when the drain has none -- but ONLY
+ * when the connection has exactly one synced wallet.
+ *
+ * THIS GUARD IS NOT OPTIONAL AND MUST NOT BE "SIMPLIFIED" INTO A PLAIN
+ * `?? polled.source_wallet_id` FALLBACK. The poll does not attribute per wallet:
+ * strike/index.ts syncByWallets stamps EVERY transaction with
+ * `accountId = walletIds[0] ?? null`. On a multi-wallet connection walletIds[0]
+ * is a coin flip, and preferring it would reintroduce precisely the guessed
+ * attribution this change exists to remove -- converting an under-attribution
+ * (recoverable) into a mis-attribution (not recoverable), which is strictly
+ * worse. With exactly one synced wallet there is nothing to guess: walletIds[0]
+ * is the only wallet the transaction can belong to.
+ *
+ * @param pollTxs         transactions from adapter.syncByWallets
+ * @param drainTxs        transactions from drainStrikeQueue
+ * @param syncedWalletIds the SAME array passed to syncByWallets as walletIds
+ */
+export function mergeStrikeTransactions(
+  pollTxs: NormalizedTransaction[],
+  drainTxs: NormalizedTransaction[],
+  syncedWalletIds: string[],
+): NormalizedTransaction[] {
+  // Non-null only when the poll's attribution was not a guess.
+  const soleWalletId = syncedWalletIds.length === 1 ? syncedWalletIds[0] : null;
+
+  const byExternalId = new Map<string, NormalizedTransaction>();
+  for (const tx of pollTxs) byExternalId.set(tx.id, tx);
+  for (const tx of drainTxs) {
+    const polled = byExternalId.get(tx.id);
+    // Recover the poll's id only if the drain has none AND that id is provably
+    // the connection's only synced wallet. Every other field stays the drain's.
+    const recover =
+      tx.source_wallet_id == null &&
+      soleWalletId !== null &&
+      polled?.source_wallet_id === soleWalletId;
+    byExternalId.set(tx.id, recover ? { ...tx, source_wallet_id: soleWalletId } : tx);
+  }
+  return [...byExternalId.values()];
+}
+
+/**
  * Resolve a subaccount's `external_user_id` for sink-mode dispatch. In
  * platform mode the subaccount row holds the platform's chosen identifier
  * (typically the platform's organizationId). Sink adapters use this as
