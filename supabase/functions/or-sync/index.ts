@@ -799,7 +799,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // until the user opts in by re-running discovery from the UI.
         const { data: sourceWallets, error: swErr } = await ctx.serviceClient
           .from('source_wallets')
-          .select('external_wallet_id, is_synced, currency')
+          .select('external_wallet_id, is_synced, wallet_fingerprint')
           .eq('connection_id', conn.id)
           .eq('is_synced', true)
           // Deterministic order so walletIds[0] is stable across syncs. Both
@@ -832,9 +832,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // polling and the drain path below. Passing the 'strike' literal to
           // the poll stamped every polled transaction with source_wallet_id =
           // 'strike', which matches no source_wallets row on the consumer, so
-          // all rows imported as unmapped and none reached the register. See
-          // the drain block below for the full walletIds reasoning and the
-          // known [0] attribution limit; it applies equally to the poll now.
+          // all rows imported as unmapped and none reached the register. The
+          // poll path's own per-wallet attribution limit is unchanged by this
+          // commit; only the drain path below is fingerprint-attributed.
           const strikeWalletIds = (sourceWallets ?? []).map(
             (w: { external_wallet_id: string }) => w.external_wallet_id,
           );
@@ -849,34 +849,45 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // 2) Real-time: drain any webhook-queued events. Side effect:
           //    registers a Strike webhook subscription on first call.
           //
-          // walletIds is REQUIRED by DrainArgs and was never passed. queue.ts does
-          // `args.walletIds[0]` unguarded, so every Strike sync threw
-          // `TypeError: Cannot read properties of undefined (reading '0')` here, before any
-          // store call. That is why zero rows have ever landed in encrypted_transactions and
-          // why last_sync_at is still NULL on every Strike connection: the throw happens
-          // upstream of both. The generic taxonomy bucket hid it, because the message matched
-          // no classifier pattern.
+          // Invoice attribution is FINGERPRINT-keyed, not currency-keyed.
           //
-          // Passing the REAL ids from source_wallets, not an empty array. An empty-array guard
-          // would stop the crash and then silently write accountId = null onto transactions
-          // that have a correct value available, which trades a loud honest failure for quiet
-          // data corruption. These are the same ids the wallet-scoped path computes below,
-          // which is what the parameter's own doc comment in queue.ts says it is for.
+          // source_wallets has no plaintext `currency` column and is not going to
+          // get one (Privacy HOLD): currency lives inside encrypted_metadata, which
+          // is ORK-encrypted and the server cannot decrypt. Selecting `currency`
+          // here is not a design choice the server can make -- PostgREST answers
+          // 42703 (column does not exist) and, because this select sits ABOVE the
+          // per-provider branch, the `if (swErr) throw swErr` above turns that into
+          // a hard failure of or-sync for EVERY provider, not just Strike.
           //
-          // KNOWN LIMITATION, deliberately not fixed here. queue.ts:96 still takes
-          // `walletIds[0]`, so a connection with more than one synced wallet has every drained
-          // transaction stamped with whichever id sorts first. This fixes the crash; it does not
-          // fix attribution.
+          // What the server CAN read is wallet_fingerprint: a BYTEA HMAC-SHA256 over
+          // (domain || subaccount_id || provider_type || canonical_account_key ||
+          // currency), written at discovery time by or-link-complete. At drain time
+          // queue.ts recomputes that HMAC from the Strike invoice response
+          // (subaccountId + 'strike' + inv.receiverId + inv.amount.currency, upper-
+          // cased) and looks it up in this map. PostgREST hands BYTEA over the wire
+          // as a leading \x plus lowercase hex, which is exactly what toByteaHex
+          // produces on the compute side, so the two keys compare directly.
           //
-          // It is not fixable in or-sync at all. Strike's external_wallet_id is a
-          // crypto.randomUUID() (strike/index.ts:740), not the receiverId, and a connection's
-          // BTC and USD wallets are the same Strike account sharing one account_key. The only
-          // field that distinguishes them is currency, which lives in encrypted_metadata that
-          // the server cannot read. The server structurally cannot attribute a Strike
-          // transaction to the right wallet. That is ZKA working as designed, not a defect, and
-          // correcting it needs an architecture decision rather than a code change here.
-          const walletsByCurrency = new Map(
-            (sourceWallets ?? []).map((w) => [w.currency, w]),
+          // A no-match returns null: the transaction is held unattributed and heals
+          // on natural re-sync. A mis-file onto the wrong wallet is structurally
+          // impossible, because a fingerprint is scoped to one exact (subaccount,
+          // Strike account, currency) triple and is never shared between wallets.
+          //
+          // Rows whose wallet_fingerprint is NULL (discovered before fingerprinting
+          // shipped) are filtered out rather than guessed at. They contribute no map
+          // entry, so their transactions hold unattributed until the wallet is
+          // re-discovered. That is the intended trade: unattributed is recoverable,
+          // mis-filed is not.
+          //
+          // The five non-invoice event types (payment, receive, deposit, payout,
+          // exchange) carry no receiverId in the Strike response, so no fingerprint
+          // can be computed for them at all; queue.ts holds them unattributed for
+          // the same reason.
+          const walletsByFingerprintHex = new Map<string, string>(
+            (sourceWallets ?? [])
+              .filter((w: { wallet_fingerprint: string | null }) => !!w.wallet_fingerprint)
+              .map((w: { wallet_fingerprint: string; external_wallet_id: string }) =>
+                [w.wallet_fingerprint, w.external_wallet_id] as [string, string]),
           );
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
@@ -886,8 +897,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               last_sync_cursor: conn.last_sync_cursor ?? null,
             },
             credentials,
-            walletIds: strikeWalletIds,
-            walletsByCurrency,
+            subaccountId: subaccountId as string,
+            walletsByFingerprintHex,
             webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
           });
           newTxs = [...poll.transactions, ...drain.transactions];
