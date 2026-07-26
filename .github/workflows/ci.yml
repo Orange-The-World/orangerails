@@ -77,10 +77,12 @@ jobs:
     # Why this job exists: until 2026-07-26 CI never looked at supabase/functions
     # at all. `bun run lint` carries continue-on-error (see the note on it above)
     # and `bun run build` only builds the Vite frontend, so every one of the 37
-    # edge functions could stop compiling with CI still green. PR #254 showed
-    # 9 of 9 checks green on a tree that `deno check` rejected with 19 errors,
-    # one of them a real Map<string, string> vs Map<string, {...}> mismatch on
-    # the Strike drain path.
+    # edge functions could stop compiling with CI still green. The open Strike
+    # attribution pull request showed 9 of 9 checks green on a tree that
+    # `deno check` rejected with 19 errors, one of them a real
+    # Map<string, string> vs Map<string, {...}> mismatch on the Strike drain
+    # path. (No PR number here on purpose: scripts/pre-publish-scan.sh flags
+    # bare #NNNN references in shipping files as dead PR refs.)
     #
     # Gate design -- read this before changing it. This is a RATCHET, not a
     # wall: it fails only when the error count goes ABOVE the recorded
@@ -116,6 +118,18 @@ jobs:
 
       - name: deno check supabase/functions
         shell: bash
+        env:
+          # Deno colourises its diagnostics even when stdout+stderr are
+          # redirected to a file on the runner. The first version of this step
+          # counted "[ERROR]" fine but its per-class breakdown grepped for
+          # 'TS1234 [ERROR]' and matched nothing, because the real bytes are
+          # 'TS1234 <ESC>[0m[ERROR]'. Under `-e -o pipefail` that zero-match
+          # grep killed the step, so the job went red while reporting exactly
+          # the baseline count. NO_COLOR removes the escapes at the source; the
+          # sed below strips them anyway, because a parser that only works when
+          # the output happens to be plain is the same class of unreliable
+          # control this job exists to replace.
+          NO_COLOR: '1'
         run: |
           set -u
 
@@ -131,7 +145,8 @@ jobs:
           # --node-modules-dir=auto: the repo has a root package.json, so Deno
           # otherwise refuses npm: specifiers with "run deno install first".
           RC=0
-          deno check --node-modules-dir=auto "${FILES[@]}" > "$RUNNER_TEMP/deno-check.log" 2>&1 || RC=$?
+          deno check --node-modules-dir=auto "${FILES[@]}" > "$RUNNER_TEMP/deno-check.raw" 2>&1 || RC=$?
+          sed -e 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/deno-check.raw" > "$RUNNER_TEMP/deno-check.log"
           cat "$RUNNER_TEMP/deno-check.log"
 
           # One "[ERROR]" marker per diagnostic (the last is additionally
@@ -156,7 +171,7 @@ jobs:
               echo
               echo "By error class:"
               echo '```'
-              grep -oE 'TS[0-9]+ \[ERROR\]' "$RUNNER_TEMP/deno-check.log" | sort | uniq -c | sort -rn
+              grep -oE 'TS[0-9]+ \[ERROR\]' "$RUNNER_TEMP/deno-check.log" | sort | uniq -c | sort -rn || true
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
