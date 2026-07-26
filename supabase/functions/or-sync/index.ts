@@ -799,7 +799,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // until the user opts in by re-running discovery from the UI.
         const { data: sourceWallets, error: swErr } = await ctx.serviceClient
           .from('source_wallets')
-          .select('external_wallet_id, is_synced')
+          .select('external_wallet_id, is_synced, wallet_fingerprint')
           .eq('connection_id', conn.id)
           .eq('is_synced', true)
           // Deterministic order so walletIds[0] is stable across syncs. Both
