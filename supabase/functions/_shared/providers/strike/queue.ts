@@ -203,7 +203,7 @@ export async function drainStrikeQueue(args: {
         if (invWalletId === null) {
           console.warn(
             `[strike-queue] event ${ev.id}: invoice fingerprint no-match` +
-            ` (currency=${invCurrency}, receiverId present=${!!invReceiverId}); held unattributed`,
+            ` (currency present=${!!invCurrency}, receiverId present=${!!invReceiverId}); held unattributed`,
           );
         }
         norm = normalizeInvoice(inv, invWalletId);

@@ -823,8 +823,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           //      Cloudflare so we iterate states; simple `eq` is fine.
           //   2. Webhook queue drain (drainStrikeQueue) -- near-real-time
           //      updates for events received since last sync.
-          // Both paths merge into newTxs. Idempotent on the consumer side
-          // via UNIQUE (connection_id, external_id) so duplicates are no-ops.
+          // Both paths merge into newTxs. The two paths CAN emit the same
+          // transaction id, and that is not a no-op -- see the dedupe below.
           const supabaseUrl = Deno.env.get('SUPABASE_URL');
           if (!supabaseUrl) throw new Error('SUPABASE_URL not set');
 
@@ -901,7 +901,42 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             walletsByFingerprintHex,
             webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
           });
-          newTxs = [...poll.transactions, ...drain.transactions];
+          // ── Dedupe before the upsert. DO NOT REMOVE. ──────────────────
+          // The legacy upsert below is ONE statement with onConflict
+          // 'connection_id,external_id' and ignoreDuplicates:false, i.e.
+          // ON CONFLICT DO UPDATE. Postgres raises SQLSTATE 21000 ("ON
+          // CONFLICT DO UPDATE command cannot affect row a second time") when
+          // a single command proposes the same conflict key twice, and the
+          // ENTIRE batch aborts.
+          //
+          // Duplicates are routine here, by two independent routes:
+          //   - STRIKE_DEFAULT_EVENT_TYPES subscribes to BOTH invoice.created
+          //     and invoice.updated. Both queue rows survive (the queue is
+          //     UNIQUE on strike_event_id, not on the invoice id), the drain
+          //     does a GET-by-id at drain time so both resolve to the same
+          //     current invoice, and normalizeInvoice returns the same
+          //     `id: invoice.invoiceId` for each.
+          //   - The poll (STATES_TO_SYNC, filtered on created > cursor) can
+          //     independently return an invoice the drain just emitted.
+          //
+          // Why the abort is unrecoverable rather than a retry: drainStrikeQueue
+          // has ALREADY written processed_at on every event in the batch before
+          // it returned, so those events never re-drain, and `throw upsertErr`
+          // below aborts this connection without advancing the cursor. Invoices
+          // self-heal on the next poll. payment.* does NOT -- Strike exposes no
+          // list endpoint for outgoing Lightning payments (see strike/index.ts,
+          // end of syncByWallets), so the webhook queue is their only discovery
+          // path. A payment lost to an aborted batch is lost PERMANENTLY.
+          //
+          // Precedence is explicit and must stay that way: poll copies are
+          // seeded first, drain copies overwrite them, whole record, no
+          // field-level merge. The drain copy is the one carrying the
+          // fingerprint-attributed source_wallet_id that the poll copy lacks.
+          // Do not reduce this back to a concat and rely on array order.
+          const dedupedByExternalId = new Map<string, NormalizedTransaction>();
+          for (const tx of poll.transactions) dedupedByExternalId.set(tx.id, tx);
+          for (const tx of drain.transactions) dedupedByExternalId.set(tx.id, tx);
+          newTxs = [...dedupedByExternalId.values()];
           // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.
           next_cursor = poll.next_cursor ?? drain.next_cursor;
