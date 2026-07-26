@@ -76,26 +76,54 @@ export interface DrainConnection {
   last_sync_cursor: string | null;
 }
 
+/**
+ * Resolve the source_wallet_id for a Strike invoice at drain time.
+ *
+ * Computes wallet_fingerprint = HMAC-SHA256(key, domain || subaccountId ||
+ * providerType || receiverId || currency) then looks up in walletsByFingerprintHex.
+ * Returns null on no-match: the transaction holds unattributed and heals on
+ * natural re-sync. No mis-file to a wrong wallet is possible because the
+ * fingerprint is scoped to the exact (account, currency) pair.
+ *
+ * receiverId is the canonical_account_key from the Strike invoice response.
+ * INTERNAL ONLY: never log or surface receiverId outside this call.
+ */
+export async function resolveInvoiceWallet(
+  subaccountId: string,
+  providerType: 'strike',
+  receiverId: string,
+  currency: string,
+  walletsByFingerprintHex: Map<string, string>,
+): Promise<string | null> {
+  if (!receiverId || !currency) return null;
+  const fp = await computeWalletFingerprint(subaccountId, providerType, receiverId, currency);
+  return walletsByFingerprintHex.get(toByteaHex(fp)) ?? null;
+}
+
 export async function drainStrikeQueue(args: {
   serviceClient: SupabaseClient;
   connection: DrainConnection;
   credentials: Record<string, unknown>;
   webhookBaseUrl: string;
   /**
-   * The external_wallet_id values from source_wallets for this connection.
-   * walletIds[0] is the Strike receiverId stored during discover(). Passed
-   * to every normalize call so webhook-sourced transactions carry the same
-   * per-account identifier as polling-sourced transactions.
+   * Map of wallet_fingerprint bytea-hex string (\x + lowercase hex) to
+   * external_wallet_id for this connection. Built from source_wallets rows
+   * selected with wallet_fingerprint. Used to attribute invoice transactions
+   * to the correct per-currency wallet at drain time by recomputing the
+   * fingerprint from the Strike invoice response (subaccountId + "strike" +
+   * inv.receiverId + inv.amount.currency). A no-match returns null: held
+   * unattributed, heals on natural re-sync. No mis-file to a wrong wallet.
    */
-  walletIds: string[];
+  walletsByFingerprintHex: Map<string, string>;
+  /**
+   * Subaccount ID owning this connection. Required to compute wallet
+   * fingerprints: HMAC(key, domain || subaccountId || providerType ||
+   * receiverId || currency).
+   */
+  subaccountId: string;
 }): Promise<SyncResult> {
   const creds = parseStrikeCredentials(args.credentials);
   const conn = args.connection;
-
-  // The receiverId stored in source_wallets.external_wallet_id. Null for
-  // legacy connections that predate discover() (they have no source_wallets
-  // row), in which case source_wallet_id will be null on these transactions.
-  const accountId = args.walletIds[0] ?? null;
 
   // ─── Step 1: ensure subscription registered ─────────────────────────────
   if (!conn.strike_subscription_id) {
