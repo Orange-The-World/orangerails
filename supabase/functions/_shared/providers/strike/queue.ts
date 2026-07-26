@@ -41,6 +41,8 @@ import {
   strikeGetReceiveById,
 } from './index.ts';
 import type { NormalizedTransaction, SyncResult } from '../types.ts';
+import { computeWalletFingerprint } from '../../account-fingerprint.ts';
+import { toByteaHex } from '../../bytea.ts';
 
 const DRAIN_BATCH = 100;
 
