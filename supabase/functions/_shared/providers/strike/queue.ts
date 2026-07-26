@@ -125,10 +125,10 @@ export async function drainStrikeQueue(args: {
   const creds = parseStrikeCredentials(args.credentials);
   const conn = args.connection;
 
-  // ─── Step 1: ensure subscription registered ─────────────────────────────
+  // Step 1: ensure subscription registered
   if (!conn.strike_subscription_id) {
     // Strike caps the `secret` field at 50 chars per
-    // docs.strike.me/api/create-subscription. 24 random bytes → 48 hex chars,
+    // docs.strike.me/api/create-subscription. 24 random bytes -> 48 hex chars,
     // safely under the limit while still 192 bits of entropy.
     const secret = generateHexSecret(24);
     const webhookUrl = `${args.webhookBaseUrl}?conn=${conn.id}`;
@@ -172,7 +172,7 @@ export async function drainStrikeQueue(args: {
     }
   }
 
-  // ─── Step 2: drain pending events ──────────────────────────────────────
+  // Step 2: drain pending events
   const { data: events, error: fetchErr } = await args.serviceClient
     .from('strike_webhook_events')
     .select('id, event_type, entity_id')
@@ -195,26 +195,48 @@ export async function drainStrikeQueue(args: {
 
       if (ev.event_type.startsWith('invoice.')) {
         const inv = await strikeGetInvoiceById(creds, ev.entity_id);
-        norm = normalizeInvoice(inv, accountId);
+        const invCurrency = (inv.amount?.currency ?? '').toUpperCase();
+        const invReceiverId = inv.receiverId ?? '';
+        const invWalletId = await resolveInvoiceWallet(
+          args.subaccountId, 'strike', invReceiverId, invCurrency, args.walletsByFingerprintHex,
+        );
+        if (invWalletId === null) {
+          console.warn(
+            `[strike-queue] event ${ev.id}: invoice fingerprint no-match` +
+            ` (currency present=${!!invCurrency}, receiverId present=${!!invReceiverId}); held unattributed`,
+          );
+        }
+        norm = normalizeInvoice(inv, invWalletId);
       } else if (ev.event_type.startsWith('payment.')) {
         // Outgoing Lightning send. No list endpoint, so webhooks are the
         // ONLY discovery path for these , critical not to drop.
+        //
+        // THE FIVE NON-INVOICE TYPES BELOW ALL HOLD UNATTRIBUTED (wallet null).
+        // Attribution needs a wallet_fingerprint, and a fingerprint needs the
+        // receiverId (canonical_account_key). Strike returns receiverId on the
+        // invoice response only; payment, receive, deposit, payout and exchange
+        // responses do not carry it. The previous currency-keyed fallback is
+        // gone with no replacement: it was built from a source_wallets.currency
+        // column that does not exist in the database and cannot be added
+        // (currency lives in ORK-encrypted encrypted_metadata, Privacy HOLD).
+        // Holding a transaction unattributed is recoverable on re-sync; filing
+        // it against a guessed wallet is not.
         const pay = await strikeGetPaymentById(creds, ev.entity_id);
-        norm = normalizePayment(pay, accountId);
+        norm = normalizePayment(pay, null);
       } else if (ev.event_type.startsWith('receive-request.')) {
         // Lightning-address receive. entityId is the receive_id (not the
         // parent receive-request id) per Strike webhook contract.
         const rec = await strikeGetReceiveById(creds, ev.entity_id);
-        norm = normalizeReceive(rec, accountId);
+        norm = normalizeReceive(rec, null);
       } else if (ev.event_type.startsWith('deposit.')) {
         const dep = await strikeGetDepositById(creds, ev.entity_id);
-        norm = normalizeDeposit(dep, accountId);
+        norm = normalizeDeposit(dep, null);
       } else if (ev.event_type.startsWith('payout.')) {
         const po = await strikeGetPayoutById(creds, ev.entity_id);
-        norm = normalizePayout(po, accountId);
+        norm = normalizePayout(po, null);
       } else if (ev.event_type.startsWith('currency-exchange-quote.')) {
         const q = await strikeGetExchangeQuoteById(creds, ev.entity_id);
-        norm = normalizeExchange(q, accountId);
+        norm = normalizeExchange(q, null);
       } else {
         // Unknown event type , log + skip + mark processed (don't loop).
         console.warn(`[strike-queue] unknown event_type=${ev.event_type} on ${ev.id}`);
