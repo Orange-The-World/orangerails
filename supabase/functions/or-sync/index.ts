@@ -799,7 +799,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // until the user opts in by re-running discovery from the UI.
         const { data: sourceWallets, error: swErr } = await ctx.serviceClient
           .from('source_wallets')
-          .select('external_wallet_id, is_synced, currency')
+          .select('external_wallet_id, is_synced, wallet_fingerprint')
           .eq('connection_id', conn.id)
           .eq('is_synced', true)
           // Deterministic order so walletIds[0] is stable across syncs. Both
@@ -823,8 +823,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           //      Cloudflare so we iterate states; simple `eq` is fine.
           //   2. Webhook queue drain (drainStrikeQueue) -- near-real-time
           //      updates for events received since last sync.
-          // Both paths merge into newTxs. Idempotent on the consumer side
-          // via UNIQUE (connection_id, external_id) so duplicates are no-ops.
+          // Both paths merge into newTxs. The two paths CAN emit the same
+          // transaction id, and that is not a no-op -- see the dedupe below.
           const supabaseUrl = Deno.env.get('SUPABASE_URL');
           if (!supabaseUrl) throw new Error('SUPABASE_URL not set');
 
@@ -832,9 +832,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // polling and the drain path below. Passing the 'strike' literal to
           // the poll stamped every polled transaction with source_wallet_id =
           // 'strike', which matches no source_wallets row on the consumer, so
-          // all rows imported as unmapped and none reached the register. See
-          // the drain block below for the full walletIds reasoning and the
-          // known [0] attribution limit; it applies equally to the poll now.
+          // all rows imported as unmapped and none reached the register. The
+          // poll path's own per-wallet attribution limit is unchanged by this
+          // commit; only the drain path below is fingerprint-attributed.
           const strikeWalletIds = (sourceWallets ?? []).map(
             (w: { external_wallet_id: string }) => w.external_wallet_id,
           );
@@ -849,34 +849,45 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // 2) Real-time: drain any webhook-queued events. Side effect:
           //    registers a Strike webhook subscription on first call.
           //
-          // walletIds is REQUIRED by DrainArgs and was never passed. queue.ts does
-          // `args.walletIds[0]` unguarded, so every Strike sync threw
-          // `TypeError: Cannot read properties of undefined (reading '0')` here, before any
-          // store call. That is why zero rows have ever landed in encrypted_transactions and
-          // why last_sync_at is still NULL on every Strike connection: the throw happens
-          // upstream of both. The generic taxonomy bucket hid it, because the message matched
-          // no classifier pattern.
+          // Invoice attribution is FINGERPRINT-keyed, not currency-keyed.
           //
-          // Passing the REAL ids from source_wallets, not an empty array. An empty-array guard
-          // would stop the crash and then silently write accountId = null onto transactions
-          // that have a correct value available, which trades a loud honest failure for quiet
-          // data corruption. These are the same ids the wallet-scoped path computes below,
-          // which is what the parameter's own doc comment in queue.ts says it is for.
+          // source_wallets has no plaintext `currency` column and is not going to
+          // get one (Privacy HOLD): currency lives inside encrypted_metadata, which
+          // is ORK-encrypted and the server cannot decrypt. Selecting `currency`
+          // here is not a design choice the server can make -- PostgREST answers
+          // 42703 (column does not exist) and, because this select sits ABOVE the
+          // per-provider branch, the `if (swErr) throw swErr` above turns that into
+          // a hard failure of or-sync for EVERY provider, not just Strike.
           //
-          // KNOWN LIMITATION, deliberately not fixed here. queue.ts:96 still takes
-          // `walletIds[0]`, so a connection with more than one synced wallet has every drained
-          // transaction stamped with whichever id sorts first. This fixes the crash; it does not
-          // fix attribution.
+          // What the server CAN read is wallet_fingerprint: a BYTEA HMAC-SHA256 over
+          // (domain || subaccount_id || provider_type || canonical_account_key ||
+          // currency), written at discovery time by or-link-complete. At drain time
+          // queue.ts recomputes that HMAC from the Strike invoice response
+          // (subaccountId + 'strike' + inv.receiverId + inv.amount.currency, upper-
+          // cased) and looks it up in this map. PostgREST hands BYTEA over the wire
+          // as a leading \x plus lowercase hex, which is exactly what toByteaHex
+          // produces on the compute side, so the two keys compare directly.
           //
-          // It is not fixable in or-sync at all. Strike's external_wallet_id is a
-          // crypto.randomUUID() (strike/index.ts:740), not the receiverId, and a connection's
-          // BTC and USD wallets are the same Strike account sharing one account_key. The only
-          // field that distinguishes them is currency, which lives in encrypted_metadata that
-          // the server cannot read. The server structurally cannot attribute a Strike
-          // transaction to the right wallet. That is ZKA working as designed, not a defect, and
-          // correcting it needs an architecture decision rather than a code change here.
-          const walletsByCurrency = new Map(
-            (sourceWallets ?? []).map((w) => [w.currency, w]),
+          // A no-match returns null: the transaction is held unattributed and heals
+          // on natural re-sync. A mis-file onto the wrong wallet is structurally
+          // impossible, because a fingerprint is scoped to one exact (subaccount,
+          // Strike account, currency) triple and is never shared between wallets.
+          //
+          // Rows whose wallet_fingerprint is NULL (discovered before fingerprinting
+          // shipped) are filtered out rather than guessed at. They contribute no map
+          // entry, so their transactions hold unattributed until the wallet is
+          // re-discovered. That is the intended trade: unattributed is recoverable,
+          // mis-filed is not.
+          //
+          // The five non-invoice event types (payment, receive, deposit, payout,
+          // exchange) carry no receiverId in the Strike response, so no fingerprint
+          // can be computed for them at all; queue.ts holds them unattributed for
+          // the same reason.
+          const walletsByFingerprintHex = new Map<string, string>(
+            (sourceWallets ?? [])
+              .filter((w: { wallet_fingerprint: string | null }) => !!w.wallet_fingerprint)
+              .map((w: { wallet_fingerprint: string; external_wallet_id: string }) =>
+                [w.wallet_fingerprint, w.external_wallet_id] as [string, string]),
           );
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
@@ -886,11 +897,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               last_sync_cursor: conn.last_sync_cursor ?? null,
             },
             credentials,
-            walletIds: strikeWalletIds,
-            walletsByCurrency,
+            subaccountId: subaccountId as string,
+            walletsByFingerprintHex,
             webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
           });
-          newTxs = [...poll.transactions, ...drain.transactions];
+          // Dedupe + attribution merge. DO NOT REMOVE, DO NOT INLINE BACK TO A
+          // CONCAT. See mergeStrikeTransactions at the bottom of this file for
+          // the full reasoning; it is unit-tested in index.test.ts. Passing
+          // strikeWalletIds (not sourceWallets) because it is exactly the array
+          // the poll was given, so "poll attributed by walletIds[0]" and the
+          // guard here read off the same value.
+          newTxs = mergeStrikeTransactions(poll.transactions, drain.transactions, strikeWalletIds);
           // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.
           next_cursor = poll.next_cursor ?? drain.next_cursor;
@@ -1064,6 +1081,89 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }));
+
+/**
+ * Merge the Strike poll batch and the Strike webhook-drain batch into the one
+ * array handed to the single `encrypted_transactions` upsert.
+ *
+ * ─── 1. Why this dedupes. DO NOT REMOVE. ─────────────────────────────────
+ *
+ * That upsert is ONE statement with onConflict 'connection_id,external_id' and
+ * ignoreDuplicates:false, i.e. ON CONFLICT DO UPDATE. Postgres raises SQLSTATE
+ * 21000 ("ON CONFLICT DO UPDATE command cannot affect row a second time") when
+ * a single command proposes the same conflict key twice, and the ENTIRE batch
+ * aborts. `connection_id` is loop-invariant inside the per-connection loop, so
+ * keying this map on `tx.id` alone is exactly the upsert's conflict key.
+ *
+ * Duplicates are routine, by two independent routes:
+ *   - STRIKE_DEFAULT_EVENT_TYPES subscribes to BOTH invoice.created and
+ *     invoice.updated. Both queue rows survive (the queue is UNIQUE on
+ *     strike_event_id, not on the invoice id), the drain does a GET-by-id at
+ *     drain time so both resolve to the same current invoice, and
+ *     normalizeInvoice returns the same `id: invoice.invoiceId` for each.
+ *   - The poll can independently return an object the drain just emitted. The
+ *     id namespaces are shared on purpose: `receive:`, `deposit:`, `payout:`
+ *     and `exchange:` are produced by the same normalizers on both paths.
+ *
+ * Why an abort is unrecoverable rather than a retry: drainStrikeQueue has
+ * ALREADY written processed_at on every event in the batch before it returned,
+ * so those events never re-drain, and `throw upsertErr` aborts the connection
+ * without advancing the cursor. Invoices self-heal on the next poll. payment.*
+ * does NOT -- Strike exposes no list endpoint for outgoing Lightning payments,
+ * so the webhook queue is their only discovery path. A payment lost to an
+ * aborted batch is lost PERMANENTLY.
+ *
+ * ─── 2. Why the drain wins, and why the fallback is GUARDED. ─────────────
+ *
+ * The drain's GET-by-id is the fresher read, so the drain record wins wholesale
+ * for every field. But its source_wallet_id is null far more often than the
+ * poll's: queue.ts passes null UNCONDITIONALLY for receive-request.*, deposit.*,
+ * payout.* and currency-exchange-quote.* (those Strike responses carry no
+ * receiverId, so no fingerprint is computable), and null for invoice.* whenever
+ * the fingerprint misses. Taking the drain record wholesale would therefore
+ * overwrite a correct poll attribution with null -- and it would not self-heal,
+ * because next_cursor advances past the object and the drain event is already
+ * processed_at-marked. That null would be permanent.
+ *
+ * So we restore the poll's source_wallet_id when the drain has none -- but ONLY
+ * when the connection has exactly one synced wallet.
+ *
+ * THIS GUARD IS NOT OPTIONAL AND MUST NOT BE "SIMPLIFIED" INTO A PLAIN
+ * `?? polled.source_wallet_id` FALLBACK. The poll does not attribute per wallet:
+ * strike/index.ts syncByWallets stamps EVERY transaction with
+ * `accountId = walletIds[0] ?? null`. On a multi-wallet connection walletIds[0]
+ * is a coin flip, and preferring it would reintroduce precisely the guessed
+ * attribution this change exists to remove -- converting an under-attribution
+ * (recoverable) into a mis-attribution (not recoverable), which is strictly
+ * worse. With exactly one synced wallet there is nothing to guess: walletIds[0]
+ * is the only wallet the transaction can belong to.
+ *
+ * @param pollTxs         transactions from adapter.syncByWallets
+ * @param drainTxs        transactions from drainStrikeQueue
+ * @param syncedWalletIds the SAME array passed to syncByWallets as walletIds
+ */
+export function mergeStrikeTransactions(
+  pollTxs: NormalizedTransaction[],
+  drainTxs: NormalizedTransaction[],
+  syncedWalletIds: string[],
+): NormalizedTransaction[] {
+  // Non-null only when the poll's attribution was not a guess.
+  const soleWalletId = syncedWalletIds.length === 1 ? syncedWalletIds[0] : null;
+
+  const byExternalId = new Map<string, NormalizedTransaction>();
+  for (const tx of pollTxs) byExternalId.set(tx.id, tx);
+  for (const tx of drainTxs) {
+    const polled = byExternalId.get(tx.id);
+    // Recover the poll's id only if the drain has none AND that id is provably
+    // the connection's only synced wallet. Every other field stays the drain's.
+    const recover =
+      tx.source_wallet_id == null &&
+      soleWalletId !== null &&
+      polled?.source_wallet_id === soleWalletId;
+    byExternalId.set(tx.id, recover ? { ...tx, source_wallet_id: soleWalletId } : tx);
+  }
+  return [...byExternalId.values()];
+}
 
 /**
  * Resolve a subaccount's `external_user_id` for sink-mode dispatch. In
