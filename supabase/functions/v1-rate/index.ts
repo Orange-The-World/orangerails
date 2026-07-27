@@ -94,7 +94,10 @@ Deno.serve(async (req: Request) => {
 
   // DB-level error is an outage or misconfiguration, not an auth failure.
   // Return 500 so callers can distinguish unavailability from a bad key.
-  if (keyErr) return errResponse(500, 'server_error', 'Database error during key lookup')
+  if (keyErr) {
+    console.error('key-lookup DB error:', keyErr.message)
+    return errResponse(500, 'server_error', 'Database error during key lookup')
+  }
   if (!keyRow) return errResponse(401, 'invalid_key', 'API key invalid or revoked')
 
   // ----- Rate limit (per consumer) -----
@@ -198,6 +201,7 @@ Deno.serve(async (req: Request) => {
     // A query error means the database is unavailable or misconfigured.
     // Return 500 so callers can distinguish DB-down from legitimate no-data.
     if (rateErr) {
+      console.error('rate-lookup DB error:', rateErr.message, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity, bucketTs }))
       return errResponse(500, 'server_error', 'Database error fetching exchange rate')
     }
 
