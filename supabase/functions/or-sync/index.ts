@@ -959,10 +959,22 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           if (upsertErr) throw upsertErr;
         }
 
-        await ctx.serviceClient
-          .from('connections')
-          .update({ last_sync_at: new Date().toISOString(), last_sync_cursor: next_cursor, status: 'active', encrypted_last_error: null })
-          .eq('id', conn.id);
+        if (newTxs.length > 0) {
+          await ctx.serviceClient
+            .from('connections')
+            .update({ last_sync_at: new Date().toISOString(), last_sync_cursor: next_cursor, status: 'active', encrypted_last_error: null })
+            .eq('id', conn.id);
+        } else {
+          // Quiet sync: nothing persisted (V3) or returned to the consumer
+          // (sink). Refresh liveness and clear any stale error, but leave
+          // last_sync_cursor exactly as it was. Overwriting it here, above all
+          // with a null next_cursor, would rewind the window and make the next
+          // sync refetch from scratch or drop history.
+          await ctx.serviceClient
+            .from('connections')
+            .update({ last_sync_at: new Date().toISOString(), status: 'active', encrypted_last_error: null })
+            .eq('id', conn.id);
+        }
 
         results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
 
