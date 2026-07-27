@@ -73,6 +73,16 @@ export const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     action: null,
     help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
   },
+  // Strike webhook subscription could not be registered. Platform-side
+  // failure: the copy is locked by the support catalog and must surface as a
+  // platform error with no customer recovery action (no key rotation, no
+  // scope change instruction). Ship verbatim.
+  "STRIKE_SCOPE_MISSING_partner.webhooks.manage": {
+    title: "We could not connect to Strike",
+    body: "We could not connect to Strike. This is a platform issue on our end, not your account settings. Please try reconnecting once the fix is live.",
+    action: null,
+    help_url: "",
+  },
 };
 
 /**
