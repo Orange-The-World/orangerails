@@ -4,8 +4,12 @@
 -- Security fix: rotate_data_key authorization gap on the authenticated path.
 --
 -- Requirement (signed by CTO + Auditor in Security & Privacy):
---   The authorization predicate must check CURRENT membership at call time,
---   for BOTH the caller and every named recipient. It must never be inferred
+--   The authorization predicate must check CURRENT membership at call time.
+--   The CALLER must be the owner or a human co-admin (workspace_admins) only:
+--   least privilege, since rotation is owner-browser driven and there is no
+--   agent-initiated rotation path. Every named RECIPIENT must be a current
+--   member of the owner's scope, and the owner must be among the recipients.
+--   Membership must never be inferred
 --   from existing wrapped_data_keys rows: those are the mutable artifact a
 --   rotation removes, so a just-removed member still co-holds the old key and
 --   would pass an old-key co-recipiency check.
@@ -163,22 +167,18 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- Authorize the CALLER as a current member of the owner's scope at call time.
-  -- Never inferred from wrapped_data_keys (the mutable artifact rotation removes).
+  -- Authorize the CALLER as the owner or a human co-admin only (least privilege).
+  -- Rotation is owner-browser driven after a revoke; there is no agent-initiated
+  -- rotation path, so active agents are recipients, never callers. Never inferred
+  -- from wrapped_data_keys (the mutable artifact rotation removes).
   IF NOT (
     v_caller = v_owner
     OR EXISTS (
       SELECT 1 FROM public.workspace_admins wa
       WHERE wa.owner_user_id = v_owner AND wa.admin_user_id = v_caller
     )
-    OR EXISTS (
-      SELECT 1 FROM public.agent_members am
-      WHERE am.owner_user_id = v_owner
-        AND am.shadow_user_id = v_caller
-        AND am.revoked_at IS NULL
-    )
   ) THEN
-    RAISE EXCEPTION 'Forbidden: caller is not a current member of this key''s scope'
+    RAISE EXCEPTION 'Forbidden: caller is not the owner or a co-admin of this key''s scope'
       USING ERRCODE = '42501';
   END IF;
 
@@ -209,6 +209,17 @@ BEGIN
     )
   ) THEN
     RAISE EXCEPTION 'One or more recipients are not current members of this key''s scope'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- The owner must be among the named recipients, else the rotation mints a new
+  -- key with no owner envelope, a self-inflicted lockout. Reject otherwise.
+  IF NOT EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(p_envelopes) e
+    WHERE (e->>'recipient_user_id')::UUID = v_owner
+  ) THEN
+    RAISE EXCEPTION 'The key owner must be among the named recipients'
       USING ERRCODE = '42501';
   END IF;
 
@@ -253,4 +264,4 @@ REVOKE ALL ON FUNCTION public.rotate_data_key(UUID, UUID, JSONB, TEXT) FROM PUBL
 GRANT EXECUTE ON FUNCTION public.rotate_data_key(UUID, UUID, JSONB, TEXT) TO authenticated;
 
 COMMENT ON FUNCTION public.rotate_data_key IS
-  'Atomic insert of new wrapped_data_keys envelopes + audit entry after a data key rotation. Authorizes the caller and every named recipient against current membership at call time (owner, workspace_admins, non-revoked agent_members), never old-key co-recipiency. Registers the new key owner in data_keys.';
+  'Atomic insert of new wrapped_data_keys envelopes + audit entry after a data key rotation. Authorizes the caller as the owner or workspace_admins only (least privilege), and every named recipient against current membership at call time (owner, workspace_admins, non-revoked agent_members), never old-key co-recipiency. Requires the owner among the recipients. Registers the new key owner in data_keys.';
