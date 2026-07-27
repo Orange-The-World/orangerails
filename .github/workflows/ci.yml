@@ -100,7 +100,7 @@ jobs:
       # the pinned Deno below. Lower it in the same PR that fixes errors -- the
       # job prints the new value when the count drops. At 0, delete the ratchet
       # and let `deno check` fail on its own.
-      DENO_CHECK_BASELINE: '19'
+      DENO_CHECK_BASELINE: '18'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
