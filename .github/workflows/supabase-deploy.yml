@@ -128,6 +128,7 @@ jobs:
         uses: supabase/setup-cli@v2
         with:
           version: latest
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Deploy Supabase edge functions
         env:
