@@ -487,8 +487,8 @@ Deno.serve(
       };
       const rowFor = (w: InboundWallet) =>
         existingByFingerprint.get(fingerprintByExternalId.get(w.external_wallet_id!)!)!;
-      const knownWallets = wallets.filter(isKnown);
-      const newWallets = wallets.filter((w) => !isKnown(w));
+      let knownWallets = wallets.filter(isKnown);
+      let newWallets = wallets.filter((w) => !isKnown(w));
 
       // 5a. Full reconnect: we already hold every wallet the user picked. Refresh
       // the credential on the connection(s) they live under and hand back their
@@ -546,6 +546,31 @@ Deno.serve(
             cors,
           );
         }
+      }
+
+      // Reconnect-guard fallthrough: the liveness guard above found all referenced
+      // connections are gone but their source_wallets rows survived as orphans.
+      // We arrive here with newWallets=[] and knownWallets holding every submitted
+      // wallet, so 5b would create the connection row and then insert zero wallets.
+      // Fix: delete the orphaned rows (their connection no longer exists) and
+      // reclassify the wallets as new so 5b creates fresh source_wallets under
+      // the new connection.
+      if (newWallets.length === 0 && knownWallets.length > 0) {
+        const staleConnIds = [...new Set(knownWallets.map((w) => rowFor(w).connectionId))];
+        console.warn(
+          "[or-link-complete] stale reconnect guard: cleaning orphaned source_wallets for dead connections",
+          staleConnIds,
+        );
+        const { error: delErr } = await serviceClient
+          .from("source_wallets")
+          .delete()
+          .in("connection_id", staleConnIds);
+        if (delErr) {
+          console.error("[or-link-complete] orphaned source_wallets cleanup failed:", delErr.message);
+          return jsonResponse({ error: "Failed to clean up orphaned wallets" }, 500, cors);
+        }
+        newWallets = [...knownWallets];
+        knownWallets = [];
       }
 
       // 5b. First connect, or a partial reconnect where some picked wallets are
