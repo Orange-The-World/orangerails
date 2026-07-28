@@ -77,8 +77,15 @@ export interface NormalizedTransaction {
   /** Hex, RPC display order. */
   txid: string;
   block_height: number;
-  /** ISO date YYYY-MM-DD derived from the block header timestamp. */
+  /** ISO date YYYY-MM-DD derived from the block header timestamp. Kept for
+   *  the server's date-scoped storage index and pagination, and for
+   *  backward compatibility with records sealed before `timestamp` existed. */
   occurred_at: string;
+  /** Full ISO 8601 UTC instant of the block that included this transaction,
+   *  derived from the same block header timestamp as occurred_at. Sealed
+   *  inside the envelope only, so the server never sees it. Lets consumers
+   *  value each transaction at its real moment instead of end-of-day. */
+  timestamp: string;
   direction: 'in' | 'out';
   /** Total sats received in matched outputs (for 'in' direction). */
   amount_sats: number;
@@ -546,6 +553,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   );
   if (fromHeight > tip) {
     // Already current. Short-circuit with empty result.
+    // Guard: this path never fetched a filter or scanned a block, so it
+    // has not earned any forward progress on lastBlockScanned. Return the
+    // previous cursor unchanged -- the caller must not persist a height
+    // the scan never reached.
     emit(opts, progress('fetching_filters', 100, 'Already up to date.'));
     emit(opts, progress('matching', 100));
     emit(opts, progress('fetching_blocks', 100));
@@ -554,7 +565,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     emit(opts, progress('uploading', 100));
     return {
       txCount: 0,
-      lastBlockScanned: tip,
+      lastBlockScanned: opts.lastBlockScanned ?? -1,
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
@@ -689,6 +700,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     const blockHeight = hits[i].height;
     const header = parseBlockHeader(block.raw);
     const occurredAt = isoDateFromUnix(header.timestamp);
+    // Full instant, not just the date. Rides inside the sealed envelope so
+    // the server learns nothing new; consumers use it for transaction-time
+    // exchange-rate valuation instead of end-of-day.
+    const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
 
     const cur = new Cursor(block.raw);
     cur.pos = header.txStart;
@@ -749,6 +764,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
           txid: tx.txid,
           block_height: blockHeight,
           occurred_at: occurredAt,
+          timestamp: occurredAtInstant,
           direction: 'out',
           amount_sats: Number(netOut),
           address: recipientAddress,
@@ -771,6 +787,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
           txid: tx.txid,
           block_height: blockHeight,
           occurred_at: occurredAt,
+          timestamp: occurredAtInstant,
           direction: 'in',
           amount_sats: Number(receivedAmount),
           address: receivedAddress,

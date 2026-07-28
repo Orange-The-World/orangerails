@@ -1086,7 +1086,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
  * Merge the Strike poll batch and the Strike webhook-drain batch into the one
  * array handed to the single `encrypted_transactions` upsert.
  *
- * ─── 1. Why this dedupes. DO NOT REMOVE. ─────────────────────────
+ * ─── 1. Why this dedupes. DO NOT REMOVE. ─────────────────────────────────
  *
  * That upsert is ONE statement with onConflict 'connection_id,external_id' and
  * ignoreDuplicates:false, i.e. ON CONFLICT DO UPDATE. Postgres raises SQLSTATE
@@ -1113,7 +1113,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
  * so the webhook queue is their only discovery path. A payment lost to an
  * aborted batch is lost PERMANENTLY.
  *
- * ─── 2. Why the drain wins, and why the fallback is GUARDED. ─────────
+ * ─── 2. Why the drain wins, and why the fallback is GUARDED. ─────────────
  *
  * The drain's GET-by-id is the fresher read, so the drain record wins wholesale
  * for every field. But its source_wallet_id is null far more often than the

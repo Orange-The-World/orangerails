@@ -1,0 +1,61 @@
+name: Deploy v1-rate to orbi-prod (dark, manual only)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: orbi-prod-deploy-v1-rate
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require project ref
+        env:
+          PROJECT_REF: ${{ vars.SUPABASE_PROJECT_ID_ORBI_PROD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PROJECT_REF}" ]; then
+            echo "SUPABASE_PROJECT_ID_ORBI_PROD is not set. Refusing to deploy."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy v1-rate (with retry)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Attempt ${attempt}/3"
+            if supabase functions deploy v1-rate \
+              --project-ref "${{ vars.SUPABASE_PROJECT_ID_ORBI_PROD }}"; then
+              echo "Deploy succeeded on attempt ${attempt}"
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "All 3 attempts failed"
+              exit 1
+            fi
+            echo "Attempt ${attempt} failed, retrying in 10s..."
+            sleep 10
+          done
+
+      - name: Verify function is listed (read-back)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          supabase functions list \
+            --project-ref "${{ vars.SUPABASE_PROJECT_ID_ORBI_PROD }}" \
+            | grep v1-rate
