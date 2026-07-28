@@ -497,43 +497,55 @@ Deno.serve(
       // touched: it is stable for the lifetime of the connection row.
       if (newWallets.length === 0 && knownWallets.length > 0) {
         const reconnectConnIds = [...new Set(knownWallets.map((w) => rowFor(w).connectionId))];
-        for (const connId of reconnectConnIds) {
-          const { error: updErr } = await serviceClient
-            .from("connections")
-            .update({
-              encrypted_label: body.encrypted_label ?? null,
-              encrypted_credentials: body.encrypted_credentials,
-              credentials_key_version: 1,
-              status: initialStatus,
-            })
-            .eq("id", connId);
-          if (updErr) {
-            console.error("[or-link-complete] reconnect credential refresh failed:", updErr.message);
-            return jsonResponse({ error: "Failed to refresh connection" }, 500, cors);
-          }
-        }
 
-        // The pure-reconnect path: every picked wallet is one we already hold,
-        // so EVERY row here comes back under its stored id while the caller only
-        // knows the id it just minted. This is the path where the two ids always
-        // disagree, and echoing the submitted one is what makes the response
-        // correlatable at all.
-        const reconnected = knownWallets.map((w) => ({
-          id: rowFor(w).id,
-          external_wallet_id: rowFor(w).externalWalletId,
-          submitted_external_wallet_id: w.external_wallet_id!,
-        }));
-        return jsonResponse(
-          {
-            subaccount_id: subaccountId,
-            connection_id: reconnectConnIds[0],
-            source_wallets: reconnected,
-            source_wallet_id: reconnected.length === 1 ? reconnected[0].id : undefined,
-            subaccount_was_newly_created: subaccountWasNewlyCreated,
-          },
-          200,
-          cors,
-        );
+        // Guard: verify referenced connections still exist before treating this as a reconnect.
+        // If a connection was deleted without cleaning up source_wallets, re-link must create a new row.
+        const { data: liveConns, error: liveErr } = await serviceClient
+          .from("connections")
+          .select("id")
+          .in("id", reconnectConnIds);
+        const liveIds = new Set((liveConns ?? []).map((c: { id: string }) => c.id));
+        const allLive = !liveErr && reconnectConnIds.every((id) => liveIds.has(id));
+
+        if (allLive) {
+          for (const connId of reconnectConnIds) {
+            const { error: updErr } = await serviceClient
+              .from("connections")
+              .update({
+                encrypted_label: body.encrypted_label ?? null,
+                encrypted_credentials: body.encrypted_credentials,
+                credentials_key_version: 1,
+                status: initialStatus,
+              })
+              .eq("id", connId);
+            if (updErr) {
+              console.error("[or-link-complete] reconnect credential refresh failed:", updErr.message);
+              return jsonResponse({ error: "Failed to refresh connection" }, 500, cors);
+            }
+          }
+
+          // The pure-reconnect path: every picked wallet is one we already hold,
+          // so EVERY row here comes back under its stored id while the caller only
+          // knows the id it just minted. This is the path where the two ids always
+          // disagree, and echoing the submitted one is what makes the response
+          // correlatable at all.
+          const reconnected = knownWallets.map((w) => ({
+            id: rowFor(w).id,
+            external_wallet_id: rowFor(w).externalWalletId,
+            submitted_external_wallet_id: w.external_wallet_id!,
+          }));
+          return jsonResponse(
+            {
+              subaccount_id: subaccountId,
+              connection_id: reconnectConnIds[0],
+              source_wallets: reconnected,
+              source_wallet_id: reconnected.length === 1 ? reconnected[0].id : undefined,
+              subaccount_was_newly_created: subaccountWasNewlyCreated,
+            },
+            200,
+            cors,
+          );
+        }
       }
 
       // 5b. First connect, or a partial reconnect where some picked wallets are
