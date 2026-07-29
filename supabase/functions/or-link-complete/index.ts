@@ -804,5 +804,5 @@ Deno.serve(
       await reportError(err, 'or-link-complete', req);
       return jsonResponse({ error: "InternalError" }, 500, cors);
     }
-  }),
+  }, 'or-link-complete'),
 );
