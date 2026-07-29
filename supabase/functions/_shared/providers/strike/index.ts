@@ -758,6 +758,12 @@ async function syncByWallets(
 
   const transactions: NormalizedTransaction[] = [];
   let maxSeen = cursor ?? '';
+  // Advance the sync cursor only for items this connection actually imported
+  // (see the trackMax calls inside each if (norm) block below). Advancing on
+  // every fetched item, including ones normalize drops, moves the watermark
+  // past events that were never persisted, so a later-settling item is skipped
+  // forever. Tracking only kept items trades that silent loss for a loud,
+  // recoverable re-scan of the pending window.
   const trackMax = (iso: string | undefined) => {
     if (iso && iso > maxSeen) maxSeen = iso;
   };
@@ -768,8 +774,10 @@ async function syncByWallets(
       const batch = await fetchInvoicesByState(creds, state, cursor);
       for (const inv of batch) {
         const norm = normalizeInvoice(inv, accountId);
-        if (norm) transactions.push(norm);
-        trackMax(inv.created);
+        if (norm) {
+          transactions.push(norm);
+          trackMax(inv.created);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -785,8 +793,10 @@ async function syncByWallets(
     );
     for (const r of receives) {
       const norm = normalizeReceive(r, accountId);
-      if (norm) transactions.push(norm);
-      trackMax(r.created);
+      if (norm) {
+        transactions.push(norm);
+        trackMax(r.created);
+      }
     }
   } catch (err) {
     if (isScopeMissing(err)) {
@@ -802,8 +812,10 @@ async function syncByWallets(
     );
     for (const d of deposits) {
       const norm = normalizeDeposit(d, accountId);
-      if (norm) transactions.push(norm);
-      trackMax(d.created);
+      if (norm) {
+        transactions.push(norm);
+        trackMax(d.created);
+      }
     }
   } catch (err) {
     if (isScopeMissing(err)) {
@@ -819,8 +831,10 @@ async function syncByWallets(
     );
     for (const p of payouts) {
       const norm = normalizePayout(p, accountId);
-      if (norm) transactions.push(norm);
-      trackMax(p.created);
+      if (norm) {
+        transactions.push(norm);
+        trackMax(p.created);
+      }
     }
   } catch (err) {
     if (isScopeMissing(err)) {
@@ -836,8 +850,10 @@ async function syncByWallets(
     );
     for (const q of quotes) {
       const norm = normalizeExchange(q, accountId);
-      if (norm) transactions.push(norm);
-      trackMax(q.created);
+      if (norm) {
+        transactions.push(norm);
+        trackMax(q.created);
+      }
     }
   } catch (err) {
     if (isScopeMissing(err)) {
