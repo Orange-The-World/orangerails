@@ -967,7 +967,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // exactly what sink mode hands the consumer. Evaluated once per pass,
         // not per page. Two failure modes this closes:
         //   - Empty pass banking a stale next_cursor left in scope: skipped
-        //     because nothing persisted (the f98df78a-holds-another-cursor bug).
+        //     because nothing persisted (a connection banking a cursor left
+        //     in scope from an unrelated connection's pass).
         //   - A pass that persisted rows but whose adapter returned a null
         //     next_cursor: we refresh liveness but leave the cursor untouched,
         //     never writing null, which would rewind the window and drop history.
