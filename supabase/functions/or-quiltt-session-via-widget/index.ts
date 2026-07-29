@@ -249,5 +249,5 @@ Deno.serve(
       );
       return jsonResponse({ error: "Internal error" }, 500, cors);
     }
-  }),
+  }, 'or-quiltt-session-via-widget'),
 );
