@@ -4,7 +4,7 @@
  * The "Users read own audit entries" policy on audit_entries must prevent
  * any authenticated user from reading another user's rows. This was left
  * with zero test coverage after the agent-membership feature retirement
- * (PR #230) removed the only fixture that seeded the table.
+ * removed the only fixture that seeded the table.
  *
  * This is a live-database test. It requires three environment variables:
  *   ORANGERAILS_TEST_SUPABASE_URL         - dev Supabase project URL
