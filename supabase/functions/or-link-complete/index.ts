@@ -74,7 +74,7 @@ import { toByteaHex } from "../_shared/bytea.ts";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
 import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
-import { wrapSentryHandler } from "../_shared/sentry.ts";
+import { wrapSentryHandler, reportError } from "../_shared/sentry.ts";
 import {
   computeAccountFingerprint,
   computeWalletFingerprint,
@@ -263,6 +263,7 @@ Deno.serve(
           .maybeSingle();
         if (claimErr) {
           console.error("[or-link-complete] widget token claim error:", claimErr.message);
+          await reportError(claimErr, 'or-link-complete', req);
           return jsonResponse({ error: "Invalid widget token" }, 401, cors);
         }
         if (!claimed) {
@@ -309,7 +310,8 @@ Deno.serve(
           // that is supposed to have it, which is the duplicate bug #153 exists
           // to kill. The message is swallowed: it can carry the account key.
           console.error("[or-link-complete] discovery_sessions read failed:", discErr.message);
-          return jsonResponse({ error: "Failed to resolve wallet identity" }, 500, cors);
+          await reportError(discErr, 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: discErr.code ?? "unknown" }, 500, cors);
         }
         for (const row of discovered ?? []) {
           discoveredByExternalId.set(row.external_wallet_id as string, {
@@ -405,7 +407,8 @@ Deno.serve(
           .single();
         if (insSubErr || !createdSub) {
           console.error("[or-link-complete] subaccount insert failed:", insSubErr);
-          return jsonResponse({ error: "Failed to create subaccount" }, 500, cors);
+          await reportError(insSubErr ?? new Error('subaccount insert returned no data'), 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: insSubErr?.code ?? "unknown" }, 500, cors);
         }
         subaccountId = createdSub.id as string;
         subaccountWasNewlyCreated = true;
@@ -470,7 +473,8 @@ Deno.serve(
           .in("wallet_fingerprint", fingerprintHexes);
         if (exErr) {
           console.error("[or-link-complete] wallet dedup lookup failed:", exErr.message);
-          return jsonResponse({ error: "Failed to resolve existing wallets" }, 500, cors);
+          await reportError(exErr, 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: exErr.code ?? "unknown" }, 500, cors);
         }
         for (const sw of existingSws ?? []) {
           existingByFingerprint.set(sw.wallet_fingerprint as string, {
@@ -509,7 +513,8 @@ Deno.serve(
             .eq("id", connId);
           if (updErr) {
             console.error("[or-link-complete] reconnect credential refresh failed:", updErr.message);
-            return jsonResponse({ error: "Failed to refresh connection" }, 500, cors);
+            await reportError(updErr, 'or-link-complete', req);
+            return jsonResponse({ error: "DatabaseError", code: updErr.code ?? "unknown" }, 500, cors);
           }
         }
 
@@ -565,7 +570,8 @@ Deno.serve(
         .single();
       if (insConnErr || !createdConn) {
         console.error("[or-link-complete] connection insert failed:", insConnErr);
-        return jsonResponse({ error: "Failed to create connection" }, 500, cors);
+        await reportError(insConnErr ?? new Error('connection insert returned no data'), 'or-link-complete', req);
+        return jsonResponse({ error: "DatabaseError", code: insConnErr?.code ?? "unknown" }, 500, cors);
       }
       const connectionId = createdConn.id as string;
 
@@ -618,7 +624,8 @@ Deno.serve(
           .select("id, external_wallet_id");
         if (err || !created) {
           console.error("[or-link-complete] source_wallet insert failed:", err);
-          return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+          await reportError(err ?? new Error('source_wallet insert returned no data'), 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: err?.code ?? "unknown" }, 500, cors);
         }
         for (const row of created) {
           // A row we just inserted stores the id we were sent, so the two agree.
@@ -676,7 +683,8 @@ Deno.serve(
           .select("id, external_wallet_id");
         if (err) {
           console.error("[or-link-complete] source_wallet upsert failed:", err);
-          return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+          await reportError(err, 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: err.code ?? "unknown" }, 500, cors);
         }
         for (const row of created ?? []) {
           // Ours won the insert, so the stored id is the one we were sent.
@@ -727,7 +735,8 @@ Deno.serve(
               raced?.length ?? 0,
               lost.length,
             );
-            return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+            await reportError(reErr ?? new Error('conflict re-read returned partial result set'), 'or-link-complete', req);
+            return jsonResponse({ error: "DatabaseError", code: reErr?.code ?? "unknown" }, 500, cors);
           }
           for (const row of raced) {
             const submitted = submittedByFingerprint.get(row.wallet_fingerprint as string);
@@ -741,7 +750,8 @@ Deno.serve(
                 "[or-link-complete] conflict re-read returned a row whose fingerprint " +
                   "matches no submitted wallet; refusing to guess the correlation",
               );
-              return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+              await reportError(new Error('conflict re-read returned a row whose fingerprint matches no submitted wallet'), 'or-link-complete', req);
+              return jsonResponse({ error: "InternalError" }, 500, cors);
             }
             sourceWallets.push({
               id: row.id as string,
@@ -768,7 +778,8 @@ Deno.serve(
 
       if (sourceWallets.length === 0) {
         console.error("[or-link-complete] no source wallets resolved for a non-empty selection");
-        return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+        await reportError(new Error('no source wallets resolved for a non-empty selection'), 'or-link-complete', req);
+        return jsonResponse({ error: "InternalError" }, 500, cors);
       }
 
       return jsonResponse(
@@ -790,7 +801,8 @@ Deno.serve(
       );
     } catch (err) {
       console.error("[or-link-complete] fatal:", err);
-      return jsonResponse({ error: "Internal error" }, 500, cors);
+      await reportError(err, 'or-link-complete', req);
+      return jsonResponse({ error: "InternalError" }, 500, cors);
     }
   }),
 );
