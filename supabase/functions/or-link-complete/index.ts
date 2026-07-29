@@ -485,6 +485,58 @@ Deno.serve(
         }
       }
 
+      // 5.1. Drop matches whose parent connection no longer exists. A deleted
+      // connection can leave source_wallets rows behind (no FK cascade covers
+      // that table), and treating those rows as a reconnect would UPDATE a
+      // connection row that is gone: 0 rows affected, no error raised, a 200
+      // carrying a dead connection_id, and no new row ever written. Verify the
+      // parent connections are alive, remove stale wallet rows loudly, and let
+      // the re-link fall through to a clean create below.
+      if (existingByFingerprint.size > 0) {
+        const matchedConnIds = [
+          ...new Set([...existingByFingerprint.values()].map((r) => r.connectionId)),
+        ];
+        const { data: liveConns, error: liveErr } = await serviceClient
+          .from("connections")
+          .select("id")
+          .in("id", matchedConnIds);
+        if (liveErr) {
+          console.error("[or-link-complete] connection liveness check failed:", liveErr.message);
+          await reportError(liveErr, 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: liveErr.code ?? "unknown" }, 500, cors);
+        }
+        const liveIds = new Set((liveConns ?? []).map((c: { id: string }) => c.id));
+        const staleWalletIds = [...existingByFingerprint.values()]
+          .filter((r) => !liveIds.has(r.connectionId))
+          .map((r) => r.id);
+        if (staleWalletIds.length > 0) {
+          console.error(
+            "[or-link-complete] %d source_wallet row(s) reference deleted connection(s); " +
+              "removing them so this link creates a fresh connection instead of updating a dead one",
+            staleWalletIds.length,
+          );
+          await reportError(
+            new Error(
+              `stale source_wallets referenced deleted connection(s); cleaned ${staleWalletIds.length} row(s)`,
+            ),
+            'or-link-complete',
+            req,
+          );
+          const { error: staleDelErr } = await serviceClient
+            .from("source_wallets")
+            .delete()
+            .in("id", staleWalletIds);
+          if (staleDelErr) {
+            console.error("[or-link-complete] stale source_wallet cleanup failed:", staleDelErr.message);
+            await reportError(staleDelErr, 'or-link-complete', req);
+            return jsonResponse({ error: "DatabaseError", code: staleDelErr.code ?? "unknown" }, 500, cors);
+          }
+          for (const [fp, r] of [...existingByFingerprint.entries()]) {
+            if (!liveIds.has(r.connectionId)) existingByFingerprint.delete(fp);
+          }
+        }
+      }
+
       const isKnown = (w: InboundWallet): boolean => {
         const fp = fingerprintByExternalId.get(w.external_wallet_id!);
         return fp !== undefined && existingByFingerprint.has(fp);
