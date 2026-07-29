@@ -21,7 +21,7 @@
  * one audit_entries row is seeded for each via append_audit_entry (a
  * SECURITY DEFINER function executable only by service_role). Each user
  * then queries audit_entries with their own JWT. No shared fixtures and no
- * dependency on the retired PR #230 setup.
+ * dependency on the retired agent-membership fixture.
  */
 
 import { createClient } from '@supabase/supabase-js';
