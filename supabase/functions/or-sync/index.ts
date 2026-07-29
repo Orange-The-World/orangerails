@@ -348,7 +348,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ synced: 0, connections: [] }, 200, cors);
     }
 
-    const results: Array<{ connection_id: string; synced: number; next_cursor: string | null; error?: string }> = [];
+    const results: Array<{
+      connection_id: string;
+      synced: number;
+      next_cursor: string | null;
+      error?: string;
+      correlation_id?: string;
+      message?: string;
+      detail?: string;
+      action?: string;
+      help_url?: string | null;
+    }> = [];
     // Sink-mode-only: collect per-connection sink outputs to merge into
     // a single `rows` map at the end. Empty in legacy mode.
     const sinkOutputs: SinkOutput[] = [];
@@ -1080,7 +1090,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     console.error('[or-sync] fatal:', err);
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-}));
+}, 'or-sync'));
 
 /**
  * Merge the Strike poll batch and the Strike webhook-drain batch into the one
