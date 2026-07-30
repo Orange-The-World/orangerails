@@ -8,7 +8,7 @@ import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
-import { strikeMarkerToCopy } from "@/lib/strike-error-copy";
+import { strikeMarkerToCopy, upstreamCodeToCopy } from "@/lib/strike-error-copy";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
@@ -458,7 +458,7 @@ function AppHome() {
                 const raw = isAdminView
                   ? await decryptString(c.encrypted_last_error, txnsKey!)
                   : await decryptText(c.encrypted_last_error);
-                decrypted_last_error = raw || "(empty error , check browser console for details)";
+                decrypted_last_error = upstreamCodeToCopy(raw);
               } catch {
                 decrypted_last_error = "(could not decrypt error , check browser console)";
               }
