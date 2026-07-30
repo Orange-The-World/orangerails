@@ -99,6 +99,17 @@ Deno.test('a state we have never seen is returned, not dropped', () => {
 });
 
 // 3. Null state fails open.
+//
+// Quiltt declares `Account.state` as `AccountState!`, NON_NULL, VERIFIED by
+// introspection against prod. OR types it `string | null` anyway. Those are not
+// in conflict: the schema states the obligation the vendor has undertaken, and
+// our type states what this handler is prepared to survive if the vendor breaks
+// it. Under a conformant response the branch below is unreachable.
+//
+// It is asserted regardless, because the cost of the two failure modes is not
+// symmetric. If the branch is dead we have one cheap test. If it is ever live
+// and we deleted it as unreachable, a vendor schema violation turns into silent
+// data loss on a ticket that exists because accounts went missing silently.
 
 Deno.test('a null state is included, and shows up in distinct_states', () => {
   const out = buildAccountsResponse([acct('a', 'OPEN'), acct('b', null)]);
