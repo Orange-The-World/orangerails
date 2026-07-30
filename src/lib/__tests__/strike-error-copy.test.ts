@@ -116,3 +116,25 @@ describe("upstreamMarkerToCopy (plaintext pre-check, before decrypt)", () => {
     }
   });
 });
+
+describe("live prod status=error shapes render exact copy (DL-0320 acceptance)", () => {
+  // The 7 live prod rows the Auditor verified read-only on the connections
+  // table are 6x UPSTREAM_OTHER and 1x UPSTREAM_UNAVAILABLE, all persisted
+  // PLAINTEXT as CODE:correlationId. Pin the EXACT customer-facing string,
+  // correlation hex included, on the raw-value pre-check path (no decrypt), so
+  // any wording drift fails the suite instead of shipping to a customer.
+  it("UPSTREAM_OTHER plaintext row renders the exact generic copy with the reference", () => {
+    expect(upstreamMarkerToCopy("UPSTREAM_OTHER:00ff00ff")).toBe(
+      "We hit an unexpected error syncing this account. Try again in a " +
+        "few minutes. If it keeps happening, contact support and quote the " +
+        "reference below. (Reference: 00ff00ff)",
+    );
+  });
+
+  it("UPSTREAM_UNAVAILABLE plaintext row renders the exact copy with the reference", () => {
+    expect(upstreamMarkerToCopy("UPSTREAM_UNAVAILABLE:00ff00ff")).toBe(
+      "Your bank's service is temporarily unreachable. Try again in a " +
+        "few minutes. (Reference: 00ff00ff)",
+    );
+  });
+});
