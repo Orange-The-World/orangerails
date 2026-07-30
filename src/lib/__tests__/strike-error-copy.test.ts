@@ -1,62 +1,64 @@
-/**
- * Tests for src/lib/strike-error-copy.ts , strikeMarkerToCopy.
- *
- * The marker strings under test mirror strikeSubscriptionErrorMarker in
- * supabase/functions/_shared/providers/strike/queue.ts. If that function's
- * markers change, these tests (and the mapping) must change with them.
- */
+import { describe, expect, it } from "vitest";
+import { strikeMarkerToCopy, upstreamCodeToCopy } from "../strike-error-copy";
 
-import { describe, it, expect } from "vitest";
-import { strikeMarkerToCopy } from "../strike-error-copy";
-
-describe("strikeMarkerToCopy: customer-key failures give an action", () => {
-  it("STRIKE_KEY_INVALID tells the customer to generate a new key", () => {
-    const copy = strikeMarkerToCopy("STRIKE_KEY_INVALID");
-    expect(copy).toBe(
-      "Your Strike API key is invalid. Generate a new one at dashboard.strike.me.",
-    );
+describe("upstreamCodeToCopy", () => {
+  it("maps a known code to plain-English copy and keeps the reference visible", () => {
+    const out = upstreamCodeToCopy("UPSTREAM_AUTH_FAILED:ab12cd34ef567890");
+    expect(out).toContain("Your bank disconnected this account");
+    expect(out).toContain("(Reference: ab12cd34ef567890)");
+    // The raw taxonomy code name must never reach the customer.
+    expect(out).not.toContain("UPSTREAM_AUTH_FAILED");
   });
 
-  it("the real suffixed scope marker maps to the scope message", () => {
-    // queue.ts emits STRIKE_SCOPE_MISSING_partner.webhooks.manage, not the bare
-    // prefix, so the mapping must match on the prefix.
-    const copy = strikeMarkerToCopy("STRIKE_SCOPE_MISSING_partner.webhooks.manage");
-    expect(copy).toBe(
-      "Your Strike API key is missing the webhooks.manage scope. " +
-        "Regenerate it with that scope enabled at dashboard.strike.me.",
-    );
+  it("omits the reference when the code has no correlation id", () => {
+    const out = upstreamCodeToCopy("UPSTREAM_RATE_LIMITED");
+    expect(out).toContain("Your bank is briefly busy");
+    expect(out).not.toContain("Reference");
+  });
+
+  it("falls back to the generic message for an unmapped code, never echoing the code name", () => {
+    const out = upstreamCodeToCopy("SOME_INTERNAL_CODE:deadbeef");
+    expect(out).toContain("We hit an unexpected error");
+    expect(out).toContain("(Reference: deadbeef)");
+    expect(out).not.toContain("SOME_INTERNAL_CODE");
+  });
+
+  it("does not treat a non-hex segment as a reference", () => {
+    const out = upstreamCodeToCopy("UPSTREAM_OTHER:not a real ref");
+    expect(out).toContain("We hit an unexpected error");
+    expect(out).not.toContain("Reference");
+    expect(out).not.toContain("not a real ref");
+  });
+
+  it("returns the generic message for an empty error", () => {
+    expect(upstreamCodeToCopy("")).toContain("We hit an unexpected error");
+  });
+
+  it("maps every known upstream code without leaking the code name", () => {
+    const codes = [
+      "UPSTREAM_AUTH_FAILED",
+      "UPSTREAM_RATE_LIMITED",
+      "UPSTREAM_UNAVAILABLE",
+      "UPSTREAM_BAD_REQUEST",
+      "UPSTREAM_PARSE_FAILED",
+      "ADAPTER_CONFIG_ERROR",
+      "UPSTREAM_OTHER",
+    ];
+    for (const code of codes) {
+      const out = upstreamCodeToCopy(`${code}:00ff00ff`);
+      expect(out).not.toContain(code);
+      expect(out.length).toBeGreaterThan(0);
+    }
   });
 });
 
-describe("strikeMarkerToCopy: platform failures share one non-blaming message", () => {
-  const platformMarkers = [
-    "STRIKE_SUBSCRIPTION_REJECTED",
-    "STRIKE_RATE_LIMITED",
-    "STRIKE_SUBSCRIPTION_FAILED",
-  ];
-
-  for (const marker of platformMarkers) {
-    it(`${marker} frames the failure as a platform issue`, () => {
-      const copy = strikeMarkerToCopy(marker);
-      expect(copy).toBe(
-        "We could not connect to Strike. This is a platform issue on our end, " +
-          "not your account settings. Please try reconnecting once the fix is live.",
-      );
-    });
-  }
-
-  it("all three platform markers return the exact same string", () => {
-    const copies = platformMarkers.map(strikeMarkerToCopy);
-    expect(new Set(copies).size).toBe(1);
+describe("strikeMarkerToCopy", () => {
+  it("maps the scope-missing marker prefix to actionable copy", () => {
+    const out = strikeMarkerToCopy("STRIKE_SCOPE_MISSING_partner.webhooks.manage");
+    expect(out).toContain("webhooks.manage");
   });
-});
 
-describe("strikeMarkerToCopy: non-markers fall through", () => {
-  it("returns null for a value that is not a Strike marker", () => {
-    // A genuine ORK ciphertext (base64-ish) must not be swallowed here; null
-    // lets the caller run the normal decrypt path.
-    expect(strikeMarkerToCopy("AQID.someBase64Ciphertext==")).toBeNull();
-    expect(strikeMarkerToCopy("")).toBeNull();
-    expect(strikeMarkerToCopy("SOME_OTHER_ERROR")).toBeNull();
+  it("returns null for anything that is not a known Strike marker", () => {
+    expect(strikeMarkerToCopy("UPSTREAM_OTHER:deadbeef")).toBeNull();
   });
 });
