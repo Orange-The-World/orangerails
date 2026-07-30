@@ -228,6 +228,13 @@ async function handleEvent(
   // The fallback is the profile id on the payload, which arrived on an
   // HMAC-verified request. It scopes the data pull and nothing else: the
   // platform this data is filed under still comes off the subaccount row.
+  //
+  // Note this reads the map by subaccount_id, while the re-resolve block above
+  // reads it by profile id. Two keys into one table can disagree, and here they
+  // do: a legacy subaccount that later mints a session gets a NEW profile mapped
+  // to it while its queued events still carry the old one. chooseProfileId keeps
+  // the event's own profile in that case, because only that credential can read
+  // the connection the event is about.
   const { data: map, error: mapErr } = await client
     .from('quiltt_profile_map')
     .select('quiltt_profile_id')
@@ -241,6 +248,13 @@ async function handleEvent(
     console.warn(
       `[or-quiltt-sync] event ${ev.event_id}: no quiltt_profile_map row for this ` +
         `subaccount, using the profile id from the verified payload (DL-0465)`,
+    );
+  } else if (profile.source === 'payload-rebound') {
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: subaccount ${subaccountId} is mapped to ` +
+        `profile ${map?.quiltt_profile_id}, but this event came from ${profile.profileId}. ` +
+        `Using the event's own profile. The subaccount was rebound by a later session ` +
+        `mint and now has two Quiltt profiles (DL-0465)`,
     );
   }
 
