@@ -1,17 +1,17 @@
 /**
- * or-quiltt-accounts — list the bank accounts under a Quiltt connection.
+ * or-quiltt-accounts: list the bank accounts under a Quiltt connection.
  *
  * Integrating apps call this immediately
  * after a successful Quiltt link to discover which accounts the user
  * just authorized. The response feeds the post-link review screen ("you
- * linked 3 accounts at Chase — pick which to import") and seeds the
+ * linked 3 accounts at Chase, pick which to import") and seeds the
  * integrator's local wallet rows.
  *
  * Why a dedicated endpoint: V2 cannot talk to Quiltt directly because
  * Quiltt's API key is bound to OR's account, and the per-user Profile
  * id lives in OR's `quiltt_profile_map`. OR brokers the GraphQL call
  * with Basic auth (`profile_id:api_key`) and hands back the cleartext
- * account metadata (institution name, mask, type, currency) — none of
+ * account metadata (institution name, mask, type, currency), none of
  * which is sensitive enough to require ZKA-style encryption.
  *
  * Auth: X-Platform-API-Key (platform mode). Direct mode is rejected:
@@ -23,18 +23,30 @@
  *   quiltt_connection_id:  string  Quiltt's connectionId returned by
  *                                  onExitSuccess in the popup flow
  *
- * Response 200:
+ * Response 200 (same shape in both modes):
  *   { accounts: [
- *       { id, name, institution_name, kind, mask, currency, state },
+ *       { id, name, institution_name, kind, mask, currency, state,
+ *         balance_current, balance_available,
+ *         connection: { id, status } | null },
  *       ...
- *     ] }
+ *     ],
+ *     total_returned:  number            how many accounts Quiltt returned
+ *     excluded_closed: number            how many this function dropped
+ *     distinct_states: (string|null)[]   every state Quiltt used in this response
+ *   }
  *
- * Response 400 — missing/bad fields
- * Response 401 — invalid platform key
- * Response 403 — direct mode rejected
- * Response 404 — no quiltt_profile_map for this (platform, app_user_id)
- * Response 502 — upstream Quiltt error
- * Response 503 — QUILTT_API_KEY not configured
+ * The three counters exist so a caller who sees "fewer accounts than I
+ * expected" can tell the difference between Quiltt returning few and OR
+ * dropping many, without needing our logs. DL-0326 burned ten days on
+ * exactly that ambiguity, so they are part of the contract, not debug
+ * output.
+ *
+ * Response 400: missing/bad fields
+ * Response 401: invalid platform key
+ * Response 403: direct mode rejected
+ * Response 404: no quiltt_profile_map for this (platform, app_user_id)
+ * Response 502: upstream Quiltt error
+ * Response 503: QUILTT_API_KEY not configured
  */
 
 import { authenticateRequest } from '../_shared/platform-auth.ts';
@@ -54,10 +66,11 @@ interface QuilttAccount {
   name: string;
   mask: string | null;
   kind: string | null;
-  state: string;
+  state: string | null;
   currencyCode: string | null;
   institution: { name: string } | null;
   balance: { current: number | null; available: number | null } | null;
+  connection?: { id: string; status: string } | null;
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -81,7 +94,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const body = JSON.parse(raw || '{}') as AccountsBody;
 
     if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-      return jsonResponse({ error: 'app_user_id required (string, ≤256 chars)' }, 400, cors);
+      return jsonResponse({ error: 'app_user_id required (string, <=256 chars)' }, 400, cors);
     }
     // quiltt_connection_id is OPTIONAL. When omitted (empty string), we
     // enumerate ALL connections under the profile. This is the fallback
@@ -115,7 +128,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .maybeSingle();
     if (subLookup.error || !subLookup.data) {
       return jsonResponse(
-        { error: 'subaccount not provisioned — call or-quiltt-session before linking' },
+        { error: 'subaccount not provisioned: call or-quiltt-session before linking' },
         404,
         cors,
       );
@@ -159,6 +172,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               currencyCode
               institution { name }
               balance { current available }
+              connection { id status }
             }
           }
         }
@@ -194,6 +208,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               currencyCode
               institution { name }
               balance { current available }
+              connection { id status }
             }
           }
         }
@@ -217,10 +232,27 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       rawAccounts = conns.flatMap((c) => c.accounts ?? []);
     }
 
+    // Warn-and-include, never warn-and-exclude, for accounts with a missing
+    // state. Dropping rows on uncertainty is the original DL-0326 bug class.
+    const nullStateAccounts = rawAccounts.filter((a) => !a.state);
+    if (nullStateAccounts.length > 0) {
+      console.warn(
+        `[or-quiltt-accounts] ${nullStateAccounts.length} account(s) returned a null or empty state ` +
+          `(ids: ${nullStateAccounts.map((a) => a.id).join(', ')}): including them in the response`,
+      );
+    }
+
+    // Counters travel with the response so the caller can distinguish
+    // "Quiltt returned few" from "OR dropped many". See docblock.
+    const totalReturned = rawAccounts.length;
+    const excludedClosed = rawAccounts.filter((a) => a.state === 'CLOSED').length;
+    const distinctStates = [...new Set(rawAccounts.map((a) => a.state))];
+
     const accounts = rawAccounts
-      // Skip closed / disconnected accounts — don't surface them as
-      // import candidates.
-      .filter((a) => a.state === 'OPEN' || a.state === 'ACTIVE' || !a.state)
+      // Denylist: exclude only CLOSED. Never allowlist an enum we do not own.
+      // AccountState is Quiltt's to extend, and a state we have not heard of
+      // yet must show up in the response, not vanish from it.
+      .filter((a) => a.state !== 'CLOSED')
       .map((a) => ({
         id:               a.id,
         name:             a.name,
@@ -231,9 +263,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         state:            a.state,
         balance_current:  a.balance?.current ?? null,
         balance_available: a.balance?.available ?? null,
+        connection:       a.connection ? { id: a.connection.id, status: a.connection.status } : null,
       }));
 
-    return jsonResponse({ accounts }, 200, cors);
+    return jsonResponse(
+      {
+        accounts,
+        total_returned: totalReturned,
+        excluded_closed: excludedClosed,
+        distinct_states: distinctStates,
+      },
+      200,
+      cors,
+    );
   } catch (e) {
     console.error('[or-quiltt-accounts] fatal:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
