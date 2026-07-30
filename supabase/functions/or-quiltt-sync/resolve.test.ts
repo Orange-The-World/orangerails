@@ -126,7 +126,7 @@ Deno.test('non string and empty payload values are not routing answers', () => {
 });
 
 Deno.test('the map supplies the profile id when it agrees with the event', () => {
-  const choice = chooseProfileId('p_same', ev({ profileId: 'p_same' }));
+  const choice = chooseProfileId('p_same', ev({ profileId: 'p_same' }), SUB_A);
 
   assertEquals(choice, { profileId: 'p_same', source: 'map' });
 });
