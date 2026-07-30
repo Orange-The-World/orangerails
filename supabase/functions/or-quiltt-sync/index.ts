@@ -242,7 +242,22 @@ async function handleEvent(
     .maybeSingle();
   if (mapErr) return `profile map lookup failed: ${mapErr.message}`;
 
-  const profile = chooseProfileId(map?.quiltt_profile_id ?? null, ev);
+  const profile = chooseProfileId(map?.quiltt_profile_id ?? null, ev, subaccountId);
+  if (profile.source === 'route-conflict') {
+    // The payload would have supplied the credential, and it does not agree
+    // with us about where its own data belongs. That is the signature of a row
+    // misrouted by the receiver's old malformed-batch index shift: the stored
+    // route is complete and confidently wrong. Authenticating as the payload
+    // here succeeds, and lands one customer's transactions under another
+    // customer's OPK. Refusing costs this event a retry, which is recoverable.
+    // The alternative is not.
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: routed to subaccount ${subaccountId}, but the ` +
+        `payload's profile metadata does not name that subaccount. Refusing to authenticate ` +
+        `with the payload's profile. Suspect a misrouted inbox row (DL-0465)`,
+    );
+    return 'payload profile does not corroborate the routed subaccount';
+  }
   if (!profile.profileId) return 'no quiltt profile id (no map row, none in payload)';
   if (profile.source === 'payload') {
     console.warn(
@@ -250,11 +265,17 @@ async function handleEvent(
         `subaccount, using the profile id from the verified payload (DL-0465)`,
     );
   } else if (profile.source === 'payload-rebound') {
+    // Ids redacted on the same posture as the GraphQL error path below: a
+    // Quiltt identifier does not belong in an edge function log. That does cost
+    // this line the ability to show that the two ids differ, which is the whole
+    // point of it, so the sentence says so and points at where both live. A
+    // human holding the event id can read them from the inbox row and the map.
     console.warn(
       `[or-quiltt-sync] event ${ev.event_id}: subaccount ${subaccountId} is mapped to ` +
-        `profile ${map?.quiltt_profile_id}, but this event came from ${profile.profileId}. ` +
-        `Using the event's own profile. The subaccount was rebound by a later session ` +
-        `mint and now has two Quiltt profiles (DL-0465)`,
+        `${redactProviderId(String(map?.quiltt_profile_id ?? ''))}, but this event came from a ` +
+        `different profile, ${redactProviderId(profile.profileId)}. Using the event's own ` +
+        `profile. The subaccount was rebound by a later session mint and now has two Quiltt ` +
+        `profiles; both ids are on the inbox row and in quiltt_profile_map (DL-0465)`,
     );
   }
 
