@@ -166,6 +166,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       } else if (handled === 'skipped') {
         await markProcessed(client, ev.event_id);  // no-op events still mark done
         skipped++;
+      } else if (handled === 'deferred') {
+        // opk_public not yet set; leave unprocessed so or-sync can drain when user opts in
+        skipped++;
       } else {
         await bumpAttempts(client, ev.event_id, handled);
         failed++;
@@ -203,7 +206,7 @@ async function handleEvent(
   if (subErr || !sub) return `subaccount lookup failed: ${subErr?.message}`;
   if (!sub.opk_public) {
     // No opt-in. Defer until user opens app (or-sync will drain).
-    return 'skipped';
+    return 'deferred';
   }
   if (sub.opk_alg !== OPK_SEAL_ALG) {
     return `unsupported opk_alg: ${sub.opk_alg}`;
