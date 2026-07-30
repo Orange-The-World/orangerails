@@ -1,0 +1,61 @@
+name: prod two party gate
+
+on:
+  pull_request:
+    branches: [prod]
+    types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  two-party:
+    name: two approvals required to promote to prod
+    if: github.event.pull_request.base.ref == 'prod'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Count approving reviews from distinct non author accounts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+
+          reviews="$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+            --jq '[.[] | {user: .user.login, state: .state}]')"
+
+          # Keep only reviews that carry a verdict, take the latest verdict per
+          # account, then count the accounts that currently approve and are not
+          # the author. A plain comment does not clear an earlier approval, and
+          # GitHub never counts an author approving their own pull request.
+          approvers="$(printf '%s' "${reviews}" | jq -r --arg author "${PR_AUTHOR}" '
+            map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
+            | group_by(.user)
+            | map(last)
+            | map(select(.state == "APPROVED" and .user != $author))
+            | map(.user)
+            | join(", ")
+          ')"
+
+          count="$(printf '%s' "${reviews}" | jq -r --arg author "${PR_AUTHOR}" '
+            map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
+            | group_by(.user)
+            | map(last)
+            | map(select(.state == "APPROVED" and .user != $author))
+            | length
+          ')"
+
+          echo "approving accounts (author excluded): ${count}"
+          echo "who: ${approvers:-none}"
+
+          if [ "${count}" -lt 2 ]; then
+            echo "::error::A merge into prod is the production deploy and takes two approvals from two different accounts, neither of them the author. Found ${count}."
+            exit 1
+          fi
+
+          echo "Two party requirement satisfied."
