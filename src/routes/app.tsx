@@ -1088,14 +1088,20 @@ function AppHome() {
                           keyVersion: vaultKeyVersion,
                         });
                       // Persist new wrapping to user_vault_meta.
-                      const { error: saveErr } = await (supabase as any)
+                      const { data: saveRows, error: saveErr } = await (supabase as any)
                         .from("user_vault_meta")
                         .update({
                           enc_mek_ciphertext: newEncMekCiphertext,
                           recovery_ciphertext: newRecoveryCiphertext,
                         })
-                        .eq("user_id", userId);
+                        .eq("user_id", userId)
+                        .select("user_id");
                       if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
+                      if (!saveRows || (saveRows as unknown[]).length !== 1) {
+                        throw new Error(
+                          "Vault update did not persist (no matching row). Your password was not changed. Reload the page and try again.",
+                        );
+                      }
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
                       setChangePwNewRecovery(newRecoveryCode);
