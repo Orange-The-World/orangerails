@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { strikeMarkerToCopy, upstreamCodeToCopy } from "../strike-error-copy";
+import {
+  strikeMarkerToCopy,
+  upstreamCodeToCopy,
+  upstreamMarkerToCopy,
+} from "../strike-error-copy";
 
 describe("upstreamCodeToCopy", () => {
   it("maps a known code to plain-English copy and keeps the reference visible", () => {
