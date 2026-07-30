@@ -408,8 +408,7 @@ async function handleEvent(
         .filter((m: string) => m.length > 0)
         .join('; ')
         .slice(0, 800);
-      const summary = messages
-        .replace(/\b[a-z]{2,8}_[A-Za-z0-9]{6,}\b/gi, '[redacted-id]')
+      const summary = redactProviderId(messages)
         .replace(/\b\d{6,}\b/g, '[redacted]')
         .slice(0, 400);
       console.error(`[or-quiltt-sync] GraphQL errors for event ${ev.event_id}:`, summary);
