@@ -33,11 +33,30 @@
  * and return 200 fast. The worker (or-quiltt-sync) drains the inbox
  * asynchronously.
  *
- * Routing: events carry profile.id which maps via quiltt_profile_map
- * to a (platform_id, subaccount_id) pair. If the lookup misses (event
- * arrives before or-link-complete persisted the mapping , possible
- * during the link race), we still enqueue but leave platform_id /
- * subaccount_id NULL; the worker re-resolves on drain.
+ * Routing, and why there are two resolution paths (DL-0465):
+ *
+ *   1. profile.id maps via quiltt_profile_map to (platform_id, subaccount_id).
+ *      This is the authoritative path.
+ *   2. If that lookup misses, fall back to profile.metadata.or_subaccount_id,
+ *      which OR itself writes at profile creation and Quiltt echoes back on
+ *      every event.
+ *
+ * Path 2 exists because path 1 alone was silently unrecoverable. When the
+ * map row was absent the event was enqueued with NULL routing on the theory
+ * that "the worker re-resolves on drain" , but the worker re-resolved by
+ * running the identical quiltt_profile_map lookup, so an event that missed
+ * once missed forever. In production that stranded 408 events, 360 of which
+ * were carrying the correct subaccount id inside the payload we had just
+ * stored. Attempt counters reached 11,495 on a query that could never
+ * succeed.
+ *
+ * Trust boundary on path 2, stated rather than assumed: the metadata is
+ * written by OR in or-link-complete and relayed by Quiltt over an
+ * HMAC-verified request, so it is as trustworthy as our own link flow and no
+ * more. We do not take platform_id from the payload. We look the subaccount
+ * up and read platform_id off that row, so a metadata value naming a
+ * subaccount which does not exist resolves to nothing rather than to
+ * something wrong. Every fallback use is logged so the path is auditable.
  *
  * Response semantics (Quiltt retries up to 20 times with exponential
  * backoff on non-2xx, per docs):
