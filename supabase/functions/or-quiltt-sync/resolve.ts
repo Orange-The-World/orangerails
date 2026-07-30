@@ -15,11 +15,11 @@
  *   3. platform_id is never read from the payload. It is read off the
  *      subaccounts row, so metadata naming a subaccount that does not exist
  *      resolves to nothing rather than to something wrong.
- *   4. The Quiltt profile id used for Basic auth prefers the map row and falls
- *      back to the payload only when there is no map row at all. See DL-0465:
- *      every profile minted before 2026-06-10 has no map row and never will,
- *      and without this fallback its events fail on `profile map missing` on
- *      every tick forever.
+ *   4. The Quiltt profile id used for Basic auth is the profile that GENERATED
+ *      the event. The map supplies it only when it agrees, or when the payload
+ *      names no profile at all. See DL-0465: every profile minted before
+ *      2026-06-10 has no map row and never will, and without this its events
+ *      fail on `profile map missing` on every tick forever.
  */
 
 export interface InboxEventLike {
@@ -54,7 +54,7 @@ export interface Routing {
   source: RoutingSource;
 }
 
-export type ProfileIdSource = 'map' | 'payload' | 'none';
+export type ProfileIdSource = 'map' | 'payload' | 'payload-rebound' | 'none';
 
 export interface ProfileIdChoice {
   profileId: string | null;
@@ -114,22 +114,43 @@ export function chooseRouting(
 /**
  * Pick the Quiltt profile id to authenticate the data pull with.
  *
- * The map row wins whenever it exists. The payload is consulted only when it
- * does not, which is the DL-0465 cohort: profiles minted before the profile map
- * was ever written. Those rows cannot be repaired by this function either, and
- * not for want of trying: quiltt_profile_map.quiltt_environment_id is NOT NULL
- * and no webhook payload carries an environment id, so there is nothing to
- * insert. Falling back is the only way their events ever drain.
+ * The credential has to belong to the profile that GENERATED the event. That is
+ * the only profile whose Basic auth can read the connection the event refers to.
+ * The map answers a different question, "which profile does this subaccount use
+ * now", and the two answers are allowed to diverge.
+ *
+ * They diverge because the map gets read by two different keys. chooseRouting
+ * reads it by profile id, so there it agrees with the payload by construction.
+ * handleEvent reads it by subaccount_id, and a legacy subaccount that later
+ * calls or-quiltt-session gets a BRAND NEW profile minted and mapped to it (see
+ * the `mintBody` branch taken when that function's map lookup misses). Its
+ * already-queued events still carry the old profile. Prefer the map there and
+ * every one of them authenticates as a profile that cannot see its own
+ * connection, and fails forever: the exact loop this file exists to end.
+ *
+ * So the map wins only when it agrees with the event, or when the event names no
+ * profile at all. Otherwise the event's own profile wins, and the caller is
+ * expected to say so loudly, because a rebound subaccount is worth a human look.
+ *
+ * DL-0465 is the no-map case: profiles minted before the map was ever written.
+ * Those rows cannot be repaired here either, and not for want of trying:
+ * quiltt_profile_map.quiltt_environment_id is NOT NULL and no webhook payload
+ * carries an environment id, so there is nothing to insert.
  */
 export function chooseProfileId(
   mapProfileId: unknown,
   ev: InboxEventLike,
 ): ProfileIdChoice {
   const fromMap = str(mapProfileId);
-  if (fromMap) return { profileId: fromMap, source: 'map' };
-
   const fromPayload = profileIdFromPayload(ev);
-  if (fromPayload) return { profileId: fromPayload, source: 'payload' };
 
-  return { profileId: null, source: 'none' };
+  if (!fromPayload) {
+    return fromMap
+      ? { profileId: fromMap, source: 'map' }
+      : { profileId: null, source: 'none' };
+  }
+  if (!fromMap) return { profileId: fromPayload, source: 'payload' };
+  if (fromMap === fromPayload) return { profileId: fromMap, source: 'map' };
+
+  return { profileId: fromPayload, source: 'payload-rebound' };
 }
