@@ -969,9 +969,31 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           if (upsertErr) throw upsertErr;
         }
 
+        // Advance last_sync_cursor only when this pass BOTH persisted at least
+        // one transaction for THIS connection AND the adapter returned a real
+        // cursor. newTxs is the honest persisted count in both paths: it is
+        // exactly what the V3 upsert writes (and that upsert rethrows on error
+        // above, so a nonzero length here cannot include a failed write) and
+        // exactly what sink mode hands the consumer. Evaluated once per pass,
+        // not per page. Two failure modes this closes:
+        //   - Empty pass banking a stale next_cursor left in scope: skipped
+        //     because nothing persisted (a connection banking a cursor left
+        //     in scope from an unrelated connection's pass).
+        //   - A pass that persisted rows but whose adapter returned a null
+        //     next_cursor: we refresh liveness but leave the cursor untouched,
+        //     never writing null, which would rewind the window and drop history.
+        // Liveness and health reporting are refreshed on every pass regardless.
+        const connUpdate: Record<string, unknown> = {
+          last_sync_at: new Date().toISOString(),
+          status: 'active',
+          encrypted_last_error: null,
+        };
+        if (newTxs.length > 0 && next_cursor != null) {
+          connUpdate.last_sync_cursor = next_cursor;
+        }
         await ctx.serviceClient
           .from('connections')
-          .update({ last_sync_at: new Date().toISOString(), last_sync_cursor: next_cursor, status: 'active', encrypted_last_error: null })
+          .update(connUpdate)
           .eq('id', conn.id);
 
         results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
