@@ -69,6 +69,8 @@ interface RateItem {
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 
 Deno.serve(async (req: Request) => {
+  const correlationId = crypto.randomUUID()
+  try {
   // ----- Feature flag -----
   // Require explicit "true"; "false", "0", or unset all disable the endpoint.
   if (Deno.env.get('ORBI_RATE_API_ENABLED') !== 'true') return errResponse(503, 'not_enabled', 'endpoint not active')
@@ -238,4 +240,8 @@ Deno.serve(async (req: Request) => {
   if (logErr) console.error('usage-log insert failed:', logErr.message)
 
   return Response.json(items.length === 1 ? results[0] : { results, count: results.length })
+  } catch (err) {
+    console.error(`v1-rate unhandled error [${correlationId}]:`, err)
+    return Response.json({ error: 'server_error', message: 'Internal error', correlation_id: correlationId }, { status: 500 })
+  }
 })
