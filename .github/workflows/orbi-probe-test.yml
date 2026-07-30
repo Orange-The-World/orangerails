@@ -70,7 +70,8 @@ jobs:
               bucket_ts       timestamptz NOT NULL,
               granularity     text        NOT NULL,
               source_currency text        NOT NULL,
-              target_currency text        NOT NULL
+              target_currency text        NOT NULL,
+              status          text        NOT NULL DEFAULT 'CONFIRMED'
             );
           "
 
