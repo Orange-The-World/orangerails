@@ -54,7 +54,12 @@ export interface Routing {
   source: RoutingSource;
 }
 
-export type ProfileIdSource = 'map' | 'payload' | 'payload-rebound' | 'none';
+export type ProfileIdSource =
+  | 'map'
+  | 'payload'
+  | 'payload-rebound'
+  | 'route-conflict'
+  | 'none';
 
 export interface ProfileIdChoice {
   profileId: string | null;
