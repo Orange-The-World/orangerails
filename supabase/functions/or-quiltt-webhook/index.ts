@@ -83,7 +83,7 @@ interface QuilttEvent {
   type?: unknown;
   at?: unknown;            // Quiltt event time (ISO 8601), per spec
   timestamp?: unknown;     // legacy alias accepted in payload (some events use this name)
-  profile?: { id?: unknown };
+  profile?: { id?: unknown; metadata?: { or_subaccount_id?: unknown } | null };
   record?: { id?: unknown };
   metadata?: unknown;
 }
@@ -146,8 +146,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
     );
 
-    // Build inbox rows. Resolve platform_id/subaccount_id per event via
-    // quiltt_profile_map; missing mapping = NULL fields (worker re-resolves).
     type InboxRow = {
       event_id: string;
       event_type: string;
@@ -156,8 +154,23 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       subaccount_id: string | null;
     };
 
+    // Routing hints for rows[i], pushed in lockstep with rows so the two
+    // arrays are aligned by construction.
+    //
+    // These used to be re-derived as events[i] during annotation, which is
+    // wrong: malformed events are skipped when building rows, so a single
+    // skip shifted every later row onto its neighbour's profile and filed
+    // that event under the wrong subaccount. Only Quiltt can reach this code
+    // (the request is HMAC verified), so it needed a malformed event inside a
+    // multi-event batch rather than an attacker, but the consequence was
+    // cross-account misrouting. Carry the hint on the row; never recompute it
+    // from an index into a differently-filtered array.
+    type RouteHint = { profileId: string | null; metaSubaccountId: string | null };
+
     const rows: InboxRow[] = [];
+    const hints: RouteHint[] = [];
     const profileIds = new Set<string>();
+    const metaSubaccountIds = new Set<string>();
     const events = parsed.events as QuilttEvent[];
 
     for (const e of events) {
@@ -165,7 +178,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       const eventType = typeof e.type      === 'string' ? e.type      : null;
       const profileId = typeof e.profile?.id === 'string' ? e.profile.id : null;
       if (!eventId || !eventType) continue;            // skip malformed
+
+      const metaSub = typeof e.profile?.metadata?.or_subaccount_id === 'string'
+        ? e.profile.metadata.or_subaccount_id
+        : null;
+
       if (profileId) profileIds.add(profileId);
+      if (metaSub)   metaSubaccountIds.add(metaSub);
+
       rows.push({
         event_id:      eventId,
         event_type:    eventType,
@@ -173,9 +193,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         platform_id:   null,
         subaccount_id: null,
       });
+      hints.push({ profileId, metaSubaccountId: metaSub });
     }
 
-    // Bulk-resolve mappings
+    if (rows.length === 0) {
+      return new Response('ok (no valid events)', { status: 200 });
+    }
+
+    // Path 1: bulk-resolve via quiltt_profile_map (authoritative).
     const mapping = new Map<string, { platform_id: string; subaccount_id: string }>();
     if (profileIds.size > 0) {
       const { data, error } = await client
@@ -184,7 +209,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         .in('quiltt_profile_id', [...profileIds]);
       if (error) {
         console.error('[or-quiltt-webhook] map lookup failed:', error.message);
-        // Still proceed , worker will re-resolve on drain.
+        // Still proceed , the metadata fallback and the worker both get a turn.
       } else if (data) {
         for (const row of data) {
           mapping.set(row.quiltt_profile_id, {
@@ -195,19 +220,56 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       }
     }
 
-    // Annotate rows with resolved mappings
-    for (let i = 0; i < rows.length; i++) {
-      const e = events[i];
-      const pid = typeof e?.profile?.id === 'string' ? e.profile.id : null;
-      const map = pid ? mapping.get(pid) : null;
-      if (map) {
-        rows[i].platform_id   = map.platform_id;
-        rows[i].subaccount_id = map.subaccount_id;
+    // Path 2: bulk-validate any subaccount ids carried in profile metadata.
+    // platform_id comes off the subaccount row, never off the payload, so an
+    // id naming a subaccount that does not exist resolves to nothing.
+    const metaResolved = new Map<string, string>();   // subaccount_id -> platform_id
+    if (metaSubaccountIds.size > 0) {
+      const { data, error } = await client
+        .from('subaccounts')
+        .select('id, platform_id')
+        .in('id', [...metaSubaccountIds]);
+      if (error) {
+        console.error('[or-quiltt-webhook] subaccount validation failed:', error.message);
+      } else if (data) {
+        for (const row of data) metaResolved.set(row.id, row.platform_id);
       }
     }
 
-    if (rows.length === 0) {
-      return new Response('ok (no valid events)', { status: 200 });
+    let viaMap = 0;
+    let viaMetadata = 0;
+    let unrouted = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const hint = hints[i];
+      const map = hint.profileId ? mapping.get(hint.profileId) : undefined;
+      if (map) {
+        rows[i].platform_id   = map.platform_id;
+        rows[i].subaccount_id = map.subaccount_id;
+        viaMap++;
+        continue;
+      }
+
+      const platformId = hint.metaSubaccountId ? metaResolved.get(hint.metaSubaccountId) : undefined;
+      if (platformId) {
+        rows[i].platform_id   = platformId;
+        rows[i].subaccount_id = hint.metaSubaccountId;
+        viaMetadata++;
+        continue;
+      }
+
+      unrouted++;
+    }
+
+    if (viaMetadata > 0 || unrouted > 0) {
+      // One line per batch, not per event: this is the signal that
+      // quiltt_profile_map is drifting from reality, and it has to be
+      // findable without reading three thousand log lines.
+      console.warn(
+        `[or-quiltt-webhook] routing: ${viaMap} via profile map, ` +
+          `${viaMetadata} via profile metadata fallback, ${unrouted} unrouted ` +
+          `(of ${rows.length} events)`,
+      );
     }
 
     // Idempotent insert. ON CONFLICT DO NOTHING on event_id PK means
