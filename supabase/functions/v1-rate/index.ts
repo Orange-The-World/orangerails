@@ -69,6 +69,8 @@ interface RateItem {
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 
 Deno.serve(async (req: Request) => {
+  const correlationId = crypto.randomUUID()
+  try {
   // ----- Feature flag -----
   // Require explicit "true"; "false", "0", or unset all disable the endpoint.
   if (Deno.env.get('ORBI_RATE_API_ENABLED') !== 'true') return errResponse(503, 'not_enabled', 'endpoint not active')
@@ -95,8 +97,8 @@ Deno.serve(async (req: Request) => {
   // DB-level error is an outage or misconfiguration, not an auth failure.
   // Return 500 so callers can distinguish unavailability from a bad key.
   if (keyErr) {
-    console.error('key-lookup DB error:', keyErr)
-    return errResponse(500, 'server_error', 'Database error during key lookup')
+    console.error(`key-lookup DB error [${correlationId}]:`, keyErr)
+    return Response.json({ error: 'server_error', message: 'Database error during key lookup', correlation_id: correlationId }, { status: 500 })
   }
   if (!keyRow) return errResponse(401, 'invalid_key', 'API key invalid or revoked')
 
@@ -201,8 +203,8 @@ Deno.serve(async (req: Request) => {
     // A query error means the database is unavailable or misconfigured.
     // Return 500 so callers can distinguish DB-down from legitimate no-data.
     if (rateErr) {
-      console.error('rate-lookup DB error:', rateErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity, bucketTs }))
-      return errResponse(500, 'server_error', 'Database error fetching exchange rate')
+      console.error(`rate-lookup DB error [${correlationId}]:`, rateErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity, bucketTs }))
+      return Response.json({ error: 'server_error', message: 'Database error fetching exchange rate', correlation_id: correlationId }, { status: 500 })
     }
 
     const resolvedTs = row ? new Date(row.bucket_ts).toISOString() : bucketTs
@@ -238,4 +240,8 @@ Deno.serve(async (req: Request) => {
   if (logErr) console.error('usage-log insert failed:', logErr.message)
 
   return Response.json(items.length === 1 ? results[0] : { results, count: results.length })
+  } catch (err) {
+    console.error(`v1-rate unhandled error [${correlationId}]:`, err)
+    return Response.json({ error: 'server_error', message: 'Internal error', correlation_id: correlationId }, { status: 500 })
+  }
 })
