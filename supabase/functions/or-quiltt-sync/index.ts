@@ -32,6 +32,7 @@ import {
   chooseRouting,
   metadataSubaccountId,
   profileIdFromPayload,
+  redactProviderId,
 } from './resolve.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
