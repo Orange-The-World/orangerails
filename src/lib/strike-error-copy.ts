@@ -103,3 +103,27 @@ export function upstreamCodeToCopy(decrypted: string): string {
   const copy = UPSTREAM_COPY[code] ?? GENERIC_UPSTREAM_COPY;
   return reference ? `${copy} (Reference: ${reference})` : copy;
 }
+
+/**
+ * Detect and map a PLAINTEXT upstream taxonomy marker on the RAW last-error
+ * column, before any decrypt attempt.
+ *
+ * or-sync persists the `CODE:correlationId` pair UNENCRYPTED in sink mode, and
+ * also as the fallback when encryptAes throws (see
+ * supabase/functions/or-sync/index.ts). decryptString/decryptText throw on that
+ * plaintext, so without this pre-check the caller falls into the decrypt catch
+ * and the customer sees a bare "(could not decrypt error)" string, the exact
+ * defect this change exists to kill.
+ *
+ * Returns customer copy only when the segment before the colon is a KNOWN
+ * taxonomy code, so genuine ORK ciphertext (opaque, and never carrying a known
+ * code prefix) returns null and falls through to the normal decrypt path.
+ */
+export function upstreamMarkerToCopy(raw: string): string | null {
+  const value = (raw ?? "").trim();
+  if (!value) return null;
+  const idx = value.indexOf(":");
+  const code = idx >= 0 ? value.slice(0, idx) : value;
+  if (!Object.prototype.hasOwnProperty.call(UPSTREAM_COPY, code)) return null;
+  return upstreamCodeToCopy(value);
+}
