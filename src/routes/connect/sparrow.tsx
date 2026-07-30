@@ -17,6 +17,7 @@
  */
 
 import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
 import {
   ArrowRight,
   CheckCircle2,
@@ -61,7 +62,7 @@ const ALLOWED_APP_ORIGINS: ReadonlySet<string> = new Set(
     .filter((s) => s.length > 0),
 );
 
-function launchStealthSync() {
+function launchStealthSync(onRefused: (message: string) => void) {
   // Option B, the bounce (DL-0426). When a consuming app deep-links here
   // with its own app_url, hand the flow straight back to that app. The
   // consuming app opens the Stealth Sync widget from its own UI, with its
@@ -86,7 +87,21 @@ function launchStealthSync() {
     // customer on this page rather than following an untrusted link.
     if (origin && ALLOWED_APP_ORIGINS.has(origin)) {
       window.location.assign(appUrl);
+      return;
     }
+    // fail-loud-on-refused-origin (DL-0426): an app_url we cannot trust must
+    // never fail silently. This handler used to return quietly, so a
+    // misconfigured or untrusted app_url looked like a dead button. Warn to
+    // the console for the developer and surface a visible message so the
+    // refusal is obvious to the customer.
+    console.warn(
+      "[sparrow] Refused app_url with untrusted origin: " +
+        (origin ?? "invalid URL") +
+        ". Add it to VITE_OR_STEALTH_ALLOWED_ORIGINS if it is a registered app.",
+    );
+    onRefused(
+      "We could not open the app that sent you here: its address is not on our allowlist. If you are testing an integration, register its origin first. Otherwise, start Stealth Sync from that app.",
+    );
     return;
   }
 
@@ -106,6 +121,7 @@ function launchStealthSync() {
 }
 
 function SparrowConnectPage() {
+  const [refusedError, setRefusedError] = useState<string | null>(null);
   return (
     <div className="min-h-screen bg-background text-foreground antialiased">
       <Navbar />
@@ -141,13 +157,25 @@ function SparrowConnectPage() {
 
             <div className="mt-8 flex flex-wrap gap-3">
               <button
-                onClick={launchStealthSync}
+                onClick={() => {
+                  setRefusedError(null);
+                  launchStealthSync(setRefusedError);
+                }}
                 className="group inline-flex h-11 items-center gap-1.5 rounded-md bg-primary px-5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
               >
                 Launch Stealth Sync
                 <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
               </button>
             </div>
+            {refusedError && (
+              <div
+                role="alert"
+                className="mt-4 flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              >
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <p>{refusedError}</p>
+              </div>
+            )}
           </div>
         </section>
 
