@@ -141,10 +141,32 @@ export function chooseRouting(
  * Those rows cannot be repaired here either, and not for want of trying:
  * quiltt_profile_map.quiltt_environment_id is NOT NULL and no webhook payload
  * carries an environment id, so there is nothing to insert.
+ *
+ * `routedSubaccountId` is what chooseRouting decided, and it is the reason this
+ * function needs a third argument at all. Borrowing the payload's credential is
+ * safe only while we agree with the payload about where its data belongs. A row
+ * misrouted by the webhook receiver's old malformed-batch index shift carries a
+ * COMPLETE stored route to the wrong subaccount, which chooseRouting trusts. The
+ * map read by that wrong subaccount then returns some other profile, which looks
+ * exactly like a rebind. Authenticate with the payload there and the credential
+ * WORKS: it returns the real customer's transactions, and index.ts seals them
+ * under the wrong subaccount's OPK and files them under the wrong tenant.
+ *
+ * Preferring the map in that case fails closed, because the map's profile cannot
+ * read the payload's connection. So the payload is only allowed to supply a
+ * credential when the profile metadata names the subaccount being processed. The
+ * check covers BOTH payload paths: a misrouted row whose wrong subaccount simply
+ * has no map row reaches the identical leak through 'payload' rather than
+ * 'payload-rebound'.
+ *
+ * 'route-conflict' carries no profile id, so the caller fails the event rather
+ * than guessing. That is the correct answer here even though it costs the event
+ * a retry: a wrong tenant is not recoverable and a retry is.
  */
 export function chooseProfileId(
   mapProfileId: unknown,
   ev: InboxEventLike,
+  routedSubaccountId: unknown,
 ): ProfileIdChoice {
   const fromMap = str(mapProfileId);
   const fromPayload = profileIdFromPayload(ev);
@@ -154,8 +176,16 @@ export function chooseProfileId(
       ? { profileId: fromMap, source: 'map' }
       : { profileId: null, source: 'none' };
   }
-  if (!fromMap) return { profileId: fromPayload, source: 'payload' };
-  if (fromMap === fromPayload) return { profileId: fromMap, source: 'map' };
+  if (fromMap && fromMap === fromPayload) return { profileId: fromMap, source: 'map' };
 
-  return { profileId: fromPayload, source: 'payload-rebound' };
+  // Past here the credential would come off the payload, so the payload has to
+  // corroborate the route before it is allowed to supply one.
+  const routed = str(routedSubaccountId);
+  if (!routed || metadataSubaccountId(ev) !== routed) {
+    return { profileId: null, source: 'route-conflict' };
+  }
+
+  return fromMap
+    ? { profileId: fromPayload, source: 'payload-rebound' }
+    : { profileId: fromPayload, source: 'payload' };
 }
