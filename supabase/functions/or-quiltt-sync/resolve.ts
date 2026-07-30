@@ -20,6 +20,10 @@
  *      names no profile at all. See DL-0465: every profile minted before
  *      2026-06-10 has no map row and never will, and without this its events
  *      fail on `profile map missing` on every tick forever.
+ *   5. A profile id taken off the payload is only usable when the payload also
+ *      names the subaccount being processed. Without that check a row misrouted
+ *      to the wrong subaccount authenticates successfully as the payload's
+ *      profile and its transactions land under the wrong tenant.
  */
 
 export interface InboxEventLike {
