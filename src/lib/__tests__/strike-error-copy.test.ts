@@ -66,3 +66,53 @@ describe("strikeMarkerToCopy", () => {
     expect(strikeMarkerToCopy("UPSTREAM_OTHER:deadbeef")).toBeNull();
   });
 });
+
+describe("upstreamMarkerToCopy (plaintext pre-check, before decrypt)", () => {
+  it("maps a plaintext CODE:correlationId marker to copy, keeping the reference, no code leak", () => {
+    // This is what or-sync writes UNENCRYPTED in sink mode / on encrypt failure.
+    const out = upstreamMarkerToCopy("UPSTREAM_AUTH_FAILED:ab12cd34ef567890");
+    expect(out).toContain("Your bank disconnected this account");
+    expect(out).toContain("(Reference: ab12cd34ef567890)");
+    expect(out).not.toContain("UPSTREAM_AUTH_FAILED");
+  });
+
+  it("maps the encrypt-failure fallback shape (a bare code, no correlation id)", () => {
+    const out = upstreamMarkerToCopy("UPSTREAM_UNAVAILABLE");
+    expect(out).toContain("temporarily unreachable");
+    expect(out).not.toContain("Reference");
+  });
+
+  it("returns null for opaque ciphertext so the caller still runs decrypt", () => {
+    // A base64-ish ORK ciphertext never carries a known taxonomy code prefix.
+    expect(upstreamMarkerToCopy("q83nZ1p+Vd2f/AbCdEf==:notacode")).toBeNull();
+    expect(upstreamMarkerToCopy("SOME_INTERNAL_CODE:deadbeef")).toBeNull();
+  });
+
+  it("returns null for an empty value", () => {
+    expect(upstreamMarkerToCopy("")).toBeNull();
+    expect(upstreamMarkerToCopy("   ")).toBeNull();
+  });
+
+  it("never treats an inherited Object property name as a known code", () => {
+    // Guards the hasOwnProperty discriminator against prototype keys.
+    expect(upstreamMarkerToCopy("toString:deadbeef")).toBeNull();
+    expect(upstreamMarkerToCopy("constructor:deadbeef")).toBeNull();
+  });
+
+  it("maps every known upstream code as a plaintext marker without leaking the code name", () => {
+    const codes = [
+      "UPSTREAM_AUTH_FAILED",
+      "UPSTREAM_RATE_LIMITED",
+      "UPSTREAM_UNAVAILABLE",
+      "UPSTREAM_BAD_REQUEST",
+      "UPSTREAM_PARSE_FAILED",
+      "ADAPTER_CONFIG_ERROR",
+      "UPSTREAM_OTHER",
+    ];
+    for (const code of codes) {
+      const out = upstreamMarkerToCopy(`${code}:00ff00ff`);
+      expect(out).not.toBeNull();
+      expect(out).not.toContain(code);
+    }
+  });
+});
