@@ -41,6 +41,12 @@
  * exactly that ambiguity, so they are part of the contract, not debug
  * output.
  *
+ * The 200 body is built by `buildAccountsResponse` in ./transform.ts, which
+ * is a separate module so the response contract can be asserted against
+ * fixtures without booting this server or holding a Quiltt credential. The
+ * assertions live in ./transform.test.ts. If you change the shape, change
+ * them together.
+ *
  * Response 400: missing/bad fields
  * Response 401: invalid platform key
  * Response 403: direct mode rejected
@@ -53,24 +59,14 @@ import { authenticateRequest } from '../_shared/platform-auth.ts';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { buildAccountsResponse } from './transform.ts';
+import type { QuilttAccount } from './transform.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 
 interface AccountsBody {
   app_user_id?: string;
   quiltt_connection_id?: string;
-}
-
-interface QuilttAccount {
-  id: string;
-  name: string;
-  mask: string | null;
-  kind: string | null;
-  state: string | null;
-  currencyCode: string | null;
-  institution: { name: string } | null;
-  balance: { current: number | null; available: number | null } | null;
-  connection?: { id: string; status: string } | null;
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -232,50 +228,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       rawAccounts = conns.flatMap((c) => c.accounts ?? []);
     }
 
-    // Warn-and-include, never warn-and-exclude, for accounts with a missing
-    // state. Dropping rows on uncertainty is the original DL-0326 bug class.
-    const nullStateAccounts = rawAccounts.filter((a) => !a.state);
-    if (nullStateAccounts.length > 0) {
-      console.warn(
-        `[or-quiltt-accounts] ${nullStateAccounts.length} account(s) returned a null or empty state ` +
-          `(ids: ${nullStateAccounts.map((a) => a.id).join(', ')}): including them in the response`,
-      );
-    }
-
-    // Counters travel with the response so the caller can distinguish
-    // "Quiltt returned few" from "OR dropped many". See docblock.
-    const totalReturned = rawAccounts.length;
-    const excludedClosed = rawAccounts.filter((a) => a.state === 'CLOSED').length;
-    const distinctStates = [...new Set(rawAccounts.map((a) => a.state))];
-
-    const accounts = rawAccounts
-      // Denylist: exclude only CLOSED. Never allowlist an enum we do not own.
-      // AccountState is Quiltt's to extend, and a state we have not heard of
-      // yet must show up in the response, not vanish from it.
-      .filter((a) => a.state !== 'CLOSED')
-      .map((a) => ({
-        id:               a.id,
-        name:             a.name,
-        institution_name: a.institution?.name ?? null,
-        kind:             a.kind ?? null,
-        mask:             a.mask ?? null,
-        currency:         a.currencyCode ?? null,
-        state:            a.state,
-        balance_current:  a.balance?.current ?? null,
-        balance_available: a.balance?.available ?? null,
-        connection:       a.connection ? { id: a.connection.id, status: a.connection.status } : null,
-      }));
-
-    return jsonResponse(
-      {
-        accounts,
-        total_returned: totalReturned,
-        excluded_closed: excludedClosed,
-        distinct_states: distinctStates,
-      },
-      200,
-      cors,
-    );
+    return jsonResponse(buildAccountsResponse(rawAccounts), 200, cors);
   } catch (e) {
     console.error('[or-quiltt-accounts] fatal:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);

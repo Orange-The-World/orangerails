@@ -83,17 +83,24 @@ Deno.test('resolveInvoiceWallet: hit -- exact match returns wallet id', async ()
   assertEquals(result, 'wallet-abc');
 });
 
-Deno.test('resolveInvoiceWallet: currency is case-sensitive -- btc does not match BTC', async () => {
-  // This is the currency-symmetry gate. The writer (or-link-complete) stores
-  // wallet_fingerprint using discovery_sessions.currency. The drain
-  // (or-sync/index.ts) passes inv.amount.currency after .toUpperCase()
-  // normalization before calling resolveInvoiceWallet. If that normalization
-  // is ever dropped, the fingerprint will not match and the transaction is
-  // held unattributed rather than mis-filed. This test pins the contract:
-  // callers must normalize currency before passing it here.
+Deno.test('resolveInvoiceWallet: currency case does not matter -- btc matches BTC', async () => {
+  // This is the currency-symmetry gate, and it used to assert the opposite.
+  //
+  // The writer (or-link-complete) stores wallet_fingerprint using
+  // discovery_sessions.currency; the drain (or-sync/index.ts) passes
+  // inv.amount.currency. If the two ever disagreed on case, the fingerprint
+  // would not match and the transaction would be held unattributed. That used
+  // to be every caller's job to prevent by uppercasing first, and this test
+  // pinned that convention.
+  //
+  // computeWalletFingerprint now normalizes with .toUpperCase() itself, so
+  // parity is the function's own contract rather than a rule each caller has
+  // to remember. Uppercasing is idempotent and both call sites already
+  // uppercased, so no stored fingerprint changed. The assertion below is
+  // inverted to match: symmetry is now guaranteed, not merely expected.
   const map = await makeMap('sub-1', 'recv-1', 'BTC', 'wallet-abc');
   const result = await resolveInvoiceWallet('sub-1', 'strike', 'recv-1', 'btc', map);
-  assertEquals(result, null, 'fingerprint built with "btc" must not match one built with "BTC"');
+  assertEquals(result, 'wallet-abc', 'currency case is normalized inside computeWalletFingerprint');
 });
 
 Deno.test('resolveInvoiceWallet: miss -- wrong receiver returns null', async () => {

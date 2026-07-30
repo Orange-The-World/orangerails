@@ -187,6 +187,47 @@ jobs:
             echo "::notice::Error count dropped to ${ERRORS}. Lower DENO_CHECK_BASELINE to ${ERRORS} in .github/workflows/ci.yml in this PR so the ratchet holds the ground you just took."
           fi
 
+  deno-test:
+    name: Test edge functions (Deno)
+    runs-on: ubuntu-latest
+    # Why this job exists: the repo has carried edge-function tests since long
+    # before this job, and not one of them has ever run. `deno check` above
+    # typechecks supabase/functions but never executes it, vitest's include is
+    # scoped to `src/**/*.test.ts`, and no workflow invoked `deno test` at all.
+    # Nine test files, zero enforcement.
+    #
+    # That is not a theoretical gap. When these were first executed, one had
+    # rotted into asserting the opposite of the shipped behaviour: a Strike
+    # test pinned "callers must uppercase currency before calling
+    # resolveInvoiceWallet" after normalization had already been moved inside
+    # computeWalletFingerprint. It was corrected in the same change that added
+    # this job. A test nobody runs does not decay into useless, it decays into
+    # wrong, and then it blocks whoever finally turns it on.
+    #
+    # --no-check is deliberate and matches the header of every test file here.
+    # Typechecking is the ratchet job above, which tolerates a known baseline;
+    # duplicating it here would make the test job fail for reasons that have
+    # nothing to do with any assertion.
+    #
+    # As with the ratchet job: making this check REQUIRED in the branch ruleset
+    # is a FOUNDER DECISION and has deliberately NOT been done here. Nothing in
+    # this change touches branch protection.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          # Same pin and same reason as the typecheck job above: the Supabase
+          # edge runtime is deno 2.1.4, so tests run on the runtime that ships.
+          deno-version: v2.1.4
+
+      - name: deno test supabase/functions
+        shell: bash
+        run: |
+          deno test --no-check --allow-all supabase/functions/
+
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
