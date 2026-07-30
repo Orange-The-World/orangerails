@@ -125,10 +125,36 @@ Deno.test('non string and empty payload values are not routing answers', () => {
   );
 });
 
-Deno.test('the map row wins as the profile id for Basic auth', () => {
-  const choice = chooseProfileId('p_from_map', ev({ profileId: 'p_from_payload' }));
+Deno.test('the map supplies the profile id when it agrees with the event', () => {
+  const choice = chooseProfileId('p_same', ev({ profileId: 'p_same' }));
 
-  assertEquals(choice, { profileId: 'p_from_map', source: 'map' });
+  assertEquals(choice, { profileId: 'p_same', source: 'map' });
+});
+
+Deno.test('a rebound subaccount does not override the profile that sent the event', () => {
+  // The legacy subaccount later called or-quiltt-session, which found no map
+  // row, minted a fresh Quiltt profile and mapped that one to it. handleEvent
+  // reads the map by subaccount_id, so it sees the new profile. The event still
+  // belongs to the old one, and only the old one's Basic credential can read the
+  // old connection.
+  //
+  // Preferring the map here is not a cosmetic wrong answer. It authenticates as
+  // a profile that cannot see this event's connection, so the event fails, bumps
+  // its counter, and holds a slot in the oldest-first drain forever: the same
+  // forever-loop this module exists to end, reintroduced one layer up.
+  const choice = chooseProfileId('p_minted_later', ev({ profileId: 'p_that_sent_this' }));
+
+  assertEquals(choice, { profileId: 'p_that_sent_this', source: 'payload-rebound' });
+});
+
+Deno.test('the map still answers when the event names no profile of its own', () => {
+  // The inverse boundary. Without this the rule above reads as "the payload
+  // always wins", and an event carrying no profile would resolve to nothing even
+  // though the map knows the answer.
+  assertEquals(chooseProfileId('p_from_map', ev({})), {
+    profileId: 'p_from_map',
+    source: 'map',
+  });
 });
 
 Deno.test('the payload profile id is used when there is no map row (DL-0465)', () => {
