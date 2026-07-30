@@ -58,6 +58,12 @@
  * subaccount which does not exist resolves to nothing rather than to
  * something wrong. Every fallback use is logged so the path is auditable.
  *
+ * The routing itself lives in ./routing.ts, not here. This module calls
+ * Deno.serve at import time, so anything importing it binds a port; keeping
+ * buildRows/applyRouting next door is what lets routing.test.ts assert the
+ * contract with no server, no database and no credential. The two database
+ * lookups stay here, because they are the part that needs a client.
+ *
  * Response semantics (Quiltt retries up to 20 times with exponential
  * backoff on non-2xx, per docs):
  *   200 , event accepted (new or already-known)
@@ -73,17 +79,20 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { applyRouting, buildRows, type QuilttEventLike } from './routing.ts';
 
 const MAX_BODY = 256 * 1024;             // 256KB , generous for batched events
 const MAX_TS_SKEW_MS = 5 * 60 * 1000;    // ±5 minutes
 const SIG_VERSION = '1';                  // literal "1", NOT "v1" , see https://www.quiltt.dev/webhooks
 
-interface QuilttEvent {
-  id?: unknown;
-  type?: unknown;
+/**
+ * The full event as Quiltt documents it. Only the fields routing.ts declares
+ * are read; the rest are here so the stored payload shape stays documented
+ * at the point where it enters the system.
+ */
+interface QuilttEvent extends QuilttEventLike {
   at?: unknown;            // Quiltt event time (ISO 8601), per spec
   timestamp?: unknown;     // legacy alias accepted in payload (some events use this name)
-  profile?: { id?: unknown; metadata?: { or_subaccount_id?: unknown } | null };
   record?: { id?: unknown };
   metadata?: unknown;
 }
@@ -146,55 +155,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
     );
 
-    type InboxRow = {
-      event_id: string;
-      event_type: string;
-      payload: unknown;
-      platform_id: string | null;
-      subaccount_id: string | null;
-    };
-
-    // Routing hints for rows[i], pushed in lockstep with rows so the two
-    // arrays are aligned by construction.
-    //
-    // These used to be re-derived as events[i] during annotation, which is
-    // wrong: malformed events are skipped when building rows, so a single
-    // skip shifted every later row onto its neighbour's profile and filed
-    // that event under the wrong subaccount. Only Quiltt can reach this code
-    // (the request is HMAC verified), so it needed a malformed event inside a
-    // multi-event batch rather than an attacker, but the consequence was
-    // cross-account misrouting. Carry the hint on the row; never recompute it
-    // from an index into a differently-filtered array.
-    type RouteHint = { profileId: string | null; metaSubaccountId: string | null };
-
-    const rows: InboxRow[] = [];
-    const hints: RouteHint[] = [];
-    const profileIds = new Set<string>();
-    const metaSubaccountIds = new Set<string>();
-    const events = parsed.events as QuilttEvent[];
-
-    for (const e of events) {
-      const eventId   = typeof e.id        === 'string' ? e.id        : null;
-      const eventType = typeof e.type      === 'string' ? e.type      : null;
-      const profileId = typeof e.profile?.id === 'string' ? e.profile.id : null;
-      if (!eventId || !eventType) continue;            // skip malformed
-
-      const metaSub = typeof e.profile?.metadata?.or_subaccount_id === 'string'
-        ? e.profile.metadata.or_subaccount_id
-        : null;
-
-      if (profileId) profileIds.add(profileId);
-      if (metaSub)   metaSubaccountIds.add(metaSub);
-
-      rows.push({
-        event_id:      eventId,
-        event_type:    eventType,
-        payload:       e,
-        platform_id:   null,
-        subaccount_id: null,
-      });
-      hints.push({ profileId, metaSubaccountId: metaSub });
-    }
+    // rows[i] and hints[i] describe the same event by construction. Malformed
+    // events are dropped inside buildRows, and the hint travels on the row
+    // rather than being recomputed from an index into a differently-filtered
+    // array. See routing.ts for what that used to cost.
+    const { rows, hints, profileIds, metaSubaccountIds } = buildRows(
+      parsed.events as QuilttEvent[],
+    );
 
     if (rows.length === 0) {
       return new Response('ok (no valid events)', { status: 200 });
@@ -202,11 +169,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     // Path 1: bulk-resolve via quiltt_profile_map (authoritative).
     const mapping = new Map<string, { platform_id: string; subaccount_id: string }>();
-    if (profileIds.size > 0) {
+    if (profileIds.length > 0) {
       const { data, error } = await client
         .from('quiltt_profile_map')
         .select('quiltt_profile_id, platform_id, subaccount_id')
-        .in('quiltt_profile_id', [...profileIds]);
+        .in('quiltt_profile_id', profileIds);
       if (error) {
         console.error('[or-quiltt-webhook] map lookup failed:', error.message);
         // Still proceed , the metadata fallback and the worker both get a turn.
@@ -224,11 +191,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // platform_id comes off the subaccount row, never off the payload, so an
     // id naming a subaccount that does not exist resolves to nothing.
     const metaResolved = new Map<string, string>();   // subaccount_id -> platform_id
-    if (metaSubaccountIds.size > 0) {
+    if (metaSubaccountIds.length > 0) {
       const { data, error } = await client
         .from('subaccounts')
         .select('id, platform_id')
-        .in('id', [...metaSubaccountIds]);
+        .in('id', metaSubaccountIds);
       if (error) {
         console.error('[or-quiltt-webhook] subaccount validation failed:', error.message);
       } else if (data) {
@@ -236,30 +203,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       }
     }
 
-    let viaMap = 0;
-    let viaMetadata = 0;
-    let unrouted = 0;
-
-    for (let i = 0; i < rows.length; i++) {
-      const hint = hints[i];
-      const map = hint.profileId ? mapping.get(hint.profileId) : undefined;
-      if (map) {
-        rows[i].platform_id   = map.platform_id;
-        rows[i].subaccount_id = map.subaccount_id;
-        viaMap++;
-        continue;
-      }
-
-      const platformId = hint.metaSubaccountId ? metaResolved.get(hint.metaSubaccountId) : undefined;
-      if (platformId) {
-        rows[i].platform_id   = platformId;
-        rows[i].subaccount_id = hint.metaSubaccountId;
-        viaMetadata++;
-        continue;
-      }
-
-      unrouted++;
-    }
+    const { viaMap, viaMetadata, unrouted } = applyRouting(rows, hints, mapping, metaResolved);
 
     if (viaMetadata > 0 || unrouted > 0) {
       // One line per batch, not per event: this is the signal that
