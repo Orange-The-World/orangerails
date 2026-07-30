@@ -13,7 +13,8 @@
  * each of which is silent in production:
  *
  *   1. Nothing caps the account count. The ticket was opened as "capped at
- *      18", so the real profile shape is pinned as a fixture.
+ *      18", so the reported shape (3 accounts on one connection plus 18 on
+ *      another) is pinned as a fixture, under generic institution names.
  *   2. Only CLOSED is excluded. A state Quiltt adds later must survive.
  *   3. A null state is included, not dropped.
  *   4. Connection status is passed through per account, unmapped, so
@@ -44,20 +45,25 @@ function acct(
 }
 
 // 1. The ticket's own shape: 21 accounts across two connections, nothing capped.
+//
+// The institution names below are deliberately generic. This repo is public and
+// its history is permanent, so a fixture must not publish which banks a real
+// customer holds accounts at. No assertion reads the institution name, so the
+// names carry no meaning here. Do not "correct" them back to the real ones.
 
 Deno.test('DL-0326: 21 accounts across two connections all come back, nothing caps at 18', () => {
-  const mercury = Array.from({ length: 3 }, (_, i) =>
-    acct(`mercury-${i}`, 'OPEN', {
-      institution: { name: 'Mercury' },
-      connection: { id: 'conn-mercury', status: 'SYNCED' },
+  const healthy = Array.from({ length: 3 }, (_, i) =>
+    acct(`bank-a-${i}`, 'OPEN', {
+      institution: { name: 'Bank A' },
+      connection: { id: 'conn-a', status: 'SYNCED' },
     }));
-  const creditUnion = Array.from({ length: 18 }, (_, i) =>
-    acct(`cu-${i}`, 'OPEN', {
-      institution: { name: 'Deseret First Credit Union' },
-      connection: { id: 'conn-cu', status: 'ERROR_REPAIRABLE' },
+  const broken = Array.from({ length: 18 }, (_, i) =>
+    acct(`bank-b-${i}`, 'OPEN', {
+      institution: { name: 'Bank B' },
+      connection: { id: 'conn-b', status: 'ERROR_REPAIRABLE' },
     }));
 
-  const out = buildAccountsResponse([...mercury, ...creditUnion]);
+  const out = buildAccountsResponse([...healthy, ...broken]);
 
   assertEquals(out.accounts.length, 21);
   assertEquals(out.total_returned, 21);
