@@ -54,6 +54,7 @@ PSQL_OUT=$(psql "$DSN" --no-password -t -A \
              WHERE source_currency = 'BTC' \
                AND target_currency = 'USD' \
                AND granularity = '1m' \
+               AND status = 'CONFIRMED' \
              ORDER BY bucket_ts DESC LIMIT 1;" 2>&1)
 PSQL_RC=$?
 
