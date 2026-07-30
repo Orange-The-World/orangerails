@@ -16,7 +16,7 @@
  * small and the test files can stub the client.
  */
 
-import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 export interface ConnectionRow {
   id: string;
