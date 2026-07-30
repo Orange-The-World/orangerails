@@ -82,9 +82,15 @@ function str(v: unknown): string | null {
  * reader can still tell a profile from a connection; everything that names a
  * specific person does not. Prefix-agnostic on purpose, so it keeps working as
  * Quiltt adds id types, and case-insensitive because Quiltt ids are mixed case.
+ *
+ * The prefix class is {1,8}, not {2,8}. A Quiltt profile id is `p_` and a single
+ * character prefix is the common case, not the edge one: the {2,8} form this was
+ * lifted from matched conn_ ids and passed every profile id through untouched.
+ * Over-redacting an ordinary word that happens to look like an id is the safe
+ * direction to be wrong in.
  */
 export function redactProviderId(id: string): string {
-  return id.replace(/\b([a-z]{2,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]');
+  return id.replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]');
 }
 
 /** The Quiltt profile id the webhook payload claims. Never a platform decision. */
