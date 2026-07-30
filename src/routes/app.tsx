@@ -1088,14 +1088,20 @@ function AppHome() {
                           keyVersion: vaultKeyVersion,
                         });
                       // Persist new wrapping to user_vault_meta.
-                      const { error: saveErr } = await (supabase as any)
+                      // CAS: match the prior ciphertext so a concurrent change or lost
+                      // session fails loudly instead of returning a dead recovery code.
+                      const { error: saveErr, data: saveData } = await (supabase as any)
                         .from("user_vault_meta")
                         .update({
                           enc_mek_ciphertext: newEncMekCiphertext,
                           recovery_ciphertext: newRecoveryCiphertext,
                         })
-                        .eq("user_id", userId);
+                        .eq("user_id", userId)
+                        .eq("enc_mek_ciphertext", vaultEncMekCiphertext)
+                        .select("user_id");
                       if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
+                      if (!saveData || (saveData as unknown[]).length === 0)
+                        throw new Error("Vault was changed from another session. Reload the page and try again.");
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
                       setChangePwNewRecovery(newRecoveryCode);
