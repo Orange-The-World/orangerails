@@ -245,4 +245,4 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     console.error(`v1-rate unhandled error [${correlationId}]:`, err)
     return Response.json({ error: 'server_error', message: 'Internal error', correlation_id: correlationId }, { status: 500 })
   }
-}), 'v1-rate')
+}, 'v1-rate'))
