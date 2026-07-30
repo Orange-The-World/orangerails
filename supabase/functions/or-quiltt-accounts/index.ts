@@ -54,7 +54,7 @@ interface QuilttAccount {
   name: string;
   mask: string | null;
   kind: string | null;
-  state: string;
+  state: string | null;
   currencyCode: string | null;
   institution: { name: string } | null;
   balance: { current: number | null; available: number | null } | null;
