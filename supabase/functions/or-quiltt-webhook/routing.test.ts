@@ -134,6 +134,19 @@ Deno.test('platform_id is never taken from the payload', () => {
 
   assertEquals(rows[0].platform_id, PLAT_A, 'platform comes from the subaccount row');
   assertEquals(rows[0].subaccount_id, SUB_A);
+
+  // And when the subaccount lookup came back empty, the platform_id sitting in
+  // the payload must not fill the gap. Unrouted is the correct answer.
+  //
+  // Without this half, an implementation that falls back to the payload passes
+  // every other case in this file: the assertions above are satisfied by the
+  // validated map winning, which it always does when the subaccount exists.
+  const second = buildRows([hostile]);
+  const counts = applyRouting(second.rows, second.hints, new Map(), new Map());
+
+  assertEquals(second.rows[0].platform_id, null);
+  assertEquals(second.rows[0].subaccount_id, null);
+  assertEquals(counts, { viaMap: 0, viaMetadata: 0, unrouted: 1 });
 });
 
 Deno.test('an event with no profile at all is unrouted, not crashed on', () => {
