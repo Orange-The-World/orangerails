@@ -112,7 +112,7 @@ jobs:
           # runtime, which the Supabase CLI provisions as edge-runtime v1.74.2
           # == deno 2.1.4; typecheck with the tsc the runtime actually ships.
           # Floating on latest would also move the number for reasons unrelated
-          # to our code: the orangerails tree reports 19 errors on 2.1.4 and 21
+          # to our code: the orangerails tree reports 15 errors on 2.1.4 and 21
           # on 2.9.4, purely from the newer bundled tsc.
           deno-version: v2.1.4
 
