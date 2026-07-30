@@ -97,7 +97,20 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   for (const ev of pending as PendingEvent[]) {
     try {
-      // Re-resolve mapping if missing (link-race tolerance)
+      // Re-resolve routing if missing (link-race tolerance).
+      //
+      // Two sources, in order of authority. The second one is the point:
+      // this block used to try quiltt_profile_map ONLY, which is the same
+      // lookup or-quiltt-webhook already ran when it wrote NULL in the first
+      // place. Re-running an identical query against unchanged data returns
+      // the identical miss, so an event that missed once missed on every
+      // tick forever. That is not link-race tolerance, it is a loop, and in
+      // production it ran attempt counters past 11,000 while the answer sat
+      // unread in the payload beside it (DL-0465).
+      //
+      // Nothing here trusts the payload for platform_id. The subaccount row
+      // is looked up and platform_id read off it, so a metadata value naming
+      // a subaccount that does not exist stays unresolved.
       let { platform_id, subaccount_id } = ev;
       if (!subaccount_id) {
         const profileId = ev.payload?.profile?.id;
@@ -110,11 +123,33 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           if (m.data) {
             platform_id   = m.data.platform_id;
             subaccount_id = m.data.subaccount_id;
-            await client
-              .from('quiltt_webhook_inbox')
-              .update({ platform_id, subaccount_id })
-              .eq('event_id', ev.event_id);
           }
+        }
+
+        if (!subaccount_id) {
+          const metaSub = ev.payload?.profile?.metadata?.or_subaccount_id;
+          if (typeof metaSub === 'string' && metaSub.length > 0) {
+            const s = await client
+              .from('subaccounts')
+              .select('id, platform_id')
+              .eq('id', metaSub)
+              .maybeSingle();
+            if (s.data) {
+              platform_id   = s.data.platform_id;
+              subaccount_id = s.data.id;
+              console.warn(
+                `[or-quiltt-sync] event ${ev.event_id}: routed via profile metadata ` +
+                  `after quiltt_profile_map missed (profile ${typeof profileId === 'string' ? profileId : 'unknown'})`,
+              );
+            }
+          }
+        }
+
+        if (subaccount_id && platform_id) {
+          await client
+            .from('quiltt_webhook_inbox')
+            .update({ platform_id, subaccount_id })
+            .eq('event_id', ev.event_id);
         }
       }
       if (!subaccount_id || !platform_id) {
