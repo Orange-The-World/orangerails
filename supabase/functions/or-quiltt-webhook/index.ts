@@ -33,11 +33,36 @@
  * and return 200 fast. The worker (or-quiltt-sync) drains the inbox
  * asynchronously.
  *
- * Routing: events carry profile.id which maps via quiltt_profile_map
- * to a (platform_id, subaccount_id) pair. If the lookup misses (event
- * arrives before or-link-complete persisted the mapping , possible
- * during the link race), we still enqueue but leave platform_id /
- * subaccount_id NULL; the worker re-resolves on drain.
+ * Routing, and why there are two resolution paths (DL-0465):
+ *
+ *   1. profile.id maps via quiltt_profile_map to (platform_id, subaccount_id).
+ *      This is the authoritative path.
+ *   2. If that lookup misses, fall back to profile.metadata.or_subaccount_id,
+ *      which OR itself writes at profile creation and Quiltt echoes back on
+ *      every event.
+ *
+ * Path 2 exists because path 1 alone was silently unrecoverable. When the
+ * map row was absent the event was enqueued with NULL routing on the theory
+ * that "the worker re-resolves on drain" , but the worker re-resolved by
+ * running the identical quiltt_profile_map lookup, so an event that missed
+ * once missed forever. In production that stranded 408 events, 360 of which
+ * were carrying the correct subaccount id inside the payload we had just
+ * stored. Attempt counters reached 11,495 on a query that could never
+ * succeed.
+ *
+ * Trust boundary on path 2, stated rather than assumed: the metadata is
+ * written by OR in or-link-complete and relayed by Quiltt over an
+ * HMAC-verified request, so it is as trustworthy as our own link flow and no
+ * more. We do not take platform_id from the payload. We look the subaccount
+ * up and read platform_id off that row, so a metadata value naming a
+ * subaccount which does not exist resolves to nothing rather than to
+ * something wrong. Every fallback use is logged so the path is auditable.
+ *
+ * The routing itself lives in ./routing.ts, not here. This module calls
+ * Deno.serve at import time, so anything importing it binds a port; keeping
+ * buildRows/applyRouting next door is what lets routing.test.ts assert the
+ * contract with no server, no database and no credential. The two database
+ * lookups stay here, because they are the part that needs a client.
  *
  * Response semantics (Quiltt retries up to 20 times with exponential
  * backoff on non-2xx, per docs):
@@ -54,17 +79,20 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { applyRouting, buildRows, type QuilttEventLike } from './routing.ts';
 
 const MAX_BODY = 256 * 1024;             // 256KB , generous for batched events
 const MAX_TS_SKEW_MS = 5 * 60 * 1000;    // ±5 minutes
 const SIG_VERSION = '1';                  // literal "1", NOT "v1" , see https://www.quiltt.dev/webhooks
 
-interface QuilttEvent {
-  id?: unknown;
-  type?: unknown;
+/**
+ * The full event as Quiltt documents it. Only the fields routing.ts declares
+ * are read; the rest are here so the stored payload shape stays documented
+ * at the point where it enters the system.
+ */
+interface QuilttEvent extends QuilttEventLike {
   at?: unknown;            // Quiltt event time (ISO 8601), per spec
   timestamp?: unknown;     // legacy alias accepted in payload (some events use this name)
-  profile?: { id?: unknown };
   record?: { id?: unknown };
   metadata?: unknown;
 }
@@ -127,45 +155,28 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
     );
 
-    // Build inbox rows. Resolve platform_id/subaccount_id per event via
-    // quiltt_profile_map; missing mapping = NULL fields (worker re-resolves).
-    type InboxRow = {
-      event_id: string;
-      event_type: string;
-      payload: unknown;
-      platform_id: string | null;
-      subaccount_id: string | null;
-    };
+    // rows[i] and hints[i] describe the same event by construction. Malformed
+    // events are dropped inside buildRows, and the hint travels on the row
+    // rather than being recomputed from an index into a differently-filtered
+    // array. See routing.ts for what that used to cost.
+    const { rows, hints, profileIds, metaSubaccountIds } = buildRows(
+      parsed.events as QuilttEvent[],
+    );
 
-    const rows: InboxRow[] = [];
-    const profileIds = new Set<string>();
-    const events = parsed.events as QuilttEvent[];
-
-    for (const e of events) {
-      const eventId   = typeof e.id        === 'string' ? e.id        : null;
-      const eventType = typeof e.type      === 'string' ? e.type      : null;
-      const profileId = typeof e.profile?.id === 'string' ? e.profile.id : null;
-      if (!eventId || !eventType) continue;            // skip malformed
-      if (profileId) profileIds.add(profileId);
-      rows.push({
-        event_id:      eventId,
-        event_type:    eventType,
-        payload:       e,
-        platform_id:   null,
-        subaccount_id: null,
-      });
+    if (rows.length === 0) {
+      return new Response('ok (no valid events)', { status: 200 });
     }
 
-    // Bulk-resolve mappings
+    // Path 1: bulk-resolve via quiltt_profile_map (authoritative).
     const mapping = new Map<string, { platform_id: string; subaccount_id: string }>();
-    if (profileIds.size > 0) {
+    if (profileIds.length > 0) {
       const { data, error } = await client
         .from('quiltt_profile_map')
         .select('quiltt_profile_id, platform_id, subaccount_id')
-        .in('quiltt_profile_id', [...profileIds]);
+        .in('quiltt_profile_id', profileIds);
       if (error) {
         console.error('[or-quiltt-webhook] map lookup failed:', error.message);
-        // Still proceed , worker will re-resolve on drain.
+        // Still proceed , the metadata fallback and the worker both get a turn.
       } else if (data) {
         for (const row of data) {
           mapping.set(row.quiltt_profile_id, {
@@ -176,19 +187,33 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       }
     }
 
-    // Annotate rows with resolved mappings
-    for (let i = 0; i < rows.length; i++) {
-      const e = events[i];
-      const pid = typeof e?.profile?.id === 'string' ? e.profile.id : null;
-      const map = pid ? mapping.get(pid) : null;
-      if (map) {
-        rows[i].platform_id   = map.platform_id;
-        rows[i].subaccount_id = map.subaccount_id;
+    // Path 2: bulk-validate any subaccount ids carried in profile metadata.
+    // platform_id comes off the subaccount row, never off the payload, so an
+    // id naming a subaccount that does not exist resolves to nothing.
+    const metaResolved = new Map<string, string>();   // subaccount_id -> platform_id
+    if (metaSubaccountIds.length > 0) {
+      const { data, error } = await client
+        .from('subaccounts')
+        .select('id, platform_id')
+        .in('id', metaSubaccountIds);
+      if (error) {
+        console.error('[or-quiltt-webhook] subaccount validation failed:', error.message);
+      } else if (data) {
+        for (const row of data) metaResolved.set(row.id, row.platform_id);
       }
     }
 
-    if (rows.length === 0) {
-      return new Response('ok (no valid events)', { status: 200 });
+    const { viaMap, viaMetadata, unrouted } = applyRouting(rows, hints, mapping, metaResolved);
+
+    if (viaMetadata > 0 || unrouted > 0) {
+      // One line per batch, not per event: this is the signal that
+      // quiltt_profile_map is drifting from reality, and it has to be
+      // findable without reading three thousand log lines.
+      console.warn(
+        `[or-quiltt-webhook] routing: ${viaMap} via profile map, ` +
+          `${viaMetadata} via profile metadata fallback, ${unrouted} unrouted ` +
+          `(of ${rows.length} events)`,
+      );
     }
 
     // Idempotent insert. ON CONFLICT DO NOTHING on event_id PK means
