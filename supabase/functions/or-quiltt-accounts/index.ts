@@ -23,15 +23,11 @@
  *   quiltt_connection_id:  string  Quiltt's connectionId returned by
  *                                  onExitSuccess in the popup flow
  *
- * Response 200 (quiltt_connection_id provided):
- *   { accounts: [...], connection_status: string|null,
- *     total_returned: number, excluded_closed: number,
- *     distinct_states: (string|null)[] }
- *
- * Response 200 (all-connections fallback):
- *   { accounts: [{...fields, connection_id: string|null}], connections: [{id, status}],
- *     total_returned: number, excluded_closed: number,
- *     distinct_states: (string|null)[] }
+ * Response 200:
+ *   { accounts: [
+ *       { id, name, institution_name, kind, mask, currency, state, connection },
+ *       ...
+ *     ] }
  *
  * Response 400: missing/bad fields
  * Response 401: invalid platform key
@@ -58,11 +54,11 @@ interface QuilttAccount {
   name: string;
   mask: string | null;
   kind: string | null;
-  state: string | null;
+  state: string;
   currencyCode: string | null;
   institution: { name: string } | null;
   balance: { current: number | null; available: number | null } | null;
-  connection?: { id: string } | null;
+  connection?: { id: string; status: string } | null;
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -86,7 +82,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const body = JSON.parse(raw || '{}') as AccountsBody;
 
     if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-      return jsonResponse({ error: 'app_user_id required (string, ≤256 chars)' }, 400, cors);
+      return jsonResponse({ error: 'app_user_id required (string, <=256 chars)' }, 400, cors);
     }
     // quiltt_connection_id is OPTIONAL. When omitted (empty string), we
     // enumerate ALL connections under the profile. This is the fallback
@@ -149,15 +145,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // Schema reference: https://www.quiltt.dev/api-reference/graphql
     const basic = btoa(`${profileId}:${apiKey}`);
     let rawAccounts: QuilttAccount[] = [];
-    let connectionStatusSingle: string | null = null;
-    const connectionStatusAll: Array<{ id: string; status: string | null }> = [];
 
     if (connectionId) {
       const query = `
         query Q($connId: ID!) {
           connection(id: $connId) {
             id
-            status
             accounts {
               id
               name
@@ -167,6 +160,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               currencyCode
               institution { name }
               balance { current available }
+              connection { id status }
             }
           }
         }
@@ -187,14 +181,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
       }
       rawAccounts = json?.data?.connection?.accounts ?? [];
-      connectionStatusSingle = json?.data?.connection?.status ?? null;
     } else {
       // Enumerate every connection under the profile and flatten accounts.
       const query = `
         query Q {
           connections {
             id
-            status
             accounts {
               id
               name
@@ -204,7 +196,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               currencyCode
               institution { name }
               balance { current available }
-              connection { id }
+              connection { id status }
             }
           }
         }
@@ -224,29 +216,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         console.error('[or-quiltt-accounts] Quiltt(all) GraphQL errors:', JSON.stringify(json.errors).slice(0, 500));
         return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
       }
-      const conns = (json?.data?.connections ?? []) as Array<{ id: string; status?: string | null; accounts?: QuilttAccount[] }>;
+      const conns = (json?.data?.connections ?? []) as Array<{ accounts?: QuilttAccount[] }>;
       rawAccounts = conns.flatMap((c) => c.accounts ?? []);
-      conns.forEach((c) => connectionStatusAll.push({ id: c.id, status: c.status ?? null }));
     }
 
-    // Warn-and-include (not warn-and-exclude) for accounts with null/undefined state.
-    // Excluding on uncertainty is the original bug class: include and make it visible.
-    const nullStateAccounts = rawAccounts.filter((a) => !a.state);
-    if (nullStateAccounts.length > 0) {
-      console.warn(
-        `[or-quiltt-accounts] ${nullStateAccounts.length} account(s) returned null/undefined state ` +
-        `(ids: ${nullStateAccounts.map((a) => a.id).join(', ')}) -- including in results`,
-      );
-    }
-
-    // Counters: every caller can see what Quiltt returned and what was filtered.
-    const totalReturned = rawAccounts.length;
-    const excludedClosed = rawAccounts.filter((a) => a.state === 'CLOSED').length;
-    const distinctStates = [...new Set(rawAccounts.map((a) => a.state))];
-
-    // Denylist: exclude only CLOSED. We never allowlist an enum we do not own;
-    // a vendor adding a new account state must never silently drop rows.
     const accounts = rawAccounts
+      // Denylist: exclude only CLOSED. Never allowlist an enum we do not own;
+      // a vendor adding a new state (e.g. ERROR_REPAIRABLE) must never silently
+      // drop rows from the response.
       .filter((a) => a.state !== 'CLOSED')
       .map((a) => ({
         id:               a.id,
@@ -258,25 +235,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         state:            a.state,
         balance_current:  a.balance?.current ?? null,
         balance_available: a.balance?.available ?? null,
-        connection_id:    a.connection?.id ?? null,
+        connection:       a.connection ? { id: a.connection.id, status: a.connection.status } : null,
       }));
 
-    const responseBody = connectionId
-      ? {
-          accounts,
-          connection_status: connectionStatusSingle,
-          total_returned: totalReturned,
-          excluded_closed: excludedClosed,
-          distinct_states: distinctStates,
-        }
-      : {
-          accounts,
-          connections: connectionStatusAll,
-          total_returned: totalReturned,
-          excluded_closed: excludedClosed,
-          distinct_states: distinctStates,
-        };
-    return jsonResponse(responseBody, 200, cors);
+    return jsonResponse({ accounts }, 200, cors);
   } catch (e) {
     console.error('[or-quiltt-accounts] fatal:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
