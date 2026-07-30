@@ -142,7 +142,11 @@ Deno.test('a rebound subaccount does not override the profile that sent the even
   // a profile that cannot see this event's connection, so the event fails, bumps
   // its counter, and holds a slot in the oldest-first drain forever: the same
   // forever-loop this module exists to end, reintroduced one layer up.
-  const choice = chooseProfileId('p_minted_later', ev({ profileId: 'p_that_sent_this' }));
+  const choice = chooseProfileId(
+    'p_minted_later',
+    ev({ profileId: 'p_that_sent_this', metaSub: SUB_A }),
+    SUB_A,
+  );
 
   assertEquals(choice, { profileId: 'p_that_sent_this', source: 'payload-rebound' });
 });
@@ -151,7 +155,7 @@ Deno.test('the map still answers when the event names no profile of its own', ()
   // The inverse boundary. Without this the rule above reads as "the payload
   // always wins", and an event carrying no profile would resolve to nothing even
   // though the map knows the answer.
-  assertEquals(chooseProfileId('p_from_map', ev({})), {
+  assertEquals(chooseProfileId('p_from_map', ev({}), SUB_A), {
     profileId: 'p_from_map',
     source: 'map',
   });
@@ -161,12 +165,85 @@ Deno.test('the payload profile id is used when there is no map row (DL-0465)', (
   // This is the whole point. The pre-2026-06-10 cohort has no map row and no
   // way to get one, so without this the event fails on `profile map missing`
   // on every tick, forever, exactly as it did 11,495 times in production.
-  const choice = chooseProfileId(null, ev({ profileId: 'p_from_payload' }));
+  //
+  // Their metadata names the same subaccount they route to, which is what earns
+  // them the payload credential under the rule below.
+  const choice = chooseProfileId(
+    null,
+    ev({ profileId: 'p_from_payload', metaSub: SUB_A }),
+    SUB_A,
+  );
 
   assertEquals(choice, { profileId: 'p_from_payload', source: 'payload' });
 });
 
+Deno.test('a payload profile is refused when it names a different subaccount', () => {
+  // A row misrouted by the receiver's old malformed-batch index shift: the
+  // stored route is COMPLETE, so chooseRouting trusts it, and it points at
+  // SUB_B. The map read by SUB_B returns SUB_B's own profile, which differs
+  // from the payload's, so this looks exactly like a rebind.
+  //
+  // It is not one, and the difference is not cosmetic. The payload's credential
+  // WORKS: it returns the real customer's transactions, which index.ts then
+  // seals under SUB_B's OPK. Preferring the map fails closed instead, because
+  // SUB_B's profile cannot read this event's connection. Refusing outright is
+  // the same fail-closed without pretending we know whose data this is.
+  const choice = chooseProfileId(
+    'p_belonging_to_sub_b',
+    ev({ profileId: 'p_that_sent_this', metaSub: SUB_A }),
+    SUB_B,
+  );
+
+  assertEquals(choice, { profileId: null, source: 'route-conflict' });
+});
+
+Deno.test('the refusal also covers a misroute where the map simply misses', () => {
+  // Same misroute, but SUB_B has no map row at all. Without this fixture the
+  // guard can be written to cover only the rebound branch, which is where the
+  // finding was reported, and this case walks straight through it into the
+  // identical leak via source 'payload'. The guard has to sit on both payload
+  // paths, so a fixture has to exist for both.
+  const choice = chooseProfileId(
+    null,
+    ev({ profileId: 'p_that_sent_this', metaSub: SUB_A }),
+    SUB_B,
+  );
+
+  assertEquals(choice, { profileId: null, source: 'route-conflict' });
+});
+
+Deno.test('a payload that names no subaccount corroborates nothing', () => {
+  // Silence is not agreement. Without this the guard can be written as
+  // "refuse only when the metadata names a DIFFERENT subaccount", and every
+  // metadata-free event goes back to handing its payload credential over on
+  // trust, which is the hole this was opened to close.
+  const choice = chooseProfileId(null, ev({ profileId: 'p_that_sent_this' }), SUB_A);
+
+  assertEquals(choice, { profileId: null, source: 'route-conflict' });
+});
+
 Deno.test('no map row and no payload profile id is not a profile id', () => {
-  assertEquals(chooseProfileId(null, ev({})), { profileId: null, source: 'none' });
-  assertEquals(chooseProfileId('', ev({ profileId: '' })), { profileId: null, source: 'none' });
+  assertEquals(chooseProfileId(null, ev({}), SUB_A), { profileId: null, source: 'none' });
+  assertEquals(chooseProfileId('', ev({ profileId: '' }), SUB_A), {
+    profileId: null,
+    source: 'none',
+  });
+});
+
+Deno.test('redactProviderId keeps the type and drops the identity', () => {
+  assertEquals(redactProviderId('p_12zb3n94iKR1drzFbVK6qF'), 'p_[redacted]');
+  assertEquals(redactProviderId('conn_14TJiFDKRJlPiBHuukUIlXZ'), 'conn_[redacted]');
+
+  // Two different profiles have to render identically. If they did not, the log
+  // line would still carry enough to tell one customer's profile from another.
+  assertEquals(
+    redactProviderId('p_aaaaaaaaaaaaaaaaaaaaaa'),
+    redactProviderId('p_bbbbbbbbbbbbbbbbbbbbbb'),
+  );
+
+  // A UUID is not a provider id and is not this function's job. Subaccount ids
+  // are ours, and index.ts logs them deliberately so an operator can find the
+  // row the warning is about.
+  assertEquals(redactProviderId(SUB_A), SUB_A);
+  assertEquals(redactProviderId(''), '');
 });
