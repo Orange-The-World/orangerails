@@ -182,6 +182,10 @@ export async function computeAccountFingerprint(
  * Same key and same rotation policy as computeAccountFingerprint: see the module
  * header. Rotating the key without re-fingerprinting every existing row silently
  * turns every reconnect back into a duplicate.
+ *
+ * currency is normalized to uppercase inside this function, so callers need not
+ * pre-normalize casing. The invariant is enforced here as a contract, not left
+ * as a convention each call site must remember.
  */
 export async function computeWalletFingerprint(
   subaccountId: string,
@@ -207,13 +211,19 @@ export async function computeWalletFingerprint(
     currency,
   });
 
+  // Normalize currency casing here so parity is the function's own contract
+  // rather than a convention every caller must repeat. Uppercasing is
+  // idempotent and both existing call sites already uppercase, so this changes
+  // no existing fingerprint and needs no key version bump.
+  const normalizedCurrency = currency.toUpperCase();
+
   const enc = new TextEncoder();
   const message = [
     WALLET_DOMAIN_SEPARATOR,
     subaccountId,
     providerType,
     canonicalAccountKey,
-    currency,
+    normalizedCurrency,
   ].join("\x00");
 
   const cryptoKey = await crypto.subtle.importKey(
