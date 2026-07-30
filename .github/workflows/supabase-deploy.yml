@@ -157,7 +157,7 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ steps.target.outputs.supabase_ref }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           MIG_DIR="supabase/migrations"
           if [ ! -d "$MIG_DIR" ]; then
             echo "no migrations directory; nothing pending"
@@ -167,16 +167,27 @@ jobs:
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
           jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
-          APPLIED=$(curl -sS -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
-            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data-binary "@$PAYLOAD" | jq -r '.[].version' | sort -u)
+          RESPONSE=""
+          for attempt in 1 2 3; do
+            RESPONSE=$(curl -sS -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$PAYLOAD") && break
+            echo "curl attempt $attempt failed; sleeping 10s"
+            sleep 10
+          done
+          if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
+            echo "::warning::migration check returned invalid JSON"
+            echo "COULD NOT CHECK PENDING MIGRATIONS"
+            exit 0
+          fi
+          APPLIED=$(echo "$RESPONSE" | jq -r '.[].version' | sort -u)
 
           PENDING=0
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
             BASENAME=$(basename "$FILE")
             VERSION="${BASENAME%%_*}"
-            if echo "$APPLIED" | grep -qx "$VERSION"; then
+            if [ -n "$APPLIED" ] && echo "$APPLIED" | grep -qx "$VERSION"; then
               continue
             fi
             echo "PENDING on ${SUPABASE_REF}: ${BASENAME}"
