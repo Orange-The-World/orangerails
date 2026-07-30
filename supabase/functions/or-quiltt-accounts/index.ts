@@ -1,17 +1,17 @@
 /**
- * or-quiltt-accounts — list the bank accounts under a Quiltt connection.
+ * or-quiltt-accounts: list the bank accounts under a Quiltt connection.
  *
  * Integrating apps call this immediately
  * after a successful Quiltt link to discover which accounts the user
  * just authorized. The response feeds the post-link review screen ("you
- * linked 3 accounts at Chase — pick which to import") and seeds the
+ * linked 3 accounts at Chase, pick which to import") and seeds the
  * integrator's local wallet rows.
  *
  * Why a dedicated endpoint: V2 cannot talk to Quiltt directly because
  * Quiltt's API key is bound to OR's account, and the per-user Profile
  * id lives in OR's `quiltt_profile_map`. OR brokers the GraphQL call
  * with Basic auth (`profile_id:api_key`) and hands back the cleartext
- * account metadata (institution name, mask, type, currency) — none of
+ * account metadata (institution name, mask, type, currency), none of
  * which is sensitive enough to require ZKA-style encryption.
  *
  * Auth: X-Platform-API-Key (platform mode). Direct mode is rejected:
@@ -29,16 +29,16 @@
  *     distinct_states: (string|null)[] }
  *
  * Response 200 (all-connections fallback):
- *   { accounts: [...], connections: [{id, status}],
+ *   { accounts: [{...fields, connection_id: string|null}], connections: [{id, status}],
  *     total_returned: number, excluded_closed: number,
  *     distinct_states: (string|null)[] }
  *
- * Response 400 — missing/bad fields
- * Response 401 — invalid platform key
- * Response 403 — direct mode rejected
- * Response 404 — no quiltt_profile_map for this (platform, app_user_id)
- * Response 502 — upstream Quiltt error
- * Response 503 — QUILTT_API_KEY not configured
+ * Response 400: missing/bad fields
+ * Response 401: invalid platform key
+ * Response 403: direct mode rejected
+ * Response 404: no quiltt_profile_map for this (platform, app_user_id)
+ * Response 502: upstream Quiltt error
+ * Response 503: QUILTT_API_KEY not configured
  */
 
 import { authenticateRequest } from '../_shared/platform-auth.ts';
@@ -62,6 +62,7 @@ interface QuilttAccount {
   currencyCode: string | null;
   institution: { name: string } | null;
   balance: { current: number | null; available: number | null } | null;
+  connection?: { id: string } | null;
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -119,7 +120,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .maybeSingle();
     if (subLookup.error || !subLookup.data) {
       return jsonResponse(
-        { error: 'subaccount not provisioned — call or-quiltt-session before linking' },
+        { error: 'subaccount not provisioned: call or-quiltt-session before linking' },
         404,
         cors,
       );
@@ -203,6 +204,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               currencyCode
               institution { name }
               balance { current available }
+              connection { id }
             }
           }
         }
@@ -256,6 +258,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         state:            a.state,
         balance_current:  a.balance?.current ?? null,
         balance_available: a.balance?.available ?? null,
+        connection_id:    a.connection?.id ?? null,
       }));
 
     const responseBody = connectionId
