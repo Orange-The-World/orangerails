@@ -5,6 +5,7 @@ import {
   type InboxEventLike,
   metadataSubaccountId,
   profileIdFromPayload,
+  redactProviderId,
 } from './resolve.ts';
 
 const SUB_A = '11111111-1111-4111-8111-111111111111';
