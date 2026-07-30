@@ -78,6 +78,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   let processed = 0;
   let failed    = 0;
   let skipped   = 0;
+  let deferred  = 0;
 
   // Pull a batch of pending events
   const { data: pending, error: pendErr } = await client
@@ -166,6 +167,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       } else if (handled === 'skipped') {
         await markProcessed(client, ev.event_id);  // no-op events still mark done
         skipped++;
+      } else if (handled === 'deferred') {
+        // OPK not yet set; leave processed_at null so or-sync session drain can pick this up.
+        deferred++;
       } else {
         await bumpAttempts(client, ev.event_id, handled);
         failed++;
@@ -177,7 +181,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
   }
 
-  return jsonResponse({ processed, failed, skipped, batch: pending.length }, 200);
+  return jsonResponse({ processed, failed, skipped, deferred, batch: pending.length }, 200);
 }, 'or-quiltt-sync'));
 
 // ─── event dispatch ──────────────────────────────────────────────────
@@ -188,7 +192,7 @@ async function handleEvent(
   platformId: string,
   subaccountId: string,
   apiKey: string,
-): Promise<'processed' | 'skipped' | string> {
+): Promise<'processed' | 'skipped' | 'deferred' | string> {
   // Only act on sync.successful.* for now
   if (!ev.event_type.startsWith('connection.synced.successful')) {
     return 'skipped';
@@ -203,7 +207,7 @@ async function handleEvent(
   if (subErr || !sub) return `subaccount lookup failed: ${subErr?.message}`;
   if (!sub.opk_public) {
     // No opt-in. Defer until user opens app (or-sync will drain).
-    return 'skipped';
+    return 'deferred';
   }
   if (sub.opk_alg !== OPK_SEAL_ALG) {
     return `unsupported opk_alg: ${sub.opk_alg}`;
