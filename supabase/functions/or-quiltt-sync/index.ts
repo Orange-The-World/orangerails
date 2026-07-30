@@ -117,8 +117,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       // Nothing here trusts the payload for platform_id. The subaccount row
       // is looked up and platform_id read off it, so a metadata value naming
       // a subaccount that does not exist stays unresolved.
-      // The decisions live in ./resolve.ts and are covered there. This block
-      // is the two lookups, which are the part that needs a client.
+      //
+      // Those decisions now live in ./resolve.ts, where they are covered by
+      // fixtures. What is left here is the two lookups, which are the part
+      // that needs a client.
       let { platform_id, subaccount_id } = ev;
       if (!platform_id || !subaccount_id) {
         const profileId = profileIdFromPayload(ev);
