@@ -6,7 +6,7 @@
  * database calls stay in index.ts, which is the part that needs a client. Same
  * split as or-quiltt-webhook/routing.ts, and for the same reason.
  *
- * Four contract points, each pinned by a fixture in resolve.test.ts:
+ * Five contract points, each pinned by a fixture in resolve.test.ts:
  *
  *   1. Routing already on the inbox row wins, and only when it is complete.
  *      A row carrying a subaccount but no platform is not routed, it is half
