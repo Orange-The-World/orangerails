@@ -456,7 +456,7 @@ async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, errMsg: st
     .update({
       attempts:   newAttempts,
       last_error: errMsg.slice(0, 500),
-      ...(terminal ? { processed_at: new Date().toISOString() } : {}),
+      ...(terminal ? { processed_at: new Date().toISOString(), retirement_reason: ('max-attempts:' + errMsg).slice(0, 500) } : {}),
     })
     .eq('event_id', ev.event_id);
   if (terminal) {
