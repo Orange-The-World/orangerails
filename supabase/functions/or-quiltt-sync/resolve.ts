@@ -74,6 +74,19 @@ function str(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
+/**
+ * Strip the identifying half of a provider id before it reaches a log.
+ *
+ * Same rule the GraphQL error path in index.ts applies to provider messages,
+ * hoisted so a log line can use it directly. The type prefix survives so a
+ * reader can still tell a profile from a connection; everything that names a
+ * specific person does not. Prefix-agnostic on purpose, so it keeps working as
+ * Quiltt adds id types, and case-insensitive because Quiltt ids are mixed case.
+ */
+export function redactProviderId(id: string): string {
+  return id.replace(/\b([a-z]{2,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]');
+}
+
 /** The Quiltt profile id the webhook payload claims. Never a platform decision. */
 export function profileIdFromPayload(ev: InboxEventLike): string | null {
   return str(ev?.payload?.profile?.id);
