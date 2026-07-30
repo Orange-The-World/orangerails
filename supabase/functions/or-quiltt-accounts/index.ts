@@ -23,11 +23,23 @@
  *   quiltt_connection_id:  string  Quiltt's connectionId returned by
  *                                  onExitSuccess in the popup flow
  *
- * Response 200:
+ * Response 200 (same shape in both modes):
  *   { accounts: [
- *       { id, name, institution_name, kind, mask, currency, state, connection },
+ *       { id, name, institution_name, kind, mask, currency, state,
+ *         balance_current, balance_available,
+ *         connection: { id, status } | null },
  *       ...
- *     ] }
+ *     ],
+ *     total_returned:  number            how many accounts Quiltt returned
+ *     excluded_closed: number            how many this function dropped
+ *     distinct_states: (string|null)[]   every state Quiltt used in this response
+ *   }
+ *
+ * The three counters exist so a caller who sees "fewer accounts than I
+ * expected" can tell the difference between Quiltt returning few and OR
+ * dropping many, without needing our logs. DL-0326 burned ten days on
+ * exactly that ambiguity, so they are part of the contract, not debug
+ * output.
  *
  * Response 400: missing/bad fields
  * Response 401: invalid platform key
@@ -220,10 +232,26 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       rawAccounts = conns.flatMap((c) => c.accounts ?? []);
     }
 
+    // Warn-and-include, never warn-and-exclude, for accounts with a missing
+    // state. Dropping rows on uncertainty is the original DL-0326 bug class.
+    const nullStateAccounts = rawAccounts.filter((a) => !a.state);
+    if (nullStateAccounts.length > 0) {
+      console.warn(
+        `[or-quiltt-accounts] ${nullStateAccounts.length} account(s) returned a null or empty state ` +
+          `(ids: ${nullStateAccounts.map((a) => a.id).join(', ')}): including them in the response`,
+      );
+    }
+
+    // Counters travel with the response so the caller can distinguish
+    // "Quiltt returned few" from "OR dropped many". See docblock.
+    const totalReturned = rawAccounts.length;
+    const excludedClosed = rawAccounts.filter((a) => a.state === 'CLOSED').length;
+    const distinctStates = [...new Set(rawAccounts.map((a) => a.state))];
+
     const accounts = rawAccounts
-      // Denylist: exclude only CLOSED. Never allowlist an enum we do not own;
-      // a vendor adding a new state (e.g. ERROR_REPAIRABLE) must never silently
-      // drop rows from the response.
+      // Denylist: exclude only CLOSED. Never allowlist an enum we do not own.
+      // AccountState is Quiltt's to extend, and a state we have not heard of
+      // yet must show up in the response, not vanish from it.
       .filter((a) => a.state !== 'CLOSED')
       .map((a) => ({
         id:               a.id,
@@ -238,7 +266,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         connection:       a.connection ? { id: a.connection.id, status: a.connection.status } : null,
       }));
 
-    return jsonResponse({ accounts }, 200, cors);
+    return jsonResponse(
+      {
+        accounts,
+        total_returned: totalReturned,
+        excluded_closed: excludedClosed,
+        distinct_states: distinctStates,
+      },
+      200,
+      cors,
+    );
   } catch (e) {
     console.error('[or-quiltt-accounts] fatal:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
