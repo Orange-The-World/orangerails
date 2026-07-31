@@ -227,9 +227,14 @@ jobs:
         shell: bash
         env:
           # Test files present on dev when this job was hardened, measured
-          # 2026-07-31. Lower this in the same PR that intentionally removes
-          # a test file, with a comment explaining why.
-          DENO_TEST_FILE_BASELINE: '3'
+          # 2026-07-31 (find catches all *.test.ts and *_test.ts, including
+          # files under _shared/). Lower this in the same PR that intentionally
+          # removes a test file, with a comment explaining why.
+          # Per-branch hazard: prod carries 9 of these files (see prod's
+          # ci.yml). If the two files are ever reconciled by copying dev across,
+          # a baseline of 15 lands red on prod on arrival. Keep the two values
+          # in sync with their actual branch counts.
+          DENO_TEST_FILE_BASELINE: '15'
         run: |
           set -euo pipefail
 
