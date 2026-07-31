@@ -69,7 +69,7 @@
  * Response 404 if platform_slug unknown; 400 on missing fields.
  */
 
-import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { toByteaHex } from "../_shared/bytea.ts";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
