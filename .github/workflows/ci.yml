@@ -47,6 +47,46 @@ jobs:
       - name: Build
         run: bun run build
 
+  deno-test:
+    name: Test edge functions (Deno)
+    runs-on: ubuntu-latest
+    # Why this job exists on prod: every Supabase edge function in this repo is
+    # Deno, and a merge into prod redeploys all of them. Until this job existed
+    # here, prod's copy of this file contained no reference to deno at all, so
+    # an edge function could go from pull request to production having been
+    # neither typechecked nor tested, with the pull request reporting green the
+    # whole way. Green then meant "the frontend built and the smoke test clicked
+    # through", which is not a statement about the code being deployed.
+    #
+    # This is dev's deno-test job, copied unchanged so the two branches stop
+    # disagreeing about what "CI passed" means. Its sibling deno-typecheck is
+    # deliberately NOT copied yet: prod currently produces 18 error markers under
+    # deno check and, unlike dev's copy, this file carries no DENO_CHECK_BASELINE
+    # ratchet to tolerate a known count, so importing it today would land red on
+    # arrival. That is tracked in #361 and wants the ratchet brought with it.
+    #
+    # --no-check is deliberate and matches the header of every test file here;
+    # typechecking is that separate job's business.
+    #
+    # As on dev: making this check REQUIRED in the branch ruleset is a FOUNDER
+    # DECISION and has deliberately NOT been done here. Nothing in this change
+    # touches branch protection.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          # The Supabase edge runtime is deno 2.1.4, so tests run on the runtime
+          # that ships. Same pin as dev.
+          deno-version: v2.1.4
+
+      - name: deno test supabase/functions
+        shell: bash
+        run: |
+          deno test --no-check --allow-all supabase/functions/
+
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest

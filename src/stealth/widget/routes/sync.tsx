@@ -290,14 +290,14 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    cursor never advanced and every sync rescanned the whole
         //    birthday-to-tip window. Best-effort: a failure here must not
         //    fail the sync, it only widens the next rescan window.
-        if (!useMock) {
+        if (!useMock && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
             last_block_scanned: result.lastBlockScanned,
           };
           try {
-            if (initWithToken.proxy_base_url && parent) {
+            if (init.proxy_base_url && parent) {
               const r = await proxyFetch({
                 parent,
                 parentOrigin: init.return_callback_origin,
@@ -311,11 +311,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
               const headers: Record<string, string> = {
                 "Content-Type": "application/json",
               };
-              if (initWithToken.access_token) {
-                headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
+              if (init.access_token) {
+                headers["Authorization"] = `Bearer ${init.access_token}`;
               }
               const cursorResp = await fetch(
-                resolveFunctionUrl("or-stealth-envelope-update", initWithToken.proxy_base_url),
+                resolveFunctionUrl("or-stealth-envelope-update", init.proxy_base_url),
                 {
                   method: "POST",
                   headers,

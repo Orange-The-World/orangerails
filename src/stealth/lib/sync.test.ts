@@ -274,7 +274,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(decrypted).toEqual(tx);
   });
 
-  it('short-circuits when lastBlockScanned is already at tip', async () => {
+  it('short-circuits when lastBlockScanned is above tip, returns stored cursor not tip', async () => {
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
       kind: 'xpub_stealth',
@@ -294,7 +294,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       envelope,
       orStealthKey,
       birthdayHeight: 800_000,
-      lastBlockScanned: 800_500,
+      lastBlockScanned: 800_600,
       fetchTip: async () => 800_500,
       fetchFilter: async () => {
         filterCalled = true;
@@ -316,7 +316,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(blockCalled).toBe(false);
     expect(result.txCount).toBe(0);
     expect(result.sealedTransactions).toEqual([]);
-    expect(result.lastBlockScanned).toBe(800_500);
+    expect(result.lastBlockScanned).toBe(800_600);
     // We still emit all stages so the modal can finish gracefully.
     expect(stagesSeen).toEqual([
       'unlocking',
@@ -328,6 +328,61 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       'sealing',
       'uploading',
     ]);
+  });
+
+  // Condition 4 of issue #335: birthdayHeight outside [0, tip]
+  // must REJECT, never clamp. Clamping would silently claim a scan range
+  // the user never requested and is not recoverable; rejection is.
+  it('rejects when birthdayHeight exceeds tip (does not clamp to tip)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'birthday-above-tip',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 800_001,
+        lastBlockScanned: null,
+        fetchTip: async () => 800_000,
+        fetchFilter: async () => { throw new Error('must not reach filter fetch'); },
+        fetchBlock: async () => { throw new Error('must not reach block fetch'); },
+        matcher: { matchAny: () => false },
+      }),
+    ).rejects.toThrow(/out of range/);
+  });
+
+  it('rejects when birthdayHeight is negative (does not clamp to 0)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'birthday-negative',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: -1,
+        lastBlockScanned: null,
+        fetchTip: async () => 800_000,
+        fetchFilter: async () => { throw new Error('must not reach filter fetch'); },
+        fetchBlock: async () => { throw new Error('must not reach block fetch'); },
+        matcher: { matchAny: () => false },
+      }),
+    ).rejects.toThrow(/out of range/);
   });
 
   it('skips transactions whose outputs do not pay any of our scripts', async () => {
