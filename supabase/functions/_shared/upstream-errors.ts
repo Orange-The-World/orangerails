@@ -124,15 +124,36 @@ const CCXT_ERROR_CODES: Readonly<Record<string, UpstreamErrorCode>> = Object.fre
  * better for errors that never set `name`: supabase-js and Postgres errors
  * leave `name` as the generic "Error" while the constructor carries the real
  * type.
+ *
+ * WHY THE RESULT IS CLAMPED (audit requirement on the DL-0421 PR):
+ *
+ * `constructor.name` is structurally guaranteed to be a JavaScript identifier.
+ * `e.name` is not: it is an ordinary writable property holding an arbitrary
+ * runtime string, and an upstream library is free to put a whole sentence, a
+ * URL, or an echoed request body in it. Three consumers take this value and
+ * none of them re-check it: the `class=` field of the edge log line, the
+ * exception type sent to the error tracker, and the fingerprint input, where
+ * it is concatenated ahead of the redaction that is applied to the message.
+ * Switching from the constructor to `e.name` therefore swapped a bounded token
+ * for an unbounded one on all three surfaces at once.
+ *
+ * So a name is only used when it is identifier-shaped and of sane length;
+ * anything else falls back to the constructor, and then to "Error". Every
+ * caller is guaranteed a token matching CLASS_NAME_SHAPE.
  */
+const CLASS_NAME_SHAPE = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
+
 export function errorClassName(e: unknown): string {
   if (!(e instanceof Error)) return typeof e;
   const name = typeof e.name === 'string' ? e.name : '';
-  if (name && name !== 'Error') return name;
+  if (name && name !== 'Error' && CLASS_NAME_SHAPE.test(name)) return name;
   const ctor = e.constructor?.name;
-  if (ctor && ctor !== 'Error') return ctor;
-  return name || 'Error';
+  if (ctor && ctor !== 'Error' && CLASS_NAME_SHAPE.test(ctor)) return ctor;
+  return 'Error';
 }
+
+/** Exposed for tests so the clamp cannot drift from what callers rely on. */
+export const _CLASS_NAME_SHAPE_FOR_TEST = CLASS_NAME_SHAPE;
 
 /**
  * Map a thrown error to OR's fixed taxonomy.

@@ -19,6 +19,7 @@ import {
   classifyUpstreamError,
   errorClassName,
   _CCXT_ERROR_CODES_FOR_TEST,
+  _CLASS_NAME_SHAPE_FOR_TEST,
 } from './upstream-errors.ts';
 
 /** The real wire shape: CCXT feedback is the exchange id then the raw body. */
@@ -201,6 +202,78 @@ Deno.test('errorClassName prefers a meaningful name, falls back to the construct
   assertEquals(errorClassName('a string'), 'string');
   assertEquals(errorClassName(undefined), 'undefined');
   assertEquals(errorClassName(null), 'object');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The clamp.
+//
+// `e.name` is an ordinary writable property, not a structural guarantee like
+// `constructor.name`. Its value reaches the edge log's class= field, the error
+// tracker's exception type, and the fingerprint input -- the last of which
+// concatenates it ahead of the redaction applied to the message. So an
+// upstream library that puts a sentence, a URL, or an echoed request body in
+// `name` must not be able to push it onto those surfaces.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Deno.test('a non-identifier name falls back to the constructor', () => {
+  class RealTypeSurvives extends Error {}
+
+  const hostile: Array<[string, string]> = [
+    ['Auth failed for user@example.com', 'a whole sentence with an address'],
+    ['Bearer sk-live-abcdef0123456789', 'a credential-shaped string'],
+    ['https://api.example.com/v1/keys?token=abc', 'a URL with a query token'],
+    ['Error: {"apiKey":"secret"}', 'an echoed request body'],
+    ['line one\nline two', 'a newline, which would forge a second log line'],
+    ['A'.repeat(65), 'one character past the 64 character bound'],
+    ['9LeadingDigit', 'not a valid identifier start'],
+    ['', 'empty'],
+  ];
+
+  for (const [name, why] of hostile) {
+    const e = new RealTypeSurvives('boom');
+    e.name = name;
+    assertEquals(
+      errorClassName(e),
+      'RealTypeSurvives',
+      `name that is ${why} must not be returned; expected the constructor`,
+    );
+  }
+
+  // Exactly at the bound is fine: 1 leading char + 63 more = 64.
+  const ok = new RealTypeSurvives('boom');
+  ok.name = 'A' + 'b'.repeat(63);
+  assertEquals(errorClassName(ok), ok.name);
+});
+
+Deno.test('errorClassName always returns an identifier-shaped token', () => {
+  // The guarantee three call sites depend on, asserted over every input shape
+  // above rather than trusting the implementation to keep honouring it.
+  const inputs: unknown[] = [
+    new Error('plain'),
+    new TypeError('builtin'),
+    new C(wire('Invalid signature')),
+    'a string',
+    undefined,
+    null,
+    42,
+  ];
+  const named = new Error('x');
+  named.name = 'not an identifier at all!';
+  inputs.push(named);
+
+  const noName = new Error('y');
+  // Some runtimes hand back a non-string name on exotic objects.
+  Object.defineProperty(noName, 'name', { value: 12345 });
+  inputs.push(noName);
+
+  for (const input of inputs) {
+    const out = errorClassName(input);
+    assertEquals(
+      _CLASS_NAME_SHAPE_FOR_TEST.test(out),
+      true,
+      `errorClassName returned ${JSON.stringify(out)}, which is not identifier-shaped`,
+    );
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
