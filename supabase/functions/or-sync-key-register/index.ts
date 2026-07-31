@@ -23,9 +23,10 @@
  *
  * Response 200:
  *   {
- *     subaccount_id: string
- *     status: 'registered' | 'unchanged' | 'rotated'
- *     opk_registered_at: ISO 8601
+ *     subaccount_id:      string
+ *     status:             'registered' | 'unchanged' | 'rotated'
+ *     opk_registered_at:  ISO 8601
+ *     deferred_unblocked: number  // quiltt_webhook_inbox rows re-admitted to the sync queue
  *   }
  *
  * Idempotent: identical payload returns 'unchanged'. Changed key returns
@@ -38,6 +39,7 @@
  * race. This matches the upsert pattern or-link-complete uses today.
  */
 
+import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
@@ -116,11 +118,30 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     let status: 'registered' | 'unchanged' | 'rotated' = 'registered';
     if (prior.opk_public !== null) {
       if (prior.opk_public === body.opk_public && prior.opk_alg === body.opk_alg) {
+        // Clear any inbox rows that remained deferred from a transient failure
+        // during the original registration.
+        //
+        // Best-effort, but NOT silent. This is the replay path a retrying client
+        // takes, so a failure here is a failure of the recovery mechanism itself,
+        // and `deferred_unblocked: 0` in the response is otherwise indistinguishable
+        // from a healthy "there was nothing to clear" (DL-0485). Same treatment as
+        // the sibling call on the registration path below.
+        const { count: deferredCount, error: unchangedErr } = await clearDeferredRows(
+          auth.serviceClient,
+          prior.id,
+        );
+        if (unchangedErr) {
+          console.warn(
+            '[or-sync-key-register] deferred-row clear failed (unchanged path):',
+            unchangedErr,
+          );
+        }
         return jsonResponse(
           {
-            subaccount_id: prior.id,
-            status: 'unchanged',
-            opk_registered_at: prior.opk_registered_at,
+            subaccount_id:      prior.id,
+            status:             'unchanged',
+            opk_registered_at:  prior.opk_registered_at,
+            deferred_unblocked: deferredCount,
           },
           200,
           cors,
@@ -161,6 +182,23 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Failed to register OPK' }, 500, cors);
     }
 
+    // Re-admit webhook inbox rows that were deferred (opk_deferred_at set) while
+    // this subaccount had no OPK. The key is now registered so clear the gate so
+    // the next or-quiltt-sync tick picks those rows up (DL-0482).
+    // Best-effort: registration already succeeded; a clear failure must not turn
+    // a 200 into a 500.
+    const { count: deferredUnblocked, error: deferErr } = await clearDeferredRows(
+      auth.serviceClient,
+      prior.id,
+    );
+    if (deferErr) {
+      console.warn('[or-sync-key-register] deferred-row clear failed:', deferErr);
+    } else if (deferredUnblocked > 0) {
+      console.log(
+        `[or-sync-key-register] cleared ${deferredUnblocked} deferred inbox row(s) for subaccount ${prior.id}`,
+      );
+    }
+
     // Append-only audit row for every state change. First registration
     // (old_opk_public = NULL) and every subsequent rotation get one row.
     // Best-effort: a failure to insert the audit row should not block the
@@ -184,9 +222,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     return jsonResponse(
       {
-        subaccount_id: update.data.id as string,
+        subaccount_id:      update.data.id as string,
         status,
-        opk_registered_at: update.data.opk_registered_at,
+        opk_registered_at:  update.data.opk_registered_at,
+        deferred_unblocked: deferredUnblocked,
       },
       200,
       cors,
@@ -196,3 +235,22 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-sync-key-register'));
+
+// ─── helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Clear opk_deferred_at on all quiltt_webhook_inbox rows for a subaccount,
+ * re-admitting them to the next or-quiltt-sync batch.
+ * Exported for unit testing.
+ */
+export async function clearDeferredRows(
+  client: SupabaseClient,
+  subaccountId: string,
+): Promise<{ count: number; error: string | null }> {
+  const { count, error } = await client
+    .from('quiltt_webhook_inbox')
+    .update({ opk_deferred_at: null }, { count: 'exact' })
+    .eq('subaccount_id', subaccountId)
+    .not('opk_deferred_at', 'is', null);
+  return { count: count ?? 0, error: error?.message ?? null };
+}
