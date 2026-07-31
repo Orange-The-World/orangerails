@@ -19,10 +19,13 @@
  *   3. A null state is included, not dropped.
  *   4. Connection status is passed through per account, unmapped, so
  *      ERROR_REPAIRABLE cannot read as healthy.
+ *   5. The profile-wide account set is the union of Quiltt's two roots, in
+ *      both directions, so an undocumented default on either one cannot
+ *      silently shorten the answer.
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { buildAccountsResponse } from './transform.ts';
+import { buildAccountsResponse, mergeAccountSets } from './transform.ts';
 import type { QuilttAccount } from './transform.ts';
 
 function acct(
@@ -194,4 +197,105 @@ Deno.test('counters describe the set before filtering', () => {
   assertEquals(out.total_returned, 4);
   assertEquals(out.excluded_closed, 2);
   assertEquals(out.distinct_states, ['OPEN', 'CLOSED', null]);
+});
+
+// The profile-wide union.
+//
+// The endpoint's no-connection-id mode means "every account under this
+// profile". Quiltt exposes two roots that each claim to list them, root
+// `accounts` and the accounts under each `connections` entry, and the public
+// schema reference documents neither one's no-filter default. These pin the
+// union, in both directions, so that whichever root turns out to be the
+// filtered one, no account is dropped.
+
+Deno.test('the union keeps an account that only the root accounts field listed', () => {
+  const merged = mergeAccountSets([acct('a', 'OPEN'), acct('b', 'OPEN')], [acct('b', 'OPEN')]);
+
+  assertEquals(merged.accounts.map((a) => a.id), ['a', 'b']);
+  assertEquals(merged.only_in_root, ['a']);
+  assertEquals(merged.only_in_connections, []);
+});
+
+Deno.test('the union keeps an account that only the connections flatten listed', () => {
+  const merged = mergeAccountSets([acct('b', 'OPEN')], [acct('b', 'OPEN'), acct('c', 'OPEN')]);
+
+  assertEquals(merged.accounts.map((a) => a.id), ['b', 'c']);
+  assertEquals(merged.only_in_root, []);
+  assertEquals(merged.only_in_connections, ['c']);
+});
+
+Deno.test('agreeing sources do not duplicate and report no disagreement', () => {
+  const both = [acct('a', 'OPEN'), acct('b', 'OPEN')];
+  const merged = mergeAccountSets(both, [...both]);
+
+  assertEquals(merged.accounts.map((a) => a.id), ['a', 'b']);
+  assertEquals(merged.only_in_root, []);
+  assertEquals(merged.only_in_connections, []);
+});
+
+// This is the ticket's own hypothesis as a fixture. If `connections` omits a
+// connection in an error state, flattening it loses that connection's accounts
+// entirely, and the caller sees 3 accounts where the user has 21. The union is
+// what makes that survivable without knowing which root filters.
+Deno.test('DL-0326: a broken connection missing from the connections list still yields its accounts', () => {
+  const healthy = Array.from({ length: 3 }, (_, i) =>
+    acct(`bank-a-${i}`, 'OPEN', { connection: { id: 'conn-a', status: 'SYNCED' } }));
+  const broken = Array.from({ length: 18 }, (_, i) =>
+    acct(`bank-b-${i}`, 'OPEN', { connection: { id: 'conn-b', status: 'ERROR_REPAIRABLE' } }));
+
+  const merged = mergeAccountSets([...healthy, ...broken], healthy);
+  const out = buildAccountsResponse(
+    merged.accounts,
+    merged.only_in_root.length + merged.only_in_connections.length,
+  );
+
+  assertEquals(out.accounts.length, 21);
+  assertEquals(out.total_returned, 21);
+  assertEquals(out.source_disagreement, 18);
+});
+
+// The mirror of the above. The fix must not trade one undocumented default for
+// the other, so the same 21 accounts survive when it is the root field that is
+// short.
+Deno.test('DL-0326: the union is symmetric, a short root accounts field loses nothing either', () => {
+  const healthy = Array.from({ length: 3 }, (_, i) =>
+    acct(`bank-a-${i}`, 'OPEN', { connection: { id: 'conn-a', status: 'SYNCED' } }));
+  const broken = Array.from({ length: 18 }, (_, i) =>
+    acct(`bank-b-${i}`, 'OPEN', { connection: { id: 'conn-b', status: 'ERROR_REPAIRABLE' } }));
+
+  const merged = mergeAccountSets(healthy, [...healthy, ...broken]);
+  const out = buildAccountsResponse(
+    merged.accounts,
+    merged.only_in_root.length + merged.only_in_connections.length,
+  );
+
+  assertEquals(out.accounts.length, 21);
+  assertEquals(out.source_disagreement, 18);
+});
+
+Deno.test('a CLOSED account reaching the union is still excluded from the response', () => {
+  const merged = mergeAccountSets([acct('a', 'OPEN')], [acct('b', 'CLOSED')]);
+  const out = buildAccountsResponse(merged.accounts, 2);
+
+  assertEquals(merged.accounts.length, 2);
+  assertEquals(out.accounts.map((a) => a.id), ['a']);
+  assertEquals(out.excluded_closed, 1);
+  assertEquals(out.total_returned, 2);
+  assertEquals(out.source_disagreement, 2);
+});
+
+Deno.test('two empty sources merge to empty rather than undefined', () => {
+  const merged = mergeAccountSets([], []);
+
+  assertEquals(merged.accounts, []);
+  assertEquals(merged.only_in_root, []);
+  assertEquals(merged.only_in_connections, []);
+});
+
+// The single-connection path has one source, so it must not report a
+// disagreement it cannot have measured.
+Deno.test('source_disagreement defaults to 0 for the single-connection path', () => {
+  const out = buildAccountsResponse([acct('a', 'OPEN')]);
+
+  assertEquals(out.source_disagreement, 0);
 });
