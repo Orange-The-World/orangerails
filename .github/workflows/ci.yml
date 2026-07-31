@@ -229,7 +229,7 @@ jobs:
           # Test files present on dev when this job was hardened, measured
           # 2026-07-31. Lower this in the same PR that intentionally removes
           # a test file, with a comment explaining why.
-          DENO_TEST_FILE_BASELINE: '10'  # PROOF ONLY -- revert follows
+          DENO_TEST_FILE_BASELINE: '3'
         run: |
           set -euo pipefail
 
