@@ -17,7 +17,8 @@
  *      OR fetches transactions, encrypts each with transactions_key, stores
  *      ciphertext in encrypted_transactions. Caller fetches via
  *      or-transactions-list and decrypts in-browser.
- *      Response: { synced: number, connections: [{ connection_id, synced, next_cursor, error? }] }
+ *      Response: { synced: number, connections: [{ connection_id, synced?, next_cursor, error? }] }
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *
  *   2. Protocol-driven sink mode (V2 today, V3 future):
  *        { subaccount_id?, connection_ids?, credentials_key, format }
@@ -26,7 +27,8 @@
  *      storage. transactions_key is NOT required.
  *      Response: {
  *        synced: number,
- *        connections: [{ connection_id, synced, next_cursor, error? }],
+ *        connections: [{ connection_id, synced?, next_cursor, error? }],
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *        rows: { <table-name>: [...rows] },
  *        metadata: { format, requires_encryption: string[] }
  *      }
@@ -94,6 +96,22 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
   const bytes = new TextEncoder().encode(`${errorClass}|${redacted}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Determine the HTTP status for a batch sync response.
+ *   200 -- every connection succeeded (or the batch was empty).
+ *   207 -- some connections succeeded, some failed.
+ *   422 -- every connection in the batch failed.
+ *
+ * Exported so the pure logic can be unit-tested without a Deno.serve mock.
+ */
+export function batchHttpStatus(results: Array<{ error?: string }>): number {
+  if (results.length === 0) return 200;
+  const errCount = results.filter(r => r.error != null).length;
+  if (errCount === 0) return 200;
+  if (errCount === results.length) return 422;
+  return 207;
 }
 
 
@@ -313,7 +331,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     const results: Array<{
       connection_id: string;
-      synced: number;
+      synced?: number;
       next_cursor: string | null;
       error?: string;
       correlation_id?: string;
@@ -1041,7 +1059,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         const copy = lookupErrorCopy(code);
         results.push({
           connection_id: conn.id,
-          synced: 0,
           next_cursor: null,
           error: code,
           correlation_id: correlationId,
@@ -1059,7 +1076,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       const merged = mergeSinkOutputs(sinkOutputs);
       return jsonResponse(
         {
-          synced: results.reduce((s, r) => s + r.synced, 0),
+          synced: results.reduce((s, r) => s + (r.synced ?? 0), 0),
           connections: results,
           rows: merged.rows,
           metadata: {
@@ -1067,12 +1084,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             requires_encryption: merged.metadata.requires_encryption,
           },
         },
-        200,
+        batchHttpStatus(results),
         cors,
       );
     }
 
-    return jsonResponse({ synced: results.reduce((s, r) => s + r.synced, 0), connections: results }, 200, cors);
+    return jsonResponse({ synced: results.reduce((s, r) => s + (r.synced ?? 0), 0), connections: results }, batchHttpStatus(results), cors);
 
   } catch (err) {
     console.error('[or-sync] fatal:', err);
