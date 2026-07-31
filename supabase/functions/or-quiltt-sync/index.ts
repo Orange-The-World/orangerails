@@ -504,7 +504,29 @@ async function markProcessed(client: SupabaseClient, eventId: string) {
     .eq('event_id', eventId);
 }
 
-async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, errMsg: string) {
+async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, rawErrMsg: string) {
+  // Redact once, on entry, before anything below applies a length limit (#333).
+  //
+  // This is the only function in this file that writes last_error or
+  // retirement_reason, so redacting here covers all four sinks below - the two
+  // column writes, the fallback write, and the console.warn - and covers every
+  // caller that exists today plus any added later, by construction.
+  //
+  // Doing it per-sink instead would need four separate edits and would
+  // reintroduce the #330 ordering defect at the console.warn, which applies its
+  // own shorter limit to its own copy of the string. Doing it per-caller would
+  // need three, and the middle one (the handleEvent result) is a funnel for
+  // eight different failure returns, so "the caller redacts" would still leave
+  // the question open at every one of them.
+  //
+  // The limit is the widest sink (500), so nothing is dropped here that a sink
+  // would otherwise have kept. Every slice below therefore cuts already-redacted
+  // text, which is the property #330 established as the safe order.
+  //
+  // redactProviderError is idempotent, so the two returns that already redact
+  // (the non-ok and GraphQL-errors branches of the transactions fetch) pass
+  // through this unchanged rather than being mangled a second time.
+  const errMsg = redactProviderError(rawErrMsg, 500);
   const newAttempts = (ev.attempts ?? 0) + 1;
   const terminal    = newAttempts >= MAX_ATTEMPTS;
   const { error } = await client

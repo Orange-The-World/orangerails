@@ -290,3 +290,33 @@ Deno.test('redaction runs before the length limit, so a cut cannot expose a frag
     assert(!/\d/.test(out), `a digit survived the limit at max=${max}: ${out}`);
   }
 });
+
+Deno.test('redactProviderError is idempotent, so a second pass cannot mangle its own output', () => {
+  // #333 moves redaction to the single entry point that writes last_error and
+  // retirement_reason. Two of the returns arriving there are already redacted
+  // (the non-ok and GraphQL-errors branches redact before returning), so the
+  // entry redactor sees clean text on those paths and must leave it alone.
+  //
+  // The property holds because the replacement inserts '[', which is outside
+  // [A-Za-z0-9], so the pattern cannot re-enter its own output. That is a
+  // property of the replacement string, and a later change to it could break
+  // this without touching anything the other fixtures assert.
+  const inputs = [
+    'connection lookup failed: conn_14TJiFDKRJlPiBHuukUIlXZ',
+    'profile map lookup failed: p_EXAMPLE0000000',
+    'reference 998877665544 not found',
+    'conn_14TJiFDKRJlPiBHuukUIlXZ and p_EXAMPLE0000000 and 998877665544',
+    'Quiltt GraphQL 502: upstream conn_[redacted] is down, ref [redacted]',
+    'conn_[redacted]',
+    '[redacted]',
+    'no identifiers here at all',
+    '',
+    'x'.repeat(600) + ' conn_14TJiFDKRJlPiBHuukUIlXZ',
+  ];
+
+  for (const input of inputs) {
+    const once  = redactProviderError(input, 500);
+    const twice = redactProviderError(once, 500);
+    assertEquals(twice, once, `not idempotent for input: ${input.slice(0, 60)}`);
+  }
+});
