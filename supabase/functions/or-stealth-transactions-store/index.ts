@@ -32,7 +32,8 @@
  * Response:
  *   { connection_id, inserted, total, skipped_duplicates, last_block_scanned }
  *   last_block_scanned in the response is the effective stored cursor after the
- *   call, not the client-supplied scan tip.
+ *   call (null when the connection has never scanned), never the client-supplied
+ *   scan tip.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
@@ -62,7 +63,7 @@ interface TransactionsStoreResponseBody {
   inserted: number;
   total: number;
   skipped_duplicates: number;
-  last_block_scanned: number;
+  last_block_scanned: number | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -274,10 +275,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
 
     // Return the effective stored cursor so callers can distinguish "cursor
-    // advanced" from "no new rows, cursor unchanged."
-    const effectiveCursor = (inserted > 0 && maxBlockInserted > storedCursor)
-      ? maxBlockInserted
-      : (storedCursor >= 0 ? storedCursor : body.last_block_scanned);
+    // advanced" from "no new rows, cursor unchanged." Derived only from stored
+    // state: on a fresh connection with no stored cursor and zero inserts this
+    // is null, never the client-supplied scan tip (body.last_block_scanned).
+    const effectiveCursor: number | null =
+      (inserted > 0 && maxBlockInserted > storedCursor)
+        ? maxBlockInserted
+        : (ownerRow.last_block_scanned as number | null);
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,
       inserted,
