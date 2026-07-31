@@ -49,6 +49,18 @@ import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttInstitutions } from "@quiltt/react/hooks";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { encryptString, importAesKey } from "@/lib/vault";
+import { resolveTargetOrigin } from "@/lib/connect-origin";
+
+// Same allowlist the Stealth widget and Sparrow path use to pin postMessage
+// targetOrigin. Baked into the bundle at build time from the env var.
+// An empty string (env var unset) means no origins are registered and every
+// resolveTargetOrigin call will return null (fail closed).
+const CONNECT_ALLOWED_ORIGINS: ReadonlySet<string> = new Set(
+  ((import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0),
+);
 
 // --------------------------------------------------------------------
 // Locking-key handoff.
@@ -1234,13 +1246,12 @@ function ConnectPageInner() {
         };
       });
 
-      const targetOrigin = (() => {
-        try {
-          return new URL(search.return_to ?? "").origin;
-        } catch {
-          return "*";
-        }
-      })();
+      const targetOrigin = resolveTargetOrigin(search.return_to, CONNECT_ALLOWED_ORIGINS);
+      if (!targetOrigin) {
+        throw new Error(
+          "return_to origin is not registered. Cannot notify the host app.",
+        );
+      }
 
       // New shape , array of source_wallets. Older parent listeners that
       // expect single-wallet fields are still served when N === 1.
@@ -1269,14 +1280,10 @@ function ConnectPageInner() {
   }
 
   function handleCancel() {
-    const targetOrigin = (() => {
-      try {
-        return new URL(search.return_to ?? "").origin;
-      } catch {
-        return "*";
-      }
-    })();
-    window.opener?.postMessage({ type: "or-link-cancel" }, targetOrigin);
+    const targetOrigin = resolveTargetOrigin(search.return_to, CONNECT_ALLOWED_ORIGINS);
+    if (targetOrigin) {
+      window.opener?.postMessage({ type: "or-link-cancel" }, targetOrigin);
+    }
     window.close();
   }
 
