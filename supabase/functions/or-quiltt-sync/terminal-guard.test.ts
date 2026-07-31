@@ -190,7 +190,7 @@ Deno.test("#333 below ceiling: provider id is redacted in last_error", async () 
     event_id: "evt_redact_below", event_type: "connection.synced.successful",
     payload: null, platform_id: null, subaccount_id: null, attempts: 3,
   };
-  await bumpAttempts(client, ev, "connection lookup failed: conn_14TJiFDKRJlPiBHuukUIlXZ");
+  await bumpAttempts(client, ev, "connection lookup failed: conn_EXAMPLE00000000000000");
 
   const lastError = calls[0].payload.last_error as string;
   assert(
@@ -231,7 +231,7 @@ Deno.test("#333 fallback write is redacted too, not just the terminal write", as
     event_id: "evt_redact_fallback", event_type: "connection.synced.successful",
     payload: null, platform_id: null, subaccount_id: null, attempts: MAX_ATTEMPTS - 1,
   };
-  await bumpAttempts(client, ev, "connection lookup failed: conn_14TJiFDKRJlPiBHuukUIlXZ");
+  await bumpAttempts(client, ev, "connection lookup failed: conn_EXAMPLE00000000000000");
 
   assertEquals(calls.length, 2, "terminal write + fallback");
   const fallbackError = calls[1].payload.last_error as string;
@@ -266,12 +266,12 @@ Deno.test("#333 the guard is at the choke point, so every message shape is cover
   // actually reach this function: the six interpolating returns, the catch-all's
   // e.message, and the two already-redacted returns.
   const shapes = [
-    "subaccount lookup failed: conn_14TJiFDKRJlPiBHuukUIlXZ",
+    "subaccount lookup failed: conn_EXAMPLE00000000000000",
     "unsupported opk_alg: xchacha_20poly1305aead",
     "profile map lookup failed: p_EXAMPLE0000000",
     "invalid opk_public: key p_EXAMPLE0000000 rejected",
     "connection lookup failed: conn_EXAMPLE00000000000000",
-    'Unexpected token \'c\', "conn_14TJi"... is not valid JSON',
+    'Unexpected token \'c\', "conn_EXAMP"... is not valid JSON',
     "Quiltt GraphQL 502: upstream conn_[redacted] is down",
     "reference 998877665544 not found",
   ];
