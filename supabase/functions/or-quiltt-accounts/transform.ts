@@ -155,9 +155,23 @@ export function mergeAccountSets(
  * sources accept none. An optional count with a default would leave the same
  * reporting failure alive one level in: a union call site that omitted the
  * argument would publish "compared, and they agreed" having compared nothing,
- * which is the exact defect the encoding exists to remove. `deno check` gates
- * this repo, so the compiler is the first line and the coercion below is the
- * second, for callers with no types at all.
+ * which is the exact defect the encoding exists to remove.
+ *
+ * The two defences are NOT symmetric, and which one covers what matters:
+ *
+ *   a non-comparing source passing a count   covered twice. `deno check`
+ *                                            refuses the call, and the
+ *                                            coercion below forces null if it
+ *                                            is ever reached anyway.
+ *   `union` with no count                    covered ONCE, by `deno check`
+ *                                            alone. The coercion below sends
+ *                                            it to `?? 0`, and 0 is precisely
+ *                                            the value meaning "compared, and
+ *                                            they agreed".
+ *
+ * So the compiler is not a convenience here. On the union side it is the only
+ * thing between an omitted argument and a false all-clear. Do not weaken these
+ * overloads on the assumption that a runtime guard is standing behind them.
  */
 export function buildAccountsResponse(
   rawAccounts: QuilttAccount[],
@@ -203,11 +217,15 @@ export function buildAccountsResponse(
   // The encoding is enforced here, not asked of the caller. A source that did
   // not compare cannot report a comparison result, whatever it passed.
   //
-  // The overloads already make both illegal calls unrepresentable in
-  // TypeScript. This runs anyway because the type gate is erased at runtime:
-  // `deno test` runs with --no-check and a JavaScript caller sees no overloads
-  // at all. Belt and braces on the one field whose failure mode is to report
-  // health during the failure.
+  // This runs behind the overloads rather than instead of them, because the
+  // type gate is erased at runtime: `deno test` runs with --no-check and a
+  // JavaScript caller sees no overloads at all.
+  //
+  // What it does and does not cover, because the difference is easy to misread.
+  // It forces null for the two non-comparing sources, so a count they had no
+  // right to pass cannot escape. It does NOT cover `union` with no count: that
+  // lands on `?? 0`, and 0 is the value meaning "compared, and they agreed".
+  // Only `deno check` stops that one. See the docblock above.
   const disagreement = source === 'union' ? sourceDisagreement ?? 0 : null;
 
   return {
