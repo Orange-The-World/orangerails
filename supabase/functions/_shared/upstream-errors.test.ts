@@ -306,3 +306,96 @@ Deno.test('the generic CCXT parents stay unmapped on purpose', () => {
     );
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wiring guard.
+//
+// This file's other tests all pass against a version of this PR in which the
+// module exists, is correct, is fully tested, and IS CALLED BY NOTHING. That
+// happened: a stray `git checkout <branch> -- .` staged a revert of the call
+// sites, the next commit swept it in, and every check stayed green because the
+// unit tests only ever exercised this module directly.
+//
+// A green suite that cannot tell "wired in" from "dead code" is not measuring
+// the thing the PR exists to change. These assertions read the consuming
+// sources as text, which is blunt, but bluntness is the point: they fail when
+// the call sites disappear, which is the exact failure mode that shipped.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const readSource = (rel: string) =>
+  Deno.readTextFileSync(new URL(rel, import.meta.url));
+
+Deno.test('or-sync imports the classifier and passes the error class to it', () => {
+  const src = readSource('../or-sync/index.ts');
+
+  assertEquals(
+    /import\s*\{[^}]*\bclassifyUpstreamError\b[^}]*\}\s*from\s*['"][^'"]*upstream-errors\.ts['"]/.test(src),
+    true,
+    'or-sync must import classifyUpstreamError from _shared/upstream-errors.ts',
+  );
+  assertEquals(
+    /import\s*\{[^}]*\berrorClassName\b[^}]*\}\s*from\s*['"][^'"]*upstream-errors\.ts['"]/.test(src),
+    true,
+    'or-sync must import errorClassName from _shared/upstream-errors.ts',
+  );
+
+  // The whole fix is that tier 1 actually fires. A call with only the message
+  // silently reverts every CCXT error to the regex tier.
+  assertEquals(
+    /classifyUpstreamError\(\s*raw\s*,\s*errorClass\s*\)/.test(src),
+    true,
+    'or-sync must pass the error class as the second argument, or tier 1 never fires',
+  );
+
+  // No local redefinition: a second copy here is how the two drift apart.
+  assertEquals(
+    /function\s+classifyUpstreamError\s*\(/.test(src),
+    false,
+    'or-sync must not define its own classifyUpstreamError',
+  );
+});
+
+Deno.test('sentry reports the error class rather than the mangled constructor', () => {
+  const src = readSource('./sentry.ts');
+
+  assertEquals(
+    /import\s*\{[^}]*\berrorClassName\b[^}]*\}\s*from\s*['"]\.\/upstream-errors\.ts['"]/.test(src),
+    true,
+    'sentry.ts must import errorClassName',
+  );
+  // The exception `type` is the grouping key. constructor.name there is how
+  // unrelated CCXT issues got grouped under "C".
+  assertEquals(
+    /type:\s*isErr\s*\?\s*errorClassName\(err\)/.test(src),
+    true,
+    'sentry.ts must report errorClassName as the exception type',
+  );
+  // Comments in that file discuss constructor.name on purpose, so strip
+  // comments before asserting that no code path still reads it.
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  assertEquals(
+    /constructor\s*\.\s*name/.test(code),
+    false,
+    'sentry.ts must not read constructor.name; minified bundles mangle it',
+  );
+});
+
+Deno.test('customer copy stays provider neutral', () => {
+  const src = readSource('./error-catalog.ts');
+
+  // OR connects to 98 crypto exchanges as well as banks. Bank-specific copy on
+  // a shared taxonomy tells a Bitstamp customer their "bank" disconnected.
+  const entries = src.split('export const ERROR_CATALOG')[1] ?? '';
+  for (const field of ['title', 'body', 'action']) {
+    const re = new RegExp(`${field}:\\s*"([^"]*)"`, 'g');
+    for (const m of entries.matchAll(re)) {
+      assertEquals(
+        /\bbank\b/i.test(m[1]),
+        false,
+        `${field} copy must be provider neutral, found: ${JSON.stringify(m[1])}`,
+      );
+    }
+  }
+});
