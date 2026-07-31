@@ -236,7 +236,7 @@ Deno.test('redactProviderId keeps the type and drops the identity', () => {
   // Synthetic. Never put a real provider id here: the previous value on this
   // line matched 49 live rows in the prod inbox, and this repo is public.
   assertEquals(redactProviderId('p_EXAMPLE000000000000000'), 'p_[redacted]');
-  assertEquals(redactProviderId('conn_14TJiFDKRJlPiBHuukUIlXZ'), 'conn_[redacted]');
+  assertEquals(redactProviderId('conn_EXAMPLE00000000000000'), 'conn_[redacted]');
 
   // Two different profiles have to render identically. If they did not, the log
   // line would still carry enough to tell one customer's profile from another.
@@ -254,7 +254,7 @@ Deno.test('redactProviderId keeps the type and drops the identity', () => {
 
 Deno.test('redactProviderError redacts both id shapes and honours the limit', () => {
   assertEquals(
-    redactProviderError('no such connection conn_14TJiFDKRJlPiBHuukUIlXZ', 400),
+    redactProviderError('no such connection conn_EXAMPLE00000000000000', 400),
     'no such connection conn_[redacted]',
   );
   // The numeric pass runs on top of the prefix pass, not instead of it.
@@ -265,9 +265,9 @@ Deno.test('redactProviderError redacts both id shapes and honours the limit', ()
 
 Deno.test('redaction runs before the length limit, so a cut cannot expose a fragment', () => {
   // The identifier is positioned so the limit falls inside it. Truncating first
-  // would leave `conn_14T`, and `[A-Za-z0-9]{6,}` needs six characters after the
+  // would leave `conn_EXA`, and `[A-Za-z0-9]{6,}` needs six characters after the
   // underscore, so that fragment would no longer match and would survive.
-  const raw = 'e'.repeat(20) + ' conn_14TJiFDKRJlPiBHuukUIlXZ';
+  const raw = 'e'.repeat(20) + ' conn_EXAMPLE00000000000000';
 
   assertEquals(redactProviderError(raw, 29), 'e'.repeat(20) + ' conn_[re');
 
@@ -304,16 +304,16 @@ Deno.test('redactProviderError is idempotent, so a second pass cannot mangle its
   // property of the replacement string, and a later change to it could break
   // this without touching anything the other fixtures assert.
   const inputs = [
-    'connection lookup failed: conn_14TJiFDKRJlPiBHuukUIlXZ',
+    'connection lookup failed: conn_EXAMPLE00000000000000',
     'profile map lookup failed: p_EXAMPLE0000000',
     'reference 998877665544 not found',
-    'conn_14TJiFDKRJlPiBHuukUIlXZ and p_EXAMPLE0000000 and 998877665544',
+    'conn_EXAMPLE00000000000000 and p_EXAMPLE0000000 and 998877665544',
     'Quiltt GraphQL 502: upstream conn_[redacted] is down, ref [redacted]',
     'conn_[redacted]',
     '[redacted]',
     'no identifiers here at all',
     '',
-    'x'.repeat(600) + ' conn_14TJiFDKRJlPiBHuukUIlXZ',
+    'x'.repeat(600) + ' conn_EXAMPLE00000000000000',
   ];
 
   for (const input of inputs) {
