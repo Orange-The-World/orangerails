@@ -1,17 +1,17 @@
 /**
- * or-quiltt-accounts — list the bank accounts under a Quiltt connection.
+ * or-quiltt-accounts: list the bank accounts under a Quiltt connection.
  *
  * Integrating apps call this immediately
  * after a successful Quiltt link to discover which accounts the user
  * just authorized. The response feeds the post-link review screen ("you
- * linked 3 accounts at Chase — pick which to import") and seeds the
+ * linked 3 accounts at Chase, pick which to import") and seeds the
  * integrator's local wallet rows.
  *
  * Why a dedicated endpoint: V2 cannot talk to Quiltt directly because
  * Quiltt's API key is bound to OR's account, and the per-user Profile
  * id lives in OR's `quiltt_profile_map`. OR brokers the GraphQL call
  * with Basic auth (`profile_id:api_key`) and hands back the cleartext
- * account metadata (institution name, mask, type, currency) — none of
+ * account metadata (institution name, mask, type, currency), none of
  * which is sensitive enough to require ZKA-style encryption.
  *
  * Auth: X-Platform-API-Key (platform mode). Direct mode is rejected:
@@ -23,24 +23,71 @@
  *   quiltt_connection_id:  string  Quiltt's connectionId returned by
  *                                  onExitSuccess in the popup flow
  *
- * Response 200:
+ * Response 200 (same shape in both modes):
  *   { accounts: [
- *       { id, name, institution_name, kind, mask, currency, state },
+ *       { id, name, institution_name, kind, mask, currency, state,
+ *         balance_current, balance_available,
+ *         connection: { id, status } | null },
  *       ...
- *     ] }
+ *     ],
+ *     total_returned:  number            how many accounts Quiltt returned
+ *     excluded_closed: number            how many this function dropped
+ *     distinct_states: (string|null)[]   every state Quiltt used in this response
+ *     account_source:  'union' | 'connections_only' | 'single_connection'
+ *     source_disagreement: number | null see below
+ *   }
  *
- * Response 400 — missing/bad fields
- * Response 401 — invalid platform key
- * Response 403 — direct mode rejected
- * Response 404 — no quiltt_profile_map for this (platform, app_user_id)
- * Response 502 — upstream Quiltt error
- * Response 503 — QUILTT_API_KEY not configured
+ * The counters exist so a caller who sees "fewer accounts than I
+ * expected" can tell the difference between Quiltt returning few and OR
+ * dropping many, without needing our logs. DL-0326 burned ten days on
+ * exactly that ambiguity, so they are part of the contract, not debug
+ * output.
+ *
+ * Profile-wide mode (no quiltt_connection_id) asks Quiltt for the account set
+ * two ways in one document, the root `accounts` field and the accounts under
+ * each `connections` entry, and returns the union. Neither root's no-filter
+ * default is documented, so neither can be shown from outside to be the
+ * complete one, and a union cannot return fewer accounts than either alone.
+ *
+ * `account_source` says which roots actually answered, and
+ * `source_disagreement` is a number ONLY when both did and were compared:
+ *
+ *   union / 0             compared, and the two roots agreed
+ *   union / n             compared, n accounts were listed by only one root
+ *   connections_only / null   NEVER COMPARED. The union query was rejected and
+ *                             the retry answered. Investigate rather than read
+ *                             it as agreement.
+ *   single_connection / null  never compared, correctly: one source exists.
+ *
+ * null is not 0. A path that compared nothing must not report the number that
+ * means "compared, all good", because that is precisely the failure this field
+ * exists to surface. Treat null as unknown, never as fine.
+ *
+ * The invariant behind that table, which is what a caller can actually rely on:
+ * `source_disagreement` is a number IF AND ONLY IF two sources were compared.
+ * Nothing puts a number there that nobody counted, including a defective caller
+ * inside this function, so a number never needs corroborating.
+ *
+ * The 200 body is built by `buildAccountsResponse` in ./transform.ts, which
+ * is a separate module so the response contract can be asserted against
+ * fixtures without booting this server or holding a Quiltt credential. The
+ * assertions live in ./transform.test.ts. If you change the shape, change
+ * them together.
+ *
+ * Response 400: missing/bad fields
+ * Response 401: invalid platform key
+ * Response 403: direct mode rejected
+ * Response 404: no quiltt_profile_map for this (platform, app_user_id)
+ * Response 502: upstream Quiltt error
+ * Response 503: QUILTT_API_KEY not configured
  */
 
 import { authenticateRequest } from '../_shared/platform-auth.ts';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { buildAccountsResponse, mergeAccountSets } from './transform.ts';
+import type { QuilttAccount } from './transform.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 
@@ -49,16 +96,22 @@ interface AccountsBody {
   quiltt_connection_id?: string;
 }
 
-interface QuilttAccount {
-  id: string;
-  name: string;
-  mask: string | null;
-  kind: string | null;
-  state: string;
-  currencyCode: string | null;
-  institution: { name: string } | null;
-  balance: { current: number | null; available: number | null } | null;
-}
+/**
+ * The selection set every account query in this file uses. It exists once so
+ * the two profile-wide sources cannot drift apart: a field present on one and
+ * missing on the other would make the union look like a disagreement.
+ */
+const ACCOUNT_FIELDS = `
+  id
+  name
+  mask
+  kind
+  state
+  currencyCode
+  institution { name }
+  balance { current available }
+  connection { id status }
+`;
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -81,7 +134,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const body = JSON.parse(raw || '{}') as AccountsBody;
 
     if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-      return jsonResponse({ error: 'app_user_id required (string, ≤256 chars)' }, 400, cors);
+      return jsonResponse({ error: 'app_user_id required (string, <=256 chars)' }, 400, cors);
     }
     // quiltt_connection_id is OPTIONAL. When omitted (empty string), we
     // enumerate ALL connections under the profile. This is the fallback
@@ -115,7 +168,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .maybeSingle();
     if (subLookup.error || !subLookup.data) {
       return jsonResponse(
-        { error: 'subaccount not provisioned — call or-quiltt-session before linking' },
+        { error: 'subaccount not provisioned: call or-quiltt-session before linking' },
         404,
         cors,
       );
@@ -143,97 +196,94 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     //     (fallback when the popup's postMessage was lost)
     // Schema reference: https://www.quiltt.dev/api-reference/graphql
     const basic = btoa(`${profileId}:${apiKey}`);
-    let rawAccounts: QuilttAccount[] = [];
+
+    // One place that posts a GraphQL document, so the two profile-wide
+    // attempts below cannot drift in their error handling.
+    const postQuiltt = async (
+      label: string,
+      query: string,
+      variables?: Record<string, unknown>,
+    ): Promise<{ data?: Record<string, unknown>; graphqlErrors?: unknown; httpFailed?: true }> => {
+      const resp = await fetch(QUILTT_GRAPHQL, {
+        method: 'POST',
+        headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(variables ? { query, variables } : { query }),
+      });
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        console.error(`[or-quiltt-accounts] ${label} ${resp.status}: ${errBody.slice(0, 300)}`);
+        return { httpFailed: true };
+      }
+      const json = await resp.json();
+      if (json.errors) {
+        console.error(`[or-quiltt-accounts] ${label} GraphQL errors:`, JSON.stringify(json.errors).slice(0, 500));
+        return { graphqlErrors: json.errors };
+      }
+      return { data: json?.data ?? {} };
+    };
 
     if (connectionId) {
-      const query = `
-        query Q($connId: ID!) {
-          connection(id: $connId) {
-            id
-            accounts {
-              id
-              name
-              mask
-              kind
-              state
-              currencyCode
-              institution { name }
-              balance { current available }
-            }
-          }
-        }
-      `;
-      const resp = await fetch(QUILTT_GRAPHQL, {
-        method: 'POST',
-        headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, variables: { connId: connectionId } }),
-      });
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        console.error(`[or-quiltt-accounts] Quiltt ${resp.status}: ${errBody.slice(0, 300)}`);
-        return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
-      }
-      const json = await resp.json();
-      if (json.errors) {
-        console.error('[or-quiltt-accounts] Quiltt GraphQL errors:', JSON.stringify(json.errors).slice(0, 500));
-        return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
-      }
-      rawAccounts = json?.data?.connection?.accounts ?? [];
-    } else {
-      // Enumerate every connection under the profile and flatten accounts.
-      const query = `
-        query Q {
-          connections {
-            id
-            accounts {
-              id
-              name
-              mask
-              kind
-              state
-              currencyCode
-              institution { name }
-              balance { current available }
-            }
-          }
-        }
-      `;
-      const resp = await fetch(QUILTT_GRAPHQL, {
-        method: 'POST',
-        headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query }),
-      });
-      if (!resp.ok) {
-        const errBody = await resp.text().catch(() => '');
-        console.error(`[or-quiltt-accounts] Quiltt(all) ${resp.status}: ${errBody.slice(0, 300)}`);
-        return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
-      }
-      const json = await resp.json();
-      if (json.errors) {
-        console.error('[or-quiltt-accounts] Quiltt(all) GraphQL errors:', JSON.stringify(json.errors).slice(0, 500));
-        return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
-      }
-      const conns = (json?.data?.connections ?? []) as Array<{ accounts?: QuilttAccount[] }>;
-      rawAccounts = conns.flatMap((c) => c.accounts ?? []);
+      const result = await postQuiltt(
+        'Quiltt',
+        `query Q($connId: ID!) { connection(id: $connId) { id accounts { ${ACCOUNT_FIELDS} } } }`,
+        { connId: connectionId },
+      );
+      if (result.httpFailed) return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
+      if (result.graphqlErrors) return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
+
+      const conn = result.data?.connection as { accounts?: QuilttAccount[] } | null | undefined;
+      return jsonResponse(buildAccountsResponse(conn?.accounts ?? [], 'single_connection'), 200, cors);
     }
 
-    const accounts = rawAccounts
-      // Skip closed / disconnected accounts — don't surface them as
-      // import candidates.
-      .filter((a) => a.state === 'OPEN' || a.state === 'ACTIVE' || !a.state)
-      .map((a) => ({
-        id:               a.id,
-        name:             a.name,
-        institution_name: a.institution?.name ?? null,
-        kind:             a.kind ?? null,
-        mask:             a.mask ?? null,
-        currency:         a.currencyCode ?? null,
-        state:            a.state,
-        balance_current:  a.balance?.current ?? null,
-        balance_available: a.balance?.available ?? null,
-      }));
+    // Profile-wide: every account under the profile, from both roots that
+    // claim to list them, unioned. See mergeAccountSets in ./transform.ts for
+    // why this asks twice. Per Quiltt's schema reference both roots return a
+    // plain list rather than a cursor page, so there is no page to miss.
+    const union = await postQuiltt(
+      'Quiltt(all)',
+      `query Q {
+         accounts { ${ACCOUNT_FIELDS} }
+         connections { id status accounts { ${ACCOUNT_FIELDS} } }
+       }`,
+    );
+    if (union.httpFailed) return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
 
-    return jsonResponse({ accounts }, 200, cors);
+    if (!union.graphqlErrors) {
+      const fromRoot = (union.data?.accounts ?? []) as QuilttAccount[];
+      const conns = (union.data?.connections ?? []) as Array<{ accounts?: QuilttAccount[] }>;
+      const fromConnections = conns.flatMap((c) => c.accounts ?? []);
+      const merged = mergeAccountSets(fromRoot, fromConnections);
+      const disagreement = merged.only_in_root.length + merged.only_in_connections.length;
+      return jsonResponse(buildAccountsResponse(merged.accounts, 'union', disagreement), 200, cors);
+    }
+
+    // The union document was rejected. The root `accounts` field is documented
+    // but has never been exercised against this schema from here, and a single
+    // unknown field makes GraphQL reject the whole document rather than the one
+    // selection. Retry with the connections-only query this branch shipped with,
+    // so an unavailable root field degrades to the previous behaviour instead of
+    // taking the fallback path down. The error above is already logged.
+    //
+    // This path answers with account_source 'connections_only' and a null
+    // source_disagreement. That combination is the alarm: it means the sources
+    // were never compared, which is a different fact from comparing them and
+    // finding they agree, and the caller must be able to tell those apart from
+    // the body alone. A log line does not close it, because the contract above
+    // promises the caller does not need our logs.
+    console.warn('[or-quiltt-accounts] union query rejected, retrying connections-only');
+    const connsOnly = await postQuiltt(
+      'Quiltt(all,connections-only)',
+      `query Q { connections { id accounts { ${ACCOUNT_FIELDS} } } }`,
+    );
+    if (connsOnly.httpFailed) return jsonResponse({ error: 'Upstream Quiltt error' }, 502, cors);
+    if (connsOnly.graphqlErrors) return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
+
+    const conns = (connsOnly.data?.connections ?? []) as Array<{ accounts?: QuilttAccount[] }>;
+    return jsonResponse(
+      buildAccountsResponse(conns.flatMap((c) => c.accounts ?? []), 'connections_only'),
+      200,
+      cors,
+    );
   } catch (e) {
     console.error('[or-quiltt-accounts] fatal:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
