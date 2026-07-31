@@ -297,7 +297,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             last_block_scanned: result.lastBlockScanned,
           };
           try {
-            if (initWithToken.proxy_base_url && parent) {
+            if (init.proxy_base_url && parent) {
               const r = await proxyFetch({
                 parent,
                 parentOrigin: init.return_callback_origin,
@@ -311,11 +311,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
               const headers: Record<string, string> = {
                 "Content-Type": "application/json",
               };
-              if (initWithToken.access_token) {
-                headers["Authorization"] = `Bearer ${initWithToken.access_token}`;
+              if (init.access_token) {
+                headers["Authorization"] = `Bearer ${init.access_token}`;
               }
               const cursorResp = await fetch(
-                resolveFunctionUrl("or-stealth-envelope-update", initWithToken.proxy_base_url),
+                resolveFunctionUrl("or-stealth-envelope-update", init.proxy_base_url),
                 {
                   method: "POST",
                   headers,
