@@ -5,8 +5,8 @@
  *
  * Does NOT import from index.ts (Deno.serve / env deps make that awkward in
  * a headless test). Instead it inlines the bumpAttempts + MAX_ATTEMPTS logic
- * verbatim so the test mirrors what ships. If you change either constant in
- * index.ts, update this file to match so the proof stays honest.
+ * (including the terminal-write error fallback) so the test mirrors what ships.
+ * If you change the logic in index.ts, update this file to match so the proof stays honest.
  */
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
@@ -29,14 +29,18 @@ interface CapturedUpdate {
   eventId:  string;
 }
 
-/** Minimal Supabase mock - captures the single UPDATE call bumpAttempts makes. */
-function makeClient(captured: CapturedUpdate[]) {
+/** Minimal Supabase mock - captures UPDATE calls.
+ *  errors[n] is the error returned on the nth call (null = success). */
+function makeClient(captured: CapturedUpdate[], errors: Array<{ message: string } | null> = []) {
+  let callIndex = 0;
   return {
     from: (_table: string) => ({
       update: (payload: Record<string, unknown>) => ({
         eq: (_col: string, val: string) => {
+          const error = errors[callIndex] ?? null;
+          callIndex++;
           captured.push({ payload, eventId: val });
-          return Promise.resolve({ error: null });
+          return Promise.resolve({ error });
         },
       }),
     }),
@@ -50,14 +54,20 @@ async function bumpAttempts(
 ): Promise<void> {
   const newAttempts = (ev.attempts ?? 0) + 1;
   const terminal    = newAttempts >= MAX_ATTEMPTS;
-  // ONE update call: terminal decision is in the same write as the attempt counter.
-  await (client.from("quiltt_webhook_inbox") as any)
+  const { error } = await (client.from("quiltt_webhook_inbox") as any)
     .update({
       attempts:   newAttempts,
       last_error: errMsg.slice(0, 500),
       ...(terminal ? { processed_at: new Date().toISOString(), retirement_reason: ('max-attempts:' + errMsg).slice(0, 500) } : {}),
     })
     .eq("event_id", ev.event_id);
+  if (error && terminal) {
+    // Terminal write rejected (e.g. retirement_reason column absent before #316 applies):
+    // fall back to counter-only bump to preserve attempts and last_error.
+    await (client.from("quiltt_webhook_inbox") as any)
+      .update({ attempts: newAttempts, last_error: errMsg.slice(0, 500) })
+      .eq("event_id", ev.event_id);
+  }
 }
 
 // --- tests ---------------------------------------------------------------
@@ -131,4 +141,28 @@ Deno.test("queue head advances: second event is not blocked by terminal first ev
   assertEquals(calls.length, 2, "both events were processed (queue did not stall)");
   assertEquals(typeof calls[0].payload.processed_at, "string", "first row retired");
   assertEquals("processed_at" in calls[1].payload, false, "second row still live");
+});
+
+Deno.test("terminal write rejected: fallback preserves attempts and last_error without retirement fields", async () => {
+  // Simulates prod where retirement_reason column does not yet exist (#316 not applied).
+  // Terminal write is rejected; fallback must carry attempts + last_error but NOT
+  // processed_at or retirement_reason.
+  const calls: CapturedUpdate[] = [];
+  const terminalError = { message: 'column "retirement_reason" of relation "quiltt_webhook_inbox" does not exist' };
+  const client = makeClient(calls, [terminalError, null]);
+  const ev: PendingEvent = {
+    event_id: "evt_fallback", event_type: "connection.synced.successful",
+    payload: null, platform_id: null, subaccount_id: null, attempts: MAX_ATTEMPTS - 1,
+  };
+  await bumpAttempts(client, ev, "mapping-missing");
+
+  assertEquals(calls.length, 2, "terminal write + fallback = two DB writes");
+  // First call: the attempted terminal write (rejected by missing column in this scenario)
+  assertEquals(typeof calls[0].payload.processed_at, "string", "terminal write attempted processed_at");
+  assertEquals(typeof calls[0].payload.retirement_reason, "string", "terminal write attempted retirement_reason");
+  // Second call: the fallback - counter fields only, no retirement fields
+  assertEquals("processed_at" in calls[1].payload, false, "fallback must NOT set processed_at");
+  assertEquals("retirement_reason" in calls[1].payload, false, "fallback must NOT set retirement_reason");
+  assertEquals(calls[1].payload.attempts, MAX_ATTEMPTS, "fallback preserves counter advance");
+  assertEquals(typeof calls[1].payload.last_error, "string", "fallback preserves last_error");
 });
