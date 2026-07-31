@@ -451,7 +451,7 @@ async function markProcessed(client: SupabaseClient, eventId: string) {
 async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, errMsg: string) {
   const newAttempts = (ev.attempts ?? 0) + 1;
   const terminal    = newAttempts >= MAX_ATTEMPTS;
-  await client
+  const { error } = await client
     .from('quiltt_webhook_inbox')
     .update({
       attempts:   newAttempts,
@@ -459,6 +459,28 @@ async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, errMsg: st
       ...(terminal ? { processed_at: new Date().toISOString(), retirement_reason: ('max-attempts:' + errMsg).slice(0, 500) } : {}),
     })
     .eq('event_id', ev.event_id);
+  if (error) {
+    console.error(
+      `[or-quiltt-sync] bumpAttempts UPDATE failed for event ${ev.event_id}: ${error.message}`,
+    );
+    if (terminal) {
+      // The terminal write includes retirement_reason which may not yet exist
+      // in prod (schema is applied by #316, which must precede this code in prod).
+      // If the column is absent the whole UPDATE is rejected and the row freezes:
+      // attempts never advances, keeping its slot in the oldest-first LIMIT select
+      // indefinitely. Fall back to a counter-only bump so the row still advances
+      // out of the batch head and does not stall the drain.
+      const { error: fbErr } = await client
+        .from('quiltt_webhook_inbox')
+        .update({ attempts: newAttempts, last_error: errMsg.slice(0, 500) })
+        .eq('event_id', ev.event_id);
+      if (fbErr) {
+        console.error(
+          `[or-quiltt-sync] bumpAttempts fallback also failed for event ${ev.event_id}: ${fbErr.message}`,
+        );
+      }
+    }
+  }
   if (terminal) {
     console.warn(
       `[or-quiltt-sync] event ${ev.event_id}: retired to dead-letter after ` +
