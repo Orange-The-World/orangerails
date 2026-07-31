@@ -119,8 +119,23 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (prior.opk_public !== null) {
       if (prior.opk_public === body.opk_public && prior.opk_alg === body.opk_alg) {
         // Clear any inbox rows that remained deferred from a transient failure
-        // during the original registration. Best-effort.
-        const { count: deferredCount } = await clearDeferredRows(auth.serviceClient, prior.id);
+        // during the original registration.
+        //
+        // Best-effort, but NOT silent. This is the replay path a retrying client
+        // takes, so a failure here is a failure of the recovery mechanism itself,
+        // and `deferred_unblocked: 0` in the response is otherwise indistinguishable
+        // from a healthy "there was nothing to clear" (DL-0485). Same treatment as
+        // the sibling call on the registration path below.
+        const { count: deferredCount, error: unchangedErr } = await clearDeferredRows(
+          auth.serviceClient,
+          prior.id,
+        );
+        if (unchangedErr) {
+          console.warn(
+            '[or-sync-key-register] deferred-row clear failed (unchanged path):',
+            unchangedErr,
+          );
+        }
         return jsonResponse(
           {
             subaccount_id:      prior.id,
