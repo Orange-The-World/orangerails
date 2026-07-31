@@ -547,16 +547,24 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   // ── fetching_filters + matching (interleaved by height for fast-fail UX) ──
   const tip = await opts.fetchTip();
+
+  // Requirement 1 (issue #335): reject a birthday height outside [0, tip]
+  // before any scan. Coercing a known-wrong start onto the chain tip would
+  // silently claim a range was scanned that was not, and that is not
+  // recoverable. Rejection is recoverable: fix wallet_birthday, retry.
+  if (opts.birthdayHeight < 0 || opts.birthdayHeight > tip) {
+    throw new Error(
+      `stealth/sync: birthday height ${opts.birthdayHeight} is out of range [0, ${tip}] -- ` +
+      `abort before scanning; fix wallet_birthday and retry`,
+    );
+  }
+
   const fromHeight = Math.max(
     opts.birthdayHeight,
     (opts.lastBlockScanned ?? -1) + 1,
   );
   if (fromHeight > tip) {
     // Already current. Short-circuit with empty result.
-    // Guard: this path never fetched a filter or scanned a block, so it
-    // has not earned any forward progress on lastBlockScanned. Return the
-    // previous cursor unchanged -- the caller must not persist a height
-    // the scan never reached.
     emit(opts, progress('fetching_filters', 100, 'Already up to date.'));
     emit(opts, progress('matching', 100));
     emit(opts, progress('fetching_blocks', 100));
@@ -565,6 +573,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     emit(opts, progress('uploading', 100));
     return {
       txCount: 0,
+      // Requirement 2 (issue #335): nothing was scanned on this path, so the
+      // chain tip is never an accurate cursor value here. Return the stored
+      // cursor so the caller does not persist tip as a range never read.
       lastBlockScanned: opts.lastBlockScanned ?? -1,
       bytesDownloaded: 0,
       sealedTransactions: [],
