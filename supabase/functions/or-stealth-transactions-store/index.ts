@@ -97,6 +97,24 @@ function isSealedTx(x: unknown): x is SealedTransactionInput {
   );
 }
 
+/**
+ * Response cursor derivation (DL-0419). Returns the effective stored cursor
+ * AFTER this call, derived only from stored state, never from the client scan
+ * tip (body.last_block_scanned). Advances to maxBlockInserted only when new
+ * rows landed and that height exceeds the stored cursor; otherwise returns the
+ * stored cursor unchanged, which is null on a connection that has never
+ * scanned. Mirrors the forward-only patch guard so the value returned to the
+ * caller always equals the value persisted.
+ */
+export function deriveResponseCursor(
+  storedCursor: number | null,
+  inserted: number,
+  maxBlockInserted: number,
+): number | null {
+  const advanced = inserted > 0 && maxBlockInserted > (storedCursor ?? -1);
+  return advanced ? maxBlockInserted : storedCursor;
+}
+
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -278,10 +296,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // advanced" from "no new rows, cursor unchanged." Derived only from stored
     // state: on a fresh connection with no stored cursor and zero inserts this
     // is null, never the client-supplied scan tip (body.last_block_scanned).
-    const effectiveCursor: number | null =
-      (inserted > 0 && maxBlockInserted > storedCursor)
-        ? maxBlockInserted
-        : (ownerRow.last_block_scanned as number | null);
+    const effectiveCursor = deriveResponseCursor(
+      ownerRow.last_block_scanned as number | null,
+      inserted,
+      maxBlockInserted,
+    );
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,
       inserted,
