@@ -53,8 +53,7 @@ import { Info } from "lucide-react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttInstitutions } from "@quiltt/react/hooks";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { deriveMEK, encryptString, importAesKey } from "@/lib/vault";
-import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
+import { encryptString, importAesKey } from "@/lib/vault";
 
 // --------------------------------------------------------------------
 // Locking-key handoff.
@@ -96,9 +95,6 @@ function __OR_readDeferCredKey(): boolean {
   return searchHit || hashHit;
 }
 export const __OR_INITIAL_DEFER_CRED_KEY: boolean = __OR_readDeferCredKey();
-
-const LINK_WIDGET_LOCK_PASSWORD = "orangerails-widget-default-lock-password-v1";
-const LINK_WIDGET_LOCK_SALT_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 interface HandoffKeys {
   credKey: CryptoKey;
@@ -675,28 +671,9 @@ async function lockEverything(params: {
     credKey = params.handoff.credKey;
     txnKey = params.handoff.txnKey;
   } else {
-    // Audit H4 (2026-05-21): the hardcoded fallback password/salt below
-    // must NEVER run in production. Any prod build that hits this path
-    // would derive the same keys every other OR deployment derives,
-    // making the credential trivially decryptable. Guard at runtime so
-    // a missing fragment in prod fails loudly instead of silently
-    // sealing with the demo key.
-    if (!import.meta.env.DEV) {
-      throw new Error(
-        "connect: cred_key missing from URL fragment , refusing demo-fallback in production build. " +
-          "The host app must pass #cred_key=...&txn_key=... when launching the widget.",
-      );
-    }
-    const mek = await deriveMEK(LINK_WIDGET_LOCK_PASSWORD, LINK_WIDGET_LOCK_SALT_B64);
-    credKey = await deriveSubkey(
-      mek,
-      HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1,
-      LINK_WIDGET_LOCK_SALT_B64,
-    );
-    txnKey = await deriveSubkey(
-      mek,
-      HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1,
-      LINK_WIDGET_LOCK_SALT_B64,
+    throw new Error(
+      "connect: cred_key missing from URL fragment. " +
+        "The host app must pass #cred_key=...&txn_key=... when launching the widget.",
     );
   }
 
