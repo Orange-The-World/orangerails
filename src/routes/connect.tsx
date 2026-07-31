@@ -53,12 +53,11 @@ import { encryptString, importAesKey } from "@/lib/vault";
 // --------------------------------------------------------------------
 // Locking-key handoff.
 //
-// Preferred path: the integrating app derives the credentials_key and
-// transactions_key in the user's browser (Argon2id of their vault
-// password + per-org salt → HKDF) and hands the raw 32-byte keys to
-// this widget through the URL fragment as `#cred_key=B64&txn_key=B64`.
-// The fragment never reaches OR's server logs and we strip it from
-// history-state on first read. This is what the V2 platform consumer sends.
+// The integrating app derives the credentials_key and txn_key
+// browser-side and passes the raw 32-byte keys to this widget via
+// the URL fragment: `#cred_key=B64&txn_key=B64`. The fragment
+// never reaches OR server logs; we strip it from history-state on
+// first read.
 //
 // The fragment handoff is required. When absent, lockEverything throws
 // so the caller surfaces a visible error instead of silently producing
