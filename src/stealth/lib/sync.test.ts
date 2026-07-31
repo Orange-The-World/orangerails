@@ -330,6 +330,61 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     ]);
   });
 
+  // Condition 4 of PR #354 / issue #335: birthdayHeight outside [0, tip]
+  // must REJECT, never clamp. Clamping would silently claim a scan range
+  // the user never requested and is not recoverable; rejection is.
+  it('rejects when birthdayHeight exceeds tip (does not clamp to tip)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'birthday-above-tip',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 800_001,
+        lastBlockScanned: null,
+        fetchTip: async () => 800_000,
+        fetchFilter: async () => { throw new Error('must not reach filter fetch'); },
+        fetchBlock: async () => { throw new Error('must not reach block fetch'); },
+        matcher: { matchAny: () => false },
+      }),
+    ).rejects.toThrow(/out of range/);
+  });
+
+  it('rejects when birthdayHeight is negative (does not clamp to 0)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'birthday-negative',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: -1,
+        lastBlockScanned: null,
+        fetchTip: async () => 800_000,
+        fetchFilter: async () => { throw new Error('must not reach filter fetch'); },
+        fetchBlock: async () => { throw new Error('must not reach block fetch'); },
+        matcher: { matchAny: () => false },
+      }),
+    ).rejects.toThrow(/out of range/);
+  });
+
   it('skips transactions whose outputs do not pay any of our scripts', async () => {
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
