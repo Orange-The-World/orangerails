@@ -149,11 +149,29 @@ export function mergeAccountSets(
  * condition this field exists to detect, so the two non-comparing sources are
  * forced to null here rather than trusted to pass it. Callers keying off this
  * must treat null as "unknown", never as "fine".
+ *
+ * The overloads below carry that rule into the type system, so it is checkable
+ * rather than conventional. `union` REQUIRES a count and the two non-comparing
+ * sources accept none. An optional count with a default would leave the same
+ * reporting failure alive one level in: a union call site that omitted the
+ * argument would publish "compared, and they agreed" having compared nothing,
+ * which is the exact defect the encoding exists to remove. `deno check` gates
+ * this repo, so the compiler is the first line and the coercion below is the
+ * second, for callers with no types at all.
  */
 export function buildAccountsResponse(
   rawAccounts: QuilttAccount[],
+  source: 'union',
+  sourceDisagreement: number,
+): AccountsResponse;
+export function buildAccountsResponse(
+  rawAccounts: QuilttAccount[],
+  source: 'connections_only' | 'single_connection',
+): AccountsResponse;
+export function buildAccountsResponse(
+  rawAccounts: QuilttAccount[],
   source: AccountSource,
-  sourceDisagreement: number | null = null,
+  sourceDisagreement?: number,
 ): AccountsResponse {
   const nullStateAccounts = rawAccounts.filter((a) => !a.state);
   if (nullStateAccounts.length > 0) {
@@ -184,6 +202,12 @@ export function buildAccountsResponse(
 
   // The encoding is enforced here, not asked of the caller. A source that did
   // not compare cannot report a comparison result, whatever it passed.
+  //
+  // The overloads already make both illegal calls unrepresentable in
+  // TypeScript. This runs anyway because the type gate is erased at runtime:
+  // `deno test` runs with --no-check and a JavaScript caller sees no overloads
+  // at all. Belt and braces on the one field whose failure mode is to report
+  // health during the failure.
   const disagreement = source === 'union' ? sourceDisagreement ?? 0 : null;
 
   return {
