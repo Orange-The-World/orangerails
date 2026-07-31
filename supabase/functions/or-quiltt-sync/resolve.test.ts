@@ -233,7 +233,9 @@ Deno.test('no map row and no payload profile id is not a profile id', () => {
 });
 
 Deno.test('redactProviderId keeps the type and drops the identity', () => {
-  assertEquals(redactProviderId('p_12zb3n94iKR1drzFbVK6qF'), 'p_[redacted]');
+  // Synthetic. Never put a real provider id here: the previous value on this
+  // line matched 49 live rows in the prod inbox, and this repo is public.
+  assertEquals(redactProviderId('p_EXAMPLE000000000000000'), 'p_[redacted]');
   assertEquals(redactProviderId('conn_14TJiFDKRJlPiBHuukUIlXZ'), 'conn_[redacted]');
 
   // Two different profiles have to render identically. If they did not, the log
