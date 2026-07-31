@@ -63,6 +63,11 @@
  * means "compared, all good", because that is precisely the failure this field
  * exists to surface. Treat null as unknown, never as fine.
  *
+ * The invariant behind that table, which is what a caller can actually rely on:
+ * `source_disagreement` is a number IF AND ONLY IF two sources were compared.
+ * Nothing puts a number there that nobody counted, including a defective caller
+ * inside this function, so a number never needs corroborating.
+ *
  * The 200 body is built by `buildAccountsResponse` in ./transform.ts, which
  * is a separate module so the response contract can be asserted against
  * fixtures without booting this server or holding a Quiltt credential. The

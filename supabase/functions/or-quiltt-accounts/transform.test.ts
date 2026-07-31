@@ -351,13 +351,10 @@ Deno.test('a union that compared and agreed reports 0, which is not null', () =>
 // be tested behind the type gate, and all three of its uses below are
 // assertions about calls the compiler refuses.
 //
-// Note what the two tests are each worth, because they are not the same. The
-// non-union one asserts a real second line of defence: the coercion forces
-// null there, so that call is covered by the compiler AND at runtime. The
-// union-with-no-count one asserts the runtime behaviour is 0, which is the
-// value that means "compared, and they agreed". It pins that behaviour rather
-// than guarding against it. Nothing at runtime catches a union call with no
-// count, so `deno check` is the only thing that does.
+// Both tests assert the same thing from opposite sides, and that symmetry is
+// the point of them: whichever way an illegal call is made, the field comes
+// back null. Neither of them pins a number, because a number in that field is
+// supposed to mean somebody counted.
 const unchecked = buildAccountsResponse as unknown as (
   rawAccounts: QuilttAccount[],
   source: AccountSource,
@@ -375,12 +372,14 @@ Deno.test('a non-union source cannot report a comparison it did not make', () =>
   assertEquals(single.source_disagreement, null);
 });
 
-Deno.test('a union with no count supplied reports 0 rather than null', () => {
-  // The inverse guard: 'union' always compared, so it must never answer
-  // "unknown". If this ever returned null it would mute the alarm from the
-  // other side.
+Deno.test('a union with no count supplied reports null rather than 0', () => {
+  // The inverse guard. Every union call the compiler admits carries a real
+  // count, so a union arriving without one did not compare anything, whatever
+  // its source says. 0 would announce "compared, and they agreed" on behalf of
+  // a caller that counted nothing, which is the reporting failure this whole
+  // encoding exists to remove. Null says "unknown", which is true.
   const out = unchecked([acct('a', 'OPEN')], 'union');
 
   assertEquals(out.account_source, 'union');
-  assertEquals(out.source_disagreement, 0);
+  assertEquals(out.source_disagreement, null);
 });
