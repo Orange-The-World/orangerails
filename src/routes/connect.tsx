@@ -21,11 +21,6 @@
  * After the user finishes, the credential is locked browser-side and an
  * array of source_wallet_ids is postMessage'd back to the parent window.
  *
- * Internal note (not shown to users): the locking password is currently a
- * fixed widget-side constant. A future hardening pass will replace it
- * with a password the user picks at first setup or hand off via a
- * short-lived widget session token from the integrating app's server.
- *
  * Query params:
  *   platform     , the integrating app's slug (e.g. 'bitbooks-v2'). Required.
  *   app_user_id  , opaque identifier for the end user, owned by the integrating app. Required.
@@ -53,24 +48,20 @@ import { Info } from "lucide-react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttInstitutions } from "@quiltt/react/hooks";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { deriveMEK, encryptString, importAesKey } from "@/lib/vault";
-import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
+import { encryptString, importAesKey } from "@/lib/vault";
 
 // --------------------------------------------------------------------
 // Locking-key handoff.
 //
-// Preferred path: the integrating app derives the credentials_key and
-// transactions_key in the user's browser (Argon2id of their vault
-// password + per-org salt → HKDF) and hands the raw 32-byte keys to
-// this widget through the URL fragment as `#cred_key=B64&txn_key=B64`.
-// The fragment never reaches OR's server logs and we strip it from
-// history-state on first read. This is what the V2 platform consumer sends.
+// The integrating app derives the credentials_key and txn_key
+// browser-side and passes the raw 32-byte keys to this widget via
+// the URL fragment: `#cred_key=B64&txn_key=B64`. The fragment
+// never reaches OR server logs; we strip it from history-state on
+// first read.
 //
-// Fallback path: when no fragment is present (standalone demo, legacy
-// integrators), we fall back to a hardcoded test password + zero salt
-// so the widget remains demo-able without a host app. NEVER ship a
-// real integration that relies on the fallback , anyone running OR
-// would derive the same keys and could decrypt the credential.
+// The fragment handoff is required. When absent, lockEverything throws
+// so the caller surfaces a visible error instead of silently producing
+// unrecoverable ciphertext with an unknown key.
 // --------------------------------------------------------------------
 // CRITICAL: capture defer_cred_key from window.location.search at MODULE
 // LOAD TIME, before TanStack Router initializes. Router's URL normalization
@@ -96,9 +87,6 @@ function __OR_readDeferCredKey(): boolean {
   return searchHit || hashHit;
 }
 export const __OR_INITIAL_DEFER_CRED_KEY: boolean = __OR_readDeferCredKey();
-
-const LINK_WIDGET_LOCK_PASSWORD = "orangerails-widget-default-lock-password-v1";
-const LINK_WIDGET_LOCK_SALT_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 interface HandoffKeys {
   credKey: CryptoKey;
@@ -131,8 +119,8 @@ function base64ToBytes(b64: string): Uint8Array {
  *     pass it and store ciphertext at rest. When absent, cred_key is
  *     reused for metadata encryption.
  *
- * Returns null only when NEITHER key is present (= no handoff at all,
- * widget falls back to dev test-password). When cred_key is present
+ * Returns null only when NEITHER key is present (= no handoff at all).
+ * The caller treats null as a missing-handoff error and throws. When cred_key is present
  * but invalid (wrong size, malformed base64), throws so the caller
  * surfaces a visible error instead of silently producing
  * unrecoverable ciphertext.
@@ -675,28 +663,9 @@ async function lockEverything(params: {
     credKey = params.handoff.credKey;
     txnKey = params.handoff.txnKey;
   } else {
-    // Audit H4 (2026-05-21): the hardcoded fallback password/salt below
-    // must NEVER run in production. Any prod build that hits this path
-    // would derive the same keys every other OR deployment derives,
-    // making the credential trivially decryptable. Guard at runtime so
-    // a missing fragment in prod fails loudly instead of silently
-    // sealing with the demo key.
-    if (!import.meta.env.DEV) {
-      throw new Error(
-        "connect: cred_key missing from URL fragment , refusing demo-fallback in production build. " +
-          "The host app must pass #cred_key=...&txn_key=... when launching the widget.",
-      );
-    }
-    const mek = await deriveMEK(LINK_WIDGET_LOCK_PASSWORD, LINK_WIDGET_LOCK_SALT_B64);
-    credKey = await deriveSubkey(
-      mek,
-      HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1,
-      LINK_WIDGET_LOCK_SALT_B64,
-    );
-    txnKey = await deriveSubkey(
-      mek,
-      HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1,
-      LINK_WIDGET_LOCK_SALT_B64,
+    throw new Error(
+      "connect: cred_key missing from URL fragment. " +
+        "The host app must pass #cred_key=...&txn_key=... when launching the widget.",
     );
   }
 
