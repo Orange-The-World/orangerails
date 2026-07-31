@@ -21,11 +21,6 @@
  * After the user finishes, the credential is locked browser-side and an
  * array of source_wallet_ids is postMessage'd back to the parent window.
  *
- * Internal note (not shown to users): the locking password is currently a
- * fixed widget-side constant. A future hardening pass will replace it
- * with a password the user picks at first setup or hand off via a
- * short-lived widget session token from the integrating app's server.
- *
  * Query params:
  *   platform     , the integrating app's slug (e.g. 'bitbooks-v2'). Required.
  *   app_user_id  , opaque identifier for the end user, owned by the integrating app. Required.
@@ -65,11 +60,9 @@ import { encryptString, importAesKey } from "@/lib/vault";
 // The fragment never reaches OR's server logs and we strip it from
 // history-state on first read. This is what the V2 platform consumer sends.
 //
-// Fallback path: when no fragment is present (standalone demo, legacy
-// integrators), we fall back to a hardcoded test password + zero salt
-// so the widget remains demo-able without a host app. NEVER ship a
-// real integration that relies on the fallback , anyone running OR
-// would derive the same keys and could decrypt the credential.
+// The fragment handoff is required. When absent, lockEverything throws
+// so the caller surfaces a visible error instead of silently producing
+// unrecoverable ciphertext with an unknown key.
 // --------------------------------------------------------------------
 // CRITICAL: capture defer_cred_key from window.location.search at MODULE
 // LOAD TIME, before TanStack Router initializes. Router's URL normalization
@@ -127,8 +120,8 @@ function base64ToBytes(b64: string): Uint8Array {
  *     pass it and store ciphertext at rest. When absent, cred_key is
  *     reused for metadata encryption.
  *
- * Returns null only when NEITHER key is present (= no handoff at all,
- * widget falls back to dev test-password). When cred_key is present
+ * Returns null only when NEITHER key is present (= no handoff at all).
+ * The caller treats null as a missing-handoff error and throws. When cred_key is present
  * but invalid (wrong size, malformed base64), throws so the caller
  * surfaces a visible error instead of silently producing
  * unrecoverable ciphertext.
