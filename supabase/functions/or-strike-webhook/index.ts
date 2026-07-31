@@ -33,7 +33,7 @@
  *   500 , DB failure (Strike will retry per their policy)
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const CONN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
