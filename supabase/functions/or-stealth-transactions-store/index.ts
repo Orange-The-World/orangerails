@@ -197,6 +197,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // the txid_blind_index_hex set after.
     let inserted = 0;
     let skipped_duplicates = 0;
+    // trackMax: highest block_height among rows that were actually inserted.
+    // Stays -1 when no rows land (all dupes or empty batch), which keeps the
+    // forward-only guard below from advancing the cursor.
+    let maxBlockInserted = -1;
 
     if (total > 0) {
       const rows = body.sealed_transactions.map((tx) => ({
@@ -241,15 +245,27 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           return jsonResponse({ error: 'Failed to insert transactions' }, 500, cors);
         }
         inserted = fresh.length;
+        // trackMax-inside-guard: compute max block_height only for the rows that
+        // actually landed. Advancing to body.last_block_scanned (the scan tip)
+        // would move the watermark past blocks this call never committed, silently
+        // losing events that settle later. The scan-tip cursor lives in
+        // or-stealth-envelope-update (step 4 of the widget sync flow).
+        maxBlockInserted = Math.max(...fresh.map((r) => r.block_height as number));
       }
+    }
+
+    // Forward-only cursor guard (trackMax-inside-guard). Advance last_block_scanned
+    // only when new rows were inserted AND their max block_height exceeds the
+    // stored cursor. Always update last_sync_at so the connection shows activity.
+    const storedCursor = (ownerRow.last_block_scanned as number | null) ?? -1;
+    const cursorPatch: Record<string, unknown> = { last_sync_at: new Date().toISOString() };
+    if (inserted > 0 && maxBlockInserted > storedCursor) {
+      cursorPatch.last_block_scanned = maxBlockInserted;
     }
 
     const { error: updErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .update({
-        last_block_scanned: body.last_block_scanned,
-        last_sync_at: new Date().toISOString(),
-      })
+      .update(cursorPatch)
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id);
     if (updErr) {
@@ -257,12 +273,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Failed to update connection sync metadata' }, 500, cors);
     }
 
+    // Return the effective stored cursor so callers can distinguish "cursor
+    // advanced" from "no new rows, cursor unchanged."
+    const effectiveCursor = (inserted > 0 && maxBlockInserted > storedCursor)
+      ? maxBlockInserted
+      : (storedCursor >= 0 ? storedCursor : body.last_block_scanned);
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,
       inserted,
       total,
       skipped_duplicates,
-      last_block_scanned: body.last_block_scanned,
+      last_block_scanned: effectiveCursor,
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {
