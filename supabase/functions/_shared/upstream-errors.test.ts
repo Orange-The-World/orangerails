@@ -374,7 +374,7 @@ Deno.test('sentry reports the error class rather than the mangled constructor', 
   // comments before asserting that no code path still reads it.
   const code = src
     .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\\/\\/.*$/gm, '$1');
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
   assertEquals(
     /constructor\s*\.\s*name/.test(code),
     false,
