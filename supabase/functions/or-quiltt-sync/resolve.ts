@@ -93,6 +93,26 @@ export function redactProviderId(id: string): string {
   return id.replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]');
 }
 
+/**
+ * Reduce provider-supplied error text to something safe to persist or log.
+ *
+ * Every return from the Quiltt call that reaches bumpAttempts or the console
+ * goes through here, so the posture is a property of the call rather than of
+ * whichever branch happened to be written with it in mind.
+ *
+ * Redaction runs BEFORE the length limit, and the order is the whole point.
+ * Truncating first can cut an identifier in half, and the tail is what the
+ * pattern matches on: `[A-Za-z0-9]{6,}` needs six characters after the
+ * underscore, so a cut landing one to five characters past it leaves a
+ * fragment that no longer matches and passes through intact. Redacting first
+ * means the only thing the limit can ever cut is text that is already safe.
+ */
+export function redactProviderError(raw: string, max: number): string {
+  return redactProviderId(raw)
+    .replace(/\b\d{6,}\b/g, '[redacted]')
+    .slice(0, max);
+}
+
 /** The Quiltt profile id the webhook payload claims. Never a platform decision. */
 export function profileIdFromPayload(ev: InboxEventLike): string | null {
   return str(ev?.payload?.profile?.id);

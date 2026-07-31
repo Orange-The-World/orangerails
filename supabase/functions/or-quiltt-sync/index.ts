@@ -32,6 +32,7 @@ import {
   chooseRouting,
   metadataSubaccountId,
   profileIdFromPayload,
+  redactProviderError,
   redactProviderId,
 } from './resolve.ts';
 
@@ -383,7 +384,7 @@ async function handleEvent(
     });
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '');
-      return `Quiltt GraphQL ${resp.status}: ${errBody.slice(0, 300)}`;
+      return `Quiltt GraphQL ${resp.status}: ${redactProviderError(errBody, 300)}`;
     }
     const json = await resp.json();
 
@@ -395,28 +396,21 @@ async function handleEvent(
     // no signal. Surface the errors so bumpAttempts fires and the event
     // stays visible for the next cron tick.
     //
-    // Redaction posture: keep only the human-readable `message` from
-    // each error, never the whole error object. A GraphQL error also
-    // carries `locations`, `path`, and a provider-defined `extensions`
-    // blob; serializing all of it into a log and the last_error column
-    // is overly broad. Provider messages can additionally embed
-    // alphanumeric connection/profile identifiers that a numeric-only
-    // filter would never catch. Quiltt IDs are mixed-case (for example
-    // conn_14TJiFDKRJlPiBHuukUIlXZ), so a lowercase-only pass would
-    // still leak the uppercase characters. We first redact any
-    // short-prefix underscore token case-insensitively, then run the
-    // numeric redaction on top. The prefix pass is intentionally
-    // prefix-agnostic: it does not depend on a hardcoded conn_/prof_
-    // list that could drift as Quiltt adds new ID types.
+    // Keep only the human-readable `message` from each error, never the
+    // whole error object. A GraphQL error also carries `locations`,
+    // `path`, and a provider-defined `extensions` blob; serializing all
+    // of it into a log and the last_error column is overly broad.
+    //
+    // Redacting whatever survives that is redactProviderError's job, not
+    // this branch's. It is applied to every return from this call, so
+    // read the posture there rather than here: a comment sitting on one
+    // conditional describes that conditional and nothing else.
     if (Array.isArray(json?.errors) && json.errors.length > 0) {
       const messages = json.errors
         .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
         .filter((m: string) => m.length > 0)
-        .join('; ')
-        .slice(0, 800);
-      const summary = redactProviderId(messages)
-        .replace(/\b\d{6,}\b/g, '[redacted]')
-        .slice(0, 400);
+        .join('; ');
+      const summary = redactProviderError(messages, 400);
       console.error(`[or-quiltt-sync] GraphQL errors for event ${ev.event_id}:`, summary);
       return `Quiltt GraphQL errors: ${summary}`;
     }
