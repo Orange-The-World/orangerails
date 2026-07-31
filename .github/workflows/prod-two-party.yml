@@ -17,7 +17,32 @@ jobs:
     if: github.event.pull_request.base.ref == 'prod'
     runs-on: ubuntu-latest
     steps:
-      - name: Count approving reviews from distinct non author accounts
+      - name: Self-test bot exclusion filter
+        run: |
+          set -euo pipefail
+
+          # Synthetic reviews: one Bot APPROVED and one User APPROVED (neither the
+          # author). The bot must not count; the human must. Expected result: 1.
+          test_reviews='[
+            {"user": "bot-reviewer", "state": "APPROVED", "type": "Bot"},
+            {"user": "human-reviewer", "state": "APPROVED", "type": "User"}
+          ]'
+
+          bot_test="$(printf '%s' "${test_reviews}" | jq -r --arg author "pr-author" '
+            map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
+            | group_by(.user)
+            | map(last)
+            | map(select(.state == "APPROVED" and .user != $author and .type == "User"))
+            | length
+          ')"
+
+          if [ "${bot_test}" -ne 1 ]; then
+            echo "::error::Bot-exclusion self-test failed: expected 1 (human only), got ${bot_test}"
+            exit 1
+          fi
+          echo "Bot-exclusion self-test passed: bot APPROVED filtered out, 1 human approver counted."
+
+      - name: Count approving reviews from distinct non-author human accounts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -27,17 +52,20 @@ jobs:
           set -euo pipefail
 
           reviews="$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-            --jq '[.[] | {user: .user.login, state: .state}]')"
+            --jq '[.[] | {user: .user.login, state: .state, type: .user.type}]')"
 
           # Keep only reviews that carry a verdict, take the latest verdict per
-          # account, then count the accounts that currently approve and are not
-          # the author. A plain comment does not clear an earlier approval, and
-          # GitHub never counts an author approving their own pull request.
+          # account, then count the accounts that currently approve, are not
+          # the author, and have user.type == "User". Bot accounts can file
+          # approving reviews in this fleet and must not satisfy the second-party
+          # requirement: the second party must be a human identity. A plain
+          # comment does not clear an earlier approval, and GitHub never counts
+          # an author approving their own pull request.
           approvers="$(printf '%s' "${reviews}" | jq -r --arg author "${PR_AUTHOR}" '
             map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
             | group_by(.user)
             | map(last)
-            | map(select(.state == "APPROVED" and .user != $author))
+            | map(select(.state == "APPROVED" and .user != $author and .type == "User"))
             | map(.user)
             | join(", ")
           ')"
@@ -46,11 +74,11 @@ jobs:
             map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
             | group_by(.user)
             | map(last)
-            | map(select(.state == "APPROVED" and .user != $author))
+            | map(select(.state == "APPROVED" and .user != $author and .type == "User"))
             | length
           ')"
 
-          echo "approving accounts (author excluded): ${count}"
+          echo "approving human accounts (author excluded): ${count}"
           echo "who: ${approvers:-none}"
 
           # Why the threshold is 1 and not 2, which is what "two party" sounds
@@ -70,12 +98,12 @@ jobs:
           # every prod pull request forever, which trains people to merge past
           # it and is worse than no gate at all.
           #
-          # So: one approving review from an account that is not the author.
+          # So: one approving review from a human account that is not the author.
           # Raise this to 2 on the day a second reviewing identity exists, and
           # not before. That is tracked in DL-0445.
           if [ "${count}" -lt 1 ]; then
-            echo "::error::A merge into prod is the production deploy and takes a second party: one approving review from an account that is not the author. Found ${count}."
+            echo "::error::A merge into prod is the production deploy and takes a second party: one approving review from a human account (user.type == User) that is not the author. Found ${count}."
             exit 1
           fi
 
-          echo "Two party requirement satisfied: author plus ${count} approving account(s)."
+          echo "Two party requirement satisfied: author plus ${count} approving human account(s)."
