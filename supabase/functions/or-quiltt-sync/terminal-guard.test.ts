@@ -55,7 +55,7 @@ async function bumpAttempts(
     .update({
       attempts:   newAttempts,
       last_error: errMsg.slice(0, 500),
-      ...(terminal ? { processed_at: new Date().toISOString() } : {}),
+      ...(terminal ? { processed_at: new Date().toISOString(), retirement_reason: ('max-attempts:' + errMsg).slice(0, 500) } : {}),
     })
     .eq("event_id", ev.event_id);
 }
@@ -88,6 +88,7 @@ Deno.test("at ceiling (attempts = MAX_ATTEMPTS - 1): retired in same single UPDA
 
   assertEquals(calls.length, 1, "terminal decision and counter are ONE UPDATE, not two");
   assertEquals(typeof calls[0].payload.processed_at, "string", "processed_at set when retiring");
+  assertEquals(typeof calls[0].payload.retirement_reason, "string", "retirement_reason set when retiring");
   assertEquals(calls[0].payload.attempts, MAX_ATTEMPTS);
   assertEquals(calls[0].eventId, "evt_threshold");
 });
@@ -104,6 +105,7 @@ Deno.test("existing prod poison row at 11,495 attempts: retired on next drain ti
   assertEquals(calls.length, 1);
   assertEquals(typeof calls[0].payload.processed_at, "string",
     "poison row at 11,495 attempts is retired immediately on first drain tick after guard ships");
+  assertEquals(typeof calls[0].payload.retirement_reason, "string", "retirement_reason set on poison row retirement");
   assertEquals(calls[0].payload.attempts, 11_496);
 });
 
