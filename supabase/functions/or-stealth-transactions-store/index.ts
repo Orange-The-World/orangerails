@@ -14,14 +14,25 @@
  * learn nothing else from the value. It is stored and compared as an opaque
  * string; nothing here decodes it.
  *
+ * Cursor semantics (DL-0419 trackMax-inside-guard):
+ *   last_block_scanned on the stealth_connections row advances only when new
+ *   rows are actually inserted, and only to max(block_height) of those rows.
+ *   Advancing unconditionally to the client-supplied scan tip (body.last_block_scanned)
+ *   is the DL-0015 bug applied to the sealed-tx path: the cursor jumps past
+ *   items that were never committed, silently losing them on the next sync.
+ *   or-stealth-envelope-update owns the scan-tip cursor (always called in step
+ *   4 of the widget sync flow, after this function returns OK).
+ *
  * POST body:
  *   connection_id:        string (uuid)
  *   app_user_id:          string (uuid)
  *   sealed_transactions:  SealedTransactionInput[]
- *   last_block_scanned:   number
+ *   last_block_scanned:   number (kept for backward compat, not used for cursor)
  *
  * Response:
  *   { connection_id, inserted, total, skipped_duplicates, last_block_scanned }
+ *   last_block_scanned in the response is the effective stored cursor after the
+ *   call, not the client-supplied scan tip.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
