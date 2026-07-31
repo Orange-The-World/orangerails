@@ -33,7 +33,8 @@
  *     total_returned:  number            how many accounts Quiltt returned
  *     excluded_closed: number            how many this function dropped
  *     distinct_states: (string|null)[]   every state Quiltt used in this response
- *     source_disagreement: number        profile-wide only; see below
+ *     account_source:  'union' | 'connections_only' | 'single_connection'
+ *     source_disagreement: number | null see below
  *   }
  *
  * The counters exist so a caller who sees "fewer accounts than I
@@ -47,8 +48,20 @@
  * each `connections` entry, and returns the union. Neither root's no-filter
  * default is documented, so neither can be shown from outside to be the
  * complete one, and a union cannot return fewer accounts than either alone.
- * `source_disagreement` counts the accounts only one source listed; it is 0
- * for the single-connection mode, which has one source.
+ *
+ * `account_source` says which roots actually answered, and
+ * `source_disagreement` is a number ONLY when both did and were compared:
+ *
+ *   union / 0             compared, and the two roots agreed
+ *   union / n             compared, n accounts were listed by only one root
+ *   connections_only / null   NEVER COMPARED. The union query was rejected and
+ *                             the retry answered. Investigate rather than read
+ *                             it as agreement.
+ *   single_connection / null  never compared, correctly: one source exists.
+ *
+ * null is not 0. A path that compared nothing must not report the number that
+ * means "compared, all good", because that is precisely the failure this field
+ * exists to surface. Treat null as unknown, never as fine.
  *
  * The 200 body is built by `buildAccountsResponse` in ./transform.ts, which
  * is a separate module so the response contract can be asserted against
@@ -214,7 +227,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       if (result.graphqlErrors) return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
 
       const conn = result.data?.connection as { accounts?: QuilttAccount[] } | null | undefined;
-      return jsonResponse(buildAccountsResponse(conn?.accounts ?? []), 200, cors);
+      return jsonResponse(buildAccountsResponse(conn?.accounts ?? [], 'single_connection'), 200, cors);
     }
 
     // Profile-wide: every account under the profile, from both roots that
@@ -236,7 +249,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       const fromConnections = conns.flatMap((c) => c.accounts ?? []);
       const merged = mergeAccountSets(fromRoot, fromConnections);
       const disagreement = merged.only_in_root.length + merged.only_in_connections.length;
-      return jsonResponse(buildAccountsResponse(merged.accounts, disagreement), 200, cors);
+      return jsonResponse(buildAccountsResponse(merged.accounts, 'union', disagreement), 200, cors);
     }
 
     // The union document was rejected. The root `accounts` field is documented
@@ -245,6 +258,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // selection. Retry with the connections-only query this branch shipped with,
     // so an unavailable root field degrades to the previous behaviour instead of
     // taking the fallback path down. The error above is already logged.
+    //
+    // This path answers with account_source 'connections_only' and a null
+    // source_disagreement. That combination is the alarm: it means the sources
+    // were never compared, which is a different fact from comparing them and
+    // finding they agree, and the caller must be able to tell those apart from
+    // the body alone. A log line does not close it, because the contract above
+    // promises the caller does not need our logs.
     console.warn('[or-quiltt-accounts] union query rejected, retrying connections-only');
     const connsOnly = await postQuiltt(
       'Quiltt(all,connections-only)',
@@ -254,7 +274,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (connsOnly.graphqlErrors) return jsonResponse({ error: 'Quiltt GraphQL error' }, 502, cors);
 
     const conns = (connsOnly.data?.connections ?? []) as Array<{ accounts?: QuilttAccount[] }>;
-    return jsonResponse(buildAccountsResponse(conns.flatMap((c) => c.accounts ?? [])), 200, cors);
+    return jsonResponse(
+      buildAccountsResponse(conns.flatMap((c) => c.accounts ?? []), 'connections_only'),
+      200,
+      cors,
+    );
   } catch (e) {
     console.error('[or-quiltt-accounts] fatal:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
