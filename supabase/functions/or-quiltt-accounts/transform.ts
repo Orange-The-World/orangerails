@@ -138,17 +138,27 @@ export function mergeAccountSets(
  *   union               n > 0                 compared, n accounts appeared
  *                                             in only one root, and the union
  *                                             saved them from being dropped
+ *   union               null                  a caller said "union" and passed
+ *                                             no count, so nothing was counted.
+ *                                             None of this endpoint's three
+ *                                             exits can produce it and
+ *                                             `deno check` refuses it besides.
+ *                                             A defect, and reported as one.
  *   connections_only    null                  NEVER COMPARED: the union query
  *                                             was rejected and the retry
  *                                             answered. Investigate.
  *   single_connection   null                  never compared, and correctly
  *                                             so: one source by construction
  *
+ * The invariant that falls out of the table, and the one to hold on to:
+ * `source_disagreement` is a number IF AND ONLY IF two sources were actually
+ * compared. There is no path by which this field carries a number nobody
+ * counted. Callers keying off it must treat null as "unknown", never as "fine".
+ *
  * `null` and `0` are different answers and the difference is the point. A 0 on
  * a path that never compared anything reports the healthy value in exactly the
- * condition this field exists to detect, so the two non-comparing sources are
- * forced to null here rather than trusted to pass it. Callers keying off this
- * must treat null as "unknown", never as "fine".
+ * condition this field exists to detect, so a source that did not compare is
+ * forced to null here rather than trusted to pass it.
  *
  * The overloads below carry that rule into the type system, so it is checkable
  * rather than conventional. `union` REQUIRES a count and the two non-comparing
@@ -157,21 +167,24 @@ export function mergeAccountSets(
  * argument would publish "compared, and they agreed" having compared nothing,
  * which is the exact defect the encoding exists to remove.
  *
- * The two defences are NOT symmetric, and which one covers what matters:
+ * Both illegal calls are covered twice, and that symmetry was bought rather
+ * than free:
  *
- *   a non-comparing source passing a count   covered twice. `deno check`
- *                                            refuses the call, and the
- *                                            coercion below forces null if it
- *                                            is ever reached anyway.
- *   `union` with no count                    covered ONCE, by `deno check`
- *                                            alone. The coercion below sends
- *                                            it to `?? 0`, and 0 is precisely
- *                                            the value meaning "compared, and
+ *   a non-comparing source passing a count   `deno check` refuses the call, and
+ *                                            the coercion below forces null if
+ *                                            it is ever reached anyway.
+ *   `union` with no count                    `deno check` refuses the call, and
+ *                                            the coercion below answers null,
+ *                                            which reads as "not compared"
+ *                                            rather than as "compared, and
  *                                            they agreed".
  *
- * So the compiler is not a convenience here. On the union side it is the only
- * thing between an omitted argument and a false all-clear. Do not weaken these
- * overloads on the assumption that a runtime guard is standing behind them.
+ * The second row used to read "covered by `deno check` alone", because the
+ * coercion sent a missing union count to `?? 0`. That made the compiler the
+ * only thing standing between an omitted argument and a false all-clear, on the
+ * one field whose whole purpose is to not report health during the failure.
+ * **Do not reintroduce a numeric default here.** A number in this field must
+ * always mean somebody counted.
  */
 export function buildAccountsResponse(
   rawAccounts: QuilttAccount[],
@@ -215,18 +228,19 @@ export function buildAccountsResponse(
     }));
 
   // The encoding is enforced here, not asked of the caller. A source that did
-  // not compare cannot report a comparison result, whatever it passed.
+  // not compare cannot report a comparison result whatever it passed, and a
+  // caller that counted nothing cannot report a count.
   //
   // This runs behind the overloads rather than instead of them, because the
   // type gate is erased at runtime: `deno test` runs with --no-check and a
   // JavaScript caller sees no overloads at all.
   //
-  // What it does and does not cover, because the difference is easy to misread.
-  // It forces null for the two non-comparing sources, so a count they had no
-  // right to pass cannot escape. It does NOT cover `union` with no count: that
-  // lands on `?? 0`, and 0 is the value meaning "compared, and they agreed".
-  // Only `deno check` stops that one. See the docblock above.
-  const disagreement = source === 'union' ? sourceDisagreement ?? 0 : null;
+  // Null on both illegal calls, deliberately. The two non-comparing sources are
+  // forced to null so a count they had no right to pass cannot escape. `union`
+  // with no count also lands on null, because null reads as "not compared"
+  // while 0 reads as "compared, and they agreed". Defaulting it to 0 would
+  // publish the healthy value in the one condition this field exists to detect.
+  const disagreement = source === 'union' ? sourceDisagreement ?? null : null;
 
   return {
     accounts,
