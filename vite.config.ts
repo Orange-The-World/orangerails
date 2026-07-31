@@ -12,6 +12,19 @@ export default defineConfig(({ mode }) => ({
     hmr: { overlay: false },
   },
   plugins: [
+    {
+      name: "guard-stealth-origins",
+      buildStart() {
+        const val = process.env.VITE_OR_STEALTH_ALLOWED_ORIGINS;
+        if (!val || !val.trim()) {
+          throw new Error(
+            "[DL-0466] VITE_OR_STEALTH_ALLOWED_ORIGINS is empty or not set. " +
+              "Set at least one trusted origin in your Cloudflare Pages " +
+              "environment variables before building."
+          );
+        }
+      },
+    },
     TanStackRouterVite({
       target: "react",
       autoCodeSplitting: true,
