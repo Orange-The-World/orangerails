@@ -210,8 +210,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // the edge log in plaintext, the same control the sync error path
         // upstream applies.
         console.error(
-          '[or-sync] sink_format resolve failed, class=' +
-            (resolveErr instanceof Error ? resolveErr.constructor.name : typeof resolveErr),
+          '[or-sync] sink_format resolve failed, class=' + errorClassName(resolveErr),
         );
         // Fall back to body.format on resolution failure rather than break.
         resolvedFormat = bodyFormat ?? null;
