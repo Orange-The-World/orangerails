@@ -69,6 +69,8 @@ jobs:
         run: node scripts/check-anon-acl-snapshot.mjs --selftest
 
       - name: Build
+        env:
+          VITE_OR_STEALTH_ALLOWED_ORIGINS: ${{ vars.VITE_OR_STEALTH_ALLOWED_ORIGINS }}
         run: bun run build
 
   deno-typecheck:
