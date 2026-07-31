@@ -116,9 +116,26 @@ jobs:
           # on 2.9.4, purely from the newer bundled tsc.
           deno-version: v2.1.4
 
+      - name: Restore Deno module cache
+        id: deno-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/deno-dir
+          key: deno-v2.1.4-${{ hashFiles('supabase/functions/**/*.ts') }}
+          restore-keys: deno-v2.1.4-
+
+      - name: Populate Deno cache and write lock
+        env:
+          DENO_DIR: ${{ runner.temp }}/deno-dir
+          NO_COLOR: '1'
+        run: |
+          mapfile -t FILES < <(find supabase/functions -name '*.ts' -type f | sort)
+          deno cache --lock=deno.lock --lock-write --node-modules-dir=auto "${FILES[@]}"
+
       - name: deno check supabase/functions
         shell: bash
         env:
+          DENO_DIR: ${{ runner.temp }}/deno-dir
           # Deno colourises its diagnostics even when stdout+stderr are
           # redirected to a file on the runner. The first version of this step
           # counted "[ERROR]" fine but its per-class breakdown grepped for
@@ -145,7 +162,7 @@ jobs:
           # --node-modules-dir=auto: the repo has a root package.json, so Deno
           # otherwise refuses npm: specifiers with "run deno install first".
           RC=0
-          deno check --node-modules-dir=auto "${FILES[@]}" > "$RUNNER_TEMP/deno-check.raw" 2>&1 || RC=$?
+          deno check --lock=deno.lock --node-modules-dir=auto "${FILES[@]}" > "$RUNNER_TEMP/deno-check.raw" 2>&1 || RC=$?
           sed -e 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/deno-check.raw" > "$RUNNER_TEMP/deno-check.log"
           cat "$RUNNER_TEMP/deno-check.log"
 
@@ -186,6 +203,14 @@ jobs:
           if [ "$ERRORS" -lt "$DENO_CHECK_BASELINE" ]; then
             echo "::notice::Error count dropped to ${ERRORS}. Lower DENO_CHECK_BASELINE to ${ERRORS} in .github/workflows/ci.yml in this PR so the ratchet holds the ground you just took."
           fi
+
+      - name: Upload deno.lock
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deno-lock
+          path: deno.lock
+          retention-days: 7
 
   deno-test:
     name: Test edge functions (Deno)
