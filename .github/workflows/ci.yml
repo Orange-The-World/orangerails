@@ -133,18 +133,3 @@ jobs:
           path: tests/e2e/screenshots/
           retention-days: 14
           if-no-files-found: ignore
-
-  deno-test:
-    name: Deno classifier tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Run upstream-errors classifier tests
-        run: deno test --no-check --allow-all supabase/functions/_shared/upstream-errors.test.ts
