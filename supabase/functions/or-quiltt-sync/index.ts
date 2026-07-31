@@ -27,6 +27,13 @@
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import {
+  chooseProfileId,
+  chooseRouting,
+  metadataSubaccountId,
+  profileIdFromPayload,
+  redactProviderId,
+} from './resolve.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
@@ -117,39 +124,40 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       // Nothing here trusts the payload for platform_id. The subaccount row
       // is looked up and platform_id read off it, so a metadata value naming
       // a subaccount that does not exist stays unresolved.
+      //
+      // Those decisions now live in ./resolve.ts, where they are covered by
+      // fixtures. What is left here is the two lookups, which are the part
+      // that needs a client.
       let { platform_id, subaccount_id } = ev;
-      if (!subaccount_id) {
-        const profileId = ev.payload?.profile?.id;
-        if (typeof profileId === 'string') {
-          const m = await client
+      if (!platform_id || !subaccount_id) {
+        const profileId = profileIdFromPayload(ev);
+        const metaSub   = metadataSubaccountId(ev);
+
+        const mapRow = profileId
+          ? (await client
             .from('quiltt_profile_map')
             .select('platform_id, subaccount_id')
             .eq('quiltt_profile_id', profileId)
-            .maybeSingle();
-          if (m.data) {
-            platform_id   = m.data.platform_id;
-            subaccount_id = m.data.subaccount_id;
-          }
-        }
+            .maybeSingle()).data
+          : null;
 
-        if (!subaccount_id) {
-          const metaSub = ev.payload?.profile?.metadata?.or_subaccount_id;
-          if (typeof metaSub === 'string' && metaSub.length > 0) {
-            const s = await client
-              .from('subaccounts')
-              .select('id, platform_id')
-              .eq('id', metaSub)
-              .maybeSingle();
-            if (s.data) {
-              platform_id   = s.data.platform_id;
-              subaccount_id = s.data.id;
-              console.warn(
-                `[or-quiltt-sync] event ${ev.event_id}: routed via profile metadata ` +
-                  `after quiltt_profile_map missed (profile ${typeof profileId === 'string' ? profileId : 'unknown'})`,
-              );
-            }
-          }
+        const subRow = metaSub
+          ? (await client
+            .from('subaccounts')
+            .select('id, platform_id')
+            .eq('id', metaSub)
+            .maybeSingle()).data
+          : null;
+
+        const routed = chooseRouting(ev, mapRow, subRow);
+        if (routed.source === 'metadata') {
+          console.warn(
+            `[or-quiltt-sync] event ${ev.event_id}: routed via profile metadata ` +
+              `after quiltt_profile_map missed (profile ${profileId ?? 'unknown'})`,
+          );
         }
+        platform_id   = routed.platform_id;
+        subaccount_id = routed.subaccount_id;
 
         if (subaccount_id && platform_id) {
           await client
@@ -215,15 +223,70 @@ async function handleEvent(
     return `unsupported opk_alg: ${sub.opk_alg}`;
   }
 
-  // Profile id for Basic auth
+  // Profile id for Basic auth.
+  //
+  // maybeSingle, not single: a missing map row is an expected state, not a
+  // query failure. Every Quiltt profile minted before the map's first row on
+  // 2026-06-10 has none, and none can be created for them, because
+  // quiltt_environment_id is NOT NULL and no webhook payload carries an
+  // environment id. Treating that as an error is what returned `profile map
+  // missing` on every tick forever (DL-0465).
+  //
+  // The fallback is the profile id on the payload, which arrived on an
+  // HMAC-verified request. It scopes the data pull and nothing else: the
+  // platform this data is filed under still comes off the subaccount row.
+  //
+  // Note this reads the map by subaccount_id, while the re-resolve block above
+  // reads it by profile id. Two keys into one table can disagree, and here they
+  // do: a legacy subaccount that later mints a session gets a NEW profile mapped
+  // to it while its queued events still carry the old one. chooseProfileId keeps
+  // the event's own profile in that case, because only that credential can read
+  // the connection the event is about.
   const { data: map, error: mapErr } = await client
     .from('quiltt_profile_map')
     .select('quiltt_profile_id')
     .eq('subaccount_id', subaccountId)
-    .single();
-  if (mapErr || !map) return `profile map missing: ${mapErr?.message}`;
+    .maybeSingle();
+  if (mapErr) return `profile map lookup failed: ${mapErr.message}`;
 
-  const basic = btoa(`${map.quiltt_profile_id}:${apiKey}`);
+  const profile = chooseProfileId(map?.quiltt_profile_id ?? null, ev, subaccountId);
+  if (profile.source === 'route-conflict') {
+    // The payload would have supplied the credential, and it does not agree
+    // with us about where its own data belongs. That is the signature of a row
+    // misrouted by the receiver's old malformed-batch index shift: the stored
+    // route is complete and confidently wrong. Authenticating as the payload
+    // here succeeds, and lands one customer's transactions under another
+    // customer's OPK. Refusing costs this event a retry, which is recoverable.
+    // The alternative is not.
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: routed to subaccount ${subaccountId}, but the ` +
+        `payload's profile metadata does not name that subaccount. Refusing to authenticate ` +
+        `with the payload's profile. Suspect a misrouted inbox row (DL-0465)`,
+    );
+    return 'payload profile does not corroborate the routed subaccount';
+  }
+  if (!profile.profileId) return 'no quiltt profile id (no map row, none in payload)';
+  if (profile.source === 'payload') {
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: no quiltt_profile_map row for this ` +
+        `subaccount, using the profile id from the verified payload (DL-0465)`,
+    );
+  } else if (profile.source === 'payload-rebound') {
+    // Ids redacted on the same posture as the GraphQL error path below: a
+    // Quiltt identifier does not belong in an edge function log. That does cost
+    // this line the ability to show that the two ids differ, which is the whole
+    // point of it, so the sentence says so and points at where both live. A
+    // human holding the event id can read them from the inbox row and the map.
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: subaccount ${subaccountId} is mapped to ` +
+        `${redactProviderId(String(map?.quiltt_profile_id ?? ''))}, but this event came from a ` +
+        `different profile, ${redactProviderId(profile.profileId)}. Using the event's own ` +
+        `profile. The subaccount was rebound by a later session mint and now has two Quiltt ` +
+        `profiles; both ids are on the inbox row and in quiltt_profile_map (DL-0465)`,
+    );
+  }
+
+  const basic = btoa(`${profile.profileId}:${apiKey}`);
   let recipientPub: Uint8Array;
   try {
     recipientPub = await decodeOpkPublicKey(sub.opk_public);
@@ -351,8 +414,7 @@ async function handleEvent(
         .filter((m: string) => m.length > 0)
         .join('; ')
         .slice(0, 800);
-      const summary = messages
-        .replace(/\b[a-z]{2,8}_[A-Za-z0-9]{6,}\b/gi, '[redacted-id]')
+      const summary = redactProviderId(messages)
         .replace(/\b\d{6,}\b/g, '[redacted]')
         .slice(0, 400);
       console.error(`[or-quiltt-sync] GraphQL errors for event ${ev.event_id}:`, summary);
