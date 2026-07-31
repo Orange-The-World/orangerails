@@ -37,12 +37,27 @@ export interface MappedAccount {
   connection: { id: string; status: string } | null;
 }
 
+/**
+ * Which Quiltt roots actually produced the account set in this response.
+ *
+ *   union             both roots were asked and the answer is their union.
+ *                     This is the only value under which the two sources were
+ *                     compared, so it is the only value under which
+ *                     `source_disagreement` is a number.
+ *   connections_only  the union document was rejected and the connections-only
+ *                     retry answered instead. NOT a comparison.
+ *   single_connection the caller named one connection. One source by
+ *                     construction, so there is nothing to compare.
+ */
+export type AccountSource = 'union' | 'connections_only' | 'single_connection';
+
 export interface AccountsResponse {
   accounts: MappedAccount[];
   total_returned: number;
   excluded_closed: number;
   distinct_states: (string | null)[];
-  source_disagreement: number;
+  account_source: AccountSource;
+  source_disagreement: number | null;
 }
 
 export interface MergedAccountSet {
@@ -111,14 +126,34 @@ export function mergeAccountSets(
  *      than vanish from it.
  *   3. The counters describe the set BEFORE filtering, so a caller can tell
  *      "Quiltt returned few" apart from "OR dropped many" without our logs.
- *   4. `source_disagreement` counts accounts that only one of the two profile
- *      wide sources listed. It is 0 for the single-connection path, which has
- *      one source. Non-zero means the two Quiltt roots do not agree and the
- *      union saved an account from being dropped.
+ *   4. `account_source` names which roots produced the set, and
+ *      `source_disagreement` is a number ONLY when they were compared.
+ *
+ * Rule 4 is the whole encoding, so it is stated as a contract rather than left
+ * to call sites:
+ *
+ *   account_source      source_disagreement   means
+ *   ----------------    -------------------   ----------------------------
+ *   union               0                     compared, and they agreed
+ *   union               n > 0                 compared, n accounts appeared
+ *                                             in only one root, and the union
+ *                                             saved them from being dropped
+ *   connections_only    null                  NEVER COMPARED: the union query
+ *                                             was rejected and the retry
+ *                                             answered. Investigate.
+ *   single_connection   null                  never compared, and correctly
+ *                                             so: one source by construction
+ *
+ * `null` and `0` are different answers and the difference is the point. A 0 on
+ * a path that never compared anything reports the healthy value in exactly the
+ * condition this field exists to detect, so the two non-comparing sources are
+ * forced to null here rather than trusted to pass it. Callers keying off this
+ * must treat null as "unknown", never as "fine".
  */
 export function buildAccountsResponse(
   rawAccounts: QuilttAccount[],
-  sourceDisagreement = 0,
+  source: AccountSource,
+  sourceDisagreement: number | null = null,
 ): AccountsResponse {
   const nullStateAccounts = rawAccounts.filter((a) => !a.state);
   if (nullStateAccounts.length > 0) {
@@ -147,11 +182,16 @@ export function buildAccountsResponse(
       connection: a.connection ? { id: a.connection.id, status: a.connection.status } : null,
     }));
 
+  // The encoding is enforced here, not asked of the caller. A source that did
+  // not compare cannot report a comparison result, whatever it passed.
+  const disagreement = source === 'union' ? sourceDisagreement ?? 0 : null;
+
   return {
     accounts,
     total_returned: totalReturned,
     excluded_closed: excludedClosed,
     distinct_states: distinctStates,
-    source_disagreement: sourceDisagreement,
+    account_source: source,
+    source_disagreement: disagreement,
   };
 }
