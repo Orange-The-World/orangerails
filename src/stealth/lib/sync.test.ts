@@ -330,7 +330,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     ]);
   });
 
-  // Condition 4 of PR #354 / issue #335: birthdayHeight outside [0, tip]
+  // Condition 4 of issue #335: birthdayHeight outside [0, tip]
   // must REJECT, never clamp. Clamping would silently claim a scan range
   // the user never requested and is not recoverable; rejection is.
   it('rejects when birthdayHeight exceeds tip (does not clamp to tip)', async () => {
