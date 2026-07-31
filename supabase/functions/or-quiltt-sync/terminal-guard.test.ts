@@ -3,13 +3,23 @@
  *
  * Run: deno test supabase/functions/or-quiltt-sync/terminal-guard.test.ts
  *
- * Does NOT import from index.ts (Deno.serve / env deps make that awkward in
- * a headless test). Instead it inlines the bumpAttempts + MAX_ATTEMPTS logic
- * (including the terminal-write error fallback) so the test mirrors what ships.
+ * Does NOT import from index.ts: index.ts calls Deno.serve at module top level,
+ * so importing it binds a port. Tracked as #329. Until that is fixed this file
+ * inlines the bumpAttempts + MAX_ATTEMPTS logic (including the terminal-write
+ * error fallback and the #333 entry redaction) so the test mirrors what ships.
  * If you change the logic in index.ts, update this file to match so the proof stays honest.
+ *
+ * Two limits on that mirroring, stated rather than implied:
+ *   - The inlined copy is only as good as the copy. Diff it against index.ts
+ *     when either changes; a comment claiming fidelity is not fidelity.
+ *   - redactProviderError is IMPORTED, not inlined, so the redaction behaviour
+ *     asserted here is the shipped behaviour. What is inlined is only where it
+ *     is called from. This file cannot prove index.ts calls it; that needs the
+ *     extraction in #329.
  */
 
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { redactProviderError } from "./resolve.ts";
 
 // --- inline the guard logic from index.ts (keep in sync) ----------------
 
@@ -50,8 +60,12 @@ function makeClient(captured: CapturedUpdate[], errors: Array<{ message: string 
 async function bumpAttempts(
   client: ReturnType<typeof makeClient>,
   ev: PendingEvent,
-  errMsg: string,
+  rawErrMsg: string,
 ): Promise<void> {
+  // #333: redaction happens once on entry, before any sink applies its limit.
+  // The real redactProviderError is imported rather than inlined, so this line
+  // cannot drift from the shipped behaviour the way a copied regex would.
+  const errMsg = redactProviderError(rawErrMsg, 500);
   const newAttempts = (ev.attempts ?? 0) + 1;
   const terminal    = newAttempts >= MAX_ATTEMPTS;
   const { error } = await (client.from("quiltt_webhook_inbox") as any)
@@ -165,4 +179,113 @@ Deno.test("terminal write rejected: fallback preserves attempts and last_error w
   assertEquals("retirement_reason" in calls[1].payload, false, "fallback must NOT set retirement_reason");
   assertEquals(calls[1].payload.attempts, MAX_ATTEMPTS, "fallback preserves counter advance");
   assertEquals(typeof calls[1].payload.last_error, "string", "fallback preserves last_error");
+});
+
+// --- #333: redaction at the choke point ----------------------------------
+
+Deno.test("#333 below ceiling: provider id is redacted in last_error", async () => {
+  const calls: CapturedUpdate[] = [];
+  const client = makeClient(calls);
+  const ev: PendingEvent = {
+    event_id: "evt_redact_below", event_type: "connection.synced.successful",
+    payload: null, platform_id: null, subaccount_id: null, attempts: 3,
+  };
+  await bumpAttempts(client, ev, "connection lookup failed: conn_14TJiFDKRJlPiBHuukUIlXZ");
+
+  const lastError = calls[0].payload.last_error as string;
+  assert(
+    !/conn_[A-Za-z0-9]/.test(lastError),
+    `provider id survived into last_error: ${lastError}`,
+  );
+  assert(lastError.includes("conn_[redacted]"), "type prefix is kept, identity is not");
+});
+
+Deno.test("#333 terminal write: both last_error and retirement_reason are redacted", async () => {
+  const calls: CapturedUpdate[] = [];
+  const client = makeClient(calls);
+  const ev: PendingEvent = {
+    event_id: "evt_redact_terminal", event_type: "connection.synced.successful",
+    payload: null, platform_id: null, subaccount_id: null, attempts: MAX_ATTEMPTS - 1,
+  };
+  await bumpAttempts(client, ev, "profile map lookup failed for p_EXAMPLE0000000 and 998877665544");
+
+  const lastError = calls[0].payload.last_error as string;
+  const reason    = calls[0].payload.retirement_reason as string;
+
+  // retirement_reason is the sink that prefixes before slicing, so it is the one
+  // a per-sink fix is most likely to miss.
+  for (const [name, value] of [["last_error", lastError], ["retirement_reason", reason]] as const) {
+    assert(!/p_[A-Za-z0-9]/.test(value), `profile id survived into ${name}: ${value}`);
+    assert(!/\d{6,}/.test(value), `digit run survived into ${name}: ${value}`);
+  }
+  assert(reason.startsWith("max-attempts:"), "retirement_reason keeps its prefix");
+});
+
+Deno.test("#333 fallback write is redacted too, not just the terminal write", async () => {
+  // The fallback fires on a prod without retirement_reason (#316 not applied).
+  // It is a separate .update() with its own .slice(), so it is a separate sink.
+  const calls: CapturedUpdate[] = [];
+  const terminalError = { message: 'column "retirement_reason" of relation "quiltt_webhook_inbox" does not exist' };
+  const client = makeClient(calls, [terminalError, null]);
+  const ev: PendingEvent = {
+    event_id: "evt_redact_fallback", event_type: "connection.synced.successful",
+    payload: null, platform_id: null, subaccount_id: null, attempts: MAX_ATTEMPTS - 1,
+  };
+  await bumpAttempts(client, ev, "connection lookup failed: conn_14TJiFDKRJlPiBHuukUIlXZ");
+
+  assertEquals(calls.length, 2, "terminal write + fallback");
+  const fallbackError = calls[1].payload.last_error as string;
+  assert(
+    !/conn_[A-Za-z0-9]/.test(fallbackError),
+    `provider id survived into the fallback last_error: ${fallbackError}`,
+  );
+});
+
+Deno.test("#333 an already-redacted message is not mangled a second time", async () => {
+  // The non-ok and GraphQL-errors returns redact before returning, so entry
+  // redaction sees clean text on those paths. It must be a no-op there.
+  const calls: CapturedUpdate[] = [];
+  const client = makeClient(calls);
+  const ev: PendingEvent = {
+    event_id: "evt_redact_idem", event_type: "connection.synced.successful",
+    payload: null, platform_id: null, subaccount_id: null, attempts: 1,
+  };
+  const alreadyClean = "Quiltt GraphQL 502: upstream conn_[redacted] is down, ref [redacted]";
+  await bumpAttempts(client, ev, alreadyClean);
+
+  assertEquals(
+    calls[0].payload.last_error,
+    alreadyClean,
+    "already-redacted text must pass through byte-identical",
+  );
+});
+
+Deno.test("#333 the guard is at the choke point, so every message shape is covered", async () => {
+  // Not one fixture per call site. The point of redacting on entry is that the
+  // call site cannot matter, so this asserts the property over the shapes that
+  // actually reach this function: the six interpolating returns, the catch-all's
+  // e.message, and the two already-redacted returns.
+  const shapes = [
+    "subaccount lookup failed: conn_14TJiFDKRJlPiBHuukUIlXZ",
+    "unsupported opk_alg: xchacha_20poly1305aead",
+    "profile map lookup failed: p_EXAMPLE0000000",
+    "invalid opk_public: key p_EXAMPLE0000000 rejected",
+    "connection lookup failed: conn_EXAMPLE00000000000000",
+    'Unexpected token \'c\', "conn_14TJi"... is not valid JSON',
+    "Quiltt GraphQL 502: upstream conn_[redacted] is down",
+    "reference 998877665544 not found",
+  ];
+
+  for (const shape of shapes) {
+    const calls: CapturedUpdate[] = [];
+    const client = makeClient(calls);
+    const ev: PendingEvent = {
+      event_id: "evt_shape", event_type: "connection.synced.successful",
+      payload: null, platform_id: null, subaccount_id: null, attempts: 0,
+    };
+    await bumpAttempts(client, ev, shape);
+    const out = calls[0].payload.last_error as string;
+    assert(!/\b(conn|p)_[A-Za-z0-9]{6,}\b/.test(out), `identity survived for "${shape}": ${out}`);
+    assert(!/\d{6,}/.test(out), `digit run survived for "${shape}": ${out}`);
+  }
 });
