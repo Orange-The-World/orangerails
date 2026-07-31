@@ -40,6 +40,7 @@ import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
+import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import {
   getSinkAdapter,
@@ -63,48 +64,11 @@ import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
 // All upstream errors are mapped to a small fixed taxonomy. The full message
 // is dropped on the floor. Callers get a code; operators get the code plus
 // an opaque correlation ID for support purposes.
-
-type UpstreamErrorCode =
-  | 'UPSTREAM_AUTH_FAILED'
-  | 'UPSTREAM_RATE_LIMITED'
-  | 'UPSTREAM_UNAVAILABLE'
-  | 'UPSTREAM_BAD_REQUEST'
-  | 'UPSTREAM_PARSE_FAILED'
-  | 'ADAPTER_CONFIG_ERROR'
-  | 'UPSTREAM_OTHER';
-
-function classifyUpstreamError(raw: string): UpstreamErrorCode {
-  const m = raw.toLowerCase();
-  if (/(\b401\b|\b403\b|unauthorized|forbidden|invalid.*(api.?key|token|credential)|signature.*(invalid|mismatch))/.test(m)) {
-    return 'UPSTREAM_AUTH_FAILED';
-  }
-  if (/(\b429\b|rate.?limit|too.?many.?requests|quota.*exceeded)/.test(m)) {
-    return 'UPSTREAM_RATE_LIMITED';
-  }
-  // Network / connectivity errors (expanded for Deno fetch + Node-style messages)
-  if (/(\b5\d\d\b|timeout|timed.?out|econn(refused|reset|aborted)|network|unreachable|service.*unavailable|error sending request|fetch failed|connection (closed|reset|refused)|dns error|tls handshake|tls error)/.test(m)) {
-    return 'UPSTREAM_UNAVAILABLE';
-  }
-  if (/(\b400\b|\b404\b|\b422\b|bad.?request|not.?found|unprocessable)/.test(m)) {
-    return 'UPSTREAM_BAD_REQUEST';
-  }
-  // Response body parse failures (upstream returned non-JSON when JSON expected)
-  if (/(syntaxerror|unexpected (token|end of json)|json[. ]*parse|invalid json)/.test(m)) {
-    return 'UPSTREAM_PARSE_FAILED';
-  }
-  // OR's own bug -- adapter received malformed credentials/config (NOT upstream's fault).
-  // Pattern matches "[provider] credentials.field required|missing|invalid".
-  if (/(\[\w+\] )?credentials\.\w+ (required|missing|invalid)|credentials must be|credentials json/.test(m)) {
-    return 'ADAPTER_CONFIG_ERROR';
-  }
-  // OR's own config gap -- missing env var on the Supabase project. We hit
-  // this 2026-06-19 when a new OR DEV ref was provisioned without QUILTT_API_KEY
-  // and the symptom surfaced as UPSTREAM_OTHER, hiding the real cause from ops.
-  if (/not set on this supabase project|not configured|is required|missing env/.test(m)) {
-    return 'ADAPTER_CONFIG_ERROR';
-  }
-  return 'UPSTREAM_OTHER';
-}
+//
+// classifyUpstreamError and errorClassName moved to _shared/upstream-errors.ts
+// (DL-0421). They were unreachable from a test while they lived here, because
+// this module calls Deno.serve() at import time. The sanitization boundary is
+// unchanged: `raw` is still inspected in memory and never emitted.
 
 function randomCorrelationId(): string {
   // Opaque short ID for cross-referencing client error → ops investigation.
@@ -1017,8 +981,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // error messages reach the client or the edge log in plaintext.
         // Map to a fixed taxonomy; emit only the code + a correlation id.
         const raw = e instanceof Error ? e.message : String(e);
-        const errorClass = e instanceof Error ? e.constructor.name : typeof e;
-        const code = classifyUpstreamError(raw);
+        // errorClassName, not e.constructor.name: CCXT ships minified, so the
+        // constructor is a mangled letter while e.name survives. See
+        // _shared/upstream-errors.ts for the evidence (DL-0421).
+        const errorClass = errorClassName(e);
+        const code = classifyUpstreamError(raw, errorClass);
         const correlationId = randomCorrelationId();
         const fp = await errorFingerprint(raw, errorClass);
         console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
