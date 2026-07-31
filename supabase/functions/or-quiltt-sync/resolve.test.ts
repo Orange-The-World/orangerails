@@ -1,10 +1,11 @@
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import {
   chooseProfileId,
   chooseRouting,
   type InboxEventLike,
   metadataSubaccountId,
   profileIdFromPayload,
+  redactProviderError,
   redactProviderId,
 } from './resolve.ts';
 
@@ -247,4 +248,45 @@ Deno.test('redactProviderId keeps the type and drops the identity', () => {
   // row the warning is about.
   assertEquals(redactProviderId(SUB_A), SUB_A);
   assertEquals(redactProviderId(''), '');
+});
+
+Deno.test('redactProviderError redacts both id shapes and honours the limit', () => {
+  assertEquals(
+    redactProviderError('no such connection conn_14TJiFDKRJlPiBHuukUIlXZ', 400),
+    'no such connection conn_[redacted]',
+  );
+  // The numeric pass runs on top of the prefix pass, not instead of it.
+  assertEquals(redactProviderError('member 998877665544 refused', 400), 'member [redacted] refused');
+  assertEquals(redactProviderError('', 400), '');
+  assertEquals(redactProviderError('abcdef', 3), 'abc');
+});
+
+Deno.test('redaction runs before the length limit, so a cut cannot expose a fragment', () => {
+  // The identifier is positioned so the limit falls inside it. Truncating first
+  // would leave `conn_14T`, and `[A-Za-z0-9]{6,}` needs six characters after the
+  // underscore, so that fragment would no longer match and would survive.
+  const raw = 'e'.repeat(20) + ' conn_14TJiFDKRJlPiBHuukUIlXZ';
+
+  assertEquals(redactProviderError(raw, 29), 'e'.repeat(20) + ' conn_[re');
+
+  // Stronger than one cut point: no limit anywhere may leave an identity
+  // character behind the prefix. Redacting first makes `[` the only thing that
+  // can ever follow `conn_`; truncating first leaks for five of these.
+  for (let max = 1; max <= raw.length + 5; max++) {
+    const out = redactProviderError(raw, max);
+    assert(
+      !/conn_[A-Za-z0-9]/.test(out),
+      `identity survived the limit at max=${max}: ${out}`,
+    );
+  }
+
+  // Same property for the numeric pass, and the assertion has to be "no digit
+  // at all" rather than "no run of six". A cut leaving five digits defeats the
+  // {6,} pattern, so testing for the pattern would pass on the very input that
+  // leaks.
+  const digits = 'x'.repeat(10) + ' 998877665544';
+  for (let max = 1; max <= digits.length + 5; max++) {
+    const out = redactProviderError(digits, max);
+    assert(!/\d/.test(out), `a digit survived the limit at max=${max}: ${out}`);
+  }
 });
