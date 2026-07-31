@@ -24,7 +24,7 @@
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY — standard
  */
 
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import {
