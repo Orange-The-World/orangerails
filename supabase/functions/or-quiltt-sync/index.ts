@@ -31,6 +31,12 @@ import { wrapSentryHandler } from '../_shared/sentry.ts';
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
 const TX_PAGE_SIZE = 100;
+// A row that fails its routing precondition on every attempt can never be
+// processed, so it holds a BATCH_SIZE slot forever. After this many tries
+// the row is retired to dead-letter state (processed_at set, last_error
+// preserved) in the same UPDATE as the final attempt counter, so it cannot
+// take another slot and the queue head always advances past it.
+const MAX_ATTEMPTS = 25;
 // 50 pages × 100 = 5,000 transactions per connection per webhook event.
 // Covers most banks' full available history (Quiltt typically caps at ~2y).
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
@@ -154,7 +160,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       }
       if (!subaccount_id || !platform_id) {
         // Still no mapping; mark attempted but not processed (try next cycle)
-        await bumpAttempts(client, ev.event_id, 'mapping-missing');
+        await bumpAttempts(client, ev, 'mapping-missing');
         skipped++;
         continue;
       }
@@ -167,12 +173,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         await markProcessed(client, ev.event_id);  // no-op events still mark done
         skipped++;
       } else {
-        await bumpAttempts(client, ev.event_id, handled);
+        await bumpAttempts(client, ev, handled);
         failed++;
       }
     } catch (e) {
       console.error(`[or-quiltt-sync] event ${ev.event_id} threw:`, e instanceof Error ? e.message : String(e));
-      await bumpAttempts(client, ev.event_id, e instanceof Error ? e.message : String(e));
+      await bumpAttempts(client, ev, e instanceof Error ? e.message : String(e));
       failed++;
     }
   }
@@ -442,16 +448,47 @@ async function markProcessed(client: SupabaseClient, eventId: string) {
     .eq('event_id', eventId);
 }
 
-async function bumpAttempts(client: SupabaseClient, eventId: string, errMsg: string) {
-  const { data: cur } = await client
+async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, errMsg: string) {
+  const newAttempts = (ev.attempts ?? 0) + 1;
+  const terminal    = newAttempts >= MAX_ATTEMPTS;
+  const { error } = await client
     .from('quiltt_webhook_inbox')
-    .select('attempts')
-    .eq('event_id', eventId)
-    .single();
-  await client
-    .from('quiltt_webhook_inbox')
-    .update({ attempts: (cur?.attempts ?? 0) + 1, last_error: errMsg.slice(0, 500) })
-    .eq('event_id', eventId);
+    .update({
+      attempts:   newAttempts,
+      last_error: errMsg.slice(0, 500),
+      ...(terminal ? { processed_at: new Date().toISOString(), retirement_reason: ('max-attempts:' + errMsg).slice(0, 500) } : {}),
+    })
+    .eq('event_id', ev.event_id);
+  if (error) {
+    console.error(
+      `[or-quiltt-sync] bumpAttempts UPDATE failed for event ${ev.event_id}: ${error.message}`,
+    );
+    if (terminal) {
+      // The terminal write includes retirement_reason which may not yet exist
+      // in prod (schema is applied by #316, which must precede this code in prod).
+      // If the column is absent the whole UPDATE is rejected and attempts freezes
+      // at its current count. Fall back to a counter-only bump to preserve
+      // attempts and last_error so the row is not stuck at a stale count.
+      // Note: bumping attempts does NOT advance the row in the batch - ordering
+      // is by received_at, not attempts. The real guard against a frozen queue
+      // is merge order: #316 applied to prod before this code promotes.
+      const { error: fbErr } = await client
+        .from('quiltt_webhook_inbox')
+        .update({ attempts: newAttempts, last_error: errMsg.slice(0, 500) })
+        .eq('event_id', ev.event_id);
+      if (fbErr) {
+        console.error(
+          `[or-quiltt-sync] bumpAttempts fallback also failed for event ${ev.event_id}: ${fbErr.message}`,
+        );
+      }
+    }
+  }
+  if (terminal) {
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: retired to dead-letter after ` +
+        `${newAttempts} attempts (${errMsg.slice(0, 100)})`,
+    );
+  }
 }
 
 function jsonResponse(body: unknown, status: number): Response {
