@@ -225,7 +225,28 @@ jobs:
 
       - name: deno test supabase/functions
         shell: bash
+        env:
+          # Test files present on dev when this job was hardened, measured
+          # 2026-07-31. Lower this in the same PR that intentionally removes
+          # a test file, with a comment explaining why.
+          DENO_TEST_FILE_BASELINE: '3'
         run: |
+          set -euo pipefail
+
+          mapfile -t TEST_FILES < <(find supabase/functions \( -name '*_test.ts' -o -name '*.test.ts' \) | sort)
+          FILE_COUNT="${#TEST_FILES[@]}"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::No test files found -- deno test is checking nothing. Fix the path rather than let it report green."
+            exit 1
+          fi
+
+          if [ "$FILE_COUNT" -lt "$DENO_TEST_FILE_BASELINE" ]; then
+            echo "::error::Test file count dropped to ${FILE_COUNT} (baseline: ${DENO_TEST_FILE_BASELINE}). Restore missing files or lower the baseline with justification."
+            exit 1
+          fi
+
+          echo "Found ${FILE_COUNT} test file(s) (baseline: ${DENO_TEST_FILE_BASELINE})"
           deno test --no-check --allow-all supabase/functions/
 
   playwright:
