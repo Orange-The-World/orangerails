@@ -189,7 +189,8 @@ async function instantiateExchange(
 ): Promise<any> {
   let ccxtModule: any;
   try {
-    ccxtModule = await import('https://esm.sh/ccxt@4.4.30');
+    // npm: specifier -- Deno native resolver, no external CDN hop (DL-0495).
+    ccxtModule = await import('npm:ccxt@4.4.30');
   } catch (err) {
     throw new Error(
       `[ccxt:${exchangeId}] failed to load ccxt package: ${err instanceof Error ? err.message : String(err)}`,
