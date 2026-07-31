@@ -347,9 +347,17 @@ Deno.test('a union that compared and agreed reports 0, which is not null', () =>
 // they reach the runtime guard through a signature that drops the overload set.
 //
 // If you are here because you want to make an illegal call in product code,
-// this alias is not the tool for that. It exists so the second line of defence
-// can be tested behind the first, and its two uses are both assertions that the
-// illegal call is refused.
+// this alias is not the tool for that. It exists so the runtime behaviour can
+// be tested behind the type gate, and all three of its uses below are
+// assertions about calls the compiler refuses.
+//
+// Note what the two tests are each worth, because they are not the same. The
+// non-union one asserts a real second line of defence: the coercion forces
+// null there, so that call is covered by the compiler AND at runtime. The
+// union-with-no-count one asserts the runtime behaviour is 0, which is the
+// value that means "compared, and they agreed". It pins that behaviour rather
+// than guarding against it. Nothing at runtime catches a union call with no
+// count, so `deno check` is the only thing that does.
 const unchecked = buildAccountsResponse as unknown as (
   rawAccounts: QuilttAccount[],
   source: AccountSource,
