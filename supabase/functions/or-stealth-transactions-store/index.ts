@@ -170,9 +170,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // Verify the connection belongs to the caller. Defense in depth on top
     // of the UNIQUE constraint check; saves us from quietly inserting tx
     // rows under a connection_id the caller does not own.
+    // Also read last_block_scanned here so the trackMax forward-only guard
+    // below knows the stored cursor without a second round trip.
     const { data: ownerRow, error: ownerErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .select('id, app_user_id')
+      .select('id, app_user_id, last_block_scanned')
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
       .maybeSingle();
