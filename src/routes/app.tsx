@@ -8,7 +8,7 @@ import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
-import { strikeMarkerToCopy } from "@/lib/strike-error-copy";
+import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
@@ -445,20 +445,32 @@ function AppHome() {
             }
           }
           if (c.encrypted_last_error) {
-            // Strike subscription failures are persisted as plaintext markers
-            // (strike/queue.ts strikeSubscriptionErrorMarker), not ORK
+            // Some failures are persisted as PLAINTEXT markers, not ORK
             // ciphertext, so map them to actionable customer copy before the
             // decrypt path below, which would otherwise throw and surface a
-            // bare decrypt error.
+            // bare decrypt error:
+            //  - Strike subscription failures (strike/queue.ts
+            //    strikeSubscriptionErrorMarker)
+            //  - the upstream taxonomy CODE:correlationId pair, which or-sync
+            //    writes UNENCRYPTED in sink mode and as the encrypt-failure
+            //    fallback (or-sync/index.ts)
+            // Staff (isAdminView) keep the raw marker / decrypted value so the
+            // taxonomy code stays available for debugging; customers get the
+            // mapped copy.
             const strikeCopy = strikeMarkerToCopy(c.encrypted_last_error);
+            const upstreamPlaintextCopy = upstreamMarkerToCopy(c.encrypted_last_error);
             if (strikeCopy) {
               decrypted_last_error = strikeCopy;
+            } else if (upstreamPlaintextCopy) {
+              decrypted_last_error = isAdminView
+                ? c.encrypted_last_error
+                : upstreamPlaintextCopy;
             } else {
               try {
                 const raw = isAdminView
                   ? await decryptString(c.encrypted_last_error, txnsKey!)
                   : await decryptText(c.encrypted_last_error);
-                decrypted_last_error = raw || "(empty error , check browser console for details)";
+                decrypted_last_error = isAdminView ? raw : upstreamCodeToCopy(raw);
               } catch {
                 decrypted_last_error = "(could not decrypt error , check browser console)";
               }
