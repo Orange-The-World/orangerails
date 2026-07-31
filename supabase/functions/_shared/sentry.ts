@@ -44,6 +44,8 @@
  * Bearer tokens, JWT-shaped strings, long hex/base64 runs.
  */
 
+import { errorClassName } from './upstream-errors.ts';
+
 const SENTRY_DSN = Deno.env.get('SENTRY_DSN') ?? '';
 const SENTRY_ENVIRONMENT = Deno.env.get('SENTRY_ENVIRONMENT') ?? 'production';
 const SENTRY_RELEASE = Deno.env.get('SENTRY_RELEASE') ?? 'dev';
@@ -128,7 +130,11 @@ export async function reportError(
     exception: {
       values: [
         {
-          type: isErr ? (err as Error).constructor.name : 'Error',
+          // errorClassName, not constructor.name: minified bundles (CCXT is
+          // one) mangle the constructor to a single letter, so this field has
+          // been reporting types like "C" and grouping unrelated issues
+          // together. See _shared/upstream-errors.ts (DL-0421).
+          type: isErr ? errorClassName(err) : 'Error',
           value: message,
           stacktrace:
             framesFromStack(stack).length > 0
