@@ -9,7 +9,7 @@
  * live probes only ever reached the pre-auth branch. Fixtures reach the rest
  * with no credential, which is why this exists rather than a sandbox call.
  *
- * Four behaviours are pinned, each of which is a defect if it regresses and
+ * Six behaviours are pinned, each of which is a defect if it regresses and
  * each of which is silent in production:
  *
  *   1. Nothing caps the account count. The ticket was opened as "capped at
@@ -22,6 +22,10 @@
  *   5. The profile-wide account set is the union of Quiltt's two roots, in
  *      both directions, so an undocumented default on either one cannot
  *      silently shorten the answer.
+ *   6. "Never compared" is distinguishable from "compared and agreed" in the
+ *      response body. This is the sharp one: a path that compared nothing must
+ *      not report the number that means all is well, because the path that
+ *      compares nothing is the failure the comparison exists to detect.
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
@@ -66,7 +70,7 @@ Deno.test('DL-0326: 21 accounts across two connections all come back, nothing ca
       connection: { id: 'conn-b', status: 'ERROR_REPAIRABLE' },
     }));
 
-  const out = buildAccountsResponse([...healthy, ...broken]);
+  const out = buildAccountsResponse([...healthy, ...broken], 'connections_only');
 
   assertEquals(out.accounts.length, 21);
   assertEquals(out.total_returned, 21);
@@ -81,7 +85,7 @@ Deno.test('only CLOSED is excluded', () => {
     acct('a', 'OPEN'),
     acct('b', 'CLOSED'),
     acct('c', 'OPEN'),
-  ]);
+  ], 'single_connection');
 
   assertEquals(out.accounts.map((a) => a.id), ['a', 'c']);
   assertEquals(out.total_returned, 3);
@@ -94,7 +98,7 @@ Deno.test('a state we have never seen is returned, not dropped', () => {
   const out = buildAccountsResponse([
     acct('a', 'OPEN'),
     acct('b', 'PENDING_VERIFICATION'),
-  ]);
+  ], 'single_connection');
 
   assertEquals(out.accounts.length, 2);
   assertEquals(out.accounts.map((a) => a.state), ['OPEN', 'PENDING_VERIFICATION']);
@@ -115,7 +119,7 @@ Deno.test('a state we have never seen is returned, not dropped', () => {
 // data loss on a ticket that exists because accounts went missing silently.
 
 Deno.test('a null state is included, and shows up in distinct_states', () => {
-  const out = buildAccountsResponse([acct('a', 'OPEN'), acct('b', null)]);
+  const out = buildAccountsResponse([acct('a', 'OPEN'), acct('b', null)], 'single_connection');
 
   assertEquals(out.accounts.length, 2);
   assertEquals(out.accounts.map((a) => a.id), ['a', 'b']);
@@ -128,7 +132,7 @@ Deno.test('a null state is included, and shows up in distinct_states', () => {
 Deno.test('connection id and status are passed through unmapped', () => {
   const out = buildAccountsResponse([
     acct('a', 'OPEN', { connection: { id: 'conn-x', status: 'ERROR_REPAIRABLE' } }),
-  ]);
+  ], 'single_connection');
 
   assertEquals(out.accounts[0].connection, { id: 'conn-x', status: 'ERROR_REPAIRABLE' });
 });
@@ -137,7 +141,7 @@ Deno.test('a missing connection maps to null rather than throwing', () => {
   const out = buildAccountsResponse([
     acct('a', 'OPEN', { connection: null }),
     acct('b', 'OPEN', { connection: undefined }),
-  ]);
+  ], 'single_connection');
 
   assertEquals(out.accounts[0].connection, null);
   assertEquals(out.accounts[1].connection, null);
@@ -149,7 +153,7 @@ Deno.test('accounts from different connections keep their own status', () => {
   const out = buildAccountsResponse([
     acct('a', 'OPEN', { connection: { id: 'conn-1', status: 'SYNCED' } }),
     acct('b', 'OPEN', { connection: { id: 'conn-2', status: 'ERROR_INSTITUTION' } }),
-  ]);
+  ], 'connections_only');
 
   assertEquals(out.accounts[0].connection?.status, 'SYNCED');
   assertEquals(out.accounts[1].connection?.status, 'ERROR_INSTITUTION');
@@ -160,7 +164,7 @@ Deno.test('accounts from different connections keep their own status', () => {
 Deno.test('optional vendor fields map to null instead of undefined', () => {
   const out = buildAccountsResponse([
     acct('a', 'OPEN', { institution: null, balance: null, mask: null, kind: null, currencyCode: null }),
-  ]);
+  ], 'single_connection');
 
   assertEquals(out.accounts[0], {
     id: 'a',
@@ -177,7 +181,7 @@ Deno.test('optional vendor fields map to null instead of undefined', () => {
 });
 
 Deno.test('an empty account list returns counters, not undefined', () => {
-  const out = buildAccountsResponse([]);
+  const out = buildAccountsResponse([], 'single_connection');
 
   assertEquals(out.accounts, []);
   assertEquals(out.total_returned, 0);
@@ -191,7 +195,7 @@ Deno.test('counters describe the set before filtering', () => {
     acct('b', 'CLOSED'),
     acct('c', 'CLOSED'),
     acct('d', null),
-  ]);
+  ], 'single_connection');
 
   assertEquals(out.accounts.length, 2);
   assertEquals(out.total_returned, 4);
@@ -246,6 +250,7 @@ Deno.test('DL-0326: a broken connection missing from the connections list still 
   const merged = mergeAccountSets([...healthy, ...broken], healthy);
   const out = buildAccountsResponse(
     merged.accounts,
+    'union',
     merged.only_in_root.length + merged.only_in_connections.length,
   );
 
@@ -266,6 +271,7 @@ Deno.test('DL-0326: the union is symmetric, a short root accounts field loses no
   const merged = mergeAccountSets(healthy, [...healthy, ...broken]);
   const out = buildAccountsResponse(
     merged.accounts,
+    'union',
     merged.only_in_root.length + merged.only_in_connections.length,
   );
 
@@ -275,7 +281,7 @@ Deno.test('DL-0326: the union is symmetric, a short root accounts field loses no
 
 Deno.test('a CLOSED account reaching the union is still excluded from the response', () => {
   const merged = mergeAccountSets([acct('a', 'OPEN')], [acct('b', 'CLOSED')]);
-  const out = buildAccountsResponse(merged.accounts, 2);
+  const out = buildAccountsResponse(merged.accounts, 'union', 2);
 
   assertEquals(merged.accounts.length, 2);
   assertEquals(out.accounts.map((a) => a.id), ['a']);
@@ -292,10 +298,65 @@ Deno.test('two empty sources merge to empty rather than undefined', () => {
   assertEquals(merged.only_in_connections, []);
 });
 
-// The single-connection path has one source, so it must not report a
-// disagreement it cannot have measured.
-Deno.test('source_disagreement defaults to 0 for the single-connection path', () => {
-  const out = buildAccountsResponse([acct('a', 'OPEN')]);
+// 6. "Never compared" versus "compared and agreed".
+//
+// Raised on #340's review: source_disagreement started as a plain number
+// defaulting to 0, so the connections-only retry, the exact path taken when the
+// root `accounts` field is unavailable, reported 0 forever and read as
+// agreement. The one condition the field exists to detect was the condition
+// where it reported the healthy value.
+//
+// The encoding is now: a number ONLY under 'union', null under everything else.
+// These pin it from both directions, because a fix that only ever asserts the
+// null side would pass just as well if the union side stopped reporting too.
 
+Deno.test('the connections-only retry reports null, not the number that means agreement', () => {
+  const out = buildAccountsResponse([acct('a', 'OPEN'), acct('b', 'OPEN')], 'connections_only');
+
+  assertEquals(out.account_source, 'connections_only');
+  assertEquals(out.source_disagreement, null);
+  // The distinction is the whole point, so assert the two are not conflated.
+  assertEquals(out.source_disagreement === 0, false);
+});
+
+Deno.test('the single-connection path reports null, because one source cannot disagree', () => {
+  const out = buildAccountsResponse([acct('a', 'OPEN')], 'single_connection');
+
+  assertEquals(out.account_source, 'single_connection');
+  assertEquals(out.source_disagreement, null);
+});
+
+Deno.test('a union that compared and agreed reports 0, which is not null', () => {
+  const both = [acct('a', 'OPEN'), acct('b', 'OPEN')];
+  const merged = mergeAccountSets(both, [...both]);
+  const out = buildAccountsResponse(
+    merged.accounts,
+    'union',
+    merged.only_in_root.length + merged.only_in_connections.length,
+  );
+
+  assertEquals(out.account_source, 'union');
+  assertEquals(out.source_disagreement, 0);
+  assertEquals(out.source_disagreement === null, false);
+});
+
+Deno.test('a non-union source cannot report a comparison it did not make', () => {
+  // The encoding is enforced in buildAccountsResponse rather than asked of the
+  // call sites, so a future caller that passes a count on a path that compared
+  // nothing still cannot publish it.
+  const retry = buildAccountsResponse([acct('a', 'OPEN')], 'connections_only', 7);
+  const single = buildAccountsResponse([acct('a', 'OPEN')], 'single_connection', 7);
+
+  assertEquals(retry.source_disagreement, null);
+  assertEquals(single.source_disagreement, null);
+});
+
+Deno.test('a union with no count supplied reports 0 rather than null', () => {
+  // The inverse guard: 'union' always compared, so it must never answer
+  // "unknown". If this ever returned null it would mute the alarm from the
+  // other side.
+  const out = buildAccountsResponse([acct('a', 'OPEN')], 'union');
+
+  assertEquals(out.account_source, 'union');
   assertEquals(out.source_disagreement, 0);
 });
