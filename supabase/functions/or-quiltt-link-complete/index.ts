@@ -37,7 +37,7 @@
  *                            checking" for the user's eyes only).
  *
  * Response 200:
- *   { subaccount_id, connection_id }
+ *   { subaccount_id, connection_id, account_emitted_id }
  *
  * Response 400 — missing/bad fields
  * Response 401 — invalid/expired/replayed widget token
@@ -54,6 +54,11 @@
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import {
+  computeAccountFingerprint,
+  generateAccountEmittedId,
+  guardAccountFingerprintKey,
+} from '../_shared/account-fingerprint.ts';
 
 const ENCRYPTED_LABEL_MAX = 4096;
 const QUILTT_CREDENTIALS_SENTINEL = 'quiltt-managed';
@@ -72,6 +77,11 @@ function makeServiceClient(): SupabaseClient {
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
   );
 }
+
+// Startup guard: throws AccountFingerprintKeyMissingError at boot if
+// OR_ACCT_FINGERPRINT_KEY_V1 is missing. A misconfigured deploy fails loudly
+// rather than silently creating connection rows with no account identity.
+guardAccountFingerprintKey();
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -184,45 +194,92 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       );
     }
 
-    // 5. Find-or-create the connections row, keyed on the Quiltt connection id.
+    // 5. Find-or-create the connections row.
     //
     // One row per linked Quiltt connection (NOT per Profile). A single
     // Quiltt Profile can host many bank links (e.g. Mercury + TD); each
     // gets its own OR connection so labels, sync state, and account
     // mappings don't collide.
     //
-    // Legacy rows (created before the quiltt_connection_id column existed)
-    // have NULL quiltt_connection_id. The first relink of those banks
-    // upgrades the legacy row by stamping the connection id, instead of
-    // creating a duplicate. The partial unique index keeps subsequent
-    // relinks idempotent.
+    // Identity scheme (GH-379): every connection row carries
+    // account_fingerprint (HMAC over subaccount + provider + quilttConnectionId,
+    // internal only) and account_emitted_id (random UUID, returned to the
+    // client). The fingerprint is the primary dedup key.
+    //
+    // Lookup order when quilttConnectionId is present:
+    //   5a. By account_fingerprint: primary dedup, catches all reconnects.
+    //   5b. By quiltt_connection_id: secondary, for rows created before
+    //       fingerprinting. Stamps identity on find so future lookups hit 5a.
+    //   5c. Legacy upgrade (NULL quiltt_connection_id row, GH-343): stamps
+    //       quiltt_connection_id + identity. Prevents a concurrent relink of a
+    //       different bank from claiming the same legacy row.
+    //   5d. Fresh insert with full identity.
+    //
+    // When quilttConnectionId is absent, skip fingerprinting and fall straight
+    // to the legacy-upgrade or insert path (unchanged from v1).
     let connectionId: string;
-    const existingByQid = quilttConnectionId
-      ? await service
+    let accountEmittedId: string | null = null;
+
+    if (quilttConnectionId) {
+      const fingerprint = await computeAccountFingerprint(
+        subaccountId,
+        'quiltt',
+        quilttConnectionId,
+      );
+
+      // 5a. Primary dedup: look up by fingerprint.
+      const existingByFp = await service
+        .from('connections')
+        .select('id, account_emitted_id')
+        .eq('subaccount_id', subaccountId)
+        .eq('provider_type', 'quiltt')
+        .eq('account_fingerprint', fingerprint)
+        .maybeSingle();
+      if (existingByFp.error) {
+        console.error('[or-quiltt-link-complete] fingerprint lookup failed:', existingByFp.error.message);
+        return jsonResponse({ error: 'Failed to look up connection' }, 500, cors);
+      }
+
+      if (existingByFp.data) {
+        connectionId = existingByFp.data.id as string;
+        accountEmittedId = existingByFp.data.account_emitted_id as string | null;
+        if (body.encrypted_label !== undefined) {
+          await service
+            .from('connections')
+            .update({ encrypted_label: body.encrypted_label })
+            .eq('id', connectionId);
+        }
+      } else {
+        // 5b. Secondary: look up by quiltt_connection_id (pre-fingerprint rows).
+        const existingByQid = await service
           .from('connections')
-          .select('id')
+          .select('id, account_emitted_id')
           .eq('subaccount_id', subaccountId)
           .eq('provider_type', 'quiltt')
           .eq('quiltt_connection_id', quilttConnectionId)
-          .maybeSingle()
-      : { data: null, error: null } as { data: { id: string } | null; error: null };
-    if (existingByQid.error) {
-      console.error('[or-quiltt-link-complete] connection lookup failed:', existingByQid.error.message);
-      return jsonResponse({ error: 'Failed to look up connection' }, 500, cors);
-    }
+          .maybeSingle();
+        if (existingByQid.error) {
+          console.error('[or-quiltt-link-complete] connection lookup failed:', existingByQid.error.message);
+          return jsonResponse({ error: 'Failed to look up connection' }, 500, cors);
+        }
 
-    if (existingByQid.data) {
-      connectionId = existingByQid.data.id as string;
-      if (body.encrypted_label !== undefined) {
-        await service
-          .from('connections')
-          .update({ encrypted_label: body.encrypted_label })
-          .eq('id', connectionId);
-      }
-    } else {
-      // Try to upgrade a legacy (NULL quiltt_connection_id) row before inserting.
-      const legacyLookup = quilttConnectionId
-        ? await service
+        if (existingByQid.data) {
+          connectionId = existingByQid.data.id as string;
+          // Stamp identity on this row so future lookups hit path 5a.
+          const mintedId = (existingByQid.data.account_emitted_id as string | null)
+            ?? generateAccountEmittedId();
+          const stampPatch: Record<string, unknown> = {
+            account_fingerprint: fingerprint,
+            account_emitted_id:  mintedId,
+          };
+          if (body.encrypted_label !== undefined) stampPatch.encrypted_label = body.encrypted_label;
+          await service.from('connections').update(stampPatch).eq('id', connectionId);
+          accountEmittedId = mintedId;
+        } else {
+          // 5c. Legacy upgrade: a NULL quiltt_connection_id row (GH-343).
+          // Stamp quiltt_connection_id + full identity so a concurrent relink
+          // of a different bank cannot claim this row.
+          const legacyLookup = await service
             .from('connections')
             .select('id')
             .eq('subaccount_id', subaccountId)
@@ -230,21 +287,74 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             .is('quiltt_connection_id', null)
             .order('created_at', { ascending: true })
             .limit(1)
-            .maybeSingle()
-        : { data: null, error: null } as { data: { id: string } | null; error: null };
+            .maybeSingle();
+
+          if (legacyLookup.data) {
+            connectionId = legacyLookup.data.id as string;
+            const mintedId = generateAccountEmittedId();
+            const patch: Record<string, unknown> = {
+              quiltt_connection_id: quilttConnectionId,
+              account_fingerprint:  fingerprint,
+              account_emitted_id:   mintedId,
+            };
+            if (body.encrypted_label !== undefined) patch.encrypted_label = body.encrypted_label;
+            await service.from('connections').update(patch).eq('id', connectionId);
+            accountEmittedId = mintedId;
+          } else {
+            // 5d. Fresh insert with full identity.
+            const mintedId = generateAccountEmittedId();
+            const insertConn = await service
+              .from('connections')
+              .insert({
+                subaccount_id:           subaccountId,
+                provider_type:           'quiltt',
+                quiltt_connection_id:    quilttConnectionId,
+                encrypted_label:         body.encrypted_label ?? null,
+                encrypted_credentials:   QUILTT_CREDENTIALS_SENTINEL,
+                credentials_key_version: 1,
+                status:                  'active',
+                account_fingerprint:     fingerprint,
+                account_emitted_id:      mintedId,
+              })
+              .select('id')
+              .single();
+            if (insertConn.error || !insertConn.data) {
+              console.error('[or-quiltt-link-complete] connection insert failed:', insertConn.error?.message);
+              return jsonResponse({ error: 'Failed to create connection' }, 500, cors);
+            }
+            connectionId = insertConn.data.id as string;
+            accountEmittedId = mintedId;
+          }
+        }
+      }
+    } else {
+      // No quilttConnectionId supplied: cannot fingerprint.
+      // Fall through to legacy upgrade or insert unchanged from v1.
+      const legacyLookup = await service
+        .from('connections')
+        .select('id')
+        .eq('subaccount_id', subaccountId)
+        .eq('provider_type', 'quiltt')
+        .is('quiltt_connection_id', null)
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
 
       if (legacyLookup.data) {
         connectionId = legacyLookup.data.id as string;
-        const patch: Record<string, unknown> = { quiltt_connection_id: quilttConnectionId };
-        if (body.encrypted_label !== undefined) patch.encrypted_label = body.encrypted_label;
-        await service.from('connections').update(patch).eq('id', connectionId);
+        if (body.encrypted_label !== undefined) {
+          await service
+            .from('connections')
+            .update({ encrypted_label: body.encrypted_label })
+            .eq('id', connectionId);
+        }
       } else {
         const insertConn = await service
           .from('connections')
           .insert({
             subaccount_id:           subaccountId,
             provider_type:           'quiltt',
-            quiltt_connection_id:    quilttConnectionId,
+            quiltt_connection_id:    null,
             encrypted_label:         body.encrypted_label ?? null,
             encrypted_credentials:   QUILTT_CREDENTIALS_SENTINEL,
             credentials_key_version: 1,
@@ -260,7 +370,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       }
     }
 
-    return jsonResponse({ subaccount_id: subaccountId, connection_id: connectionId }, 200, cors);
+    return jsonResponse(
+      { subaccount_id: subaccountId, connection_id: connectionId, account_emitted_id: accountEmittedId },
+      200,
+      cors,
+    );
   } catch (e) {
     console.error('[or-quiltt-link-complete] fatal:', e instanceof Error ? e.message : String(e));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
