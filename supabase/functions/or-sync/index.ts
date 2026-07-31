@@ -106,7 +106,7 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
  *
  * Exported so the pure logic can be unit-tested without a Deno.serve mock.
  */
-export function batchHttpStatus(results: Array<{ error?: string }>): number {
+export function batchHttpStatus(results: Array<{ synced?: number; error?: string }>): number {
   if (results.length === 0) return 200;
   const errCount = results.filter(r => r.error != null).length;
   if (errCount === 0) return 200;
