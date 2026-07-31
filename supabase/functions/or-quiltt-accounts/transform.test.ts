@@ -30,7 +30,7 @@
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { buildAccountsResponse, mergeAccountSets } from './transform.ts';
-import type { QuilttAccount } from './transform.ts';
+import type { AccountsResponse, AccountSource, QuilttAccount } from './transform.ts';
 
 function acct(
   id: string,
@@ -340,12 +340,28 @@ Deno.test('a union that compared and agreed reports 0, which is not null', () =>
   assertEquals(out.source_disagreement === null, false);
 });
 
+// The two tests below call buildAccountsResponse in ways its overloads make
+// unrepresentable in TypeScript, which is exactly what the overloads are for.
+// They are still worth running: the type gate is erased at runtime, `deno test`
+// runs with --no-check, and a JavaScript caller sees no overloads at all. So
+// they reach the runtime guard through a signature that drops the overload set.
+//
+// If you are here because you want to make an illegal call in product code,
+// this alias is not the tool for that. It exists so the second line of defence
+// can be tested behind the first, and its two uses are both assertions that the
+// illegal call is refused.
+const unchecked = buildAccountsResponse as unknown as (
+  rawAccounts: QuilttAccount[],
+  source: AccountSource,
+  sourceDisagreement?: number,
+) => AccountsResponse;
+
 Deno.test('a non-union source cannot report a comparison it did not make', () => {
   // The encoding is enforced in buildAccountsResponse rather than asked of the
   // call sites, so a future caller that passes a count on a path that compared
   // nothing still cannot publish it.
-  const retry = buildAccountsResponse([acct('a', 'OPEN')], 'connections_only', 7);
-  const single = buildAccountsResponse([acct('a', 'OPEN')], 'single_connection', 7);
+  const retry = unchecked([acct('a', 'OPEN')], 'connections_only', 7);
+  const single = unchecked([acct('a', 'OPEN')], 'single_connection', 7);
 
   assertEquals(retry.source_disagreement, null);
   assertEquals(single.source_disagreement, null);
@@ -355,7 +371,7 @@ Deno.test('a union with no count supplied reports 0 rather than null', () => {
   // The inverse guard: 'union' always compared, so it must never answer
   // "unknown". If this ever returned null it would mute the alarm from the
   // other side.
-  const out = buildAccountsResponse([acct('a', 'OPEN')], 'union');
+  const out = unchecked([acct('a', 'OPEN')], 'union');
 
   assertEquals(out.account_source, 'union');
   assertEquals(out.source_disagreement, 0);
