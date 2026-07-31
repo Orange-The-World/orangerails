@@ -274,7 +274,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(decrypted).toEqual(tx);
   });
 
-  it('short-circuits when lastBlockScanned is already at tip', async () => {
+  it('short-circuits when lastBlockScanned is above tip, returns stored cursor not tip', async () => {
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
       kind: 'xpub_stealth',
@@ -294,7 +294,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       envelope,
       orStealthKey,
       birthdayHeight: 800_000,
-      lastBlockScanned: 800_500,
+      lastBlockScanned: 800_600,
       fetchTip: async () => 800_500,
       fetchFilter: async () => {
         filterCalled = true;
@@ -316,7 +316,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(blockCalled).toBe(false);
     expect(result.txCount).toBe(0);
     expect(result.sealedTransactions).toEqual([]);
-    expect(result.lastBlockScanned).toBe(800_500);
+    expect(result.lastBlockScanned).toBe(800_600);
     // We still emit all stages so the modal can finish gracefully.
     expect(stagesSeen).toEqual([
       'unlocking',
