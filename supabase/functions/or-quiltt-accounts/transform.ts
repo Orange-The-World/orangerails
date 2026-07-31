@@ -42,6 +42,61 @@ export interface AccountsResponse {
   total_returned: number;
   excluded_closed: number;
   distinct_states: (string | null)[];
+  source_disagreement: number;
+}
+
+export interface MergedAccountSet {
+  accounts: QuilttAccount[];
+  only_in_root: string[];
+  only_in_connections: string[];
+}
+
+/**
+ * Union the two account sources the profile-wide query asks for.
+ *
+ * The profile-wide branch of this endpoint means "every account under this
+ * profile". Quiltt exposes that directly as the root `accounts` field. The
+ * original implementation instead flattened `connections { accounts }`, which
+ * makes the answer depend on whatever the `connections` list returns by
+ * default, and Quiltt's public schema reference documents `ConnectionFilter`
+ * without documenting the no-filter default. Neither source can be shown from
+ * outside to be the complete one.
+ *
+ * So this asks for both in a single document and returns the union, keyed by
+ * account id. A union can never return fewer accounts than either source
+ * alone, which is the same fail-open direction the CLOSED denylist takes and
+ * for the same reason: undercounting accounts is the defect this ticket exists
+ * for.
+ *
+ * The two id lists are the measurement. If they are ever non-empty in
+ * production, that is the undocumented default becoming visible, and it
+ * answers the question without a call to Quiltt.
+ */
+export function mergeAccountSets(
+  fromRoot: QuilttAccount[],
+  fromConnections: QuilttAccount[],
+): MergedAccountSet {
+  const rootIds = new Set(fromRoot.map((a) => a.id));
+  const connIds = new Set(fromConnections.map((a) => a.id));
+
+  const accounts = [...fromRoot];
+  for (const a of fromConnections) {
+    if (!rootIds.has(a.id)) accounts.push(a);
+  }
+
+  const onlyInRoot = fromRoot.filter((a) => !connIds.has(a.id)).map((a) => a.id);
+  const onlyInConnections = fromConnections.filter((a) => !rootIds.has(a.id)).map((a) => a.id);
+
+  if (onlyInRoot.length > 0 || onlyInConnections.length > 0) {
+    console.warn(
+      `[or-quiltt-accounts] account sources disagree: ${onlyInRoot.length} account(s) only in ` +
+        `root accounts (ids: ${onlyInRoot.join(', ') || 'none'}), ${onlyInConnections.length} ` +
+        `only in flattened connections (ids: ${onlyInConnections.join(', ') || 'none'}): ` +
+        `returning the union`,
+    );
+  }
+
+  return { accounts, only_in_root: onlyInRoot, only_in_connections: onlyInConnections };
 }
 
 /**
@@ -56,8 +111,15 @@ export interface AccountsResponse {
  *      than vanish from it.
  *   3. The counters describe the set BEFORE filtering, so a caller can tell
  *      "Quiltt returned few" apart from "OR dropped many" without our logs.
+ *   4. `source_disagreement` counts accounts that only one of the two profile
+ *      wide sources listed. It is 0 for the single-connection path, which has
+ *      one source. Non-zero means the two Quiltt roots do not agree and the
+ *      union saved an account from being dropped.
  */
-export function buildAccountsResponse(rawAccounts: QuilttAccount[]): AccountsResponse {
+export function buildAccountsResponse(
+  rawAccounts: QuilttAccount[],
+  sourceDisagreement = 0,
+): AccountsResponse {
   const nullStateAccounts = rawAccounts.filter((a) => !a.state);
   if (nullStateAccounts.length > 0) {
     console.warn(
@@ -90,5 +152,6 @@ export function buildAccountsResponse(rawAccounts: QuilttAccount[]): AccountsRes
     total_returned: totalReturned,
     excluded_closed: excludedClosed,
     distinct_states: distinctStates,
+    source_disagreement: sourceDisagreement,
   };
 }
