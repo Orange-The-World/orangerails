@@ -108,9 +108,12 @@ const CCXT_ERROR_CODES: Readonly<Record<string, UpstreamErrorCode>> = Object.fre
  *     e.constructor.name  === "C"                    <- mangled, useless
  *     e.name              === "AuthenticationError"  <- survives
  *
- * Verified against the shipped bundle: all 23 CCXT error classes are emitted
- * this way and the bundle contains zero named-class forms. So a classifier
- * built on `constructor.name` passes locally against the unminified npm
+ * Verified against the shipped bundle (4151010 bytes, fetched from
+ * https://esm.sh/ccxt@4.4.30/es2022/ccxt.mjs): all 40 CCXT error classes are
+ * emitted this way, every one of them bound to a one or two character
+ * identifier, and zero are emitted as `class X extends` declarations. There is
+ * no CCXT error class in that bundle whose constructor name is usable. So a
+ * classifier built on `constructor.name` passes locally against the unminified npm
  * package and then silently classifies everything as UPSTREAM_OTHER in
  * production, forever, which is the exact bug DL-0421 is about. It also means
  * the `class=` field this feeds into the edge log has been a one or two letter
