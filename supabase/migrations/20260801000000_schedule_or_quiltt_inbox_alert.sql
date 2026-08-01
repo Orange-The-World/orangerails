@@ -52,33 +52,39 @@ COMMENT ON FUNCTION public.quiltt_sync_cron_failures(int) IS
   'or-quiltt-inbox-alert edge function (GH-385).';
 
 
--- 2. HTTP helper to invoke the alert edge function (same pattern as
---    invoke_or_quiltt_sync in 20260527000000_schedule_or_quiltt_sync.sql).
---    Reads the worker token and base URL from per-project GUCs set once with:
---      ALTER DATABASE postgres SET app.or_internal_worker_token = '<hex64>';
---      ALTER DATABASE postgres SET app.or_functions_base_url   = 'https://<ref>.supabase.co/functions/v1';
+-- 2. HTTP helper to invoke the alert edge function.
+--    Reads worker token and base URL from vault.decrypted_secrets, matching
+--    the live invoke_or_quiltt_sync() post
+--    20260619100000_or_quiltt_sync_vault_url.sql.
+--    RAISE EXCEPTION on missing config so pg_cron marks the run failed.
 
 CREATE OR REPLACE FUNCTION public.invoke_or_quiltt_inbox_alert()
 RETURNS bigint
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_temp
+SET search_path = public, vault, pg_temp
 AS $$
 DECLARE
   worker_token TEXT;
   base_url     TEXT;
   request_id   BIGINT;
 BEGIN
-  worker_token := current_setting('app.or_internal_worker_token', true);
-  base_url     := current_setting('app.or_functions_base_url',    true);
+  SELECT decrypted_secret INTO worker_token
+  FROM vault.decrypted_secrets
+  WHERE name = 'or_internal_worker_token'
+  LIMIT 1;
 
   IF worker_token IS NULL OR worker_token = '' THEN
-    RAISE NOTICE '[invoke_or_quiltt_inbox_alert] app.or_internal_worker_token unset -- skipping';
-    RETURN NULL;
+    RAISE EXCEPTION '[invoke_or_quiltt_inbox_alert] vault secret or_internal_worker_token missing';
   END IF;
+
+  SELECT decrypted_secret INTO base_url
+  FROM vault.decrypted_secrets
+  WHERE name = 'or_functions_base_url'
+  LIMIT 1;
+
   IF base_url IS NULL OR base_url = '' THEN
-    RAISE NOTICE '[invoke_or_quiltt_inbox_alert] app.or_functions_base_url unset -- skipping';
-    RETURN NULL;
+    RAISE EXCEPTION '[invoke_or_quiltt_inbox_alert] vault secret or_functions_base_url missing';
   END IF;
 
   SELECT net.http_post(
@@ -99,9 +105,9 @@ REVOKE ALL ON FUNCTION public.invoke_or_quiltt_inbox_alert() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.invoke_or_quiltt_inbox_alert() FROM authenticated, anon;
 
 COMMENT ON FUNCTION public.invoke_or_quiltt_inbox_alert() IS
-  'Cron-only helper. POSTs to or-quiltt-inbox-alert with the internal worker token GUC. '
-  'Returns net.http_post request id. No-op + NOTICE if GUCs are unset. '
-  'Same pattern as invoke_or_quiltt_sync (GH-385).';
+  'Cron-only helper. POSTs to or-quiltt-inbox-alert with the internal worker token. '
+  'Both secrets read from vault.decrypted_secrets (or_internal_worker_token, or_functions_base_url). '
+  'RAISE EXCEPTION on missing config so pg_cron marks the run failed (GH-385).';
 
 
 -- 3. Schedule the alert job every 5 minutes.
