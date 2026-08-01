@@ -35,16 +35,8 @@ jobs:
   source-guard:
     name: prod pull requests must come from dev
     runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'prod'
     steps:
-      - name: Skip if not targeting prod
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: |
-          if [ "${BASE_REF}" != "prod" ]; then
-            echo "This pull request targets '${BASE_REF}', not prod. Nothing to enforce."
-            exit 0
-          fi
-
       - name: Self-test the decision logic
         run: |
           set -euo pipefail
