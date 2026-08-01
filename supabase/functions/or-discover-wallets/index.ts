@@ -39,6 +39,7 @@ import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http
 import { authenticateRequest, resolveSubaccount, isAuthError } from "../_shared/platform-auth.ts";
 import { getProvider, listProviderSlugs, parseCredentials } from "../_shared/providers/dispatch.ts";
 import { wrapSentryHandler } from "../_shared/sentry.ts";
+import { lookupErrorCopy } from "../_shared/error-catalog.ts";
 
 // -- AES-256-GCM helpers (kept inline for edge-fn isolation) ----------------
 
@@ -274,6 +275,20 @@ Deno.serve(
       );
       return jsonResponse({ discovered_wallets: stripped }, 200, cors);
     } catch (err) {
+      // When discoverWallets throws with upstreamCode, surface the OR error code
+      // and customer copy. Preserves the distinction between auth failures
+      // (bad key -> UPSTREAM_AUTH_FAILED) and transient outages
+      // (UPSTREAM_UNAVAILABLE, UPSTREAM_RATE_LIMITED).
+      const upstreamCode =
+        err instanceof Error ? (err as any).upstreamCode as string | undefined : undefined;
+      if (upstreamCode) {
+        const catalog = lookupErrorCopy(upstreamCode);
+        const status =
+          upstreamCode === 'UPSTREAM_RATE_LIMITED' ? 429
+          : upstreamCode === 'UPSTREAM_UNAVAILABLE' ? 503
+          : 422;
+        return jsonResponse({ error_code: upstreamCode, ...catalog }, status, cors);
+      }
       console.error("[or-discover-wallets] fatal:", err);
       return jsonResponse({ error: "Internal error" }, 500, cors);
     }
