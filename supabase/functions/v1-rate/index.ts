@@ -10,7 +10,7 @@
 // Updated: Dev 1, 2026-07-22 -- ISO_UTC_RE: Z suffix only (spec says offset timestamps return 400)
 // Updated: Security, 2026-07-23 -- key lookup uses maybeSingle so a bad or revoked key returns 401, not 500
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
