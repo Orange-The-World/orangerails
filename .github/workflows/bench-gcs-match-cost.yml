@@ -19,7 +19,9 @@ jobs:
           node-version: "22"
 
       - name: Run GCS match cost bench
-        run: node benches/gcs_match_cost.mjs 2>&1 | tee /tmp/bench_output.txt
+        run: |
+          set -o pipefail
+          node benches/gcs_match_cost.mjs 2>&1 | tee /tmp/bench_output.txt
 
       - name: Post results to job summary
         if: always()
