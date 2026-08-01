@@ -94,7 +94,7 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     await expect(page.getByText(/launch stealth sync and paste/i)).toBeVisible();
     await expect(
       page.getByText(/your descriptor never leaves your browser in plaintext/i),
-    ).toBeVisible(),
+    ).toBeVisible();
     await capture(page, "04-connect-sparrow-landing");
   });
 
