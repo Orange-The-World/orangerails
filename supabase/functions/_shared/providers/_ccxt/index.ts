@@ -204,6 +204,7 @@ async function instantiateExchange(
   }
   const config: Record<string, unknown> = {
     enableRateLimit: true, // let CCXT throttle requests automatically
+    timeout: 15000, // 15 s hard limit per request; matches the ccxt-stress harness
   };
   for (const field of ['apiKey', 'secret', 'password', 'uid', 'walletAddress', 'privateKey']) {
     if (typeof credentials[field] === 'string' && (credentials[field] as string).length > 0) {
