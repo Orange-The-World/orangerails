@@ -279,7 +279,7 @@ export function App() {
         if (!Number.isInteger(g) || g < 1 || g > 1000) {
           setError("INIT gap_limit out of range");
           postError(event.source as Window | null, event.origin, {
-            code: "INTERNAL",
+            code: "INVALID_GAP_LIMIT",
             message: `OR_STEALTH_INIT gap_limit must be an integer between 1 and 1000; got ${String(g)}.`,
             retryable: false,
           });
