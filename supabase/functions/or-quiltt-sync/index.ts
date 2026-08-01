@@ -593,6 +593,7 @@ async function reconcileConnectionSuccess(
     .from('connections')
     .select('id')
     .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
     .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
   if (exact) {
@@ -602,7 +603,10 @@ async function reconcileConnectionSuccess(
       .from('connections')
       .select('id')
       .eq('subaccount_id', subaccountId)
+      .eq('provider_type', 'quiltt')
       .is('quiltt_connection_id', null)
+      .order('created_at', { ascending: true })
+      .limit(1)
       .maybeSingle();
     if (legacy) orConnId = legacy.id;
   }
