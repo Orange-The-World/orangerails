@@ -2,6 +2,9 @@ name: "Bench: GCS match cost (DL-0353)"
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - 'bench/**'
 
 permissions:
   contents: read
