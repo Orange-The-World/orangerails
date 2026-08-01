@@ -100,7 +100,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
     message: "Vault unlocked",
     detail: "Your password never left this browser.",
   });
-  const [done, setDone] = useState<{ txCount: number; bytes: number } | null>(null);
+  const [done, setDone] = useState<{ txCount: number; bytes: number; windowExhausted: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   function postWidgetError(code: StealthErrorCode, message: string, retryable: boolean) {
@@ -346,6 +346,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             tx_count: result.txCount,
             bytes_downloaded: result.bytesDownloaded,
             duration_seconds: (Date.now() - startedAt) / 1000,
+            address_window_exhausted: result.address_window_exhausted,
           };
           try {
             parent.postMessage(msg, init.return_callback_origin);
@@ -355,7 +356,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         }
 
         if (cancelled) return;
-        setDone({ txCount: result.txCount, bytes: result.bytesDownloaded });
+        setDone({ txCount: result.txCount, bytes: result.bytesDownloaded, windowExhausted: result.address_window_exhausted });
       } catch (e) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
@@ -399,6 +400,17 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
               ? "Nothing new on chain since the last sync."
               : `Sealed and stored ${done.txCount} transaction${done.txCount === 1 ? "" : "s"}.`}
           </p>
+          {done.windowExhausted && (
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-left dark:border-amber-800 dark:bg-amber-950">
+              <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+                Your transaction history may be incomplete.
+              </p>
+              <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                This wallet has activity near the edge of the address window used for this sync.
+                Re-connecting with a wider window will recover any missing transactions.
+              </p>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => window.close()}
