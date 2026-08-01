@@ -44,6 +44,7 @@ import {
   type ScriptType,
 } from "@/stealth/lib/derive";
 import { sealEnvelope, computeConnectionBlindIndex } from "@/stealth/lib/seal";
+import { DEFAULT_GAP_LIMIT } from "@/stealth/lib/postmessage";
 import type {
   StealthAddCompleteMessage,
   StealthErrorCode,
@@ -159,7 +160,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   // (waste sync time or miss transactions), never expose the xpub,
   // descriptor, or stealth key, none of which this code path touches.
   const birthdayInputRef = useRef<HTMLInputElement>(null);
-  const [gapLimit, setGapLimit] = useState<number>(20);
+  const [gapLimit, setGapLimit] = useState<number>(() => init.gap_limit ?? DEFAULT_GAP_LIMIT);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<{ alreadyExisted: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);

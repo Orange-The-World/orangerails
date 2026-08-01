@@ -51,6 +51,16 @@
 export const STEALTH_PROTOCOL_VERSION = 1 as const;
 export const STEALTH_HKDF_INFO = 'or-stealth-v1' as const;
 
+/**
+ * Default gap limit used when OR_STEALTH_INIT omits the field.
+ *
+ * Currently 20: this is a placeholder pending the GCS match-cost
+ * benchmark (benches/gcs_match_cost.mjs). Do not raise this number
+ * without running the three-point sweep at gap_limit 20 / 250 / 1000
+ * and confirming the curve is acceptable in-browser. See issue #357.
+ */
+export const DEFAULT_GAP_LIMIT = 20 as const;
+
 /** Path the Stealth Sync widget is mounted at. See src/routes/connect/stealth.tsx. */
 export const STEALTH_WIDGET_PATH = '/connect/stealth' as const;
 
@@ -129,6 +139,19 @@ export interface StealthInitWidgetMessage {
    *  at OR (required for cross-device sync); only the per-tx records
    *  are skipped. */
   skip_transaction_upload?: boolean;
+  /**
+   * Optional address gap limit (integer, 1-1000). When present, seeds the
+   * gap-limit field in the add-route form (the user can still override it).
+   * When absent the widget uses DEFAULT_GAP_LIMIT.
+   *
+   * Out-of-range values (non-integer, < 1, or > 1000) are rejected at INIT
+   * with code INVALID_GAP_LIMIT and a descriptive message rather than silently clamped.
+   *
+   * This affects only connections created after the INIT. Existing sealed
+   * connections retain the gap_limit baked into their envelope at add-time;
+   * a changed default cannot reach into a sealed envelope.
+   */
+  gap_limit?: number;
 }
 
 /**
@@ -172,6 +195,11 @@ export interface StealthInitAppMessage {
   proxy_base_url?: string;
   /** Auth mode B: direct Supabase JWT. See StealthInitWidgetMessage. */
   access_token?: string;
+  /**
+   * Optional address gap limit. Same contract as StealthInitWidgetMessage.
+   * App mode supports this field for parity with widget mode.
+   */
+  gap_limit?: number;
 }
 
 /**
@@ -347,6 +375,7 @@ export interface StealthDeleteCompleteMessage {
 export type StealthErrorCode =
   | 'INVALID_XPUB'
   | 'INVALID_DESCRIPTOR'
+  | 'INVALID_GAP_LIMIT'
   | 'NETWORK'
   | 'TIMEOUT'
   | 'KEY_MISMATCH'
