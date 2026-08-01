@@ -589,6 +589,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
+      windowExhausted: false,
     };
   }
 
