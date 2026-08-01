@@ -290,6 +290,14 @@ export interface StealthSyncCompleteWidgetMessage {
   bytes_downloaded: number;
   /** Wall-clock seconds from INIT to this message. */
   duration_seconds: number;
+  /**
+   * True when any matched address during the scan landed at or above the
+   * top of the derived window (index >= gap_limit * 2 - 1). The wallet has
+   * likely outgrown its fixed address ceiling and history may be incomplete.
+   * Prompt the user to re-sync with a larger gap_limit.
+   * Absent on older widget versions that do not emit this field.
+   */
+  address_window_exhausted?: boolean;
 }
 
 /**
@@ -313,6 +321,14 @@ export interface StealthSyncCompleteAppMessage {
   bytes_downloaded: number;
   /** Wall-clock seconds from INIT to this message. */
   duration_seconds: number;
+  /**
+   * True when any matched address during the scan landed at or above the
+   * top of the derived window (index >= gap_limit * 2 - 1). The wallet has
+   * likely outgrown its fixed address ceiling and history may be incomplete.
+   * Prompt the user to re-sync with a larger gap_limit.
+   * Absent on older widget versions that do not emit this field.
+   */
+  address_window_exhausted?: boolean;
 }
 
 /**
