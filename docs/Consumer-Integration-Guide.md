@@ -256,9 +256,9 @@ Body: {
   format:          string,    // your App Profile slug, e.g. 'bitbooks-v2'
   connection_ids?: string[]   // optional filter; default = all active connections
 }
-200: {
-  synced:      number,
-  connections: [{ connection_id, synced, next_cursor, error? }],
+200 / 207 / 422: {
+  synced?:     number,        // omitted when error is set on all connections
+  connections: [{ connection_id, synced?, next_cursor?, error? }],
   rows: {
     Wallet:       [...],
     Transaction:  [...],
