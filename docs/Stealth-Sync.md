@@ -328,6 +328,7 @@ window.addEventListener('message', (event) => {
       break;
     case 'OR_STEALTH_SYNC_COMPLETE':
       // event.data.sealed_transactions[]: see "Sealed envelope schema" above
+      // event.data.address_window_exhausted: true when history may be incomplete (see below)
       break;
     case 'OR_STEALTH_ERROR':
       // event.data.code, message, retryable
@@ -335,6 +336,26 @@ window.addEventListener('message', (event) => {
   }
 });
 ```
+
+### Handling `address_window_exhausted` in `OR_STEALTH_SYNC_COMPLETE`
+
+`OR_STEALTH_SYNC_COMPLETE` carries an optional boolean field:
+
+```js
+event.data.address_window_exhausted // boolean | undefined
+```
+
+**What it means.** Stealth Sync derives a fixed address window: `gap_limit * 2` addresses per chain (receive and change). This is not a real BIP44 gap limit: it is a ceiling. When any matched transaction paid an address at the very top of that window, the wallet has very likely outgrown the window and some transactions beyond the ceiling are missing from this sync. The widget also shows the user a plain-language warning on the done screen.
+
+**What to do when it is `true`:**
+
+1. Do not book the synced history as complete. Treat it as a lower bound.
+2. Tell the user their history may be incomplete and offer a way to re-connect the wallet with a larger `gap_limit`. The consuming app controls `gap_limit` inside the sealed envelope; bump it (for example from 20 to 200) and run a full resync from the wallet birthday.
+3. If you store this flag, a future sync that does NOT return `true` confirms the history is now complete for the current window.
+
+**When it is `false` or absent:** the scan saw no activity at the ceiling. History is complete within the scanned range and the current window.
+
+**Privacy note:** detecting exhaustion requires no new network call and discloses nothing. All matching happens locally in the browser against BIP158 filters that are already downloaded. The derived addresses involved never leave the browser.
 
 ### Implementation status: `add` and `sync` are live, `list` and `delete` are not yet
 
