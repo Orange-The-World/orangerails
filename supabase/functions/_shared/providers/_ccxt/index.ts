@@ -196,7 +196,7 @@ async function instantiateExchange(
       `[ccxt:${exchangeId}] failed to load ccxt package: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  // esm.sh sometimes exposes things under .default , try both.
+  // Deno npm: specifier may expose the module under .default -- try both.
   const ExchangeClass = ccxtModule[exchangeId] ?? ccxtModule.default?.[exchangeId];
   if (typeof ExchangeClass !== 'function') {
     throw new Error(`[ccxt:${exchangeId}] unknown CCXT exchange id (not exposed on package)`);
