@@ -62,7 +62,7 @@ import type {
   SyncResult,
   CredentialField,
 } from '../types.ts';
-import { classifyUpstreamError, errorClassName } from '../upstream-errors.ts';
+import { classifyUpstreamError, errorClassName } from '../../upstream-errors.ts';
 
 // --- Per-exchange config -------------------------------------------------
 
