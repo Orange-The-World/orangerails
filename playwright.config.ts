@@ -3,7 +3,7 @@ import { defineConfig, devices } from '@playwright/test';
 /**
  * Playwright smoke tests for Orange Rails landing pages.
  *
- * Default target: orangerails.dev (the deployed dev site).
+ * Default target: dev.orangerails.com (the deployed dev app).
  * Override with: PLAYWRIGHT_BASE_URL=https://localhost:8080 npx playwright test
  *
  * Tests live in tests/e2e/. They are intentionally shallow — page loads,
@@ -24,7 +24,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: process.env.CI ? [['html', { open: 'never' }], ['list']] : 'list',
   use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'https://orangerails.dev',
+    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'https://dev.orangerails.com',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
