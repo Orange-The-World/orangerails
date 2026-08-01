@@ -1,11 +1,13 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 
 // https://vitejs.dev/config/
-export default defineConfig(({ mode }) => ({
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "");
+  return ({
   server: {
     host: "::",
     port: 8080,
@@ -14,8 +16,9 @@ export default defineConfig(({ mode }) => ({
   plugins: [
     {
       name: "guard-stealth-origins",
+      apply: "build",
       buildStart() {
-        const val = process.env.VITE_OR_STEALTH_ALLOWED_ORIGINS;
+        const val = env.VITE_OR_STEALTH_ALLOWED_ORIGINS;
         if (!val || !val.trim()) {
           throw new Error(
             "[DL-0466] VITE_OR_STEALTH_ALLOWED_ORIGINS is empty or not set. " +
@@ -48,4 +51,5 @@ export default defineConfig(({ mode }) => ({
       "@tanstack/react-router",
     ],
   },
-}));
+  });
+});
