@@ -284,8 +284,23 @@ const initMessage = {
   or_stealth_key_b64: derivedKeyB64,   // see Vault setup section above
   return_callback_origin: window.location.origin,
   // connection_id required for sync / list / delete, omit for add
+  // gap_limit: 250,  // optional, see "gap_limit" section below
 };
 ```
+
+**Optional `gap_limit` field.** An integer from 1 to 1000 that seeds
+the gap-limit form field shown to the user on the add route. The user
+can still override the value in the UI; this is just the starting point.
+When absent the widget uses its built-in default (see `DEFAULT_GAP_LIMIT`
+in `src/stealth/lib/postmessage.ts`). Out-of-range values (non-integer,
+below 1, or above 1000) are rejected at INIT with
+`OR_STEALTH_ERROR { code: 'INTERNAL' }` rather than silently clamped.
+
+> **Existing-connection caveat.** This field only affects connections
+> created after the INIT. Sealed envelopes bake in the gap_limit at
+> add-time; passing a new value to a sync or list INIT has no effect on
+> the stored value. Re-issuing a connection (new add) is the only way to
+> change the gap_limit of an existing row.
 
 Two fields the widget validates strictly and will silently reject you
 over if wrong:
