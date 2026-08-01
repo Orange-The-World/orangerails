@@ -439,6 +439,84 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     // Bytes downloaded still tracks both filter and block.
     expect(result.bytesDownloaded).toBeGreaterThan(0);
   });
+
+  // ── Window exhaustion detection (issue #352) ────────────────────────────
+
+  it('windowExhausted is true when a match lands at or above the exhaustion threshold', async () => {
+    // gap_limit=3 => windowSize=6 => threshold = windowSize - gapLimit = 3.
+    // A match at receive chain index 3 is exactly at the threshold; the flag must fire.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'exhaustion-true',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 3,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    // Derive address at chain=0, index=3 (receive chain, index at threshold).
+    const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 3, 'p2wpkh');
+    const ts = Math.floor(new Date('2024-07-01T00:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({ payToScript: targetScript, amountSats: 10_000n, timestamp: ts });
+    const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+    const blockHashHex = bytesToHex(blockHash);
+    const fakeFilter = new Uint8Array([0xaa]);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 900_000,
+      lastBlockScanned: 900_000,
+      fetchTip: async () => 900_001,
+      fetchFilter: async (h) =>
+        h === 900_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
+      fetchBlock: async () => ({ height: 900_001, blockHashHex, raw: blockBuild.raw }),
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.txCount).toBe(1);
+    expect(result.windowExhausted).toBe(true);
+  });
+
+  it('windowExhausted is false when all matches are well below the exhaustion threshold', async () => {
+    // gap_limit=5 => windowSize=10 => threshold = 5.
+    // A match at receive chain index 0 is far below the threshold; no flag.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'exhaustion-false',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    // Derive address at chain=0, index=0 (receive chain, index far from threshold).
+    const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+    const ts = Math.floor(new Date('2024-07-02T00:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({ payToScript: targetScript, amountSats: 5_000n, timestamp: ts });
+    const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+    const blockHashHex = bytesToHex(blockHash);
+    const fakeFilter = new Uint8Array([0xbb]);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 910_000,
+      lastBlockScanned: 910_000,
+      fetchTip: async () => 910_001,
+      fetchFilter: async (h) =>
+        h === 910_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
+      fetchBlock: async () => ({ height: 910_001, blockHashHex, raw: blockBuild.raw }),
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.txCount).toBe(1);
+    expect(result.windowExhausted).toBe(false);
+  });
 });
 
 // ─── Live fetcher unit tests ────────────────────────────────────────────
