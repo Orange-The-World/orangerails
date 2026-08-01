@@ -1,0 +1,35 @@
+name: "Bench: GCS match cost (DL-0353)"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: GCS match cost bench
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run GCS match cost bench
+        run: |
+          set -o pipefail
+          node benches/gcs_match_cost.mjs 2>&1 | tee /tmp/bench_output.txt
+
+      - name: Post results to job summary
+        if: always()
+        run: |
+          echo '## GCS Match Cost Bench (DL-0353)' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Script: `benches/gcs_match_cost.mjs` -- fixed-window match cost only.' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/bench_output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
