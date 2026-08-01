@@ -647,6 +647,11 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
 
   let nextHeight = fromHeight;
+  // Record which heights were present and which were skipped so we can tell
+  // benign producer lag (skips ABOVE the highest committed height) apart
+  // from a hole (a skip BELOW it). Checked after the fetch completes.
+  let maxPresentHeight = -1;
+  const skippedHeights: number[] = [];
   async function worker(): Promise<void> {
     while (true) {
       const h = nextHeight;
@@ -655,12 +660,15 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       const f = await opts.fetchFilter(h);
       processedCount += 1;
       if (f !== null) {
+        if (h > maxPresentHeight) maxPresentHeight = h;
         bytesDownloaded += f.filter.length;
         const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
         const matched = matcher.matchAny(f.filter, blockHashLE, scripts);
         if (matched) {
           hits.push({ height: h, blockHashHex: f.blockHashHex });
         }
+      } else {
+        skippedHeights.push(h);
       }
       emitFetchProgress(false);
     }
@@ -669,6 +677,26 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   await Promise.all(
     Array.from({ length: FETCH_CONCURRENCY }, () => worker()),
   );
+
+  // The producer writes filters in ascending block order, so if a filter
+  // exists at height maxPresentHeight, every height at or below it was
+  // definitely produced. A skipped (404) height below that frontier is a
+  // lost or never-written object, not tip lag: scanning past it would
+  // silently drop any transactions in that block. Fail loud instead of
+  // claiming a range was scanned that was not (DL-0489).
+  const holes = skippedHeights
+    .filter((h) => h < maxPresentHeight)
+    .sort((a, b) => a - b);
+  if (holes.length > 0) {
+    const preview = holes.slice(0, 10).join(', ');
+    throw new Error(
+      `stealth/sync: ${holes.length} filter(s) missing below the producer's ` +
+      `committed tip (height ${maxPresentHeight}) -- these are holes, not tip ` +
+      `lag, so continuing would silently drop transactions in those blocks. ` +
+      `Missing heights: ${preview}${holes.length > 10 ? ', ...' : ''}. Aborting; ` +
+      `retry once the producer backfills.`,
+    );
+  }
   emitFetchProgress(true);
   emit(opts, progress('fetching_filters', 100));
   emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
@@ -933,8 +961,11 @@ export async function liveFetchTip(
  * Fetch a BIP158 filter for the given block height, plus the sidecar JSON
  * that names which block hash that filter is bound to.
  *
- * Returns null if the producer does not yet have a filter for that height
- * (404 from either resource); the orchestrator treats that as "skip".
+ * Returns null ONLY when both the .gcs.gz and .json 404 together, which
+ * means the producer has not committed this height yet (benign lag near the
+ * chain tip); the orchestrator treats that as "not produced yet". An
+ * asymmetric 404 (one resource present, the other missing) is a partial or
+ * lost object, not absence, and throws so the caller can retry.
  */
 export async function liveFetchFilter(
   height: number,
@@ -944,7 +975,21 @@ export async function liveFetchFilter(
     fetch(`${baseUrl}/${height}.gcs.gz`),
     fetch(`${baseUrl}/${height}.json`),
   ]);
-  if (gzResp.status === 404 || jsonResp.status === 404) return null;
+  // Both sidecars 404 = the producer has not written this height yet
+  // (benign lag near the chain tip). But if ONE resource is present and the
+  // other 404s, the height was only partially written or an object was
+  // lost: that is a hole, not absence. Silently returning null here would
+  // drop any transactions in that block (DL-0489), so fail loud.
+  const gz404 = gzResp.status === 404;
+  const json404 = jsonResp.status === 404;
+  if (gz404 && json404) return null;
+  if (gz404 !== json404) {
+    throw new Error(
+      `fetchFilter ${height}: partial filter object (gcs.gz ${gzResp.status}, ` +
+      `json ${jsonResp.status}); one resource present, the other missing -- ` +
+      `treating as a hole, not absence`,
+    );
+  }
   if (!gzResp.ok) throw new Error(`fetchFilter ${height} gz failed: ${gzResp.status}`);
   if (!jsonResp.ok) throw new Error(`fetchFilter ${height} json failed: ${jsonResp.status}`);
 
