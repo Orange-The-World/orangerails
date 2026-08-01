@@ -9,6 +9,9 @@
 alter table public.quiltt_webhook_inbox
   add column if not exists opk_deferred_at timestamptz;
 
+comment on column public.quiltt_webhook_inbox.opk_deferred_at is
+  'Set when the row is deferred pending OPK key availability. or-quiltt-sync skips rows where this IS NOT NULL; or-sync-key-register clears it to NULL on key registration.';
+
 -- Rebuild the partial index so pending-queue scans exclude deferred rows.
 -- The predicate cannot be ALTERed in place, so drop and recreate.
 -- Column must exist before the index predicate can reference it (above).
