@@ -273,6 +273,20 @@ export function App() {
         }
       }
 
+      // Optional gap_limit: reject explicitly rather than silently coercing.
+      if (data.gap_limit !== undefined) {
+        const g = data.gap_limit;
+        if (!Number.isInteger(g) || g < 1 || g > 1000) {
+          setError("INIT gap_limit out of range");
+          postError(event.source as Window | null, event.origin, {
+            code: "INTERNAL",
+            message: `OR_STEALTH_INIT gap_limit must be an integer between 1 and 1000; got ${String(g)}.`,
+            retryable: false,
+          });
+          return;
+        }
+      }
+
       // sync / list / delete need an existing connection_id. Add does not.
       if (data.mode !== "add" && typeof data.connection_id !== "string") {
         setError("INIT mode requires a connection_id");
