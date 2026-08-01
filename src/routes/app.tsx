@@ -9,6 +9,7 @@ import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
+import { extractDiscoveryErrorMessage } from "@/lib/discovery-error";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
@@ -609,18 +610,7 @@ function AppHome() {
       if (!discRes.ok) {
         const rawText = await discRes.text().catch(() => "");
         console.warn("[OrangeRails] Wallet discovery failed:", discRes.status, rawText);
-        let errData: Record<string, unknown> = {};
-        try {
-          errData = JSON.parse(rawText) as Record<string, unknown>;
-        } catch {
-          /* ignore: handled below */
-        }
-        const errMsg =
-          (typeof errData.body === "string" ? errData.body : undefined) ??
-          (typeof errData.title === "string" ? errData.title : undefined) ??
-          (typeof errData.error === "string" ? errData.error : undefined) ??
-          `Wallet discovery failed (${discRes.status}). Check your credentials and try again.`;
-        setNotice(errMsg);
+        setNotice(extractDiscoveryErrorMessage(discRes.status, rawText));
         return;
       }
 
@@ -637,8 +627,11 @@ function AppHome() {
       });
     } catch (e) {
       console.warn("[OrangeRails] Discovery threw:", e);
+      const throwMsg = e instanceof Error ? e.message : undefined;
       setNotice(
-        "Connection added. Couldn't discover wallets right now , sync will pull all account transactions until you retry.",
+        throwMsg
+          ? `Discovery could not complete: ${throwMsg}. Sync will use all-transactions mode until you retry.`
+          : "Discovery could not complete. Check your connection and try again.",
       );
     }
   }
