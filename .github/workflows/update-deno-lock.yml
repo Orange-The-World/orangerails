@@ -5,7 +5,9 @@ name: Update Deno lockfile
 # commit the real lockfile so subsequent CI runs verify against it
 # rather than regenerating it on every run.
 #
-# The workflow opens a PR against dev with the updated deno.lock.
+# The workflow pushes a branch with the updated deno.lock.
+# Open a PR from that branch manually so CI fires under a real
+# user identity (GITHUB_TOKEN pushes cannot trigger CI runs).
 # Review and merge that PR; CI then verifies in strict mode.
 
 on:
@@ -13,7 +15,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   update-lockfile:
@@ -52,9 +53,7 @@ jobs:
           fi
           echo "deno.lock written ($(wc -c < deno.lock) bytes)"
 
-      - name: Open PR with updated lockfile
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push branch with updated lockfile
         run: |
           BRANCH="fix/deno-lock-$(date -u +%Y%m%d-%H%M)"
           git config user.name "github-actions[bot]"
@@ -62,7 +61,7 @@ jobs:
           git checkout -b "$BRANCH"
           git add deno.lock
           if git diff --staged --quiet; then
-            echo "deno.lock unchanged from HEAD -- nothing to commit."
+            echo "::notice::deno.lock is unchanged -- no branch pushed, no PR needed."
             exit 0
           fi
           git commit -m "fix: commit real deno.lock from pinned imports (DL-0534)
@@ -73,8 +72,12 @@ supabase/functions after esm.sh import pinning (DL-0510 Phase 2).
 CI now verifies future imports against committed hashes instead
 of regenerating the lock on every run."
           git push origin "$BRANCH"
-          gh pr create \
-            --title "fix: commit real deno.lock (DL-0534)" \
-            --body "Replaces the stub deno.lock with the real content generated from supabase/functions after esm.sh import pinning (DL-0510 Phase 2). Triggered by manual workflow dispatch." \
-            --base dev \
-            --head "$BRANCH"
+          echo "::notice::Branch pushed: $BRANCH"
+          echo ""
+          echo "Next step: open a PR from '$BRANCH' -> 'dev' so CI runs"
+          echo "under a real user identity -- GITHUB_TOKEN pushes cannot"
+          echo "trigger pull_request/push CI runs (documented GitHub behaviour)."
+          echo ""
+          PR_URL="https://github.com/Orange-The-World/orangerails/compare/dev...$BRANCH?expand=1"
+          echo "Create the PR here: $PR_URL"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
