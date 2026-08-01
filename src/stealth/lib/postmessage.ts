@@ -145,7 +145,7 @@ export interface StealthInitWidgetMessage {
    * When absent the widget uses DEFAULT_GAP_LIMIT.
    *
    * Out-of-range values (non-integer, < 1, or > 1000) are rejected at INIT
-   * with code INTERNAL and a descriptive message rather than silently clamped.
+   * with code INVALID_GAP_LIMIT and a descriptive message rather than silently clamped.
    *
    * This affects only connections created after the INIT. Existing sealed
    * connections retain the gap_limit baked into their envelope at add-time;
@@ -375,6 +375,7 @@ export interface StealthDeleteCompleteMessage {
 export type StealthErrorCode =
   | 'INVALID_XPUB'
   | 'INVALID_DESCRIPTOR'
+  | 'INVALID_GAP_LIMIT'
   | 'NETWORK'
   | 'TIMEOUT'
   | 'KEY_MISMATCH'
