@@ -1,0 +1,26 @@
+name: Prod source guard
+
+on:
+  pull_request:
+    branches: [prod]
+
+# One run per PR at a time. A new push cancels the in-progress run.
+concurrency:
+  group: prod-source-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check-source:
+    name: prod must be updated from dev only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify head branch is dev
+        run: |
+          HEAD="${{ github.head_ref }}"
+          echo "PR source branch: ${HEAD}"
+          echo "PR target branch: ${{ github.base_ref }}"
+          if [ "${HEAD}" != "dev" ]; then
+            echo "::error::Production can only be updated from the 'dev' branch. This PR is from '${HEAD}'. Retarget to dev first, integrate, then promote dev -> prod."
+            exit 1
+          fi
+          echo "Source is dev. Promotion is allowed."
