@@ -22,18 +22,26 @@ stealth.orangerails.com {
 
     encode zstd gzip
 
+    # Security headers apply to all responses.
     header {
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         Referrer-Policy "no-referrer"
         Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
         X-Robots-Tag "noindex, nofollow, noarchive"
-        # Filter files are content-addressed by block height. Once written
-        # they never change, so we mark them immutable for one year.
-        Cache-Control "public, max-age=31536000, immutable"
         -Server
         -X-Powered-By
     }
+
+    # Filter files are content-addressed by block height. Once written
+    # they never change, so mark them immutable for one year.
+    @filter_files not path /manifest.json
+    header @filter_files Cache-Control "public, max-age=31536000, immutable"
+
+    # manifest.json is rewritten on every new block and must NOT be immutable.
+    # A 10-second TTL keeps it fresh without hammering the server.
+    @manifest path /manifest.json
+    header @manifest Cache-Control "public, max-age=10"
 
     @cors_preflight method OPTIONS
     handle @cors_preflight {
