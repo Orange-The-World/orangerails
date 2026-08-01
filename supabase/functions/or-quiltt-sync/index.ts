@@ -315,6 +315,9 @@ async function handleEvent(
   // not, we skip and let the user-session sync path create it on next
   // open.
   //
+  // Quiltt confirms successful sync: clear any error state so the connection shows active.
+  await reconcileConnectionSuccess(client, connectionId, subaccountId);
+
   // Schema note: connections.user_id was dropped in
   // 20260421200000_platforms_subaccounts.sql; the current owning column
   // is subaccount_id.
@@ -573,6 +576,46 @@ async function reconcileConnectionError(
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
+
+/**
+ * When Quiltt reports a successful connection sync, flip any error row back to active.
+ * Uses the same lookup pattern as reconcileConnectionError: exact quiltt_connection_id
+ * match first, legacy NULL-id fallback for pre-migration rows.
+ * Only transitions error -> active; leaves pending/active rows untouched.
+ */
+async function reconcileConnectionSuccess(
+  client: SupabaseClient,
+  connectionId: string,
+  subaccountId: string,
+): Promise<void> {
+  let orConnId: string | null = null;
+  const { data: exact } = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('quiltt_connection_id', connectionId)
+    .maybeSingle();
+  if (exact) {
+    orConnId = exact.id;
+  } else {
+    const { data: legacy } = await client
+      .from('connections')
+      .select('id')
+      .eq('subaccount_id', subaccountId)
+      .is('quiltt_connection_id', null)
+      .maybeSingle();
+    if (legacy) orConnId = legacy.id;
+  }
+  if (!orConnId) return;
+  const { error: statusErr } = await client
+    .from('connections')
+    .update({ status: 'active' })
+    .eq('id', orConnId)
+    .eq('status', 'error');
+  if (statusErr) {
+    console.error(`[or-quiltt-sync] reconcileConnectionSuccess failed: ${statusErr.message}`);
+  }
+}
 
 async function markProcessed(client: SupabaseClient, eventId: string) {
   await client
