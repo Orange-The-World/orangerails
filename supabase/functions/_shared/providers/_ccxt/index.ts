@@ -62,6 +62,7 @@ import type {
   SyncResult,
   CredentialField,
 } from '../types.ts';
+import { classifyUpstreamError, errorClassName } from '../upstream-errors.ts';
 
 // --- Per-exchange config -------------------------------------------------
 
@@ -219,15 +220,46 @@ async function instantiateExchange(
  * widget; per-asset enumeration happens during sync (CCXT methods
  * naturally span all assets the API key can see).
  *
- * We DO NOT call into CCXT here , exchange APIs almost universally block
- * browser-origin CORS, so the discovery flow can't actually validate the
- * API key from the widget anyway. The OR adapter validates on first
- * sync attempt instead.
+ * Discovery now runs server-side in or-discover-wallets, so CORS is no
+ * longer a constraint. We validate credentials before returning a wallet:
+ * a wallet that fails on every subsequent sync is worse than a clear error
+ * during connection setup.
+ *
+ * Validation: call fetchBalance (the most broadly supported auth-requiring
+ * CCXT method). If the exchange does not advertise it, we log a warning and
+ * proceed; the first sync will catch bad credentials.
+ *
+ * Error taxonomy: UPSTREAM_AUTH_FAILED, UPSTREAM_UNAVAILABLE, and
+ * UPSTREAM_RATE_LIMITED are preserved as distinct codes. The caller
+ * (or-discover-wallets) maps them to HTTP status and customer copy via the
+ * error catalog. A bad key must NOT look like a downed exchange.
  */
-function buildDiscover(slug: string, _exchangeId: string) {
+function buildDiscover(slug: string, exchangeId: string) {
   return async function discoverWallets(
-    _credentials: Record<string, unknown>,
+    credentials: Record<string, unknown>,
   ): Promise<DiscoveredWallet[]> {
+    const exchange = await instantiateExchange(exchangeId, credentials);
+
+    if (exchange.has?.fetchBalance) {
+      try {
+        await exchange.fetchBalance();
+      } catch (raw) {
+        const err = raw instanceof Error ? raw : new Error(String(raw));
+        const code = classifyUpstreamError(err.message, errorClassName(err));
+        // Tag the rethrown error so or-discover-wallets can return the right
+        // HTTP status and customer copy without collapsing distinct codes.
+        const out = new Error(`[ccxt:${exchangeId}] discover credential check: ${code}`);
+        (out as any).upstreamCode = code;
+        throw out;
+      }
+    } else {
+      // Exchange does not advertise fetchBalance; skip live validation here.
+      // The first sync will surface bad credentials through the sync error path.
+      // This should be rare: fetchBalance is supported by virtually all CCXT
+      // exchanges that require authentication.
+      console.warn(`[ccxt:${exchangeId}] fetchBalance not advertised; skipping discovery credential check`);
+    }
+
     return [
       {
         external_wallet_id: slug,
@@ -267,8 +299,9 @@ async function fetchAllSince(
         out.push(normalizeTrade(t, exchangeId));
       }
     } catch (e) {
+      const cls = e instanceof Error ? errorClassName(e) : '';
       const msg = e instanceof Error ? e.message : String(e);
-      if (!/NotSupported/i.test(msg)) {
+      if (cls !== 'NotSupported' && !/NotSupported/i.test(msg)) {
         // Not a "this feature isn't here" error , surface it.
         throw e;
       }
@@ -284,8 +317,9 @@ async function fetchAllSince(
         out.push(normalizeTransfer(d, 'deposit', 'in', exchangeId));
       }
     } catch (e) {
+      const cls = e instanceof Error ? errorClassName(e) : '';
       const msg = e instanceof Error ? e.message : String(e);
-      if (!/NotSupported/i.test(msg)) throw e;
+      if (cls !== 'NotSupported' && !/NotSupported/i.test(msg)) throw e;
       console.warn(`[ccxt:${exchangeId}] fetchDeposits unsupported; skipping`);
     }
   }
@@ -298,8 +332,9 @@ async function fetchAllSince(
         out.push(normalizeTransfer(w, 'withdrawal', 'out', exchangeId));
       }
     } catch (e) {
+      const cls = e instanceof Error ? errorClassName(e) : '';
       const msg = e instanceof Error ? e.message : String(e);
-      if (!/NotSupported/i.test(msg)) throw e;
+      if (cls !== 'NotSupported' && !/NotSupported/i.test(msg)) throw e;
       console.warn(`[ccxt:${exchangeId}] fetchWithdrawals unsupported; skipping`);
     }
   }
