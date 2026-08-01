@@ -8,21 +8,24 @@
 -- updated. Every other platform kept widget_url and app_profile_slug NULL,
 -- which leaves the bootstrap response incomplete for those platforms.
 --
--- The original intent was:
---   widget_url       = COALESCE(widget_url, 'https://connect.orangerails.com')
---   app_profile_slug = COALESCE(app_profile_slug, slug)
--- so each platform's app_profile_slug defaults to its own slug and every
--- platform points at the shared connect widget. This migration completes
--- that backfill for the rows the original missed, matching on the NULL
--- state rather than a hardcoded slug list so it cannot silently skip a row.
+-- This migration corrects app_profile_slug only. It sets app_profile_slug to
+-- the row's own slug wherever it is NULL, which matches the onboarding
+-- helper default (COALESCE(p_app_profile_slug, p_slug)), and it matches on
+-- the NULL state rather than a hardcoded slug list so it cannot silently
+-- skip a row.
 --
--- Idempotent: only rows where a target column IS NULL are touched, so a
+-- widget_url is deliberately left NULL on the rows the original missed.
+-- supabase/functions/or-platform-bootstrap/index.ts already returns
+-- row.widget_url ?? 'https://connect.orangerails.com', so NULL and the
+-- default are the same answer at read time. Writing the default into the
+-- table buys no behaviour and would turn a visible gap into a permanent
+-- wrong value for any platform that hosts its widget elsewhere.
+--
+-- Idempotent: only rows where app_profile_slug IS NULL are touched, so a
 -- re-run is a no-op. No undo block: the corrected app_profile_slug equals
--- the row's own slug and is derivable at any time, and reverting either
--- column back to NULL would re-break the bootstrap response.
+-- the row's own slug and is derivable at any time, and reverting it back to
+-- NULL would re-break the bootstrap response.
 
 UPDATE public.platforms
-SET app_profile_slug = COALESCE(app_profile_slug, slug),
-    widget_url       = COALESCE(widget_url, 'https://connect.orangerails.com')
-WHERE app_profile_slug IS NULL
-   OR widget_url IS NULL;
+SET app_profile_slug = slug
+WHERE app_profile_slug IS NULL;
