@@ -517,6 +517,91 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(result.txCount).toBe(1);
     expect(result.windowExhausted).toBe(false);
   });
+
+  it('seals extension transactions: sealedTransactions includes txs found in rolling-window passes', async () => {
+    // Scenario: gap_limit=2, so initial chainWindowEnd=[4,4] (indices 0..3 per chain).
+    // Block A (height 800_001) pays to index 3 on chain 0: near-edge (3 >= 4-2=2),
+    // so the extension loop fires. Block B (height 800_002) pays to index 4 on chain 0,
+    // which falls in the first extension window (indices 4,5). After the fix, both txs
+    // must appear in sealedTransactions. Before the fix, the sealing loop ran BEFORE
+    // the extension loop, so sealedTransactions had 1 entry while txCount reported 2.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'extension-sealing',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const scriptIdx3 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 3, 'p2wpkh');
+    const scriptIdx4 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 4, 'p2wpkh');
+
+    const tsA = Math.floor(new Date('2024-08-01T10:00:00Z').getTime() / 1000);
+    const tsB = Math.floor(new Date('2024-08-02T10:00:00Z').getTime() / 1000);
+    const blockA = buildFixtureBlock({ payToScript: scriptIdx3, amountSats: 12_345n, timestamp: tsA });
+    const blockB = buildFixtureBlock({ payToScript: scriptIdx4, amountSats: 6_789n, timestamp: tsB });
+
+    const hashHexA = bytesToHex(reverseBytes(await dsha256Async(blockA.raw.subarray(0, 80))));
+    const hashHexB = bytesToHex(reverseBytes(await dsha256Async(blockB.raw.subarray(0, 80))));
+
+    // Filters are distinguishable by first byte so the stub matcher can respond
+    // per-block without a WASM GCS implementation.
+    const filterA = new Uint8Array([0xa1]);
+    const filterB = new Uint8Array([0xa2]);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => 800_002,
+      fetchFilter: async (h) => {
+        if (h === 800_001) return { height: h, blockHashHex: hashHexA, filter: filterA };
+        if (h === 800_002) return { height: h, blockHashHex: hashHexB, filter: filterB };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === hashHexA) return { height: 0, blockHashHex: hashHexA, raw: blockA.raw };
+        if (hashHex === hashHexB) return { height: 0, blockHashHex: hashHexB, raw: blockB.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      // Reads filter[0] to identify the block, then checks if the target script is
+      // present in the scripts list. Simulates GCS semantics without WASM.
+      //   filterA (block A, pays idx3): matches when idx3 is in scripts (initial pass only).
+      //   filterB (block B, pays idx4): matches when idx4 is in scripts (extension pass 1 only).
+      matcher: {
+        matchAny: (filter, _hash, scripts) => {
+          const target = filter[0] === 0xa1 ? scriptIdx3
+            : filter[0] === 0xa2 ? scriptIdx4
+            : null;
+          if (!target) return false;
+          return scripts.some((s) => s.length === target.length && s.every((b, i) => b === target[i]));
+        },
+      },
+    });
+
+    // Both transactions must be present in normalized.
+    expect(result.txCount).toBe(2);
+    expect(result.normalized).toHaveLength(2);
+
+    // KEY: sealedTransactions must also have 2 entries including the extension tx.
+    expect(result.sealedTransactions).toHaveLength(2);
+
+    // The extension tx (idx4, 6789 sats) must round-trip through unsealing.
+    const extNormalized = result.normalized.find((t) => t.amount_sats === 6_789);
+    expect(extNormalized).toBeDefined();
+    const extSealed = result.sealedTransactions.find((s) => s.occurred_at === '2024-08-02');
+    expect(extSealed).toBeDefined();
+    const decrypted = await unsealEnvelope<typeof extNormalized>(extSealed!, orStealthKey);
+    expect(decrypted!.amount_sats).toBe(6_789);
+    expect(decrypted!.direction).toBe('in');
+
+    // Extension fired, so the flag must be set.
+    expect(result.windowExhausted).toBe(true);
+  });
 });
 
 // ─── Live fetcher unit tests ────────────────────────────────────────────
