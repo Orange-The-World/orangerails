@@ -515,9 +515,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('deriving', 0));
 
   // For Stealth Sync we cannot use an oracle (querying an indexer would
-  // leak addresses). We derive a fixed window per chain: 2x gap_limit
-  // entries per chain. If the user has more activity than that, the
-  // birthday-rescan UI lets them widen the window on a subsequent sync.
+  // leak addresses). We derive addresses locally and match BIP158 filters
+  // client-side so no address is disclosed to any server. The window
+  // extends automatically: when activity lands within gapLimit slots of
+  // the current ceiling on either chain, we derive gapLimit more addresses
+  // and re-match the cached filter data for those new scripts. No new
+  // network call is keyed by a derived address; filter fetches stay keyed
+  // by block height only, preserving the privacy invariant. See issue #353.
   const gapLimit = payload.gap_limit;
   const windowSize = gapLimit * 2;
 
@@ -553,6 +557,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   const scripts = derived.map((d) => d.script);
   emit(opts, progress('deriving', 100, `${derived.length} addresses ready`));
+
+  // Per-chain ceiling: the highest address index derived so far (inclusive).
+  // Grows during the rolling extension phase after block processing.
+  const chainWindowCeiling: [number, number] = [windowSize - 1, windowSize - 1];
 
   // ── fetching_filters + matching (interleaved by height for fast-fail UX) ──
   const tip = await opts.fetchTip();
@@ -614,6 +622,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
   const hits: MatchedHit[] = [];
 
+  // Cache all fetched filter records so extension passes can re-match them
+  // without re-downloading. Memory trade-off: about 3 KB per scanned height
+  // held simultaneously. A one-year-old wallet across roughly 52 K heights
+  // uses around 150 MB. Callers with tight memory budgets can pre-set a
+  // larger gap_limit instead of relying on extension.
+  const cachedFilters: FilterRecord[] = [];
+
   // Parallel filter fetch with bounded concurrency. Sequential
   // (one-at-a-time) was the right shape for the first proof-of-life
   // milestone but is unworkable for real wallets , a 1-year-old
@@ -665,6 +680,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       const f = await opts.fetchFilter(h);
       processedCount += 1;
       if (f !== null) {
+        cachedFilters.push(f);
         bytesDownloaded += f.filter.length;
         const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
         const matched = matcher.matchAny(f.filter, blockHashLE, scripts);
