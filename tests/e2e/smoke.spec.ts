@@ -52,7 +52,7 @@ test.describe('landing page', () => {
         !e.includes('Loading chunk') &&
         // #432: dev VITE_SENTRY_DSN is rejected as invalid; known infra gap,
         // not a product bug. Remove this line once #432 is resolved.
-        !e.toLowerCase().includes('sentry')
+        !e.toLowerCase().includes('invalid sentry dsn')
     );
     expect(significantErrors, 'no console errors on home page').toEqual([]);
   });
