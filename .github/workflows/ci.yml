@@ -384,7 +384,7 @@ jobs:
 
       - name: Run Playwright
         env:
-          PLAYWRIGHT_BASE_URL: https://dev.orangerails.com
+          PLAYWRIGHT_BASE_URL: ${{ vars.PLAYWRIGHT_BASE_URL }}
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
           ACCOUNT_A: ${{ secrets.ACCOUNT_A }}
           ACCOUNT_B: ${{ secrets.ACCOUNT_B }}
