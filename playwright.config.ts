@@ -3,7 +3,7 @@ import { defineConfig, devices } from '@playwright/test';
 /**
  * Playwright smoke tests for Orange Rails landing pages.
  *
- * Default target: dev.orangerails.com (the deployed dev app).
+ * Default target: dev.orangerails.com (the deployed dev application).
  * Override with: PLAYWRIGHT_BASE_URL=https://localhost:8080 npx playwright test
  *
  * Tests live in tests/e2e/. They are intentionally shallow — page loads,
