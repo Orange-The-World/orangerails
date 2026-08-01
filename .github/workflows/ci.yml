@@ -130,7 +130,7 @@ jobs:
           NO_COLOR: '1'
         run: |
           mapfile -t FILES < <(find supabase/functions -name '*.ts' -type f | sort)
-          deno cache --lock=deno.lock --lock-write --node-modules-dir=auto "${FILES[@]}"
+          deno cache --lock=deno.lock --node-modules-dir=auto "${FILES[@]}"
 
       - name: deno check supabase/functions
         shell: bash
