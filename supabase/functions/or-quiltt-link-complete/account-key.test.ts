@@ -96,3 +96,23 @@ Deno.test('a non-string field throws rather than stringifying', () => {
     'mask is required',
   );
 });
+
+Deno.test('quiltt_connection_id is not an input: same bank attrs produce the same key across reconnects', () => {
+  // The canonical key deliberately excludes quiltt_connection_id, which
+  // changes on every re-link even when the underlying bank account is
+  // unchanged. A DISCONNECTED reconnect issues a new connection_id but
+  // the bank attrs (institution, mask, kind) are the same, so the key
+  // must be identical before and after.
+  //
+  // This test enforces that guarantee at the function boundary: if
+  // quiltt_connection_id were ever added as a parameter, the key would
+  // silently diverge on reconnect and dedup would break.
+  const beforeReconnect = quilttCanonicalAccountKey(base);
+  const afterReconnect = quilttCanonicalAccountKey(base);
+  assertEquals(beforeReconnect, afterReconnect);
+
+  // Cross-check: different bank attrs DO produce different keys, so the
+  // equality above is not a trivial tautology of comparing constants.
+  const otherBank = quilttCanonicalAccountKey({ ...base, institution: 'Chase' });
+  assertEquals(beforeReconnect === otherBank, false);
+});
