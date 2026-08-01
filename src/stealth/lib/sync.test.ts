@@ -439,6 +439,82 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     // Bytes downloaded still tracks both filter and block.
     expect(result.bytesDownloaded).toBeGreaterThan(0);
   });
+
+  it('returns address_window_exhausted=true when a match lands at the top index of the derived window', async () => {
+    const orStealthKey = randomKeyB64();
+    // gap_limit=2 -> windowSize=4: indices 0..3 per chain. We pay to
+    // index 3 (windowSize - 1) on chain 0 and expect exhaustion=true.
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'exhaustion-positive',
+      wallet_birthday: '2021-01-15',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    // Script at the top of the window: chain 0, index 3.
+    const topScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 3, 'p2wpkh');
+
+    const ts = Math.floor(new Date('2024-06-01T12:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({ payToScript: topScript, amountSats: 9_999n, timestamp: ts });
+    const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+    const blockHashHex = bytesToHex(blockHash);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 700_000,
+      lastBlockScanned: 700_000,
+      fetchTip: async () => 700_001,
+      fetchFilter: async (h) =>
+        h === 700_001 ? { height: h, blockHashHex, filter: new Uint8Array([0x01]) } : null,
+      fetchBlock: async () => ({ height: 0, blockHashHex, raw: blockBuild.raw }),
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.txCount).toBe(1);
+    expect(result.address_window_exhausted).toBe(true);
+  });
+
+  it('returns address_window_exhausted=false when all matches are well below the window top', async () => {
+    const orStealthKey = randomKeyB64();
+    // gap_limit=5 -> windowSize=10: indices 0..9 per chain. We pay to
+    // index 0 (bottom of window) and expect exhaustion=false.
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'exhaustion-negative',
+      wallet_birthday: '2021-01-15',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    // Script at index 0: far below the window ceiling of 9.
+    const lowScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+
+    const ts = Math.floor(new Date('2024-06-01T12:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({ payToScript: lowScript, amountSats: 5_000n, timestamp: ts });
+    const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+    const blockHashHex = bytesToHex(blockHash);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 700_000,
+      lastBlockScanned: 700_000,
+      fetchTip: async () => 700_001,
+      fetchFilter: async (h) =>
+        h === 700_001 ? { height: h, blockHashHex, filter: new Uint8Array([0x01]) } : null,
+      fetchBlock: async () => ({ height: 0, blockHashHex, raw: blockBuild.raw }),
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.txCount).toBe(1);
+    expect(result.address_window_exhausted).toBe(false);
+  });
 });
 
 // ─── Live fetcher unit tests ────────────────────────────────────────────
