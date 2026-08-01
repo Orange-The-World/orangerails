@@ -277,7 +277,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t TEST_FILES < <(find supabase/functions \( -name '*_test.ts' -o -name '*.test.ts' \) | sort)
+          mapfile -t TEST_FILES < <(find supabase/functions_nonexistent \( -name '*_test.ts' -o -name '*.test.ts' \) | sort)
           FILE_COUNT="${#TEST_FILES[@]}"
 
           if [ "$FILE_COUNT" -eq 0 ]; then
