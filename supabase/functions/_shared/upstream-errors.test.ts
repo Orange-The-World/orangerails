@@ -145,6 +145,10 @@ Deno.test('unrecognised classes fall through rather than being guessed', () => {
   );
   assertEquals(classifyUpstreamError('totally unknown', 'NoSuchErrorClass'), 'UPSTREAM_OTHER');
   assertEquals(classifyUpstreamError('totally unknown'), 'UPSTREAM_OTHER');
+  // Object.prototype pollution: inherited names must not escape as taxonomy codes.
+  assertEquals(classifyUpstreamError('x', 'toString'), 'UPSTREAM_OTHER');
+  assertEquals(classifyUpstreamError('x', 'constructor'), 'UPSTREAM_OTHER');
+  assertEquals(classifyUpstreamError('x', 'hasOwnProperty'), 'UPSTREAM_OTHER');
 
   // Trading-branch errors are intentionally absent from the map.
   assertEquals(classifyUpstreamError('order rejected', 'InvalidOrder'), 'UPSTREAM_OTHER');
