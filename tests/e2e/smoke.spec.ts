@@ -61,4 +61,15 @@ test.describe('landing page', () => {
     const headings = page.locator('h1, h2');
     await expect(headings.first()).toBeVisible();
   });
+
+  test('app route redirects unauthenticated visitors to login', async ({ page }) => {
+    // /app is an authenticated SPA route. Without a session the app redirects
+    // to /login. The marketing site (orangerails.dev) has no /app route and
+    // renders the NotFound component without ever navigating to /login.
+    // Waiting for that redirect therefore proves the base URL points at the
+    // app, not the marketing site, and would have caught the bug this PR fixes.
+    await page.goto('/app');
+    await page.waitForURL(/\/login/, { timeout: 15000 });
+    expect(page.url()).toMatch(/\/login/);
+  });
 });
