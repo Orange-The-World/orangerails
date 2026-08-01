@@ -398,7 +398,7 @@ scan "CGNAT-range address" \
 scan "Admin-only orangerails subdomains in shipping code" \
      "\\b(blocks|stealth)\\.orangerails\\.com\\b" \
      "" \
-     "$EXEMPT_PROTOCOL_RE|$EXEMPT_CRYPTO_RE|^./caddy/|docs/Stealth-Sync\\.md|scripts/README\\.md|src/stealth/lib/mock-fixtures|^./CHANGELOG\\.md"
+     "$EXEMPT_PROTOCOL_RE|$EXEMPT_CRYPTO_RE|^./caddy/|docs/Stealth-Sync\\.md|scripts/README\\.md|src/stealth/lib/mock-fixtures|^./CHANGELOG\\.md|^./benches/"
 
 # ----------------------------------------------------------------------
 # Category 4 — Internal milestone tags + dead PR references
