@@ -93,13 +93,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   let failed    = 0;
   let skipped   = 0;
 
-  // Pull a batch of pending events
-  const { data: pending, error: pendErr } = await client
-    .from('quiltt_webhook_inbox')
-    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts')
-    .is('processed_at', null)
-    .order('received_at', { ascending: true })
-    .limit(BATCH_SIZE);
+  // Pull a batch of pending, non-deferred events.
+  // fetchPendingBatch filters both processed_at IS NULL and opk_deferred_at IS NULL
+  // so opk-deferred rows never pile up at the head and starve drainable events.
+  const { data: pending, error: pendErr } = await fetchPendingBatch(client, BATCH_SIZE);
 
   if (pendErr) {
     console.error('[or-quiltt-sync] inbox query failed:', pendErr.message);
@@ -181,6 +178,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       } else if (handled === 'skipped') {
         await markProcessed(client, ev.event_id);  // no-op events still mark done
         skipped++;
+      } else if (handled === 'deferred') {
+        // opk_public not yet set. Stamp opk_deferred_at so the batch query
+        // skips this row on future ticks. When the subaccount registers an
+        // OPK, the caller must clear opk_deferred_at for this row to
+        // re-enter the queue.
+        await markDeferred(client, ev.event_id);
+        skipped++;
       } else {
         await bumpAttempts(client, ev, handled);
         failed++;
@@ -197,7 +201,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
 // ─── event dispatch ──────────────────────────────────────────────────
 
-async function handleEvent(
+export async function handleEvent(
   client: SupabaseClient,
   ev: PendingEvent,
   platformId: string,
@@ -217,8 +221,10 @@ async function handleEvent(
     .single();
   if (subErr || !sub) return `subaccount lookup failed: ${subErr?.message}`;
   if (!sub.opk_public) {
-    // No opt-in. Defer until user opens app (or-sync will drain).
-    return 'skipped';
+    // No OPK registered. Return deferred so the main loop stamps
+    // opk_deferred_at and the batch query skips this row until a
+    // key is registered and the flag is cleared.
+    return 'deferred';
   }
   if (sub.opk_alg !== OPK_SEAL_ALG) {
     return `unsupported opk_alg: ${sub.opk_alg}`;
@@ -571,6 +577,23 @@ async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, rawErrMsg:
         `${newAttempts} attempts (${errMsg.slice(0, 100)})`,
     );
   }
+}
+
+export async function fetchPendingBatch(client: SupabaseClient, batchSize: number) {
+  return client
+    .from('quiltt_webhook_inbox')
+    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts')
+    .is('processed_at', null)
+    .is('opk_deferred_at', null)
+    .order('received_at', { ascending: true })
+    .limit(batchSize);
+}
+
+export async function markDeferred(client: SupabaseClient, eventId: string) {
+  await client
+    .from('quiltt_webhook_inbox')
+    .update({ opk_deferred_at: new Date().toISOString() })
+    .eq('event_id', eventId);
 }
 
 function jsonResponse(body: unknown, status: number): Response {
