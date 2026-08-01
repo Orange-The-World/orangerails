@@ -515,11 +515,25 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('deriving', 0));
 
   // For Stealth Sync we cannot use an oracle (querying an indexer would
-  // leak addresses). We derive a fixed window per chain: 2x gap_limit
-  // entries per chain. If the user has more activity than that, the
-  // birthday-rescan UI lets them widen the window on a subsequent sync.
+  // leak addresses). We derive addresses locally and match against BIP158
+  // filters that are keyed only by block height -- no address is ever sent
+  // to a third party. The window extends automatically when activity is
+  // found near its edge, implementing real BIP44 gap-limit semantics
+  // client-side. See issue #353 for the full design rationale.
   const gapLimit = payload.gap_limit;
-  const windowSize = gapLimit * 2;
+
+  // Maximum extension passes beyond the initial scan (issue #353, req 3).
+  // Each pass extends one or both chains by gapLimit addresses when activity
+  // lands within gapLimit slots of the edge. Cap prevents unbounded work;
+  // windowExhausted signals when it fires. The final value should come from
+  // the three-point GCS benchmark described in the #353 open question.
+  const MAX_WINDOW_PASSES = 10;
+
+  // Per-chain window end index (exclusive). Starts at gapLimit * 2 per chain
+  // (same initial window as before). Each chain can extend independently:
+  // activity on the change branch does not force extension of the receive
+  // branch, and vice versa (issue #353, req: both chains extend independently).
+  const chainWindowEnd: [number, number] = [gapLimit * 2, gapLimit * 2];
 
   interface DerivedAddr {
     chain: 0 | 1;
@@ -531,7 +545,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   if (payload.kind === 'xpub_stealth') {
     for (const chain of [0, 1] as const) {
-      for (let i = 0; i < windowSize; i++) {
+      for (let i = 0; i < chainWindowEnd[chain]; i++) {
         const script = deriveScriptPubkeyBytes(payload.xpub, chain, i, payload.script_type);
         const address = deriveAddress(payload.xpub, chain, i, payload.script_type);
         derived.push({ chain, index: i, script, address });
@@ -543,7 +557,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     }
     const desc = opts.descriptor;
     for (const chain of [0, 1] as const) {
-      for (let i = 0; i < windowSize; i++) {
+      for (let i = 0; i < chainWindowEnd[chain]; i++) {
         const script = deriveMultisigScriptPubkeyBytes(desc, chain, i);
         const address = deriveMultisigAddress(desc, chain, i);
         derived.push({ chain, index: i, script, address });
@@ -869,13 +883,186 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('uploading', 0));
   emit(opts, progress('uploading', 100));
 
-  // Exhaustion: activity landed within the last gapLimit slots of the
-  // derived window on at least one chain. That is the exact BIP44 signal
-  // that the window needs extending; a wallet with this flag set may be
-  // silently missing transactions beyond the ceiling (issue #352).
-  const windowExhausted =
-    maxMatchedIndexPerChain[0] >= windowSize - gapLimit ||
-    maxMatchedIndexPerChain[1] >= windowSize - gapLimit;
+  // ── rolling-window extension (issue #353) ───────────────────────────
+  // After the initial filter scan, check whether any chain has a match within
+  // gapLimit slots of its current window edge -- the BIP44 signal that more
+  // addresses may have been used beyond the current ceiling. If so, extend
+  // that chain by gapLimit more addresses and run a second filter scan against
+  // ONLY the new addresses (passNewScripts). Repeat until no near-edge match
+  // or MAX_WINDOW_PASSES is reached.
+  //
+  // Key design decision: each extension pass scans passNewScripts, NOT all
+  // scripts. This avoids re-scanning blocks the initial pass already covered:
+  // a block that matched addr0 but not addr5 is not a hit for the extension
+  // pass (addr5-only scan). If a block has BOTH addr0 and addr5 outputs it
+  // WILL appear in both the initial hits and the extension hits; the
+  // processedTxids set below prevents double-counting in normalized.
+  //
+  // Filter re-downloads: extension passes re-fetch filter bytes from the CDN
+  // (no in-memory cache yet). TODO(#353 req 4): cache filter bytes from the
+  // initial scan and re-match locally for extension passes.
+  let windowPass = 0;
+  let windowExhausted = false;
+  // Txids recorded in normalized so far. Used to prevent double-counting when
+  // extension scans hit blocks already processed in an earlier pass.
+  const processedTxids = new Set<string>(normalized.map((tx) => tx.txid));
+
+  extensionLoop: while (windowPass < MAX_WINDOW_PASSES) {
+    const chain0Near = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
+    const chain1Near = maxMatchedIndexPerChain[1] >= chainWindowEnd[1] - gapLimit;
+    if (!chain0Near && !chain1Near) break;  // window not near its edge -- done
+
+    windowPass++;
+    if (windowPass >= MAX_WINDOW_PASSES) {
+      // Cap hit. Signal incomplete history via the sibling ticket's mechanism
+      // (#352, issue #353 req 3). The caller surfaces this to the user.
+      windowExhausted = true;
+      break extensionLoop;
+    }
+
+    // Derive addresses for the chain(s) that need extension. Collect them
+    // separately so the extension scan can target only the new scripts.
+    const passNewDerived: DerivedAddr[] = [];
+    for (const chain of [0, 1] as const) {
+      if (chain === 0 && !chain0Near) continue;
+      if (chain === 1 && !chain1Near) continue;
+
+      const prevEnd = chainWindowEnd[chain];
+      const newEnd  = prevEnd + gapLimit;
+      chainWindowEnd[chain] = newEnd;
+
+      for (let i = prevEnd; i < newEnd; i++) {
+        if (payload.kind === 'xpub_stealth') {
+          const script  = deriveScriptPubkeyBytes(payload.xpub, chain, i, payload.script_type);
+          const address = deriveAddress(payload.xpub, chain, i, payload.script_type);
+          const entry: DerivedAddr = { chain, index: i, script, address };
+          passNewDerived.push(entry);
+          derived.push(entry);
+        } else {
+          if (!opts.descriptor || opts.descriptor.kind !== 'multisig') {
+            throw new Error('descriptor_stealth payload requires opts.descriptor (multisig parsed)');
+          }
+          const desc = opts.descriptor;
+          const script  = deriveMultisigScriptPubkeyBytes(desc, chain, i);
+          const address = deriveMultisigAddress(desc, chain, i);
+          const entry: DerivedAddr = { chain, index: i, script, address };
+          passNewDerived.push(entry);
+          derived.push(entry);
+        }
+      }
+    }
+
+    // Scan filters for blocks matching ONLY the new addresses from this pass.
+    const passNewScripts = passNewDerived.map((d) => d.script);
+    const extHits: Array<{ height: number; blockHashHex: string }> = [];
+    let extNextHeight = fromHeight;
+    const extWorker = async (): Promise<void> => {
+      while (true) {
+        const h = extNextHeight;
+        if (h > tip) return;
+        extNextHeight = h + 1;
+        const f = await opts.fetchFilter(h);
+        if (f !== null) {
+          bytesDownloaded += f.filter.length;
+          const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
+          if (matcher.matchAny(f.filter, blockHashLE, passNewScripts)) {
+            extHits.push({ height: h, blockHashHex: f.blockHashHex });
+          }
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, extWorker));
+    extHits.sort((a, b) => a.height - b.height);
+
+    // Process extension hits. Only new-address outputs are checked for receives
+    // (passNewDerived), but inputs are checked against the full UTXO map so a
+    // spend of a previously-received UTXO is detected correctly even when the
+    // spending tx appears in an extension pass.
+    for (let ei = 0; ei < extHits.length; ei++) {
+      const block = await opts.fetchBlock(extHits[ei].blockHashHex);
+      bytesDownloaded += block.raw.length;
+      const blockHeight = extHits[ei].height;
+      const header = parseBlockHeader(block.raw);
+      const occurredAt = isoDateFromUnix(header.timestamp);
+      const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
+
+      const cur = new Cursor(block.raw);
+      cur.pos = header.txStart;
+      for (let t = 0; t < header.txCount; t++) {
+        const tx = parseTx(cur);
+
+        // Check inputs against full UTXO map (all passes).
+        let spentInputs = 0n;
+        for (const inp of tx.inputs) {
+          const key = utxoKey(inp.prevTxid, inp.voutIdx);
+          const utxo = utxoMap.get(key);
+          if (utxo) { spentInputs += utxo.value; utxoMap.delete(key); }
+        }
+
+        // Check outputs against NEW addresses only.
+        let receivedAmount = 0n;
+        let receivedAddress = '';
+        let anyReceive = false;
+        const newUtxos: Array<{ idx: number; value: bigint; address: string }> = [];
+        for (let oi = 0; oi < tx.outputs.length; oi++) {
+          const out = tx.outputs[oi];
+          for (const d of passNewDerived) {
+            if (bytesEqual(out.script, d.script)) {
+              receivedAmount += out.value;
+              if (!receivedAddress) receivedAddress = d.address;
+              anyReceive = true;
+              newUtxos.push({ idx: oi, value: out.value, address: d.address });
+              if (d.index > maxMatchedIndexPerChain[d.chain]) {
+                maxMatchedIndexPerChain[d.chain] = d.index;
+              }
+              break;
+            }
+          }
+        }
+
+        // Only add to normalized if this txid has not been recorded in a
+        // prior pass. Double-adding the same txid would corrupt the balance.
+        const alreadySeen = processedTxids.has(tx.txid);
+
+        if (spentInputs > 0n && !alreadySeen) {
+          const netOut = spentInputs - receivedAmount;
+          let recipientAddress = '';
+          for (const out of tx.outputs) {
+            let isOurs = false;
+            for (const d of derived) {
+              if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+            }
+            if (!isOurs) {
+              recipientAddress = scriptToAddressBestEffort(out.script);
+              if (recipientAddress) break;
+            }
+          }
+          normalized.push({
+            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            timestamp: occurredAtInstant, direction: 'out',
+            amount_sats: Number(netOut), address: recipientAddress,
+            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
+          });
+          processedTxids.add(tx.txid);
+          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
+        } else if (anyReceive && !alreadySeen) {
+          normalized.push({
+            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            timestamp: occurredAtInstant, direction: 'in',
+            amount_sats: Number(receivedAmount), address: receivedAddress,
+            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
+          });
+          processedTxids.add(tx.txid);
+          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
+        } else if (anyReceive || spentInputs > 0n) {
+          // txid was already processed in an earlier pass. Still update utxoMap
+          // for new-address UTXOs so future spends in later blocks can find them.
+          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
+        }
+      }
+    }
+    // Outer while re-checks maxMatchedIndexPerChain against updated chainWindowEnd.
+  }
 
   return {
     txCount: normalized.length,
