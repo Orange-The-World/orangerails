@@ -98,26 +98,35 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     await capture(page, "04-connect-sparrow-landing");
   });
 
-  test('"Launch Stealth Sync" button targets /connect/stealth', async ({ page }) => {
+  test('"Launch Stealth Sync" button opens /connect/stealth via window.open', async ({ page }) => {
     await page.goto("/connect/sparrow");
-    const launchButton = page.getByRole("button", {
-      name: /launch stealth sync/i,
-    });
+    const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
     await expect(launchButton).toBeVisible();
 
-    const openCallPromise = page.evaluate(() => {
-      return new Promise<string>((resolve) => {
-        const orig = window.open;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).open = (url: string) => {
-          (window as any).open = orig;
-          resolve(url);
-          return null;
-        };
-      });
-    });
-    await launchButton.click();
-    const opened = await openCallPromise;
-    expect(opened).toContain("/connect/stealth");
+    // Patch window.open before clicking. Promise.all starts both concurrently:
+    // the evaluate message is sent to the browser first (JS is single-threaded,
+    // array items are processed left-to-right), so the intercept is guaranteed
+    // to be in place when the click event fires.
+    //
+    // Returning a mock non-null Window suppresses the popup-blocked fallback
+    // (window.location.href = url) so the page does not navigate away and the
+    // promise can resolve back to Node.js cleanly.
+    const [destination] = await Promise.all([
+      page.evaluate(() =>
+        new Promise<string>((resolve) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const orig = (window as any).open;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (window as any).open = (url: string) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (window as any).open = orig;
+            resolve(url);
+            return { closed: false } as unknown as Window;
+          };
+        })
+      ),
+      launchButton.click(),
+    ]);
+    expect(destination).toContain("/connect/stealth");
   });
 });
