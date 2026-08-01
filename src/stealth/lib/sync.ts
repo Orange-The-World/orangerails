@@ -162,6 +162,17 @@ export interface SyncResult {
    *  caller is responsible for sealing them before transport; the
    *  sealedTransactions array above is what gets uploaded to OR. */
   normalized: NormalizedTransaction[];
+  /**
+   * True when any matched address during this scan landed at or above the
+   * top of the derived window (index >= windowSize - 1). Indicates the
+   * wallet has likely outgrown the fixed address ceiling and history may be
+   * incomplete. Surface this to the consuming app via SYNC_COMPLETE so it
+   * can prompt the user to re-sync with a larger gap_limit.
+   *
+   * False on the short-circuit path (nothing scanned) and on any scan
+   * where all matches land below the window ceiling.
+   */
+  address_window_exhausted: boolean;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -580,6 +591,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
+      address_window_exhausted: false,
     };
   }
 
@@ -692,6 +704,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // such a pre-birthday UTXO will not be detected. For correct balance,
   // the wallet birthday must be at-or-before the wallet's first ever
   // receive , V2's UI defaults to one year ago and lets users override.
+  // Exhaustion tracking: true when any matched address sits at or above
+  // the top of the derived window (index >= windowSize - 1). Set in the
+  // receive-detection block below and returned in SyncResult so the widget
+  // can surface a machine-readable incomplete-history warning to the
+  // consuming app via SYNC_COMPLETE.
+  let addressWindowExhausted = false;
+
   const utxoMap = new Map<
     string,
     { value: bigint; address: string }
@@ -744,6 +763,12 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
             receivedAmount += out.value;
             if (!receivedAddress) receivedAddress = d.address;
             anyReceive = true;
+            // Exhaustion check: a match at or above the window ceiling means
+            // the wallet has likely outgrown the fixed window and more
+            // addresses beyond windowSize may have activity.
+            if (d.index >= windowSize - 1) {
+              addressWindowExhausted = true;
+            }
             newUtxos.push({ idx: oi, value: out.value, address: d.address });
             break;
           }
@@ -855,6 +880,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     bytesDownloaded,
     sealedTransactions,
     normalized,
+    address_window_exhausted: addressWindowExhausted,
   };
 }
 
