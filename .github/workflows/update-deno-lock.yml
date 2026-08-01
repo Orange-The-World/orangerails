@@ -1,0 +1,80 @@
+name: Update Deno lockfile
+
+# Manually dispatched to regenerate deno.lock from the current imports.
+# Run this once after pinning imports (DL-0510 esm.sh phase 2) to
+# commit the real lockfile so subsequent CI runs verify against it
+# rather than regenerating it on every run.
+#
+# The workflow opens a PR against dev with the updated deno.lock.
+# Review and merge that PR; CI then verifies in strict mode.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-lockfile:
+    name: Regenerate deno.lock and open PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          # Same pin as ci.yml: Supabase edge runtime ships deno 2.1.4.
+          deno-version: v2.1.4
+
+      - name: Regenerate deno.lock
+        env:
+          DENO_DIR: ${{ runner.temp }}/deno-dir
+          NO_COLOR: '1'
+        run: |
+          # Remove the stub so deno cache writes a fresh lockfile with
+          # the real hashes for all current imports.
+          rm -f deno.lock
+          mapfile -t FILES < <(find supabase/functions -name '*.ts' -type f | sort)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::No .ts files found under supabase/functions -- nothing to lock."
+            exit 1
+          fi
+          echo "Caching ${#FILES[@]} file(s) and writing deno.lock"
+          deno cache --lock=deno.lock --node-modules-dir=auto "${FILES[@]}"
+          if [ ! -s deno.lock ]; then
+            echo "::error::deno cache produced an empty deno.lock -- aborting."
+            exit 1
+          fi
+          echo "deno.lock written ($(wc -c < deno.lock) bytes)"
+
+      - name: Open PR with updated lockfile
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="fix/deno-lock-$(date -u +%Y%m%d-%H%M)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add deno.lock
+          if git diff --staged --quiet; then
+            echo "deno.lock unchanged from HEAD -- nothing to commit."
+            exit 0
+          fi
+          git commit -m "fix: commit real deno.lock from pinned imports (DL-0534)
+
+Replaces the stub lockfile with the real content generated from
+supabase/functions after esm.sh import pinning (DL-0510 Phase 2).
+
+CI now verifies future imports against committed hashes instead
+of regenerating the lock on every run."
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "fix: commit real deno.lock (DL-0534)" \
+            --body "Replaces the stub deno.lock with the real content generated from supabase/functions after esm.sh import pinning (DL-0510 Phase 2). Triggered by manual workflow dispatch." \
+            --base dev \
+            --head "$BRANCH"
