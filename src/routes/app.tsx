@@ -744,14 +744,16 @@ function AppHome() {
         body: JSON.stringify(body),
       });
 
-      if (!fnRes.ok) {
+      // 422 carries a structured JSON body with per-connection error results; parse it
+      // instead of throwing raw text. Other non-2xx codes (401, 500, etc.) fall back to text.
+      if (!fnRes.ok && fnRes.status !== 422) {
         const detail = await fnRes.text().catch(() => "");
         throw new Error(`Sync failed (HTTP ${fnRes.status}): ${detail || "see console"}`);
       }
 
       const result = (await fnRes.json()) as {
-        synced: number;
-        connections: Array<{ connection_id: string; synced: number; error?: string }>;
+        synced?: number;
+        connections: Array<{ connection_id: string; synced?: number; error?: string }>;
       };
 
       // Surface any per-connection error from the edge function.
@@ -759,7 +761,7 @@ function AppHome() {
       if (connResult?.error) throw new Error(connResult.error);
 
       setNotice(
-        `Synced ${result.synced} transaction${result.synced === 1 ? "" : "s"} from ${conn.decrypted_label || conn.provider_type}.`,
+        `Synced ${result.synced ?? 0} transaction${(result.synced ?? 0) === 1 ? "" : "s"} from ${conn.decrypted_label || conn.provider_type}.`,
       );
       await refresh();
     } catch (e) {

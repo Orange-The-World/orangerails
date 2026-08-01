@@ -20,7 +20,7 @@
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { mergeStrikeTransactions } from './index.ts';
+import { mergeStrikeTransactions, batchHttpStatus } from './index.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 
 const WALLET_A = 'wallet-aaaa';
@@ -159,4 +159,22 @@ Deno.test('merge: does not mutate the input records', () => {
 
 Deno.test('merge: empty inputs produce an empty batch (no upsert)', () => {
   assert(mergeStrikeTransactions([], [], [WALLET_A]).length === 0);
+});
+
+// ── batchHttpStatus: response contract for issue #364 ───────────────
+
+Deno.test('batchHttpStatus: empty results -> 200', () => {
+  assertEquals(batchHttpStatus([]), 200);
+});
+
+Deno.test('batchHttpStatus: all succeeded -> 200', () => {
+  assertEquals(batchHttpStatus([{ synced: 3 }, { synced: 1 }]), 200);
+});
+
+Deno.test('batchHttpStatus: mixed (some error) -> 207', () => {
+  assertEquals(batchHttpStatus([{ synced: 5 }, { error: 'AUTH_FAILURE' }]), 207);
+});
+
+Deno.test('batchHttpStatus: all failed -> 422', () => {
+  assertEquals(batchHttpStatus([{ error: 'AUTH_FAILURE' }, { error: 'RATE_LIMITED' }]), 422);
 });
