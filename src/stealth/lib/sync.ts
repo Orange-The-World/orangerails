@@ -855,34 +855,6 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('fetching_blocks', 100));
   emit(opts, progress('building_txs', 100, `${normalized.length} transactions.`));
 
-  // ── sealing ──────────────────────────────────────────────────────────
-  emit(opts, progress('sealing', 0));
-  const sealedTransactions: SealedTransaction[] = [];
-  for (let i = 0; i < normalized.length; i++) {
-    const tx = normalized[i];
-    const env = await sealEnvelope(tx, opts.orStealthKey);
-    const blind = await blindIndex(tx.txid, opts.orStealthKey);
-    sealedTransactions.push({
-      version: 1,
-      algorithm: 'AES-256-GCM',
-      iv_b64: env.iv_b64,
-      ciphertext_b64: env.ciphertext_b64,
-      occurred_at: tx.occurred_at,
-      block_height: tx.block_height,
-      txid_blind_index_b64: blind,
-    });
-    if (i % 8 === 0 || i === normalized.length - 1) {
-      const pct = ((i + 1) / Math.max(1, normalized.length)) * 100;
-      emit(opts, progress('sealing', pct));
-    }
-  }
-  emit(opts, progress('sealing', 100));
-
-  // ── uploading (the orchestrator emits the stage; the actual POST is the
-  // caller's job so the same orchestrator works for tests with no network) ──
-  emit(opts, progress('uploading', 0));
-  emit(opts, progress('uploading', 100));
-
   // ── rolling-window extension (issue #353) ───────────────────────────
   // After the initial filter scan, check whether any chain has a match within
   // gapLimit slots of its current window edge -- the BIP44 signal that more
@@ -917,12 +889,6 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // caller regardless of whether subsequent extension passes resolve it
     // (#352, issue #353 req 3). The caller surfaces this to the user.
     windowExhausted = true;
-
-    windowPass++;
-    if (windowPass >= MAX_WINDOW_PASSES) {
-      // Cap hit. Break without extending further.
-      break extensionLoop;
-    }
 
     // Derive addresses for the chain(s) that need extension. Collect them
     // separately so the extension scan can target only the new scripts.
@@ -1065,8 +1031,37 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         }
       }
     }
+    windowPass++;
     // Outer while re-checks maxMatchedIndexPerChain against updated chainWindowEnd.
   }
+
+  // ── sealing (runs after extension so all extension transactions are sealed) ──
+  emit(opts, progress('sealing', 0));
+  const sealedTransactions: SealedTransaction[] = [];
+  for (let i = 0; i < normalized.length; i++) {
+    const tx = normalized[i];
+    const env = await sealEnvelope(tx, opts.orStealthKey);
+    const blind = await blindIndex(tx.txid, opts.orStealthKey);
+    sealedTransactions.push({
+      version: 1,
+      algorithm: 'AES-256-GCM',
+      iv_b64: env.iv_b64,
+      ciphertext_b64: env.ciphertext_b64,
+      occurred_at: tx.occurred_at,
+      block_height: tx.block_height,
+      txid_blind_index_b64: blind,
+    });
+    if (i % 8 === 0 || i === normalized.length - 1) {
+      const pct = ((i + 1) / Math.max(1, normalized.length)) * 100;
+      emit(opts, progress('sealing', pct));
+    }
+  }
+  emit(opts, progress('sealing', 100));
+
+  // ── uploading (the orchestrator emits the stage; the actual POST is the
+  // caller's job so the same orchestrator works for tests with no network) ──
+  emit(opts, progress('uploading', 0));
+  emit(opts, progress('uploading', 100));
 
   return {
     txCount: normalized.length,
