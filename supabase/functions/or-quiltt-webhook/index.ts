@@ -77,7 +77,7 @@
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY , standard
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import { applyRouting, buildRows, type QuilttEventLike } from './routing.ts';
 

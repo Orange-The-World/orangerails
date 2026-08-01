@@ -6,7 +6,7 @@
  * source plug-ins, resolve functions, rate-limit gate). Returns a Response.
  */
 
-import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { partitionBucketTs, type ResolveResult } from "../../../orbi/src/calculate/resolve.ts";
 import type { CompositeResolveResult } from "../../../orbi/src/calculate/resolve-composite.ts";
 import type { Source } from "../../../orbi/src/sources/interface.ts";

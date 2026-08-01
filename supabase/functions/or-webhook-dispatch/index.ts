@@ -67,7 +67,7 @@
  * the response (just a count).
  */
 
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { jsonResponse } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 

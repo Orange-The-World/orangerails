@@ -34,7 +34,7 @@
  * leaves the server. It must never appear in any external API response body.
  */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { authenticateRequest, resolveSubaccount, isAuthError } from "../_shared/platform-auth.ts";
 import { getProvider, listProviderSlugs, parseCredentials } from "../_shared/providers/dispatch.ts";
