@@ -162,6 +162,15 @@ export interface SyncResult {
    *  caller is responsible for sealing them before transport; the
    *  sealedTransactions array above is what gets uploaded to OR. */
   normalized: NormalizedTransaction[];
+  /**
+   * True when any matched address landed at or within gapLimit slots of the
+   * top of the derived window on either chain. Signals that the wallet may
+   * have outgrown the fixed address ceiling and history could be incomplete.
+   * Consuming apps must branch on this flag and prompt re-sync with a wider
+   * gap_limit. Surfaces through OR_STEALTH_SYNC_COMPLETE as
+   * address_window_exhausted. See issue #352 and docs/Stealth-Sync.md.
+   */
+  windowExhausted: boolean;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -580,6 +589,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
+      windowExhausted: false,
     };
   }
 
@@ -701,6 +711,12 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
 
   const normalized: NormalizedTransaction[] = [];
+
+  // Track the highest address index matched on each chain (receive=0,
+  // change=1). -1 means no match yet. Updated in the receive detection
+  // loop below; used after block parsing to detect exhaustion (#352).
+  const maxMatchedIndexPerChain: [number, number] = [-1, -1];
+
   for (let i = 0; i < hits.length; i++) {
     const block = await opts.fetchBlock(hits[i].blockHashHex);
     bytesDownloaded += block.raw.length;
@@ -745,6 +761,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
             if (!receivedAddress) receivedAddress = d.address;
             anyReceive = true;
             newUtxos.push({ idx: oi, value: out.value, address: d.address });
+            // Record highest matched index per chain for exhaustion detection.
+            if (d.index > maxMatchedIndexPerChain[d.chain]) {
+              maxMatchedIndexPerChain[d.chain] = d.index;
+            }
             break;
           }
         }
@@ -849,12 +869,21 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('uploading', 0));
   emit(opts, progress('uploading', 100));
 
+  // Exhaustion: activity landed within the last gapLimit slots of the
+  // derived window on at least one chain. That is the exact BIP44 signal
+  // that the window needs extending; a wallet with this flag set may be
+  // silently missing transactions beyond the ceiling (issue #352).
+  const windowExhausted =
+    maxMatchedIndexPerChain[0] >= windowSize - gapLimit ||
+    maxMatchedIndexPerChain[1] >= windowSize - gapLimit;
+
   return {
     txCount: normalized.length,
     lastBlockScanned: tip,
     bytesDownloaded,
     sealedTransactions,
     normalized,
+    windowExhausted,
   };
 }
 

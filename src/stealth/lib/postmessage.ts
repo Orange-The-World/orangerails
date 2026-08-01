@@ -318,6 +318,15 @@ export interface StealthSyncCompleteWidgetMessage {
   bytes_downloaded: number;
   /** Wall-clock seconds from INIT to this message. */
   duration_seconds: number;
+  /**
+   * True when any matched transaction landed at or within gap_limit slots
+   * of the top of the derived address window on either chain. Signals that
+   * the wallet may have outgrown the current window and history could be
+   * incomplete. The consuming app must prompt the user to re-sync with a
+   * wider gap_limit. Absent or false means the history is complete within
+   * the current window. See docs/Stealth-Sync.md for full details.
+   */
+  address_window_exhausted?: boolean;
 }
 
 /**
@@ -341,6 +350,12 @@ export interface StealthSyncCompleteAppMessage {
   bytes_downloaded: number;
   /** Wall-clock seconds from INIT to this message. */
   duration_seconds: number;
+  /**
+   * True when any matched transaction landed at or within gap_limit slots
+   * of the top of the derived address window on either chain. See the
+   * widget-mode variant above for full semantics.
+   */
+  address_window_exhausted?: boolean;
 }
 
 /**
