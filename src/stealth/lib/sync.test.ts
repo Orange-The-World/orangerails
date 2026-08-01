@@ -442,9 +442,12 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
 
   // ── Window exhaustion detection (issue #352) ────────────────────────────
 
-  it('windowExhausted is true when a match lands at or above the exhaustion threshold', async () => {
-    // gap_limit=3 => windowSize=6 => threshold = windowSize - gapLimit = 3.
-    // A match at receive chain index 3 is exactly at the threshold; the flag must fire.
+  it('windowExhausted is false after rolling extension confirms no further activity exists', async () => {
+    // gap_limit=3 => initial windowSize=6, ceiling at index 5.
+    // A match at receive chain index 3 triggers the extension (3 >= 5-3+1=3).
+    // The extension derives indices 6-8 but the cached filter for the single block
+    // is already in hits, so no new blocks appear and the loop exits cleanly.
+    // windowExhausted is false: the gap is confirmed and no re-sync is needed.
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
       kind: 'xpub_stealth',
@@ -477,7 +480,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     });
 
     expect(result.txCount).toBe(1);
-    expect(result.windowExhausted).toBe(true);
+    expect(result.windowExhausted).toBe(false);
   });
 
   it('windowExhausted is false when all matches are well below the exhaustion threshold', async () => {
