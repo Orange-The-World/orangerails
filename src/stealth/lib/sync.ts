@@ -705,157 +705,262 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // Process blocks strictly by ascending height.
   hits.sort((a, b) => a.height - b.height);
 
-  // ── fetching_blocks + building_txs ───────────────────────────────────
-  emit(opts, progress('fetching_blocks', 0, `${hits.length} blocks to fetch.`));
-
-  // UTXO tracking , keyed by `${prev_txid}:${vout_idx}`. Populated as we
-  // encounter outputs to our addresses; consulted when scanning inputs
-  // to detect spends. Mirrors how Wasabi and Sparrow detect outgoing
-  // transactions over a BIP158 filter scan.
+  // ── fetching_blocks + building_txs (with rolling address-window) ─────
   //
-  // NOTE: this map is in-memory for the duration of one sync run. UTXOs
-  // funded BEFORE the wallet birthday are not tracked, so a spend of
-  // such a pre-birthday UTXO will not be detected. For correct balance,
-  // the wallet birthday must be at-or-before the wallet's first ever
-  // receive , V2's UI defaults to one year ago and lets users override.
-  const utxoMap = new Map<
-    string,
-    { value: bigint; address: string }
-  >();
+  // Helper: derive one address entry for a given chain and index. Used
+  // during window extension when the initial derived set proves too small.
+  function extendDerived(chain: 0 | 1, index: number): DerivedAddr {
+    if (payload.kind === 'xpub_stealth') {
+      return {
+        chain,
+        index,
+        script: deriveScriptPubkeyBytes(payload.xpub, chain, index, payload.script_type),
+        address: deriveAddress(payload.xpub, chain, index, payload.script_type),
+      };
+    }
+    const desc = opts.descriptor;
+    if (!desc || desc.kind !== 'multisig') {
+      throw new Error('descriptor_stealth payload requires opts.descriptor (multisig parsed)');
+    }
+    return {
+      chain,
+      index,
+      script: deriveMultisigScriptPubkeyBytes(desc, chain, index),
+      address: deriveMultisigAddress(desc, chain, index),
+    };
+  }
+
+  // Block cache: a block is fetched once on first hit and reused across
+  // extension passes. Only matching blocks are ever cached, so the set
+  // stays small regardless of scan range.
+  const blockCache = new Map<string, BlockRecord>();
+
+  // UTXO tracking key.
   function utxoKey(txid: string, voutIdx: number): string {
     return `${txid}:${voutIdx}`;
   }
 
-  const normalized: NormalizedTransaction[] = [];
+  // Process a sorted list of hit blocks against a given derived address set.
+  // Resets UTXO state from scratch each call so order-sensitive spend
+  // detection stays correct when the hit list changes between extension passes.
+  async function processAllBlocks(
+    hitList: MatchedHit[],
+    derivedAddrs: DerivedAddr[],
+    emitProgress: boolean,
+  ): Promise<{ normalized: NormalizedTransaction[]; maxMatchedIndexPerChain: [number, number] }> {
+    const utxoMap = new Map<string, { value: bigint; address: string }>();
+    const txs: NormalizedTransaction[] = [];
+    const maxIdx: [number, number] = [-1, -1];
 
-  // Track the highest address index matched on each chain (receive=0,
-  // change=1). -1 means no match yet. Updated in the receive detection
-  // loop below; used after block parsing to detect exhaustion (#352).
-  const maxMatchedIndexPerChain: [number, number] = [-1, -1];
-
-  for (let i = 0; i < hits.length; i++) {
-    const block = await opts.fetchBlock(hits[i].blockHashHex);
-    bytesDownloaded += block.raw.length;
-    // Height comes from the filter match, not the block record: the
-    // X-Block-Height response header is invisible to browsers unless the
-    // block source exposes it via Access-Control-Expose-Headers, so the
-    // block record height can silently arrive as 0.
-    const blockHeight = hits[i].height;
-    const header = parseBlockHeader(block.raw);
-    const occurredAt = isoDateFromUnix(header.timestamp);
-    // Full instant, not just the date. Rides inside the sealed envelope so
-    // the server learns nothing new; consumers use it for transaction-time
-    // exchange-rate valuation instead of end-of-day.
-    const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
-
-    const cur = new Cursor(block.raw);
-    cur.pos = header.txStart;
-    for (let t = 0; t < header.txCount; t++) {
-      const tx = parseTx(cur);
-
-      // ─── Spend detection (this tx spends one of our UTXOs?) ────────
-      let spentInputs = 0n;
-      for (const inp of tx.inputs) {
-        const key = utxoKey(inp.prevTxid, inp.voutIdx);
-        const utxo = utxoMap.get(key);
-        if (utxo) {
-          spentInputs += utxo.value;
-          utxoMap.delete(key);
-        }
+    for (let i = 0; i < hitList.length; i++) {
+      let block = blockCache.get(hitList[i].blockHashHex);
+      if (!block) {
+        block = await opts.fetchBlock(hitList[i].blockHashHex);
+        blockCache.set(hitList[i].blockHashHex, block);
+        bytesDownloaded += block.raw.length;
       }
+      // Height comes from the filter match, not the block record: the
+      // X-Block-Height response header is invisible to browsers unless the
+      // block source exposes it via Access-Control-Expose-Headers, so the
+      // block record height can silently arrive as 0.
+      const blockHeight = hitList[i].height;
+      const header = parseBlockHeader(block.raw);
+      const occurredAt = isoDateFromUnix(header.timestamp);
+      // Full instant, not just the date. Rides inside the sealed envelope so
+      // the server learns nothing new; consumers use it for transaction-time
+      // exchange-rate valuation instead of end-of-day.
+      const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
 
-      // ─── Receive detection (this tx pays one of our addresses?) ────
-      let receivedAmount = 0n;
-      let receivedAddress = '';
-      let anyReceive = false;
-      const newUtxos: Array<{ idx: number; value: bigint; address: string }> = [];
-      for (let oi = 0; oi < tx.outputs.length; oi++) {
-        const out = tx.outputs[oi];
-        for (const d of derived) {
-          if (bytesEqual(out.script, d.script)) {
-            receivedAmount += out.value;
-            if (!receivedAddress) receivedAddress = d.address;
-            anyReceive = true;
-            newUtxos.push({ idx: oi, value: out.value, address: d.address });
-            // Record highest matched index per chain for exhaustion detection.
-            if (d.index > maxMatchedIndexPerChain[d.chain]) {
-              maxMatchedIndexPerChain[d.chain] = d.index;
+      const cur = new Cursor(block.raw);
+      cur.pos = header.txStart;
+      for (let t = 0; t < header.txCount; t++) {
+        const tx = parseTx(cur);
+
+        // ─── Spend detection (this tx spends one of our UTXOs?) ────────
+        let spentInputs = 0n;
+        for (const inp of tx.inputs) {
+          const key = utxoKey(inp.prevTxid, inp.voutIdx);
+          const utxo = utxoMap.get(key);
+          if (utxo) {
+            spentInputs += utxo.value;
+            utxoMap.delete(key);
+          }
+        }
+
+        // ─── Receive detection (this tx pays one of our addresses?) ────
+        let receivedAmount = 0n;
+        let receivedAddress = '';
+        let anyReceive = false;
+        const newUtxos: Array<{ idx: number; value: bigint; address: string }> = [];
+        for (let oi = 0; oi < tx.outputs.length; oi++) {
+          const out = tx.outputs[oi];
+          for (const d of derivedAddrs) {
+            if (bytesEqual(out.script, d.script)) {
+              receivedAmount += out.value;
+              if (!receivedAddress) receivedAddress = d.address;
+              anyReceive = true;
+              newUtxos.push({ idx: oi, value: out.value, address: d.address });
+              // Record highest matched index per chain for window extension.
+              if (d.index > maxIdx[d.chain]) {
+                maxIdx[d.chain] = d.index;
+              }
+              break;
             }
-            break;
+          }
+        }
+
+        // ─── Emit normalized records ───────────────────────────────────
+        if (spentInputs > 0n) {
+          // SPEND. amount_sats = what left our wallet net of change.
+          //   spentInputs    , total value of UTXOs we destroyed
+          //   receivedAmount , total value of new outputs paying us back (change)
+          // The difference is what we paid out (and includes the network fee).
+          // Pure self-transfer (consolidation) => amount = fee only.
+          const netOut = spentInputs - receivedAmount;
+          // Best-effort recipient address: first output that does NOT pay
+          // us. Empty if every output pays us (pure consolidation).
+          let recipientAddress = '';
+          for (const out of tx.outputs) {
+            let isOurs = false;
+            for (const d of derivedAddrs) {
+              if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+            }
+            if (!isOurs) {
+              recipientAddress = scriptToAddressBestEffort(out.script);
+              if (recipientAddress) break;
+            }
+          }
+          txs.push({
+            txid: tx.txid,
+            block_height: blockHeight,
+            occurred_at: occurredAt,
+            timestamp: occurredAtInstant,
+            direction: 'out',
+            amount_sats: Number(netOut),
+            address: recipientAddress,
+            vin_count: tx.vinCount,
+            vout_count: tx.voutCount,
+            memo: null,
+          });
+          // Add change outputs to UTXO map so future spends can reference
+          // them. (A receive that is also a change-back from our own spend
+          // still counts as a UTXO we own.)
+          for (const u of newUtxos) {
+            utxoMap.set(utxoKey(tx.txid, u.idx), {
+              value: u.value,
+              address: u.address,
+            });
+          }
+        } else if (anyReceive) {
+          // RECEIVE only , pure incoming, no inputs of ours were spent.
+          txs.push({
+            txid: tx.txid,
+            block_height: blockHeight,
+            occurred_at: occurredAt,
+            timestamp: occurredAtInstant,
+            direction: 'in',
+            amount_sats: Number(receivedAmount),
+            address: receivedAddress,
+            vin_count: tx.vinCount,
+            vout_count: tx.voutCount,
+            memo: null,
+          });
+          for (const u of newUtxos) {
+            utxoMap.set(utxoKey(tx.txid, u.idx), {
+              value: u.value,
+              address: u.address,
+            });
           }
         }
       }
 
-      // ─── Emit normalized records ───────────────────────────────────
-      if (spentInputs > 0n) {
-        // SPEND. amount_sats = what left our wallet net of change.
-        //   spentInputs    , total value of UTXOs we destroyed
-        //   receivedAmount , total value of new outputs paying us back (change)
-        // The difference is "what we paid out" (and includes the network fee).
-        // Pure self-transfer (consolidation) → amount = fee only.
-        const netOut = spentInputs - receivedAmount;
-        // Best-effort recipient address: first output that does NOT pay
-        // us. Empty if every output pays us (pure consolidation).
-        let recipientAddress = '';
-        for (const out of tx.outputs) {
-          let isOurs = false;
-          for (const d of derived) {
-            if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
-          }
-          if (!isOurs) {
-            recipientAddress = scriptToAddressBestEffort(out.script);
-            if (recipientAddress) break;
-          }
-        }
-        normalized.push({
-          txid: tx.txid,
-          block_height: blockHeight,
-          occurred_at: occurredAt,
-          timestamp: occurredAtInstant,
-          direction: 'out',
-          amount_sats: Number(netOut),
-          address: recipientAddress,
-          vin_count: tx.vinCount,
-          vout_count: tx.voutCount,
-          memo: null,
-        });
-        // Add change outputs to UTXO map so future spends can reference
-        // them. (A receive that is also a change-back from our own spend
-        // still counts as a UTXO we own.)
-        for (const u of newUtxos) {
-          utxoMap.set(utxoKey(tx.txid, u.idx), {
-            value: u.value,
-            address: u.address,
-          });
-        }
-      } else if (anyReceive) {
-        // RECEIVE only , pure incoming, no inputs of ours were spent.
-        normalized.push({
-          txid: tx.txid,
-          block_height: blockHeight,
-          occurred_at: occurredAt,
-          timestamp: occurredAtInstant,
-          direction: 'in',
-          amount_sats: Number(receivedAmount),
-          address: receivedAddress,
-          vin_count: tx.vinCount,
-          vout_count: tx.voutCount,
-          memo: null,
-        });
-        for (const u of newUtxos) {
-          utxoMap.set(utxoKey(tx.txid, u.idx), {
-            value: u.value,
-            address: u.address,
-          });
+      if (emitProgress) {
+        const pct = ((i + 1) / Math.max(1, hitList.length)) * 100;
+        emit(opts, progress('fetching_blocks', pct, `${i + 1} of ${hitList.length} blocks.`));
+      }
+    }
+
+    return { normalized: txs, maxMatchedIndexPerChain: maxIdx };
+  }
+
+  emit(opts, progress('fetching_blocks', 0, `${hits.length} blocks to fetch.`));
+  let { normalized, maxMatchedIndexPerChain } = await processAllBlocks(hits, derived, true);
+  emit(opts, progress('fetching_blocks', 100));
+  emit(opts, progress('building_txs', 100, `${normalized.length} transactions.`));
+
+  // ── Rolling address-window extension ─────────────────────────────────
+  // BIP44 gap-limit semantics, implemented client-side without an oracle.
+  // When activity lands within gapLimit slots of the current ceiling on
+  // either chain, we derive gapLimit more addresses for that chain and
+  // re-match the cached filter data to find blocks paying those new scripts.
+  // Block processing then re-runs from scratch with the extended derived set
+  // so UTXO state stays order-consistent.
+  //
+  // Privacy invariant: re-matching calls matcher.matchAny with only the new
+  // scripts; no new fetchFilter call is issued. Filter fetches remain keyed
+  // by block height only, exactly as in the initial scan.
+  //
+  // Iteration cap: after MAX_EXTENSION_PASSES the loop stops. If activity is
+  // still within gapLimit of the ceiling after the cap, windowExhausted is
+  // set so the consuming app can prompt re-sync with a wider gap_limit.
+  const MAX_EXTENSION_PASSES = 20;
+  let windowExhausted = false;
+
+  for (let pass = 0; pass < MAX_EXTENSION_PASSES; pass++) {
+    const existingHitSet = new Set(hits.map((h) => h.blockHashHex));
+    let foundNewHits = false;
+
+    for (const chain of [0, 1] as const) {
+      if (maxMatchedIndexPerChain[chain] < chainWindowCeiling[chain] - gapLimit + 1) {
+        continue; // clear gap confirmed on this chain; no extension needed
+      }
+
+      // Activity is within gapLimit slots of the ceiling on this chain.
+      // Derive the next gapLimit addresses and widen the window.
+      const newDerived: DerivedAddr[] = [];
+      for (
+        let idx = chainWindowCeiling[chain] + 1;
+        idx <= chainWindowCeiling[chain] + gapLimit;
+        idx++
+      ) {
+        const d = extendDerived(chain, idx);
+        derived.push(d);
+        newDerived.push(d);
+      }
+      chainWindowCeiling[chain] += gapLimit;
+
+      // Re-match cached filter bytes against only the new scripts.
+      // No new network call; we reuse in-memory filter data from the initial scan.
+      const newScripts = newDerived.map((d) => d.script);
+      for (const fr of cachedFilters) {
+        if (existingHitSet.has(fr.blockHashHex)) continue;
+        const blockHashLE = reverseBytes(hexToBytes(fr.blockHashHex));
+        if (matcher.matchAny(fr.filter, blockHashLE, newScripts)) {
+          hits.push({ height: fr.height, blockHashHex: fr.blockHashHex });
+          existingHitSet.add(fr.blockHashHex);
+          foundNewHits = true;
         }
       }
     }
 
-    const pct = ((i + 1) / Math.max(1, hits.length)) * 100;
-    emit(opts, progress('fetching_blocks', pct, `${i + 1} of ${hits.length} blocks.`));
+    if (!foundNewHits) break; // window is stable; no new blocks to process
+
+    // New blocks found: re-sort and re-process the full hit list with the
+    // extended derived set. UTXO state must rebuild from scratch to keep
+    // spend detection order-consistent.
+    hits.sort((a, b) => a.height - b.height);
+    const rerun = await processAllBlocks(hits, derived, false);
+    normalized = rerun.normalized;
+    maxMatchedIndexPerChain = rerun.maxMatchedIndexPerChain;
   }
-  emit(opts, progress('fetching_blocks', 100));
-  emit(opts, progress('building_txs', 100, `${normalized.length} transactions.`));
+
+  // If activity is still within gapLimit of the ceiling after all extension
+  // passes, the wallet has more history than the cap allows us to recover in
+  // one sync. Signal via windowExhausted so the consuming app can prompt
+  // re-sync with a wider gap_limit (same semantic as issue #352).
+  windowExhausted =
+    maxMatchedIndexPerChain[0] >= chainWindowCeiling[0] - gapLimit + 1 ||
+    maxMatchedIndexPerChain[1] >= chainWindowCeiling[1] - gapLimit + 1;
 
   // ── sealing ──────────────────────────────────────────────────────────
   emit(opts, progress('sealing', 0));
@@ -885,13 +990,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('uploading', 0));
   emit(opts, progress('uploading', 100));
 
-  // Exhaustion: activity landed within the last gapLimit slots of the
-  // derived window on at least one chain. That is the exact BIP44 signal
-  // that the window needs extending; a wallet with this flag set may be
-  // silently missing transactions beyond the ceiling (issue #352).
-  const windowExhausted =
-    maxMatchedIndexPerChain[0] >= windowSize - gapLimit ||
-    maxMatchedIndexPerChain[1] >= windowSize - gapLimit;
+  // windowExhausted is set above in the extension loop.
 
   return {
     txCount: normalized.length,
