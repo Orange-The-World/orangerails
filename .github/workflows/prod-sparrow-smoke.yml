@@ -3,6 +3,7 @@ name: Prod Sparrow Smoke
 on:
   push:
     branches: [prod]
+  workflow_dispatch:
 
 jobs:
   sparrow-prod-smoke:
