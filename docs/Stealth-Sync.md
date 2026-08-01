@@ -328,6 +328,7 @@ window.addEventListener('message', (event) => {
       break;
     case 'OR_STEALTH_SYNC_COMPLETE':
       // event.data.sealed_transactions[]: see "Sealed envelope schema" above
+      // event.data.address_window_exhausted: boolean | undefined -- see below
       break;
     case 'OR_STEALTH_ERROR':
       // event.data.code, message, retryable
