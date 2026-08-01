@@ -543,13 +543,17 @@ async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, rawErrMsg:
     );
     if (terminal) {
       // The terminal write includes retirement_reason which may not yet exist
-      // in prod (schema is applied by #316, which must precede this code in prod).
+      // in prod. The column reaches prod only via the two-party hand-apply
+      // (SQLA-00069), not by merging #316: apply_migrations is workflow_dispatch
+      // only and is never triggered by a branch push.
       // If the column is absent the whole UPDATE is rejected and attempts freezes
       // at its current count. Fall back to a counter-only bump to preserve
       // attempts and last_error so the row is not stuck at a stale count.
       // Note: bumping attempts does NOT advance the row in the batch - ordering
       // is by received_at, not attempts. The real guard against a frozen queue
-      // is merge order: #316 applied to prod before this code promotes.
+      // is that SQLA-00069 must be applied to prod before this code promotes.
+      // Merging #316 alone does not apply the column; only the two-party
+      // hand-apply does.
       const { error: fbErr } = await client
         .from('quiltt_webhook_inbox')
         .update({ attempts: newAttempts, last_error: errMsg.slice(0, 500) })
