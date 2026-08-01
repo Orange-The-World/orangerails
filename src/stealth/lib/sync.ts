@@ -912,11 +912,15 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     const chain1Near = maxMatchedIndexPerChain[1] >= chainWindowEnd[1] - gapLimit;
     if (!chain0Near && !chain1Near) break;  // window not near its edge -- done
 
+    // Near-edge match: the wallet has used addresses close enough to the
+    // window ceiling that history beyond it may exist. Signal this to the
+    // caller regardless of whether subsequent extension passes resolve it
+    // (#352, issue #353 req 3). The caller surfaces this to the user.
+    windowExhausted = true;
+
     windowPass++;
     if (windowPass >= MAX_WINDOW_PASSES) {
-      // Cap hit. Signal incomplete history via the sibling ticket's mechanism
-      // (#352, issue #353 req 3). The caller surfaces this to the user.
-      windowExhausted = true;
+      // Cap hit. Break without extending further.
       break extensionLoop;
     }
 
