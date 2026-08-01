@@ -70,7 +70,10 @@ jobs:
 
       - name: Build
         env:
-          VITE_OR_STEALTH_ALLOWED_ORIGINS: ${{ vars.VITE_OR_STEALTH_ALLOWED_ORIGINS }}
+          # CI never deploys; the origin is already in the public prod bundle.
+          # Any non-empty well-formed value satisfies the build guard.
+          # The actual per-project values live in Cloudflare Pages dashboard env.
+          VITE_OR_STEALTH_ALLOWED_ORIGINS: https://orangerails.dev
         run: bun run build
 
   deno-typecheck:
