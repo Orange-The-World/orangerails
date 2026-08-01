@@ -578,9 +578,9 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
               className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
             />
             <p className="mt-1 text-[10px] text-muted-foreground">
-              How many empty addresses we scan before stopping. Default 20 works for almost every
-              wallet (Sparrow, BlueWallet, Ledger, Trezor). Only change this if your wallet
-              generates addresses with unusually large gaps.
+              How many empty addresses we scan before stopping. A higher limit finds more of your
+              history but makes each sync slower. If some transactions are missing after a sync,
+              raise this and sync again.
             </p>
           </div>
         </details>
