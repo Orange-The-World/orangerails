@@ -628,6 +628,12 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
   const hits: MatchedHit[] = [];
 
+  // req 4: cache filter records during the initial scan so extension passes
+  // can re-match locally without re-downloading from the CDN on every pass.
+  // Stores null explicitly for heights that returned 404 so the extension
+  // loop never falls through to a redundant network fetch for known-missing heights.
+  const filterCache = new Map<number, FilterRecord | null>();
+
   // Parallel filter fetch with bounded concurrency. Sequential
   // (one-at-a-time) was the right shape for the first proof-of-life
   // milestone but is unworkable for real wallets , a 1-year-old
@@ -678,6 +684,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       nextHeight = h + 1;
       const f = await opts.fetchFilter(h);
       processedCount += 1;
+      filterCache.set(h, f);  // cache result (including null) for extension passes (req 4)
       if (f !== null) {
         bytesDownloaded += f.filter.length;
         const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
@@ -870,9 +877,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // WILL appear in both the initial hits and the extension hits; the
   // processedTxids set below prevents double-counting in normalized.
   //
-  // Filter re-downloads: extension passes re-fetch filter bytes from the CDN
-  // (no in-memory cache yet). TODO(#353 req 4): cache filter bytes from the
-  // initial scan and re-match locally for extension passes.
+  // req 4: filter bytes from the initial scan are cached in filterCache.
+  // Extension passes re-match locally; CDN re-downloads only occur on a cache
+  // miss, which should not happen in normal flows since the initial scan covers
+  // the full [fromHeight, tip] range.
   let windowPass = 0;
   let windowExhausted = false;
   // Txids recorded in normalized so far. Used to prevent double-counting when
@@ -931,9 +939,18 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         const h = extNextHeight;
         if (h > tip) return;
         extNextHeight = h + 1;
-        const f = await opts.fetchFilter(h);
+        // req 4: re-use cached filter bytes from the initial scan. Only fall
+        // back to a network fetch on a cache miss (should not occur in normal
+        // flows since the initial scan covers the full [fromHeight, tip] range).
+        let f: FilterRecord | null;
+        if (filterCache.has(h)) {
+          f = filterCache.get(h)!;
+        } else {
+          f = await opts.fetchFilter(h);
+          filterCache.set(h, f);
+          if (f !== null) bytesDownloaded += f.filter.length;
+        }
         if (f !== null) {
-          bytesDownloaded += f.filter.length;
           const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
           if (matcher.matchAny(f.filter, blockHashLE, passNewScripts)) {
             extHits.push({ height: h, blockHashHex: f.blockHashHex });
