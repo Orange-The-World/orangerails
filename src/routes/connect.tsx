@@ -452,10 +452,10 @@ async function serverDiscover(
     /* ignore , handled by the !res.ok / shape checks below */
   }
   if (!res.ok) {
+    const copy = typeof data.body === "string" ? data.body : undefined;
+    const title = typeof data.title === "string" ? data.title : undefined;
     throw new Error(
-      typeof data.error === "string"
-        ? data.error
-        : `Could not discover wallets (status ${res.status}).`,
+      copy ?? title ?? (typeof data.error === "string" ? data.error : `Could not discover wallets (status ${res.status}).`),
     );
   }
   const wallets = data.discovered_wallets;
