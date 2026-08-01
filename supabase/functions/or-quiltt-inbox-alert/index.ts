@@ -122,10 +122,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   if (oldestAt === null && !oldestErr) {
     stalenessNote = 'inbox empty, no unprocessed rows';
-  } else {
+  } else if (oldestAt !== null) {
     const ageMs = Date.now() - new Date(oldestAt).getTime();
     stalenessFiring = ageMs > STALE_MINUTES * 60 * 1000;
   }
+  // else: oldestErr is set; queryError already drives alertFiring
 
   // Signal 3: pg_cron failures for or_quiltt_sync_drain.
   // Calls public.quiltt_sync_cron_failures() (SECURITY DEFINER) because
