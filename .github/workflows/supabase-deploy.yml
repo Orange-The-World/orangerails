@@ -261,12 +261,20 @@ jobs:
             REC=$(mktemp); chmod 600 "$REC"
             jq -n --arg v "$VERSION" \
               '{query:"INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('"'"'\($v)'"'"') ON CONFLICT DO NOTHING;"}' > "$REC"
-            curl -sS -o /tmp/mig.resp -w "%{http_code}" \
+            REC_CODE=$(curl -sS -o /tmp/mig.resp -w "%{http_code}" \
               -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
               -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
               -H "Content-Type: application/json" \
-              --data-binary "@$REC" >/dev/null
-            rm -f "$REC" /tmp/mig.resp
+              --data-binary "@$REC")
+            rm -f "$REC"
+
+            if [[ ! "$REC_CODE" =~ ^2 ]]; then
+              echo "  x FAILED to record migration in ledger (HTTP $REC_CODE): $(head -c 400 /tmp/mig.resp)"
+              rm -f /tmp/mig.resp
+              exit 1
+            fi
+            rm -f /tmp/mig.resp
+            echo "  v migration recorded in ledger (HTTP $REC_CODE)"
             APPLIED_COUNT=$((APPLIED_COUNT + 1))
           done
 
