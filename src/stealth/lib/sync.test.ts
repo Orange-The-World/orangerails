@@ -602,6 +602,70 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     // Extension fired, so the flag must be set.
     expect(result.windowExhausted).toBe(true);
   });
+
+  it('extension passes re-match cached filters without calling fetchFilter again (req 4)', async () => {
+    // Regression guard for the filter-cache fix (#353 req 4): when extension
+    // fires because activity lands near the window edge, the orchestrator must
+    // re-match filter bytes from the initial scan cache, NOT re-download them.
+    // A redundant network call per height per extension pass would multiply
+    // bandwidth by up to MAX_WINDOW_PASSES (10), which is the defect this
+    // test guards against.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'filter-cache-req4',
+      wallet_birthday: '2024-01-01',
+      // gap_limit=1: initial window covers indices [0, 1]; match at index 1
+      // is within gapLimit=1 of the edge (chainWindowEnd=2), so one
+      // extension pass fires.
+      gap_limit: 1,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const scriptIdx1 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 1, 'p2wpkh');
+    const ts = Math.floor(new Date('2024-06-01T00:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({
+      payToScript: scriptIdx1,
+      amountSats: 1_000n,
+      timestamp: ts,
+    });
+    const blockHashHex = bytesToHex(reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80))));
+    const fakeFilter = new Uint8Array([0xc1]);
+
+    const fetchFilterCalls: number[] = [];
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => 800_001,
+      fetchFilter: async (h) => {
+        fetchFilterCalls.push(h);
+        if (h === 800_001) return { height: h, blockHashHex, filter: fakeFilter };
+        return null;
+      },
+      fetchBlock: async () => ({ height: 0, blockHashHex, raw: blockBuild.raw }),
+      // Matches filter 0xc1 only when scriptIdx1 is in the scripts list.
+      // The extension pass uses passNewScripts (idx2 only), so no new hits
+      // are found and the loop terminates after one extension pass.
+      matcher: {
+        matchAny: (filter, _hash, scripts) => {
+          if (filter[0] !== 0xc1) return false;
+          return scripts.some((s) => s.length === scriptIdx1.length && s.every((b, i) => b === scriptIdx1[i]));
+        },
+      },
+    });
+
+    expect(result.txCount).toBe(1);
+    expect(result.windowExhausted).toBe(true);
+
+    // KEY: fetchFilter must be called exactly once (initial scan only).
+    // If the extension pass bypassed the cache, height 800_001 would appear
+    // twice in fetchFilterCalls, revealing the defect.
+    expect(fetchFilterCalls).toEqual([800_001]);
+  });
 });
 
 // ─── Live fetcher unit tests ────────────────────────────────────────────
