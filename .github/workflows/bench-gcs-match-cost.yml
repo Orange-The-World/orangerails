@@ -2,6 +2,12 @@ name: "Bench: GCS match cost (DL-0353)"
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - 'bench/gcs-match-cost*'
+    paths:
+      - 'benches/gcs_match_cost.mjs'
+      - '.github/workflows/bench-gcs-match-cost.yml'
 
 permissions:
   contents: read
