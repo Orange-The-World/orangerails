@@ -14,18 +14,20 @@
 -- the durable guard is a trigger, which fires for every role, service_role and
 -- postgres included.
 --
--- Semantics of the trigger (UPDATE and DELETE):
+-- Semantics of the trigger (UPDATE only):
 --   NULL      -> value            permitted   (first registration)
 --   value     -> same value       permitted   (idempotent re-write)
 --   value     -> different value  refused     (substitution)
 --   value     -> NULL             refused     (clearing)
---   DELETE where key IS NULL      permitted   (row never had a key)
---   DELETE where key IS NOT NULL  refused     (delete-and-reinsert bypass)
 -- The UPDATE guard is gated on a real change (OLD is not null AND NEW is
 -- distinct from OLD), so first registration and an identical re-write pass.
--- The DELETE guard blocks any deletion of a row that carries a registered key,
--- preventing a service_role or SECURITY DEFINER caller from bypassing write-once
--- by deleting and reinserting with different key material.
+-- DELETE is intentionally not guarded: client roles have no DELETE policy on
+-- either table (RLS), so a client-path delete-and-reinsert attack is already
+-- blocked. A trigger-level DELETE guard would fire for service_role and CASCADE
+-- deletes too, making rows with a registered key permanently undeletable by
+-- anyone, including the erasure path needed for GDPR Art. 17 account deletion.
+-- If an explicit audit trail for key-bearing row deletion is needed later, that
+-- is a separate feature with an authorized erasure path designed from the start.
 --
 -- No rotation path is included, on purpose. A legitimate key swap needs a proof
 -- that the user, not the server, authorized it, and the protocol does not yet
@@ -62,16 +64,8 @@ BEGIN
         TG_TABLE_SCHEMA, TG_TABLE_NAME
         USING ERRCODE = 'check_violation';
     END IF;
-    RETURN NEW;
-  ELSIF TG_OP = 'DELETE' THEN
-    IF OLD.kem_public_key IS NOT NULL THEN
-      RAISE EXCEPTION
-        'kem_public_key is write-once: rows with a registered key cannot be deleted (%.%)',
-        TG_TABLE_SCHEMA, TG_TABLE_NAME
-        USING ERRCODE = 'check_violation';
-    END IF;
-    RETURN OLD;
   END IF;
+  RETURN NEW;
 END;
 $$;
 
@@ -86,7 +80,7 @@ BEGIN
   ) THEN
     DROP TRIGGER IF EXISTS trg_user_vault_meta_kem_write_once ON public.user_vault_meta;
     CREATE TRIGGER trg_user_vault_meta_kem_write_once
-      BEFORE UPDATE OR DELETE ON public.user_vault_meta
+      BEFORE UPDATE ON public.user_vault_meta
       FOR EACH ROW
       EXECUTE FUNCTION public.enforce_kem_public_key_write_once();
   ELSE
@@ -102,7 +96,7 @@ BEGIN
   ) THEN
     DROP TRIGGER IF EXISTS trg_customer_vault_meta_kem_write_once ON public.customer_vault_meta;
     CREATE TRIGGER trg_customer_vault_meta_kem_write_once
-      BEFORE UPDATE OR DELETE ON public.customer_vault_meta
+      BEFORE UPDATE ON public.customer_vault_meta
       FOR EACH ROW
       EXECUTE FUNCTION public.enforce_kem_public_key_write_once();
   ELSE
