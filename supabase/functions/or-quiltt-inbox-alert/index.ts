@@ -37,6 +37,7 @@ const CRON_WINDOW_MINUTES = 60;
 interface HealthReport {
   checked_at:   string;
   alert_firing: boolean;
+  error?:       string;
   signals: {
     depth: {
       value:     number | null;
@@ -119,7 +120,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   let stalenessFiring = false;
   let stalenessNote: string | undefined;
 
-  if (oldestAt === null) {
+  if (oldestAt === null && !oldestErr) {
     stalenessNote = 'inbox empty, no unprocessed rows';
   } else {
     const ageMs = Date.now() - new Date(oldestAt).getTime();
@@ -144,6 +145,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     : null;
   const cronFiring = failedRuns !== null && failedRuns > 0;
 
+  // Surface query errors so connectivity failures are reported unhealthy, not false-green.
+  // Absence of evidence (null from a failed query) is not evidence of absence.
+  const queryErrors: string[] = [];
+  if (depthErr)  queryErrors.push(`signal 1 (depth): ${depthErr.message}`);
+  if (oldestErr) queryErrors.push(`signal 2 (staleness): ${oldestErr.message}`);
+  if (cronErr)   queryErrors.push(`signal 3 (pg_cron): ${cronErr.message}`);
+  const queryError = queryErrors.length > 0 ? queryErrors.join('; ') : undefined;
+
   // Log each firing signal as an error visible in Supabase function logs.
   if (depthFiring) {
     console.error(
@@ -161,11 +170,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     );
   }
 
-  const alertFiring = depthFiring || stalenessFiring || cronFiring;
+  const alertFiring = depthFiring || stalenessFiring || cronFiring || queryError !== undefined;
 
   const report: HealthReport = {
     checked_at:   checkedAt,
     alert_firing: alertFiring,
+    ...(queryError !== undefined ? { error: queryError } : {}),
     signals: {
       depth: {
         value:     depth,
