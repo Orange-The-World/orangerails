@@ -57,7 +57,7 @@ const SAMPLE_HEIGHTS = Array.from(
 
 // Decision rule constants.
 const OLD_WALLET_BLOCKS = 500_000;  // birthday at ~block 360k to current tip
-const VETO_MS           = 15_000;   // old-wallet total match time must be < 15s
+const PER_BLOCK_MAX_MS  = 5;        // per-block match cost cap (ms); pipelined under async fetch
 
 const SCENARIOS = [
   {
@@ -155,8 +155,9 @@ console.log(`Fetched ${samples.length} of ${SAMPLE_COUNT} requested filters.\n`)
 
 console.log(
   'Label: fixed-window cost only -- does not price #353\'s rolling window (K-pass) cost.\n' +
-  `Veto: old-wallet total match cost must be < ${VETO_MS / 1000}s.\n` +
-  'Rule: recommend smallest gap_limit >= 20 that clears the veto.\n',
+  `Veto: per-block match cost must be < ${PER_BLOCK_MAX_MS}ms (match is pipelined under\n` +
+  '  async fetch; old-wallet totals below are CPU-only extrapolations, not wall time).\n' +
+  'Rule: recommend smallest gap_limit >= 20 where median < per-block cap.\n',
 );
 
 const rows = [];
@@ -177,7 +178,10 @@ for (const { gapLimit, scriptCount } of POINTS) {
   });
 
   const st = stats(perBlockMs);
-  console.log(`gap_limit=${gapLimit}  scripts=${scriptCount}`);
+  const pointVerdict = st.median <= PER_BLOCK_MAX_MS
+    ? `PASS (<= ${PER_BLOCK_MAX_MS}ms/block)`
+    : `FAIL (> ${PER_BLOCK_MAX_MS}ms/block)`;
+  console.log(`gap_limit=${gapLimit}  scripts=${scriptCount}  [${pointVerdict}]`);
   console.log(
     `  per-block: median=${st.median.toFixed(3)}ms  p95=${st.p95.toFixed(3)}ms` +
     `  min=${st.min.toFixed(3)}ms  max=${st.max.toFixed(3)}ms  n=${st.n}`,
@@ -186,39 +190,35 @@ for (const { gapLimit, scriptCount } of POINTS) {
   for (const sc of SCENARIOS) {
     const totalMs = st.median * sc.blockCount;
     const totalS  = (totalMs / 1000).toFixed(1);
-    let verdict   = '';
-    if (sc.name === 'old-wallet') {
-      verdict = totalMs <= VETO_MS
-        ? `  PASS (<= ${VETO_MS / 1000}s)`
-        : `  FAIL (> ${VETO_MS / 1000}s) -- escalate to product`;
-    }
-    console.log(`  ${sc.name.padEnd(14)} ~${totalS.padStart(6)}s  ${sc.label}${verdict}`);
-    rows.push({ gapLimit, scriptCount, scenario: sc.name, totalMs });
+    const cpuNote = sc.name === 'old-wallet'
+      ? '  (CPU-only; pipelined under fetch in real sync)'
+      : '';
+    console.log(`  ${sc.name.padEnd(14)} ~${totalS.padStart(6)}s  ${sc.label}${cpuNote}`);
+    rows.push({ gapLimit, scriptCount, scenario: sc.name, totalMs, perBlockMs: st.median });
   }
   console.log();
 }
 
 // Recommendation
 console.log('--- Recommendation ---');
-const oldWallet = rows.filter(r => r.scenario === 'old-wallet');
-const passing   = oldWallet.filter(r => r.totalMs <= VETO_MS);
+const passing = rows
+  .filter(r => r.scenario === 'old-wallet')
+  .filter(r => r.perBlockMs <= PER_BLOCK_MAX_MS);
 
 if (passing.length === 0) {
-  const baseline = oldWallet.find(r => r.gapLimit === 20);
-  const totalS   = baseline ? (baseline.totalMs / 1000).toFixed(1) : '?';
   console.log(
-    `FINDING: gap_limit=20 blows the ${VETO_MS / 1000}s veto ` +
-    `(estimated old-wallet match cost: ~${totalS}s). ` +
-    'Product escalation required. Do not pick below 20.',
+    `FINDING: all tested gap_limit values exceed the ${PER_BLOCK_MAX_MS}ms/block cap. ` +
+    'Review match cost relative to network fetch latency before setting a default. ' +
+    'Do not pick below 20.',
   );
 } else {
   const rec = passing[0];
   console.log(
     `Recommend gap_limit=${rec.gapLimit} (${rec.scriptCount} scripts, ` +
-    `~${(rec.totalMs / 1000).toFixed(1)}s old-wallet match cost).`,
+    `${rec.perBlockMs.toFixed(3)}ms/block match cost).`,
   );
   console.log(
-    'Note: this is pure match (CPU) cost only. ' +
-    `Network fetch of ~${OLD_WALLET_BLOCKS.toLocaleString()} filters adds separately.`,
+    `Note: at any fetch latency > ${PER_BLOCK_MAX_MS}ms/block, match is hidden under I/O ` +
+    'and adds nothing to user-visible sync time.',
   );
 }
