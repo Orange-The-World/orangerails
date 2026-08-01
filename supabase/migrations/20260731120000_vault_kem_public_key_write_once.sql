@@ -14,19 +14,18 @@
 -- the durable guard is a trigger, which fires for every role, service_role and
 -- postgres included.
 --
--- Semantics of the trigger:
+-- Semantics of the trigger (UPDATE and DELETE):
 --   NULL      -> value            permitted   (first registration)
 --   value     -> same value       permitted   (idempotent re-write)
 --   value     -> different value  refused     (substitution)
 --   value     -> NULL             refused     (clearing)
--- The guard is gated on a real change (OLD is not null AND NEW is distinct from
--- OLD), so first registration and an identical re-write are never tripped.
---
--- Defense in depth: column-scoped REVOKE of UPDATE(kem_public_key) from anon
--- and authenticated. These client roles never legitimately rewrite this column
--- (it is set once, on insert), so the revoke narrows the client surface without
--- touching their ability to update other columns of the row. The trigger
--- remains the universal guard; the revoke is the second layer.
+--   DELETE where key IS NULL      permitted   (row never had a key)
+--   DELETE where key IS NOT NULL  refused     (delete-and-reinsert bypass)
+-- The UPDATE guard is gated on a real change (OLD is not null AND NEW is
+-- distinct from OLD), so first registration and an identical re-write pass.
+-- The DELETE guard blocks any deletion of a row that carries a registered key,
+-- preventing a service_role or SECURITY DEFINER caller from bypassing write-once
+-- by deleting and reinserting with different key material.
 --
 -- No rotation path is included, on purpose. A legitimate key swap needs a proof
 -- that the user, not the server, authorized it, and the protocol does not yet
@@ -38,16 +37,13 @@
 -- gated rotation path.
 --
 -- Idempotent: CREATE OR REPLACE for the function, DROP TRIGGER IF EXISTS before
--- each CREATE TRIGGER, a REVOKE of an already-absent privilege is a no-op, and
--- each table block is guarded on the column being present so a project missing
--- it is skipped rather than failing the run.
+-- each CREATE TRIGGER, and each table block is guarded on the column being
+-- present so a project missing it is skipped rather than failing the run.
 --
 -- Reversible, run as postgres:
 --   DROP TRIGGER IF EXISTS trg_user_vault_meta_kem_write_once ON public.user_vault_meta;
 --   DROP TRIGGER IF EXISTS trg_customer_vault_meta_kem_write_once ON public.customer_vault_meta;
 --   DROP FUNCTION IF EXISTS public.enforce_kem_public_key_write_once();
---   GRANT UPDATE (kem_public_key) ON public.user_vault_meta TO anon, authenticated;
---   GRANT UPDATE (kem_public_key) ON public.customer_vault_meta TO anon, authenticated;
 
 BEGIN;
 
@@ -58,47 +54,57 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  IF OLD.kem_public_key IS NOT NULL
-     AND NEW.kem_public_key IS DISTINCT FROM OLD.kem_public_key THEN
-    RAISE EXCEPTION
-      'kem_public_key is write-once and cannot be changed once set (%.%)',
-      TG_TABLE_SCHEMA, TG_TABLE_NAME
-      USING ERRCODE = 'check_violation';
+  IF TG_OP = 'UPDATE' THEN
+    IF OLD.kem_public_key IS NOT NULL
+       AND NEW.kem_public_key IS DISTINCT FROM OLD.kem_public_key THEN
+      RAISE EXCEPTION
+        'kem_public_key is write-once and cannot be changed once set (%.%)',
+        TG_TABLE_SCHEMA, TG_TABLE_NAME
+        USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+  ELSIF TG_OP = 'DELETE' THEN
+    IF OLD.kem_public_key IS NOT NULL THEN
+      RAISE EXCEPTION
+        'kem_public_key is write-once: rows with a registered key cannot be deleted (%.%)',
+        TG_TABLE_SCHEMA, TG_TABLE_NAME
+        USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN OLD;
   END IF;
-  RETURN NEW;
 END;
 $$;
 
 DO $$
 BEGIN
   IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = 'user_vault_meta'
-      AND column_name = 'kem_public_key'
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = 'public.user_vault_meta'::regclass
+      AND attname = 'kem_public_key'
+      AND attnum > 0
+      AND NOT attisdropped
   ) THEN
     DROP TRIGGER IF EXISTS trg_user_vault_meta_kem_write_once ON public.user_vault_meta;
     CREATE TRIGGER trg_user_vault_meta_kem_write_once
-      BEFORE UPDATE ON public.user_vault_meta
+      BEFORE UPDATE OR DELETE ON public.user_vault_meta
       FOR EACH ROW
       EXECUTE FUNCTION public.enforce_kem_public_key_write_once();
-    REVOKE UPDATE (kem_public_key) ON public.user_vault_meta FROM anon, authenticated;
   ELSE
     RAISE NOTICE 'skipped user_vault_meta: kem_public_key column not present';
   END IF;
 
   IF EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = 'customer_vault_meta'
-      AND column_name = 'kem_public_key'
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = 'public.customer_vault_meta'::regclass
+      AND attname = 'kem_public_key'
+      AND attnum > 0
+      AND NOT attisdropped
   ) THEN
     DROP TRIGGER IF EXISTS trg_customer_vault_meta_kem_write_once ON public.customer_vault_meta;
     CREATE TRIGGER trg_customer_vault_meta_kem_write_once
-      BEFORE UPDATE ON public.customer_vault_meta
+      BEFORE UPDATE OR DELETE ON public.customer_vault_meta
       FOR EACH ROW
       EXECUTE FUNCTION public.enforce_kem_public_key_write_once();
-    REVOKE UPDATE (kem_public_key) ON public.customer_vault_meta FROM anon, authenticated;
   ELSE
     RAISE NOTICE 'skipped customer_vault_meta: kem_public_key column not present';
   END IF;
