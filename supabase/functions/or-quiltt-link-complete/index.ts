@@ -59,6 +59,7 @@ import {
   generateAccountEmittedId,
   guardAccountFingerprintKey,
 } from '../_shared/account-fingerprint.ts';
+import { quilttCanonicalAccountKey } from './account-key.ts';
 
 const ENCRYPTED_LABEL_MAX = 4096;
 const QUILTT_CREDENTIALS_SENTINEL = 'quiltt-managed';
@@ -69,6 +70,9 @@ interface LinkCompleteBody {
   widget_token?: string;
   encrypted_label?: string;
   quiltt_connection_id?: string;
+  institution?: string;
+  mask?: string;
+  kind?: string;
 }
 
 function makeServiceClient(): SupabaseClient {
@@ -115,7 +119,25 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         return jsonResponse({ error: 'quiltt_connection_id must be a string ≤256 chars' }, 400, cors);
       }
     }
+    if (body.institution !== undefined) {
+      if (typeof body.institution !== 'string' || !body.institution || body.institution.length > 256) {
+        return jsonResponse({ error: 'institution must be a non-empty string <=256 chars' }, 400, cors);
+      }
+    }
+    if (body.mask !== undefined) {
+      if (typeof body.mask !== 'string' || !body.mask || body.mask.length > 32) {
+        return jsonResponse({ error: 'mask must be a non-empty string <=32 chars' }, 400, cors);
+      }
+    }
+    if (body.kind !== undefined) {
+      if (typeof body.kind !== 'string' || !body.kind || body.kind.length > 64) {
+        return jsonResponse({ error: 'kind must be a non-empty string <=64 chars' }, 400, cors);
+      }
+    }
     const quilttConnectionId = body.quiltt_connection_id ?? null;
+    const quilttInstitution = body.institution ?? null;
+    const quilttMask = body.mask ?? null;
+    const quilttKind = body.kind ?? null;
 
     const service = makeServiceClient();
 
@@ -202,7 +224,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // mappings don't collide.
     //
     // Identity scheme (GH-379): every connection row carries
-    // account_fingerprint (HMAC over subaccount + provider + quilttConnectionId,
+    // account_fingerprint (HMAC over subaccount + provider + canonical_account_key,
     // internal only) and account_emitted_id (random UUID, returned to the
     // client). The fingerprint is the primary dedup key.
     //
@@ -221,10 +243,31 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     let accountEmittedId: string | null = null;
 
     if (quilttConnectionId) {
+      if (!quilttInstitution || !quilttMask || !quilttKind) {
+        return jsonResponse(
+          { error: 'institution, mask, and kind are required when quiltt_connection_id is present' },
+          400,
+          cors,
+        );
+      }
+      let canonicalKey: string;
+      try {
+        canonicalKey = quilttCanonicalAccountKey({
+          institution: quilttInstitution,
+          mask: quilttMask,
+          kind: quilttKind,
+        });
+      } catch (e) {
+        return jsonResponse(
+          { error: e instanceof Error ? e.message : 'invalid account attributes' },
+          400,
+          cors,
+        );
+      }
       const fingerprint = await computeAccountFingerprint(
         subaccountId,
         'quiltt',
-        quilttConnectionId,
+        canonicalKey,
       );
 
       // 5a. Primary dedup: look up by fingerprint.
