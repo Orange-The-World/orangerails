@@ -98,26 +98,25 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     await capture(page, "04-connect-sparrow-landing");
   });
 
-  test('"Launch Stealth Sync" button targets /connect/stealth', async ({ page }) => {
+  test('"Launch Stealth Sync" button navigates via location.assign', async ({ page }) => {
     await page.goto("/connect/sparrow");
-    const launchButton = page.getByRole("button", {
-      name: /launch stealth sync/i,
-    });
+    const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
     await expect(launchButton).toBeVisible();
 
-    const openCallPromise = page.evaluate(() => {
-      return new Promise<string>((resolve) => {
-        const orig = window.open;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).open = (url: string) => {
-          (window as any).open = orig;
-          resolve(url);
-          return null;
-        };
-      });
-    });
+    const navigated = page.evaluate(() =>
+      new Promise<string>((resolve) => {
+        const orig = window.location.assign.bind(window.location);
+        Object.defineProperty(window.location, "assign", {
+          configurable: true,
+          value: (url: string) => {
+            Object.defineProperty(window.location, "assign", { configurable: true, value: orig });
+            resolve(url);
+          },
+        });
+      })
+    );
     await launchButton.click();
-    const opened = await openCallPromise;
-    expect(opened).toContain("/connect/stealth");
+    const destination = await navigated;
+    expect(destination).toContain("/connect/stealth");
   });
 });
