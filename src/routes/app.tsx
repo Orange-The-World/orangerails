@@ -607,11 +607,20 @@ function AppHome() {
       );
 
       if (!discRes.ok) {
-        const detail = await discRes.text().catch(() => "");
-        console.warn("[OrangeRails] Wallet discovery failed:", discRes.status, detail);
-        setNotice(
-          "Connection added. Wallet discovery failed , sync will pull all account transactions until you re-run discovery.",
-        );
+        const rawText = await discRes.text().catch(() => "");
+        console.warn("[OrangeRails] Wallet discovery failed:", discRes.status, rawText);
+        let errData: Record<string, unknown> = {};
+        try {
+          errData = JSON.parse(rawText) as Record<string, unknown>;
+        } catch {
+          /* ignore: handled below */
+        }
+        const errMsg =
+          (typeof errData.body === "string" ? errData.body : undefined) ??
+          (typeof errData.title === "string" ? errData.title : undefined) ??
+          (typeof errData.error === "string" ? errData.error : undefined) ??
+          `Wallet discovery failed (${discRes.status}). Check your credentials and try again.`;
+        setNotice(errMsg);
         return;
       }
 
