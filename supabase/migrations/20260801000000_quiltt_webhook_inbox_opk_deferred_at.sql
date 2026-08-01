@@ -9,5 +9,19 @@
 alter table public.quiltt_webhook_inbox
   add column if not exists opk_deferred_at timestamptz;
 
+-- Rebuild the partial index so pending-queue scans exclude deferred rows.
+-- The predicate cannot be ALTERed in place, so drop and recreate.
+-- Column must exist before the index predicate can reference it (above).
+drop index if exists public.idx_quiltt_webhook_inbox_pending;
+create index if not exists idx_quiltt_webhook_inbox_pending
+  on public.quiltt_webhook_inbox using btree (received_at)
+  where ((processed_at is null) and (opk_deferred_at is null));
+
 -- Undo (safe only while the column holds no data you need):
--- alter table public.quiltt_webhook_inbox drop column if exists opk_deferred_at;
+-- 1) restore the original index predicate (without opk_deferred_at):
+--    drop index if exists idx_quiltt_webhook_inbox_pending;
+--    create index if not exists idx_quiltt_webhook_inbox_pending
+--      on public.quiltt_webhook_inbox (received_at)
+--      where processed_at is null;
+-- 2) then drop the column:
+--    alter table public.quiltt_webhook_inbox drop column if exists opk_deferred_at;
