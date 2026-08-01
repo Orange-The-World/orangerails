@@ -478,7 +478,7 @@ export interface SealedEnvelope {
    *     xpub: string,
    *     label: string,
    *     wallet_birthday: string,    // ISO date
-   *     gap_limit: number,          // default 20
+   *     gap_limit: number,          // default 250
    *     script_type: 'p2pkh' | 'p2sh-p2wpkh' | 'p2wpkh' | 'p2tr'
    *   }
    *   {
