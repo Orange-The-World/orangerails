@@ -382,9 +382,28 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve Playwright base URL
+        # On pull_request: build the Cloudflare Pages branch-preview URL from
+        # the head ref so Playwright tests against the actual branch build.
+        # On push to dev/prod: keep the static deployment URL unchanged.
+        # CF Pages branch-alias slug rules: lowercase, non-alphanumeric to
+        # hyphen, collapse consecutive hyphens, strip trailing hyphens,
+        # truncate at 28 chars.
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            SLUG=$(echo "$GITHUB_HEAD_REF" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed 's/[^a-z0-9]/-/g' \
+              | sed 's/-\+/-/g' \
+              | cut -c1-28 \
+              | sed 's/-$//')
+            echo "PLAYWRIGHT_BASE_URL=https://${SLUG}.orangerails-dev.pages.dev" >> "$GITHUB_ENV"
+          else
+            echo "PLAYWRIGHT_BASE_URL=https://dev.orangerails.com" >> "$GITHUB_ENV"
+          fi
+
       - name: Run Playwright
         env:
-          PLAYWRIGHT_BASE_URL: https://dev.orangerails.com
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
           ACCOUNT_A: ${{ secrets.ACCOUNT_A }}
           ACCOUNT_B: ${{ secrets.ACCOUNT_B }}
