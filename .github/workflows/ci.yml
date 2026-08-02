@@ -440,6 +440,17 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Align ccxt to runtime version
+        # index.ts is the single source of truth: it declares which ccxt version
+        # production executes. devDependencies.ccxt in package.json may drift.
+        # This step extracts that pinned version and re-installs ccxt at it so
+        # the generator runs against the same library production uses.
+        run: |
+          RUNTIME=$(grep -oP 'npm:ccxt@\K[0-9.]+' \
+            supabase/functions/_shared/providers/_ccxt/index.ts | head -1)
+          echo "Aligning ccxt install to runtime version: $RUNTIME"
+          bun add ccxt@"$RUNTIME"
+
       - name: Regenerate CCXT manifest
         # stderr carries the "Wrote ..." summary; redirect to stdout so the log
         # shows it. The generator exits 0 on success; any constructor error for
@@ -466,7 +477,7 @@ jobs:
           )
 
           if [ -n "$DRIFT" ]; then
-            echo "::error::CCXT manifest has substantive drift from installed ccxt. Run 'node scripts/generate-ccxt-manifest.mjs' and commit the output."
+            echo "::error::CCXT manifest has substantive drift. CI installs the ccxt version pinned in index.ts (the runtime source of truth). Run 'bun add ccxt@<that-version> && node scripts/generate-ccxt-manifest.mjs' locally and commit the result."
             echo ""
             echo "Full diff:"
             git diff -- \
