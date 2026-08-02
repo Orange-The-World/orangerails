@@ -135,19 +135,47 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          # esm.sh occasionally 522s mid-bundle. Retry up to 3 times before
-          # giving up so the deploy is not at the mercy of a single CDN hiccup.
-          for attempt in 1 2 3; do
-            if supabase functions deploy --project-ref ${{ steps.target.outputs.supabase_ref }}; then
-              echo "edge functions deployed on attempt $attempt"
-              break
+          # Determine which functions to deploy.
+          # - workflow_dispatch: always deploy all (may be a manual hotfix).
+          # - Force push or fresh branch (before == 000...): cannot diff; deploy all.
+          # - _shared changed: all functions import it; deploy all.
+          # - Otherwise: only deploy functions whose directory changed.
+          BEFORE="${{ github.event.before }}"
+          ALL_FUNCS=$(ls supabase/functions/ | grep -v '^_' || true)
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [[ "$BEFORE" =~ ^0+$ ]]; then
+            DEPLOY_FUNCS="$ALL_FUNCS"
+            echo "Full deploy (workflow_dispatch or force push): $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
+          else
+            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/' 2>/dev/null || true)
+            if echo "$CHANGED" | grep -q 'supabase/functions/_shared/'; then
+              DEPLOY_FUNCS="$ALL_FUNCS"
+              echo "_shared changed; redeploying all functions: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
+            else
+              DEPLOY_FUNCS=$(echo "$CHANGED" | grep -oP 'supabase/functions/\K[^/]+' | grep -v '^_' | sort -u || true)
+              echo "Targeted deploy: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
             fi
-            if [ $attempt -eq 3 ]; then
-              echo "edge functions deploy failed after 3 attempts"
-              exit 1
-            fi
-            echo "attempt $attempt failed; sleeping 15s and retrying"
-            sleep 15
+          fi
+
+          if [ -z "$DEPLOY_FUNCS" ]; then
+            echo "No edge functions changed; skipping deploy"
+            exit 0
+          fi
+
+          # Deploy each function with retry on esm.sh 522 errors.
+          for FUNC in $DEPLOY_FUNCS; do
+            for attempt in 1 2 3; do
+              if supabase functions deploy "$FUNC" --project-ref ${{ steps.target.outputs.supabase_ref }}; then
+                echo "$FUNC deployed on attempt $attempt"
+                break
+              fi
+              if [ $attempt -eq 3 ]; then
+                echo "$FUNC deploy failed after 3 attempts"
+                exit 1
+              fi
+              echo "attempt $attempt for $FUNC failed; sleeping 15s and retrying"
+              sleep 15
+            done
           done
 
       - name: Report pending DB migrations (read-only, never applies)
