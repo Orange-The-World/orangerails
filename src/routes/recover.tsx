@@ -53,7 +53,7 @@ function RecoverPage() {
 
       const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
-        .select("vault_salt, vault_verifier_ciphertext, recovery_ciphertext")
+        .select("vault_salt, vault_verifier_ciphertext, recovery_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
 
@@ -74,15 +74,22 @@ function RecoverPage() {
         });
 
       // Persist the updated key material.
-      const { error: updateErr } = await (supabase as any)
+      // CAS predicate: only update if vault_key_version still matches what we
+      // read above. A concurrent recovery that already bumped the version will
+      // cause 0 rows to match, which we detect with the zero-row check below.
+      const { data: updateData, error: updateErr } = await (supabase as any)
         .from("user_vault_meta")
         .update({
           enc_mek_ciphertext: newEncMekCiphertext,
           recovery_ciphertext: newRecoveryCiphertext,
           vault_key_version: CURRENT_VAULT_KEY_VERSION,
         })
-        .eq("user_id", session.user.id);
+        .eq("user_id", session.user.id)
+        .eq("vault_key_version", meta.vault_key_version)
+        .select("user_id");
       if (updateErr) throw updateErr;
+      if (!updateData || updateData.length === 0)
+        throw new Error("Vault update failed: row not found or a concurrent recovery already updated this vault.");
 
       void logSecurityEvent(supabase, session.user.id, "vault_recover");
 
