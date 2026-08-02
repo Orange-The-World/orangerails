@@ -1,57 +1,48 @@
 /**
- * or-stealth-envelope-update: persist the sync cursor for a stealth
- * connection, without requiring a transaction upload.
+ * or-stealth-envelope-update -- advance the scan-tip cursor for a stealth connection.
  *
- * Naming note: the function name is fixed by consumer-side proxy
- * allow-lists that already include it, which is why it says "envelope"
- * while the envelope itself is only ever replaced in
- * or-stealth-connection-create.
+ * Master plan: STEALTH-SYNC-MASTER-PLAN.md section 4.6.
  *
- * Why this exists: the widget's sync starts from
- * max(birthday_height, last_block_scanned + 1). Until now the cursor
- * only advanced inside or-stealth-transactions-store, which consumer
- * apps that set skip_transaction_upload never call (and which nobody
- * calls on a sync that found zero new transactions). Result: those
- * syncs rescanned the whole birthday-to-tip window every time. The
- * widget now posts the cursor here at the end of every successful
- * sync, whether or not transactions were uploaded.
+ * Called by the widget in step 4 of the sync flow (sync.tsx lines 286-337),
+ * after or-stealth-transactions-store has stored any new sealed transactions.
+ * or-stealth-transactions-store advances last_block_scanned only to the max
+ * block_height of rows it actually committed; this function advances it to the
+ * true scan tip (the chain tip at the time runSync finished), so syncs that
+ * found zero matching transactions still move the window forward and the next
+ * sync does not rescan the same range.
  *
  * POST body:
- *   connection_id:      string (uuid, required)
- *   app_user_id:        string (required)
- *   app_slug:           string (optional, defense-in-depth filter)
- *   last_block_scanned: number (required, non-negative integer)
- *
- * Rules:
- *   - The cursor only moves FORWARD here. A value at or below the stored
- *     cursor is acknowledged but not written (idempotent, and a stale or
- *     buggy client cannot rewind another tab's progress). Cursor RESETS
- *     (for a changed wallet birthday or an explicit full rescan) happen in
- *     or-stealth-connection-create when the envelope is replaced, not here.
+ *   connection_id:      string (uuid)
+ *   app_user_id:        string
+ *   last_block_scanned: number (non-negative integer, the scan tip)
  *
  * Response:
- *   { connection_id, last_block_scanned, updated }
+ *   { connection_id, last_block_scanned }
+ *   last_block_scanned reflects the stored cursor after the call. It may be
+ *   higher than the supplied value when a concurrent call already advanced it;
+ *   it is never lower (forward-only guard).
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
+import {
+  authenticateRequest,
+  isAuthError,
+  getCallerPlatformId,
+} from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 interface EnvelopeUpdateRequestBody {
   connection_id?: string;
   app_user_id?: string;
-  app_slug?: string;
   last_block_scanned?: number;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+interface EnvelopeUpdateResponseBody {
+  connection_id: string;
+  last_block_scanned: number;
+}
 
-// Plausibility ceiling for a block height. Bitcoin adds ~52,600 blocks a
-// year, so real heights stay far below this for well over a century. A
-// cursor poisoned with an absurdly high value would make every future
-// sync silently skip real blocks, and the forward-only rule would make
-// that sticky, so nonsense is rejected outright.
-const MAX_PLAUSIBLE_HEIGHT = 10_000_000;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -73,14 +64,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'app_user_id required' }, 400, cors);
     }
     if (
+      body.last_block_scanned === undefined ||
       typeof body.last_block_scanned !== 'number' ||
       !Number.isInteger(body.last_block_scanned) ||
-      body.last_block_scanned < 0 ||
-      body.last_block_scanned > MAX_PLAUSIBLE_HEIGHT
+      body.last_block_scanned < 0
     ) {
       return jsonResponse(
-        { error: `last_block_scanned must be an integer between 0 and ${MAX_PLAUSIBLE_HEIGHT}` },
-        400, cors,
+        { error: 'last_block_scanned must be a non-negative integer' },
+        400,
+        cors,
       );
     }
 
@@ -90,29 +82,28 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (ctx.mode === 'direct' && body.app_user_id !== ctx.userId) {
       return jsonResponse(
         { error: 'app_user_id must match the authenticated user' },
-        403, cors,
+        403,
+        cors,
       );
     }
 
-    // Every stealth_connections read/write must be scoped to the calling
-    // platform, derived server-side from the API key. Resolve once here.
+    // Audit 2026-05-16 High #2: every stealth_connections read/write must be
+    // bound to the calling platform. Resolve once here.
     const platformIdOrErr = await getCallerPlatformId(ctx);
     if (isAuthError(platformIdOrErr)) {
       return jsonResponse({ error: platformIdOrErr.message }, platformIdOrErr.status, cors);
     }
     const callerPlatformId = platformIdOrErr;
 
-    let query = ctx.serviceClient
+    // Read the current cursor so we can apply the forward-only guard.
+    // Two round trips (read then conditional write) keeps the logic
+    // transparent and auditable without a stored procedure.
+    const { data: row, error: selErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .select('id, last_block_scanned')
+      .select('id, app_user_id, last_block_scanned')
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
-      .eq('app_user_id', body.app_user_id);
-    if (body.app_slug) {
-      query = query.eq('app_slug', body.app_slug);
-    }
-    const { data: row, error: selErr } = await query.maybeSingle();
-
+      .maybeSingle();
     if (selErr) {
       console.error('[or-stealth-envelope-update] select failed:', selErr);
       return jsonResponse({ error: 'Failed to load stealth connection' }, 500, cors);
@@ -120,54 +111,46 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (!row) {
       return jsonResponse({ error: 'Connection not found' }, 404, cors);
     }
-
-    const stored = (row.last_block_scanned as number | null) ?? -1;
-    if (body.last_block_scanned <= stored) {
-      // Forward-only: acknowledge without writing.
-      return jsonResponse(
-        {
-          connection_id: row.id as string,
-          last_block_scanned: stored,
-          updated: false,
-        },
-        200, cors,
-      );
+    if ((row.app_user_id as string) !== body.app_user_id) {
+      return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
-    // Same pins as the select (platform, id, app_user_id), plus an
-    // atomic forward-only guard: without the .or filter, two interleaved
-    // requests could land a lower cursor after a higher one.
-    let update = ctx.serviceClient
+    const storedCursor = (row.last_block_scanned as number | null) ?? -1;
+
+    // Forward-only guard: never move the cursor backwards. Return the current
+    // stored value without touching the row. Concurrent calls that race to
+    // write the same tip are both safe: the first one lands, the second is a
+    // no-op here (equal, not greater-than).
+    if (body.last_block_scanned <= storedCursor) {
+      const resp: EnvelopeUpdateResponseBody = {
+        connection_id: body.connection_id,
+        last_block_scanned: storedCursor,
+      };
+      return jsonResponse(resp, 200, cors);
+    }
+
+    const { error: updErr } = await ctx.serviceClient
       .from('stealth_connections')
       .update({
         last_block_scanned: body.last_block_scanned,
         last_sync_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
       })
       .eq('platform_id', callerPlatformId)
-      .eq('id', row.id as string)
-      .eq('app_user_id', body.app_user_id)
-      .or(`last_block_scanned.is.null,last_block_scanned.lt.${body.last_block_scanned}`);
-    if (body.app_slug) {
-      update = update.eq('app_slug', body.app_slug);
-    }
-    const { error: updErr } = await update;
-
+      .eq('id', body.connection_id);
     if (updErr) {
       console.error('[or-stealth-envelope-update] update failed:', updErr);
-      return jsonResponse({ error: 'Failed to update sync cursor' }, 500, cors);
+      return jsonResponse({ error: 'Failed to update cursor' }, 500, cors);
     }
 
-    return jsonResponse(
-      {
-        connection_id: row.id as string,
-        last_block_scanned: body.last_block_scanned,
-        updated: true,
-      },
-      200, cors,
-    );
+    const resp: EnvelopeUpdateResponseBody = {
+      connection_id: body.connection_id,
+      last_block_scanned: body.last_block_scanned,
+    };
+    return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-envelope-update] fatal:', err);
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-}));
+}, 'or-stealth-envelope-update'));
+
+export type { EnvelopeUpdateRequestBody, EnvelopeUpdateResponseBody };
