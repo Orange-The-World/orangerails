@@ -316,18 +316,12 @@ async function handleEvent(
     return `invalid opk_public: ${e instanceof Error ? e.message : String(e)}`;
   }
 
-  // Pull transactions paginated. We need the connection id from the
-  // event payload to scope the pull.
-  const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
-  if (!connectionId) return 'event missing record.id';
-
   // Find the OR-side connection row tied to this Quiltt link. For Phase
   // 1 we expect or-link-complete (Quiltt branch) to have created it; if
   // not, we skip and let the user-session sync path create it on next
   // open.
-  //
-  // Quiltt confirms successful sync: clear any error state so the connection shows active.
-  await reconcileConnectionSuccess(client, connectionId, subaccountId);
+  // connectionId was extracted and reconcileConnectionSuccess was called before
+  // the OPK gate above so all subaccounts get status reconciled (DL-0441).
 
   // Schema note: connections.user_id was dropped in
   // 20260421200000_platforms_subaccounts.sql; the current owning column
