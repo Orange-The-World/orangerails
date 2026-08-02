@@ -1,18 +1,20 @@
 # CCXT exchange support matrix
 
-**Generated:** 2026-05-15 from `ccxt@4.4.30` introspection.
+**Generated:** 2026-08-02 from `ccxt@4.4.30` introspection.
 
 **Total wired:** 98 exchanges using OR's standard CCXT adapter.
 
 **Skipped:** 11 exchanges using credential shapes that need adapter changes (privateKey+walletAddress for DEX wrappers, accountId+apiKey+secret, apiKey-only sandboxes). Tracked as a Sprint 2 follow-up.
 
+Regenerate with: `node scripts/generate-ccxt-manifest.mjs`
+
 ## What the matrix means
 
 Three CCXT capabilities matter to OR sync:
 
-* **trades**: `fetchMyTrades` available, OR can pull buy/sell history
-* **deposits**: `fetchDeposits` available, OR can pull funding events
-* **withdrawals**: `fetchWithdrawals` available, OR can pull payouts
+* **trades** — `fetchMyTrades` available, OR can pull buy/sell history
+* **deposits** — `fetchDeposits` available, OR can pull funding events
+* **withdrawals** — `fetchWithdrawals` available, OR can pull payouts
 
 If `trades` is false for an exchange, sync surfaces zero transactions until CCXT adds it upstream. That's a CCXT limitation, not OR.
 
@@ -110,7 +112,7 @@ If `trades` is false for an exchange, sync surfaces zero transactions until CCXT
 | ProBit | `probit` | SC, KR | ✅ | ✅ | ✅ | apiKey+secret |
 | TimeX | `timex` | AU | ✅ | ✅ | ✅ | apiKey+secret |
 | Tokocrypto | `tokocrypto` | ID | ✅ | ✅ | ✅ | apiKey+secret |
-| tradeogre | `tradeogre` | - | ❌ | ❌ | ❌ | apiKey+secret |
+| tradeogre | `tradeogre` | — | ❌ | ❌ | ❌ | apiKey+secret |
 | Waves.Exchange | `wavesexchange` | CH | ✅ | ❌ | ❌ | apiKey+secret |
 | WazirX | `wazirx` | IN | ❌ | ✅ | ✅ | apiKey+secret |
 | WOO X | `woo` | KY | ✅ | ✅ | ✅ | apiKey+secret |
@@ -118,3 +120,19 @@ If `trades` is false for an exchange, sync surfaces zero transactions until CCXT
 | YoBit | `yobit` | RU | ✅ | ❌ | ❌ | apiKey+secret |
 | Zaif | `zaif` | JP | ❌ | ❌ | ❌ | apiKey+secret |
 | Zonda | `zonda` | EE | ✅ | ❌ | ❌ | apiKey+secret |
+
+## Skipped (need adapter changes)
+
+| Exchange | Cred shape required |
+|----------|---------------------|
+| `bitpanda` | apiKey |
+| `blockchaincom` | secret |
+| `coinmetro` | token+uid |
+| `hyperliquid` | privateKey+walletAddress |
+| `idex` | apiKey+privateKey+secret+walletAddress |
+| `lykke` | apiKey |
+| `ndax` | apiKey+login+password+secret+uid |
+| `onetrading` | apiKey |
+| `paradex` | privateKey+walletAddress |
+| `vertex` | privateKey+walletAddress |
+| `woofipro` | accountId+apiKey+secret |
