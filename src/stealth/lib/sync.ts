@@ -877,9 +877,24 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('uploading', 0));
   emit(opts, progress('uploading', 100));
 
+  // Benign producer lag: every skipped height that survived the hole check
+  // above is at or above the producer frontier, i.e. the producer has not
+  // published it yet. Advancing the cursor to `tip` would seal it over those
+  // gaps, and once the producer backfills them the cursor would already be
+  // past, so those blocks would never be re-read. Cap the reported cursor
+  // just below the lowest still-missing height so the next run resumes there.
+  // This fix is forward-only and NOT retroactive: rows already persisted with
+  // a cursor above an earlier gap are corrected separately as prod DML
+  // (two-party), tracked in its own ticket, not here.
+  const lowestSkipped = skippedHeights.reduce(
+    (m, h) => (h < m ? h : m),
+    Number.POSITIVE_INFINITY,
+  );
+  const lastBlockScanned = Math.min(tip, lowestSkipped - 1);
+
   return {
     txCount: normalized.length,
-    lastBlockScanned: tip,
+    lastBlockScanned,
     bytesDownloaded,
     sealedTransactions,
     normalized,
