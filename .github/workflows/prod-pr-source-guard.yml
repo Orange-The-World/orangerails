@@ -1,0 +1,128 @@
+name: prod pr source guard
+
+# Why this gate exists.
+#
+# On 2026-07-31 prod was 26 commits ahead of dev, up from 15 the same morning.
+# None of those commits carried code dev was missing: all of it had already been
+# hand-back-ported. What was missing was the history link, so git still saw the
+# branches as divergent and the standing promotion PR sat unmergeable.
+#
+# That is a loop, and it feeds itself:
+#
+#   1. the promotion PR conflicts, so dev to prod promotion is blocked
+#   2. so fixes get opened directly against prod, or cherry-picked onto it
+#   3. each of those adds a commit that exists only on prod
+#   4. which deepens the promotion PR's conflict, forcing the next cherry-pick
+#
+# Reconciling the branches fixes the symptom once. Only this gate stops step 2,
+# which is the step that regenerates the whole problem. Without it the divergence
+# rebuilds itself within weeks, which is what happened the last two times this was
+# cleaned up.
+#
+# The rule: prod is written to by promoting dev, and by nothing else.
+
+on:
+  pull_request:
+    # `edited` matters as much as the others: it is what fires when someone
+    # retargets an existing PR onto prod after it was opened elsewhere. Without
+    # it, a PR opened against dev and later repointed at prod is never checked.
+    types: [opened, reopened, synchronize, edited, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  source-guard:
+    name: prod pull requests must come from dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Self-test the decision logic
+        run: |
+          set -euo pipefail
+
+          # The same function the real check uses, exercised against the four
+          # cases that matter before it is trusted with a verdict. A gate that
+          # has never been shown to fail is not known to work.
+          verdict() {
+            head_ref="$1"
+            labels="$2"
+
+            if [ "${head_ref}" = "dev" ]; then
+              echo "allow-promotion"
+              return
+            fi
+
+            if printf '%s' "${labels}" | jq -e 'any(. == "prod-hotfix")' >/dev/null; then
+              echo "allow-hotfix"
+              return
+            fi
+
+            echo "block"
+          }
+
+          fail=0
+          check() {
+            got="$(verdict "$2" "$3")"
+            if [ "${got}" != "$4" ]; then
+              echo "::error::self-test '$1' expected '$4', got '${got}'"
+              fail=1
+            else
+              echo "ok: $1 -> ${got}"
+            fi
+          }
+
+          check "the promotion PR"            "dev"                    '[]'                          "allow-promotion"
+          check "an ordinary fix branch"      "fix/some-bug"           '[]'                          "block"
+          check "a hand-promote branch"       "promote/dl-0421-to-prod" '[]'                         "block"
+          check "a labelled emergency hotfix" "fix/urgent"             '["prod-hotfix"]'             "allow-hotfix"
+          check "an unrelated label"          "fix/urgent"             '["documentation"]'           "block"
+
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::decision logic self-test failed. The gate is broken, not passing."
+            exit 1
+          fi
+          echo "Self-test passed: 5 cases, all as expected."
+
+      - name: Check this pull request's source branch
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          echo "base: ${BASE_REF}"
+          echo "head: ${HEAD_REF}"
+          echo "labels: ${LABELS}"
+
+          if [ "${BASE_REF}" != "prod" ]; then
+            echo "Not targeting prod (base: ${BASE_REF}). Nothing to enforce here."
+            exit 0
+          fi
+
+          if [ "${HEAD_REF}" = "dev" ]; then
+            echo "This is the promotion PR. Allowed."
+            exit 0
+          fi
+
+          if printf '%s' "${LABELS}" | jq -e 'any(. == "prod-hotfix")' >/dev/null; then
+            echo "::warning::Emergency hotfix straight to prod, allowed by the 'prod-hotfix' label."
+            echo "::warning::This creates a commit that exists only on prod. Back-merge prod into dev the SAME DAY, or the promotion PR will conflict and the cherry-pick loop starts again."
+            exit 0
+          fi
+
+          echo "::error::A pull request into prod must come from dev. This one comes from '${HEAD_REF}'."
+          echo ""
+          echo "Why this is blocked:"
+          echo "  Merging this would create a commit that exists only on prod. That is what"
+          echo "  makes the promotion PR conflict, which is what forces the next fix to be"
+          echo "  cherry-picked onto prod, which deepens the conflict again."
+          echo ""
+          echo "What to do instead:"
+          echo "  1. Open this against dev. It reaches prod with the next promotion."
+          echo "  2. If the content is ALREADY in dev, this PR is a hand-promotion. Close it:"
+          echo "     the promotion PR carries it, and merging it here only adds divergence."
+          echo "  3. If prod is genuinely broken right now and cannot wait for a promotion,"
+          echo "     add the 'prod-hotfix' label. That is deliberate, visible and auditable,"
+          echo "     and it obliges you to back-merge prod into dev the same day."
+          exit 1

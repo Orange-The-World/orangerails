@@ -17,7 +17,8 @@
  *      OR fetches transactions, encrypts each with transactions_key, stores
  *      ciphertext in encrypted_transactions. Caller fetches via
  *      or-transactions-list and decrypts in-browser.
- *      Response: { synced: number, connections: [{ connection_id, synced, next_cursor, error? }] }
+ *      Response: { synced: number, connections: [{ connection_id, synced?, next_cursor, error? }] }
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *
  *   2. Protocol-driven sink mode (V2 today, V3 future):
  *        { subaccount_id?, connection_ids?, credentials_key, format }
@@ -26,7 +27,8 @@
  *      storage. transactions_key is NOT required.
  *      Response: {
  *        synced: number,
- *        connections: [{ connection_id, synced, next_cursor, error? }],
+ *        connections: [{ connection_id, synced?, next_cursor, error? }],
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *        rows: { <table-name>: [...rows] },
  *        metadata: { format, requires_encryption: string[] }
  *      }
@@ -94,6 +96,22 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
   const bytes = new TextEncoder().encode(`${errorClass}|${redacted}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Determine the HTTP status for a batch sync response.
+ *   200 -- every connection succeeded (or the batch was empty).
+ *   207 -- some connections succeeded, some failed.
+ *   422 -- every connection in the batch failed.
+ *
+ * Exported so the pure logic can be unit-tested without a Deno.serve mock.
+ */
+export function batchHttpStatus(results: Array<{ synced?: number; error?: string }>): number {
+  if (results.length === 0) return 200;
+  const errCount = results.filter(r => r.error != null).length;
+  if (errCount === 0) return 200;
+  if (errCount === results.length) return 422;
+  return 207;
 }
 
 
@@ -311,7 +329,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ synced: 0, connections: [] }, 200, cors);
     }
 
-    const results: Array<{ connection_id: string; synced: number; next_cursor: string | null; error?: string }> = [];
+    const results: Array<{
+      connection_id: string;
+      synced?: number;
+      next_cursor: string | null;
+      error?: string;
+      correlation_id?: string;
+      message?: string;
+      detail?: string;
+      action?: string;
+      help_url?: string | null;
+      skip_reason?: string;
+    }> = [];
     // Sink-mode-only: collect per-connection sink outputs to merge into
     // a single `rows` map at the end. Empty in legacy mode.
     const sinkOutputs: SinkOutput[] = [];
@@ -345,7 +374,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               .maybeSingle();
             if (mapErrSink) throw mapErrSink;
             if (!mapRowSink) {
-              results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+              console.log(`[or-sync] quiltt no-map-row skip (sink) subaccount=${subaccountId}`);
+              results.push({ connection_id: conn.id, synced: 0, next_cursor: null, skip_reason: 'no_quiltt_profile_map' });
               continue;
             }
 
@@ -576,9 +606,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             .maybeSingle();
           if (mapErr) throw mapErr;
           if (!mapRow) {
-            // Link was never completed for this subaccount. Surface a
-            // structured no-op result; integrator's UI explains.
-            results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+            // Link was never completed for this subaccount. Log the skip so
+            // it is visible in edge logs and surface a reason field so callers
+            // can distinguish a genuine zero-sync from a missing-profile bail.
+            console.log(`[or-sync] quiltt no-map-row skip (legacy) subaccount=${subaccountId}`);
+            results.push({ connection_id: conn.id, synced: 0, next_cursor: null, skip_reason: 'no_quiltt_profile_map' });
             continue;
           }
 
@@ -922,9 +954,31 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           if (upsertErr) throw upsertErr;
         }
 
+        // Advance last_sync_cursor only when this pass BOTH persisted at least
+        // one transaction for THIS connection AND the adapter returned a real
+        // cursor. newTxs is the honest persisted count in both paths: it is
+        // exactly what the V3 upsert writes (and that upsert rethrows on error
+        // above, so a nonzero length here cannot include a failed write) and
+        // exactly what sink mode hands the consumer. Evaluated once per pass,
+        // not per page. Two failure modes this closes:
+        //   - Empty pass banking a stale next_cursor left in scope: skipped
+        //     because nothing persisted (a connection banking a cursor left
+        //     in scope from an unrelated connection's pass).
+        //   - A pass that persisted rows but whose adapter returned a null
+        //     next_cursor: we refresh liveness but leave the cursor untouched,
+        //     never writing null, which would rewind the window and drop history.
+        // Liveness and health reporting are refreshed on every pass regardless.
+        const connUpdate: Record<string, unknown> = {
+          last_sync_at: new Date().toISOString(),
+          status: 'active',
+          encrypted_last_error: null,
+        };
+        if (newTxs.length > 0 && next_cursor != null) {
+          connUpdate.last_sync_cursor = next_cursor;
+        }
         await ctx.serviceClient
           .from('connections')
-          .update({ last_sync_at: new Date().toISOString(), last_sync_cursor: next_cursor, status: 'active', encrypted_last_error: null })
+          .update(connUpdate)
           .eq('id', conn.id);
 
         results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
@@ -1009,7 +1063,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         const copy = lookupErrorCopy(code);
         results.push({
           connection_id: conn.id,
-          synced: 0,
           next_cursor: null,
           error: code,
           correlation_id: correlationId,
@@ -1027,7 +1080,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       const merged = mergeSinkOutputs(sinkOutputs);
       return jsonResponse(
         {
-          synced: results.reduce((s, r) => s + r.synced, 0),
+          synced: results.reduce((s, r) => s + (r.synced ?? 0), 0),
           connections: results,
           rows: merged.rows,
           metadata: {
@@ -1035,24 +1088,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             requires_encryption: merged.metadata.requires_encryption,
           },
         },
-        200,
+        batchHttpStatus(results),
         cors,
       );
     }
 
-    return jsonResponse({ synced: results.reduce((s, r) => s + r.synced, 0), connections: results }, 200, cors);
+    return jsonResponse({ synced: results.reduce((s, r) => s + (r.synced ?? 0), 0), connections: results }, batchHttpStatus(results), cors);
 
   } catch (err) {
     console.error('[or-sync] fatal:', err);
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-}));
+}, 'or-sync'));
 
 /**
  * Merge the Strike poll batch and the Strike webhook-drain batch into the one
  * array handed to the single `encrypted_transactions` upsert.
  *
- * ─── 1. Why this dedupes. DO NOT REMOVE. ─────────────────────────
+ * ─── 1. Why this dedupes. DO NOT REMOVE. ─────────────────────────────────
  *
  * That upsert is ONE statement with onConflict 'connection_id,external_id' and
  * ignoreDuplicates:false, i.e. ON CONFLICT DO UPDATE. Postgres raises SQLSTATE
@@ -1079,7 +1132,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
  * so the webhook queue is their only discovery path. A payment lost to an
  * aborted batch is lost PERMANENTLY.
  *
- * ─── 2. Why the drain wins, and why the fallback is GUARDED. ─────────
+ * ─── 2. Why the drain wins, and why the fallback is GUARDED. ─────────────
  *
  * The drain's GET-by-id is the fresher read, so the drain record wins wholesale
  * for every field. But its source_wallet_id is null far more often than the

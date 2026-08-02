@@ -24,13 +24,27 @@
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY — standard
  */
 
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import {
+  chooseProfileId,
+  chooseRouting,
+  metadataSubaccountId,
+  profileIdFromPayload,
+  redactProviderError,
+  redactProviderId,
+} from './resolve.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
 const TX_PAGE_SIZE = 100;
+// A row that fails its routing precondition on every attempt can never be
+// processed, so it holds a BATCH_SIZE slot forever. After this many tries
+// the row is retired to dead-letter state (processed_at set, last_error
+// preserved) in the same UPDATE as the final attempt counter, so it cannot
+// take another slot and the queue head always advances past it.
+const MAX_ATTEMPTS = 25;
 // 50 pages × 100 = 5,000 transactions per connection per webhook event.
 // Covers most banks' full available history (Quiltt typically caps at ~2y).
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
@@ -79,13 +93,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   let failed    = 0;
   let skipped   = 0;
 
-  // Pull a batch of pending events
-  const { data: pending, error: pendErr } = await client
-    .from('quiltt_webhook_inbox')
-    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts')
-    .is('processed_at', null)
-    .order('received_at', { ascending: true })
-    .limit(BATCH_SIZE);
+  // Pull a batch of pending, non-deferred events.
+  // fetchPendingBatch filters both processed_at IS NULL and opk_deferred_at IS NULL
+  // so opk-deferred rows never pile up at the head and starve drainable events.
+  const { data: pending, error: pendErr } = await fetchPendingBatch(client, BATCH_SIZE);
 
   if (pendErr) {
     console.error('[or-quiltt-sync] inbox query failed:', pendErr.message);
@@ -97,29 +108,65 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   for (const ev of pending as PendingEvent[]) {
     try {
-      // Re-resolve mapping if missing (link-race tolerance)
+      // Re-resolve routing if missing (link-race tolerance).
+      //
+      // Two sources, in order of authority. The second one is the point:
+      // this block used to try quiltt_profile_map ONLY, which is the same
+      // lookup or-quiltt-webhook already ran when it wrote NULL in the first
+      // place. Re-running an identical query against unchanged data returns
+      // the identical miss, so an event that missed once missed on every
+      // tick forever. That is not link-race tolerance, it is a loop, and in
+      // production it ran attempt counters past 11,000 while the answer sat
+      // unread in the payload beside it (DL-0465).
+      //
+      // Nothing here trusts the payload for platform_id. The subaccount row
+      // is looked up and platform_id read off it, so a metadata value naming
+      // a subaccount that does not exist stays unresolved.
+      //
+      // Those decisions now live in ./resolve.ts, where they are covered by
+      // fixtures. What is left here is the two lookups, which are the part
+      // that needs a client.
       let { platform_id, subaccount_id } = ev;
-      if (!subaccount_id) {
-        const profileId = ev.payload?.profile?.id;
-        if (typeof profileId === 'string') {
-          const m = await client
+      if (!platform_id || !subaccount_id) {
+        const profileId = profileIdFromPayload(ev);
+        const metaSub   = metadataSubaccountId(ev);
+
+        const mapRow = profileId
+          ? (await client
             .from('quiltt_profile_map')
             .select('platform_id, subaccount_id')
             .eq('quiltt_profile_id', profileId)
-            .maybeSingle();
-          if (m.data) {
-            platform_id   = m.data.platform_id;
-            subaccount_id = m.data.subaccount_id;
-            await client
-              .from('quiltt_webhook_inbox')
-              .update({ platform_id, subaccount_id })
-              .eq('event_id', ev.event_id);
-          }
+            .maybeSingle()).data
+          : null;
+
+        const subRow = metaSub
+          ? (await client
+            .from('subaccounts')
+            .select('id, platform_id')
+            .eq('id', metaSub)
+            .maybeSingle()).data
+          : null;
+
+        const routed = chooseRouting(ev, mapRow, subRow);
+        if (routed.source === 'metadata') {
+          console.warn(
+            `[or-quiltt-sync] event ${ev.event_id}: routed via profile metadata ` +
+              `after quiltt_profile_map missed (profile ${profileId ?? 'unknown'})`,
+          );
+        }
+        platform_id   = routed.platform_id;
+        subaccount_id = routed.subaccount_id;
+
+        if (subaccount_id && platform_id) {
+          await client
+            .from('quiltt_webhook_inbox')
+            .update({ platform_id, subaccount_id })
+            .eq('event_id', ev.event_id);
         }
       }
       if (!subaccount_id || !platform_id) {
         // Still no mapping; mark attempted but not processed (try next cycle)
-        await bumpAttempts(client, ev.event_id, 'mapping-missing');
+        await bumpAttempts(client, ev, 'mapping-missing');
         skipped++;
         continue;
       }
@@ -131,13 +178,20 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       } else if (handled === 'skipped') {
         await markProcessed(client, ev.event_id);  // no-op events still mark done
         skipped++;
+      } else if (handled === 'deferred') {
+        // opk_public not yet set. Stamp opk_deferred_at so the batch query
+        // skips this row on future ticks. When the subaccount registers an
+        // OPK, the caller must clear opk_deferred_at for this row to
+        // re-enter the queue.
+        await markDeferred(client, ev.event_id);
+        skipped++;
       } else {
-        await bumpAttempts(client, ev.event_id, handled);
+        await bumpAttempts(client, ev, handled);
         failed++;
       }
     } catch (e) {
       console.error(`[or-quiltt-sync] event ${ev.event_id} threw:`, e instanceof Error ? e.message : String(e));
-      await bumpAttempts(client, ev.event_id, e instanceof Error ? e.message : String(e));
+      await bumpAttempts(client, ev, e instanceof Error ? e.message : String(e));
       failed++;
     }
   }
@@ -147,7 +201,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
 // ─── event dispatch ──────────────────────────────────────────────────
 
-async function handleEvent(
+export async function handleEvent(
   client: SupabaseClient,
   ev: PendingEvent,
   platformId: string,
@@ -167,22 +221,79 @@ async function handleEvent(
     .single();
   if (subErr || !sub) return `subaccount lookup failed: ${subErr?.message}`;
   if (!sub.opk_public) {
-    // No opt-in. Defer until user opens app (or-sync will drain).
-    return 'skipped';
+    // No OPK registered. Return deferred so the main loop stamps
+    // opk_deferred_at and the batch query skips this row until a
+    // key is registered and the flag is cleared.
+    return 'deferred';
   }
   if (sub.opk_alg !== OPK_SEAL_ALG) {
     return `unsupported opk_alg: ${sub.opk_alg}`;
   }
 
-  // Profile id for Basic auth
+  // Profile id for Basic auth.
+  //
+  // maybeSingle, not single: a missing map row is an expected state, not a
+  // query failure. Every Quiltt profile minted before the map's first row on
+  // 2026-06-10 has none, and none can be created for them, because
+  // quiltt_environment_id is NOT NULL and no webhook payload carries an
+  // environment id. Treating that as an error is what returned `profile map
+  // missing` on every tick forever (DL-0465).
+  //
+  // The fallback is the profile id on the payload, which arrived on an
+  // HMAC-verified request. It scopes the data pull and nothing else: the
+  // platform this data is filed under still comes off the subaccount row.
+  //
+  // Note this reads the map by subaccount_id, while the re-resolve block above
+  // reads it by profile id. Two keys into one table can disagree, and here they
+  // do: a legacy subaccount that later mints a session gets a NEW profile mapped
+  // to it while its queued events still carry the old one. chooseProfileId keeps
+  // the event's own profile in that case, because only that credential can read
+  // the connection the event is about.
   const { data: map, error: mapErr } = await client
     .from('quiltt_profile_map')
     .select('quiltt_profile_id')
     .eq('subaccount_id', subaccountId)
-    .single();
-  if (mapErr || !map) return `profile map missing: ${mapErr?.message}`;
+    .maybeSingle();
+  if (mapErr) return `profile map lookup failed: ${mapErr.message}`;
 
-  const basic = btoa(`${map.quiltt_profile_id}:${apiKey}`);
+  const profile = chooseProfileId(map?.quiltt_profile_id ?? null, ev, subaccountId);
+  if (profile.source === 'route-conflict') {
+    // The payload would have supplied the credential, and it does not agree
+    // with us about where its own data belongs. That is the signature of a row
+    // misrouted by the receiver's old malformed-batch index shift: the stored
+    // route is complete and confidently wrong. Authenticating as the payload
+    // here succeeds, and lands one customer's transactions under another
+    // customer's OPK. Refusing costs this event a retry, which is recoverable.
+    // The alternative is not.
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: routed to subaccount ${subaccountId}, but the ` +
+        `payload's profile metadata does not name that subaccount. Refusing to authenticate ` +
+        `with the payload's profile. Suspect a misrouted inbox row (DL-0465)`,
+    );
+    return 'payload profile does not corroborate the routed subaccount';
+  }
+  if (!profile.profileId) return 'no quiltt profile id (no map row, none in payload)';
+  if (profile.source === 'payload') {
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: no quiltt_profile_map row for this ` +
+        `subaccount, using the profile id from the verified payload (DL-0465)`,
+    );
+  } else if (profile.source === 'payload-rebound') {
+    // Ids redacted on the same posture as the GraphQL error path below: a
+    // Quiltt identifier does not belong in an edge function log. That does cost
+    // this line the ability to show that the two ids differ, which is the whole
+    // point of it, so the sentence says so and points at where both live. A
+    // human holding the event id can read them from the inbox row and the map.
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: subaccount ${subaccountId} is mapped to ` +
+        `${redactProviderId(String(map?.quiltt_profile_id ?? ''))}, but this event came from a ` +
+        `different profile, ${redactProviderId(profile.profileId)}. Using the event's own ` +
+        `profile. The subaccount was rebound by a later session mint and now has two Quiltt ` +
+        `profiles; both ids are on the inbox row and in quiltt_profile_map (DL-0465)`,
+    );
+  }
+
+  const basic = btoa(`${profile.profileId}:${apiKey}`);
   let recipientPub: Uint8Array;
   try {
     recipientPub = await decodeOpkPublicKey(sub.opk_public);
@@ -279,7 +390,7 @@ async function handleEvent(
     });
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '');
-      return `Quiltt GraphQL ${resp.status}: ${errBody.slice(0, 300)}`;
+      return `Quiltt GraphQL ${resp.status}: ${redactProviderError(errBody, 300)}`;
     }
     const json = await resp.json();
 
@@ -291,29 +402,21 @@ async function handleEvent(
     // no signal. Surface the errors so bumpAttempts fires and the event
     // stays visible for the next cron tick.
     //
-    // Redaction posture: keep only the human-readable `message` from
-    // each error, never the whole error object. A GraphQL error also
-    // carries `locations`, `path`, and a provider-defined `extensions`
-    // blob; serializing all of it into a log and the last_error column
-    // is overly broad. Provider messages can additionally embed
-    // alphanumeric connection/profile identifiers that a numeric-only
-    // filter would never catch. Quiltt IDs are mixed-case (for example
-    // conn_14TJiFDKRJlPiBHuukUIlXZ), so a lowercase-only pass would
-    // still leak the uppercase characters. We first redact any
-    // short-prefix underscore token case-insensitively, then run the
-    // numeric redaction on top. The prefix pass is intentionally
-    // prefix-agnostic: it does not depend on a hardcoded conn_/prof_
-    // list that could drift as Quiltt adds new ID types.
+    // Keep only the human-readable `message` from each error, never the
+    // whole error object. A GraphQL error also carries `locations`,
+    // `path`, and a provider-defined `extensions` blob; serializing all
+    // of it into a log and the last_error column is overly broad.
+    //
+    // Redacting whatever survives that is redactProviderError's job, not
+    // this branch's. It is applied to every return from this call, so
+    // read the posture there rather than here: a comment sitting on one
+    // conditional describes that conditional and nothing else.
     if (Array.isArray(json?.errors) && json.errors.length > 0) {
       const messages = json.errors
         .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
         .filter((m: string) => m.length > 0)
-        .join('; ')
-        .slice(0, 800);
-      const summary = messages
-        .replace(/\b[a-z]{2,8}_[A-Za-z0-9]{6,}\b/gi, '[redacted-id]')
-        .replace(/\b\d{6,}\b/g, '[redacted]')
-        .slice(0, 400);
+        .join('; ');
+      const summary = redactProviderError(messages, 400);
       console.error(`[or-quiltt-sync] GraphQL errors for event ${ev.event_id}:`, summary);
       return `Quiltt GraphQL errors: ${summary}`;
     }
@@ -407,15 +510,89 @@ async function markProcessed(client: SupabaseClient, eventId: string) {
     .eq('event_id', eventId);
 }
 
-async function bumpAttempts(client: SupabaseClient, eventId: string, errMsg: string) {
-  const { data: cur } = await client
+async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, rawErrMsg: string) {
+  // Redact once, on entry, before anything below applies a length limit (#333).
+  //
+  // This is the only function in this file that writes last_error or
+  // retirement_reason, so redacting here covers all four sinks below - the two
+  // column writes, the fallback write, and the console.warn - and covers every
+  // caller that exists today plus any added later, by construction.
+  //
+  // Doing it per-sink instead would need four separate edits and would
+  // reintroduce the #330 ordering defect at the console.warn, which applies its
+  // own shorter limit to its own copy of the string. Doing it per-caller would
+  // need three, and the middle one (the handleEvent result) is a funnel for
+  // eight different failure returns, so "the caller redacts" would still leave
+  // the question open at every one of them.
+  //
+  // The limit is the widest sink (500), so nothing is dropped here that a sink
+  // would otherwise have kept. Every slice below therefore cuts already-redacted
+  // text, which is the property #330 established as the safe order.
+  //
+  // redactProviderError is idempotent, so the two returns that already redact
+  // (the non-ok and GraphQL-errors branches of the transactions fetch) pass
+  // through this unchanged rather than being mangled a second time.
+  const errMsg = redactProviderError(rawErrMsg, 500);
+  const newAttempts = (ev.attempts ?? 0) + 1;
+  const terminal    = newAttempts >= MAX_ATTEMPTS;
+  const { error } = await client
     .from('quiltt_webhook_inbox')
-    .select('attempts')
-    .eq('event_id', eventId)
-    .single();
+    .update({
+      attempts:   newAttempts,
+      last_error: errMsg.slice(0, 500),
+      ...(terminal ? { processed_at: new Date().toISOString(), retirement_reason: ('max-attempts:' + errMsg).slice(0, 500) } : {}),
+    })
+    .eq('event_id', ev.event_id);
+  if (error) {
+    console.error(
+      `[or-quiltt-sync] bumpAttempts UPDATE failed for event ${ev.event_id}: ${error.message}`,
+    );
+    if (terminal) {
+      // The terminal write includes retirement_reason which may not yet exist
+      // in prod. The column reaches prod only via the two-party hand-apply
+      // (SQLA-00069), not by merging #316: apply_migrations is workflow_dispatch
+      // only and is never triggered by a branch push.
+      // If the column is absent the whole UPDATE is rejected and attempts freezes
+      // at its current count. Fall back to a counter-only bump to preserve
+      // attempts and last_error so the row is not stuck at a stale count.
+      // Note: bumping attempts does NOT advance the row in the batch - ordering
+      // is by received_at, not attempts. The real guard against a frozen queue
+      // is that SQLA-00069 must be applied to prod before this code promotes.
+      // Merging #316 alone does not apply the column; only the two-party
+      // hand-apply does.
+      const { error: fbErr } = await client
+        .from('quiltt_webhook_inbox')
+        .update({ attempts: newAttempts, last_error: errMsg.slice(0, 500) })
+        .eq('event_id', ev.event_id);
+      if (fbErr) {
+        console.error(
+          `[or-quiltt-sync] bumpAttempts fallback also failed for event ${ev.event_id}: ${fbErr.message}`,
+        );
+      }
+    }
+  }
+  if (terminal) {
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: retired to dead-letter after ` +
+        `${newAttempts} attempts (${errMsg.slice(0, 100)})`,
+    );
+  }
+}
+
+export async function fetchPendingBatch(client: SupabaseClient, batchSize: number) {
+  return client
+    .from('quiltt_webhook_inbox')
+    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts')
+    .is('processed_at', null)
+    .is('opk_deferred_at', null)
+    .order('received_at', { ascending: true })
+    .limit(batchSize);
+}
+
+export async function markDeferred(client: SupabaseClient, eventId: string) {
   await client
     .from('quiltt_webhook_inbox')
-    .update({ attempts: (cur?.attempts ?? 0) + 1, last_error: errMsg.slice(0, 500) })
+    .update({ opk_deferred_at: new Date().toISOString() })
     .eq('event_id', eventId);
 }
 

@@ -44,33 +44,63 @@ jobs:
         # is a declaration rather than a code scan.
         run: node scripts/check-public-auth.mjs
 
+      - name: Anon RPC grant self-test
+        # The parser IS the control, so it is tested here rather than trusted. Runs before the
+        # check itself so a broken parser fails as a broken parser, not as a silent pass over
+        # every migration.
+        run: node scripts/check-anon-rpc-grants.mjs --selftest
+
+      - name: Anon RPC grant check
+        # A real gate, no continue-on-error. Replays the migrations in order and fails if any
+        # function in the public schema is left executable by anon without being declared in
+        # supabase/anon-executable-rpcs.json with a reason. Source scan only: a grant typed
+        # straight into a SQL console never reaches a migration and is not visible here. See
+        # the script header for that boundary in full.
+        run: node scripts/check-anon-rpc-grants.mjs
+
+      - name: Anon ACL snapshot self-test
+        # The other half of the same control, and the half that reads a real database rather
+        # than our SQL. No credential lives in CI, so the check itself runs against a catalog
+        # snapshot outside this workflow. What runs here is its parser test, because a parser
+        # nobody exercises reports green whether it works or not. It pins the two cases a role
+        # name match gets wrong: an empty grantee (=X/postgres), which is how Postgres writes
+        # PUBLIC, and a NULL acl, which means the built in default stands and PUBLIC holds
+        # EXECUTE. Needs nothing but node, so it is unconditional.
+        run: node scripts/check-anon-acl-snapshot.mjs --selftest
+
       - name: Build
         run: bun run build
 
-  deno-test:
-    name: Test edge functions (Deno)
+  deno-typecheck:
+    name: Typecheck edge functions (Deno)
     runs-on: ubuntu-latest
-    # Why this job exists on prod: every Supabase edge function in this repo is
-    # Deno, and a merge into prod redeploys all of them. Until this job existed
-    # here, prod's copy of this file contained no reference to deno at all, so
-    # an edge function could go from pull request to production having been
-    # neither typechecked nor tested, with the pull request reporting green the
-    # whole way. Green then meant "the frontend built and the smoke test clicked
-    # through", which is not a statement about the code being deployed.
+    # Why this job exists: until 2026-07-26 CI never looked at supabase/functions
+    # at all. `bun run lint` carries continue-on-error (see the note on it above)
+    # and `bun run build` only builds the Vite frontend, so every one of the 37
+    # edge functions could stop compiling with CI still green. The open Strike
+    # attribution pull request showed 9 of 9 checks green on a tree that
+    # `deno check` rejected with 19 errors, one of them a real
+    # Map<string, string> vs Map<string, {...}> mismatch on the Strike drain
+    # path. (No PR number here on purpose: scripts/pre-publish-scan.sh flags
+    # bare #NNNN references in shipping files as dead PR refs.)
     #
-    # This is dev's deno-test job, copied unchanged so the two branches stop
-    # disagreeing about what "CI passed" means. Its sibling deno-typecheck is
-    # deliberately NOT copied yet: prod currently produces 18 error markers under
-    # deno check and, unlike dev's copy, this file carries no DENO_CHECK_BASELINE
-    # ratchet to tolerate a known count, so importing it today would land red on
-    # arrival. That is tracked in #361 and wants the ratchet brought with it.
+    # Gate design -- read this before changing it. This is a RATCHET, not a
+    # wall: it fails only when the error count goes ABOVE the recorded
+    # baseline. A plain `deno check` gate would go red on day one and block
+    # every open PR in the repo; a `continue-on-error: true` advisory would
+    # reproduce the exact blindness this job exists to end. The ratchet does
+    # neither -- new type errors cannot land, the existing backlog is printed
+    # in the job summary on every run, and the number only moves down.
     #
-    # --no-check is deliberate and matches the header of every test file here;
-    # typechecking is that separate job's business.
-    #
-    # As on dev: making this check REQUIRED in the branch ruleset is a FOUNDER
-    # DECISION and has deliberately NOT been done here. Nothing in this change
-    # touches branch protection.
+    # Making this check REQUIRED in the branch ruleset is a FOUNDER DECISION
+    # and has deliberately NOT been done here. Nothing in this PR touches
+    # branch protection.
+    env:
+      # Errors present on dev when this job was added, measured 2026-07-26 with
+      # the pinned Deno below. Lower it in the same PR that fixes errors -- the
+      # job prints the new value when the count drops. At 0, delete the ratchet
+      # and let `deno check` fail on its own.
+      DENO_CHECK_BASELINE: '14'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -78,14 +108,222 @@ jobs:
       - name: Setup Deno
         uses: denoland/setup-deno@v2
         with:
-          # The Supabase edge runtime is deno 2.1.4, so tests run on the runtime
-          # that ships. Same pin as dev.
+          # Pinned, not `latest`. These functions run on Supabase's edge
+          # runtime, which the Supabase CLI provisions as edge-runtime v1.74.2
+          # == deno 2.1.4; typecheck with the tsc the runtime actually ships.
+          # Floating on latest would also move the number for reasons unrelated
+          # to our code: the orangerails tree reports 19 errors on 2.1.4 and 21
+          # on 2.9.4, purely from the newer bundled tsc.
+          deno-version: v2.1.4
+
+      - name: Restore Deno module cache
+        id: deno-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/deno-dir
+          key: deno-v2.1.4-${{ hashFiles('supabase/functions/**/*.ts') }}
+          restore-keys: deno-v2.1.4-
+
+      - name: Populate Deno cache and write lock
+        env:
+          DENO_DIR: ${{ runner.temp }}/deno-dir
+          NO_COLOR: '1'
+        run: |
+          mapfile -t FILES < <(find supabase/functions -name '*.ts' -type f | sort)
+          deno cache --lock=deno.lock --node-modules-dir=auto "${FILES[@]}"
+
+      - name: deno check supabase/functions
+        shell: bash
+        env:
+          DENO_DIR: ${{ runner.temp }}/deno-dir
+          # Deno colourises its diagnostics even when stdout+stderr are
+          # redirected to a file on the runner. The first version of this step
+          # counted "[ERROR]" fine but its per-class breakdown grepped for
+          # 'TS1234 [ERROR]' and matched nothing, because the real bytes are
+          # 'TS1234 <ESC>[0m[ERROR]'. Under `-e -o pipefail` that zero-match
+          # grep killed the step, so the job went red while reporting exactly
+          # the baseline count. NO_COLOR removes the escapes at the source; the
+          # sed below strips them anyway, because a parser that only works when
+          # the output happens to be plain is the same class of unreliable
+          # control this job exists to replace.
+          NO_COLOR: '1'
+        run: |
+          set -u
+
+          # Scoped to the edge functions only. The rest of the repo is
+          # Bun/Vite and is covered by the lint-and-build job.
+          mapfile -t FILES < <(find supabase/functions -name '*.ts' -type f | sort)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::No .ts files found under supabase/functions -- this job is checking nothing. Fix the path rather than let it report green."
+            exit 1
+          fi
+          echo "Checking ${#FILES[@]} file(s) with $(deno --version | head -1)"
+
+          # --node-modules-dir=auto: the repo has a root package.json, so Deno
+          # otherwise refuses npm: specifiers with "run deno install first".
+          RC=0
+          deno check --lock=deno.lock --node-modules-dir=auto "${FILES[@]}" > "$RUNNER_TEMP/deno-check.raw" 2>&1 || RC=$?
+          sed -e 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/deno-check.raw" > "$RUNNER_TEMP/deno-check.log"
+          cat "$RUNNER_TEMP/deno-check.log"
+
+          # One "[ERROR]" marker per diagnostic (the last is additionally
+          # prefixed "error: "). Counting markers is stable; Deno's
+          # "Found N errors." line is not printed when N == 1.
+          ERRORS=$(grep -c '\[ERROR\]' "$RUNNER_TEMP/deno-check.log" || true)
+
+          # A non-zero exit with no diagnostics means the check itself broke
+          # (network, unresolvable import, bad flag). That must never be scored
+          # as "0 errors, under baseline, pass" -- a check that silently stops
+          # checking is the precise failure this job exists to eliminate.
+          if [ "$RC" -ne 0 ] && [ "$ERRORS" -eq 0 ]; then
+            echo "::error::deno check exited $RC without reporting any type diagnostic. The check is broken, not passing."
+            exit 1
+          fi
+
+          {
+            echo "## Deno typecheck: supabase/functions"
+            echo
+            echo "**${ERRORS} error(s)** across ${#FILES[@]} file(s) (ratchet baseline: ${DENO_CHECK_BASELINE})"
+            if [ "$ERRORS" -gt 0 ]; then
+              echo
+              echo "By error class:"
+              echo '```'
+              grep -oE 'TS[0-9]+ \[ERROR\]' "$RUNNER_TEMP/deno-check.log" | sort | uniq -c | sort -rn || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "deno check: ${ERRORS} error(s); ratchet baseline ${DENO_CHECK_BASELINE}"
+
+          if [ "$ERRORS" -gt "$DENO_CHECK_BASELINE" ]; then
+            echo "::error::Edge-function type errors went UP: ${ERRORS} > baseline ${DENO_CHECK_BASELINE}. Fix the new errors listed above. Do not raise the baseline."
+            exit 1
+          fi
+
+          if [ "$ERRORS" -lt "$DENO_CHECK_BASELINE" ]; then
+            echo "::notice::Error count dropped to ${ERRORS}. Lower DENO_CHECK_BASELINE to ${ERRORS} in .github/workflows/ci.yml in this PR so the ratchet holds the ground you just took."
+          fi
+
+      - name: Upload deno.lock
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deno-lock
+          path: deno.lock
+          retention-days: 7
+
+  deno-test:
+    name: Test edge functions (Deno)
+    runs-on: ubuntu-latest
+    # Why this job exists: the repo has carried edge-function tests since long
+    # before this job, and not one of them has ever run. `deno check` above
+    # typechecks supabase/functions but never executes it, vitest's include is
+    # scoped to `src/**/*.test.ts`, and no workflow invoked `deno test` at all.
+    # Nine test files, zero enforcement.
+    #
+    # That is not a theoretical gap. When these were first executed, one had
+    # rotted into asserting the opposite of the shipped behaviour: a Strike
+    # test pinned "callers must uppercase currency before calling
+    # resolveInvoiceWallet" after normalization had already been moved inside
+    # computeWalletFingerprint. It was corrected in the same change that added
+    # this job. A test nobody runs does not decay into useless, it decays into
+    # wrong, and then it blocks whoever finally turns it on.
+    #
+    # --no-check is deliberate and matches the header of every test file here.
+    # Typechecking is the ratchet job above, which tolerates a known baseline;
+    # duplicating it here would make the test job fail for reasons that have
+    # nothing to do with any assertion.
+    #
+    # As with the ratchet job: making this check REQUIRED in the branch ruleset
+    # is a FOUNDER DECISION and has deliberately NOT been done here. Nothing in
+    # this change touches branch protection.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          # Same pin and same reason as the typecheck job above: the Supabase
+          # edge runtime is deno 2.1.4, so tests run on the runtime that ships.
           deno-version: v2.1.4
 
       - name: deno test supabase/functions
         shell: bash
+        env:
+          # The baseline is the number of test files actually present on the
+          # branch this job is running against, and it is PER BRANCH because
+          # the two branches genuinely differ.
+          #
+          # MEASURED 2026-07-31 with this job's own find pattern:
+          #   dev  15 files
+          #   prod  9 files
+          #
+          # The value shipped when this guard landed was 3, which was the count
+          # of test-file DIRECTORIES someone eyeballed rather than the count of
+          # files the pattern collects. A baseline of 3 against a real 15 means
+          # twelve test files can disappear and this job still reports green,
+          # which is the exact failure DL-0459 was opened to stop. The guard was
+          # correct; only its number was wrong.
+          #
+          # Why this is an expression and not one number: prod's tree has 9,
+          # so a single hardcoded 15 promoted from dev to prod turns this job
+          # red on prod the moment it lands, on a count that is correct for
+          # prod. Selecting on the branch lets the same file be true on both.
+          #
+          # When you add or remove a test file, change the number for that
+          # branch in the same PR, and say why in the message if it goes down.
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '15' }}
         run: |
+          set -euo pipefail
+
+          mapfile -t TEST_FILES < <(find supabase/functions \( -name '*_test.ts' -o -name '*.test.ts' \) | sort)
+          FILE_COUNT="${#TEST_FILES[@]}"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::No test files found -- deno test is checking nothing. Fix the path rather than let it report green."
+            exit 1
+          fi
+
+          if [ "$FILE_COUNT" -lt "$DENO_TEST_FILE_BASELINE" ]; then
+            echo "::error::Test file count dropped to ${FILE_COUNT} (baseline: ${DENO_TEST_FILE_BASELINE}). Restore missing files or lower the baseline with justification."
+            printf '%s\n' "${TEST_FILES[@]}" | sed 's/^/  collected: /'
+            exit 1
+          fi
+
+          # Print the collected list, not only the count. A count that matches
+          # the baseline can still be the wrong fifteen files, and the list is
+          # what makes that visible in the log without a rerun.
+          printf '%s\n' "${TEST_FILES[@]}" | sed 's/^/  collected: /'
+          echo "Found ${FILE_COUNT} test file(s) (baseline: ${DENO_TEST_FILE_BASELINE})"
           deno test --no-check --allow-all supabase/functions/
+
+  vitest:
+    name: Unit tests (vitest)
+    runs-on: ubuntu-latest
+    # Why this job exists: src/**/*.test.ts carries discriminating tests for the
+    # stealth/sync orchestrator: birthday height rejection and the stored-cursor
+    # short-circuit requirement. Without this job those tests sit in the tree
+    # and never gate a merge. Runner note: bun test cannot run this suite
+    # because vitest uses vi.stubGlobal, which bun's runner does not implement.
+    # It fails every case for a tooling reason unrelated to the code. npx vitest
+    # run matches the test script in package.json and is the correct runner for
+    # this repo. No PR number here on purpose: pre-publish-scan.sh flags bare
+    # NNNN references in shipping files as dead PR refs.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run vitest
+        run: npx vitest run
 
   playwright:
     name: Playwright smoke
@@ -144,9 +382,31 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve Playwright base URL
+        # On pull_request: build the Cloudflare Pages branch-preview URL from
+        # the head ref so Playwright tests against the actual branch build.
+        # On push to dev/prod: keep the static deployment URL unchanged.
+        # CF Pages branch-alias slug rules: lowercase, non-alphanumeric to
+        # hyphen, collapse consecutive hyphens, strip trailing hyphens,
+        # truncate at 28 chars.
+        run: |
+          # dev and prod branches have no Cloudflare branch preview; their
+          # builds go to the static host. Only feature-branch PRs get
+          # a per-branch preview URL.
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$GITHUB_HEAD_REF" != "dev" ] && [ "$GITHUB_HEAD_REF" != "prod" ]; then
+            SLUG=$(echo "$GITHUB_HEAD_REF" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed 's/[^a-z0-9]/-/g' \
+              | sed 's/-\+/-/g' \
+              | cut -c1-28 \
+              | sed 's/-$//')
+            echo "PLAYWRIGHT_BASE_URL=https://${SLUG}.orangerails-dev.pages.dev" >> "$GITHUB_ENV"
+          else
+            echo "PLAYWRIGHT_BASE_URL=https://dev.orangerails.com" >> "$GITHUB_ENV"
+          fi
+
       - name: Run Playwright
         env:
-          PLAYWRIGHT_BASE_URL: ${{ vars.PLAYWRIGHT_BASE_URL || 'https://orangerails.dev' }}
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
           ACCOUNT_A: ${{ secrets.ACCOUNT_A }}
           ACCOUNT_B: ${{ secrets.ACCOUNT_B }}

@@ -284,8 +284,23 @@ const initMessage = {
   or_stealth_key_b64: derivedKeyB64,   // see Vault setup section above
   return_callback_origin: window.location.origin,
   // connection_id required for sync / list / delete, omit for add
+  // gap_limit: 250,  // optional, see "gap_limit" section below
 };
 ```
+
+**Optional `gap_limit` field.** An integer from 1 to 1000 that seeds
+the gap-limit form field shown to the user on the add route. The user
+can still override the value in the UI; this is just the starting point.
+When absent the widget uses its built-in default (see `DEFAULT_GAP_LIMIT`
+in `src/stealth/lib/postmessage.ts`). Out-of-range values (non-integer,
+below 1, or above 1000) are rejected at INIT with
+`OR_STEALTH_ERROR { code: 'INTERNAL' }` rather than silently clamped.
+
+> **Existing-connection caveat.** This field only affects connections
+> created after the INIT. Sealed envelopes bake in the gap_limit at
+> add-time; passing a new value to a sync or list INIT has no effect on
+> the stored value. Re-issuing a connection (new add) is the only way to
+> change the gap_limit of an existing row.
 
 Two fields the widget validates strictly and will silently reject you
 over if wrong:
@@ -328,6 +343,7 @@ window.addEventListener('message', (event) => {
       break;
     case 'OR_STEALTH_SYNC_COMPLETE':
       // event.data.sealed_transactions[]: see "Sealed envelope schema" above
+      // event.data.address_window_exhausted: boolean | undefined -- see below
       break;
     case 'OR_STEALTH_ERROR':
       // event.data.code, message, retryable
@@ -335,6 +351,40 @@ window.addEventListener('message', (event) => {
   }
 });
 ```
+
+### `OR_STEALTH_SYNC_COMPLETE`: the `address_window_exhausted` field
+
+`OR_STEALTH_SYNC_COMPLETE` carries an optional boolean field
+`address_window_exhausted`. When it is `true`, the widget found
+transactions at or near the top of the derived address window on at
+least one chain, which means the wallet has likely outgrown the current
+window and some transactions may be missing from the result.
+
+**Why this happens.** Stealth Sync derives a fixed set of addresses
+(`gap_limit * 2` per chain) before scanning. Any transaction that pays
+an address beyond that ceiling is silently invisible. A standard BIP44
+gap-limit scan would extend the window when activity is found near the
+top; Stealth Sync currently uses a fixed ceiling to keep the browser
+scan bounded. `address_window_exhausted` tells you when you have hit
+that ceiling.
+
+**What your app must do when this field is true:**
+
+1. Do not book the synced history as authoritative or complete.
+2. Prompt the user: "Some transactions may be missing. Re-connect this
+   wallet with a wider address window to recover the full history."
+3. Offer a path to re-add the wallet with a larger `gap_limit` value
+   (your app passes `gap_limit` inside the sealed envelope payload).
+   A value of 100 recovers most real-world wallets.
+
+**What your app can ignore.** When the field is absent or `false`, the
+history is complete within the current window. You do not need to
+handle the absent case specially: absent and `false` are equivalent.
+
+**Detection predicate.** The flag fires when any matched receive-chain
+or change-chain address has an index >= `gap_limit` within the
+`gap_limit * 2` window. This is the BIP44 signal that the window needs
+extending, implemented client-side with no new network calls.
 
 ### Implementation status: `add` and `sync` are live, `list` and `delete` are not yet
 

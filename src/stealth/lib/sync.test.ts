@@ -330,9 +330,9 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     ]);
   });
 
-  // Condition 4 of issue #335: birthdayHeight outside [0, tip]
-  // must REJECT, never clamp. Clamping would silently claim a scan range
-  // the user never requested and is not recoverable; rejection is.
+  // Condition 4 of issue #335: birthdayHeight outside [0, tip] must REJECT,
+  // never clamp. Clamping would silently claim a scan range the user never
+  // requested and is not recoverable; rejection is.
   it('rejects when birthdayHeight exceeds tip (does not clamp to tip)', async () => {
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
@@ -438,6 +438,233 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(result.sealedTransactions).toEqual([]);
     // Bytes downloaded still tracks both filter and block.
     expect(result.bytesDownloaded).toBeGreaterThan(0);
+  });
+
+  // ── Window exhaustion detection (issue #352) ────────────────────────────
+
+  it('windowExhausted is true when a match lands at or above the exhaustion threshold', async () => {
+    // gap_limit=3 => windowSize=6 => threshold = windowSize - gapLimit = 3.
+    // A match at receive chain index 3 is exactly at the threshold; the flag must fire.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'exhaustion-true',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 3,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    // Derive address at chain=0, index=3 (receive chain, index at threshold).
+    const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 3, 'p2wpkh');
+    const ts = Math.floor(new Date('2024-07-01T00:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({ payToScript: targetScript, amountSats: 10_000n, timestamp: ts });
+    const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+    const blockHashHex = bytesToHex(blockHash);
+    const fakeFilter = new Uint8Array([0xaa]);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 900_000,
+      lastBlockScanned: 900_000,
+      fetchTip: async () => 900_001,
+      fetchFilter: async (h) =>
+        h === 900_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
+      fetchBlock: async () => ({ height: 900_001, blockHashHex, raw: blockBuild.raw }),
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.txCount).toBe(1);
+    expect(result.windowExhausted).toBe(true);
+  });
+
+  it('windowExhausted is false when all matches are well below the exhaustion threshold', async () => {
+    // gap_limit=5 => windowSize=10 => threshold = 5.
+    // A match at receive chain index 0 is far below the threshold; no flag.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'exhaustion-false',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    // Derive address at chain=0, index=0 (receive chain, index far from threshold).
+    const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+    const ts = Math.floor(new Date('2024-07-02T00:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({ payToScript: targetScript, amountSats: 5_000n, timestamp: ts });
+    const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+    const blockHashHex = bytesToHex(blockHash);
+    const fakeFilter = new Uint8Array([0xbb]);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 910_000,
+      lastBlockScanned: 910_000,
+      fetchTip: async () => 910_001,
+      fetchFilter: async (h) =>
+        h === 910_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
+      fetchBlock: async () => ({ height: 910_001, blockHashHex, raw: blockBuild.raw }),
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.txCount).toBe(1);
+    expect(result.windowExhausted).toBe(false);
+  });
+
+  it('seals extension transactions: sealedTransactions includes txs found in rolling-window passes', async () => {
+    // Scenario: gap_limit=2, so initial chainWindowEnd=[4,4] (indices 0..3 per chain).
+    // Block A (height 800_001) pays to index 3 on chain 0: near-edge (3 >= 4-2=2),
+    // so the extension loop fires. Block B (height 800_002) pays to index 4 on chain 0,
+    // which falls in the first extension window (indices 4,5). After the fix, both txs
+    // must appear in sealedTransactions. Before the fix, the sealing loop ran BEFORE
+    // the extension loop, so sealedTransactions had 1 entry while txCount reported 2.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'extension-sealing',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const scriptIdx3 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 3, 'p2wpkh');
+    const scriptIdx4 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 4, 'p2wpkh');
+
+    const tsA = Math.floor(new Date('2024-08-01T10:00:00Z').getTime() / 1000);
+    const tsB = Math.floor(new Date('2024-08-02T10:00:00Z').getTime() / 1000);
+    const blockA = buildFixtureBlock({ payToScript: scriptIdx3, amountSats: 12_345n, timestamp: tsA });
+    const blockB = buildFixtureBlock({ payToScript: scriptIdx4, amountSats: 6_789n, timestamp: tsB });
+
+    const hashHexA = bytesToHex(reverseBytes(await dsha256Async(blockA.raw.subarray(0, 80))));
+    const hashHexB = bytesToHex(reverseBytes(await dsha256Async(blockB.raw.subarray(0, 80))));
+
+    // Filters are distinguishable by first byte so the stub matcher can respond
+    // per-block without a WASM GCS implementation.
+    const filterA = new Uint8Array([0xa1]);
+    const filterB = new Uint8Array([0xa2]);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => 800_002,
+      fetchFilter: async (h) => {
+        if (h === 800_001) return { height: h, blockHashHex: hashHexA, filter: filterA };
+        if (h === 800_002) return { height: h, blockHashHex: hashHexB, filter: filterB };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === hashHexA) return { height: 0, blockHashHex: hashHexA, raw: blockA.raw };
+        if (hashHex === hashHexB) return { height: 0, blockHashHex: hashHexB, raw: blockB.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      // Reads filter[0] to identify the block, then checks if the target script is
+      // present in the scripts list. Simulates GCS semantics without WASM.
+      //   filterA (block A, pays idx3): matches when idx3 is in scripts (initial pass only).
+      //   filterB (block B, pays idx4): matches when idx4 is in scripts (extension pass 1 only).
+      matcher: {
+        matchAny: (filter, _hash, scripts) => {
+          const target = filter[0] === 0xa1 ? scriptIdx3
+            : filter[0] === 0xa2 ? scriptIdx4
+            : null;
+          if (!target) return false;
+          return scripts.some((s) => s.length === target.length && s.every((b, i) => b === target[i]));
+        },
+      },
+    });
+
+    // Both transactions must be present in normalized.
+    expect(result.txCount).toBe(2);
+    expect(result.normalized).toHaveLength(2);
+
+    // KEY: sealedTransactions must also have 2 entries including the extension tx.
+    expect(result.sealedTransactions).toHaveLength(2);
+
+    // The extension tx (idx4, 6789 sats) must round-trip through unsealing.
+    const extNormalized = result.normalized.find((t) => t.amount_sats === 6_789);
+    expect(extNormalized).toBeDefined();
+    const extSealed = result.sealedTransactions.find((s) => s.occurred_at === '2024-08-02');
+    expect(extSealed).toBeDefined();
+    const decrypted = await unsealEnvelope<typeof extNormalized>(extSealed!, orStealthKey);
+    expect(decrypted!.amount_sats).toBe(6_789);
+    expect(decrypted!.direction).toBe('in');
+
+    // Extension fired, so the flag must be set.
+    expect(result.windowExhausted).toBe(true);
+  });
+
+  it('extension passes re-match cached filters without calling fetchFilter again (req 4)', async () => {
+    // Regression guard for the filter-cache fix (#353 req 4): when extension
+    // fires because activity lands near the window edge, the orchestrator must
+    // re-match filter bytes from the initial scan cache, NOT re-download them.
+    // A redundant network call per height per extension pass would multiply
+    // bandwidth by up to MAX_WINDOW_PASSES (10), which is the defect this
+    // test guards against.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'filter-cache-req4',
+      wallet_birthday: '2024-01-01',
+      // gap_limit=1: initial window covers indices [0, 1]; match at index 1
+      // is within gapLimit=1 of the edge (chainWindowEnd=2), so one
+      // extension pass fires.
+      gap_limit: 1,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const scriptIdx1 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 1, 'p2wpkh');
+    const ts = Math.floor(new Date('2024-06-01T00:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({
+      payToScript: scriptIdx1,
+      amountSats: 1_000n,
+      timestamp: ts,
+    });
+    const blockHashHex = bytesToHex(reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80))));
+    const fakeFilter = new Uint8Array([0xc1]);
+
+    const fetchFilterCalls: number[] = [];
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => 800_001,
+      fetchFilter: async (h) => {
+        fetchFilterCalls.push(h);
+        if (h === 800_001) return { height: h, blockHashHex, filter: fakeFilter };
+        return null;
+      },
+      fetchBlock: async () => ({ height: 0, blockHashHex, raw: blockBuild.raw }),
+      // Matches filter 0xc1 only when scriptIdx1 is in the scripts list.
+      // The extension pass uses passNewScripts (idx2 only), so no new hits
+      // are found and the loop terminates after one extension pass.
+      matcher: {
+        matchAny: (filter, _hash, scripts) => {
+          if (filter[0] !== 0xc1) return false;
+          return scripts.some((s) => s.length === scriptIdx1.length && s.every((b, i) => b === scriptIdx1[i]));
+        },
+      },
+    });
+
+    expect(result.txCount).toBe(1);
+    expect(result.windowExhausted).toBe(true);
+
+    // KEY: fetchFilter must be called exactly once (initial scan only).
+    // If the extension pass bypassed the cache, height 800_001 would appear
+    // twice in fetchFilterCalls, revealing the defect.
+    expect(fetchFilterCalls).toEqual([800_001]);
   });
 });
 

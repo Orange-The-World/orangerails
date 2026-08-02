@@ -44,6 +44,7 @@ import {
   type ScriptType,
 } from "@/stealth/lib/derive";
 import { sealEnvelope, computeConnectionBlindIndex } from "@/stealth/lib/seal";
+import { DEFAULT_GAP_LIMIT } from "@/stealth/lib/postmessage";
 import type {
   StealthAddCompleteMessage,
   StealthErrorCode,
@@ -159,7 +160,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   // (waste sync time or miss transactions), never expose the xpub,
   // descriptor, or stealth key, none of which this code path touches.
   const birthdayInputRef = useRef<HTMLInputElement>(null);
-  const [gapLimit, setGapLimit] = useState<number>(20);
+  const [gapLimit, setGapLimit] = useState<number>(() => init.gap_limit ?? DEFAULT_GAP_LIMIT);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<{ alreadyExisted: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -578,9 +579,9 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
               className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
             />
             <p className="mt-1 text-[10px] text-muted-foreground">
-              How many empty addresses we scan before stopping. Default 20 works for almost every
-              wallet (Sparrow, BlueWallet, Ledger, Trezor). Only change this if your wallet
-              generates addresses with unusually large gaps.
+              How many empty addresses we scan before stopping. A higher limit finds more of your
+              history but makes each sync slower. If some transactions are missing after a sync,
+              raise this and sync again.
             </p>
           </div>
         </details>

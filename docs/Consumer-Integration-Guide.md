@@ -86,7 +86,7 @@ Header: Authorization: Bearer <jwt>
 
 The user's Supabase JWT. The platform-auth helper resolves it to that user's direct subaccount automatically; passing `subaccount_id` in the body is rejected to prevent self-impersonation.
 
-The Link widget at `orangerails.com/connect` is currently *unauthenticated* (the widget runs in an arbitrary user's browser with no platform secret). It calls `or-link-complete`, a special endpoint that authenticates by `platform_slug` and trusts the widget to honestly relay the user's intent. A future hardening pass will issue a short-lived widget session token from the integrating app's server.
+The Link widget at `connect.orangerails.com/connect` is currently *unauthenticated* (the widget runs in an arbitrary user's browser with no platform secret). It calls `or-link-complete`, a special endpoint that authenticates by `platform_slug` and trusts the widget to honestly relay the user's intent. A future hardening pass will issue a short-lived widget session token from the integrating app's server.
 
 ### Public endpoints
 
@@ -189,7 +189,7 @@ The Link widget is OR's hosted credential collection page. Plaid-hybrid co-brand
 ### Open the popup
 
 ```js
-const url = new URL('https://orangerails.com/connect');
+const url = new URL('https://connect.orangerails.com/connect');
 url.searchParams.set('platform',     'your-app-slug');     // = your App Profile slug, e.g. 'bitbooks-v2'
 url.searchParams.set('app_user_id',  organizationId);       // = the external_user_id you used at provision time
 url.searchParams.set('provider',     selectedProvider);     // = a slug from /or-providers
@@ -213,7 +213,7 @@ window.open(url.toString(), 'or-link', 'width=520,height=720');
 
 ```js
 window.addEventListener('message', (event) => {
-  if (event.origin !== 'https://orangerails.com') return;
+  if (event.origin !== 'https://connect.orangerails.com') return;
   if (event.data?.type !== 'or-link-success') return;
 
   const { source_wallets, subaccount_id, connection_id } = event.data;
@@ -228,8 +228,8 @@ The widget closes itself ~1.2s after posting. If the user cancels, you get `{ ty
 
 Per `source_wallet`, create one of your local wallet rows with:
 - A foreign key to your "OR connection" row (which holds the salt + verifier)
-- `sourceWalletId = source_wallet.id` (OR's source_wallets.id, used as the cross-system anchor)
-- `externalId = source_wallet.external_wallet_id` (the upstream provider's stable ID for this wallet)
+- `sourceWalletId = source_wallet.id` (OR's source_wallets.id: the stable cross-system anchor, key all dedup and lookups on this)
+- `externalId = source_wallet.external_wallet_id` (the provider's own id for this wallet; stable only for providers that emit a stable one, and some emit a fresh opaque id on every discovery, so store it if useful but never dedup or match on it, use `source_wallet.id` above)
 - Whatever name / metadata the user chooses (the widget sends a default label)
 
 Reference: V2 `app/api/organizations/[organizationId]/orange-rails/connect-wallet/route.ts` (in the consuming app's repo).
@@ -256,9 +256,9 @@ Body: {
   format:          string,    // your App Profile slug, e.g. 'bitbooks-v2'
   connection_ids?: string[]   // optional filter; default = all active connections
 }
-200: {
-  synced:      number,
-  connections: [{ connection_id, synced, next_cursor, error? }],
+200 / 207 / 422: {
+  synced?:     number,        // omitted when error is set on all connections
+  connections: [{ connection_id, synced?, next_cursor?, error? }],
   rows: {
     Wallet:       [...],
     Transaction:  [...],
@@ -418,7 +418,7 @@ Symptom: `Sync failed at Bitcoin Connections: synced 0 / 0 wallets`, no errors l
 
 ### `cred_key` REQUIRED, `txn_key` OPTIONAL
 
-The widget at orangerails.com/connect (commit 615614b or later) accepts cred_key alone. Older widgets required both and silently fell back to a built-in test password when one was missing, locking the credential with the wrong key. Sync later failed with "decryption failed" with no trail back to the cause.
+The widget at connect.orangerails.com/connect (commit 615614b or later) accepts cred_key alone. Older widgets required both and silently fell back to a built-in test password when one was missing, locking the credential with the wrong key. Sync later failed with "decryption failed" with no trail back to the cause.
 
 Make sure your widget deploy is fresh. → [Connecting a wallet](#connecting-a-wallet-through-the-link-widget).
 

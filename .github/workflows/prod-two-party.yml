@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   two-party:
-    name: two approvals required to promote to prod
+    name: prod promotion requires the author plus one approving account
     if: github.event.pull_request.base.ref == 'prod'
     runs-on: ubuntu-latest
     steps:
@@ -62,17 +62,14 @@ jobs:
           # sounds like. GitHub reports type == "Bot" only for GitHub App
           # identities, the ones whose login ends in "[bot]". Every ordinary
           # account reports "User" whether a person or a program holds the
-          # password. VERIFIED 2026-07-31: the Auditor seat's reviewing account
-          # reports "User", and it is the only account that has ever approved
-          # anything here. So this predicate does NOT establish that the second
+          # password. So this predicate does NOT establish that the second
           # party is a person, and the check passing is not evidence that one
           # reviewed. What it does do, which is worth keeping: a GitHub App
           # installed on this repo cannot become the second party by filing an
           # approving review.
           #
           # Enforcing an actually-human second party is an identity question,
-          # not a jq question, and it is DL-0445's business rather than this
-          # file's.
+          # not a jq question, and is reviewed separately.
           #
           # A plain comment does not clear an earlier approval, and GitHub never
           # counts an author approving their own pull request.
@@ -100,22 +97,18 @@ jobs:
           # like it should mean.
           #
           # The two parties are the AUTHOR and the APPROVER, not two approvers.
-          # The authoring account is the founder's own GitHub account, held
-          # since 2024 and predating this agent fleet by two years. Work pushed
-          # under it is pushed with his authority, so party one is present on
-          # every pull request by construction, and GitHub will never let that
-          # account also file an approving review on its own pull request.
+          # The author account opens the pull request, so party one is present
+          # on every pull request by construction, and GitHub will never let
+          # that account also file an approving review on its own pull request.
           #
           # A threshold of 2 therefore asks for three parties while calling
-          # itself two, and in this org it can never be met: exactly one other
-          # account has ever filed a review. Verified 2026-07-31 across eleven
-          # pull requests. Shipping -lt 2 would install a gate that is red on
-          # every prod pull request forever, which trains people to merge past
-          # it and is worse than no gate at all.
+          # itself two. Shipping -lt 2 would install a gate that cannot be met
+          # by a project with a single approving identity, which trains people
+          # to merge past it and is worse than no gate at all.
           #
           # So: one approving review from a non-author account that is not a GitHub App.
-          # Raise this to 2 on the day a second reviewing identity exists, and
-          # not before. That is tracked in DL-0445.
+          # Raise this to 2 on the day a second reviewing identity exists and
+          # is established, and not before. That threshold is reviewed separately.
           if [ "${count}" -lt 1 ]; then
             echo "::error::A merge into prod is the production deploy and takes a second party: one approving review from a non-author account that is not a GitHub App. Found ${count}."
             exit 1

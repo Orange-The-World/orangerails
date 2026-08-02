@@ -119,3 +119,9 @@ verify_jwt = false
 # per-Profile rate-limit quota.
 [functions.or-quiltt-session-revoke]
 verify_jwt = false
+
+# --- ORBI API key auth (orbi_api_keys table, SHA-256 hash check) ------
+# v1-rate authenticates against orbi_api_keys, not the platform key table.
+# Gateway must pass through so the function's own auth block can run.
+[functions.v1-rate]
+verify_jwt = false

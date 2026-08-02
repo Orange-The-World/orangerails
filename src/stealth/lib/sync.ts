@@ -162,6 +162,15 @@ export interface SyncResult {
    *  caller is responsible for sealing them before transport; the
    *  sealedTransactions array above is what gets uploaded to OR. */
   normalized: NormalizedTransaction[];
+  /**
+   * True when any matched address landed at or within gapLimit slots of the
+   * top of the derived window on either chain. Signals that the wallet may
+   * have outgrown the fixed address ceiling and history could be incomplete.
+   * Consuming apps must branch on this flag and prompt re-sync with a wider
+   * gap_limit. Surfaces through OR_STEALTH_SYNC_COMPLETE as
+   * address_window_exhausted. See issue #352 and docs/Stealth-Sync.md.
+   */
+  windowExhausted: boolean;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -506,11 +515,25 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('deriving', 0));
 
   // For Stealth Sync we cannot use an oracle (querying an indexer would
-  // leak addresses). We derive a fixed window per chain: 2x gap_limit
-  // entries per chain. If the user has more activity than that, the
-  // birthday-rescan UI lets them widen the window on a subsequent sync.
+  // leak addresses). We derive addresses locally and match against BIP158
+  // filters that are keyed only by block height -- no address is ever sent
+  // to a third party. The window extends automatically when activity is
+  // found near its edge, implementing real BIP44 gap-limit semantics
+  // client-side. See issue #353 for the full design rationale.
   const gapLimit = payload.gap_limit;
-  const windowSize = gapLimit * 2;
+
+  // Maximum extension passes beyond the initial scan (issue #353, req 3).
+  // Each pass extends one or both chains by gapLimit addresses when activity
+  // lands within gapLimit slots of the edge. Cap prevents unbounded work;
+  // windowExhausted signals when it fires. The final value should come from
+  // the three-point GCS benchmark described in the #353 open question.
+  const MAX_WINDOW_PASSES = 10;
+
+  // Per-chain window end index (exclusive). Starts at gapLimit * 2 per chain
+  // (same initial window as before). Each chain can extend independently:
+  // activity on the change branch does not force extension of the receive
+  // branch, and vice versa (issue #353, req: both chains extend independently).
+  const chainWindowEnd: [number, number] = [gapLimit * 2, gapLimit * 2];
 
   interface DerivedAddr {
     chain: 0 | 1;
@@ -522,7 +545,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   if (payload.kind === 'xpub_stealth') {
     for (const chain of [0, 1] as const) {
-      for (let i = 0; i < windowSize; i++) {
+      for (let i = 0; i < chainWindowEnd[chain]; i++) {
         const script = deriveScriptPubkeyBytes(payload.xpub, chain, i, payload.script_type);
         const address = deriveAddress(payload.xpub, chain, i, payload.script_type);
         derived.push({ chain, index: i, script, address });
@@ -534,7 +557,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     }
     const desc = opts.descriptor;
     for (const chain of [0, 1] as const) {
-      for (let i = 0; i < windowSize; i++) {
+      for (let i = 0; i < chainWindowEnd[chain]; i++) {
         const script = deriveMultisigScriptPubkeyBytes(desc, chain, i);
         const address = deriveMultisigAddress(desc, chain, i);
         derived.push({ chain, index: i, script, address });
@@ -580,6 +603,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
+      windowExhausted: false,
     };
   }
 
@@ -603,6 +627,12 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     blockHashHex: string;
   }
   const hits: MatchedHit[] = [];
+
+  // req 4: cache filter records during the initial scan so extension passes
+  // can re-match locally without re-downloading from the CDN on every pass.
+  // Stores null explicitly for heights that returned 404 so the extension
+  // loop never falls through to a redundant network fetch for known-missing heights.
+  const filterCache = new Map<number, FilterRecord | null>();
 
   // Parallel filter fetch with bounded concurrency. Sequential
   // (one-at-a-time) was the right shape for the first proof-of-life
@@ -654,6 +684,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       nextHeight = h + 1;
       const f = await opts.fetchFilter(h);
       processedCount += 1;
+      filterCache.set(h, f);  // cache result (including null) for extension passes (req 4)
       if (f !== null) {
         bytesDownloaded += f.filter.length;
         const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
@@ -701,6 +732,12 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
 
   const normalized: NormalizedTransaction[] = [];
+
+  // Track the highest address index matched on each chain (receive=0,
+  // change=1). -1 means no match yet. Updated in the receive detection
+  // loop below; used after block parsing to detect exhaustion (#352).
+  const maxMatchedIndexPerChain: [number, number] = [-1, -1];
+
   for (let i = 0; i < hits.length; i++) {
     const block = await opts.fetchBlock(hits[i].blockHashHex);
     bytesDownloaded += block.raw.length;
@@ -745,6 +782,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
             if (!receivedAddress) receivedAddress = d.address;
             anyReceive = true;
             newUtxos.push({ idx: oi, value: out.value, address: d.address });
+            // Record highest matched index per chain for exhaustion detection.
+            if (d.index > maxMatchedIndexPerChain[d.chain]) {
+              maxMatchedIndexPerChain[d.chain] = d.index;
+            }
             break;
           }
         }
@@ -821,7 +862,197 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('fetching_blocks', 100));
   emit(opts, progress('building_txs', 100, `${normalized.length} transactions.`));
 
-  // ── sealing ──────────────────────────────────────────────────────────
+  // ── rolling-window extension (issue #353) ───────────────────────────
+  // After the initial filter scan, check whether any chain has a match within
+  // gapLimit slots of its current window edge -- the BIP44 signal that more
+  // addresses may have been used beyond the current ceiling. If so, extend
+  // that chain by gapLimit more addresses and run a second filter scan against
+  // ONLY the new addresses (passNewScripts). Repeat until no near-edge match
+  // or MAX_WINDOW_PASSES is reached.
+  //
+  // Key design decision: each extension pass scans passNewScripts, NOT all
+  // scripts. This avoids re-scanning blocks the initial pass already covered:
+  // a block that matched addr0 but not addr5 is not a hit for the extension
+  // pass (addr5-only scan). If a block has BOTH addr0 and addr5 outputs it
+  // WILL appear in both the initial hits and the extension hits; the
+  // processedTxids set below prevents double-counting in normalized.
+  //
+  // req 4: filter bytes from the initial scan are cached in filterCache.
+  // Extension passes re-match locally; CDN re-downloads only occur on a cache
+  // miss, which should not happen in normal flows since the initial scan covers
+  // the full [fromHeight, tip] range.
+  let windowPass = 0;
+  let windowExhausted = false;
+  // Txids recorded in normalized so far. Used to prevent double-counting when
+  // extension scans hit blocks already processed in an earlier pass.
+  const processedTxids = new Set<string>(normalized.map((tx) => tx.txid));
+
+  extensionLoop: while (windowPass < MAX_WINDOW_PASSES) {
+    const chain0Near = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
+    const chain1Near = maxMatchedIndexPerChain[1] >= chainWindowEnd[1] - gapLimit;
+    if (!chain0Near && !chain1Near) break;  // window not near its edge -- done
+
+    // Near-edge match: the wallet has used addresses close enough to the
+    // window ceiling that history beyond it may exist. Signal this to the
+    // caller regardless of whether subsequent extension passes resolve it
+    // (#352, issue #353 req 3). The caller surfaces this to the user.
+    windowExhausted = true;
+
+    // Derive addresses for the chain(s) that need extension. Collect them
+    // separately so the extension scan can target only the new scripts.
+    const passNewDerived: DerivedAddr[] = [];
+    for (const chain of [0, 1] as const) {
+      if (chain === 0 && !chain0Near) continue;
+      if (chain === 1 && !chain1Near) continue;
+
+      const prevEnd = chainWindowEnd[chain];
+      const newEnd  = prevEnd + gapLimit;
+      chainWindowEnd[chain] = newEnd;
+
+      for (let i = prevEnd; i < newEnd; i++) {
+        if (payload.kind === 'xpub_stealth') {
+          const script  = deriveScriptPubkeyBytes(payload.xpub, chain, i, payload.script_type);
+          const address = deriveAddress(payload.xpub, chain, i, payload.script_type);
+          const entry: DerivedAddr = { chain, index: i, script, address };
+          passNewDerived.push(entry);
+          derived.push(entry);
+        } else {
+          if (!opts.descriptor || opts.descriptor.kind !== 'multisig') {
+            throw new Error('descriptor_stealth payload requires opts.descriptor (multisig parsed)');
+          }
+          const desc = opts.descriptor;
+          const script  = deriveMultisigScriptPubkeyBytes(desc, chain, i);
+          const address = deriveMultisigAddress(desc, chain, i);
+          const entry: DerivedAddr = { chain, index: i, script, address };
+          passNewDerived.push(entry);
+          derived.push(entry);
+        }
+      }
+    }
+
+    // Scan filters for blocks matching ONLY the new addresses from this pass.
+    const passNewScripts = passNewDerived.map((d) => d.script);
+    const extHits: Array<{ height: number; blockHashHex: string }> = [];
+    let extNextHeight = fromHeight;
+    const extWorker = async (): Promise<void> => {
+      while (true) {
+        const h = extNextHeight;
+        if (h > tip) return;
+        extNextHeight = h + 1;
+        // req 4: re-use cached filter bytes from the initial scan. Only fall
+        // back to a network fetch on a cache miss (should not occur in normal
+        // flows since the initial scan covers the full [fromHeight, tip] range).
+        let f: FilterRecord | null;
+        if (filterCache.has(h)) {
+          f = filterCache.get(h)!;
+        } else {
+          f = await opts.fetchFilter(h);
+          filterCache.set(h, f);
+          if (f !== null) bytesDownloaded += f.filter.length;
+        }
+        if (f !== null) {
+          const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
+          if (matcher.matchAny(f.filter, blockHashLE, passNewScripts)) {
+            extHits.push({ height: h, blockHashHex: f.blockHashHex });
+          }
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, extWorker));
+    extHits.sort((a, b) => a.height - b.height);
+
+    // Process extension hits. Only new-address outputs are checked for receives
+    // (passNewDerived), but inputs are checked against the full UTXO map so a
+    // spend of a previously-received UTXO is detected correctly even when the
+    // spending tx appears in an extension pass.
+    for (let ei = 0; ei < extHits.length; ei++) {
+      const block = await opts.fetchBlock(extHits[ei].blockHashHex);
+      bytesDownloaded += block.raw.length;
+      const blockHeight = extHits[ei].height;
+      const header = parseBlockHeader(block.raw);
+      const occurredAt = isoDateFromUnix(header.timestamp);
+      const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
+
+      const cur = new Cursor(block.raw);
+      cur.pos = header.txStart;
+      for (let t = 0; t < header.txCount; t++) {
+        const tx = parseTx(cur);
+
+        // Check inputs against full UTXO map (all passes).
+        let spentInputs = 0n;
+        for (const inp of tx.inputs) {
+          const key = utxoKey(inp.prevTxid, inp.voutIdx);
+          const utxo = utxoMap.get(key);
+          if (utxo) { spentInputs += utxo.value; utxoMap.delete(key); }
+        }
+
+        // Check outputs against NEW addresses only.
+        let receivedAmount = 0n;
+        let receivedAddress = '';
+        let anyReceive = false;
+        const newUtxos: Array<{ idx: number; value: bigint; address: string }> = [];
+        for (let oi = 0; oi < tx.outputs.length; oi++) {
+          const out = tx.outputs[oi];
+          for (const d of passNewDerived) {
+            if (bytesEqual(out.script, d.script)) {
+              receivedAmount += out.value;
+              if (!receivedAddress) receivedAddress = d.address;
+              anyReceive = true;
+              newUtxos.push({ idx: oi, value: out.value, address: d.address });
+              if (d.index > maxMatchedIndexPerChain[d.chain]) {
+                maxMatchedIndexPerChain[d.chain] = d.index;
+              }
+              break;
+            }
+          }
+        }
+
+        // Only add to normalized if this txid has not been recorded in a
+        // prior pass. Double-adding the same txid would corrupt the balance.
+        const alreadySeen = processedTxids.has(tx.txid);
+
+        if (spentInputs > 0n && !alreadySeen) {
+          const netOut = spentInputs - receivedAmount;
+          let recipientAddress = '';
+          for (const out of tx.outputs) {
+            let isOurs = false;
+            for (const d of derived) {
+              if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+            }
+            if (!isOurs) {
+              recipientAddress = scriptToAddressBestEffort(out.script);
+              if (recipientAddress) break;
+            }
+          }
+          normalized.push({
+            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            timestamp: occurredAtInstant, direction: 'out',
+            amount_sats: Number(netOut), address: recipientAddress,
+            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
+          });
+          processedTxids.add(tx.txid);
+          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
+        } else if (anyReceive && !alreadySeen) {
+          normalized.push({
+            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            timestamp: occurredAtInstant, direction: 'in',
+            amount_sats: Number(receivedAmount), address: receivedAddress,
+            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
+          });
+          processedTxids.add(tx.txid);
+          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
+        } else if (anyReceive || spentInputs > 0n) {
+          // txid was already processed in an earlier pass. Still update utxoMap
+          // for new-address UTXOs so future spends in later blocks can find them.
+          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
+        }
+      }
+    }
+    windowPass++;
+    // Outer while re-checks maxMatchedIndexPerChain against updated chainWindowEnd.
+  }
+
+  // ── sealing (runs after extension so all extension transactions are sealed) ──
   emit(opts, progress('sealing', 0));
   const sealedTransactions: SealedTransaction[] = [];
   for (let i = 0; i < normalized.length; i++) {
@@ -855,6 +1086,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     bytesDownloaded,
     sealedTransactions,
     normalized,
+    windowExhausted,
   };
 }
 
