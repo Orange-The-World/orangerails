@@ -208,7 +208,17 @@ export async function handleEvent(
   subaccountId: string,
   apiKey: string,
 ): Promise<'processed' | 'skipped' | string> {
-  // Only act on sync.successful.* for now
+  // Reconcile connection status on Quiltt error events without pulling data (DL-0441).
+  // These events mean Quiltt's own bank connection is broken; the OR connections table
+  // must reflect that so callers (e.g. the app's connection health UI) see the truth.
+  if (
+    ev.event_type.startsWith('connection.synced.errored.repairable') ||
+    ev.event_type.startsWith('connection.synced.errored.provider')
+  ) {
+    return reconcileConnectionError(client, ev, subaccountId);
+  }
+
+  // Only act on sync.successful.* for data pulls
   if (!ev.event_type.startsWith('connection.synced.successful')) {
     return 'skipped';
   }
@@ -220,10 +230,19 @@ export async function handleEvent(
     .eq('id', subaccountId)
     .single();
   if (subErr || !sub) return `subaccount lookup failed: ${subErr?.message}`;
+  // Extract connectionId and reconcile success status BEFORE the OPK gate so that
+  // every subaccount (not just OPK-opted-in ones) can recover from error state.
+  // Auditor blocking finding DL-0441 second review: placing this after the gate
+  // made error a terminal state for non-opted-in subaccounts.
+  const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
+  if (!connectionId) return 'event missing record.id';
+
+  // Quiltt confirms successful sync: clear any error state so the connection shows active.
+  // Called before the OPK gate so the status fix covers ALL subaccounts.
+  await reconcileConnectionSuccess(client, connectionId, subaccountId);
+
   if (!sub.opk_public) {
-    // No OPK registered. Return deferred so the main loop stamps
-    // opk_deferred_at and the batch query skips this row until a
-    // key is registered and the flag is cleared.
+    // No opt-in. Status already reconciled above. Defer data pull until user opens app.
     return 'deferred';
   }
   if (sub.opk_alg !== OPK_SEAL_ALG) {
@@ -300,11 +319,6 @@ export async function handleEvent(
   } catch (e) {
     return `invalid opk_public: ${e instanceof Error ? e.message : String(e)}`;
   }
-
-  // Pull transactions paginated. We need the connection id from the
-  // event payload to scope the pull.
-  const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
-  if (!connectionId) return 'event missing record.id';
 
   // Find the OR-side connection row tied to this Quiltt link. For Phase
   // 1 we expect or-link-complete (Quiltt branch) to have created it; if
@@ -499,6 +513,117 @@ export async function handleEvent(
   }
 
   return 'processed';
+}
+
+// ─── Quiltt error reconciliation ────────────────────────────────────
+
+/**
+ * Handle connection.synced.errored.repairable and .provider events.
+ * Finds the OR-side connection row and flips status to 'error' so the
+ * connections table reflects Quiltt's own view of the connection health.
+ * No transaction data is pulled. No DDL required (DL-0441).
+ */
+async function reconcileConnectionError(
+  client: SupabaseClient,
+  ev: PendingEvent,
+  subaccountId: string,
+): Promise<'processed' | string> {
+  const connectionId = typeof ev.payload?.record?.id === 'string'
+    ? ev.payload.record.id
+    : null;
+  if (!connectionId) return 'event missing record.id';
+
+  // Prefer an exact quiltt_connection_id match; fall back to the legacy
+  // NULL-id row only if no exact match exists -- same pattern as handleEvent.
+  let conn: { id: string } | null = null;
+  const exactMatch = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', connectionId)
+    .maybeSingle();
+  if (exactMatch.error) return `connection lookup failed: ${exactMatch.error.message}`;
+  if (exactMatch.data) {
+    conn = exactMatch.data as { id: string };
+  } else {
+    const legacy = await client
+      .from('connections')
+      .select('id')
+      .eq('subaccount_id', subaccountId)
+      .eq('provider_type', 'quiltt')
+      .is('quiltt_connection_id', null)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
+    if (!legacy.data) {
+      // No OR-side connection row yet; nothing to reconcile.
+      // Mark processed so the event does not retry forever.
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: error event for Quiltt connection ` +
+          `(type: ${ev.event_type}), no OR connection row found -- marking processed`,
+      );
+      return 'processed';
+    }
+    conn = legacy.data as { id: string };
+  }
+
+  const { error } = await client
+    .from('connections')
+    .update({ status: 'error', updated_at: new Date().toISOString() })
+    .eq('id', conn.id);
+  if (error) return `connection status update failed: ${error.message}`;
+
+  console.log(
+    `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} ` +
+      `reconciled to error (event_type: ${ev.event_type})`,
+  );
+  return 'processed';
+}
+
+/**
+ * When Quiltt reports a successful connection sync, flip any error row back to active.
+ * Uses the same lookup pattern as reconcileConnectionError: exact quiltt_connection_id
+ * match first, legacy NULL-id fallback for pre-migration rows.
+ * Only transitions error -> active; leaves pending/active rows untouched.
+ */
+async function reconcileConnectionSuccess(
+  client: SupabaseClient,
+  connectionId: string,
+  subaccountId: string,
+): Promise<void> {
+  let orConnId: string | null = null;
+  const { data: exact } = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', connectionId)
+    .maybeSingle();
+  if (exact) {
+    orConnId = exact.id;
+  } else {
+    const { data: legacy } = await client
+      .from('connections')
+      .select('id')
+      .eq('subaccount_id', subaccountId)
+      .eq('provider_type', 'quiltt')
+      .is('quiltt_connection_id', null)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (legacy) orConnId = legacy.id;
+  }
+  if (!orConnId) return;
+  const { error: statusErr } = await client
+    .from('connections')
+    .update({ status: 'active' })
+    .eq('id', orConnId)
+    .eq('status', 'error');
+  if (statusErr) {
+    console.error(`[or-quiltt-sync] reconcileConnectionSuccess failed: ${statusErr.message}`);
+  }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
