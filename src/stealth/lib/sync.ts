@@ -150,6 +150,9 @@ export interface RunSyncOptions {
   /** PROGRESS pump. The orchestrator emits one event per stage and at
    *  most a handful of intra-stage updates. */
   onProgress?: (ev: SyncProgressEvent) => void;
+  /** Override the maximum number of rolling-window extension passes.
+   *  Defaults to 10. Exposed for tests; production callers should omit it. */
+  maxWindowPasses?: number;
 }
 
 export interface SyncResult {
@@ -527,7 +530,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // lands within gapLimit slots of the edge. Cap prevents unbounded work;
   // windowExhausted signals when it fires. The final value should come from
   // the three-point GCS benchmark described in the #353 open question.
-  const MAX_WINDOW_PASSES = 10;
+  const MAX_WINDOW_PASSES = opts.maxWindowPasses ?? 10;
 
   // Per-chain window end index (exclusive). Starts at gapLimit * 2 per chain
   // (same initial window as before). Each chain can extend independently:
@@ -1050,6 +1053,21 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     }
     windowPass++;
     // Outer while re-checks maxMatchedIndexPerChain against updated chainWindowEnd.
+  }
+
+  // Loud-fail (DL-0512): if the extension loop consumed all passes and the
+  // window is still near its edge on either chain, wallet history beyond the
+  // scanned window may be missing. Throw explicitly so the caller cannot
+  // silently succeed with a truncated result.
+  if (windowPass >= MAX_WINDOW_PASSES) {
+    const chain0StillNear = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
+    const chain1StillNear = maxMatchedIndexPerChain[1] >= chainWindowEnd[1] - gapLimit;
+    if (chain0StillNear || chain1StillNear) {
+      throw new Error(
+        `stealth/sync: address window exhausted after ${MAX_WINDOW_PASSES} extension passes` +
+        ` -- wallet history beyond the scanned window may be missing`,
+      );
+    }
   }
 
   // ── sealing (runs after extension so all extension transactions are sealed) ──
