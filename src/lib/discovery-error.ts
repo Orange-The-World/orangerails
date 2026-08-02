@@ -10,6 +10,28 @@
  * @param rawText Raw response body text (may be non-JSON).
  * @returns       A displayable error string, never the old "Connection added" text.
  */
+/**
+ * Returns true only when the discovery error response signals a confirmed
+ * authentication failure (error_code === 'UPSTREAM_AUTH_FAILED').
+ *
+ * All other outcomes, including unrecognised codes, missing codes, and
+ * non-JSON bodies, return false so that transient failures (rate limiting,
+ * upstream outages) and unknown errors never trigger a destructive action on
+ * the connection row. Treat a missing or unrecognised code as not a confirmed
+ * authentication failure and leave the row untouched, per the precondition
+ * documented in https://github.com/Orange-The-World/orangerails/issues/406
+ *
+ * @param rawText Raw response body text (may be non-JSON).
+ */
+export function isDiscoveryAuthFailure(rawText: string): boolean {
+  try {
+    const body = JSON.parse(rawText) as Record<string, unknown>;
+    return body.error_code === "UPSTREAM_AUTH_FAILED";
+  } catch {
+    return false;
+  }
+}
+
 export function extractDiscoveryErrorMessage(status: number, rawText: string): string {
   let body: Record<string, unknown> = {};
   try {
