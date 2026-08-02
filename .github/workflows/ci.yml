@@ -440,6 +440,27 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Assert package.json ccxt matches runtime pin
+        # package.json devDependencies.ccxt and the npm:ccxt@X.Y.Z specifier in
+        # index.ts must agree. If they diverge the manifest generator runs against
+        # the wrong version, which the drift check would then silently accept.
+        # This step catches that before any install or generation happens.
+        run: |
+          set -euo pipefail
+          RUNTIME=$(grep -oE 'npm:ccxt@[0-9]+\.[0-9]+\.[0-9]+' \
+            supabase/functions/_shared/providers/_ccxt/index.ts \
+            | sed 's/npm:ccxt@//' | head -1)
+          if [ -z "$RUNTIME" ]; then
+            echo "::error::Could not extract ccxt version from index.ts -- verify the npm:ccxt@X.Y.Z import exists"
+            exit 1
+          fi
+          PKGJSON=$(node -p "require('./package.json').devDependencies.ccxt")
+          if [ "$RUNTIME" != "$PKGJSON" ]; then
+            echo "::error::ccxt version mismatch: index.ts pins runtime at $RUNTIME but package.json devDependencies.ccxt is $PKGJSON. Bring package.json down to $RUNTIME."
+            exit 1
+          fi
+          echo "ccxt version consistent: package.json and index.ts both declare $RUNTIME"
+
       - name: Align ccxt to runtime version
         # index.ts is the single source of truth: it declares which ccxt version
         # production executes. devDependencies.ccxt in package.json may drift.
