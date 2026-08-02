@@ -596,6 +596,43 @@ describe('runSync height source and block ordering regressions', () => {
       }),
     ).rejects.toThrow(/missing below the producer/);
   });
+
+  it('caps the reported cursor below a benign tip-lag skip, not at tip (DL-0489)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'tip-lag cursor cap',
+      wallet_birthday: '2021-01-15',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    // Scan 700_001..700_003. The producer has published 700_001 (the
+    // frontier) but 700_002 and 700_003 are still missing: benign tip lag,
+    // ABOVE the committed frontier, so the scan must NOT abort. It also must
+    // NOT advance the cursor to tip (700_003), or once the producer backfills
+    // 700_002/700_003 the cursor is already past and those blocks are never
+    // re-read. The reported cursor must stop just below the lowest gap.
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 700_000,
+      lastBlockScanned: 700_000,
+      fetchTip: async () => 700_003,
+      fetchFilter: async (h) =>
+        h === 700_001
+          ? { height: h, blockHashHex: 'ab'.repeat(32), filter: new Uint8Array([1]) }
+          : null,
+      fetchBlock: async () => {
+        throw new Error('no matched blocks in this scan');
+      },
+      matcher: { matchAny: () => false },
+    });
+
+    expect(result.lastBlockScanned).toBe(700_001);
+  });
 });
 
 describe('live fetchers', () => {
