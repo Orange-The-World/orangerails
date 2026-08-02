@@ -129,4 +129,20 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     ]);
     expect(destination).toContain("/connect/stealth");
   });
+
+  // #451: a bare direct load of the widget must reach the guidance card once the
+  // grace window expires, never hang on "Waiting for OR_STEALTH_INIT". This is
+  // the regression guard for the no-parameter branch (requirement 3).
+  test("bare /connect/stealth direct-load shows the guidance card after the grace window", async ({ page }) => {
+    await page.goto("/connect/stealth");
+    await page.waitForTimeout(1600); // just past the 1500ms DIRECT_LOAD_GRACE_MS window
+    await expect(page).toHaveURL(/\/connect\/stealth/);
+    await expect(
+      page.getByRole("heading", { name: /stealth sync widget/i, level: 1 }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/OR_STEALTH_INIT postMessage to this window/i),
+    ).toBeVisible();
+    await capture(page, "05-stealth-bare-load-guidance-card");
+  });
 });
