@@ -98,6 +98,46 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     await capture(page, "04-connect-sparrow-landing");
   });
 
+  // DL-0426: app_url redirect and refusal (three paths in launchStealthSync).
+  // Test 1 is fixme until https://dev.orangerails.com is confirmed in
+  // VITE_OR_STEALTH_ALLOWED_ORIGINS on the orangerails-dev Cloudflare Pages
+  // project and a redeploy bakes it into the bundle. Tests 2 and 3 (the
+  // no-app_url window.open path below) are env-independent and run today.
+
+  // Test 1: trusted origin -> browser navigates to appUrl.
+  // location.assign is a non-configurable own property on the window.location
+  // object; patching Location.prototype.assign intercepts nothing. Assert the
+  // observable outcome (the browser URL) via waitForURL instead.
+  test.fixme(
+    "app_url with trusted origin bounces to the app (DL-0426)",
+    async ({ page }) => {
+      // Remove fixme after Chief of Staff confirms https://dev.orangerails.com
+      // is live in the deployed bundle on orangerails-dev.
+      const appUrl = "https://dev.orangerails.com/stealth-return";
+      await page.goto(`/connect/sparrow?app_url=${encodeURIComponent(appUrl)}`);
+      const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
+      await expect(launchButton).toBeVisible();
+      await launchButton.click();
+      await page.waitForURL(appUrl, { timeout: 5_000 });
+    },
+  );
+
+  // Test 2: untrusted origin -> refusal alert shown, no redirect.
+  // evil.example.com is never allowlisted regardless of the env var value,
+  // so this test is fully env-independent and runs in CI today.
+  test("app_url with untrusted origin shows the refusal alert (DL-0426)", async ({ page }) => {
+    await page.goto(
+      "/connect/sparrow?app_url=" + encodeURIComponent("https://evil.example.com/callback"),
+    );
+    const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
+    await expect(launchButton).toBeVisible();
+    await launchButton.click();
+    const alert = page.getByRole("alert");
+    await expect(alert).toBeVisible();
+    await expect(alert).toContainText(/not on our allowlist/i);
+    await capture(page, "06-sparrow-app-url-refused");
+  });
+
   test('"Launch Stealth Sync" button opens /connect/stealth via window.open', async ({ page }) => {
     await page.goto("/connect/sparrow");
     const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
