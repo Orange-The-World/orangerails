@@ -666,6 +666,64 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     // twice in fetchFilterCalls, revealing the defect.
     expect(fetchFilterCalls).toEqual([800_001]);
   });
+
+  it('throws when extension passes are exhausted and window is still near its edge', async () => {
+    // gap_limit=1 means chainWindowEnd starts at [2, 2]; near-edge threshold
+    // is index >= windowEnd - 1 on each chain.
+    //
+    // height 900_001: pays to chain=0 index=1 (at threshold 1 >= 2-1=1).
+    //   Triggers extension pass 0: chain 0 extends from [2, 2] to [3, 2].
+    // height 900_002: pays to chain=0 index=2 (the extension-window address).
+    //   Extension pass 0 finds this match, window still near edge (2 >= 3-1=2).
+    // maxWindowPasses=1: windowPass reaches 1 == MAX_WINDOW_PASSES, loop exits.
+    // Loud-fail check fires: chain0StillNear is true -> throw.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'loud-fail',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 1,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const ts = Math.floor(new Date('2024-07-01T00:00:00Z').getTime() / 1000);
+
+    // Block paying to chain=0, index=1 (triggers initial near-edge).
+    const script1 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 1, 'p2wpkh');
+    const block1 = buildFixtureBlock({ payToScript: script1, amountSats: 1_000n, timestamp: ts });
+    const hash1Hex = bytesToHex(reverseBytes(await dsha256Async(block1.raw.subarray(0, 80))));
+
+    // Block paying to chain=0, index=2 (the extension-window address).
+    const script2 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 2, 'p2wpkh');
+    const block2 = buildFixtureBlock({ payToScript: script2, amountSats: 1_000n, timestamp: ts + 600 });
+    const hash2Hex = bytesToHex(reverseBytes(await dsha256Async(block2.raw.subarray(0, 80))));
+
+    const fakeFilter = new Uint8Array([0xdd]);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 900_001,
+        lastBlockScanned: null,
+        fetchTip: async () => 900_002,
+        fetchFilter: async (h) => {
+          if (h === 900_001) return { height: h, blockHashHex: hash1Hex, filter: fakeFilter };
+          if (h === 900_002) return { height: h, blockHashHex: hash2Hex, filter: fakeFilter };
+          return null;
+        },
+        fetchBlock: async (hashHex) => {
+          if (hashHex === hash1Hex) return { height: 900_001, blockHashHex: hash1Hex, raw: block1.raw };
+          if (hashHex === hash2Hex) return { height: 900_002, blockHashHex: hash2Hex, raw: block2.raw };
+          throw new Error(`unexpected block hash ${hashHex}`);
+        },
+        matcher: { matchAny: () => true },
+        maxWindowPasses: 1,
+      }),
+    ).rejects.toThrow(/address window exhausted/);
+  });
 });
 
 // ─── Live fetcher unit tests ────────────────────────────────────────────
