@@ -1,5 +1,5 @@
 /**
- * GENERATED FILE , do not edit by hand.
+ * GENERATED FILE, do not edit by hand.
  * Source: scripts/generate-ccxt-manifest.mjs introspecting ccxt@4.4.30
  * Regenerated: 2026-08-02
  * Total exchanges: 98
