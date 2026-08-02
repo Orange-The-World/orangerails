@@ -211,10 +211,10 @@ export async function handleEvent(
   // Reconcile connection status on Quiltt error events without pulling data (DL-0441).
   // These events mean Quiltt's own bank connection is broken; the OR connections table
   // must reflect that so callers (e.g. the app's connection health UI) see the truth.
-  if (
-    ev.event_type.startsWith('connection.synced.errored.repairable') ||
-    ev.event_type.startsWith('connection.synced.errored.provider')
-  ) {
+  // Match on the shared prefix rather than an enumeration of subtypes: Quiltt's full
+  // errored taxonomy is not guaranteed to be bounded, and a subtype not listed here
+  // would fall through to 'skipped' without reconciling, which is the gap this fix closes.
+  if (ev.event_type.startsWith('connection.synced.errored')) {
     return reconcileConnectionError(client, ev, subaccountId);
   }
 
@@ -232,8 +232,7 @@ export async function handleEvent(
   if (subErr || !sub) return `subaccount lookup failed: ${subErr?.message}`;
   // Extract connectionId and reconcile success status BEFORE the OPK gate so that
   // every subaccount (not just OPK-opted-in ones) can recover from error state.
-  // Auditor blocking finding DL-0441 second review: placing this after the gate
-  // made error a terminal state for non-opted-in subaccounts.
+  // Placing this after the OPK gate made error a terminal state for non-opted-in subaccounts.
   const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
   if (!connectionId) return 'event missing record.id';
 
