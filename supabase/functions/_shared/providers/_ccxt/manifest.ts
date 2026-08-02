@@ -13,7 +13,7 @@ export interface CcxtExchangeManifestEntry {
   tags: string[];
   popularity: number;
   credentialShape: 'apiKey+secret' | 'apiKey+password+secret' | 'apiKey+secret+uid';
-  capabilities: { trades: boolean; deposits: boolean; withdrawals: boolean };
+  capabilities: { trades: boolean; deposits: boolean; withdrawals: boolean; fetchBalance: boolean };
 }
 
 export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
@@ -25,7 +25,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 100,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "binance",
@@ -35,7 +35,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","asia","fiat-on-ramp"],
     popularity: 95,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "kraken",
@@ -45,7 +45,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 95,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bybit",
@@ -55,7 +55,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 85,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "okx",
@@ -65,7 +65,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 82,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "gemini",
@@ -75,7 +75,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us"],
     popularity: 75,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "kucoin",
@@ -85,7 +85,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 75,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "cryptocom",
@@ -95,7 +95,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","fiat-on-ramp"],
     popularity: 72,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bitstamp",
@@ -105,7 +105,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","fiat-on-ramp"],
     popularity: 70,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: true },
+    capabilities: { trades: true, deposits: false, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bitfinex",
@@ -115,7 +115,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 65,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "bitget",
@@ -125,7 +125,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 65,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "gate",
@@ -135,7 +135,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 65,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "htx",
@@ -145,7 +145,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 60,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "mexc",
@@ -155,7 +155,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 60,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "upbit",
@@ -165,7 +165,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 60,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: true, withdrawals: true },
+    capabilities: { trades: false, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bingx",
@@ -175,7 +175,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 55,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: true, withdrawals: true },
+    capabilities: { trades: false, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bitflyer",
@@ -185,7 +185,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 55,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bithumb",
@@ -195,7 +195,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia"],
     popularity: 55,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: false, withdrawals: false },
+    capabilities: { trades: false, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "coincheck",
@@ -205,7 +205,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 50,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "hitbtc",
@@ -215,7 +215,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 50,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "luno",
@@ -225,7 +225,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","asia"],
     popularity: 50,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "poloniex",
@@ -235,7 +235,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 50,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "btcmarkets",
@@ -245,7 +245,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 45,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "hashkey",
@@ -255,7 +255,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 45,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "independentreserve",
@@ -265,7 +265,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 45,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "lbank",
@@ -275,7 +275,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 45,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "whitebit",
@@ -285,7 +285,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","fiat-on-ramp"],
     popularity: 45,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: false },
+    capabilities: { trades: true, deposits: true, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "hollaex",
@@ -295,7 +295,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 40,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "ace",
@@ -305,7 +305,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "alpaca",
@@ -315,7 +315,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "ascendex",
@@ -325,7 +325,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: true, withdrawals: true },
+    capabilities: { trades: false, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bequant",
@@ -335,7 +335,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bigone",
@@ -345,7 +345,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "binancecoinm",
@@ -355,7 +355,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "binanceus",
@@ -365,7 +365,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "binanceusdm",
@@ -375,7 +375,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bit2c",
@@ -385,7 +385,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "bitbank",
@@ -395,7 +395,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "bitbns",
@@ -405,7 +405,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bitcoincom",
@@ -415,7 +415,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bitfinex2",
@@ -425,7 +425,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "bitmart",
@@ -435,7 +435,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret+uid",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bitmex",
@@ -445,7 +445,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "bitopro",
@@ -455,7 +455,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bitrue",
@@ -465,7 +465,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bitso",
@@ -475,7 +475,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: false },
+    capabilities: { trades: true, deposits: true, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "bitteam",
@@ -485,7 +485,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "bitvavo",
@@ -495,7 +495,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "bl3p",
@@ -505,7 +505,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: false, withdrawals: false },
+    capabilities: { trades: false, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "blofin",
@@ -515,7 +515,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "btcalpha",
@@ -525,7 +525,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "btcbox",
@@ -535,7 +535,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: false, withdrawals: false },
+    capabilities: { trades: false, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "btcturk",
@@ -545,7 +545,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "cex",
@@ -555,7 +555,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: false, withdrawals: false },
+    capabilities: { trades: false, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "coinbaseadvanced",
@@ -565,7 +565,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "coinbaseexchange",
@@ -575,7 +575,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "coinbaseinternational",
@@ -585,7 +585,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "coincatch",
@@ -595,7 +595,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "coinex",
@@ -605,7 +605,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "coinlist",
@@ -615,7 +615,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "coinmate",
@@ -625,7 +625,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu"],
     popularity: 35,
     credentialShape: "apiKey+secret+uid",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "coinone",
@@ -635,7 +635,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "coinsph",
@@ -645,7 +645,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "coinspot",
@@ -655,7 +655,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "currencycom",
@@ -665,7 +665,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "delta",
@@ -675,7 +675,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "deribit",
@@ -685,7 +685,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "digifinex",
@@ -695,7 +695,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "exmo",
@@ -705,7 +705,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "fmfwio",
@@ -715,7 +715,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "gateio",
@@ -725,7 +725,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "huobi",
@@ -735,7 +735,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "huobijp",
@@ -745,7 +745,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "indodax",
@@ -755,7 +755,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: false, withdrawals: false },
+    capabilities: { trades: false, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "krakenfutures",
@@ -765,7 +765,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "kucoinfutures",
@@ -775,7 +775,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "kuna",
@@ -785,7 +785,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "latoken",
@@ -795,7 +795,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "mercado",
@@ -805,7 +805,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "novadax",
@@ -815,7 +815,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "oceanex",
@@ -825,7 +825,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: false, withdrawals: false },
+    capabilities: { trades: false, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "okcoin",
@@ -835,7 +835,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "oxfun",
@@ -845,7 +845,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "p2b",
@@ -855,7 +855,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "paymium",
@@ -865,7 +865,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: false, withdrawals: false },
+    capabilities: { trades: false, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "phemex",
@@ -875,7 +875,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "poloniexfutures",
@@ -885,7 +885,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us"],
     popularity: 35,
     credentialShape: "apiKey+password+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "probit",
@@ -895,7 +895,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "timex",
@@ -905,7 +905,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "tokocrypto",
@@ -915,7 +915,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "tradeogre",
@@ -925,7 +925,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: false, withdrawals: false },
+    capabilities: { trades: false, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "wavesexchange",
@@ -935,7 +935,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "wazirx",
@@ -945,7 +945,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: true, withdrawals: true },
+    capabilities: { trades: false, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "woo",
@@ -955,7 +955,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "xt",
@@ -965,7 +965,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
   },
   {
     slug: "yobit",
@@ -975,7 +975,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "zaif",
@@ -985,7 +985,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","asia"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: false, deposits: false, withdrawals: false },
+    capabilities: { trades: false, deposits: false, withdrawals: false, fetchBalance: true },
   },
   {
     slug: "zonda",
@@ -995,6 +995,6 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","eu"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: false, withdrawals: false },
+    capabilities: { trades: true, deposits: false, withdrawals: false, fetchBalance: true },
   },
 ];
