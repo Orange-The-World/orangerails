@@ -23,7 +23,6 @@ name: prod pr source guard
 
 on:
   pull_request:
-    branches: [prod]
     # `edited` matters as much as the others: it is what fires when someone
     # retargets an existing PR onto prod after it was opened elsewhere. Without
     # it, a PR opened against dev and later repointed at prod is never checked.
@@ -35,7 +34,6 @@ permissions:
 jobs:
   source-guard:
     name: prod pull requests must come from dev
-    if: github.event.pull_request.base.ref == 'prod'
     runs-on: ubuntu-latest
     steps:
       - name: Self-test the decision logic
@@ -96,6 +94,11 @@ jobs:
           echo "base: ${BASE_REF}"
           echo "head: ${HEAD_REF}"
           echo "labels: ${LABELS}"
+
+          if [ "${BASE_REF}" != "prod" ]; then
+            echo "Not targeting prod (base: ${BASE_REF}). Nothing to enforce here."
+            exit 0
+          fi
 
           if [ "${HEAD_REF}" = "dev" ]; then
             echo "This is the promotion PR. Allowed."
