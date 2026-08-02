@@ -202,8 +202,25 @@ export interface ProviderAdapter {
    * "Lightning", "Self-hosted") and full-text search matching. Lower-case,
    * hyphenated. Country codes are ISO 3166-1 alpha-2 lower-case ('us',
    * 'ca', 'eu').
+   *
+   * These strings are for search chips and UI filters only. They are NOT
+   * the custody source of truth -- read the `custody` field for that.
    */
   tags?: string[];
+
+  /**
+   * Whether this provider holds user funds (custodial) or the user holds
+   * the keys (self_custody).
+   *
+   * Required and fail-closed by design. TypeScript enforces it at compile
+   * time. At runtime, resolveCustody() treats an absent or unrecognised
+   * value as 'custodial' and emits a loud error -- never 'self_custody',
+   * never silent.
+   *
+   * Tags may carry 'custodial' or 'self-custody' strings for search chips
+   * but are NOT authoritative. Always read this field, never tags.
+   */
+  custody: 'custodial' | 'self_custody';
 
   /**
    * Default sort weight inside a category , higher first. Hand-picked so
@@ -287,4 +304,27 @@ export function parseCredentials(
     }
   }
   return obj;
+}
+
+/**
+ * Runtime custody classifier that fails closed.
+ *
+ * TypeScript enforces `custody` at compile time, but runtime objects (e.g.
+ * adapters from a future dynamic registry or a JSON payload) may bypass
+ * typechecking. This helper is the authoritative read path: if `custody`
+ * is absent or is an unrecognised string, it emits a loud console.error
+ * and returns 'custodial'. It NEVER returns 'self_custody' for an unknown
+ * or absent value.
+ *
+ * @param adapter - Any object that may have a `custody` field.
+ */
+export function resolveCustody(
+  adapter: { custody?: unknown },
+): 'custodial' | 'self_custody' {
+  const value = adapter.custody;
+  if (value === 'custodial' || value === 'self_custody') return value;
+  console.error(
+    `[custody] absent or unrecognised custody value (${JSON.stringify(value)}): failing closed to 'custodial'.`,
+  );
+  return 'custodial';
 }
