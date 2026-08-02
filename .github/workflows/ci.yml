@@ -58,9 +58,9 @@ jobs:
     # whole way. Green then meant "the frontend built and the smoke test clicked
     # through", which is not a statement about the code being deployed.
     #
-    # This is dev's deno-test job, copied unchanged so the two branches stop
-    # disagreeing about what "CI passed" means. Its sibling deno-typecheck is
-    # deliberately NOT copied yet: prod currently produces 18 error markers under
+    # This job now matches dev's deno-test job including the file-count guard so
+    # the two branches agree on what "CI passed" means. Its sibling deno-typecheck
+    # is deliberately NOT copied yet: prod currently produces 18 error markers under
     # deno check and, unlike dev's copy, this file carries no DENO_CHECK_BASELINE
     # ratchet to tolerate a known count, so importing it today would land red on
     # arrival. That is tracked in #361 and wants the ratchet brought with it.
@@ -84,7 +84,52 @@ jobs:
 
       - name: deno test supabase/functions
         shell: bash
+        env:
+          # The baseline is the number of test files actually present on the
+          # branch this job is running against, and it is PER BRANCH because
+          # the two branches genuinely differ.
+          #
+          # MEASURED 2026-07-31 with this job's own find pattern:
+          #   dev  15 files
+          #   prod  9 files
+          #
+          # The value shipped when this guard landed was 3, which was the count
+          # of test-file DIRECTORIES someone eyeballed rather than the count of
+          # files the pattern collects. A baseline of 3 against a real 15 means
+          # twelve test files can disappear and this job still reports green,
+          # which is the exact failure DL-0459 was opened to stop. The guard was
+          # correct; only its number was wrong.
+          #
+          # Why this is an expression and not one number: prod's tree has 9,
+          # so a single hardcoded 15 promoted from dev to prod turns this job
+          # red on prod the moment it lands, on a count that is correct for
+          # prod. Selecting on the branch lets the same file be true on both.
+          #
+          # When you add or remove a test file, change the number for that
+          # branch in the same PR, and say why in the message if it goes down.
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '15' }}
         run: |
+          set -euo pipefail
+
+          mapfile -t TEST_FILES < <(find supabase/functions \( -name '*_test.ts' -o -name '*.test.ts' \) | sort)
+          FILE_COUNT="${#TEST_FILES[@]}"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::No test files found -- deno test is checking nothing. Fix the path rather than let it report green."
+            exit 1
+          fi
+
+          if [ "$FILE_COUNT" -lt "$DENO_TEST_FILE_BASELINE" ]; then
+            echo "::error::Test file count dropped to ${FILE_COUNT} (baseline: ${DENO_TEST_FILE_BASELINE}). Restore missing files or lower the baseline with justification."
+            printf '%s\n' "${TEST_FILES[@]}" | sed 's/^/  collected: /'
+            exit 1
+          fi
+
+          # Print the collected list, not only the count. A count that matches
+          # the baseline can still be the wrong nine files, and the list is
+          # what makes that visible in the log without a rerun.
+          printf '%s\n' "${TEST_FILES[@]}" | sed 's/^/  collected: /'
+          echo "Found ${FILE_COUNT} test file(s) (baseline: ${DENO_TEST_FILE_BASELINE})"
           deno test --no-check --allow-all supabase/functions/
 
   playwright:
