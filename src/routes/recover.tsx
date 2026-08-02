@@ -2,7 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
-import { MIN_PASSWORD_LENGTH } from "@/lib/vault";
+import { MIN_PASSWORD_LENGTH, CURRENT_VAULT_KEY_VERSION } from "@/lib/vault";
 import { formatError } from "@/lib/format-error";
 import { logSecurityEvent } from "@/lib/audit";
 
@@ -79,7 +79,7 @@ function RecoverPage() {
         .update({
           enc_mek_ciphertext: newEncMekCiphertext,
           recovery_ciphertext: newRecoveryCiphertext,
-          vault_key_version: 2,
+          vault_key_version: CURRENT_VAULT_KEY_VERSION,
         })
         .eq("user_id", session.user.id);
       if (updateErr) throw updateErr;
