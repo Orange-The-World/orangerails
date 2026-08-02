@@ -17,7 +17,10 @@
  */
 
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useCallback } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { useVault } from "@/context/VaultContext";
+import { STEALTH_PROTOCOL_VERSION } from "@/stealth/lib/postmessage";
 import {
   ArrowRight,
   CheckCircle2,
@@ -62,66 +65,112 @@ const ALLOWED_APP_ORIGINS: ReadonlySet<string> = new Set(
     .filter((s) => s.length > 0),
 );
 
-function launchStealthSync(onRefused: (message: string) => void) {
-  // Option B, the bounce (DL-0426). When a consuming app deep-links here
-  // with its own app_url, hand the flow straight back to that app. The
-  // consuming app opens the Stealth Sync widget from its own UI, with its
-  // own user key, so OR never holds another app's key in this path.
-  //
-  // Before this fix, this handler opened a local /connect/stealth popup and
-  // never sent OR_STEALTH_INIT, so the widget sat forever on "Waiting for
-  // the parent app". A popup always has a non-null window.opener, so the
-  // widget's direct-load fallback never fired either.
-  const params = new URLSearchParams(window.location.search);
-  const appUrl = params.get("app_url");
-
-  if (appUrl) {
-    let origin: string | null = null;
-    try {
-      origin = new URL(appUrl).origin;
-    } catch {
-      origin = null;
-    }
-    // Never redirect to an origin we have not registered. If app_url is
-    // malformed or its origin is not on the allowlist, refuse and leave the
-    // customer on this page rather than following an untrusted link.
-    if (origin && ALLOWED_APP_ORIGINS.has(origin)) {
-      window.location.assign(appUrl);
-      return;
-    }
-    // fail-loud-on-refused-origin (DL-0426): an app_url we cannot trust must
-    // never fail silently. This handler used to return quietly, so a
-    // misconfigured or untrusted app_url looked like a dead button. Warn to
-    // the console for the developer and surface a visible message so the
-    // refusal is obvious to the customer.
-    console.warn(
-      "[sparrow] Refused app_url with untrusted origin: " +
-        (origin ?? "invalid URL") +
-        ". Add it to VITE_OR_STEALTH_ALLOWED_ORIGINS if it is a registered app.",
-    );
-    onRefused(
-      "We could not open the app that sent you here: its address is not on our allowlist. If you are testing an integration, register its origin first. Otherwise, start Stealth Sync from that app.",
-    );
-    return;
-  }
-
-  // Bare /connect/sparrow with no consuming app: v0.1 behavior is unchanged.
-  // OR acting as its own consuming app (a signed-in OR user syncing their
-  // own descriptor) is the separate app-mode flow and is out of scope here.
-  const url = "/connect/stealth";
-  const w = window.open(
-    url,
-    "or-stealth-sparrow",
-    "width=560,height=720,menubar=no,toolbar=no,location=no,status=no",
-  );
-  if (!w) {
-    // Popup blocked, fall back to same-tab navigation.
-    window.location.href = url;
-  }
-}
-
 function SparrowConnectPage() {
   const [refusedError, setRefusedError] = useState<string | null>(null);
+  const { isUnlocked, exportStealthKeyForWidget } = useVault();
+
+  // DL-0448: send OR_STEALTH_INIT when the vault is unlocked so a signed-in
+  // OR user goes straight into AddRoute. Anonymous visitors still see
+  // DirectLoadCard after the widget's 1500ms grace window.
+  const handleLaunch = useCallback(async () => {
+    setRefusedError(null);
+
+    const params = new URLSearchParams(window.location.search);
+    const appUrl = params.get("app_url");
+
+    if (appUrl) {
+      // Option B: bounce back to the consuming app (DL-0426). Unchanged.
+      let origin: string | null = null;
+      try {
+        origin = new URL(appUrl).origin;
+      } catch {
+        origin = null;
+      }
+      if (origin && ALLOWED_APP_ORIGINS.has(origin)) {
+        window.location.assign(appUrl);
+        return;
+      }
+      console.warn(
+        "[sparrow] Refused app_url with untrusted origin: " +
+          (origin ?? "invalid URL") +
+          ". Add it to VITE_OR_STEALTH_ALLOWED_ORIGINS if it is a registered app.",
+      );
+      setRefusedError(
+        "We could not open the app that sent you here: its address is not on our allowlist. If you are testing an integration, register its origin first. Otherwise, start Stealth Sync from that app.",
+      );
+      return;
+    }
+
+    // Bare /connect/sparrow. Open the Stealth Sync widget in a popup.
+    // Append parent_origin so the widget targets OR_STEALTH_READY at this
+    // exact origin instead of broadcasting to '*'.
+    const selfOrigin = window.location.origin;
+    const url =
+      "/connect/stealth?parent_origin=" + encodeURIComponent(selfOrigin);
+    const w = window.open(
+      url,
+      "or-stealth-sparrow",
+      "width=560,height=720,menubar=no,toolbar=no,location=no,status=no",
+    );
+    if (!w) {
+      // Popup blocked. Fall back to same-tab navigation; INIT cannot be sent.
+      window.location.href = "/connect/stealth";
+      return;
+    }
+
+    if (!isUnlocked) {
+      // Anonymous visitor. Popup shows DirectLoadCard after the grace window.
+      return;
+    }
+
+    // Listen for OR_STEALTH_READY from the popup, then post OR_STEALTH_INIT.
+    let sent = false;
+    // eslint-disable-next-line prefer-const
+    let intervalId: ReturnType<typeof setInterval>;
+
+    const handler = async (event: MessageEvent) => {
+      if (event.source !== w) return;
+      if (event.origin !== selfOrigin) return;
+      const msg = event.data as { type?: string };
+      if (msg?.type !== "OR_STEALTH_READY" || sent) return;
+      sent = true;
+      window.removeEventListener("message", handler);
+      clearInterval(intervalId);
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        if (!session) return;
+        const keyB64 = await exportStealthKeyForWidget();
+        w.postMessage(
+          {
+            type: "OR_STEALTH_INIT",
+            protocol_version: STEALTH_PROTOCOL_VERSION,
+            app_slug: "or",
+            app_user_id: session.user.id,
+            mode: "add",
+            or_stealth_key_b64: keyB64,
+            return_callback_origin: selfOrigin,
+            access_token: session.access_token,
+            gap_limit: 250,
+          },
+          selfOrigin,
+        );
+      } catch (err) {
+        // Non-fatal: popup is open and falls through to DirectLoadCard.
+        console.warn("[sparrow] Could not send OR_STEALTH_INIT:", err);
+      }
+    };
+
+    window.addEventListener("message", handler);
+    intervalId = setInterval(() => {
+      if (w.closed) {
+        clearInterval(intervalId);
+        window.removeEventListener("message", handler);
+      }
+    }, 500);
+  }, [isUnlocked, exportStealthKeyForWidget]);
+
   return (
     <div className="min-h-screen bg-background text-foreground antialiased">
       <Navbar />
@@ -157,10 +206,7 @@ function SparrowConnectPage() {
 
             <div className="mt-8 flex flex-wrap gap-3">
               <button
-                onClick={() => {
-                  setRefusedError(null);
-                  launchStealthSync(setRefusedError);
-                }}
+                onClick={() => { void handleLaunch(); }}
                 className="group inline-flex h-11 items-center gap-1.5 rounded-md bg-primary px-5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
               >
                 Launch Stealth Sync
