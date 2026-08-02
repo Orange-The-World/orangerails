@@ -411,3 +411,68 @@ jobs:
           path: tests/e2e/screenshots/
           retention-days: 14
           if-no-files-found: ignore
+
+  ccxt-manifest-drift:
+    name: CCXT manifest drift check
+    runs-on: ubuntu-latest
+    # Why this job exists: manifest.ts is a GENERATED file but has been edited
+    # by hand on at least one branch (Regenerated date still reads 2026-05-15
+    # when added, not today). Hand-typed capability values can silently diverge
+    # from what ccxt actually reports. This job re-runs the generator on every
+    # PR and fails if any capability line (exchanges, fetchBalance flags, cred
+    # shapes) differs from what the installed ccxt produces.
+    #
+    # Date-only changes (the "Regenerated:" header and the "Generated:" line in
+    # ccxt-status.md) are excluded from the comparison: the generator always
+    # writes today, so a committed date from a previous run always differs and
+    # would make every PR red for a reason unrelated to correctness. Excluding
+    # exactly those two patterns means the gate fires on capability drift and
+    # nothing else.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Regenerate CCXT manifest
+        # stderr carries the "Wrote ..." summary; redirect to stdout so the log
+        # shows it. The generator exits 0 on success; any constructor error for
+        # a specific exchange is handled internally (that exchange is skipped).
+        run: node scripts/generate-ccxt-manifest.mjs 2>&1
+
+      - name: Check for substantive drift
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Collect diff lines for the two generated files, strip ANSI, remove
+          # unified-diff file headers (+++ / ---), then remove any line that
+          # carries ONLY a date update (Regenerated: or Generated:). Whatever
+          # remains is a substantive capability change not present in the tree.
+          DRIFT=$(
+            git diff -- \
+              supabase/functions/_shared/providers/_ccxt/manifest.ts \
+              docs/ccxt-status.md \
+            | grep -E '^[+-]' \
+            | grep -vE '^(\+\+\+|---)' \
+            | grep -vE '(Regenerated:|Generated:)' \
+            || true
+          )
+
+          if [ -n "$DRIFT" ]; then
+            echo "::error::CCXT manifest has substantive drift from installed ccxt. Run 'node scripts/generate-ccxt-manifest.mjs' and commit the output."
+            echo ""
+            echo "Full diff:"
+            git diff -- \
+              supabase/functions/_shared/providers/_ccxt/manifest.ts \
+              docs/ccxt-status.md
+            exit 1
+          fi
+
+          echo "Manifest values match installed ccxt. Date header update is expected and does not fail this check."
