@@ -130,19 +130,40 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     expect(destination).toContain("/connect/stealth");
   });
 
-  // #451: a bare direct load of the widget must reach the guidance card once the
-  // grace window expires, never hang on "Waiting for OR_STEALTH_INIT". This is
-  // the regression guard for the no-parameter branch (requirement 3).
-  test("bare /connect/stealth direct-load shows the guidance card after the grace window", async ({ page }) => {
-    await page.goto("/connect/stealth");
+  // #451: the widget must reach the guidance card for ANY entry shape once the
+  // grace window expires, not only a top-level tab where window.parent === window.
+  // Load it inside a same-origin iframe: window.opener stays null while
+  // window.parent !== window. On the pre-fix gate the card only rendered when
+  // window.parent === window, so this framed load stayed stuck on the waiting
+  // state. This case is the regression guard that the fix dropped that condition:
+  // red at the dev tip, green on this branch.
+  test("iframe direct-load of /connect/stealth shows the guidance card after the grace window", async ({ page }) => {
+    await page.goto("/connect/sparrow");
+
+    // Inject a same-origin iframe pointing at the widget. Inside it,
+    // window.parent !== window (framed) while window.opener is null, which is
+    // exactly the shape the old opener/parent gate rejected.
+    await page.evaluate(() => {
+      const frame = document.createElement("iframe");
+      frame.id = "stealth-frame";
+      frame.src = "/connect/stealth";
+      frame.style.width = "480px";
+      frame.style.height = "640px";
+      document.body.appendChild(frame);
+    });
+
+    const widget = page.frameLocator("#stealth-frame");
+
+    // Never post OR_STEALTH_INIT. Wait just past the grace window so awaitingInit
+    // flips to false with no init set.
     await page.waitForTimeout(1600); // just past the 1500ms DIRECT_LOAD_GRACE_MS window
-    await expect(page).toHaveURL(/\/connect\/stealth/);
+
     await expect(
-      page.getByRole("heading", { name: /stealth sync widget/i, level: 1 }),
+      widget.getByRole("heading", { name: /stealth sync widget/i, level: 1 }),
     ).toBeVisible();
     await expect(
-      page.getByText(/OR_STEALTH_INIT postMessage to this window/i),
+      widget.getByText(/OR_STEALTH_INIT postMessage to this window/i),
     ).toBeVisible();
-    await capture(page, "05-stealth-bare-load-guidance-card");
+    await capture(page, "05-stealth-iframe-load-guidance-card");
   });
 });
