@@ -810,6 +810,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
         let newTxs: NormalizedTransaction[];
         let next_cursor: string | null;
+        let isPartial = false;
 
         if (conn.provider_type === 'strike') {
           // Strike uses BOTH paths now (V3 ADR 2026-05-25):
@@ -911,10 +912,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           const out = await adapter.syncByWallets(credentials, walletIds, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
+          isPartial = out.partial ?? false;
         } else {
           const out = await adapter.syncAccountWide(credentials, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
+          isPartial = out.partial ?? false;
         }
 
         if (sinkMode) {
@@ -970,7 +973,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // Liveness and health reporting are refreshed on every pass regardless.
         const connUpdate: Record<string, unknown> = {
           last_sync_at: new Date().toISOString(),
-          status: 'active',
+          status: isPartial ? 'partial' : 'active',
           encrypted_last_error: null,
         };
         if (newTxs.length > 0 && next_cursor != null) {
