@@ -172,7 +172,7 @@ if (skipped.length > 0) {
   md.push('');
 }
 
-writeFileSync(STATUS_PATH, md.join('\n'));
+writeFileSync(STATUS_PATH, md.join('\n') + '\n');
 console.error('Wrote ' + STATUS_PATH);
 
 const caps = rows.reduce((a, r) => ({
