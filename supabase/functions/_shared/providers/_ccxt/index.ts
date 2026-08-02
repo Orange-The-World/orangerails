@@ -251,10 +251,11 @@ function buildDiscover(slug: string, exchangeId: string) {
     if (exchange.has?.fetchBalance) {
       try {
         await exchange.fetchBalance();
-        // Credentials validated. Compute a stable, non-reversible account_key so
-        // or-link-complete can dedup reconnects and confirm validation happened.
-        // sha256(exchangeId + ":" + apiKey) is unique per account and never leaves
-        // the server (discovery_sessions is service-role only).
+        // fetchBalance succeeded: compute a stable, non-reversible fingerprint for
+        // reconnect dedup. sha256(exchangeId + ":" + apiKey) is unique per account
+        // and never leaves the server (discovery_sessions is service-role only).
+        // This records that fetchBalance ran for this exchange, not that all
+        // exchanges enforce it (see else-branch for those that skip it).
         const keyMaterial = `${exchangeId}:${String(credentials.apiKey ?? '')}`;
         const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyMaterial));
         accountKey = Array.from(new Uint8Array(hashBuf))
