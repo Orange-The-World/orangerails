@@ -2,7 +2,7 @@
  * Generate the CCXT exchange manifest by introspecting the installed
  * `ccxt` package. Output:
  *
- *   supabase/functions/_shared/providers/_ccxt-manifest.ts   (TS module)
+ *   supabase/functions/_shared/providers/_ccxt/manifest.ts   (TS module)
  *   docs/ccxt-status.md                                       (support matrix)
  *
  * Usage: node scripts/generate-ccxt-manifest.mjs
@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MANIFEST_PATH = join(__dirname, '..', 'supabase', 'functions', '_shared', 'providers', '_ccxt-manifest.ts');
+const MANIFEST_PATH = join(__dirname, '..', 'supabase', 'functions', '_shared', 'providers', '_ccxt', 'manifest.ts');
 const STATUS_PATH = join(__dirname, '..', 'docs', 'ccxt-status.md');
 
 // Hand-curated popularity hints for the headline exchanges. Anything not
@@ -79,6 +79,7 @@ for (const id of ccxt.exchanges) {
       trades: !!inst.has?.fetchMyTrades,
       deposits: !!inst.has?.fetchDeposits,
       withdrawals: !!inst.has?.fetchWithdrawals,
+      fetchBalance: !!inst.has?.fetchBalance,
       popularity: POPULARITY[id] ?? 35,
       tags,
     });
@@ -93,7 +94,7 @@ const today = new Date().toISOString().slice(0, 10);
 
 const ts = [];
 ts.push('/**');
-ts.push(' * GENERATED FILE — do not edit by hand.');
+ts.push(' * GENERATED FILE, do not edit by hand.');
 ts.push(' * Source: scripts/generate-ccxt-manifest.mjs introspecting ccxt@' + ccxt.version);
 ts.push(' * Regenerated: ' + today);
 ts.push(' * Total exchanges: ' + rows.length);
@@ -107,7 +108,7 @@ ts.push('  description?: string;');
 ts.push('  tags: string[];');
 ts.push('  popularity: number;');
 ts.push("  credentialShape: 'apiKey+secret' | 'apiKey+password+secret' | 'apiKey+secret+uid';");
-ts.push('  capabilities: { trades: boolean; deposits: boolean; withdrawals: boolean };');
+ts.push('  capabilities: { trades: boolean; deposits: boolean; withdrawals: boolean; fetchBalance: boolean };');
 ts.push('}');
 ts.push('');
 ts.push('export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [');
@@ -121,7 +122,7 @@ for (const r of rows) {
   ts.push('    tags: ' + JSON.stringify(r.tags) + ',');
   ts.push('    popularity: ' + r.popularity + ',');
   ts.push('    credentialShape: ' + JSON.stringify(r.creds) + ',');
-  ts.push('    capabilities: { trades: ' + r.trades + ', deposits: ' + r.deposits + ', withdrawals: ' + r.withdrawals + ' },');
+  ts.push('    capabilities: { trades: ' + r.trades + ', deposits: ' + r.deposits + ', withdrawals: ' + r.withdrawals + ', fetchBalance: ' + r.fetchBalance + ' },');
   ts.push('  },');
 }
 ts.push('];');
