@@ -315,7 +315,7 @@ export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [
     tags: ["exchange","us","fiat-on-ramp"],
     popularity: 35,
     credentialShape: "apiKey+secret",
-    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: true },
+    capabilities: { trades: true, deposits: true, withdrawals: true, fetchBalance: false },
   },
   {
     slug: "ascendex",
