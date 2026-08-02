@@ -327,11 +327,17 @@ export function App() {
   }
 
   if (!init) {
-    const isDirectLoad =
-      !awaitingInit &&
-      (typeof window === "undefined" || (window.opener === null && window.parent === window));
-
-    if (isDirectLoad) {
+    // No INIT yet. While the grace window is still open (awaitingInit) we wait,
+    // giving a real parent time to finish the handshake. Once it expires with no
+    // INIT, none is coming, so show the direct-load guidance regardless of whether
+    // an opener or parent frame exists. This is the bare /connect/sparrow case
+    // (#451): the Sparrow route opens this widget in a popup with a non-null
+    // window.opener but never sends OR_STEALTH_INIT, so the old opener/parent gate
+    // left the popup stuck on the waiting state forever. A real parent that does
+    // send INIT sets init and supersedes this card, and the server render still
+    // shows the card because awaitingInit starts false there. Requirement 2:
+    // popup and same-tab paths now reach the same explained state.
+    if (!awaitingInit) {
       return <DirectLoadCard />;
     }
 
