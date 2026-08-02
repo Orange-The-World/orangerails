@@ -1,6 +1,6 @@
 # CHANGELOG
 
-Reverse-chronological log of major changes to Orange Rails , anything that touches the API contract, the deploy surface, or the consumer-app integration shape.
+Reverse-chronological log of major changes to Orange Rails, anything that touches the API contract, the deploy surface, or the consumer-app integration shape.
 
 Per-session work continues to be logged in the per-workstream wiki Changelogs (`Apps/🚂 Orange Rails/...` in the maintainer wiki). This file is the integrator-facing record.
 
