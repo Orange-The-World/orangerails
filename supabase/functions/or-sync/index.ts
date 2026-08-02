@@ -563,10 +563,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               }
             }
 
+            // Only flip to active if not in a Quiltt-reconciled error state (DL-0441).
+            // or-quiltt-sync owns the error->active transition for Quiltt connections;
+            // or-sync must not overwrite an error set by a Quiltt webhook event.
             await ctx.serviceClient
               .from('connections')
               .update({ last_sync_at: new Date().toISOString(), status: 'active' })
-              .eq('id', conn.id);
+              .eq('id', conn.id)
+              .neq('status', 'error');
 
             results.push({ connection_id: conn.id, synced: quilttSinkSynced, next_cursor: null });
 
@@ -720,10 +724,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               .eq('event_id', ev.event_id);
           }
 
+          // Only flip to active if not in a Quiltt-reconciled error state (DL-0441).
           await ctx.serviceClient
             .from('connections')
             .update({ last_sync_at: new Date().toISOString(), status: 'active' })
-            .eq('id', conn.id);
+            .eq('id', conn.id)
+            .neq('status', 'error');
 
           results.push({ connection_id: conn.id, synced, next_cursor: null });
 
