@@ -275,6 +275,7 @@ export const btcpayAdapter: ProviderAdapter = {
   description: 'Self-hosted merchant',
   category: 'payment_processor',
   tags: ['merchant', 'self-hosted', 'lightning', 'on-chain'],
+  custody: 'self_custody',
   popularity: 85,
   multiWallet: true,
   credentialFields: [
