@@ -226,8 +226,19 @@ async function handleEvent(
     .eq('id', subaccountId)
     .single();
   if (subErr || !sub) return `subaccount lookup failed: ${subErr?.message}`;
+  // Extract connectionId and reconcile success status BEFORE the OPK gate so that
+  // every subaccount (not just OPK-opted-in ones) can recover from error state.
+  // Auditor blocking finding DL-0441 second review: placing this after the gate
+  // made error a terminal state for non-opted-in subaccounts.
+  const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
+  if (!connectionId) return 'event missing record.id';
+
+  // Quiltt confirms successful sync: clear any error state so the connection shows active.
+  // Called before the OPK gate so the status fix covers ALL subaccounts.
+  await reconcileConnectionSuccess(client, connectionId, subaccountId);
+
   if (!sub.opk_public) {
-    // No opt-in. Defer until user opens app (or-sync will drain).
+    // No opt-in. Status already reconciled above. Defer data pull until user opens app.
     return 'skipped';
   }
   if (sub.opk_alg !== OPK_SEAL_ALG) {
