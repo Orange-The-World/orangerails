@@ -144,22 +144,23 @@ md.push('Regenerate with: `node scripts/generate-ccxt-manifest.mjs`');
 md.push('');
 md.push('## What the matrix means');
 md.push('');
-md.push('Three CCXT capabilities matter to OR sync:');
+md.push('Four CCXT capabilities matter to OR sync:');
 md.push('');
 md.push('* **trades** — `fetchMyTrades` available, OR can pull buy/sell history');
 md.push('* **deposits** — `fetchDeposits` available, OR can pull funding events');
 md.push('* **withdrawals** — `fetchWithdrawals` available, OR can pull payouts');
+md.push('* **fetchBalance** — `fetchBalance` available, OR uses this to validate credentials on connect');
 md.push('');
 md.push("If `trades` is false for an exchange, sync surfaces zero transactions until CCXT adds it upstream. That's a CCXT limitation, not OR.");
 md.push('');
 md.push('## Matrix');
 md.push('');
-md.push('| Exchange | Slug | Countries | Trades | Deposits | Withdrawals | Cred shape |');
-md.push('|----------|------|-----------|--------|----------|-------------|------------|');
+md.push('| Exchange | Slug | Countries | Trades | Deposits | Withdrawals | fetchBalance | Cred shape |');
+md.push('|----------|------|-----------|--------|----------|-------------|--------------|------------|');
 for (const r of rows) {
   md.push('| ' + r.name + ' | `' + r.id + '` | ' + (r.countries.join(', ') || '—') + ' | ' +
     (r.trades ? '✅' : '❌') + ' | ' + (r.deposits ? '✅' : '❌') + ' | ' +
-    (r.withdrawals ? '✅' : '❌') + ' | ' + r.creds + ' |');
+    (r.withdrawals ? '✅' : '❌') + ' | ' + (r.fetchBalance ? '✅' : '❌') + ' | ' + r.creds + ' |');
 }
 md.push('');
 if (skipped.length > 0) {
@@ -178,5 +179,6 @@ const caps = rows.reduce((a, r) => ({
   trades: a.trades + (r.trades ? 1 : 0),
   deposits: a.deposits + (r.deposits ? 1 : 0),
   withdrawals: a.withdrawals + (r.withdrawals ? 1 : 0),
-}), { trades: 0, deposits: 0, withdrawals: 0 });
+  fetchBalance: a.fetchBalance + (r.fetchBalance ? 1 : 0),
+}), { trades: 0, deposits: 0, withdrawals: 0, fetchBalance: 0 });
 console.error('Capabilities across ' + rows.length + ' exchanges:', caps);
