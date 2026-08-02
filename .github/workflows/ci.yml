@@ -390,7 +390,10 @@ jobs:
         # hyphen, collapse consecutive hyphens, strip trailing hyphens,
         # truncate at 28 chars.
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          # dev and prod branches have no Cloudflare branch preview; their
+          # builds go to the static host. Only feature-branch PRs get
+          # a per-branch preview URL.
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$GITHUB_HEAD_REF" != "dev" ] && [ "$GITHUB_HEAD_REF" != "prod" ]; then
             SLUG=$(echo "$GITHUB_HEAD_REF" \
               | tr '[:upper:]' '[:lower:]' \
               | sed 's/[^a-z0-9]/-/g' \
