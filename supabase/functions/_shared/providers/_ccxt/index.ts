@@ -241,9 +241,24 @@ function buildDiscover(slug: string, exchangeId: string) {
   ): Promise<DiscoveredWallet[]> {
     const exchange = await instantiateExchange(exchangeId, credentials);
 
+    // `accountKey` is set only when fetchBalance succeeds (credentials proven).
+    // Its presence in the returned wallet causes or-discover-wallets to write a
+    // discovery_sessions row, giving or-link-complete a server-side signal that
+    // the credentials were validated before the connection row was created.
+    let accountKey: string | undefined;
+
     if (exchange.has?.fetchBalance) {
       try {
         await exchange.fetchBalance();
+        // Credentials validated. Compute a stable, non-reversible account_key so
+        // or-link-complete can dedup reconnects and confirm validation happened.
+        // sha256(exchangeId + ":" + apiKey) is unique per account and never leaves
+        // the server (discovery_sessions is service-role only).
+        const keyMaterial = `${exchangeId}:${String(credentials.apiKey ?? '')}`;
+        const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyMaterial));
+        accountKey = Array.from(new Uint8Array(hashBuf))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
       } catch (raw) {
         const err = raw instanceof Error ? raw : new Error(String(raw));
         const code = classifyUpstreamError(err.message, errorClassName(err));
@@ -264,6 +279,7 @@ function buildDiscover(slug: string, exchangeId: string) {
     return [
       {
         external_wallet_id: slug,
+        ...(accountKey !== undefined ? { account_key: accountKey } : {}),
         currency: 'USD', // exchange wallets are multi-currency; this is the display default
         label: `${slug} account`,
       },
