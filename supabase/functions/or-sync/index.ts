@@ -339,6 +339,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       detail?: string;
       action?: string;
       help_url?: string | null;
+      skip_reason?: string;
     }> = [];
     // Sink-mode-only: collect per-connection sink outputs to merge into
     // a single `rows` map at the end. Empty in legacy mode.
@@ -373,7 +374,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               .maybeSingle();
             if (mapErrSink) throw mapErrSink;
             if (!mapRowSink) {
-              results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+              console.log(`[or-sync] quiltt no-map-row skip (sink) subaccount=${subaccountId}`);
+              results.push({ connection_id: conn.id, synced: 0, next_cursor: null, skip_reason: 'no_quiltt_profile_map' });
               continue;
             }
 
@@ -604,9 +606,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             .maybeSingle();
           if (mapErr) throw mapErr;
           if (!mapRow) {
-            // Link was never completed for this subaccount. Surface a
-            // structured no-op result; integrator's UI explains.
-            results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+            // Link was never completed for this subaccount. Log the skip so
+            // it is visible in edge logs and surface a reason field so callers
+            // can distinguish a genuine zero-sync from a missing-profile bail.
+            console.log(`[or-sync] quiltt no-map-row skip (legacy) subaccount=${subaccountId}`);
+            results.push({ connection_id: conn.id, synced: 0, next_cursor: null, skip_reason: 'no_quiltt_profile_map' });
             continue;
           }
 
