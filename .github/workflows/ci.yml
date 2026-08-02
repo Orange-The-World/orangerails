@@ -510,7 +510,8 @@ jobs:
             echo ""
             echo "Full diff:"
             git diff -- \
-              supabase/functions/_shared/providers/_ccxt/manifest.ts
+              supabase/functions/_shared/providers/_ccxt/manifest.ts \
+              docs/ccxt-status.md
             exit 1
           fi
 
