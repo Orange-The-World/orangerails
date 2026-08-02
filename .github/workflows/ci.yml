@@ -368,7 +368,10 @@ jobs:
           ACCOUNT_A: ${{ secrets.ACCOUNT_A }}
           ACCOUNT_B: ${{ secrets.ACCOUNT_B }}
           OR_TEST_PLATFORM_API_KEY: ${{ secrets.OR_TEST_PLATFORM_API_KEY }}
-          OR_TEST_PLATFORM_SLUG: ${{ secrets.OR_TEST_PLATFORM_SLUG }}
+          # PROOF RUN ONLY, NOT FOR MERGE: this value is deliberately blanked so
+          # the guard below sees it empty and exits 1. Restore the secret
+          # reference to undo.
+          OR_TEST_PLATFORM_SLUG: ''
         run: |
           missing=""
           [ -z "$OR_API_BASE_URL" ]          && missing="$missing OR_API_BASE_URL"
