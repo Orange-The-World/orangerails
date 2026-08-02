@@ -241,10 +241,11 @@ function buildDiscover(slug: string, exchangeId: string) {
   ): Promise<DiscoveredWallet[]> {
     const exchange = await instantiateExchange(exchangeId, credentials);
 
-    // `accountKey` is set only when fetchBalance succeeds (credentials proven).
-    // Its presence in the returned wallet causes or-discover-wallets to write a
-    // discovery_sessions row, giving or-link-complete a server-side signal that
-    // the credentials were validated before the connection row was created.
+    // `accountKey` is set when fetchBalance succeeds. It is a stable fingerprint
+    // for reconnect deduplication: or-link-complete can tell a reconnect from a
+    // new connect. It is NOT a guarantee that credentials were validated for every
+    // exchange: exchanges that do not advertise fetchBalance skip this path and
+    // return no accountKey (see else-branch below).
     let accountKey: string | undefined;
 
     if (exchange.has?.fetchBalance) {
