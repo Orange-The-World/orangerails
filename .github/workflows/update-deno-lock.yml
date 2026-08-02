@@ -12,6 +12,13 @@ name: Update Deno lockfile
 
 on:
   workflow_dispatch:
+  # Also starts from a branch push, because the seats that own this work
+  # have no workflow_dispatch tool. Creating a chore/deno-lock-* branch
+  # starts the run. The branch this job pushes is fix/deno-lock-*, which
+  # does not match, so the workflow cannot retrigger itself.
+  push:
+    branches:
+      - 'chore/deno-lock-*'
 
 permissions:
   contents: write
