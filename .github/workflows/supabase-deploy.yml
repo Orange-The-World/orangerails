@@ -150,7 +150,7 @@ jobs:
             DEPLOY_FUNCS="$ALL_FUNCS"
             echo "Full deploy (workflow_dispatch or force push): $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
           else
-            if ! CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/' 2>/dev/null); then
+            if ! CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/'); then
               DEPLOY_FUNCS="$ALL_FUNCS"
               echo "git diff failed; falling back to full deploy: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
             elif echo "$CHANGED" | grep -qE 'supabase/functions/_[^/]+/'; then
