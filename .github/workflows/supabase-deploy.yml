@@ -135,19 +135,86 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          # esm.sh occasionally 522s mid-bundle. Retry up to 3 times before
-          # giving up so the deploy is not at the mercy of a single CDN hiccup.
-          for attempt in 1 2 3; do
-            if supabase functions deploy --project-ref ${{ steps.target.outputs.supabase_ref }}; then
-              echo "edge functions deployed on attempt $attempt"
-              break
-            fi
-            if [ $attempt -eq 3 ]; then
-              echo "edge functions deploy failed after 3 attempts"
+          # Explicit deploy list: only functions named here are deployed by CI.
+          # Adding a new function requires updating this list in the same PR that
+          # adds the function source. An unlisted directory in supabase/functions/
+          # causes a hard failure before any deploy runs, so a new function can
+          # never be pushed unintentionally by a broad 'supabase functions deploy'.
+          DEPLOY_FUNCTIONS=(
+            client-signup
+            client-verify-email
+            or-connection-cancel
+            or-connection-confirm
+            or-connection-create
+            or-connection-delete
+            or-connection-list
+            or-discover-wallets
+            or-institutions-catalog
+            or-ldk-channel-state
+            or-link-complete
+            or-link-mint-token
+            or-platform-bootstrap
+            or-platform-display
+            or-provision
+            or-providers
+            or-quiltt-accounts
+            or-quiltt-disconnect
+            or-quiltt-link-complete
+            or-quiltt-session
+            or-quiltt-session-revoke
+            or-quiltt-session-via-widget
+            or-quiltt-sync
+            or-quiltt-webhook
+            or-source-wallets-set
+            or-stealth-connection-create
+            or-stealth-connection-delete
+            or-stealth-connection-list
+            or-stealth-envelope-fetch
+            or-stealth-envelope-update
+            or-stealth-transactions-store
+            or-strike-webhook
+            or-sync
+            or-sync-key-register
+            or-transactions-list
+            or-webhook-dispatch
+            sync-blink
+            v1-rate
+            world-gateway
+          )
+
+          REF="${{ steps.target.outputs.supabase_ref }}"
+
+          # Guard: any function directory not on the approved list is a hard stop
+          # before any deploy runs. _shared is a shared import directory, not a
+          # deployable function, and is always skipped.
+          for DIR in supabase/functions/*/; do
+            FN=$(basename "$DIR")
+            [ "$FN" = "_shared" ] && continue
+            if [[ ! " ${DEPLOY_FUNCTIONS[*]} " =~ " ${FN} " ]]; then
+              echo "::error::Function '${FN}' exists in supabase/functions/ but is not on the approved deploy list. Add it to DEPLOY_FUNCTIONS in this workflow before merging."
               exit 1
             fi
-            echo "attempt $attempt failed; sleeping 15s and retrying"
-            sleep 15
+          done
+
+          # Deploy each listed function individually.
+          # esm.sh occasionally 522s mid-bundle; retry up to 3 times.
+          for FN in "${DEPLOY_FUNCTIONS[@]}"; do
+            if [ ! -d "supabase/functions/${FN}" ]; then
+              echo "WARNING: ${FN} is on the deploy list but has no local source directory; skipping"
+              continue
+            fi
+            for attempt in 1 2 3; do
+              if supabase functions deploy "${FN}" --project-ref "${REF}"; then
+                echo "${FN} deployed on attempt ${attempt}"
+                break
+              fi
+              if [ $attempt -eq 3 ]; then
+                echo "${FN} deploy failed after 3 attempts"
+                exit 1
+              fi
+              echo "attempt ${attempt} for ${FN} failed; sleeping 15s and retrying"
+              sleep 15
+            done
           done
 
       - name: Report pending DB migrations (read-only, never applies)
