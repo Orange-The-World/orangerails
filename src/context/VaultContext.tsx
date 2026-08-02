@@ -40,6 +40,7 @@ import {
   unwrapMekBytes,
   generateRecoveryCode,
   deriveRecoveryKek,
+  CURRENT_VAULT_KEY_VERSION,
 } from "@/lib/vault";
 import {
   deriveVerifierKey,
@@ -368,7 +369,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
       encMekCiphertext,
       recoveryCiphertext,
       recoveryCode,
-      keyVersion: 2,
+      keyVersion: CURRENT_VAULT_KEY_VERSION,
     };
   }, []);
 
