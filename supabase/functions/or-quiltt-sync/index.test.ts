@@ -62,6 +62,9 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
       const chain: any = {
         select(_cols: string) { return chain; },
         eq(_col: string, _val: unknown) { return chain; },
+        is(_col: string, _val: unknown) { return chain; },
+        order(_col: string, _opts: unknown) { return chain; },
+        limit(_n: number) { return chain; },
         single() {
           if (table === 'subaccounts') {
             return Promise.resolve({
