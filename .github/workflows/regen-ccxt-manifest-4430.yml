@@ -1,0 +1,62 @@
+# TEMPORARY - remove this file before merging the PR.
+# Purpose: regenerate the CCXT exchange manifest and support-matrix doc at
+# the version the runtime actually executes (4.4.30, pinned in index.ts),
+# then commit both generated files back to the branch so every subsequent
+# CI run finds no substantive drift.
+#
+# Why CI instead of a local shell: neither the CTO nor SR Dev B can run an
+# arbitrary bun/node command; the auditable path is a workflow-scoped job
+# that commits the result for everyone to inspect.
+#
+# Anti-loop guards:
+#   paths-ignore: if the only files changed are the two generated files,
+#     this workflow does not retrigger. Combined with the fact that commits
+#     made by github-actions[bot] via GITHUB_TOKEN cannot trigger additional
+#     workflow runs, there is no infinite loop.
+name: Regen CCXT manifest at 4.4.30 (temp, this branch only)
+
+on:
+  push:
+    branches: ['chore/ccxt-manifest-4.4.30']
+    paths-ignore:
+      - 'supabase/functions/_shared/providers/_ccxt-manifest.ts'
+      - 'docs/ccxt-status.md'
+
+jobs:
+  regen:
+    name: Regenerate manifest at ccxt@4.4.30
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Align ccxt to runtime pin 4.4.30
+        # package.json devDependency is 4.5.56; the runtime import in
+        # supabase/functions/_shared/providers/_ccxt/index.ts is pinned to
+        # 4.4.30. Aligning here ensures the generator reflects production.
+        run: bun add -d ccxt@4.4.30
+
+      - name: Regenerate manifest and status doc
+        # stderr carries the "Wrote ..." summary lines; redirect to stdout
+        # so the Actions log shows them without an extra step.
+        run: node scripts/generate-ccxt-manifest.mjs 2>&1
+
+      - name: Commit generated files back to branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add \
+            supabase/functions/_shared/providers/_ccxt-manifest.ts \
+            docs/ccxt-status.md
+          if git diff --cached --quiet; then
+            echo "Generated files already match ccxt@4.4.30. No commit needed."
+          else
+            git commit -m "chore: regen ccxt manifest at ccxt@4.4.30 (generated, do not edit)"
+            git push
+          fi
