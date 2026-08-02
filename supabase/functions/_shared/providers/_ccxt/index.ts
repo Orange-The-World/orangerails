@@ -241,9 +241,26 @@ function buildDiscover(slug: string, exchangeId: string) {
   ): Promise<DiscoveredWallet[]> {
     const exchange = await instantiateExchange(exchangeId, credentials);
 
+    // `accountKey` is set when fetchBalance succeeds. It is a stable fingerprint
+    // for reconnect deduplication: or-link-complete can tell a reconnect from a
+    // new connect. It is NOT a guarantee that credentials were validated for every
+    // exchange: exchanges that do not advertise fetchBalance skip this path and
+    // return no accountKey (see else-branch below).
+    let accountKey: string | undefined;
+
     if (exchange.has?.fetchBalance) {
       try {
         await exchange.fetchBalance();
+        // fetchBalance succeeded: compute a stable, non-reversible fingerprint for
+        // reconnect dedup. sha256(exchangeId + ":" + apiKey) is unique per account
+        // and never leaves the server (discovery_sessions is service-role only).
+        // This records that fetchBalance ran for this exchange, not that all
+        // exchanges enforce it (see else-branch for those that skip it).
+        const keyMaterial = `${exchangeId}:${String(credentials.apiKey ?? '')}`;
+        const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyMaterial));
+        accountKey = Array.from(new Uint8Array(hashBuf))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
       } catch (raw) {
         const err = raw instanceof Error ? raw : new Error(String(raw));
         const code = classifyUpstreamError(err.message, errorClassName(err));
@@ -264,6 +281,7 @@ function buildDiscover(slug: string, exchangeId: string) {
     return [
       {
         external_wallet_id: slug,
+        ...(accountKey !== undefined ? { account_key: accountKey } : {}),
         currency: 'USD', // exchange wallets are multi-currency; this is the display default
         label: `${slug} account`,
       },

@@ -452,11 +452,16 @@ async function serverDiscover(
     /* ignore , handled by the !res.ok / shape checks below */
   }
   if (!res.ok) {
+    const errorCode = typeof data.error_code === "string" ? data.error_code : undefined;
     const copy = typeof data.body === "string" ? data.body : undefined;
     const title = typeof data.title === "string" ? data.title : undefined;
-    throw new Error(
-      copy ?? title ?? (typeof data.error === "string" ? data.error : `Could not discover wallets (status ${res.status}).`),
-    );
+    const message =
+      copy ?? title ?? (typeof data.error === "string" ? data.error : `Could not discover wallets (status ${res.status}).`);
+    // Attach error_code so callers can distinguish a definitive credential
+    // rejection (UPSTREAM_AUTH_FAILED) from a transient error (rate limit,
+    // unavailable). Only the former is proof that the credentials are wrong;
+    // the others must not mark or block a connection that may still be valid.
+    throw Object.assign(new Error(message), { discoveryErrorCode: errorCode });
   }
   const wallets = data.discovered_wallets;
   if (!Array.isArray(wallets)) {
