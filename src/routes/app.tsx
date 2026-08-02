@@ -9,7 +9,7 @@ import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
-import { extractDiscoveryErrorMessage } from "@/lib/discovery-error";
+import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
@@ -610,6 +610,14 @@ function AppHome() {
       if (!discRes.ok) {
         const rawText = await discRes.text().catch(() => "");
         console.warn("[OrangeRails] Wallet discovery failed:", discRes.status, rawText);
+        if (isDiscoveryAuthFailure(rawText)) {
+          // Credentials are confirmed invalid: remove the row so the user
+          // is not left with a broken active connection. All other failure
+          // modes (rate limiting, outage, unknown) leave the row and let
+          // the user retry without re-entering credentials.
+          await supabase.from("connections").delete().eq("id", newConnectionId);
+          await refresh();
+        }
         setNotice(extractDiscoveryErrorMessage(discRes.status, rawText));
         return;
       }
