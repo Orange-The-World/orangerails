@@ -140,8 +140,9 @@ jobs:
           # Determine which functions to deploy.
           # - workflow_dispatch: always deploy all (may be a manual hotfix).
           # - Force push or fresh branch (before == 000...): cannot diff; deploy all.
-          # - _shared changed: all functions import it; deploy all.
-          # - Otherwise: only deploy functions whose directory changed.
+          # - Any _-prefixed shared directory changed (_shared, _lib, etc.): deploy all.
+          # - git diff fails for any reason: fail closed, deploy all.
+          # - Otherwise: only deploy functions whose directory changed and still exists.
           BEFORE="${{ github.event.before }}"
           ALL_FUNCS=$(ls supabase/functions/ | grep -v '^_' || true)
 
@@ -149,12 +150,18 @@ jobs:
             DEPLOY_FUNCS="$ALL_FUNCS"
             echo "Full deploy (workflow_dispatch or force push): $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
           else
-            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/' 2>/dev/null || true)
-            if echo "$CHANGED" | grep -q 'supabase/functions/_shared/'; then
+            if ! CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/' 2>/dev/null); then
               DEPLOY_FUNCS="$ALL_FUNCS"
-              echo "_shared changed; redeploying all functions: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
+              echo "git diff failed; falling back to full deploy: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
+            elif echo "$CHANGED" | grep -qE 'supabase/functions/_[^/]+/'; then
+              DEPLOY_FUNCS="$ALL_FUNCS"
+              echo "Shared directory changed; redeploying all functions: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
             else
               DEPLOY_FUNCS=$(echo "$CHANGED" | grep -oP 'supabase/functions/\K[^/]+' | grep -v '^_' | sort -u || true)
+              # Skip any function directory deleted in this push.
+              DEPLOY_FUNCS=$(echo "$DEPLOY_FUNCS" | while IFS= read -r func; do
+                [ -n "$func" ] && [ -d "supabase/functions/$func" ] && echo "$func"
+              done)
               echo "Targeted deploy: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
             fi
           fi
