@@ -121,3 +121,20 @@ If `trades` is false for an exchange, sync surfaces zero transactions until CCXT
 | YoBit | `yobit` | RU | ✅ | ❌ | ❌ | ✅ | apiKey+secret |
 | Zaif | `zaif` | JP | ❌ | ❌ | ❌ | ✅ | apiKey+secret |
 | Zonda | `zonda` | EE | ✅ | ❌ | ❌ | ✅ | apiKey+secret |
+
+## Skipped (need adapter changes)
+
+| Exchange | Cred shape required |
+|----------|---------------------|
+| `bitpanda` | apiKey |
+| `blockchaincom` | secret |
+| `coinmetro` | token+uid |
+| `hyperliquid` | privateKey+walletAddress |
+| `idex` | apiKey+privateKey+secret+walletAddress |
+| `lykke` | apiKey |
+| `ndax` | apiKey+login+password+secret+uid |
+| `onetrading` | apiKey |
+| `paradex` | privateKey+walletAddress |
+| `vertex` | privateKey+walletAddress |
+| `woofipro` | accountId+apiKey+secret |
+
