@@ -35,7 +35,6 @@ jobs:
   source-guard:
     name: prod pull requests must come from dev
     runs-on: ubuntu-latest
-    if: github.event.pull_request.base.ref == 'prod'
     steps:
       - name: Self-test the decision logic
         run: |
@@ -95,6 +94,11 @@ jobs:
           echo "base: ${BASE_REF}"
           echo "head: ${HEAD_REF}"
           echo "labels: ${LABELS}"
+
+          if [ "${BASE_REF}" != "prod" ]; then
+            echo "Not targeting prod (base: ${BASE_REF}). Nothing to enforce here."
+            exit 0
+          fi
 
           if [ "${HEAD_REF}" = "dev" ]; then
             echo "This is the promotion PR. Allowed."
