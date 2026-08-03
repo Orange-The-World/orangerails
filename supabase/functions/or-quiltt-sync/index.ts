@@ -75,19 +75,21 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
   const callerToken = req.headers.get('X-Internal-Worker-Token');
-  // Read expected token from Vault at invocation using service_role.
-  // No OR_INTERNAL_WORKER_TOKEN env var: Vault is the single source of truth.
-  const _vaultUrl = Deno.env.get('SUPABASE_URL')!;
-  const _vaultKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-  const _vaultResp = await fetch(
-    `${_vaultUrl}/rest/v1/decrypted_secrets?name=eq.or_internal_worker_token&select=decrypted_secret`,
-    { headers: { 'apikey': _vaultKey, 'Authorization': `Bearer ${_vaultKey}`, 'Accept-Profile': 'vault' } },
+  // Read expected token via SECURITY DEFINER RPC.
+  // Accept-Profile: vault over PostgREST fails at runtime (DL-0599): the vault
+  // schema is not exposed via the REST API in the deployed edge runtime. The RPC
+  // get_or_internal_worker_token() runs as its owner (postgres), reads
+  // vault.decrypted_secrets, and returns the value. service_role can call it;
+  // anon and authenticated cannot. Migration: 20260804000000_or_quiltt_sync_vault_rpc.sql
+  const client = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
   );
-  if (!_vaultResp.ok) {
+  const { data: expected, error: _vaultErr } = await client.rpc('get_or_internal_worker_token');
+  if (_vaultErr) {
+    console.error('[or-quiltt-sync] vault RPC failed:', _vaultErr.code, _vaultErr.message);
     return new Response('vault read error', { status: 503 });
   }
-  const _vaultRows: { decrypted_secret: string }[] = await _vaultResp.json();
-  const expected: string | null = _vaultRows[0]?.decrypted_secret ?? null;
   if (!expected) {
     return new Response('worker token missing from vault', { status: 503 });
   }
@@ -97,11 +99,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
   if (!quilttApiKey) return new Response('QUILTT_API_KEY missing', { status: 503 });
-
-  const client = createClient(
-    Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
-  );
 
   let processed = 0;
   let failed    = 0;
