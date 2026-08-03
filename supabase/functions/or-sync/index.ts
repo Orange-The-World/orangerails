@@ -979,10 +979,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         if (newTxs.length > 0 && next_cursor != null) {
           connUpdate.last_sync_cursor = next_cursor;
         }
-        await ctx.serviceClient
+        const { error: connUpdateErr } = await ctx.serviceClient
           .from('connections')
           .update(connUpdate)
           .eq('id', conn.id);
+        if (connUpdateErr) throw connUpdateErr;
 
         results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
 
