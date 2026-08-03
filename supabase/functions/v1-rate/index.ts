@@ -69,6 +69,25 @@ interface RateItem {
 // timezone marker are also rejected.
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 
+// Caller surface and non-200 behavior (required for Auditor sign-off):
+//
+// Callers: only external ORBI API consumers holding orbi_api_keys.
+// No internal OR service-to-service call reaches this endpoint.
+//
+//   400/401/405/429/503 -- handler returns structured JSON { error, message };
+//     callers act per code (retry 429 with Retry-After, fix request on 4xx,
+//     back off on 503).
+//   500 -- outer try/catch (below) returns structured JSON
+//     { error: 'server_error', message, correlation_id }; callers treat as
+//     transient and may retry.
+//   502 -- wrapSentryHandler catches any exception that escapes the outer
+//     catch, reports it to GlitchTip, then re-throws; Supabase edge runtime
+//     converts the unhandled throw into 502 Bad Gateway. This fires only for
+//     true programming bugs or fatal init failures after module load. Callers
+//     receive a raw Supabase 502 body (no structured JSON). External
+//     integrators should treat 502 as a transient outage and retry with
+//     exponential backoff. No internal caller exists; this path affects only
+//     external consumers.
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const correlationId = crypto.randomUUID()
   try {
