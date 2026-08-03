@@ -20,7 +20,7 @@
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { mergeStrikeTransactions, batchHttpStatus } from './index.ts';
+import { mergeStrikeTransactions, batchHttpStatus, throwOnDbError, handleConnectionError } from './index.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 
 const WALLET_A = 'wallet-aaaa';
@@ -177,4 +177,69 @@ Deno.test('batchHttpStatus: mixed (some error) -> 207', () => {
 
 Deno.test('batchHttpStatus: all failed -> 422', () => {
   assertEquals(batchHttpStatus([{ error: 'AUTH_FAILURE' }, { error: 'RATE_LIMITED' }]), 422);
+});
+
+// ── throwOnDbError: connections update error-swallow guard (DL-0501) ────
+
+Deno.test('throwOnDbError: throws the exact error object when present', () => {
+  const err = { message: 'update failed: RLS violation', code: '42501' };
+  let caught: unknown = undefined;
+  try {
+    throwOnDbError(err);
+  } catch (e) {
+    caught = e;
+  }
+  assertEquals(caught, err, 'must re-throw the exact DB error, not wrap it');
+});
+
+Deno.test('throwOnDbError: is a no-op when error is null or undefined', () => {
+  // Neither call should throw; if they do, Deno.test fails the case.
+  throwOnDbError(null);
+  throwOnDbError(undefined);
+});
+
+// ── handleConnectionError: catch-body (DL-0501) ──────────────────────────────
+
+Deno.test('handleConnectionError: classifies error, stamps status=error, returns structured result', async () => {
+  // Fake client -- records what update() was called with; deliberately returns
+  // a Supabase-style error object so the test verifies the catch body does not
+  // re-throw on a failed status stamp and still returns the structured result.
+  const updates: Record<string, unknown>[] = [];
+  // deno-lint-ignore no-explicit-any
+  const fakeClient: any = {
+    from: (_table: string) => ({
+      update: (data: Record<string, unknown>) => {
+        updates.push(data);
+        return {
+          eq: (_col: string, _val: string) =>
+            Promise.resolve({ error: { message: 'db write rejected', code: '42501' } }),
+        };
+      },
+    }),
+  };
+
+  const conn = { id: 'conn-test-123' };
+  // sinkMode=true: txnsKey is unused, no CryptoKey ceremony needed.
+  const result = await handleConnectionError(
+    fakeClient,
+    conn,
+    new Error('upstream auth failure'),
+    { sinkMode: true, txnsKey: null },
+  );
+
+  // 1. Classifies: error field is a taxonomy code, not the raw upstream message.
+  assert(typeof result.error === 'string' && result.error.length > 0, 'error must be a non-empty code');
+  assert(!result.error.includes('auth failure'), 'raw upstream message must not appear in the error code');
+
+  // 2. Stamps status='error' on the connection.
+  assertEquals(updates[0]?.status, 'error');
+
+  // 3. Structured result shape: all required fields present.
+  assertEquals(result.connection_id, conn.id);
+  assertEquals(result.next_cursor, null);
+  assert(typeof result.correlation_id === 'string' && result.correlation_id.length > 0, 'correlation_id must be set');
+  assert(typeof result.message === 'string', 'message field must be present');
+  assert(typeof result.detail === 'string', 'detail field must be present');
+
+  // 4. No re-throw: reaching this line proves handleConnectionError returned normally.
 });
