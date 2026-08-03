@@ -238,7 +238,8 @@ export async function handleEvent(
 
   // Quiltt confirms successful sync: clear any error state so the connection shows active.
   // Called before the OPK gate so the status fix covers ALL subaccounts.
-  await reconcileConnectionSuccess(client, connectionId, subaccountId);
+  const successResult = await reconcileConnectionSuccess(client, connectionId, subaccountId);
+  if (successResult !== 'processed') return successResult;
 
   if (!sub.opk_public) {
     // No opt-in. Status already reconciled above. Defer data pull until user opens app.
@@ -591,7 +592,7 @@ async function reconcileConnectionSuccess(
   client: SupabaseClient,
   connectionId: string,
   subaccountId: string,
-): Promise<void> {
+): Promise<'processed' | string> {
   let orConnId: string | null = null;
   const { data: exact, error: exactErr } = await client
     .from('connections')
@@ -600,10 +601,7 @@ async function reconcileConnectionSuccess(
     .eq('provider_type', 'quiltt')
     .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
-  if (exactErr) {
-    console.error(`[or-quiltt-sync] reconcileConnectionSuccess exact lookup failed: ${exactErr.message}`);
-    return;
-  }
+  if (exactErr) return `connection lookup failed: ${exactErr.message}`;
   if (exact) {
     orConnId = exact.id;
   } else {
@@ -616,21 +614,20 @@ async function reconcileConnectionSuccess(
       .order('created_at', { ascending: true })
       .limit(1)
       .maybeSingle();
-    if (legacyErr) {
-      console.error(`[or-quiltt-sync] reconcileConnectionSuccess legacy lookup failed: ${legacyErr.message}`);
-      return;
-    }
+    if (legacyErr) return `connection lookup failed: ${legacyErr.message}`;
     if (legacy) orConnId = legacy.id;
   }
-  if (!orConnId) return;
+  if (!orConnId) return 'processed';
   const { error: statusErr } = await client
     .from('connections')
     .update({ status: 'active' })
     .eq('id', orConnId)
     .eq('status', 'error');
-  if (statusErr) {
-    console.error(`[or-quiltt-sync] reconcileConnectionSuccess failed: ${statusErr.message}`);
-  }
+  if (statusErr) return `connection status update failed: ${statusErr.message}`;
+  console.log(
+    `[or-quiltt-sync] connection ${orConnId} reconciled to active`,
+  );
+  return 'processed';
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
