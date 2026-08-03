@@ -1,0 +1,67 @@
+name: Approved and green PR sweep
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      checks: read
+      statuses: read
+    steps:
+      - name: Find approved and green PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZULIP_SITE: ${{ secrets.ZULIP_SITE }}
+          ZULIP_BOT_EMAIL: ${{ secrets.ZULIP_BOT_EMAIL }}
+          ZULIP_API_KEY: ${{ secrets.ZULIP_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ZULIP_SITE:-}" ] || [ -z "${ZULIP_BOT_EMAIL:-}" ] || [ -z "${ZULIP_API_KEY:-}" ]; then
+            echo "::error::Chat credentials are not configured, so this sweep cannot report anything. Set ZULIP_SITE, ZULIP_BOT_EMAIL and ZULIP_API_KEY."
+            exit 1
+          fi
+
+          now=$(date +%s)
+          report=""
+          count=0
+
+          prs=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --json number,title,url,reviewDecision,statusCheckRollup,createdAt \
+            --limit 100)
+
+          while IFS= read -r pr; do
+            review=$(echo "$pr" | jq -r '.reviewDecision')
+            [ "$review" = "APPROVED" ] || continue
+
+            non_green=$(echo "$pr" | jq '[.statusCheckRollup[] | select((.conclusion // .state) as $s | $s != "SUCCESS" and $s != "NEUTRAL" and $s != "SKIPPED")] | length')
+            total=$(echo "$pr" | jq '.statusCheckRollup | length')
+            [ "$non_green" = "0" ] && [ "$total" -gt "0" ] || continue
+
+            number=$(echo "$pr" | jq -r '.number')
+            title=$(echo "$pr" | jq -r '.title')
+            url=$(echo "$pr" | jq -r '.url')
+            created=$(echo "$pr" | jq -r '.createdAt')
+            age_h=$(( (now - $(date -d "$created" +%s)) / 3600 ))
+            report="${report}- PR #${number}: [${title}](${url}) is ${age_h}h old"$'\n'
+            count=$((count + 1))
+          done < <(echo "$prs" | jq -c '.[]')
+
+          echo "Scanned $(echo "$prs" | jq 'length') open PRs, ${count} are approved and green."
+          [ "$count" -gt 0 ] || exit 0
+
+          body="**Approved and green PRs waiting to merge (${count}):**"$'\n'"${report}"
+
+          curl -s --fail -X POST "${ZULIP_SITE}/api/v1/messages" \
+            -u "${ZULIP_BOT_EMAIL}:${ZULIP_API_KEY}" \
+            --data-urlencode "type=stream" \
+            --data-urlencode "to=Releases" \
+            --data-urlencode "topic=Approved and green PRs waiting to merge (DL-0544)" \
+            --data-urlencode "content=${body}"
