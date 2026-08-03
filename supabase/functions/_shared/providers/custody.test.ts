@@ -11,8 +11,8 @@
  */
 
 import { assertThrows, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { validateAdapter } from '../types.ts';
-import type { ProviderAdapter } from '../types.ts';
+import { validateAdapter } from './types.ts';
+import type { ProviderAdapter } from './types.ts';
 
 // Minimal stub that satisfies all required ProviderAdapter fields except
 // the one being probed.
