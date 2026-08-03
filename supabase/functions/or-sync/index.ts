@@ -983,7 +983,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .from('connections')
           .update(connUpdate)
           .eq('id', conn.id);
-        if (connUpdateErr) throw connUpdateErr;
+        throwOnDbError(connUpdateErr);
 
         results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
 
@@ -1165,6 +1165,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
  * @param drainTxs        transactions from drainStrikeQueue
  * @param syncedWalletIds the SAME array passed to syncByWallets as walletIds
  */
+/**
+ * Throws when a Supabase write returns an error object.
+ *
+ * Extracted from the inline `if (connUpdateErr) throw connUpdateErr` guard
+ * so that index.test.ts can exercise the throw path directly without
+ * constructing a full Supabase mock. No behaviour change.
+ * See DL-0501 (connections update error was silently swallowed).
+ */
+export function throwOnDbError(error: unknown): void {
+  if (error) throw error;
+}
+
 export function mergeStrikeTransactions(
   pollTxs: NormalizedTransaction[],
   drainTxs: NormalizedTransaction[],
