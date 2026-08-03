@@ -17,7 +17,8 @@
  *      OR fetches transactions, encrypts each with transactions_key, stores
  *      ciphertext in encrypted_transactions. Caller fetches via
  *      or-transactions-list and decrypts in-browser.
- *      Response: { synced: number, connections: [{ connection_id, synced, next_cursor, error? }] }
+ *      Response: { synced: number, connections: [{ connection_id, synced?, next_cursor, error? }] }
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *
  *   2. Protocol-driven sink mode (V2 today, V3 future):
  *        { subaccount_id?, connection_ids?, credentials_key, format }
@@ -26,7 +27,8 @@
  *      storage. transactions_key is NOT required.
  *      Response: {
  *        synced: number,
- *        connections: [{ connection_id, synced, next_cursor, error? }],
+ *        connections: [{ connection_id, synced?, next_cursor, error? }],
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *        rows: { <table-name>: [...rows] },
  *        metadata: { format, requires_encryption: string[] }
  *      }
@@ -40,6 +42,7 @@ import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
+import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import {
   getSinkAdapter,
@@ -63,48 +66,11 @@ import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
 // All upstream errors are mapped to a small fixed taxonomy. The full message
 // is dropped on the floor. Callers get a code; operators get the code plus
 // an opaque correlation ID for support purposes.
-
-type UpstreamErrorCode =
-  | 'UPSTREAM_AUTH_FAILED'
-  | 'UPSTREAM_RATE_LIMITED'
-  | 'UPSTREAM_UNAVAILABLE'
-  | 'UPSTREAM_BAD_REQUEST'
-  | 'UPSTREAM_PARSE_FAILED'
-  | 'ADAPTER_CONFIG_ERROR'
-  | 'UPSTREAM_OTHER';
-
-function classifyUpstreamError(raw: string): UpstreamErrorCode {
-  const m = raw.toLowerCase();
-  if (/(\b401\b|\b403\b|unauthorized|forbidden|invalid.*(api.?key|token|credential)|signature.*(invalid|mismatch))/.test(m)) {
-    return 'UPSTREAM_AUTH_FAILED';
-  }
-  if (/(\b429\b|rate.?limit|too.?many.?requests|quota.*exceeded)/.test(m)) {
-    return 'UPSTREAM_RATE_LIMITED';
-  }
-  // Network / connectivity errors (expanded for Deno fetch + Node-style messages)
-  if (/(\b5\d\d\b|timeout|timed.?out|econn(refused|reset|aborted)|network|unreachable|service.*unavailable|error sending request|fetch failed|connection (closed|reset|refused)|dns error|tls handshake|tls error)/.test(m)) {
-    return 'UPSTREAM_UNAVAILABLE';
-  }
-  if (/(\b400\b|\b404\b|\b422\b|bad.?request|not.?found|unprocessable)/.test(m)) {
-    return 'UPSTREAM_BAD_REQUEST';
-  }
-  // Response body parse failures (upstream returned non-JSON when JSON expected)
-  if (/(syntaxerror|unexpected (token|end of json)|json[. ]*parse|invalid json)/.test(m)) {
-    return 'UPSTREAM_PARSE_FAILED';
-  }
-  // OR's own bug -- adapter received malformed credentials/config (NOT upstream's fault).
-  // Pattern matches "[provider] credentials.field required|missing|invalid".
-  if (/(\[\w+\] )?credentials\.\w+ (required|missing|invalid)|credentials must be|credentials json/.test(m)) {
-    return 'ADAPTER_CONFIG_ERROR';
-  }
-  // OR's own config gap -- missing env var on the Supabase project. We hit
-  // this 2026-06-19 when a new OR DEV ref was provisioned without QUILTT_API_KEY
-  // and the symptom surfaced as UPSTREAM_OTHER, hiding the real cause from ops.
-  if (/not set on this supabase project|not configured|is required|missing env/.test(m)) {
-    return 'ADAPTER_CONFIG_ERROR';
-  }
-  return 'UPSTREAM_OTHER';
-}
+//
+// classifyUpstreamError and errorClassName moved to _shared/upstream-errors.ts
+// (DL-0421). They were unreachable from a test while they lived here, because
+// this module calls Deno.serve() at import time. The sanitization boundary is
+// unchanged: `raw` is still inspected in memory and never emitted.
 
 function randomCorrelationId(): string {
   // Opaque short ID for cross-referencing client error → ops investigation.
@@ -130,6 +96,22 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
   const bytes = new TextEncoder().encode(`${errorClass}|${redacted}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Determine the HTTP status for a batch sync response.
+ *   200 -- every connection succeeded (or the batch was empty).
+ *   207 -- some connections succeeded, some failed.
+ *   422 -- every connection in the batch failed.
+ *
+ * Exported so the pure logic can be unit-tested without a Deno.serve mock.
+ */
+export function batchHttpStatus(results: Array<{ synced?: number; error?: string }>): number {
+  if (results.length === 0) return 200;
+  const errCount = results.filter(r => r.error != null).length;
+  if (errCount === 0) return 200;
+  if (errCount === results.length) return 422;
+  return 207;
 }
 
 
@@ -204,23 +186,53 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'credentials_key required' }, 400, cors);
     }
 
-    // Resolve sink format: platforms.sink_format wins over body.format.
-    // Server-side resolution defends against a buggy or malicious caller
-    // asking for a sink shape that isn't theirs. body.format kept as a
-    // backwards-compat fallback for callers (V2) that pre-date the
-    // multi-tenant column. Once every platform row has sink_format
-    // populated, the body field can be deprecated.
-    let resolvedFormat: string | null = null;
-    try {
-      resolvedFormat = await resolveSinkFormatForPlatform(
-        auth.serviceClient,
-        auth.platformId,
-        bodyFormat ?? null,
-      );
-    } catch (resolveErr) {
-      console.error('[or-sync] sink_format resolve failed:', resolveErr);
-      // Fall back to body.format on resolution failure rather than break.
-      resolvedFormat = bodyFormat ?? null;
+    // Resolve sink format. platforms.sink_format is intended to win over
+    // body.format so a caller cannot request a sink shape that isn't theirs,
+    // with body.format kept as a backwards-compat fallback for callers (V2)
+    // that pre-date the multi-tenant column.
+    //
+    // Rolled out dark. The flag OR_SYNC_SINK_FORMAT_ENFORCE is OFF by default,
+    // so behavior is unchanged here: body.format is used. We still run the
+    // resolution and log, per platform, when the server-resolved format WOULD
+    // differ from the body.format actually sent. That turns an otherwise
+    // unmeasurable question (no store records the body.format each platform
+    // sends) into an observed fact, with zero behavior change, before the flag
+    // is turned on later (a separate, prod, two-party change).
+    //
+    // platformId only exists on a platform-mode context, so the resolution is
+    // guarded to that mode. Direct-mode callers keep the body.format fallback.
+    const enforceSinkFormat = Deno.env.get('OR_SYNC_SINK_FORMAT_ENFORCE') === '1';
+    let resolvedFormat: string | null = bodyFormat ?? null;
+    if (ctx.mode === 'platform') {
+      try {
+        const serverFormat = await resolveSinkFormatForPlatform(
+          ctx.serviceClient,
+          ctx.platformId,
+          bodyFormat ?? null,
+        );
+        if (serverFormat !== (bodyFormat ?? null)) {
+          // Format names and the platform id only. No user data, no secrets.
+          console.log(
+            `[or-sync] sink_format-observe platform=${ctx.platformId} ` +
+            `would_change=1 body_format=${bodyFormat ?? 'null'} ` +
+            `server_format=${serverFormat ?? 'null'} enforced=${enforceSinkFormat ? '1' : '0'}`,
+          );
+        }
+        if (enforceSinkFormat) {
+          resolvedFormat = serverFormat;
+        }
+      } catch (resolveErr) {
+        // Log the error CLASS only, never the error object. Now that the
+        // resolution actually executes, this catch can receive a Postgres
+        // error whose message may embed row values. Those must never reach
+        // the edge log in plaintext, the same control the sync error path
+        // upstream applies.
+        console.error(
+          '[or-sync] sink_format resolve failed, class=' + errorClassName(resolveErr),
+        );
+        // Fall back to body.format on resolution failure rather than break.
+        resolvedFormat = bodyFormat ?? null;
+      }
     }
     const format = resolvedFormat;
 
@@ -317,7 +329,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ synced: 0, connections: [] }, 200, cors);
     }
 
-    const results: Array<{ connection_id: string; synced: number; next_cursor: string | null; error?: string }> = [];
+    const results: Array<{
+      connection_id: string;
+      synced?: number;
+      next_cursor: string | null;
+      error?: string;
+      correlation_id?: string;
+      message?: string;
+      detail?: string;
+      action?: string;
+      help_url?: string | null;
+      skip_reason?: string;
+    }> = [];
     // Sink-mode-only: collect per-connection sink outputs to merge into
     // a single `rows` map at the end. Empty in legacy mode.
     const sinkOutputs: SinkOutput[] = [];
@@ -351,7 +374,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               .maybeSingle();
             if (mapErrSink) throw mapErrSink;
             if (!mapRowSink) {
-              results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+              console.log(`[or-sync] quiltt no-map-row skip (sink) subaccount=${subaccountId}`);
+              results.push({ connection_id: conn.id, synced: 0, next_cursor: null, skip_reason: 'no_quiltt_profile_map' });
               continue;
             }
 
@@ -582,9 +606,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             .maybeSingle();
           if (mapErr) throw mapErr;
           if (!mapRow) {
-            // Link was never completed for this subaccount. Surface a
-            // structured no-op result; integrator's UI explains.
-            results.push({ connection_id: conn.id, synced: 0, next_cursor: null });
+            // Link was never completed for this subaccount. Log the skip so
+            // it is visible in edge logs and surface a reason field so callers
+            // can distinguish a genuine zero-sync from a missing-profile bail.
+            console.log(`[or-sync] quiltt no-map-row skip (legacy) subaccount=${subaccountId}`);
+            results.push({ connection_id: conn.id, synced: 0, next_cursor: null, skip_reason: 'no_quiltt_profile_map' });
             continue;
           }
 
@@ -768,14 +794,23 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // until the user opts in by re-running discovery from the UI.
         const { data: sourceWallets, error: swErr } = await ctx.serviceClient
           .from('source_wallets')
-          .select('external_wallet_id, is_synced')
+          .select('external_wallet_id, is_synced, wallet_fingerprint')
           .eq('connection_id', conn.id)
-          .eq('is_synced', true);
+          .eq('is_synced', true)
+          // Deterministic order so walletIds[0] is stable across syncs. Both
+          // currency wallets are inserted in one batch at discovery, so they
+          // share an identical created_at; created_at alone leaves the order
+          // unspecified and [0] could still flip between syncs. The
+          // external_wallet_id (a unique UUID) tiebreaker fully determines the
+          // order; created_at stays first for the "oldest wallet wins" intent.
+          .order('created_at', { ascending: true })
+          .order('external_wallet_id', { ascending: true });
 
         if (swErr) throw swErr;
 
         let newTxs: NormalizedTransaction[];
         let next_cursor: string | null;
+        let isPartial = false;
 
         if (conn.provider_type === 'strike') {
           // Strike uses BOTH paths now (V3 ADR 2026-05-25):
@@ -784,20 +819,72 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           //      Cloudflare so we iterate states; simple `eq` is fine.
           //   2. Webhook queue drain (drainStrikeQueue) -- near-real-time
           //      updates for events received since last sync.
-          // Both paths merge into newTxs. Idempotent on the consumer side
-          // via UNIQUE (connection_id, external_id) so duplicates are no-ops.
+          // Both paths merge into newTxs. The two paths CAN emit the same
+          // transaction id, and that is not a no-op -- see the dedupe below.
           const supabaseUrl = Deno.env.get('SUPABASE_URL');
           if (!supabaseUrl) throw new Error('SUPABASE_URL not set');
+
+          // The real per-wallet ids from source_wallets, used by BOTH the
+          // polling and the drain path below. Passing the 'strike' literal to
+          // the poll stamped every polled transaction with source_wallet_id =
+          // 'strike', which matches no source_wallets row on the consumer, so
+          // all rows imported as unmapped and none reached the register. The
+          // poll path's own per-wallet attribution limit is unchanged by this
+          // commit; only the drain path below is fingerprint-attributed.
+          const strikeWalletIds = (sourceWallets ?? []).map(
+            (w: { external_wallet_id: string }) => w.external_wallet_id,
+          );
 
           // 1) Polling: historical + ongoing per-state list scan
           const poll = await adapter.syncByWallets(
             credentials,
-            ['strike'],
+            strikeWalletIds,
             conn.last_sync_cursor ?? null,
           );
 
           // 2) Real-time: drain any webhook-queued events. Side effect:
           //    registers a Strike webhook subscription on first call.
+          //
+          // Invoice attribution is FINGERPRINT-keyed, not currency-keyed.
+          //
+          // source_wallets has no plaintext `currency` column and is not going to
+          // get one (Privacy HOLD): currency lives inside encrypted_metadata, which
+          // is ORK-encrypted and the server cannot decrypt. Selecting `currency`
+          // here is not a design choice the server can make -- PostgREST answers
+          // 42703 (column does not exist) and, because this select sits ABOVE the
+          // per-provider branch, the `if (swErr) throw swErr` above turns that into
+          // a hard failure of or-sync for EVERY provider, not just Strike.
+          //
+          // What the server CAN read is wallet_fingerprint: a BYTEA HMAC-SHA256 over
+          // (domain || subaccount_id || provider_type || canonical_account_key ||
+          // currency), written at discovery time by or-link-complete. At drain time
+          // queue.ts recomputes that HMAC from the Strike invoice response
+          // (subaccountId + 'strike' + inv.receiverId + inv.amount.currency, upper-
+          // cased) and looks it up in this map. PostgREST hands BYTEA over the wire
+          // as a leading \x plus lowercase hex, which is exactly what toByteaHex
+          // produces on the compute side, so the two keys compare directly.
+          //
+          // A no-match returns null: the transaction is held unattributed and heals
+          // on natural re-sync. A mis-file onto the wrong wallet is structurally
+          // impossible, because a fingerprint is scoped to one exact (subaccount,
+          // Strike account, currency) triple and is never shared between wallets.
+          //
+          // Rows whose wallet_fingerprint is NULL (discovered before fingerprinting
+          // shipped) are filtered out rather than guessed at. They contribute no map
+          // entry, so their transactions hold unattributed until the wallet is
+          // re-discovered. That is the intended trade: unattributed is recoverable,
+          // mis-filed is not.
+          //
+          // The five non-invoice event types (payment, receive, deposit, payout,
+          // exchange) carry no receiverId in the Strike response, so no fingerprint
+          // can be computed for them at all; queue.ts holds them unattributed for
+          // the same reason.
+          const walletsByFingerprintHex = new Map<string, string>(
+            (sourceWallets ?? [])
+              .filter((w: { wallet_fingerprint: string | null }) => !!w.wallet_fingerprint)
+              .map((w: { wallet_fingerprint: string; external_wallet_id: string }) =>
+                [w.wallet_fingerprint, w.external_wallet_id] as [string, string]),
+          );
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
             connection: {
@@ -806,10 +893,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               last_sync_cursor: conn.last_sync_cursor ?? null,
             },
             credentials,
+            subaccountId: subaccountId as string,
+            walletsByFingerprintHex,
             webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
           });
-
-          newTxs = [...poll.transactions, ...drain.transactions];
+          // Dedupe + attribution merge. DO NOT REMOVE, DO NOT INLINE BACK TO A
+          // CONCAT. See mergeStrikeTransactions at the bottom of this file for
+          // the full reasoning; it is unit-tested in index.test.ts. Passing
+          // strikeWalletIds (not sourceWallets) because it is exactly the array
+          // the poll was given, so "poll attributed by walletIds[0]" and the
+          // guard here read off the same value.
+          newTxs = mergeStrikeTransactions(poll.transactions, drain.transactions, strikeWalletIds);
           // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.
           next_cursor = poll.next_cursor ?? drain.next_cursor;
@@ -818,10 +912,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           const out = await adapter.syncByWallets(credentials, walletIds, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
+          isPartial = out.partial ?? false;
         } else {
           const out = await adapter.syncAccountWide(credentials, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
+          isPartial = out.partial ?? false;
         }
 
         if (sinkMode) {
@@ -861,9 +957,31 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           if (upsertErr) throw upsertErr;
         }
 
+        // Advance last_sync_cursor only when this pass BOTH persisted at least
+        // one transaction for THIS connection AND the adapter returned a real
+        // cursor. newTxs is the honest persisted count in both paths: it is
+        // exactly what the V3 upsert writes (and that upsert rethrows on error
+        // above, so a nonzero length here cannot include a failed write) and
+        // exactly what sink mode hands the consumer. Evaluated once per pass,
+        // not per page. Two failure modes this closes:
+        //   - Empty pass banking a stale next_cursor left in scope: skipped
+        //     because nothing persisted (a connection banking a cursor left
+        //     in scope from an unrelated connection's pass).
+        //   - A pass that persisted rows but whose adapter returned a null
+        //     next_cursor: we refresh liveness but leave the cursor untouched,
+        //     never writing null, which would rewind the window and drop history.
+        // Liveness and health reporting are refreshed on every pass regardless.
+        const connUpdate: Record<string, unknown> = {
+          last_sync_at: new Date().toISOString(),
+          status: isPartial ? 'partial' : 'active',
+          encrypted_last_error: null,
+        };
+        if (newTxs.length > 0 && next_cursor != null) {
+          connUpdate.last_sync_cursor = next_cursor;
+        }
         await ctx.serviceClient
           .from('connections')
-          .update({ last_sync_at: new Date().toISOString(), last_sync_cursor: next_cursor, status: 'active', encrypted_last_error: null })
+          .update(connUpdate)
           .eq('id', conn.id);
 
         results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
@@ -919,8 +1037,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // error messages reach the client or the edge log in plaintext.
         // Map to a fixed taxonomy; emit only the code + a correlation id.
         const raw = e instanceof Error ? e.message : String(e);
-        const errorClass = e instanceof Error ? e.constructor.name : typeof e;
-        const code = classifyUpstreamError(raw);
+        // errorClassName, not e.constructor.name: CCXT ships minified, so the
+        // constructor is a mangled letter while e.name survives. See
+        // _shared/upstream-errors.ts for the evidence (DL-0421).
+        const errorClass = errorClassName(e);
+        const code = classifyUpstreamError(raw, errorClass);
         const correlationId = randomCorrelationId();
         const fp = await errorFingerprint(raw, errorClass);
         console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
@@ -945,7 +1066,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         const copy = lookupErrorCopy(code);
         results.push({
           connection_id: conn.id,
-          synced: 0,
           next_cursor: null,
           error: code,
           correlation_id: correlationId,
@@ -963,7 +1083,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       const merged = mergeSinkOutputs(sinkOutputs);
       return jsonResponse(
         {
-          synced: results.reduce((s, r) => s + r.synced, 0),
+          synced: results.reduce((s, r) => s + (r.synced ?? 0), 0),
           connections: results,
           rows: merged.rows,
           metadata: {
@@ -971,18 +1091,101 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             requires_encryption: merged.metadata.requires_encryption,
           },
         },
-        200,
+        batchHttpStatus(results),
         cors,
       );
     }
 
-    return jsonResponse({ synced: results.reduce((s, r) => s + r.synced, 0), connections: results }, 200, cors);
+    return jsonResponse({ synced: results.reduce((s, r) => s + (r.synced ?? 0), 0), connections: results }, batchHttpStatus(results), cors);
 
   } catch (err) {
     console.error('[or-sync] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-}));
+}, 'or-sync'));
+
+/**
+ * Merge the Strike poll batch and the Strike webhook-drain batch into the one
+ * array handed to the single `encrypted_transactions` upsert.
+ *
+ * ─── 1. Why this dedupes. DO NOT REMOVE. ─────────────────────────────────
+ *
+ * That upsert is ONE statement with onConflict 'connection_id,external_id' and
+ * ignoreDuplicates:false, i.e. ON CONFLICT DO UPDATE. Postgres raises SQLSTATE
+ * 21000 ("ON CONFLICT DO UPDATE command cannot affect row a second time") when
+ * a single command proposes the same conflict key twice, and the ENTIRE batch
+ * aborts. `connection_id` is loop-invariant inside the per-connection loop, so
+ * keying this map on `tx.id` alone is exactly the upsert's conflict key.
+ *
+ * Duplicates are routine, by two independent routes:
+ *   - STRIKE_DEFAULT_EVENT_TYPES subscribes to BOTH invoice.created and
+ *     invoice.updated. Both queue rows survive (the queue is UNIQUE on
+ *     strike_event_id, not on the invoice id), the drain does a GET-by-id at
+ *     drain time so both resolve to the same current invoice, and
+ *     normalizeInvoice returns the same `id: invoice.invoiceId` for each.
+ *   - The poll can independently return an object the drain just emitted. The
+ *     id namespaces are shared on purpose: `receive:`, `deposit:`, `payout:`
+ *     and `exchange:` are produced by the same normalizers on both paths.
+ *
+ * Why an abort is unrecoverable rather than a retry: drainStrikeQueue has
+ * ALREADY written processed_at on every event in the batch before it returned,
+ * so those events never re-drain, and `throw upsertErr` aborts the connection
+ * without advancing the cursor. Invoices self-heal on the next poll. payment.*
+ * does NOT -- Strike exposes no list endpoint for outgoing Lightning payments,
+ * so the webhook queue is their only discovery path. A payment lost to an
+ * aborted batch is lost PERMANENTLY.
+ *
+ * ─── 2. Why the drain wins, and why the fallback is GUARDED. ─────────────
+ *
+ * The drain's GET-by-id is the fresher read, so the drain record wins wholesale
+ * for every field. But its source_wallet_id is null far more often than the
+ * poll's: queue.ts passes null UNCONDITIONALLY for receive-request.*, deposit.*,
+ * payout.* and currency-exchange-quote.* (those Strike responses carry no
+ * receiverId, so no fingerprint is computable), and null for invoice.* whenever
+ * the fingerprint misses. Taking the drain record wholesale would therefore
+ * overwrite a correct poll attribution with null -- and it would not self-heal,
+ * because next_cursor advances past the object and the drain event is already
+ * processed_at-marked. That null would be permanent.
+ *
+ * So we restore the poll's source_wallet_id when the drain has none -- but ONLY
+ * when the connection has exactly one synced wallet.
+ *
+ * THIS GUARD IS NOT OPTIONAL AND MUST NOT BE "SIMPLIFIED" INTO A PLAIN
+ * `?? polled.source_wallet_id` FALLBACK. The poll does not attribute per wallet:
+ * strike/index.ts syncByWallets stamps EVERY transaction with
+ * `accountId = walletIds[0] ?? null`. On a multi-wallet connection walletIds[0]
+ * is a coin flip, and preferring it would reintroduce precisely the guessed
+ * attribution this change exists to remove -- converting an under-attribution
+ * (recoverable) into a mis-attribution (not recoverable), which is strictly
+ * worse. With exactly one synced wallet there is nothing to guess: walletIds[0]
+ * is the only wallet the transaction can belong to.
+ *
+ * @param pollTxs         transactions from adapter.syncByWallets
+ * @param drainTxs        transactions from drainStrikeQueue
+ * @param syncedWalletIds the SAME array passed to syncByWallets as walletIds
+ */
+export function mergeStrikeTransactions(
+  pollTxs: NormalizedTransaction[],
+  drainTxs: NormalizedTransaction[],
+  syncedWalletIds: string[],
+): NormalizedTransaction[] {
+  // Non-null only when the poll's attribution was not a guess.
+  const soleWalletId = syncedWalletIds.length === 1 ? syncedWalletIds[0] : null;
+
+  const byExternalId = new Map<string, NormalizedTransaction>();
+  for (const tx of pollTxs) byExternalId.set(tx.id, tx);
+  for (const tx of drainTxs) {
+    const polled = byExternalId.get(tx.id);
+    // Recover the poll's id only if the drain has none AND that id is provably
+    // the connection's only synced wallet. Every other field stays the drain's.
+    const recover =
+      tx.source_wallet_id == null &&
+      soleWalletId !== null &&
+      polled?.source_wallet_id === soleWalletId;
+    byExternalId.set(tx.id, recover ? { ...tx, source_wallet_id: soleWalletId } : tx);
+  }
+  return [...byExternalId.values()];
+}
 
 /**
  * Resolve a subaccount's `external_user_id` for sink-mode dispatch. In

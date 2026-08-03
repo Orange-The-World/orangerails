@@ -21,11 +21,6 @@
  * After the user finishes, the credential is locked browser-side and an
  * array of source_wallet_ids is postMessage'd back to the parent window.
  *
- * Internal note (not shown to users): the locking password is currently a
- * fixed widget-side constant. A future hardening pass will replace it
- * with a password the user picks at first setup or hand off via a
- * short-lived widget session token from the integrating app's server.
- *
  * Query params:
  *   platform     , the integrating app's slug (e.g. 'bitbooks-v2'). Required.
  *   app_user_id  , opaque identifier for the end user, owned by the integrating app. Required.
@@ -53,24 +48,32 @@ import { Info } from "lucide-react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttInstitutions } from "@quiltt/react/hooks";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { deriveMEK, encryptString, importAesKey } from "@/lib/vault";
-import { deriveSubkey, HKDF_CONTEXTS } from "@/lib/key-derivation";
+import { encryptString, importAesKey } from "@/lib/vault";
+import { resolveTargetOrigin } from "@/lib/connect-origin";
+
+// Same allowlist the Stealth widget and Sparrow path use to pin postMessage
+// targetOrigin. Baked into the bundle at build time from the env var.
+// An empty string (env var unset) means no origins are registered and every
+// resolveTargetOrigin call will return null (fail closed).
+const CONNECT_ALLOWED_ORIGINS: ReadonlySet<string> = new Set(
+  ((import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0),
+);
 
 // --------------------------------------------------------------------
 // Locking-key handoff.
 //
-// Preferred path: the integrating app derives the credentials_key and
-// transactions_key in the user's browser (Argon2id of their vault
-// password + per-org salt → HKDF) and hands the raw 32-byte keys to
-// this widget through the URL fragment as `#cred_key=B64&txn_key=B64`.
-// The fragment never reaches OR's server logs and we strip it from
-// history-state on first read. This is what the V2 platform consumer sends.
+// The integrating app derives the credentials_key and txn_key
+// browser-side and passes the raw 32-byte keys to this widget via
+// the URL fragment: `#cred_key=B64&txn_key=B64`. The fragment
+// never reaches OR server logs; we strip it from history-state on
+// first read.
 //
-// Fallback path: when no fragment is present (standalone demo, legacy
-// integrators), we fall back to a hardcoded test password + zero salt
-// so the widget remains demo-able without a host app. NEVER ship a
-// real integration that relies on the fallback , anyone running OR
-// would derive the same keys and could decrypt the credential.
+// The fragment handoff is required. When absent, lockEverything throws
+// so the caller surfaces a visible error instead of silently producing
+// unrecoverable ciphertext with an unknown key.
 // --------------------------------------------------------------------
 // CRITICAL: capture defer_cred_key from window.location.search at MODULE
 // LOAD TIME, before TanStack Router initializes. Router's URL normalization
@@ -90,25 +93,20 @@ function __OR_readDeferCredKey(): boolean {
   const searchHit = new URLSearchParams(window.location.search).get("defer_cred_key") === "1";
   const hashHit =
     new URLSearchParams(window.location.hash.replace(/^#/, "")).get("defer_cred_key") === "1";
-  const result = searchHit || hashHit;
-  // eslint-disable-next-line no-console
-  console.log("[OR-defer] module-load snapshot", {
-    searchHit,
-    hashHit,
-    result,
-    search: window.location.search,
-    hash: window.location.hash,
-  });
-  return result;
+  // Do not log the query string or the fragment here. Both can carry
+  // handoff material that must not be echoed anywhere, and a module-load
+  // diagnostic is not worth that exposure.
+  return searchHit || hashHit;
 }
 export const __OR_INITIAL_DEFER_CRED_KEY: boolean = __OR_readDeferCredKey();
-
-const LINK_WIDGET_LOCK_PASSWORD = "orangerails-widget-default-lock-password-v1";
-const LINK_WIDGET_LOCK_SALT_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 interface HandoffKeys {
   credKey: CryptoKey;
   txnKey: CryptoKey;
+  // Base64 of the raw 32-byte cred_key (ORK). Held in memory only, same
+  // lifetime as credKey. Needed to pass credentials_key to or-discover-wallets
+  // raw-credentials mode (#157), which imports it and decrypts in memory only.
+  credKeyB64: string;
 }
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -133,8 +131,8 @@ function base64ToBytes(b64: string): Uint8Array {
  *     pass it and store ciphertext at rest. When absent, cred_key is
  *     reused for metadata encryption.
  *
- * Returns null only when NEITHER key is present (= no handoff at all,
- * widget falls back to dev test-password). When cred_key is present
+ * Returns null only when NEITHER key is present (= no handoff at all).
+ * The caller treats null as a missing-handoff error and throws. When cred_key is present
  * but invalid (wrong size, malformed base64), throws so the caller
  * surfaces a visible error instead of silently producing
  * unrecoverable ciphertext.
@@ -179,7 +177,7 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
   } else {
     txnKey = credKey;
   }
-  return { credKey, txnKey };
+  return { credKey, txnKey, credKeyB64: credB64 };
 }
 
 /**
@@ -242,7 +240,7 @@ async function requestHandoffKeysFromParent(
         }
         const credKey = await importAesKey(bytes.buffer as ArrayBuffer);
         cleanup();
-        resolve({ credKey, txnKey: credKey });
+        resolve({ credKey, txnKey: credKey, credKeyB64 });
       } catch (err) {
         cleanup();
         reject(err);
@@ -406,6 +404,70 @@ function syntheticDiscovery(
       label: manifest.displayName,
     },
   ];
+}
+
+/**
+ * Server-side wallet discovery via or-discover-wallets in raw-credentials
+ * mode (#157). This replaces the browser slug fabricator (syntheticDiscovery)
+ * so the connector returns the provider's REAL per-account, per-currency
+ * wallet(s) instead of the provider slug ('strike', an exchange slug, ...),
+ * which is the fix for the multi-account collision (bitbooks#281).
+ *
+ * The widget encrypts the credential form with the ORK and sends the
+ * ciphertext plus the ORK (credentials_key); the edge function decrypts in
+ * memory only, calls the adapter's discoverWallets() live, and NEVER persists
+ * anything. The response shape { external_wallet_id, currency, label } already
+ * matches DiscoveredWallet, so there is no mapping layer.
+ */
+async function serverDiscover(
+  manifest: ProviderManifest,
+  formValues: Record<string, string>,
+  handoff: HandoffKeys,
+  search: ConnectSearch,
+  widgetToken: string,
+): Promise<DiscoveredWallet[]> {
+  const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+  if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
+  if (!search.platform || !search.app_user_id || !widgetToken) {
+    throw new Error("Server discovery requires platform, app_user_id and widget_token.");
+  }
+  const encrypted_credentials = await encryptString(JSON.stringify(formValues), handoff.credKey);
+  const res = await fetch(`${base}/functions/v1/or-discover-wallets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      platform_slug: search.platform,
+      app_user_id: search.app_user_id,
+      provider_type: manifest.slug,
+      encrypted_credentials,
+      credentials_key: handoff.credKeyB64,
+      widget_token: widgetToken,
+    }),
+  });
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    /* ignore , handled by the !res.ok / shape checks below */
+  }
+  if (!res.ok) {
+    const errorCode = typeof data.error_code === "string" ? data.error_code : undefined;
+    const copy = typeof data.body === "string" ? data.body : undefined;
+    const title = typeof data.title === "string" ? data.title : undefined;
+    const message =
+      copy ?? title ?? (typeof data.error === "string" ? data.error : `Could not discover wallets (status ${res.status}).`);
+    // Attach error_code so callers can distinguish a definitive credential
+    // rejection (UPSTREAM_AUTH_FAILED) from a transient error (rate limit,
+    // unavailable). Only the former is proof that the credentials are wrong;
+    // the others must not mark or block a connection that may still be valid.
+    throw Object.assign(new Error(message), { discoveryErrorCode: errorCode });
+  }
+  const wallets = data.discovered_wallets;
+  if (!Array.isArray(wallets)) {
+    throw new Error("Discovery returned an unexpected response.");
+  }
+  return wallets as DiscoveredWallet[];
 }
 
 // ---- Blink ---------------------------------------------------------
@@ -618,28 +680,9 @@ async function lockEverything(params: {
     credKey = params.handoff.credKey;
     txnKey = params.handoff.txnKey;
   } else {
-    // Audit H4 (2026-05-21): the hardcoded fallback password/salt below
-    // must NEVER run in production. Any prod build that hits this path
-    // would derive the same keys every other OR deployment derives,
-    // making the credential trivially decryptable. Guard at runtime so
-    // a missing fragment in prod fails loudly instead of silently
-    // sealing with the demo key.
-    if (!import.meta.env.DEV) {
-      throw new Error(
-        "connect: cred_key missing from URL fragment , refusing demo-fallback in production build. " +
-          "The host app must pass #cred_key=...&txn_key=... when launching the widget.",
-      );
-    }
-    const mek = await deriveMEK(LINK_WIDGET_LOCK_PASSWORD, LINK_WIDGET_LOCK_SALT_B64);
-    credKey = await deriveSubkey(
-      mek,
-      HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1,
-      LINK_WIDGET_LOCK_SALT_B64,
-    );
-    txnKey = await deriveSubkey(
-      mek,
-      HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1,
-      LINK_WIDGET_LOCK_SALT_B64,
+    throw new Error(
+      "connect: cred_key missing from URL fragment. " +
+        "The host app must pass #cred_key=...&txn_key=... when launching the widget.",
     );
   }
 
@@ -689,7 +732,11 @@ async function callLinkComplete(payload: {
 }): Promise<{
   subaccount_id: string;
   connection_id: string;
-  source_wallets: Array<{ id: string; external_wallet_id: string }>;
+  source_wallets: Array<{
+    id: string;
+    external_wallet_id: string;
+    submitted_external_wallet_id: string;
+  }>;
 }> {
   const base = import.meta.env.VITE_SUPABASE_URL as string | undefined;
   if (!base) throw new Error("VITE_SUPABASE_URL not configured.");
@@ -715,7 +762,11 @@ async function callLinkComplete(payload: {
   return data as {
     subaccount_id: string;
     connection_id: string;
-    source_wallets: Array<{ id: string; external_wallet_id: string }>;
+    source_wallets: Array<{
+      id: string;
+      external_wallet_id: string;
+      submitted_external_wallet_id: string;
+    }>;
   };
 }
 
@@ -1039,10 +1090,32 @@ function ConnectPageInner() {
     setError(null);
     setStep("discovering");
     try {
-      // Use the provider-specific override when one exists; otherwise fall
-      // back to a synthetic single-wallet entry (the OR adapter does the
-      // real per-asset enumeration server-side at first sync).
-      const discover = CLIENT_DISCOVERY_OVERRIDES[manifest.slug] ?? syntheticDiscovery(manifest);
+      // Discovery precedence:
+      //  1. A client-side override (Blink/xpub/BTCPay compute the real
+      //     per-account id in-browser) always wins.
+      //  2. Otherwise call the server (or-discover-wallets, #157) so the
+      //     adapter returns the provider's REAL per-account, per-currency
+      //     wallet(s) instead of the fabricated slug. This is the fix for
+      //     the multi-account collision (bitbooks#281).
+      //  3. Only if the cred_key handoff and a widget_token are not both
+      //     available here do we fall back to the synthetic single-wallet
+      //     entry (today's behaviour), so nothing regresses.
+      //
+      // FOLLOW-UP: the deferred-cred-key flow (defer_cred_key=1) has no key
+      // at this step, so it takes the synthetic fallback for now. Moving
+      // discovery to after the key handoff for that flow is tracked separately.
+      const override = CLIENT_DISCOVERY_OVERRIDES[manifest.slug];
+      const hk = handoffKeys;
+      // Standard integrations pass widget_token in the URL fragment (#widget_token=),
+      // which readHandoffKeysFromFragment strips early, so search.widget_token is
+      // empty for them. Fall back to the snapshotted fragment token so server
+      // discovery runs for the documented handoff flow, not just query-string tokens.
+      const widgetToken = search.widget_token ?? initialFragmentWidgetToken;
+      const discover = override
+        ? override
+        : hk && widgetToken
+          ? (values: Record<string, string>) => serverDiscover(manifest, values, hk, search, widgetToken)
+          : syntheticDiscovery(manifest);
       const result = await discover(formValues);
       if (result.length === 0) {
         throw new Error("That account has no wallets to track yet.");
@@ -1130,31 +1203,60 @@ function ConnectPageInner() {
         // integrating app's backend minted before opening this popup. The
         // edge function ignores tokenless requests during the rollout
         // window (warning only) and rejects them once the env flag flips.
-        widget_token: search.widget_token,
+        //
+        // Same fallback as the discovery call above, and for the same reason:
+        // the documented handoff puts widget_token in the URL fragment so it
+        // never reaches our server logs, and readHandoffKeysFromFragment strips
+        // the fragment early, so search.widget_token is empty for those callers.
+        // Reading only the query string here sent undefined and the server
+        // answered "widget_token required", which is why a fragment integrator
+        // could discover its wallets and then fail on the very last call.
+        widget_token: search.widget_token ?? initialFragmentWidgetToken ?? undefined,
       });
 
       // Compose the postMessage payload, attaching the user-facing
       // currency + label for each wallet so the integrating app can
       // render them without re-decrypting.
       const enrichedSourceWallets = result.source_wallets.map((sw) => {
+        // Match on submitted_external_wallet_id, NOT external_wallet_id.
+        //
+        // walletCiphertexts is keyed by the id THIS discovery minted, and the
+        // adapter mints a fresh one every call. On a reconnect the server
+        // returns the STORED id instead, so matching on external_wallet_id finds
+        // nothing and every wallet goes out with a blank currency and label.
+        // submitted_external_wallet_id is the server echoing our own id back, so
+        // it matches on both first connect and reconnect.
         const meta = locked.walletCiphertexts.find(
-          (w) => w.external_wallet_id === sw.external_wallet_id,
+          (w) => w.external_wallet_id === sw.submitted_external_wallet_id,
         );
+
+        // Unreachable: the server echoes an id we sent, and every id we sent came
+        // from walletCiphertexts. If it does happen the correlation is broken and
+        // the integrating app is about to book a wallet with no currency on it,
+        // so say so instead of shipping an empty string. The previous `?? ""`
+        // here is exactly how the reconnect bug stayed invisible: nothing threw,
+        // nothing logged, and the blank went out looking like data.
+        if (!meta) {
+          throw new Error(
+            `Could not match wallet ${sw.id} back to its metadata. ` +
+              "Refusing to report a wallet with no currency.",
+          );
+        }
+
         return {
           id: sw.id,
           external_wallet_id: sw.external_wallet_id,
-          currency: meta?.currency ?? "",
-          label: meta?.label ?? "",
+          currency: meta.currency,
+          label: meta.label,
         };
       });
 
-      const targetOrigin = (() => {
-        try {
-          return new URL(search.return_to ?? "").origin;
-        } catch {
-          return "*";
-        }
-      })();
+      const targetOrigin = resolveTargetOrigin(search.return_to, CONNECT_ALLOWED_ORIGINS);
+      if (!targetOrigin) {
+        throw new Error(
+          "return_to origin is not registered. Cannot notify the host app.",
+        );
+      }
 
       // New shape , array of source_wallets. Older parent listeners that
       // expect single-wallet fields are still served when N === 1.
@@ -1183,14 +1285,10 @@ function ConnectPageInner() {
   }
 
   function handleCancel() {
-    const targetOrigin = (() => {
-      try {
-        return new URL(search.return_to ?? "").origin;
-      } catch {
-        return "*";
-      }
-    })();
-    window.opener?.postMessage({ type: "or-link-cancel" }, targetOrigin);
+    const targetOrigin = resolveTargetOrigin(search.return_to, CONNECT_ALLOWED_ORIGINS);
+    if (targetOrigin) {
+      window.opener?.postMessage({ type: "or-link-cancel" }, targetOrigin);
+    }
     window.close();
   }
 

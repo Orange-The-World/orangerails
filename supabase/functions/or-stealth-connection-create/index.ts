@@ -172,6 +172,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .update({
             sealed_envelope: body.sealed_envelope,
             wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
+            // A replaced envelope may carry a new (possibly earlier)
+            // wallet birthday. The next sync starts from
+            // max(birthday_height, last_block_scanned + 1), so the old
+            // cursor would swallow the deeper rescan the user just asked
+            // for. Reset it alongside the envelope.
+            last_block_scanned: null,
             updated_at: new Date().toISOString(),
           })
           .eq('id', existing.id as string);
@@ -230,6 +236,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             .update({
               sealed_envelope: body.sealed_envelope,
               wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
+              // Same cursor reset as the primary path above.
+              last_block_scanned: null,
               updated_at: new Date().toISOString(),
             })
             .eq('id', raceRow.id as string);
@@ -251,7 +259,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-connection-create] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-stealth-connection-create'));
 

@@ -15,9 +15,11 @@ import { Route as RecoverRouteImport } from './routes/recover'
 import { Route as PortalRouteImport } from './routes/portal'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as DocsRouteImport } from './routes/docs'
+import { Route as DemoRouteImport } from './routes/demo'
 import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as AdminRouteImport } from './routes/admin'
+import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminIndexRouteImport } from './routes/admin/index'
 import { Route as DocsXpubExportRouteImport } from './routes/docs/xpub-export'
 import { Route as ConnectStealthRouteImport } from './routes/connect/stealth'
@@ -55,6 +57,11 @@ const DocsRoute = DocsRouteImport.update({
   path: '/docs',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DemoRoute = DemoRouteImport.update({
+  id: '/demo',
+  path: '/demo',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ConnectRoute = ConnectRouteImport.update({
   id: '/connect',
   path: '/connect',
@@ -68,6 +75,11 @@ const AppRoute = AppRouteImport.update({
 const AdminRoute = AdminRouteImport.update({
   id: '/admin',
   path: '/admin',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminIndexRoute = AdminIndexRouteImport.update({
@@ -102,9 +114,11 @@ const AdminCustomerIdRoute = AdminCustomerIdRouteImport.update({
 } as any)
 
 export interface FileRoutesByFullPath {
+  '/': typeof IndexRoute
   '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
+  '/demo': typeof DemoRoute
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
   '/portal': typeof PortalRoute
@@ -119,8 +133,10 @@ export interface FileRoutesByFullPath {
   '/admin/': typeof AdminIndexRoute
 }
 export interface FileRoutesByTo {
+  '/': typeof IndexRoute
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
+  '/demo': typeof DemoRoute
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
   '/portal': typeof PortalRoute
@@ -136,9 +152,11 @@ export interface FileRoutesByTo {
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
   '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
+  '/demo': typeof DemoRoute
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
   '/portal': typeof PortalRoute
@@ -155,9 +173,11 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
+    | '/'
     | '/admin'
     | '/app'
     | '/connect'
+    | '/demo'
     | '/docs'
     | '/login'
     | '/portal'
@@ -172,8 +192,10 @@ export interface FileRouteTypes {
     | '/admin/'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/'
     | '/app'
     | '/connect'
+    | '/demo'
     | '/docs'
     | '/login'
     | '/portal'
@@ -188,9 +210,11 @@ export interface FileRouteTypes {
     | '/admin'
   id:
     | '__root__'
+    | '/'
     | '/admin'
     | '/app'
     | '/connect'
+    | '/demo'
     | '/docs'
     | '/login'
     | '/portal'
@@ -206,9 +230,11 @@ export interface FileRouteTypes {
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
+  IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRouteWithChildren
   AppRoute: typeof AppRoute
   ConnectRoute: typeof ConnectRouteWithChildren
+  DemoRoute: typeof DemoRoute
   DocsRoute: typeof DocsRouteWithChildren
   LoginRoute: typeof LoginRoute
   PortalRoute: typeof PortalRoute
@@ -261,6 +287,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DocsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/demo': {
+      id: '/demo'
+      path: '/demo'
+      fullPath: '/demo'
+      preLoaderRoute: typeof DemoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/connect': {
       id: '/connect'
       path: '/connect'
@@ -280,6 +313,13 @@ declare module '@tanstack/react-router' {
       path: '/admin'
       fullPath: '/admin'
       preLoaderRoute: typeof AdminRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin/': {
@@ -365,9 +405,11 @@ const DocsRouteChildren: DocsRouteChildren = {
 const DocsRouteWithChildren = DocsRoute._addFileChildren(DocsRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
+  IndexRoute: IndexRoute,
   AdminRoute: AdminRouteWithChildren,
   AppRoute: AppRoute,
   ConnectRoute: ConnectRouteWithChildren,
+  DemoRoute: DemoRoute,
   DocsRoute: DocsRouteWithChildren,
   LoginRoute: LoginRoute,
   PortalRoute: PortalRoute,

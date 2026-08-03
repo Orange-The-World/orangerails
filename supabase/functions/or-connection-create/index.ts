@@ -20,7 +20,7 @@
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { getProvider, listProviderSlugs } from '../_shared/providers/dispatch.ts';
-import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { wrapSentryHandler, reportError } from '../_shared/sentry.ts';
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -73,12 +73,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     if (insErr || !created) {
       console.error('[or-connection-create] insert failed:', insErr);
-      return jsonResponse({ error: 'Failed to create connection' }, 500, cors);
+      await reportError(insErr ?? new Error('connection insert returned no data'), 'or-connection-create', req);
+      return jsonResponse({ error: 'DatabaseError', code: insErr?.code ?? 'unknown' }, 500, cors);
     }
 
     return jsonResponse({ connection_id: created.id as string }, 200, cors);
   } catch (err) {
     console.error('[or-connection-create] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    await reportError(err, 'or-connection-create', req);
+    return jsonResponse({ error: 'InternalError' }, 500, cors);
   }
 }, 'or-connection-create'));

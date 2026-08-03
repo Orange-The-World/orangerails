@@ -124,6 +124,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       strikeSubscriptionDeleted = result.ok;
     }
 
+    // Step 2.5: remove source_wallets rows for this connection. source_wallets
+    // has no FK cascade from connections, so clean up explicitly to prevent
+    // stale fingerprint rows from hijacking a future re-add of the same
+    // provider account.
+    const { error: swDelErr } = await ctx.serviceClient
+      .from('source_wallets')
+      .delete()
+      .eq('connection_id', body.connection_id);
+    if (swDelErr) {
+      console.error('[or-connection-delete] source_wallets cleanup failed:', swDelErr);
+      // Best effort: log but do not block the connection delete.
+    }
+
     // Step 3: delete the OR connection row (cascades to transactions and the
     // strike_webhook_events queue via FK).
     const { error: delErr, count } = await ctx.serviceClient
@@ -147,6 +160,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse(response, 200, cors);
   } catch (err) {
     console.error('[or-connection-delete] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-connection-delete'));

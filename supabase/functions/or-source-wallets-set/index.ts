@@ -125,6 +125,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse({ source_wallets: upserted ?? [] }, 200, cors);
   } catch (err) {
     console.error('[or-source-wallets-set] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-source-wallets-set'));

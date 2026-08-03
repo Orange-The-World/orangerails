@@ -41,7 +41,7 @@
  * is still the one and only consumer of the widget_token.
  */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 

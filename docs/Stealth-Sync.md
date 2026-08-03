@@ -1,4 +1,4 @@
-# Stealth Sync , Architecture Overview
+# Stealth Sync: Architecture Overview
 
 **Audience:** developers integrating Stealth Sync into their own SaaS, BitBooks engineers maintaining the system, security researchers auditing the design.
 **Status:** developer reference. Source of truth for the build is `STEALTH-SYNC-MASTER-PLAN.md` v0.4.
@@ -88,7 +88,7 @@ Documented in `src/stealth/lib/postmessage.ts` in the orangerails repo. Stable s
 
 **App → Widget:** one message type, `OR_STEALTH_INIT`, carrying mode (add / sync / list / delete), the per-app key, and the consuming app's identity.
 
-**Widget → App:** seven message types: `OR_STEALTH_READY`, `OR_STEALTH_PROGRESS` (with eight stages), `OR_STEALTH_ADD_COMPLETE`, `OR_STEALTH_SYNC_COMPLETE` (with sealed transactions array), `OR_STEALTH_LIST_RESULT`, `OR_STEALTH_DELETE_COMPLETE`, `OR_STEALTH_ERROR` (with eight error codes).
+**Widget → App:** seven message types: `OR_STEALTH_READY`, `OR_STEALTH_PROGRESS` (with eight stages), `OR_STEALTH_ADD_COMPLETE`, `OR_STEALTH_SYNC_COMPLETE` (with sealed transactions array), `OR_STEALTH_LIST_RESULT`, `OR_STEALTH_DELETE_COMPLETE`, `OR_STEALTH_ERROR` (with nine error codes).
 
 Origin checks: the widget validates that the parent window's origin is on an allowlist (the consuming app's domain) before accepting an INIT.
 
@@ -173,14 +173,262 @@ Memory footprint: ~100 MB peak. CPU: minimal except during initial backfill.
 
 A consuming app that wants Stealth Sync only needs to:
 
-1. Open a popup at `https://connect.orangerails.com/connect?mode=...`
-2. Listen for `OR_STEALTH_READY`
-3. Send `OR_STEALTH_INIT` with the per-app key derived locally
-4. Render progress and final state from the messages flowing back
+1. Get its origin allowlisted by an OR maintainer (one-time, see below)
+2. Open a popup at `https://connect.orangerails.com/connect/stealth`
+3. Listen for `OR_STEALTH_READY`
+4. Send `OR_STEALTH_INIT` with the per-app key derived locally
+5. Render progress and final state from the messages flowing back
 
 No server-side code is required. No Bitcoin libraries are required. The widget owns the entire sync pipeline. The consuming app stores sealed transactions if it wants to and decrypts them client-side under its own MEK.
 
 This is why Stealth Sync can ship to Orange Way, BitBooks, and arbitrary third-party SaaS without each one re-implementing the math.
+
+## Consumer integration: the exact steps
+
+This section is the practical, code-level companion to the architecture
+overview above. Follow it in order. Every step below is read from the
+current `prod` branch source, not from memory or an older design doc.
+
+### Step 0 (required, one-time, ask OR to do this): get your origin allowlisted
+
+Before your app can complete a handshake, **your app's exact origin must
+be added to the widget's allowlist by an Orange Rails maintainer.** This
+is not something you can self-serve; it is a Cloudflare Pages environment
+variable (`VITE_OR_STEALTH_ALLOWED_ORIGINS`) on the OR side, baked into
+the widget at build time.
+
+Tell OR the exact origin(s) you need, for every environment you run
+(local dev, staging, production are three different origins and all
+three need to be listed separately):
+
+```
+https://app.yourdomain.com
+https://staging.app.yourdomain.com
+```
+
+Do not guess this step is done. Ask OR to confirm the deploy is live, or
+verify yourself:
+
+```
+curl -s https://connect.orangerails.com/assets/<current-stealth-chunk>.js \
+  | grep -c "your-exact-origin.example.com"
+```
+
+If your origin is missing, the widget renders and loads fine, receives
+your `OR_STEALTH_INIT`, and immediately replies with a typed error:
+
+```js
+{ type: 'OR_STEALTH_ERROR', code: 'ORIGIN_NOT_ALLOWED', message: '...', retryable: false }
+```
+
+Listen for this message; it is your signal that OR needs to add your
+origin (Step 0 above), not a bug in your handshake code.
+
+Do not confuse this with the widget sitting indefinitely on "Waiting for
+the parent app to send OR_STEALTH_INIT." That screen means your app
+never sent `OR_STEALTH_INIT` at all, which is a different failure class,
+usually a bug in your own app before it ever reaches the popup. This
+exact confusion cost real debugging time on 2026-06-30: a missing-origin
+bug and a V2-side bug that failed before ever posting INIT looked
+identical from the popup's UI until the browser console was checked.
+
+### Step 1: open the popup
+
+```js
+const popup = window.open(
+  'https://connect.orangerails.com/connect/stealth',
+  'or-stealth-widget',
+  'width=480,height=720,menubar=no,toolbar=no,location=no,status=no',
+);
+```
+
+> **Known issue**: the `openStealthWidget()` helper exported from
+> `src/stealth/lib/postmessage.ts` builds its popup URL as `${base}/connect`,
+> not `${base}/connect/stealth`. That helper is unused elsewhere in this
+> repo (dead code, meant for consumers to copy), so the bug has not
+> surfaced in OR's own code, but copying it verbatim opens the wrong
+> route. Use the URL above (`/connect/stealth`) directly instead of the
+> helper until this is fixed. Filed for a follow-up fix.
+
+Optional: append `?parent_origin=https://your-exact-origin.example.com`
+to the URL. The widget uses this (falling back to `document.referrer`,
+then `"*"`) only to target its first `OR_STEALTH_READY` ping. That
+message carries no secrets, so this is a convenience, not a security
+control. The real origin check happens on your reply, in Step 3.
+
+### Step 2: listen for `OR_STEALTH_READY`
+
+```js
+window.addEventListener('message', (event) => {
+  if (event.origin !== 'https://connect.orangerails.com') return;
+  if (event.data?.type === 'OR_STEALTH_READY') {
+    popup.postMessage(initMessage, 'https://connect.orangerails.com');
+  }
+});
+```
+
+Check `event.origin` here even though `OR_STEALTH_READY` itself carries
+no secret. `initMessage` (sent right after) carries `or_stealth_key_b64`,
+so this is the point where a missing origin check would matter if a
+malicious frame ever managed to send a fake READY.
+
+### Step 3: send `OR_STEALTH_INIT`
+
+```js
+const initMessage = {
+  type: 'OR_STEALTH_INIT',
+  protocol_version: 1,
+  app_slug: 'bitbooks-v2',        // your platform slug, agreed with OR
+  app_user_id: organizationId,    // your own user/org identifier
+  mode: 'add',                    // 'add' | 'sync' | 'list' | 'delete'
+  or_stealth_key_b64: derivedKeyB64,   // see Vault setup section above
+  return_callback_origin: window.location.origin,
+  // connection_id required for sync / list / delete, omit for add
+  // gap_limit: 250,  // optional, see "gap_limit" section below
+};
+```
+
+**Optional `gap_limit` field.** An integer from 1 to 1000 that seeds
+the gap-limit form field shown to the user on the add route. The user
+can still override the value in the UI; this is just the starting point.
+When absent the widget uses its built-in default (see `DEFAULT_GAP_LIMIT`
+in `src/stealth/lib/postmessage.ts`). Out-of-range values (non-integer,
+below 1, or above 1000) are rejected at INIT with
+`OR_STEALTH_ERROR { code: 'INTERNAL' }` rather than silently clamped.
+
+> **Existing-connection caveat.** This field only affects connections
+> created after the INIT. Sealed envelopes bake in the gap_limit at
+> add-time; passing a new value to a sync or list INIT has no effect on
+> the stored value. Re-issuing a connection (new add) is the only way to
+> change the gap_limit of an existing row.
+
+Two fields the widget validates strictly and will silently reject you
+over if wrong:
+
+- **`return_callback_origin` must equal `event.origin` exactly** as the
+  widget sees your window (scheme, host, port, no trailing slash). If
+  your app is reachable at both `https://staging.app.yourdomain.com` and
+  `https://staging.app.yourdomain.com/` (rare, but some frameworks
+  normalize this inconsistently) make sure the value you send matches
+  what the browser actually reports as your page's origin.
+- **`app_slug`, `app_user_id`, `or_stealth_key_b64`, and `mode` are all
+  required** on every INIT. Missing any one gets you back an
+  `OR_STEALTH_ERROR` with code `INTERNAL`, not a silent hang.
+- **`mode` other than `'add'` requires `connection_id`.** Missing it
+  gets you `CONNECTION_NOT_FOUND`.
+
+If the widget rejects your INIT for an origin reason, you get back:
+
+```js
+{ type: 'OR_STEALTH_ERROR', code: 'ORIGIN_NOT_ALLOWED', message: '...', retryable: false }
+```
+
+Listen for this. A silent-looking hang with no error message at all
+usually means your `postMessage` call itself is malformed or targeting
+the wrong window, not an origin rejection: the widget always replies
+with a typed error when it can.
+
+### Step 4: handle the response messages
+
+```js
+window.addEventListener('message', (event) => {
+  if (event.origin !== 'https://connect.orangerails.com') return;
+  switch (event.data?.type) {
+    case 'OR_STEALTH_PROGRESS':
+      // event.data.stage, event.data.percent, event.data.message
+      break;
+    case 'OR_STEALTH_ADD_COMPLETE':
+      // event.data.connection_id, wallet_birthday, label, script_type
+      // Save connection_id in your DB. Close the popup.
+      break;
+    case 'OR_STEALTH_SYNC_COMPLETE':
+      // event.data.sealed_transactions[]: see "Sealed envelope schema" above
+      // event.data.address_window_exhausted: boolean | undefined -- see below
+      break;
+    case 'OR_STEALTH_ERROR':
+      // event.data.code, message, retryable
+      break;
+  }
+});
+```
+
+### `OR_STEALTH_SYNC_COMPLETE`: the `address_window_exhausted` field
+
+`OR_STEALTH_SYNC_COMPLETE` carries an optional boolean field
+`address_window_exhausted`. When it is `true`, the widget found
+transactions at or near the top of the derived address window on at
+least one chain, which means the wallet has likely outgrown the current
+window and some transactions may be missing from the result.
+
+**Why this happens.** Stealth Sync derives a fixed set of addresses
+(`gap_limit * 2` per chain) before scanning. Any transaction that pays
+an address beyond that ceiling is silently invisible. A standard BIP44
+gap-limit scan would extend the window when activity is found near the
+top; Stealth Sync currently uses a fixed ceiling to keep the browser
+scan bounded. `address_window_exhausted` tells you when you have hit
+that ceiling.
+
+**What your app must do when this field is true:**
+
+1. Do not book the synced history as authoritative or complete.
+2. Prompt the user: "Some transactions may be missing. Re-connect this
+   wallet with a wider address window to recover the full history."
+3. Offer a path to re-add the wallet with a larger `gap_limit` value
+   (your app passes `gap_limit` inside the sealed envelope payload).
+   A value of 100 recovers most real-world wallets.
+
+**What your app can ignore.** When the field is absent or `false`, the
+history is complete within the current window. You do not need to
+handle the absent case specially: absent and `false` are equivalent.
+
+**Detection predicate.** The flag fires when any matched receive-chain
+or change-chain address has an index >= `gap_limit` within the
+`gap_limit * 2` window. This is the BIP44 signal that the window needs
+extending, implemented client-side with no new network calls.
+
+### Implementation status: `add` and `sync` are live, `list` and `delete` are not yet
+
+As of this writing, `mode: 'add'` and `mode: 'sync'` are real, shipped
+implementations. `mode: 'list'` and `mode: 'delete'` currently render a
+"Coming soon" placeholder and do not call any backend function yet. If
+you send `OR_STEALTH_INIT` with `mode: 'list'` or `mode: 'delete'`, the
+widget accepts the handshake but shows a placeholder screen instead of
+doing the work. Do not build a consumer-side feature against those two
+modes yet; ask OR for a status update before you do.
+
+### Step 5: close-without-complete must be a no-op, not a re-run
+
+If the user closes the popup without ever seeing
+`OR_STEALTH_ADD_COMPLETE` or `OR_STEALTH_SYNC_COMPLETE`, treat it as a
+plain cancel. Do not re-trigger wallet discovery or any other flow on
+close. The wallets from a previous successful session are already
+saved; re-running discovery re-prompts the user to add wallets they
+already have. This was a live bug against a `bitbooks-v2` consumer (2026-06-30); the
+fix belongs in the consuming app's close handler, not in the widget.
+
+### Which flow to use: Stealth Sync vs the plain Link widget
+
+Orange Rails ships **two different popup flows** at two different URLs.
+Pick the one that matches what you are connecting:
+
+| Flow | URL | Use for | Protocol |
+|---|---|---|---|
+| **Stealth Sync** | `/connect/stealth` | Bitcoin wallets (xpub / descriptor), BIP 158 client-side scan | `OR_STEALTH_INIT` / `OR_STEALTH_*` messages, documented above |
+| **Link widget** | `/connect` | Bank-linked and custodial sources (Quiltt-backed banks, Strike, BTCPay, etc.) | `or-link-success` / `or-link-cancel` messages, documented in [Connecting a wallet through the Link widget](Consumer-Integration-Guide.md#connecting-a-wallet-through-the-link-widget) |
+
+A single consuming app typically integrates both: Stealth Sync for
+self-custodied wallets, the Link widget for everything that requires a
+provider credential OR holds on the user's behalf. `bitbooks-v2` uses
+both today.
+
+### After the connection: receiving and syncing data
+
+Once you have a `connection_id` (from either flow), the data-sync
+contract is identical regardless of which popup created the connection.
+See [Syncing transactions: protocol-driven sink mode](Consumer-Integration-Guide.md#syncing-transactions-protocol-driven-sink-mode)
+in the Consumer Integration Guide: that is the part that answers "how
+does my app receive and store the data OR fetched."
+
 
 ## Why we did NOT use existing libraries directly
 

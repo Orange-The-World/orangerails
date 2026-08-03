@@ -1,5 +1,5 @@
 /**
- * api.orangerails.com — canonical API gateway.
+ * api.orangerails.com -- canonical API gateway.
  *
  * Replaces the per-client hardcoded Supabase URL pattern with a single
  * canonical entry point. Clients only ever know about
@@ -34,6 +34,13 @@ import * as Sentry from "@sentry/cloudflare";
 export interface Env {
   /** OR Supabase URL, e.g. https://lcdicqalreskibdfxkzb.supabase.co (prod) or the dev ref. Set per environment in wrangler.toml. */
   OR_SUPABASE_URL: string;
+  /**
+   * ORBI Supabase project base URL, e.g. https://<ref>.supabase.co.
+   * Set as a Cloudflare secret on the production Worker via CF dashboard
+   * or `wrangler secret put`; never committed (OR repo is public).
+   * Required for /v1/rate forwarding. Returns 503 not_configured if unset.
+   */
+  ORBI_FUNCTIONS_BASE_URL?: string;
   /** Sentry-compatible DSN for the self-hosted GlitchTip project that catches Worker errors. Public client key by convention; safe to ship. */
   SENTRY_DSN?: string;
   /** Optional release identifier surfaced in Sentry events. Set in CI; defaults to "dev" when unset. */
@@ -47,6 +54,8 @@ type V1Route = {
   fn: string;
   /** When set, the public path includes a trailing segment that maps to the upstream subpath. */
   upstreamSuffix?: (rest: string) => string;
+  /** When "orbi", this route forwards to ORBI_FUNCTIONS_BASE_URL instead of OR_SUPABASE_URL. */
+  target?: "orbi";
 };
 
 const V1_ROUTES: Record<string, V1Route> = {
@@ -102,6 +111,15 @@ const V1_ROUTES: Record<string, V1Route> = {
     fn: "world-gateway",
     upstreamSuffix: () => "commodity-prices",
   },
+  // ORBI rate API: separate Supabase project from OR's own.
+  // Authorization and x-api-key headers pass through unchanged so
+  // v1-rate can handle per-consumer key lookup and metering.
+  // x-api-key is intentionally absent from the CORS preflight allowlist:
+  // server-to-server callers (the expected consumers for key metering)
+  // are not CORS-bound. Browser callers must use the authorization header.
+  // Do NOT inject any OR Supabase anon or service key here.
+  "GET  /v1/rate": { method: "GET", fn: "v1-rate", target: "orbi" },
+  "POST /v1/rate": { method: "POST", fn: "v1-rate", target: "orbi" },
 };
 
 function lookupV1(method: string, pathname: string): V1Route | null {
@@ -170,10 +188,17 @@ const handler = {
           headers: { "content-type": "application/json" },
         });
       }
+      const baseUrl = route.target === "orbi" ? env.ORBI_FUNCTIONS_BASE_URL : env.OR_SUPABASE_URL;
+      if (!baseUrl) {
+        return new Response(JSON.stringify({ error: "not_configured", path: url.pathname }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      }
       const suffix = route.upstreamSuffix ? `/${route.upstreamSuffix(url.pathname)}` : "";
       const upstream = new URL(
         `/functions/v1/${route.fn}${suffix}${url.search}`,
-        env.OR_SUPABASE_URL,
+        baseUrl,
       ).toString();
       return proxyToSupabase(upstream, request);
     }

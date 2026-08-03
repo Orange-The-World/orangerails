@@ -100,7 +100,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
     message: "Vault unlocked",
     detail: "Your password never left this browser.",
   });
-  const [done, setDone] = useState<{ txCount: number; bytes: number } | null>(null);
+  const [done, setDone] = useState<{ txCount: number; bytes: number; windowExhausted: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   function postWidgetError(code: StealthErrorCode, message: string, retryable: boolean) {
@@ -283,7 +283,60 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           }
         }
 
-        // 4. SYNC_COMPLETE.
+        // 4. Persist the sync cursor, independent of transaction upload.
+        //    Consumer apps that set skip_transaction_upload (and any sync
+        //    that found zero new transactions) never reach
+        //    or-stealth-transactions-store, so without this call their
+        //    cursor never advanced and every sync rescanned the whole
+        //    birthday-to-tip window. Best-effort: a failure here must not
+        //    fail the sync, it only widens the next rescan window.
+        //
+        //    Guard: only write if the cursor actually advanced. runSync
+        //    returns the previous cursor unchanged when fromHeight > tip
+        //    (short-circuit path). Persisting that value would falsely mark
+        //    the wallet as synced to a height it never scanned.
+        if (!useMock && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
+          const cursorBody = {
+            connection_id: init.connection_id,
+            app_user_id: init.app_user_id,
+            last_block_scanned: result.lastBlockScanned,
+          };
+          try {
+            if (init.proxy_base_url && parent) {
+              const r = await proxyFetch({
+                parent,
+                parentOrigin: init.return_callback_origin,
+                fn: "or-stealth-envelope-update",
+                body: cursorBody,
+              });
+              if (!r.ok) {
+                console.warn(`[stealth/sync] cursor update failed: ${r.status} ${r.bodyText}`);
+              }
+            } else {
+              const headers: Record<string, string> = {
+                "Content-Type": "application/json",
+              };
+              if (init.access_token) {
+                headers["Authorization"] = `Bearer ${init.access_token}`;
+              }
+              const cursorResp = await fetch(
+                resolveFunctionUrl("or-stealth-envelope-update", init.proxy_base_url),
+                {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify(cursorBody),
+                },
+              );
+              if (!cursorResp.ok) {
+                console.warn(`[stealth/sync] cursor update failed: ${cursorResp.status}`);
+              }
+            }
+          } catch (e) {
+            console.warn("[stealth/sync] cursor update failed:", e);
+          }
+        }
+
+        // 5. SYNC_COMPLETE.
         if (parent) {
           const msg: StealthSyncCompleteMessage = {
             type: "OR_STEALTH_SYNC_COMPLETE",
@@ -293,6 +346,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             tx_count: result.txCount,
             bytes_downloaded: result.bytesDownloaded,
             duration_seconds: (Date.now() - startedAt) / 1000,
+            address_window_exhausted: result.windowExhausted || undefined,
           };
           try {
             parent.postMessage(msg, init.return_callback_origin);
@@ -302,7 +356,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         }
 
         if (cancelled) return;
-        setDone({ txCount: result.txCount, bytes: result.bytesDownloaded });
+        setDone({ txCount: result.txCount, bytes: result.bytesDownloaded, windowExhausted: result.windowExhausted });
       } catch (e) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
@@ -346,6 +400,16 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
               ? "Nothing new on chain since the last sync."
               : `Sealed and stored ${done.txCount} transaction${done.txCount === 1 ? "" : "s"}.`}
           </p>
+          {done.windowExhausted && (
+            <div className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-left text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+              <p className="font-semibold">Your history may be incomplete.</p>
+              <p className="mt-1">
+                Transactions were found near the edge of the address window. Some older
+                transactions may not have been found. Re-connect this wallet with a
+                wider address window to recover the full history.
+              </p>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => window.close()}
