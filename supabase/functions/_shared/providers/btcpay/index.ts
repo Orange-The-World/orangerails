@@ -275,7 +275,11 @@ export const btcpayAdapter: ProviderAdapter = {
   description: 'Self-hosted merchant',
   category: 'payment_processor',
   tags: ['merchant', 'self-hosted', 'lightning', 'on-chain'],
-  custody: 'self_custody',
+  // BTCPay cannot determine custody at declaration time: a merchant's own
+  // node is self_custody, but a shared community instance is custodial.
+  // Fail closed: stamp custodial so no user is falsely assured of
+  // self-custody they do not have. v1.1 will resolve per-connection.
+  custody: 'custodial',
   popularity: 85,
   multiWallet: true,
   credentialFields: [
