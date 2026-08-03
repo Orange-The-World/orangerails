@@ -208,16 +208,6 @@ export async function handleEvent(
   subaccountId: string,
   apiKey: string,
 ): Promise<'processed' | 'skipped' | string> {
-  // Reconcile connection status on Quiltt error events without pulling data (DL-0441).
-  // These events mean Quiltt's own bank connection is broken; the OR connections table
-  // must reflect that so callers (e.g. the app's connection health UI) see the truth.
-  // Match on the shared prefix rather than an enumeration of subtypes: Quiltt's full
-  // errored taxonomy is not guaranteed to be bounded, and a subtype not listed here
-  // would fall through to 'skipped' without reconciling, which is the gap this fix closes.
-  if (ev.event_type.startsWith('connection.synced.errored')) {
-    return reconcileConnectionError(client, ev, subaccountId);
-  }
-
   // Only act on sync.successful.* for data pulls
   if (!ev.event_type.startsWith('connection.synced.successful')) {
     return 'skipped';
