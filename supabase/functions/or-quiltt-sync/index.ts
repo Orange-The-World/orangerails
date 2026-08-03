@@ -129,7 +129,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .eq('event_id', ev.event_id);
         if (retireErr) {
           console.error(
-            `[or-quiltt-sync] event ${ev.event_id}: pre-dispatch retirement UPDATE failed: ${retireErr.message}`,
+            `[or-quiltt-sync] event ${ev.event_id}: pre-dispatch retirement UPDATE failed (retirement_reason=max-attempts-pre-dispatch): ${retireErr.message}`,
           );
         } else {
           console.warn(
