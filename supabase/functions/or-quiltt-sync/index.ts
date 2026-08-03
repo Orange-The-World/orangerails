@@ -87,6 +87,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   );
   const { data: expected, error: _vaultErr } = await client.rpc('get_or_internal_worker_token');
   if (_vaultErr) {
+    console.error('[or-quiltt-sync] vault RPC failed:', _vaultErr.code, _vaultErr.message);
     return new Response('vault read error', { status: 503 });
   }
   if (!expected) {
