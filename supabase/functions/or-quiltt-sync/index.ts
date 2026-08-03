@@ -108,6 +108,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   for (const ev of pending as PendingEvent[]) {
     try {
+      // DL-0596: pre-dispatch cap guard. A row at or above MAX_ATTEMPTS must
+      // be retired here, unconditionally, before any routing or dispatch.
+      // Without this check, a row that succeeds on a high-attempt tick passes
+      // through markProcessed with no retirement_reason, leaving the audit slot
+      // NULL. bumpAttempts sets terminal = true (newAttempts >= MAX_ATTEMPTS)
+      // and writes processed_at + retirement_reason in a single UPDATE.
+      if ((ev.attempts ?? 0) >= MAX_ATTEMPTS) {
+        await bumpAttempts(client, ev, 'max-attempts-pre-dispatch');
+        failed++;
+        continue;
+      }
+
       // Re-resolve routing if missing (link-race tolerance).
       //
       // Two sources, in order of authority. The second one is the point:
