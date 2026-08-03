@@ -208,6 +208,15 @@ export async function handleEvent(
   subaccountId: string,
   apiKey: string,
 ): Promise<'processed' | 'skipped' | string> {
+  // Dispatch connection.synced.errored.* to reconcileConnectionError (DL-0441).
+  // Without this block, errored events fall through to the successful-only guard
+  // below and return 'skipped', leaving the connection in a stale non-error state.
+  if (ev.event_type.startsWith('connection.synced.errored')) {
+    const errResult = await reconcileConnectionError(client, ev, subaccountId);
+    if (errResult) return errResult;
+    return 'processed';
+  }
+
   // Only act on sync.successful.* for data pulls
   if (!ev.event_type.startsWith('connection.synced.successful')) {
     return 'skipped';
