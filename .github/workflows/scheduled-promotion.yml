@@ -4,11 +4,10 @@ name: scheduled dev to prod promotion
 #
 # Promotion to production is currently an act of memory: someone has to decide
 # to open the promotion pull request. When nobody does, finished work piles up
-# on dev invisibly. Measured 2026-08-02 and 2026-08-03: Orange-Way-Books went
-# 36 days without shipping and reached 194 commits ahead of prod; Orange-Way-Me
-# was 190 ahead with its oldest unpromoted commit 42 days old; Orange Rails hit
-# 384 commits ahead before being cleared. Nothing ever opened a promotion on a
-# schedule.
+# on dev invisibly. Measured here on 2026-08-03: dev is 73 commits ahead of prod
+# and the oldest unpromoted commit is 11 days old. Before that backlog was
+# cleared it had reached 384 commits ahead. Nothing has ever opened a promotion
+# on a schedule.
 #
 # The Release seat owns the dev to prod promotion gate in both orgs. From its
 # ROLE.md: "You own the path to production and the ability to undo it." The
