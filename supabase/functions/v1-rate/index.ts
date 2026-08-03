@@ -11,6 +11,7 @@
 // Updated: Security, 2026-07-23 -- key lookup uses maybeSingle so a bad or revoked key returns 401, not 500
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
+import { wrapSentryHandler } from '../_shared/sentry.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -68,7 +69,7 @@ interface RateItem {
 // timezone marker are also rejected.
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 
-Deno.serve(async (req: Request) => {
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const correlationId = crypto.randomUUID()
   try {
   // ----- Feature flag -----
@@ -244,4 +245,4 @@ Deno.serve(async (req: Request) => {
     console.error(`v1-rate unhandled error [${correlationId}]:`, err)
     return Response.json({ error: 'server_error', message: 'Internal error', correlation_id: correlationId }, { status: 500 })
   }
-})
+}))
