@@ -1177,6 +1177,75 @@ export function throwOnDbError(error: unknown): void {
   if (error) throw error;
 }
 
+/**
+ * Handle a per-connection sync error: classify the error, stamp status='error'
+ * on the connection row, and return a structured error result for the batch.
+ * Does not re-throw: the caller loop continues to the next connection.
+ *
+ * Exported so that index.test.ts can exercise the full error path with a
+ * fake client, without constructing a full integration harness. See DL-0501.
+ */
+// deno-lint-ignore no-explicit-any
+export async function handleConnectionError(
+  serviceClient: any,
+  conn: { id: string },
+  e: unknown,
+  opts: { sinkMode: boolean; txnsKey: CryptoKey | null },
+): Promise<{
+  connection_id: string;
+  next_cursor: null;
+  error: string;
+  correlation_id: string;
+  message: string;
+  detail: string;
+  action: string;
+  help_url: string;
+}> {
+  // Audit 2026-05-16 findings #1 + #4: never let upstream provider
+  // error messages reach the client or the edge log in plaintext.
+  // Map to a fixed taxonomy; emit only the code + a correlation id.
+  const raw = e instanceof Error ? e.message : String(e);
+  // errorClassName, not e.constructor.name: CCXT ships minified, so the
+  // constructor is a mangled letter while e.name survives. See
+  // _shared/upstream-errors.ts for the evidence (DL-0421).
+  const errorClass = errorClassName(e);
+  const code = classifyUpstreamError(raw, errorClass);
+  const correlationId = randomCorrelationId();
+  const fp = await errorFingerprint(raw, errorClass);
+  console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
+
+  // Persist the taxonomy code on the connection row. In legacy
+  // (non-sink) mode we still want it encrypted at rest so the column
+  // shape stays uniform across modes. In sink mode the column is
+  // plaintext per the V2 contract. We NEVER fall back to writing the
+  // raw upstream message -- if encryption fails, store only the code.
+  const persistable = `${code}:${correlationId}`;
+  let storedErr: string | null = persistable;
+  if (!opts.sinkMode) {
+    try {
+      storedErr = await encryptAes(persistable, opts.txnsKey!);
+    } catch {
+      // Encryption failed -- store the unencrypted taxonomy code, not the raw message.
+      // (Code + correlation ID contain no customer plaintext.)
+      storedErr = persistable;
+    }
+  }
+  await serviceClient.from('connections').update({ status: 'error', encrypted_last_error: storedErr }).eq('id', conn.id);
+  const copy = lookupErrorCopy(code);
+  return {
+    connection_id: conn.id,
+    next_cursor: null,
+    error: code,
+    correlation_id: correlationId,
+    // Customer-facing copy. Backward-compatible additive fields --
+    // existing clients reading only `error` keep working.
+    message: copy.title,
+    detail: copy.body,
+    action: copy.action,
+    help_url: copy.help_url,
+  };
+}
+
 export function mergeStrikeTransactions(
   pollTxs: NormalizedTransaction[],
   drainTxs: NormalizedTransaction[],
