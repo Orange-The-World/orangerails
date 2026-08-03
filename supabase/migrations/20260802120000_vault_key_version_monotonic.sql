@@ -10,6 +10,7 @@
 CREATE OR REPLACE FUNCTION public.vault_key_version_must_not_decrease()
 RETURNS TRIGGER
 LANGUAGE plpgsql
+SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF NEW.vault_key_version < OLD.vault_key_version THEN
@@ -36,3 +37,8 @@ CREATE TRIGGER trg_vault_key_version_monotonic
   BEFORE UPDATE OF vault_key_version ON public.customer_vault_meta
   FOR EACH ROW
   EXECUTE FUNCTION public.vault_key_version_must_not_decrease();
+
+-- DOWN
+DROP TRIGGER IF EXISTS trg_vault_key_version_monotonic ON public.customer_vault_meta;
+DROP TRIGGER IF EXISTS trg_vault_key_version_monotonic ON public.user_vault_meta;
+DROP FUNCTION IF EXISTS public.vault_key_version_must_not_decrease();
