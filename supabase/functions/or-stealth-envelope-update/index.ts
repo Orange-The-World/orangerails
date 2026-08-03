@@ -114,9 +114,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
-    // Fallback value when the conditional UPDATE below is a no-op.
-    const storedCursor = (row.last_block_scanned as number | null) ?? -1;
-
     // Advance the cursor atomically. The UPDATE includes the forward-only
     // condition as a PostgREST filter so the write fires only when the stored
     // value is NULL (never set) or strictly less than the incoming tip.
@@ -144,9 +141,28 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
 
     // When 0 rows matched the conditional filter, the stored cursor was already
-    // at or above the incoming value. storedCursor (from the SELECT above) is
-    // guaranteed to be >= body.last_block_scanned in that case.
-    const effectiveCursor = updatedRow !== null ? body.last_block_scanned : storedCursor;
+    // at or above the incoming tip. Re-read the current row so the response
+    // reflects the actual stored cursor, not the pre-UPDATE snapshot which may
+    // have been advanced further by a concurrent caller between our SELECT and
+    // this UPDATE.
+    let effectiveCursor: number;
+    if (updatedRow !== null) {
+      effectiveCursor = body.last_block_scanned;
+    } else {
+      const { data: freshRow, error: freshErr } = await ctx.serviceClient
+        .from('stealth_connections')
+        .select('last_block_scanned')
+        .eq('platform_id', callerPlatformId)
+        .eq('id', body.connection_id)
+        .maybeSingle();
+      if (freshErr || !freshRow) {
+        console.error('[or-stealth-envelope-update] post-update read failed:', freshErr);
+        return jsonResponse({ error: 'Failed to read cursor after update' }, 500, cors);
+      }
+      // NULL is impossible here: the UPDATE filter includes last_block_scanned.is.null,
+      // so a null cursor always triggers the UPDATE and updatedRow is non-null.
+      effectiveCursor = (freshRow.last_block_scanned as number | null) ?? 0;
+    }
 
     const resp: EnvelopeUpdateResponseBody = {
       connection_id: body.connection_id,
