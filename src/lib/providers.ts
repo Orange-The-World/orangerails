@@ -41,6 +41,16 @@ export interface ProviderManifest {
   /** Optional in-app route for providers whose connect flow lives outside
    *  the generic credential dialog (e.g. Sparrow's Stealth Sync popup). */
   connectUrl?: string;
+  /**
+   * Exchange-level sync capabilities from CCXT manifest introspection.
+   * Present only for CCXT-backed exchanges. Absent (not false) for native
+   * adapters and client-side manifests.
+   */
+  capabilities?: {
+    trades: boolean;
+    deposits: boolean;
+    withdrawals: boolean;
+  };
 }
 
 export interface CategoryManifest {
