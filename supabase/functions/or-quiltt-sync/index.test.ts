@@ -94,6 +94,59 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
   assertEquals(result, 'deferred', 'handleEvent must return deferred when opk_public is null');
 });
 
+// ── handleEvent: errored event reconciles connection to error ─────────
+
+Deno.test('handleEvent: dispatches errored event, reconciles connection to error, returns processed', async () => {
+  let updateCalled = false;
+
+  const mockClient = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select() { return chain; },
+        eq()     { return chain; },
+        is()     { return chain; },
+        order()  { return chain; },
+        limit()  { return chain; },
+        update(_patch: unknown) {
+          if (table === 'connections') updateCalled = true;
+          return chain;
+        },
+        single() {
+          if (table === 'subaccounts') {
+            return Promise.resolve({
+              data: { id: 'sub-1', opk_public: 'pk-abc', opk_alg: 'ed25519' },
+              error: null,
+            });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+        maybeSingle() {
+          if (table === 'connections') {
+            return Promise.resolve({ data: { id: 'conn-or-1' }, error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-err-1',
+    event_type:    'connection.synced.errored.repairable',
+    payload:       { record: { id: 'quiltt-conn-1' } },
+    platform_id:   'plat-1',
+    subaccount_id: 'sub-1',
+    attempts:      0,
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const result = await handleEvent(mockClient as any, ev, 'plat-1', 'sub-1', 'api-key');
+  assertEquals(result, 'processed', 'errored event must return processed after status flip');
+  assertEquals(updateCalled, true, 'must call update on connections table to flip status to error');
+});
+
 // ── markDeferred: stamps opk_deferred_at, not processed_at ───────────
 
 Deno.test('markDeferred: updates opk_deferred_at field on the correct row', async () => {
