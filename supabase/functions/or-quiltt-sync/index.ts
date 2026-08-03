@@ -15,12 +15,12 @@
  *     processed without action; or wired into the dispatcher later.
  *
  * Auth: requires X-Internal-Worker-Token (constant-time compared to
- * OR_INTERNAL_WORKER_TOKEN env). This endpoint is for OR ops + cron
+ * Vault (or_internal_worker_token, read at invocation via service_role). This endpoint is for OR ops + cron
  * only; never callable from integrators or browsers.
  *
  * Env vars:
  *   QUILTT_API_KEY              — Model A master key
- *   OR_INTERNAL_WORKER_TOKEN    — caller auth for this endpoint
+ *   vault: or_internal_worker_token — caller auth token, read from Vault at invocation via service_role
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY — standard
  */
 
@@ -75,8 +75,22 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
   const callerToken = req.headers.get('X-Internal-Worker-Token');
-  const expected = Deno.env.get('OR_INTERNAL_WORKER_TOKEN');
-  if (!expected) return new Response('worker token not configured', { status: 503 });
+  // Read expected token from Vault at invocation using service_role.
+  // No OR_INTERNAL_WORKER_TOKEN env var: Vault is the single source of truth.
+  const _vaultUrl = Deno.env.get('SUPABASE_URL')!;
+  const _vaultKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+  const _vaultResp = await fetch(
+    `${_vaultUrl}/rest/v1/decrypted_secrets?name=eq.or_internal_worker_token&select=decrypted_secret`,
+    { headers: { 'apikey': _vaultKey, 'Authorization': `Bearer ${_vaultKey}`, 'Accept-Profile': 'vault' } },
+  );
+  if (!_vaultResp.ok) {
+    return new Response('vault read error', { status: 503 });
+  }
+  const _vaultRows: { decrypted_secret: string }[] = await _vaultResp.json();
+  const expected: string | null = _vaultRows[0]?.decrypted_secret ?? null;
+  if (!expected) {
+    return new Response('worker token missing from vault', { status: 503 });
+  }
   if (!callerToken || !timingSafeEqual(callerToken, expected)) {
     return new Response('unauthorized', { status: 401 });
   }
