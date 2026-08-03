@@ -1156,7 +1156,7 @@ export async function handleConnectionError(
   correlation_id: string;
   message: string;
   detail: string;
-  action: string;
+  action: string | null;
   help_url: string;
 }> {
   // Audit 2026-05-16 findings #1 + #4: never let upstream provider
