@@ -64,6 +64,11 @@ export interface NormalizedTransaction {
    * was scoped via source_wallets; null for legacy account-wide sync.
    */
   source_wallet_id: string | null;
+  /**
+   * Provider-specific recipient identifier. For Strike this is the opaque
+   * receiverId from the invoice. Not persisted in v0; reserved for PR 2.
+   */
+  receiverId?: string | null;
 }
 
 export interface DiscoveredWallet {
