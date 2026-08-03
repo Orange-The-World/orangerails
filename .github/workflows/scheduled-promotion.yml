@@ -128,7 +128,11 @@ jobs:
           What to do:
             1. Add a repository secret named FLEET_PAT.
             2. Its value is a token for the orange-builder machine user, scoped
-               to this repository with Contents:read and Pull requests:write.
+               to this repository with Contents:read, Pull requests:write and
+               Issues:write. Issues:write is required, not optional: this job
+               creates the owner:release label and applies it, and the label
+               endpoints sit under Issues. Without it the job dies at the label
+               step and no promotion pull request is opened.
             3. Re-run this workflow (Actions, then Run workflow).
 
           Why not the built-in GITHUB_TOKEN: "Allow GitHub Actions to create and
