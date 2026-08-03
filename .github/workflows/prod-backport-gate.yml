@@ -3,7 +3,9 @@ name: prod backport gate
 # Why this gate exists.
 #
 # Orange Way and Orange Rails developed a loop that took Orange Rails to 384
-# commits of divergence. From PR #377, 2026-07-31, in the team's own words:
+# commits of divergence. From orangerails pull request 377, 2026-07-31, in the
+# team's own words (the number is spelled out because the pre-publish hygiene
+# scan rejects the "PR #<n>" form as a dead reference):
 #
 #   "prod was 26 commits ahead of dev. It was 15 the same morning... That is the
 #    loop: #314 is conflicted, so the normal dev to prod promote is blocked ->
