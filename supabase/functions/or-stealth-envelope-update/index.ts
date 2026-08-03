@@ -19,8 +19,9 @@
  * Response:
  *   { connection_id, last_block_scanned }
  *   last_block_scanned reflects the stored cursor after the call. It may be
- *   higher than the supplied value when a concurrent call already advanced it;
- *   it is never lower (forward-only guard).
+ *   higher than the supplied value when a concurrent call already advanced it.
+ *   The forward-only guarantee is enforced atomically by the UPDATE itself
+ *   (conditional WHERE on the row, not application-level read-then-compare).
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
@@ -95,9 +96,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     const callerPlatformId = platformIdOrErr;
 
-    // Read the current cursor so we can apply the forward-only guard.
-    // Two round trips (read then conditional write) keeps the logic
-    // transparent and auditable without a stored procedure.
+    // Read the row to verify ownership (app_user_id must match the connection owner).
     const { data: row, error: selErr } = await ctx.serviceClient
       .from('stealth_connections')
       .select('id, app_user_id, last_block_scanned')
@@ -115,36 +114,43 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
+    // Fallback value when the conditional UPDATE below is a no-op.
     const storedCursor = (row.last_block_scanned as number | null) ?? -1;
 
-    // Forward-only guard: never move the cursor backwards. Return the current
-    // stored value without touching the row. Concurrent calls that race to
-    // write the same tip are both safe: the first one lands, the second is a
-    // no-op here (equal, not greater-than).
-    if (body.last_block_scanned <= storedCursor) {
-      const resp: EnvelopeUpdateResponseBody = {
-        connection_id: body.connection_id,
-        last_block_scanned: storedCursor,
-      };
-      return jsonResponse(resp, 200, cors);
-    }
-
-    const { error: updErr } = await ctx.serviceClient
+    // Advance the cursor atomically. The UPDATE includes the forward-only
+    // condition as a PostgREST filter so the write fires only when the stored
+    // value is NULL (never set) or strictly less than the incoming tip.
+    // Two concurrent callers carrying different tips cannot both advance the
+    // cursor to their own values: the one that arrives second finds stored >=
+    // its tip and the UPDATE is a no-op, leaving the cursor at max(both).
+    // A read-then-unconditional-write pair cannot give this guarantee because
+    // nothing locks the row between the SELECT and the UPDATE: both callers
+    // can pass an application-level comparison and the later UPDATE wins
+    // regardless of which tip it carries.
+    const { data: updatedRow, error: updErr } = await ctx.serviceClient
       .from('stealth_connections')
       .update({
         last_block_scanned: body.last_block_scanned,
         last_sync_at: new Date().toISOString(),
       })
       .eq('platform_id', callerPlatformId)
-      .eq('id', body.connection_id);
+      .eq('id', body.connection_id)
+      .or(`last_block_scanned.lt.${body.last_block_scanned},last_block_scanned.is.null`)
+      .select('last_block_scanned')
+      .maybeSingle();
     if (updErr) {
       console.error('[or-stealth-envelope-update] update failed:', updErr);
       return jsonResponse({ error: 'Failed to update cursor' }, 500, cors);
     }
 
+    // When 0 rows matched the conditional filter, the stored cursor was already
+    // at or above the incoming value. storedCursor (from the SELECT above) is
+    // guaranteed to be >= body.last_block_scanned in that case.
+    const effectiveCursor = updatedRow !== null ? body.last_block_scanned : storedCursor;
+
     const resp: EnvelopeUpdateResponseBody = {
       connection_id: body.connection_id,
-      last_block_scanned: body.last_block_scanned,
+      last_block_scanned: effectiveCursor,
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {
