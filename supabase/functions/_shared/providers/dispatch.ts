@@ -20,6 +20,7 @@
  */
 
 import type { ProviderAdapter } from './types.ts';
+import { validateAdapter } from './types.ts';
 import { blinkAdapter } from './blink/index.ts';
 import { xpubAdapter } from './xpub/index.ts';
 import { btcpayAdapter } from './btcpay/index.ts';
@@ -54,7 +55,7 @@ const PROVIDERS: ReadonlyArray<ProviderAdapter> = [
   surgeAdapter,
   // CCXT-backed exchanges (manifest-driven, 98 today)
   ...ccxtAdapters,
-];
+].map(validateAdapter);
 
 const PROVIDER_MAP: ReadonlyMap<string, ProviderAdapter> = new Map(
   PROVIDERS.map(p => [p.slug, p]),
