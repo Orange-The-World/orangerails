@@ -71,8 +71,14 @@ const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 
 // Caller surface and non-200 behavior (required for Auditor sign-off):
 //
-// Callers: only external ORBI API consumers holding orbi_api_keys.
-// No internal OR service-to-service call reaches this endpoint.
+// Callers:
+//   1. External ORBI API consumers holding orbi_api_keys, calling this
+//      endpoint directly.
+//   2. workers/api-gateway (this repo): routes GET /v1/rate and POST /v1/rate
+//      to this function via proxyToSupabase, which returns fetch(upstream)
+//      verbatim without inspecting or rewriting the status. Any non-200
+//      response from this function (including 502) reaches the end consumer
+//      unchanged.
 //
 //   400/401/405/429/503 -- handler returns structured JSON { error, message };
 //     callers act per code (retry 429 with Retry-After, fix request on 4xx,
@@ -84,10 +90,9 @@ const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 //     catch, reports it to GlitchTip, then re-throws; Supabase edge runtime
 //     converts the unhandled throw into 502 Bad Gateway. This fires only for
 //     true programming bugs or fatal init failures after module load. Callers
-//     receive a raw Supabase 502 body (no structured JSON). External
-//     integrators should treat 502 as a transient outage and retry with
-//     exponential backoff. No internal caller exists; this path affects only
-//     external consumers.
+//     receive a raw Supabase 502 body (no structured JSON); the api-gateway
+//     forwards this verbatim to the end consumer. Treat 502 as a transient
+//     outage and retry with exponential backoff.
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const correlationId = crypto.randomUUID()
   try {
