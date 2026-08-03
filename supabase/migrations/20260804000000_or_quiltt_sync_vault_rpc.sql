@@ -25,7 +25,7 @@ CREATE OR REPLACE FUNCTION public.get_or_internal_worker_token()
 RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = vault, public, pg_temp
+SET search_path = ''
 AS $$
 DECLARE
   secret_val text;
@@ -39,6 +39,7 @@ END;
 $$;
 
 REVOKE EXECUTE ON FUNCTION public.get_or_internal_worker_token() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.get_or_internal_worker_token() FROM anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.get_or_internal_worker_token() TO service_role;
 
 COMMENT ON FUNCTION public.get_or_internal_worker_token() IS
