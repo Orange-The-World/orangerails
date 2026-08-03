@@ -219,6 +219,18 @@ export interface ProviderAdapter {
    */
   popularity?: number;
 
+  /**
+   * Exchange capabilities introspected from the CCXT manifest.
+   * Present only for CCXT-backed exchanges; omitted entirely for native
+   * adapters (blink, xpub, btcpay, strike, surge). Never defaults to false
+   * because a missing capability is not the same as a known-false one.
+   */
+  capabilities?: {
+    trades: boolean;
+    deposits: boolean;
+    withdrawals: boolean;
+  };
+
   /** Schema for the credential blob the adapter expects. */
   credentialFields: CredentialField[];
 
