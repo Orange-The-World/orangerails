@@ -37,7 +37,7 @@
  * Response 503 — QUILTT_API_KEY or QUILTT_CONNECTOR_ID_LINK missing on this project
  */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { resolveQuilttConfigForPlatform } from "../_shared/quiltt-config.ts";
 import { wrapSentryHandler } from "../_shared/sentry.ts";
@@ -249,5 +249,5 @@ Deno.serve(
       );
       return jsonResponse({ error: "Internal error" }, 500, cors);
     }
-  }),
+  }, 'or-quiltt-session-via-widget'),
 );

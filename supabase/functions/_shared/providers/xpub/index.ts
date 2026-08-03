@@ -11,6 +11,10 @@
  *   - ypub (BIP49, P2SH-P2WPKH wrapped segwit)
  *   - zpub (BIP84, P2WPKH native segwit)
  *
+ * Prefix handling and canonicalization live in ./canonical.ts, which is pure and
+ * separately tested, because the shared connector identity module needs the
+ * canonical key without needing this adapter's network client.
+ *
  * Not yet supported (v1 limitations , easy to add when a user needs them):
  *   - BIP86 P2TR (`xpub` with derivation hint, or descriptors)
  *   - Multisig (Ypub/Zpub uppercase = multisig variants)
@@ -38,9 +42,10 @@
 
 import { HDKey } from 'https://esm.sh/@scure/bip32@1.4.0';
 import * as btc from 'https://esm.sh/@scure/btc-signer@1.3.2';
-import { base58check } from 'https://esm.sh/@scure/base@1.1.7';
 import { hmac } from 'https://esm.sh/@noble/hashes@1.4.0/hmac';
 import { sha256 } from 'https://esm.sh/@noble/hashes@1.4.0/sha256';
+
+import { normalizeExtendedPubkey, type ScriptType } from './canonical.ts';
 
 import type {
   ProviderAdapter,
@@ -54,16 +59,6 @@ import type {
 const MEMPOOL_API = 'https://mempool.space/api';
 const DEFAULT_GAP_LIMIT = 20;          // BIP44 standard
 const MAX_ADDRESSES_PER_CHAIN = 500;   // safety cap
-
-type ScriptType = 'p2pkh' | 'p2sh-p2wpkh' | 'p2wpkh';
-
-const VERSION_TABLE: Record<string, { version: Uint8Array; scriptType: ScriptType }> = {
-  xpub: { version: new Uint8Array([0x04, 0x88, 0xb2, 0x1e]), scriptType: 'p2pkh' },
-  ypub: { version: new Uint8Array([0x04, 0x9d, 0x7c, 0xb2]), scriptType: 'p2sh-p2wpkh' },
-  zpub: { version: new Uint8Array([0x04, 0xb2, 0x47, 0x46]), scriptType: 'p2wpkh' },
-};
-
-const b58check = base58check(sha256);
 
 // --- Credential parsing -------------------------------------------------
 
@@ -83,30 +78,6 @@ function parseXpubCredentials(credentials: Record<string, unknown>): XpubCredent
     ? Math.min(Math.max(1, credentials.gap_limit), 100)
     : DEFAULT_GAP_LIMIT;
   return { xpub, gap_limit };
-}
-
-// --- Key canonicalization -----------------------------------------------
-
-function normalizeExtendedPubkey(input: string): { canonicalXpub: string; scriptType: ScriptType } {
-  const prefix = input.slice(0, 4);
-  const cfg = VERSION_TABLE[prefix];
-  if (!cfg) {
-    throw new Error(
-      `[xpub] unsupported extended-pubkey prefix '${prefix}' , supported: xpub, ypub, zpub`,
-    );
-  }
-  let decoded: Uint8Array;
-  try {
-    decoded = b58check.decode(input);
-  } catch (err) {
-    throw new Error(`[xpub] base58check decode failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (decoded.length !== 78) {
-    throw new Error(`[xpub] decoded extended key has wrong length ${decoded.length} (expected 78)`);
-  }
-  const rewritten = new Uint8Array(decoded);
-  rewritten.set(VERSION_TABLE.xpub.version, 0);
-  return { canonicalXpub: b58check.encode(rewritten), scriptType: cfg.scriptType };
 }
 
 // --- Wallet identity: fingerprint + opaque ID ---------------------------
@@ -407,15 +378,13 @@ export const xpubAdapter: ProviderAdapter = {
       placeholder: 'xpub... / ypub... / zpub...',
       multiline: true,
       helpLabel: 'How to export your xpub',
-      helpHref: 'https://orangerails.com/docs/xpub-export',
+      // Relative path resolves correctly in every environment (dev, staging, prod).
+      // The absolute production URL caused 404s on non-prod deploys.
+      helpHref: '/docs/xpub-export',
     },
-    {
-      name: 'gap_limit',
-      type: 'string',
-      label: 'Gap limit (advanced)',
-      placeholder: '20',
-      optional: true,
-    },
+    // gap_limit removed from the form: the BIP44 default (20) is correct
+    // for virtually all personal wallets and exposing it confused users.
+    // The server defaults to 20 in parseXpubCredentials when the field is absent.
   ],
   discoverWallets: discover,
   syncByWallets,

@@ -51,6 +51,29 @@
 export const STEALTH_PROTOCOL_VERSION = 1 as const;
 export const STEALTH_HKDF_INFO = 'or-stealth-v1' as const;
 
+/**
+ * Default gap limit used when OR_STEALTH_INIT omits the field.
+ *
+ * Raised to 250 based on benchmark run 30698208747 (bench/gcs-match-cost*,
+ * benches/gcs_match_cost.mjs). All three sweep points passed the 5ms/block
+ * veto on fixed-window cost:
+ *   gap_limit=20    median=0.757ms  p95=1.803ms  PASS
+ *   gap_limit=250   median=1.080ms  p95=2.241ms  PASS
+ *   gap_limit=1000  median=1.965ms  p95=3.127ms  PASS
+ *
+ * Cost curve is GCS decode dominated, not script-count dominated.
+ * 50x more scripts (80 to 1000) costs only 2.19x more per block.
+ *
+ * The old default of 20 caused silent address-window exhaustion for
+ * Sparrow wallets using address indices beyond gap 20 (the Marina/Fedi
+ * escalation). See issue #357.
+ *
+ * Rolling-window (K-pass, #398) cost is not yet measured by this harness.
+ * If that measurement changes the picture, raise a follow-up against this
+ * constant.
+ */
+export const DEFAULT_GAP_LIMIT = 250 as const;
+
 /** Path the Stealth Sync widget is mounted at. See src/routes/connect/stealth.tsx. */
 export const STEALTH_WIDGET_PATH = '/connect/stealth' as const;
 
@@ -129,6 +152,19 @@ export interface StealthInitWidgetMessage {
    *  at OR (required for cross-device sync); only the per-tx records
    *  are skipped. */
   skip_transaction_upload?: boolean;
+  /**
+   * Optional address gap limit (integer, 1-1000). When present, seeds the
+   * gap-limit field in the add-route form (the user can still override it).
+   * When absent the widget uses DEFAULT_GAP_LIMIT.
+   *
+   * Out-of-range values (non-integer, < 1, or > 1000) are rejected at INIT
+   * with code INVALID_GAP_LIMIT and a descriptive message rather than silently clamped.
+   *
+   * This affects only connections created after the INIT. Existing sealed
+   * connections retain the gap_limit baked into their envelope at add-time;
+   * a changed default cannot reach into a sealed envelope.
+   */
+  gap_limit?: number;
 }
 
 /**
@@ -172,6 +208,11 @@ export interface StealthInitAppMessage {
   proxy_base_url?: string;
   /** Auth mode B: direct Supabase JWT. See StealthInitWidgetMessage. */
   access_token?: string;
+  /**
+   * Optional address gap limit. Same contract as StealthInitWidgetMessage.
+   * App mode supports this field for parity with widget mode.
+   */
+  gap_limit?: number;
 }
 
 /**
@@ -290,6 +331,15 @@ export interface StealthSyncCompleteWidgetMessage {
   bytes_downloaded: number;
   /** Wall-clock seconds from INIT to this message. */
   duration_seconds: number;
+  /**
+   * True when any matched transaction landed at or within gap_limit slots
+   * of the top of the derived address window on either chain. Signals that
+   * the wallet may have outgrown the current window and history could be
+   * incomplete. The consuming app must prompt the user to re-sync with a
+   * wider gap_limit. Absent or false means the history is complete within
+   * the current window. See docs/Stealth-Sync.md for full details.
+   */
+  address_window_exhausted?: boolean;
 }
 
 /**
@@ -313,6 +363,12 @@ export interface StealthSyncCompleteAppMessage {
   bytes_downloaded: number;
   /** Wall-clock seconds from INIT to this message. */
   duration_seconds: number;
+  /**
+   * True when any matched transaction landed at or within gap_limit slots
+   * of the top of the derived address window on either chain. See the
+   * widget-mode variant above for full semantics.
+   */
+  address_window_exhausted?: boolean;
 }
 
 /**
@@ -347,6 +403,7 @@ export interface StealthDeleteCompleteMessage {
 export type StealthErrorCode =
   | 'INVALID_XPUB'
   | 'INVALID_DESCRIPTOR'
+  | 'INVALID_GAP_LIMIT'
   | 'NETWORK'
   | 'TIMEOUT'
   | 'KEY_MISMATCH'
@@ -421,7 +478,7 @@ export interface SealedEnvelope {
    *     xpub: string,
    *     label: string,
    *     wallet_birthday: string,    // ISO date
-   *     gap_limit: number,          // default 20
+   *     gap_limit: number,          // default 250
    *     script_type: 'p2pkh' | 'p2sh-p2wpkh' | 'p2wpkh' | 'p2tr'
    *   }
    *   {

@@ -19,7 +19,7 @@
  * is populated, the env vars can be retired in a follow-up cleanup.
  */
 
-import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 
 export interface PlatformQuilttConfig {
   /** Master API key (Bearer token to Quiltt). */

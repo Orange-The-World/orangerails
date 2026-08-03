@@ -1,11 +1,11 @@
 /**
  * /connect/sparrow , Sparrow Wallet landing screen.
  *
- * The customer arrives here after picking "Sparrow Wallet" on /providers
- * or from a direct link in our docs. The page explains in plain English
- * what a wallet descriptor is, where in Sparrow to find it, what v0.1
- * actually delivers (and does not deliver), and launches the Stealth
- * Sync widget when the customer is ready to paste.
+ * The customer arrives here from a direct link in our docs or from a
+ * marketing page. The page explains in plain English what a wallet
+ * descriptor is, where in Sparrow to find it, what v0.1 actually
+ * delivers (and does not deliver), and launches the Stealth Sync
+ * widget when the customer is ready to paste.
  *
  * Source of truth: docs/Sparrow.md
  *
@@ -16,9 +16,9 @@
  * cannot carry that context.
  */
 
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
 import {
-  ArrowLeft,
   ArrowRight,
   CheckCircle2,
   Copy,
@@ -50,14 +50,64 @@ export const Route = createFileRoute("/connect/sparrow")({
   component: SparrowConnectPage,
 });
 
-function launchStealthSync() {
-  // Open the Stealth Sync widget popup. The widget will post
-  // OR_STEALTH_READY back to this window; we respond with INIT and the
-  // customer's flow takes over from there.
+// Consuming-app origins OR has registered for Stealth Sync. This is the
+// same allowlist the Stealth widget enforces on OR_STEALTH_INIT
+// (src/stealth/widget/App.tsx), reused here so the bounce below can only
+// ever send the browser to an origin we already trust. An unvalidated
+// app_url would be an open redirect.
+const ALLOWED_APP_ORIGINS: ReadonlySet<string> = new Set(
+  ((import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0),
+);
+
+function launchStealthSync(onRefused: (message: string) => void) {
+  // Option B, the bounce (DL-0426). When a consuming app deep-links here
+  // with its own app_url, hand the flow straight back to that app. The
+  // consuming app opens the Stealth Sync widget from its own UI, with its
+  // own user key, so OR never holds another app's key in this path.
   //
-  // For v0.1 the consuming app is orangerails.com itself, so we INIT
-  // with a demo app key. Real consuming apps (V2, V3, OW) invoke the
-  // widget from their own UI with their own keys.
+  // Before this fix, this handler opened a local /connect/stealth popup and
+  // never sent OR_STEALTH_INIT, so the widget sat forever on "Waiting for
+  // the parent app". A popup always has a non-null window.opener, so the
+  // widget's direct-load fallback never fired either.
+  const params = new URLSearchParams(window.location.search);
+  const appUrl = params.get("app_url");
+
+  if (appUrl) {
+    let origin: string | null = null;
+    try {
+      origin = new URL(appUrl).origin;
+    } catch {
+      origin = null;
+    }
+    // Never redirect to an origin we have not registered. If app_url is
+    // malformed or its origin is not on the allowlist, refuse and leave the
+    // customer on this page rather than following an untrusted link.
+    if (origin && ALLOWED_APP_ORIGINS.has(origin)) {
+      window.location.assign(appUrl);
+      return;
+    }
+    // fail-loud-on-refused-origin (DL-0426): an app_url we cannot trust must
+    // never fail silently. This handler used to return quietly, so a
+    // misconfigured or untrusted app_url looked like a dead button. Warn to
+    // the console for the developer and surface a visible message so the
+    // refusal is obvious to the customer.
+    console.warn(
+      "[sparrow] Refused app_url with untrusted origin: " +
+        (origin ?? "invalid URL") +
+        ". Add it to VITE_OR_STEALTH_ALLOWED_ORIGINS if it is a registered app.",
+    );
+    onRefused(
+      "We could not open the app that sent you here: its address is not on our allowlist. If you are testing an integration, register its origin first. Otherwise, start Stealth Sync from that app.",
+    );
+    return;
+  }
+
+  // Bare /connect/sparrow with no consuming app: v0.1 behavior is unchanged.
+  // OR acting as its own consuming app (a signed-in OR user syncing their
+  // own descriptor) is the separate app-mode flow and is out of scope here.
   const url = "/connect/stealth";
   const w = window.open(
     url,
@@ -65,12 +115,13 @@ function launchStealthSync() {
     "width=560,height=720,menubar=no,toolbar=no,location=no,status=no",
   );
   if (!w) {
-    // Popup blocked , fall back to same-tab navigation.
+    // Popup blocked, fall back to same-tab navigation.
     window.location.href = url;
   }
 }
 
 function SparrowConnectPage() {
+  const [refusedError, setRefusedError] = useState<string | null>(null);
   return (
     <div className="min-h-screen bg-background text-foreground antialiased">
       <Navbar />
@@ -79,15 +130,7 @@ function SparrowConnectPage() {
         <section className="relative overflow-hidden border-b border-border/60">
           <div className="pointer-events-none absolute inset-0 grid-bg opacity-50 [mask-image:radial-gradient(ellipse_at_top,black,transparent_70%)]" />
           <div className="relative mx-auto max-w-4xl px-6 py-16">
-            <Link
-              to="/providers"
-              className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              All connections
-            </Link>
-
-            <div className="mt-6 flex items-start gap-4">
+            <div className="flex items-start gap-4">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-primary-soft font-mono text-lg font-semibold text-primary ring-1 ring-primary/15">
                 SW
               </div>
@@ -114,21 +157,25 @@ function SparrowConnectPage() {
 
             <div className="mt-8 flex flex-wrap gap-3">
               <button
-                onClick={launchStealthSync}
+                onClick={() => {
+                  setRefusedError(null);
+                  launchStealthSync(setRefusedError);
+                }}
                 className="group inline-flex h-11 items-center gap-1.5 rounded-md bg-primary px-5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
               >
                 Launch Stealth Sync
                 <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
               </button>
-              <a
-                href="/docs/sparrow"
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex h-11 items-center gap-1.5 rounded-md border border-border bg-background px-5 text-sm font-medium transition-colors hover:bg-muted"
-              >
-                Read the full spec
-              </a>
             </div>
+            {refusedError && (
+              <div
+                role="alert"
+                className="mt-4 flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              >
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <p>{refusedError}</p>
+              </div>
+            )}
           </div>
         </section>
 
@@ -295,19 +342,6 @@ function SparrowConnectPage() {
                   same privacy boundary.
                 </p>
               </div>
-            </div>
-
-            <div className="mt-10 text-center">
-              <a
-                href="/docs/sparrow"
-                target="_blank"
-                rel="noreferrer"
-                className="group inline-flex items-center gap-1.5 text-sm font-medium text-primary"
-              >
-                Read the full spec, including how we compare to Koinly,
-                CoinTracker, and BTCPay
-                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-              </a>
             </div>
           </div>
         </section>

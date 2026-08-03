@@ -1,10 +1,10 @@
-import { createFileRoute, Link, Outlet, useChildMatches } from "@tanstack/react-router";
+import { createFileRoute, Outlet, useChildMatches } from "@tanstack/react-router";
 import { Toaster } from "@/components/ui/sonner";
 import { Navbar } from "@/components/landing/Navbar";
 import { Footer } from "@/components/landing/Footer";
 import {
   ArrowRight, Rocket, Code2, Server,
-  Wrench, Lock, FileText, Shield, GitCompare, Users,
+  Wrench, Lock, FileText, Shield, Users,
 } from "lucide-react";
 
 export const Route = createFileRoute("/docs")({
@@ -88,7 +88,6 @@ const secondary = [
   { icon: Lock, title: "How authentication works", body: "Three-layer model (app, source, zero-knowledge wrapper).", href: "/docs/authentication" },
   { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933754-openapi-spec-v0-draft" },
   { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933752-security-and-threat-model" },
-  { icon: GitCompare, title: "Stealth Sync architecture", body: "How xpub stays in the browser, BIP 158 filters.", href: "/docs/stealth-sync" },
   { icon: FileText, title: "How to export your xpub", body: "Find your extended public key in Sparrow, Specter, BlueWallet, Electrum, Wasabi.", href: "/docs/xpub-export" },
   { icon: Users, title: "Contributing", body: "Repo conventions, branch model, RFCs.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933753-contributing" },
 ];
@@ -181,7 +180,7 @@ function DocsIndexPage() {
               ))}
             </div>
 
-            <div className="mt-12 grid gap-4 md:grid-cols-3">
+            <div className="mt-12 grid gap-4 md:grid-cols-2">
               <a href="https://docs.orangerails.com/support" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
                 <h3 className="font-semibold">Need support?</h3>
                 <p className="mt-1 text-sm text-muted-foreground">Open a ticket at docs.orangerails.com/support.</p>
@@ -190,10 +189,6 @@ function DocsIndexPage() {
                 <h3 className="font-semibold">Request a feature</h3>
                 <p className="mt-1 text-sm text-muted-foreground">Vote and propose at docs.orangerails.com/feedback.</p>
               </a>
-              <Link to="/providers" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
-                <h3 className="font-semibold">Browse 100+ connections</h3>
-                <p className="mt-1 text-sm text-muted-foreground">Every source supported today.</p>
-              </Link>
             </div>
           </div>
         </section>

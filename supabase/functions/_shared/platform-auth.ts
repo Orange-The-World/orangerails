@@ -17,7 +17,7 @@
  * a unified `AuthContext` that downstream edge functions consume.
  */
 
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 
 export interface PlatformAuthContext {
   mode: 'platform';

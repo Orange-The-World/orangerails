@@ -14,14 +14,26 @@
  * learn nothing else from the value. It is stored and compared as an opaque
  * string; nothing here decodes it.
  *
+ * Cursor semantics (DL-0419 trackMax-inside-guard):
+ *   last_block_scanned on the stealth_connections row advances only when new
+ *   rows are actually inserted, and only to max(block_height) of those rows.
+ *   Advancing unconditionally to the client-supplied scan tip (body.last_block_scanned)
+ *   is the DL-0015 bug applied to the sealed-tx path: the cursor jumps past
+ *   items that were never committed, silently losing them on the next sync.
+ *   or-stealth-envelope-update owns the scan-tip cursor (always called in step
+ *   4 of the widget sync flow, after this function returns OK).
+ *
  * POST body:
  *   connection_id:        string (uuid)
  *   app_user_id:          string (uuid)
  *   sealed_transactions:  SealedTransactionInput[]
- *   last_block_scanned:   number
+ *   last_block_scanned:   number (kept for backward compat, not used for cursor)
  *
  * Response:
  *   { connection_id, inserted, total, skipped_duplicates, last_block_scanned }
+ *   last_block_scanned in the response is the effective stored cursor after the
+ *   call (null when the connection has never scanned), never the client-supplied
+ *   scan tip.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
@@ -51,7 +63,7 @@ interface TransactionsStoreResponseBody {
   inserted: number;
   total: number;
   skipped_duplicates: number;
-  last_block_scanned: number;
+  last_block_scanned: number | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -83,6 +95,24 @@ function isSealedTx(x: unknown): x is SealedTransactionInput {
     typeof o.txid_blind_index_hex === 'string' &&
     BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string)
   );
+}
+
+/**
+ * Response cursor derivation (DL-0419). Returns the effective stored cursor
+ * AFTER this call, derived only from stored state, never from the client scan
+ * tip (body.last_block_scanned). Advances to maxBlockInserted only when new
+ * rows landed and that height exceeds the stored cursor; otherwise returns the
+ * stored cursor unchanged, which is null on a connection that has never
+ * scanned. Mirrors the forward-only patch guard so the value returned to the
+ * caller always equals the value persisted.
+ */
+export function deriveResponseCursor(
+  storedCursor: number | null,
+  inserted: number,
+  maxBlockInserted: number,
+): number | null {
+  const advanced = inserted > 0 && maxBlockInserted > (storedCursor ?? -1);
+  return advanced ? maxBlockInserted : storedCursor;
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -159,9 +189,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // Verify the connection belongs to the caller. Defense in depth on top
     // of the UNIQUE constraint check; saves us from quietly inserting tx
     // rows under a connection_id the caller does not own.
+    // Also read last_block_scanned here so the trackMax forward-only guard
+    // below knows the stored cursor without a second round trip.
     const { data: ownerRow, error: ownerErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .select('id, app_user_id')
+      .select('id, app_user_id, last_block_scanned')
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
       .maybeSingle();
@@ -184,6 +216,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // the txid_blind_index_hex set after.
     let inserted = 0;
     let skipped_duplicates = 0;
+    // trackMax: highest block_height among rows that were actually inserted.
+    // Stays -1 when no rows land (all dupes or empty batch), which keeps the
+    // forward-only guard below from advancing the cursor.
+    let maxBlockInserted = -1;
 
     if (total > 0) {
       const rows = body.sealed_transactions.map((tx) => ({
@@ -228,15 +264,27 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           return jsonResponse({ error: 'Failed to insert transactions' }, 500, cors);
         }
         inserted = fresh.length;
+        // trackMax-inside-guard: compute max block_height only for the rows that
+        // actually landed. Advancing to body.last_block_scanned (the scan tip)
+        // would move the watermark past blocks this call never committed, silently
+        // losing events that settle later. The scan-tip cursor lives in
+        // or-stealth-envelope-update (step 4 of the widget sync flow).
+        maxBlockInserted = Math.max(...fresh.map((r) => r.block_height as number));
       }
+    }
+
+    // Forward-only cursor guard (trackMax-inside-guard). Advance last_block_scanned
+    // only when new rows were inserted AND their max block_height exceeds the
+    // stored cursor. Always update last_sync_at so the connection shows activity.
+    const storedCursor = (ownerRow.last_block_scanned as number | null) ?? -1;
+    const cursorPatch: Record<string, unknown> = { last_sync_at: new Date().toISOString() };
+    if (inserted > 0 && maxBlockInserted > storedCursor) {
+      cursorPatch.last_block_scanned = maxBlockInserted;
     }
 
     const { error: updErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .update({
-        last_block_scanned: body.last_block_scanned,
-        last_sync_at: new Date().toISOString(),
-      })
+      .update(cursorPatch)
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id);
     if (updErr) {
@@ -244,17 +292,26 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Failed to update connection sync metadata' }, 500, cors);
     }
 
+    // Return the effective stored cursor so callers can distinguish "cursor
+    // advanced" from "no new rows, cursor unchanged." Derived only from stored
+    // state: on a fresh connection with no stored cursor and zero inserts this
+    // is null, never the client-supplied scan tip (body.last_block_scanned).
+    const effectiveCursor = deriveResponseCursor(
+      ownerRow.last_block_scanned as number | null,
+      inserted,
+      maxBlockInserted,
+    );
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,
       inserted,
       total,
       skipped_duplicates,
-      last_block_scanned: body.last_block_scanned,
+      last_block_scanned: effectiveCursor,
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-transactions-store] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-stealth-transactions-store'));
 

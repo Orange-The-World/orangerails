@@ -16,7 +16,7 @@
  * Response 404: { error: 'Unknown platform' }
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { buildPublicCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
@@ -69,6 +69,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     );
   } catch (err) {
     console.error('[or-platform-display] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-platform-display'));

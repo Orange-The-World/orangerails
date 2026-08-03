@@ -8,6 +8,8 @@ import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
+import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
+import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
@@ -52,7 +54,7 @@ interface Connection {
   encrypted_label: string | null;
   encrypted_credentials: string;
   credentials_key_version: number;
-  status: "active" | "error" | "disconnected";
+  status: "pending" | "active" | "error" | "disconnected" | "partial";
   last_sync_at: string | null;
   last_sync_cursor: string | null;
   encrypted_last_error: string | null;
@@ -444,13 +446,35 @@ function AppHome() {
             }
           }
           if (c.encrypted_last_error) {
-            try {
-              const raw = isAdminView
-                ? await decryptString(c.encrypted_last_error, txnsKey!)
-                : await decryptText(c.encrypted_last_error);
-              decrypted_last_error = raw || "(empty error , check browser console for details)";
-            } catch {
-              decrypted_last_error = "(could not decrypt error , check browser console)";
+            // Some failures are persisted as PLAINTEXT markers, not ORK
+            // ciphertext, so map them to actionable customer copy before the
+            // decrypt path below, which would otherwise throw and surface a
+            // bare decrypt error:
+            //  - Strike subscription failures (strike/queue.ts
+            //    strikeSubscriptionErrorMarker)
+            //  - the upstream taxonomy CODE:correlationId pair, which or-sync
+            //    writes UNENCRYPTED in sink mode and as the encrypt-failure
+            //    fallback (or-sync/index.ts)
+            // Staff (isAdminView) keep the raw marker / decrypted value so the
+            // taxonomy code stays available for debugging; customers get the
+            // mapped copy.
+            const strikeCopy = strikeMarkerToCopy(c.encrypted_last_error);
+            const upstreamPlaintextCopy = upstreamMarkerToCopy(c.encrypted_last_error);
+            if (strikeCopy) {
+              decrypted_last_error = strikeCopy;
+            } else if (upstreamPlaintextCopy) {
+              decrypted_last_error = isAdminView
+                ? c.encrypted_last_error
+                : upstreamPlaintextCopy;
+            } else {
+              try {
+                const raw = isAdminView
+                  ? await decryptString(c.encrypted_last_error, txnsKey!)
+                  : await decryptText(c.encrypted_last_error);
+                decrypted_last_error = isAdminView ? raw : upstreamCodeToCopy(raw);
+              } catch {
+                decrypted_last_error = "(could not decrypt error , check browser console)";
+              }
             }
           }
           // Decrypt source-wallet metadata (currency + optional label).
@@ -584,11 +608,17 @@ function AppHome() {
       );
 
       if (!discRes.ok) {
-        const detail = await discRes.text().catch(() => "");
-        console.warn("[OrangeRails] Wallet discovery failed:", discRes.status, detail);
-        setNotice(
-          "Connection added. Wallet discovery failed , sync will pull all account transactions until you re-run discovery.",
-        );
+        const rawText = await discRes.text().catch(() => "");
+        console.warn("[OrangeRails] Wallet discovery failed:", discRes.status, rawText);
+        if (isDiscoveryAuthFailure(rawText)) {
+          // Credentials are confirmed invalid: remove the row so the user
+          // is not left with a broken active connection. All other failure
+          // modes (rate limiting, outage, unknown) leave the row and let
+          // the user retry without re-entering credentials.
+          await supabase.from("connections").delete().eq("id", newConnectionId);
+          await refresh();
+        }
+        setNotice(extractDiscoveryErrorMessage(discRes.status, rawText));
         return;
       }
 
@@ -605,8 +635,11 @@ function AppHome() {
       });
     } catch (e) {
       console.warn("[OrangeRails] Discovery threw:", e);
+      const throwMsg = e instanceof Error ? e.message : undefined;
       setNotice(
-        "Connection added. Couldn't discover wallets right now , sync will pull all account transactions until you retry.",
+        throwMsg
+          ? `Discovery could not complete: ${throwMsg}. Sync will use all-transactions mode until you retry.`
+          : "Discovery could not complete. Check your connection and try again.",
       );
     }
   }
@@ -721,14 +754,16 @@ function AppHome() {
         body: JSON.stringify(body),
       });
 
-      if (!fnRes.ok) {
+      // 422 carries a structured JSON body with per-connection error results; parse it
+      // instead of throwing raw text. Other non-2xx codes (401, 500, etc.) fall back to text.
+      if (!fnRes.ok && fnRes.status !== 422) {
         const detail = await fnRes.text().catch(() => "");
         throw new Error(`Sync failed (HTTP ${fnRes.status}): ${detail || "see console"}`);
       }
 
       const result = (await fnRes.json()) as {
-        synced: number;
-        connections: Array<{ connection_id: string; synced: number; error?: string }>;
+        synced?: number;
+        connections: Array<{ connection_id: string; synced?: number; error?: string }>;
       };
 
       // Surface any per-connection error from the edge function.
@@ -736,7 +771,7 @@ function AppHome() {
       if (connResult?.error) throw new Error(connResult.error);
 
       setNotice(
-        `Synced ${result.synced} transaction${result.synced === 1 ? "" : "s"} from ${conn.decrypted_label || conn.provider_type}.`,
+        `Synced ${result.synced ?? 0} transaction${(result.synced ?? 0) === 1 ? "" : "s"} from ${conn.decrypted_label || conn.provider_type}.`,
       );
       await refresh();
     } catch (e) {
@@ -1077,14 +1112,20 @@ function AppHome() {
                           keyVersion: vaultKeyVersion,
                         });
                       // Persist new wrapping to user_vault_meta.
-                      const { error: saveErr } = await (supabase as any)
+                      // CAS: match the prior ciphertext so a concurrent change or lost
+                      // session fails loudly instead of returning a dead recovery code.
+                      const { error: saveErr, data: saveData } = await (supabase as any)
                         .from("user_vault_meta")
                         .update({
                           enc_mek_ciphertext: newEncMekCiphertext,
                           recovery_ciphertext: newRecoveryCiphertext,
                         })
-                        .eq("user_id", userId);
+                        .eq("user_id", userId)
+                        .eq("enc_mek_ciphertext", vaultEncMekCiphertext)
+                        .select("user_id");
                       if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
+                      if (!saveData || (saveData as unknown[]).length === 0)
+                        throw new Error("Vault was changed from another session. Reload the page and try again.");
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
                       setChangePwNewRecovery(newRecoveryCode);
@@ -1265,9 +1306,11 @@ function ConnectionRow({
   const statusColor =
     conn.status === "active"
       ? "text-green-600 dark:text-green-400"
-      : conn.status === "error"
-        ? "text-destructive"
-        : "text-muted-foreground";
+      : conn.status === "partial"
+        ? "text-yellow-600 dark:text-yellow-400"
+        : conn.status === "error"
+          ? "text-destructive"
+          : "text-muted-foreground";
 
   return (
     <div className="rounded-md border p-4 flex items-center justify-between gap-4">

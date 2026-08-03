@@ -12,7 +12,7 @@ A reference implementation is maintained by the BitBooks team; see their integra
 2. [Architecture in one page](#architecture-in-one-page)
 3. [Authentication: platform vs direct mode](#authentication-platform-vs-direct-mode)
 4. [Subaccount provisioning](#subaccount-provisioning)
-5. [Vault setup (Path B, zero-knowledge)](#vault-setup-path-b-zero-knowledge)
+5. [Vault setup (Path B, client-sealed)](#vault-setup-path-b-client-sealed)
 6. [Connecting a wallet through the Link widget](#connecting-a-wallet-through-the-link-widget)
 7. [Syncing transactions: protocol-driven sink mode](#syncing-transactions-protocol-driven-sink-mode)
 8. [App Profile (sink configuration)](#app-profile-sink-configuration)
@@ -86,7 +86,7 @@ Header: Authorization: Bearer <jwt>
 
 The user's Supabase JWT. The platform-auth helper resolves it to that user's direct subaccount automatically; passing `subaccount_id` in the body is rejected to prevent self-impersonation.
 
-The Link widget at `orangerails.com/connect` is currently *unauthenticated* (the widget runs in an arbitrary user's browser with no platform secret). It calls `or-link-complete`, a special endpoint that authenticates by `platform_slug` and trusts the widget to honestly relay the user's intent. A future hardening pass will issue a short-lived widget session token from the integrating app's server.
+The Link widget at `connect.orangerails.com/connect` is currently *unauthenticated* (the widget runs in an arbitrary user's browser with no platform secret). It calls `or-link-complete`, a special endpoint that authenticates by `platform_slug` and trusts the widget to honestly relay the user's intent. A future hardening pass will issue a short-lived widget session token from the integrating app's server.
 
 ### Public endpoints
 
@@ -112,10 +112,10 @@ Store both the `external_user_id` you sent and the `subaccount_id` you got back.
 
 > **Gotcha**: the field on V2's connection table is named `orPlatformUserId` for legacy reasons but actually stores the OR-side `subaccount_id`. Don't confuse the two when wiring URL parameters.
 
-Reference: V2 [`app/api/organizations/[organizationId]/orange-rails/setup/route.ts`](https://github.com/DeeJanuz/bitbooks/blob/feat/orange-rails-integration/app/api/organizations/%5BorganizationId%5D/orange-rails/setup/route.ts).
+Reference: V2 `app/api/organizations/[organizationId]/orange-rails/setup/route.ts` (in the consuming app's repo).
 
 
-## Vault setup (Path B, zero-knowledge)
+## Vault setup (Path B, client-sealed)
 
 The user's vault password never reaches your server.
 
@@ -176,12 +176,20 @@ Wordlist source must match between server and browser; OR uses the same 256 word
 
 ## Connecting a wallet through the Link widget
 
+> **Which flow do you want?** This section documents the plain `/connect`
+> Link widget (Quiltt-backed banks, Strike, BTCPay, anything where OR or
+> a provider holds a credential). If you are connecting a self-custodied
+> Bitcoin wallet (xpub or descriptor) with the BIP 158 client-side privacy
+> model instead, see [Stealth-Sync.md, Consumer integration: the exact
+> steps](Stealth-Sync.md#consumer-integration-the-exact-steps). Most apps
+> (`bitbooks-v2` included) integrate both.
+
 The Link widget is OR's hosted credential collection page. Plaid-hybrid co-branding: your app's name appears prominently, "Powered by OrangeRails" smaller. Provider-specific form fields (Blink: API key; xpub: extended public key + gap limit; BTCPay: server URL + API key; etc.) come from the [provider catalog](#provider-catalog-dynamic-discovery).
 
 ### Open the popup
 
 ```js
-const url = new URL('https://orangerails.com/connect');
+const url = new URL('https://connect.orangerails.com/connect');
 url.searchParams.set('platform',     'your-app-slug');     // = your App Profile slug, e.g. 'bitbooks-v2'
 url.searchParams.set('app_user_id',  organizationId);       // = the external_user_id you used at provision time
 url.searchParams.set('provider',     selectedProvider);     // = a slug from /or-providers
@@ -205,7 +213,7 @@ window.open(url.toString(), 'or-link', 'width=520,height=720');
 
 ```js
 window.addEventListener('message', (event) => {
-  if (event.origin !== 'https://orangerails.com') return;
+  if (event.origin !== 'https://connect.orangerails.com') return;
   if (event.data?.type !== 'or-link-success') return;
 
   const { source_wallets, subaccount_id, connection_id } = event.data;
@@ -220,11 +228,11 @@ The widget closes itself ~1.2s after posting. If the user cancels, you get `{ ty
 
 Per `source_wallet`, create one of your local wallet rows with:
 - A foreign key to your "OR connection" row (which holds the salt + verifier)
-- `sourceWalletId = source_wallet.id` (OR's source_wallets.id, used as the cross-system anchor)
-- `externalId = source_wallet.external_wallet_id` (the upstream provider's stable ID for this wallet)
+- `sourceWalletId = source_wallet.id` (OR's source_wallets.id: the stable cross-system anchor, key all dedup and lookups on this)
+- `externalId = source_wallet.external_wallet_id` (the provider's own id for this wallet; stable only for providers that emit a stable one, and some emit a fresh opaque id on every discovery, so store it if useful but never dedup or match on it, use `source_wallet.id` above)
 - Whatever name / metadata the user chooses (the widget sends a default label)
 
-Reference: V2 [`app/api/organizations/[organizationId]/orange-rails/connect-wallet/route.ts`](https://github.com/DeeJanuz/bitbooks/blob/feat/orange-rails-integration/app/api/organizations/%5BorganizationId%5D/orange-rails/connect-wallet/route.ts).
+Reference: V2 `app/api/organizations/[organizationId]/orange-rails/connect-wallet/route.ts` (in the consuming app's repo).
 
 ### Wallet name uniqueness
 
@@ -248,9 +256,9 @@ Body: {
   format:          string,    // your App Profile slug, e.g. 'bitbooks-v2'
   connection_ids?: string[]   // optional filter; default = all active connections
 }
-200: {
-  synced:      number,
-  connections: [{ connection_id, synced, next_cursor, error? }],
+200 / 207 / 422: {
+  synced?:     number,        // omitted when error is set on all connections
+  connections: [{ connection_id, synced?, next_cursor?, error? }],
   rows: {
     Wallet:       [...],
     Transaction:  [...],
@@ -300,7 +308,7 @@ JournalEntryLine:
 
 Your handler iterates the rows, replaces each hint with the resolved foreign key from your DB (find-or-create), then inserts. Pure mechanical translation.
 
-Reference: V2 [`lib/orange-rails/sync-handler.ts`](https://github.com/DeeJanuz/bitbooks/blob/feat/orange-rails-integration/lib/orange-rails/sync-handler.ts) handles resolveCoa, resolveWalletId, resolveContactId, resolveSystemUser.
+Reference: V2 `lib/orange-rails/sync-handler.ts` (in the consuming app's repo) handles resolveCoa, resolveWalletId, resolveContactId, resolveSystemUser.
 
 ### Idempotency
 
@@ -377,9 +385,9 @@ Public unauthenticated endpoint. Cache for 5 minutes at the edge. Fetch on modal
 
 ### Status semantics
 
-- `live` , adapter shipped, picker tile clickable
-- `beta` , adapter shipped, surface a beta badge but allow connections
-- `coming_soon` , placeholder manifest with no adapter yet, picker tile greyed out
+- `live`: adapter shipped, picker tile clickable
+- `beta`: adapter shipped, surface a beta badge but allow connections
+- `coming_soon`: placeholder manifest with no adapter yet, picker tile greyed out
 
 Trying to use a `coming_soon` provider with `or-connection-create` returns 400 with the list of registered slugs. UI renders the tile as informational only.
 
@@ -395,7 +403,7 @@ const tile = provider.status === 'coming_soon'
     />;
 ```
 
-Reference: V2 [`components/admin/add-connection-modal.tsx`](https://github.com/DeeJanuz/bitbooks/blob/feat/orange-rails-integration/components/admin/add-connection-modal.tsx) `ProviderTiles` component.
+Reference: V2 `components/admin/add-connection-modal.tsx` (in the consuming app's repo) `ProviderTiles` component.
 
 
 ## Wire-format gotchas (read before integrating)
@@ -410,7 +418,7 @@ Symptom: `Sync failed at Bitcoin Connections: synced 0 / 0 wallets`, no errors l
 
 ### `cred_key` REQUIRED, `txn_key` OPTIONAL
 
-The widget at orangerails.com/connect (commit 615614b or later) accepts cred_key alone. Older widgets required both and silently fell back to a built-in test password when one was missing, locking the credential with the wrong key. Sync later failed with "decryption failed" with no trail back to the cause.
+The widget at connect.orangerails.com/connect (commit 615614b or later) accepts cred_key alone. Older widgets required both and silently fell back to a built-in test password when one was missing, locking the credential with the wrong key. Sync later failed with "decryption failed" with no trail back to the cause.
 
 Make sure your widget deploy is fresh. → [Connecting a wallet](#connecting-a-wallet-through-the-link-widget).
 
@@ -451,7 +459,7 @@ If your DB has `@@unique([orgId, name])` on wallets, archive does not free the s
 
 ### Setup flow: salt + verifier + ciphertext, not password
 
-Path B requires the browser to generate the salt, derive the MEK, compute the verifier, generate AND encrypt the recovery code, then POST the resulting blobs. Sending the password to the server (Path A) breaks the security guarantee even for one HTTP request. → [Vault setup](#vault-setup-path-b-zero-knowledge).
+Path B requires the browser to generate the salt, derive the MEK, compute the verifier, generate AND encrypt the recovery code, then POST the resulting blobs. Sending the password to the server (Path A) breaks the security guarantee even for one HTTP request. → [Vault setup](#vault-setup-path-b-client-sealed).
 
 
 ## Adding a provider (for OR maintainers)

@@ -98,6 +98,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     );
   } catch (err) {
     console.error('[or-transactions-list] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-transactions-list'));

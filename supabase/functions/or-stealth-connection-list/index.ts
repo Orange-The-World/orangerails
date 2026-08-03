@@ -109,7 +109,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-connection-list] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500, cors);
+    return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-stealth-connection-list'));
 

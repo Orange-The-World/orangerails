@@ -67,7 +67,7 @@
  * the response (just a count).
  */
 
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { jsonResponse } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
@@ -311,6 +311,6 @@ Deno.serve(wrapSentryHandler(async (_req: Request) => {
     return jsonResponse(result, 200);
   } catch (err) {
     console.error('[or-webhook-dispatch] fatal:', err);
-    return jsonResponse({ error: 'Internal error', detail: String(err) }, 500);
+    return jsonResponse({ error: 'Internal error' }, 500);
   }
 }, 'or-webhook-dispatch'));

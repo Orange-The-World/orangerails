@@ -1,0 +1,117 @@
+name: prod two party gate
+
+on:
+  pull_request:
+    branches: [prod]
+    types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  two-party:
+    name: prod promotion requires the author plus one approving account
+    if: github.event.pull_request.base.ref == 'prod'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Self-test bot exclusion filter
+        run: |
+          set -euo pipefail
+
+          # Synthetic reviews: one Bot APPROVED and one User APPROVED (neither the
+          # author). The App must not count; the ordinary account must. Expected result: 1.
+          test_reviews='[
+            {"user": "bot-reviewer", "state": "APPROVED", "type": "Bot"},
+            {"user": "human-reviewer", "state": "APPROVED", "type": "User"}
+          ]'
+
+          bot_test="$(printf '%s' "${test_reviews}" | jq -r --arg author "pr-author" '
+            map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
+            | group_by(.user)
+            | map(last)
+            | map(select(.state == "APPROVED" and .user != $author and .type == "User"))
+            | length
+          ')"
+
+          if [ "${bot_test}" -ne 1 ]; then
+            echo "::error::App-exclusion self-test failed: expected 1 (non-App only), got ${bot_test}"
+            exit 1
+          fi
+          echo "Bot-exclusion self-test passed: GitHub App APPROVED filtered out, 1 non-App approver counted."
+
+      - name: Count approving reviews from distinct non-author non-App accounts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+
+          reviews="$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+            --jq '[.[] | {user: .user.login, state: .state, type: .user.type}]')"
+
+          # Keep only reviews that carry a verdict, take the latest verdict per
+          # account, then count the accounts that currently approve, are not
+          # the author, and have user.type == "User".
+          #
+          # BE PRECISE ABOUT WHAT user.type FILTERS, because it is less than it
+          # sounds like. GitHub reports type == "Bot" only for GitHub App
+          # identities, the ones whose login ends in "[bot]". Every ordinary
+          # account reports "User" whether a person or a program holds the
+          # password. So this predicate does NOT establish that the second
+          # party is a person, and the check passing is not evidence that one
+          # reviewed. What it does do, which is worth keeping: a GitHub App
+          # installed on this repo cannot become the second party by filing an
+          # approving review.
+          #
+          # Enforcing an actually-human second party is an identity question,
+          # not a jq question, and is reviewed separately.
+          #
+          # A plain comment does not clear an earlier approval, and GitHub never
+          # counts an author approving their own pull request.
+          approvers="$(printf '%s' "${reviews}" | jq -r --arg author "${PR_AUTHOR}" '
+            map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
+            | group_by(.user)
+            | map(last)
+            | map(select(.state == "APPROVED" and .user != $author and .type == "User"))
+            | map(.user)
+            | join(", ")
+          ')"
+
+          count="$(printf '%s' "${reviews}" | jq -r --arg author "${PR_AUTHOR}" '
+            map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED"))
+            | group_by(.user)
+            | map(last)
+            | map(select(.state == "APPROVED" and .user != $author and .type == "User"))
+            | length
+          ')"
+
+          echo "approving accounts, author and GitHub Apps excluded: ${count}"
+          echo "who: ${approvers:-none}"
+
+          # Why the threshold is 1 and not 2, which is what "two party" sounds
+          # like it should mean.
+          #
+          # The two parties are the AUTHOR and the APPROVER, not two approvers.
+          # The author account opens the pull request, so party one is present
+          # on every pull request by construction, and GitHub will never let
+          # that account also file an approving review on its own pull request.
+          #
+          # A threshold of 2 therefore asks for three parties while calling
+          # itself two. Shipping -lt 2 would install a gate that cannot be met
+          # by a project with a single approving identity, which trains people
+          # to merge past it and is worse than no gate at all.
+          #
+          # So: one approving review from a non-author account that is not a GitHub App.
+          # Raise this to 2 on the day a second reviewing identity exists and
+          # is established, and not before. That threshold is reviewed separately.
+          if [ "${count}" -lt 1 ]; then
+            echo "::error::A merge into prod is the production deploy and takes a second party: one approving review from a non-author account that is not a GitHub App. Found ${count}."
+            exit 1
+          fi
+
+          echo "Two party requirement satisfied: author plus ${count} approving account(s). This does not assert the approver is a person, see the comment above."

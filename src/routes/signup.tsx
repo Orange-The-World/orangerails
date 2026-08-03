@@ -5,6 +5,7 @@ import { useVault } from "@/context/VaultContext";
 import { MIN_PASSWORD_LENGTH } from "@/lib/vault";
 import { formatError } from "@/lib/format-error";
 import { logSecurityEvent } from "@/lib/audit";
+import { captureHubSignupComplete } from "@/lib/analytics";
 
 // ─── Inline password strength scorer ─────────────────────────────────────────
 // Entropy-based heuristic that scores passphrases fairly alongside
@@ -228,6 +229,12 @@ function SignupPage() {
         vault_key_version: keyVersion,
       });
       if (metaError) throw metaError;
+
+      // The vault-meta insert just succeeded, so the account is now real.
+      // This is the single conversion point for both the fresh and the resume
+      // path, so the capture fires exactly once per completed signup. It is
+      // self-wrapped and no-ops under Do Not Track, so it cannot fail a signup.
+      captureHubSignupComplete();
 
       void logSecurityEvent(supabase, userId, "vault_setup", { key_version: keyVersion });
 

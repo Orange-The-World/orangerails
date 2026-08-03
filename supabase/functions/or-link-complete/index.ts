@@ -51,20 +51,30 @@
  * Response 200:
  *   {
  *     subaccount_id, connection_id,
- *     source_wallets: [{ id, external_wallet_id }, ...],
+ *     source_wallets: [{ id, external_wallet_id, submitted_external_wallet_id }, ...],
  *     // Backward-compat: if exactly one wallet was created, also return source_wallet_id.
  *     source_wallet_id?: string
  *   }
  *
+ * The two ids on a returned wallet are NOT interchangeable:
+ *   external_wallet_id            the STORED id, stable across reconnects. Dedup
+ *                                 on this one.
+ *   submitted_external_wallet_id  the id the caller sent in THIS request. Equal
+ *                                 to the above on a first connect, different on a
+ *                                 reconnect, because the adapter mints a fresh
+ *                                 opaque id per discovery and we return the
+ *                                 stored one. Correlate our response back to your
+ *                                 request on this one, never on external_wallet_id.
+ *
  * Response 404 if platform_slug unknown; 400 on missing fields.
  */
 
-import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { toByteaHex } from "../_shared/bytea.ts";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { getProvider, listProviderSlugs } from "../_shared/providers/dispatch.ts";
 import { checkPlatformRateLimit } from "../_shared/rate-limit.ts";
-import { wrapSentryHandler } from "../_shared/sentry.ts";
+import { wrapSentryHandler, reportError } from "../_shared/sentry.ts";
 import {
   computeAccountFingerprint,
   computeWalletFingerprint,
@@ -253,6 +263,7 @@ Deno.serve(
           .maybeSingle();
         if (claimErr) {
           console.error("[or-link-complete] widget token claim error:", claimErr.message);
+          await reportError(claimErr, 'or-link-complete', req);
           return jsonResponse({ error: "Invalid widget token" }, 401, cors);
         }
         if (!claimed) {
@@ -299,7 +310,8 @@ Deno.serve(
           // that is supposed to have it, which is the duplicate bug #153 exists
           // to kill. The message is swallowed: it can carry the account key.
           console.error("[or-link-complete] discovery_sessions read failed:", discErr.message);
-          return jsonResponse({ error: "Failed to resolve wallet identity" }, 500, cors);
+          await reportError(discErr, 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: discErr.code ?? "unknown" }, 500, cors);
         }
         for (const row of discovered ?? []) {
           discoveredByExternalId.set(row.external_wallet_id as string, {
@@ -395,7 +407,8 @@ Deno.serve(
           .single();
         if (insSubErr || !createdSub) {
           console.error("[or-link-complete] subaccount insert failed:", insSubErr);
-          return jsonResponse({ error: "Failed to create subaccount" }, 500, cors);
+          await reportError(insSubErr ?? new Error('subaccount insert returned no data'), 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: insSubErr?.code ?? "unknown" }, 500, cors);
         }
         subaccountId = createdSub.id as string;
         subaccountWasNewlyCreated = true;
@@ -460,7 +473,8 @@ Deno.serve(
           .in("wallet_fingerprint", fingerprintHexes);
         if (exErr) {
           console.error("[or-link-complete] wallet dedup lookup failed:", exErr.message);
-          return jsonResponse({ error: "Failed to resolve existing wallets" }, 500, cors);
+          await reportError(exErr, 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: exErr.code ?? "unknown" }, 500, cors);
         }
         for (const sw of existingSws ?? []) {
           existingByFingerprint.set(sw.wallet_fingerprint as string, {
@@ -468,6 +482,58 @@ Deno.serve(
             externalWalletId: sw.external_wallet_id as string,
             connectionId: sw.connection_id as string,
           });
+        }
+      }
+
+      // 5.1. Drop matches whose parent connection no longer exists. A deleted
+      // connection can leave source_wallets rows behind (no FK cascade covers
+      // that table), and treating those rows as a reconnect would UPDATE a
+      // connection row that is gone: 0 rows affected, no error raised, a 200
+      // carrying a dead connection_id, and no new row ever written. Verify the
+      // parent connections are alive, remove stale wallet rows loudly, and let
+      // the re-link fall through to a clean create below.
+      if (existingByFingerprint.size > 0) {
+        const matchedConnIds = [
+          ...new Set([...existingByFingerprint.values()].map((r) => r.connectionId)),
+        ];
+        const { data: liveConns, error: liveErr } = await serviceClient
+          .from("connections")
+          .select("id")
+          .in("id", matchedConnIds);
+        if (liveErr) {
+          console.error("[or-link-complete] connection liveness check failed:", liveErr.message);
+          await reportError(liveErr, 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: liveErr.code ?? "unknown" }, 500, cors);
+        }
+        const liveIds = new Set((liveConns ?? []).map((c: { id: string }) => c.id));
+        const staleWalletIds = [...existingByFingerprint.values()]
+          .filter((r) => !liveIds.has(r.connectionId))
+          .map((r) => r.id);
+        if (staleWalletIds.length > 0) {
+          console.error(
+            "[or-link-complete] %d source_wallet row(s) reference deleted connection(s); " +
+              "removing them so this link creates a fresh connection instead of updating a dead one",
+            staleWalletIds.length,
+          );
+          await reportError(
+            new Error(
+              `stale source_wallets referenced deleted connection(s); cleaned ${staleWalletIds.length} row(s)`,
+            ),
+            'or-link-complete',
+            req,
+          );
+          const { error: staleDelErr } = await serviceClient
+            .from("source_wallets")
+            .delete()
+            .in("id", staleWalletIds);
+          if (staleDelErr) {
+            console.error("[or-link-complete] stale source_wallet cleanup failed:", staleDelErr.message);
+            await reportError(staleDelErr, 'or-link-complete', req);
+            return jsonResponse({ error: "DatabaseError", code: staleDelErr.code ?? "unknown" }, 500, cors);
+          }
+          for (const [fp, r] of [...existingByFingerprint.entries()]) {
+            if (!liveIds.has(r.connectionId)) existingByFingerprint.delete(fp);
+          }
         }
       }
 
@@ -499,13 +565,20 @@ Deno.serve(
             .eq("id", connId);
           if (updErr) {
             console.error("[or-link-complete] reconnect credential refresh failed:", updErr.message);
-            return jsonResponse({ error: "Failed to refresh connection" }, 500, cors);
+            await reportError(updErr, 'or-link-complete', req);
+            return jsonResponse({ error: "DatabaseError", code: updErr.code ?? "unknown" }, 500, cors);
           }
         }
 
+        // The pure-reconnect path: every picked wallet is one we already hold,
+        // so EVERY row here comes back under its stored id while the caller only
+        // knows the id it just minted. This is the path where the two ids always
+        // disagree, and echoing the submitted one is what makes the response
+        // correlatable at all.
         const reconnected = knownWallets.map((w) => ({
           id: rowFor(w).id,
           external_wallet_id: rowFor(w).externalWalletId,
+          submitted_external_wallet_id: w.external_wallet_id!,
         }));
         return jsonResponse(
           {
@@ -549,7 +622,8 @@ Deno.serve(
         .single();
       if (insConnErr || !createdConn) {
         console.error("[or-link-complete] connection insert failed:", insConnErr);
-        return jsonResponse({ error: "Failed to create connection" }, 500, cors);
+        await reportError(insConnErr ?? new Error('connection insert returned no data'), 'or-link-complete', req);
+        return jsonResponse({ error: "DatabaseError", code: insConnErr?.code ?? "unknown" }, 500, cors);
       }
       const connectionId = createdConn.id as string;
 
@@ -572,7 +646,25 @@ Deno.serve(
           wallet_fingerprint_key_version: fp === null ? null : 1,
         };
       };
-      const sourceWallets: Array<{ id: string; external_wallet_id: string }> = [];
+      // Every returned wallet carries BOTH ids, and they are not the same thing:
+      //
+      //   external_wallet_id            the STORED id. Stable across reconnects,
+      //                                 and what the integrating app dedups on.
+      //   submitted_external_wallet_id  the id the CALLER sent us in this request.
+      //
+      // On a first connect they are equal. On a reconnect they are not, because
+      // the adapter mints a fresh opaque id on every discovery and we hand back
+      // the stored one. The caller therefore cannot match our response to the
+      // request it just made using external_wallet_id alone, and the widget has
+      // to: it holds this wallet's currency and label keyed by the id it sent,
+      // and it cannot read them back out of encrypted_metadata. Echoing the
+      // submitted id is what lets it correlate the two without weakening
+      // external_wallet_id's meaning.
+      const sourceWallets: Array<{
+        id: string;
+        external_wallet_id: string;
+        submitted_external_wallet_id: string;
+      }> = [];
 
       const plainRows = newWallets
         .filter((w) => !fingerprintByExternalId.has(w.external_wallet_id!))
@@ -584,12 +676,15 @@ Deno.serve(
           .select("id, external_wallet_id");
         if (err || !created) {
           console.error("[or-link-complete] source_wallet insert failed:", err);
-          return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+          await reportError(err ?? new Error('source_wallet insert returned no data'), 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: err?.code ?? "unknown" }, 500, cors);
         }
         for (const row of created) {
+          // A row we just inserted stores the id we were sent, so the two agree.
           sourceWallets.push({
             id: row.id as string,
             external_wallet_id: row.external_wallet_id as string,
+            submitted_external_wallet_id: row.external_wallet_id as string,
           });
         }
       }
@@ -640,12 +735,15 @@ Deno.serve(
           .select("id, external_wallet_id");
         if (err) {
           console.error("[or-link-complete] source_wallet upsert failed:", err);
-          return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+          await reportError(err, 'or-link-complete', req);
+          return jsonResponse({ error: "DatabaseError", code: err.code ?? "unknown" }, 500, cors);
         }
         for (const row of created ?? []) {
+          // Ours won the insert, so the stored id is the one we were sent.
           sourceWallets.push({
             id: row.id as string,
             external_wallet_id: row.external_wallet_id as string,
+            submitted_external_wallet_id: row.external_wallet_id as string,
           });
         }
 
@@ -659,9 +757,22 @@ Deno.serve(
         const insertedIds = new Set((created ?? []).map((r) => r.external_wallet_id as string));
         const lost = fingerprintedWallets.filter((w) => !insertedIds.has(w.external_wallet_id!));
         if (lost.length > 0) {
+          // The winner's row cannot tell us which of OUR ids it corresponds to,
+          // so the fingerprint is the only link back: it is equal across both
+          // requests by construction, which is the whole reason it is the dedup
+          // key. Select it and invert the map. Same wire form as the dedup
+          // lookup above: the hex PostgREST reads back is what fingerprintBy-
+          // ExternalId already holds.
+          const submittedByFingerprint = new Map<string, string>();
+          for (const w of lost) {
+            submittedByFingerprint.set(
+              fingerprintByExternalId.get(w.external_wallet_id!)!,
+              w.external_wallet_id!,
+            );
+          }
           const { data: raced, error: reErr } = await serviceClient
             .from("source_wallets")
-            .select("id, external_wallet_id")
+            .select("id, external_wallet_id, wallet_fingerprint")
             .in(
               "wallet_fingerprint",
               lost.map((w) => fingerprintByExternalId.get(w.external_wallet_id!)!),
@@ -676,12 +787,28 @@ Deno.serve(
               raced?.length ?? 0,
               lost.length,
             );
-            return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+            await reportError(reErr ?? new Error('conflict re-read returned partial result set'), 'or-link-complete', req);
+            return jsonResponse({ error: "DatabaseError", code: reErr?.code ?? "unknown" }, 500, cors);
           }
           for (const row of raced) {
+            const submitted = submittedByFingerprint.get(row.wallet_fingerprint as string);
+            // Impossible: we selected these rows BY those fingerprints. If it
+            // happens the inversion above is wrong, and returning the row with a
+            // guessed id would hand the caller a wallet it cannot correlate,
+            // which is the silent-blank failure this field exists to remove.
+            // Fail loudly instead.
+            if (submitted === undefined) {
+              console.error(
+                "[or-link-complete] conflict re-read returned a row whose fingerprint " +
+                  "matches no submitted wallet; refusing to guess the correlation",
+              );
+              await reportError(new Error('conflict re-read returned a row whose fingerprint matches no submitted wallet'), 'or-link-complete', req);
+              return jsonResponse({ error: "InternalError" }, 500, cors);
+            }
             sourceWallets.push({
               id: row.id as string,
               external_wallet_id: row.external_wallet_id as string,
+              submitted_external_wallet_id: submitted,
             });
           }
         }
@@ -691,12 +818,20 @@ Deno.serve(
       // ones it just created, so the caller always gets back every wallet it
       // picked, whether or not this call is what created it.
       for (const w of knownWallets) {
-        sourceWallets.push({ id: rowFor(w).id, external_wallet_id: rowFor(w).externalWalletId });
+        // w IS the submitted wallet, so its id is what the caller sent. The
+        // stored id comes from the row we matched it to, and on a reconnect the
+        // two differ.
+        sourceWallets.push({
+          id: rowFor(w).id,
+          external_wallet_id: rowFor(w).externalWalletId,
+          submitted_external_wallet_id: w.external_wallet_id!,
+        });
       }
 
       if (sourceWallets.length === 0) {
         console.error("[or-link-complete] no source wallets resolved for a non-empty selection");
-        return jsonResponse({ error: "Failed to create source wallets" }, 500, cors);
+        await reportError(new Error('no source wallets resolved for a non-empty selection'), 'or-link-complete', req);
+        return jsonResponse({ error: "InternalError" }, 500, cors);
       }
 
       return jsonResponse(
@@ -718,7 +853,8 @@ Deno.serve(
       );
     } catch (err) {
       console.error("[or-link-complete] fatal:", err);
-      return jsonResponse({ error: "Internal error" }, 500, cors);
+      await reportError(err, 'or-link-complete', req);
+      return jsonResponse({ error: "InternalError" }, 500, cors);
     }
-  }),
+  }, 'or-link-complete'),
 );

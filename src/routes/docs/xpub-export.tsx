@@ -189,16 +189,7 @@ function XpubExportPage() {
                     tab. The server stores ciphertext only and cannot decrypt
                     it. For supported wallets we run Stealth Sync , scanning
                     BIP 158 compact filters directly in your browser so the
-                    server never learns your addresses at all. Read the{" "}
-                    <a
-                      href="/docs/stealth-sync"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
-                    >
-                      Stealth Sync architecture note
-                    </a>{" "}
-                    for the long version.
+                    server never learns your addresses at all.
                   </p>
                 </div>
               </div>

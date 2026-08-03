@@ -62,6 +62,7 @@ import type {
   SyncResult,
   CredentialField,
 } from '../types.ts';
+import { classifyUpstreamError, errorClassName } from '../../upstream-errors.ts';
 
 // --- Per-exchange config -------------------------------------------------
 
@@ -189,19 +190,21 @@ async function instantiateExchange(
 ): Promise<any> {
   let ccxtModule: any;
   try {
-    ccxtModule = await import('https://esm.sh/ccxt@4.4.30');
+    // npm: specifier -- Deno native resolver, no external CDN hop (DL-0495).
+    ccxtModule = await import('npm:ccxt@4.4.30');
   } catch (err) {
     throw new Error(
       `[ccxt:${exchangeId}] failed to load ccxt package: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  // esm.sh sometimes exposes things under .default , try both.
+  // Deno npm: specifier may expose the module under .default -- try both.
   const ExchangeClass = ccxtModule[exchangeId] ?? ccxtModule.default?.[exchangeId];
   if (typeof ExchangeClass !== 'function') {
     throw new Error(`[ccxt:${exchangeId}] unknown CCXT exchange id (not exposed on package)`);
   }
   const config: Record<string, unknown> = {
     enableRateLimit: true, // let CCXT throttle requests automatically
+    timeout: 15000, // 15 s hard limit per request; matches the ccxt-stress harness
   };
   for (const field of ['apiKey', 'secret', 'password', 'uid', 'walletAddress', 'privateKey']) {
     if (typeof credentials[field] === 'string' && (credentials[field] as string).length > 0) {
@@ -218,18 +221,67 @@ async function instantiateExchange(
  * widget; per-asset enumeration happens during sync (CCXT methods
  * naturally span all assets the API key can see).
  *
- * We DO NOT call into CCXT here , exchange APIs almost universally block
- * browser-origin CORS, so the discovery flow can't actually validate the
- * API key from the widget anyway. The OR adapter validates on first
- * sync attempt instead.
+ * Discovery now runs server-side in or-discover-wallets, so CORS is no
+ * longer a constraint. We validate credentials before returning a wallet:
+ * a wallet that fails on every subsequent sync is worse than a clear error
+ * during connection setup.
+ *
+ * Validation: call fetchBalance (the most broadly supported auth-requiring
+ * CCXT method). If the exchange does not advertise it, we log a warning and
+ * proceed; the first sync will catch bad credentials.
+ *
+ * Error taxonomy: UPSTREAM_AUTH_FAILED, UPSTREAM_UNAVAILABLE, and
+ * UPSTREAM_RATE_LIMITED are preserved as distinct codes. The caller
+ * (or-discover-wallets) maps them to HTTP status and customer copy via the
+ * error catalog. A bad key must NOT look like a downed exchange.
  */
-function buildDiscover(slug: string, _exchangeId: string) {
+function buildDiscover(slug: string, exchangeId: string) {
   return async function discoverWallets(
-    _credentials: Record<string, unknown>,
+    credentials: Record<string, unknown>,
   ): Promise<DiscoveredWallet[]> {
+    const exchange = await instantiateExchange(exchangeId, credentials);
+
+    // `accountKey` is set when fetchBalance succeeds. It is a stable fingerprint
+    // for reconnect deduplication: or-link-complete can tell a reconnect from a
+    // new connect. It is NOT a guarantee that credentials were validated for every
+    // exchange: exchanges that do not advertise fetchBalance skip this path and
+    // return no accountKey (see else-branch below).
+    let accountKey: string | undefined;
+
+    if (exchange.has?.fetchBalance) {
+      try {
+        await exchange.fetchBalance();
+        // fetchBalance succeeded: compute a stable, non-reversible fingerprint for
+        // reconnect dedup. sha256(exchangeId + ":" + apiKey) is unique per account
+        // and never leaves the server (discovery_sessions is service-role only).
+        // This records that fetchBalance ran for this exchange, not that all
+        // exchanges enforce it (see else-branch for those that skip it).
+        const keyMaterial = `${exchangeId}:${String(credentials.apiKey ?? '')}`;
+        const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyMaterial));
+        accountKey = Array.from(new Uint8Array(hashBuf))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
+      } catch (raw) {
+        const err = raw instanceof Error ? raw : new Error(String(raw));
+        const code = classifyUpstreamError(err.message, errorClassName(err));
+        // Tag the rethrown error so or-discover-wallets can return the right
+        // HTTP status and customer copy without collapsing distinct codes.
+        const out = new Error(`[ccxt:${exchangeId}] discover credential check: ${code}`);
+        (out as any).upstreamCode = code;
+        throw out;
+      }
+    } else {
+      // Exchange does not advertise fetchBalance; skip live validation here.
+      // The first sync will surface bad credentials through the sync error path.
+      // This should be rare: fetchBalance is supported by virtually all CCXT
+      // exchanges that require authentication.
+      console.warn(`[ccxt:${exchangeId}] fetchBalance not advertised; skipping discovery credential check`);
+    }
+
     return [
       {
         external_wallet_id: slug,
+        ...(accountKey !== undefined ? { account_key: accountKey } : {}),
         currency: 'USD', // exchange wallets are multi-currency; this is the display default
         label: `${slug} account`,
       },
@@ -266,8 +318,9 @@ async function fetchAllSince(
         out.push(normalizeTrade(t, exchangeId));
       }
     } catch (e) {
+      const cls = e instanceof Error ? errorClassName(e) : '';
       const msg = e instanceof Error ? e.message : String(e);
-      if (!/NotSupported/i.test(msg)) {
+      if (cls !== 'NotSupported' && !/NotSupported/i.test(msg)) {
         // Not a "this feature isn't here" error , surface it.
         throw e;
       }
@@ -283,8 +336,9 @@ async function fetchAllSince(
         out.push(normalizeTransfer(d, 'deposit', 'in', exchangeId));
       }
     } catch (e) {
+      const cls = e instanceof Error ? errorClassName(e) : '';
       const msg = e instanceof Error ? e.message : String(e);
-      if (!/NotSupported/i.test(msg)) throw e;
+      if (cls !== 'NotSupported' && !/NotSupported/i.test(msg)) throw e;
       console.warn(`[ccxt:${exchangeId}] fetchDeposits unsupported; skipping`);
     }
   }
@@ -297,8 +351,9 @@ async function fetchAllSince(
         out.push(normalizeTransfer(w, 'withdrawal', 'out', exchangeId));
       }
     } catch (e) {
+      const cls = e instanceof Error ? errorClassName(e) : '';
       const msg = e instanceof Error ? e.message : String(e);
-      if (!/NotSupported/i.test(msg)) throw e;
+      if (cls !== 'NotSupported' && !/NotSupported/i.test(msg)) throw e;
       console.warn(`[ccxt:${exchangeId}] fetchWithdrawals unsupported; skipping`);
     }
   }
