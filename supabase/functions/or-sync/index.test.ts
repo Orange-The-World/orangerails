@@ -20,7 +20,7 @@
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { mergeStrikeTransactions, batchHttpStatus } from './index.ts';
+import { mergeStrikeTransactions, batchHttpStatus, throwOnDbError } from './index.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 
 const WALLET_A = 'wallet-aaaa';
@@ -177,4 +177,23 @@ Deno.test('batchHttpStatus: mixed (some error) -> 207', () => {
 
 Deno.test('batchHttpStatus: all failed -> 422', () => {
   assertEquals(batchHttpStatus([{ error: 'AUTH_FAILURE' }, { error: 'RATE_LIMITED' }]), 422);
+});
+
+// ── throwOnDbError: connections update error-swallow guard (DL-0501) ────
+
+Deno.test('throwOnDbError: throws the exact error object when present', () => {
+  const err = { message: 'update failed: RLS violation', code: '42501' };
+  let caught: unknown = undefined;
+  try {
+    throwOnDbError(err);
+  } catch (e) {
+    caught = e;
+  }
+  assertEquals(caught, err, 'must re-throw the exact DB error, not wrap it');
+});
+
+Deno.test('throwOnDbError: is a no-op when error is null or undefined', () => {
+  // Neither call should throw; if they do, Deno.test fails the case.
+  throwOnDbError(null);
+  throwOnDbError(undefined);
 });
