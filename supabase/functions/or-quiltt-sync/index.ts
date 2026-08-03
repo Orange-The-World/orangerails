@@ -248,7 +248,9 @@ export async function handleEvent(
   // errored taxonomy is not guaranteed to be bounded, and a subtype not listed here
   // would fall through to 'skipped' without reconciling, which is the gap this fix closes.
   if (ev.event_type.startsWith('connection.synced.errored')) {
-    return reconcileConnectionError(client, ev, subaccountId);
+    const reconcileErr = await reconcileConnectionError(client, ev, subaccountId);
+    if (reconcileErr) return reconcileErr;
+    return 'processed';
   }
 
   // Only act on sync.successful.* for data pulls
@@ -271,8 +273,8 @@ export async function handleEvent(
 
   // Quiltt confirms successful sync: clear any error state so the connection shows active.
   // Called before the OPK gate so the status fix covers ALL subaccounts.
-  const successResult = await reconcileConnectionSuccess(client, connectionId, subaccountId);
-  if (successResult !== 'processed') return successResult;
+  const successErr = await reconcileConnectionSuccess(client, connectionId, subaccountId);
+  if (successErr) return successErr;
 
   if (!sub.opk_public) {
     // No opt-in. Status already reconciled above. Defer data pull until user opens app.
@@ -560,7 +562,7 @@ async function reconcileConnectionError(
   client: SupabaseClient,
   ev: PendingEvent,
   subaccountId: string,
-): Promise<'processed' | string> {
+): Promise<string | null> {
   const connectionId = typeof ev.payload?.record?.id === 'string'
     ? ev.payload.record.id
     : null;
@@ -597,7 +599,7 @@ async function reconcileConnectionError(
         `[or-quiltt-sync] event ${ev.event_id}: error event for Quiltt connection ` +
           `(type: ${ev.event_type}), no OR connection row found -- marking processed`,
       );
-      return 'processed';
+      return null;
     }
     conn = legacy.data as { id: string };
   }
@@ -612,7 +614,7 @@ async function reconcileConnectionError(
     `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} ` +
       `reconciled to error (event_type: ${ev.event_type})`,
   );
-  return 'processed';
+  return null;
 }
 
 /**
@@ -625,7 +627,7 @@ async function reconcileConnectionSuccess(
   client: SupabaseClient,
   connectionId: string,
   subaccountId: string,
-): Promise<'processed' | string> {
+): Promise<string | null> {
   let orConnId: string | null = null;
   const { data: exact, error: exactErr } = await client
     .from('connections')
@@ -650,17 +652,17 @@ async function reconcileConnectionSuccess(
     if (legacyErr) return `connection lookup failed: ${legacyErr.message}`;
     if (legacy) orConnId = legacy.id;
   }
-  if (!orConnId) return 'processed';
+  if (!orConnId) return null;
   const { error: statusErr } = await client
     .from('connections')
-    .update({ status: 'active' })
+    .update({ status: 'active', updated_at: new Date().toISOString() })
     .eq('id', orConnId)
     .eq('status', 'error');
   if (statusErr) return `connection status update failed: ${statusErr.message}`;
   console.log(
     `[or-quiltt-sync] connection ${orConnId} reconciled to active`,
   );
-  return 'processed';
+  return null;
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
