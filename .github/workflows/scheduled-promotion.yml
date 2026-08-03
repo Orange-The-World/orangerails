@@ -1,0 +1,275 @@
+name: scheduled dev to prod promotion
+
+# DL-0564, Gate 2.
+#
+# Promotion to production is currently an act of memory: someone has to decide
+# to open the promotion pull request. When nobody does, finished work piles up
+# on dev invisibly. Measured 2026-08-02 and 2026-08-03: Orange-Way-Books went
+# 36 days without shipping and reached 194 commits ahead of prod; Orange-Way-Me
+# was 190 ahead with its oldest unpromoted commit 42 days old; Orange Rails hit
+# 384 commits ahead before being cleared. Nothing ever opened a promotion on a
+# schedule.
+#
+# The Release seat owns the dev to prod promotion gate in both orgs. From its
+# ROLE.md: "You own the path to production and the ability to undo it." The
+# threshold Release answers to, set 2026-08-02, is 50 commits ahead OR 3 days
+# since the oldest unpromoted commit, whichever comes first.
+#
+# This workflow turns the promotion into a default event that Release responds
+# to, rather than something a human has to remember to start. It only ever
+# opens or updates one pull request.
+#
+# HARD LIMITS. This workflow never merges, never enables auto-merge, and never
+# pushes to prod. Merging is Release's decision. If Release holds the gate, the
+# CTO owns the risk decision. Nothing here changes a branch, a ruleset, or a
+# repository setting.
+#
+# WHY IT NEEDS FLEET_PAT. "Allow GitHub Actions to create and approve pull
+# requests" is off in this repository and is deliberately staying off, because
+# that single toggle also lets Actions APPROVE pull requests, which would
+# undermine the one-approving-review requirement. With the toggle off, the
+# built-in GITHUB_TOKEN cannot open a pull request. So the write step uses a
+# repository secret named FLEET_PAT (a machine user), and only the read-only
+# comparison uses GITHUB_TOKEN. Until FLEET_PAT exists this workflow fails
+# loudly on purpose rather than quietly doing nothing.
+
+on:
+  schedule:
+    # Every 2 days at 06:17 UTC (about 02:17 US Eastern). Off-peak, and
+    # deliberately not on the hour: minute 0 is the busiest slot on shared
+    # runners and schedule delivery there is the least reliable.
+    - cron: '17 6 */2 * *'
+  workflow_dispatch:
+
+# Least privilege for the built-in token. contents:read is what the compare
+# call needs; pull-requests:write is declared because this workflow's purpose
+# is writing a pull request, even though the actual write is done with
+# FLEET_PAT (the built-in token cannot do it while the create-and-approve
+# toggle is off).
+permissions:
+  contents: read
+  pull-requests: write
+
+# One promotion pull request at a time, per repository. A scheduled run and a
+# manual run must never race each other into opening two.
+concurrency:
+  group: scheduled-dev-to-prod-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Open or update the dev to prod promotion pull request
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # This workflow never pushes. Do not leave a credential in .git.
+          persist-credentials: false
+
+      - name: Compare prod and dev
+        id: compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          gh api "repos/${GH_REPO}/compare/prod...dev" > compare.json
+
+          AHEAD=$(jq -r '.ahead_by' compare.json)
+          BEHIND=$(jq -r '.behind_by' compare.json)
+          # The compare payload lists commits oldest first, so element 0 is
+          # the oldest unpromoted commit even when the list is truncated.
+          OLDEST_DATE=$(jq -r '.commits[0].commit.committer.date // ""' compare.json)
+          OLDEST_SHA=$(jq -r '.commits[0].sha // ""' compare.json)
+
+          if [ -n "${OLDEST_DATE}" ]; then
+            OLDEST_EPOCH=$(date -u -d "${OLDEST_DATE}" +%s)
+            NOW_EPOCH=$(date -u +%s)
+            AGE_DAYS=$(( (NOW_EPOCH - OLDEST_EPOCH) / 86400 ))
+          else
+            AGE_DAYS=0
+          fi
+
+          {
+            echo "ahead=${AHEAD}"
+            echo "behind=${BEHIND}"
+            echo "age_days=${AGE_DAYS}"
+            echo "oldest_date=${OLDEST_DATE}"
+            echo "oldest_sha=${OLDEST_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "dev is ${AHEAD} commit(s) ahead of prod and ${BEHIND} behind."
+          echo "Oldest unpromoted commit is ${AGE_DAYS} day(s) old."
+
+      - name: Nothing to promote
+        if: steps.compare.outputs.ahead == '0'
+        run: |
+          echo "nothing to promote: dev is 0 commits ahead of prod."
+          echo "Clean no-op. No pull request opened, nothing updated."
+
+      - name: Require FLEET_PAT
+        if: steps.compare.outputs.ahead != '0'
+        env:
+          FLEET_PAT: ${{ secrets.FLEET_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FLEET_PAT:-}" ]; then
+            echo "::error title=FLEET_PAT is not set::There is work to promote but this workflow cannot open the pull request."
+            cat <<'MSG'
+
+          FLEET_PAT is missing.
+
+          There ARE commits to promote, so staying silent would hide exactly the
+          problem this workflow exists to surface. Failing instead.
+
+          What to do:
+            1. Add a repository secret named FLEET_PAT.
+            2. Its value is a token for the orange-builder machine user, scoped
+               to this repository with Contents:read and Pull requests:write.
+            3. Re-run this workflow (Actions, then Run workflow).
+
+          Why not the built-in GITHUB_TOKEN: "Allow GitHub Actions to create and
+          approve pull requests" is off in this repository and stays off, because
+          the same toggle would also let Actions approve pull requests. So the
+          built-in token can read the comparison but cannot open the promotion.
+
+          MSG
+            exit 1
+          fi
+          echo "FLEET_PAT is present."
+
+      - name: Open or update the promotion pull request
+        if: steps.compare.outputs.ahead != '0'
+        env:
+          # Every write below runs as the machine user, never as the built-in
+          # token. See the FLEET_PAT note in the header.
+          GH_TOKEN: ${{ secrets.FLEET_PAT }}
+          AHEAD: ${{ steps.compare.outputs.ahead }}
+          BEHIND: ${{ steps.compare.outputs.behind }}
+          AGE_DAYS: ${{ steps.compare.outputs.age_days }}
+          OLDEST_DATE: ${{ steps.compare.outputs.oldest_date }}
+          OLDEST_SHA: ${{ steps.compare.outputs.oldest_sha }}
+        run: |
+          set -euo pipefail
+
+          COMPARE_URL="${GITHUB_SERVER_URL}/${GH_REPO}/compare/prod...dev"
+
+          # ---- threshold ------------------------------------------------
+          BREACH="no"
+          BREACH_WHY="below both thresholds"
+          if [ "${AHEAD}" -ge 50 ] && [ "${AGE_DAYS}" -ge 3 ]; then
+            BREACH="YES"
+            BREACH_WHY="${AHEAD} commits (limit 50) and ${AGE_DAYS} days (limit 3)"
+          elif [ "${AHEAD}" -ge 50 ]; then
+            BREACH="YES"
+            BREACH_WHY="${AHEAD} commits, over the 50 commit limit"
+          elif [ "${AGE_DAYS}" -ge 3 ]; then
+            BREACH="YES"
+            BREACH_WHY="oldest unpromoted commit is ${AGE_DAYS} days old, over the 3 day limit"
+          fi
+
+          # ---- divergence ------------------------------------------------
+          if [ "${BEHIND}" -gt 0 ]; then
+            DIVERGED="**prod has ${BEHIND} commit(s) that dev does not have.** The
+          branches have diverged, and that is what makes this promotion conflict.
+          Gate 3 (\`prod-backmerge.yml\`, ticket DL-0565) exists to bring those
+          commits back into dev. Expect to run the backmerge before, or as part
+          of, merging this."
+          else
+            DIVERGED="prod has no commits that dev is missing. The branches have
+          not diverged, so this promotion should be a clean fast path."
+          fi
+
+          # ---- body -------------------------------------------------------
+          {
+            echo "Opened automatically by \`.github/workflows/scheduled-promotion.yml\` (DL-0564, Gate 2)."
+            echo
+            echo "## State of the promotion"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commits on dev not on prod | **${AHEAD}** |"
+            echo "| Oldest unpromoted commit | **${AGE_DAYS} day(s)** old (${OLDEST_DATE}, \`${OLDEST_SHA}\`) |"
+            echo "| Commits on prod not on dev | **${BEHIND}** |"
+            echo "| Threshold breached (50 commits or 3 days) | **${BREACH}** (${BREACH_WHY}) |"
+            echo
+            echo "Full comparison: ${COMPARE_URL}"
+            echo
+            echo "## Divergence"
+            echo
+            echo "${DIVERGED}"
+            echo
+            echo "## Who owns this"
+            echo
+            echo "**The Release seat owns merging this.** This workflow will never merge it,"
+            echo "will never enable auto-merge, and will never push to prod. If Release holds"
+            echo "the gate and chooses not to promote, the CTO owns the risk decision."
+            echo
+            echo "There is no GitHub identity for Release today (both orgs have only two"
+            echo "collaborators), so this pull request carries the \`owner:release\` label and"
+            echo "names Release here instead of setting a GitHub assignee that would be wrong."
+            echo
+            echo "## About this automation"
+            echo
+            echo "The schedule runs every 2 days. If dev is level with prod the run is a clean"
+            echo "no-op. If an open dev to prod pull request already exists, this workflow"
+            echo "updates it rather than opening a second one, because a duplicate promotion"
+            echo "would be actively harmful."
+            echo
+            echo "This workflow is inert until a repository secret named \`FLEET_PAT\` is added"
+            echo "(a token for the \`orange-builder\` machine user, being created shortly). That"
+            echo "is expected. Until then a run with work to promote fails loudly instead of"
+            echo "silently doing nothing. FLEET_PAT is required because \"Allow GitHub Actions"
+            echo "to create and approve pull requests\" is off in this repository and is staying"
+            echo "off: that single toggle would also let Actions approve pull requests, which"
+            echo "would undermine the one-approving-review requirement."
+          } > pr-body.md
+
+          # ---- label ------------------------------------------------------
+          if ! gh api "repos/${GH_REPO}/labels/owner:release" >/dev/null 2>&1; then
+            gh api -X POST "repos/${GH_REPO}/labels" \
+              -f name='owner:release' \
+              -f color='d93f0b' \
+              -f description='Owned by the Release seat' >/dev/null
+            echo "Created label owner:release."
+          fi
+
+          # ---- reuse or open ----------------------------------------------
+          # Duplicate guard. Ask GitHub for any OPEN pull request whose base is
+          # prod and whose head is dev. If one exists we update it. We never
+          # reach gh pr create while one is open.
+          EXISTING=$(gh api "repos/${GH_REPO}/pulls?state=open&base=prod&head=${GH_REPO%%/*}:dev" \
+                       --jq '.[0].number // ""')
+
+          if [ -n "${EXISTING}" ]; then
+            EXISTING_TITLE=$(gh api "repos/${GH_REPO}/pulls/${EXISTING}" --jq '.title')
+            echo "Reusing open promotion pull request ${EXISTING}. Not opening a duplicate."
+
+            gh pr edit "${EXISTING}" --body-file pr-body.md
+            gh pr edit "${EXISTING}" --add-label 'owner:release'
+
+            # Only retitle a title this workflow itself generated. A title a
+            # human wrote is left alone; the counts live in the body either way.
+            case "${EXISTING_TITLE}" in
+              "promote: dev to prod ("*)
+                gh pr edit "${EXISTING}" --title "promote: dev to prod (${AHEAD} commits)"
+                ;;
+              *)
+                echo "Left the existing human-written title unchanged."
+                ;;
+            esac
+
+            echo "Updated: ${GITHUB_SERVER_URL}/${GH_REPO}/pull/${EXISTING}"
+            exit 0
+          fi
+
+          URL=$(gh pr create \
+                  --base prod \
+                  --head dev \
+                  --title "promote: dev to prod (${AHEAD} commits)" \
+                  --body-file pr-body.md \
+                  --label 'owner:release')
+          echo "Opened: ${URL}"
