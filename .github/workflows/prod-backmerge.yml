@@ -7,8 +7,7 @@ name: back-merge prod into dev
 # prod accumulates commits that dev does not have. Every one of those commits
 # makes the NEXT promotion harder, and a promotion that is hard to land gets
 # worked around with another direct-to-prod fix. That is a loop, and it is
-# measurable here: as of 2026-08-03 this repository carries 1 commit on prod
-# that dev does not have, and dev is 73 commits ahead of prod. From pull
+# measurable here. From pull
 # request 377, opened 2026-07-31: "prod was 26 commits ahead of dev. It was 15
 # the same morning... 15 to 26 in one day is that loop running." This
 # repository reached 384 commits of drift that way before it was cleared.
