@@ -286,11 +286,6 @@ export interface ProviderAdapter {
 }
 
 /**
- * Helper: parse the decrypted credentials JSON and validate required fields
- * against the adapter's declared schema. Throws a helpful error rather than
- * letting an undefined field surface as a confusing upstream call failure.
- */
-/**
  * Runtime guard: throws if `adapter.custody` is missing or invalid.
  * Call this when registering an adapter so the failure is loud and early,
  * not silent at sync time.
@@ -317,6 +312,11 @@ export function validateAdapter(adapter: ProviderAdapter): ProviderAdapter {
   return adapter;
 }
 
+/**
+ * Helper: parse the decrypted credentials JSON and validate required fields
+ * against the adapter's declared schema. Throws a helpful error rather than
+ * letting an undefined field surface as a confusing upstream call failure.
+ */
 export function parseCredentials(
   adapter: ProviderAdapter,
   credentialsJson: string,
