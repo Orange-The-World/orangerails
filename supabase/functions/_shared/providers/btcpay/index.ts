@@ -277,6 +277,7 @@ export const btcpayAdapter: ProviderAdapter = {
   tags: ['merchant', 'self-hosted', 'lightning', 'on-chain'],
   popularity: 85,
   multiWallet: true,
+  custody: 'non_custodial',
   credentialFields: [
     {
       name: 'btcpay_url',
