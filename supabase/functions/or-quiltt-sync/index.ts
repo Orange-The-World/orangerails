@@ -593,17 +593,21 @@ async function reconcileConnectionSuccess(
   subaccountId: string,
 ): Promise<void> {
   let orConnId: string | null = null;
-  const { data: exact } = await client
+  const { data: exact, error: exactErr } = await client
     .from('connections')
     .select('id')
     .eq('subaccount_id', subaccountId)
     .eq('provider_type', 'quiltt')
     .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
+  if (exactErr) {
+    console.error(`[or-quiltt-sync] reconcileConnectionSuccess exact lookup failed: ${exactErr.message}`);
+    return;
+  }
   if (exact) {
     orConnId = exact.id;
   } else {
-    const { data: legacy } = await client
+    const { data: legacy, error: legacyErr } = await client
       .from('connections')
       .select('id')
       .eq('subaccount_id', subaccountId)
@@ -612,6 +616,10 @@ async function reconcileConnectionSuccess(
       .order('created_at', { ascending: true })
       .limit(1)
       .maybeSingle();
+    if (legacyErr) {
+      console.error(`[or-quiltt-sync] reconcileConnectionSuccess legacy lookup failed: ${legacyErr.message}`);
+      return;
+    }
     if (legacy) orConnId = legacy.id;
   }
   if (!orConnId) return;
