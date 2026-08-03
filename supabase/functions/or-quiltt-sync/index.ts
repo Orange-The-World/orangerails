@@ -120,17 +120,23 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       // to diagnose these rows. Write processed_at and retirement_reason
       // directly so last_error is preserved untouched.
       if ((ev.attempts ?? 0) >= MAX_ATTEMPTS) {
-        await client
+        const { error: retireErr } = await client
           .from('quiltt_webhook_inbox')
           .update({
             processed_at:      new Date().toISOString(),
             retirement_reason: 'max-attempts-pre-dispatch',
           })
           .eq('event_id', ev.event_id);
-        console.warn(
-          `[or-quiltt-sync] event ${ev.event_id}: retired pre-dispatch after ` +
-            `${ev.attempts ?? 0} attempts (last_error preserved)`,
-        );
+        if (retireErr) {
+          console.error(
+            `[or-quiltt-sync] event ${ev.event_id}: pre-dispatch retirement UPDATE failed: ${retireErr.message}`,
+          );
+        } else {
+          console.warn(
+            `[or-quiltt-sync] event ${ev.event_id}: retired pre-dispatch after ` +
+              `${ev.attempts ?? 0} attempts (last_error preserved)`,
+          );
+        }
         failed++;
         continue;
       }
