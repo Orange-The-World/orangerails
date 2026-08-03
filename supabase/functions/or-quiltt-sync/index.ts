@@ -112,10 +112,25 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       // be retired here, unconditionally, before any routing or dispatch.
       // Without this check, a row that succeeds on a high-attempt tick passes
       // through markProcessed with no retirement_reason, leaving the audit slot
-      // NULL. bumpAttempts sets terminal = true (newAttempts >= MAX_ATTEMPTS)
-      // and writes processed_at + retirement_reason in a single UPDATE.
+      // NULL.
+      //
+      // Do NOT call bumpAttempts here. bumpAttempts always writes the error
+      // string argument into last_error, which would destroy the real error
+      // that drove the row to the cap -- precisely the data someone will need
+      // to diagnose these rows. Write processed_at and retirement_reason
+      // directly so last_error is preserved untouched.
       if ((ev.attempts ?? 0) >= MAX_ATTEMPTS) {
-        await bumpAttempts(client, ev, 'max-attempts-pre-dispatch');
+        await client
+          .from('quiltt_webhook_inbox')
+          .update({
+            processed_at:      new Date().toISOString(),
+            retirement_reason: 'max-attempts-pre-dispatch',
+          })
+          .eq('event_id', ev.event_id);
+        console.warn(
+          `[or-quiltt-sync] event ${ev.event_id}: retired pre-dispatch after ` +
+            `${ev.attempts ?? 0} attempts (last_error preserved)`,
+        );
         failed++;
         continue;
       }
@@ -689,18 +704,13 @@ async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, rawErrMsg:
       `[or-quiltt-sync] bumpAttempts UPDATE failed for event ${ev.event_id}: ${error.message}`,
     );
     if (terminal) {
-      // The terminal write includes retirement_reason which may not yet exist
-      // in prod. The column reaches prod only via the two-party hand-apply
-      // (SQLA-00069), not by merging #316: apply_migrations is workflow_dispatch
-      // only and is never triggered by a branch push.
-      // If the column is absent the whole UPDATE is rejected and attempts freezes
-      // at its current count. Fall back to a counter-only bump to preserve
-      // attempts and last_error so the row is not stuck at a stale count.
-      // Note: bumping attempts does NOT advance the row in the batch - ordering
-      // is by received_at, not attempts. The real guard against a frozen queue
-      // is that SQLA-00069 must be applied to prod before this code promotes.
-      // Merging #316 alone does not apply the column; only the two-party
-      // hand-apply does.
+      // retirement_reason column is confirmed present in prod (SQLA-00069
+      // applied; verified by Auditor 2026-08-03). This fallback fires only if
+      // the combined UPDATE fails for any reason other than column absence
+      // (transient DB error, constraint violation, etc.). It preserves attempts
+      // and last_error so the row is not stuck at a stale count. Batch ordering
+      // is by received_at, not attempts, so this fallback does not shift queue
+      // head position in either direction.
       const { error: fbErr } = await client
         .from('quiltt_webhook_inbox')
         .update({ attempts: newAttempts, last_error: errMsg.slice(0, 500) })
