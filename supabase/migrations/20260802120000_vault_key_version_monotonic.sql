@@ -28,3 +28,11 @@ CREATE TRIGGER trg_vault_key_version_monotonic
   BEFORE UPDATE OF vault_key_version ON public.user_vault_meta
   FOR EACH ROW
   EXECUTE FUNCTION public.vault_key_version_must_not_decrease();
+
+-- Enforce the same monotonic constraint on customer_vault_meta
+DROP TRIGGER IF EXISTS trg_vault_key_version_monotonic ON public.customer_vault_meta;
+
+CREATE TRIGGER trg_vault_key_version_monotonic
+  BEFORE UPDATE OF vault_key_version ON public.customer_vault_meta
+  FOR EACH ROW
+  EXECUTE FUNCTION public.vault_key_version_must_not_decrease();
