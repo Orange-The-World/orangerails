@@ -385,6 +385,38 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     ).rejects.toThrow(/out of range/);
   });
 
+  it('rejects when fetchBlock rejects, does not silently advance lastBlockScanned (DL-0629)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'fetchBlock-rejection',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 850_000,
+        lastBlockScanned: 850_000,
+        fetchTip: async () => 850_001,
+        fetchFilter: async (h) => ({
+          height: h,
+          blockHashHex: 'ab'.repeat(32),
+          filter: new Uint8Array([1, 2, 3]),
+        }),
+        fetchBlock: async () => {
+          throw new Error('block-fetch-network-error');
+        },
+        matcher: { matchAny: () => true },
+      }),
+    ).rejects.toThrow('block-fetch-network-error');
+  });
+
   it('skips transactions whose outputs do not pay any of our scripts', async () => {
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
