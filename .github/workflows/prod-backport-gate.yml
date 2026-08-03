@@ -2,10 +2,10 @@ name: prod backport gate
 
 # Why this gate exists.
 #
-# Orange Way and Orange Rails developed a loop that took Orange Rails to 384
-# commits of divergence. From orangerails pull request 377, 2026-07-31, in the
-# team's own words (the number is spelled out because the pre-publish hygiene
-# scan rejects the "PR #<n>" form as a dead reference):
+# This repository developed a loop that took it to 384 commits of divergence
+# between dev and prod. From pull request 377, 2026-07-31, in the team's own
+# words (the number is spelled out because the pre-publish hygiene scan rejects
+# the "PR #<n>" form as a dead reference):
 #
 #   "prod was 26 commits ahead of dev. It was 15 the same morning... That is the
 #    loop: #314 is conflicted, so the normal dev to prod promote is blocked ->
@@ -17,10 +17,9 @@ name: prod backport gate
 # forbids a hotfix that has no path back to dev, which is the single step that
 # regenerates the whole problem.
 #
-# Measured 2026-08-02, the standing cost of the loop:
-#   Orange-Way-Me           14 prod-only commits
-#   orangerails-marketing    5 prod-only commits
-#   Orange-Way-Books         3 prod-only commits
+# Measured here on 2026-08-03, after the 384 was cleared: 1 commit still sits on
+# prod that dev does not have, and dev is 73 commits ahead of prod with the
+# oldest unpromoted commit 11 days old. The loop is smaller, not gone.
 #
 # NOTE: this check is deliberately NOT a required status check yet. See the pull
 # request that introduced it for why (a pull_request workflow only runs if the
@@ -170,12 +169,10 @@ jobs:
           echo "  A prod-only commit with no path back to dev is how branches"
           echo "  permanently diverge: the next dev -> prod promotion conflicts,"
           echo "  so the fix after this one also gets opened straight against prod,"
-          echo "  which deepens the conflict further. Orange Rails reached 384"
+          echo "  which deepens the conflict further. This repository reached 384"
           echo "  commits of divergence this way, and went from 15 to 26 prod-only"
-          echo "  commits in a single day on 2026-07-31. As measured on 2026-08-02"
-          echo "  the backlog still standing is 14 prod-only commits on"
-          echo "  Orange-Way-Me, 5 on orangerails-marketing and 3 on"
-          echo "  Orange-Way-Books."
+          echo "  commits in a single day on 2026-07-31. As measured on 2026-08-03,"
+          echo "  1 prod-only commit is still standing here."
           echo ""
           echo "Why the containment rule did not save you"
           echo "  This check passes automatically when dev already contains every"
