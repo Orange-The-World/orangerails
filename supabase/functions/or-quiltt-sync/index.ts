@@ -14,14 +14,13 @@
  *     Other events (profile.*, account.verified, errors) are marked
  *     processed without action; or wired into the dispatcher later.
  *
- * Auth: requires X-Internal-Worker-Token (constant-time compared to
- * OR_INTERNAL_WORKER_TOKEN env). This endpoint is for OR ops + cron
- * only; never callable from integrators or browsers.
+ * Auth: requires Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>.
+ * This endpoint is for OR ops + cron only; never callable from
+ * integrators or browsers.
  *
  * Env vars:
- *   QUILTT_API_KEY              — Model A master key
- *   OR_INTERNAL_WORKER_TOKEN    — caller auth for this endpoint
- *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY — standard
+ *   QUILTT_API_KEY                          -- Model A master key
+ *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY -- standard (Supabase auto-sets)
  */
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
@@ -74,10 +73,11 @@ interface PendingEvent {
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
-  const callerToken = req.headers.get('X-Internal-Worker-Token');
-  const expected = Deno.env.get('OR_INTERNAL_WORKER_TOKEN');
-  if (!expected) return new Response('worker token not configured', { status: 503 });
-  if (!callerToken || !timingSafeEqual(callerToken, expected)) {
+  const authHeader = req.headers.get('Authorization');
+  const callerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!serviceRoleKey) return new Response('service role key not configured', { status: 503 });
+  if (!callerToken || !timingSafeEqual(callerToken, serviceRoleKey)) {
     return new Response('unauthorized', { status: 401 });
   }
 
