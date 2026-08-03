@@ -272,6 +272,7 @@ export function invoiceToTransaction(inv: StrikeInvoice): StrikeApiTransaction {
     amount: inv.amount.amount,
     description: inv.description,
     reference: inv.correlationId ?? inv.invoiceId,
+    receiverId: inv.receiverId,
   };
 }
 
