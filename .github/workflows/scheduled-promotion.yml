@@ -9,10 +9,11 @@ name: scheduled dev to prod promotion
 # cleared it had reached 384 commits ahead. Nothing has ever opened a promotion
 # on a schedule.
 #
-# The Release seat owns the dev to prod promotion gate in both orgs. From its
-# ROLE.md: "You own the path to production and the ability to undo it." The
-# threshold Release answers to, set 2026-08-02, is 50 commits ahead OR 3 days
-# since the oldest unpromoted commit, whichever comes first.
+# Promotion in this repository is owned by the Release role: it decides when dev
+# goes to prod and it owns backing a promotion out again. This workflow does not
+# change that ownership and does not exercise it. The threshold Release answers
+# to, set for this repository on 2026-08-02, is 50 commits ahead OR 3 days since
+# the oldest unpromoted commit, whichever comes first.
 #
 # This workflow turns the promotion into a default event that Release responds
 # to, rather than something a human has to remember to start. It only ever
@@ -207,9 +208,9 @@ jobs:
             echo "will never enable auto-merge, and will never push to prod. If Release holds"
             echo "the gate and chooses not to promote, the CTO owns the risk decision."
             echo
-            echo "There is no GitHub identity for Release today (both orgs have only two"
-            echo "collaborators), so this pull request carries the \`owner:release\` label and"
-            echo "names Release here instead of setting a GitHub assignee that would be wrong."
+            echo "There is no GitHub account that corresponds to the Release role in this"
+            echo "repository, so this pull request carries the \`owner:release\` label and names"
+            echo "Release here rather than setting a GitHub assignee that would be wrong."
             echo
             echo "## About this automation"
             echo
