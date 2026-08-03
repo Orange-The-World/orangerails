@@ -204,12 +204,12 @@ Deno.test('handleConnectionError: classifies error, stamps status=error, returns
   // Fake client -- records what update() was called with; deliberately returns
   // a Supabase-style error object so the test verifies the catch body does not
   // re-throw on a failed status stamp and still returns the structured result.
-  let updatePayload: Record<string, unknown> | null = null;
+  const updates: Record<string, unknown>[] = [];
   // deno-lint-ignore no-explicit-any
   const fakeClient: any = {
     from: (_table: string) => ({
       update: (data: Record<string, unknown>) => {
-        updatePayload = data;
+        updates.push(data);
         return {
           eq: (_col: string, _val: string) =>
             Promise.resolve({ error: { message: 'db write rejected', code: '42501' } }),
@@ -232,7 +232,7 @@ Deno.test('handleConnectionError: classifies error, stamps status=error, returns
   assert(!result.error.includes('auth failure'), 'raw upstream message must not appear in the error code');
 
   // 2. Stamps status='error' on the connection.
-  assertEquals(updatePayload?.status, 'error');
+  assertEquals(updates[0]?.status, 'error');
 
   // 3. Structured result shape: all required fields present.
   assertEquals(result.connection_id, conn.id);
