@@ -196,8 +196,9 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred rows 
       return {
         select() { return this; },
         is()     { return this; },
-        not()    {
-          // this is the terminal call in step-1 (returns a promise)
+        not()    { return this; },
+        order()  { return this; },
+        limit()  {
           return Promise.resolve({ data: [], error: null });
         },
         in() {
@@ -240,11 +241,12 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred subac
       };
       if (table === 'quiltt_webhook_inbox' && call === 1) {
         // step-1: return two deferred rows
-        chain[Symbol.iterator] = undefined;
         return {
           select() { return this; },
           is()     { return this; },
-          not()    {
+          not()    { return this; },
+          order()  { return this; },
+          limit()  {
             return Promise.resolve({
               data: [
                 { subaccount_id: 'sub-a' },
@@ -294,7 +296,9 @@ Deno.test('reDriveReadyDeferrals: clears opk_deferred_at for OPK-ready subaccoun
         return {
           select() { return this; },
           is()     { return this; },
-          not()    {
+          not()    { return this; },
+          order()  { return this; },
+          limit()  {
             return Promise.resolve({
               data: [{ subaccount_id: 'sub-a' }, { subaccount_id: 'sub-b' }],
               error: null,
@@ -364,7 +368,9 @@ Deno.test('reDriveReadyDeferrals: returns error string when first query fails, d
       return {
         select() { return this; },
         is()     { return this; },
-        not()    {
+        not()    { return this; },
+        order()  { return this; },
+        limit()  {
           return Promise.resolve({ data: null, error: { message: 'connection timeout' } });
         },
       };
