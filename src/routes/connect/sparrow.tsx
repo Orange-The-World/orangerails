@@ -20,7 +20,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
-import { STEALTH_PROTOCOL_VERSION } from "@/stealth/lib/postmessage";
+import { sendInitOnReady } from "./_sparrow-init-handler";
 import {
   ArrowRight,
   CheckCircle2,
@@ -129,36 +129,23 @@ function SparrowConnectPage() {
     let intervalId: ReturnType<typeof setInterval>;
 
     const handler = async (event: MessageEvent) => {
-      if (event.source !== w) return;
-      if (event.origin !== selfOrigin) return;
-      const msg = event.data as { type?: string };
-      if (msg?.type !== "OR_STEALTH_READY" || sent) return;
-      sent = true;
-      window.removeEventListener("message", handler);
-      clearInterval(intervalId);
-      try {
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
-        if (!session) return;
-        const keyB64 = await exportStealthKeyForWidget();
-        w.postMessage(
-          {
-            type: "OR_STEALTH_INIT",
-            protocol_version: STEALTH_PROTOCOL_VERSION,
-            app_slug: "or",
-            app_user_id: session.user.id,
-            mode: "add",
-            or_stealth_key_b64: keyB64,
-            return_callback_origin: selfOrigin,
-            access_token: session.access_token,
-            gap_limit: 250,
-          },
-          selfOrigin,
-        );
-      } catch (err) {
-        // Non-fatal: popup is open and falls through to DirectLoadCard.
-        console.warn("[sparrow] Could not send OR_STEALTH_INIT:", err);
+      if (sent) return;
+      const didSend = await sendInitOnReady(
+        event,
+        w,
+        selfOrigin,
+        async () => {
+          const {
+            data: { session },
+          } = await supabase.auth.getSession();
+          return session;
+        },
+        exportStealthKeyForWidget,
+      );
+      if (didSend) {
+        sent = true;
+        window.removeEventListener("message", handler);
+        clearInterval(intervalId);
       }
     };
 
