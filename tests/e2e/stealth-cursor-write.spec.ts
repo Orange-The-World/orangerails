@@ -15,7 +15,7 @@
  * CF Pages build (import.meta.env.DEV = false, isForceCursor tree-shaken)
  * so the skip is expected in that context, not a lie.
  *
- * Full invocation (local or dedicated CI job):
+ * Full invocation (local or a dedicated CI job with PLAYWRIGHT_WITH_VITE_DEV=1):
  *   PLAYWRIGHT_WITH_VITE_DEV=1 \
  *   OR_API_BASE_URL=https://fzwmnzmtqidumdqjdddz.supabase.co \
  *   OR_TEST_PLATFORM_API_KEY=<key> \
