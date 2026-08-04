@@ -437,6 +437,7 @@ jobs:
   rls-test:
     name: RLS isolation test (OR-21)
     runs-on: ubuntu-latest
+    environment: dev-tests
     # Why this job exists: audit_entries cross-tenant RLS isolation had zero
     # test coverage after agent-membership retirement removed the only fixture
     # that seeded the table. The test lives at tests/security/rls.test.ts and
