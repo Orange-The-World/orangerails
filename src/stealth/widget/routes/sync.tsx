@@ -288,8 +288,8 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    that found zero new transactions) never reach
         //    or-stealth-transactions-store, so without this call their
         //    cursor never advanced and every sync rescanned the whole
-        //    birthday-to-tip window. Best-effort: a failure here must not
-        //    fail the sync, it only widens the next rescan window.
+        //    birthday-to-tip window. A failure here must surface loudly:
+        //    a NULL cursor silently restarts every future sync from scratch.
         //
         //    Guard: only write if the cursor actually advanced. runSync
         //    returns the previous cursor unchanged when fromHeight > tip
@@ -301,38 +301,34 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             app_user_id: init.app_user_id,
             last_block_scanned: result.lastBlockScanned,
           };
-          try {
-            if (init.proxy_base_url && parent) {
-              const r = await proxyFetch({
-                parent,
-                parentOrigin: init.return_callback_origin,
-                fn: "or-stealth-envelope-update",
-                body: cursorBody,
-              });
-              if (!r.ok) {
-                console.warn(`[stealth/sync] cursor update failed: ${r.status} ${r.bodyText}`);
-              }
-            } else {
-              const headers: Record<string, string> = {
-                "Content-Type": "application/json",
-              };
-              if (init.access_token) {
-                headers["Authorization"] = `Bearer ${init.access_token}`;
-              }
-              const cursorResp = await fetch(
-                resolveFunctionUrl("or-stealth-envelope-update", init.proxy_base_url),
-                {
-                  method: "POST",
-                  headers,
-                  body: JSON.stringify(cursorBody),
-                },
-              );
-              if (!cursorResp.ok) {
-                console.warn(`[stealth/sync] cursor update failed: ${cursorResp.status}`);
-              }
+          if (init.proxy_base_url && parent) {
+            const r = await proxyFetch({
+              parent,
+              parentOrigin: init.return_callback_origin,
+              fn: "or-stealth-envelope-update",
+              body: cursorBody,
+            });
+            if (!r.ok) {
+              throw new Error(`[stealth/sync] cursor update failed: ${r.status} ${r.bodyText}`);
             }
-          } catch (e) {
-            console.warn("[stealth/sync] cursor update failed:", e);
+          } else {
+            const headers: Record<string, string> = {
+              "Content-Type": "application/json",
+            };
+            if (init.access_token) {
+              headers["Authorization"] = `Bearer ${init.access_token}`;
+            }
+            const cursorResp = await fetch(
+              resolveFunctionUrl("or-stealth-envelope-update", init.proxy_base_url),
+              {
+                method: "POST",
+                headers,
+                body: JSON.stringify(cursorBody),
+              },
+            );
+            if (!cursorResp.ok) {
+              throw new Error(`[stealth/sync] cursor update failed: ${cursorResp.status}`);
+            }
           }
         }
 
