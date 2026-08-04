@@ -134,7 +134,9 @@ jobs:
           # - git diff fails for any reason: fail closed, deploy all.
           # - Otherwise: only deploy functions whose directory changed and still exists.
           BEFORE="${{ github.event.before }}"
-          ALL_FUNCS=$(ls supabase/functions/ | grep -v '^_' || true)
+          # Directories only. `ls` also returns plain files that live in this
+          # directory, and a file name is not a valid Supabase function name.
+          ALL_FUNCS=$(find supabase/functions -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -v '^_' | sort || true)
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [[ "$BEFORE" =~ ^0+$ ]]; then
             DEPLOY_FUNCS="$ALL_FUNCS"
