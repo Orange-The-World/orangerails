@@ -102,6 +102,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
   });
   const [done, setDone] = useState<{ txCount: number; bytes: number; windowExhausted: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isFirstSync, setIsFirstSync] = useState<boolean | null>(null);
 
   function postWidgetError(code: StealthErrorCode, message: string, retryable: boolean) {
     if (!parent) return;
@@ -195,6 +196,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           last_block_scanned: number | null;
           wallet_birthday_plaintext: string | null;
         };
+        setIsFirstSync(envJson.last_block_scanned === null);
 
         // We need a birthday-height. In live mode we ask the block source
         // for the first block at-or-after the birthday date; in mock mode
@@ -423,6 +425,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
       stage={progress.stage as StealthStage}
       percent={progress.percent}
       detailOverride={progress.detail}
+      isFirstSync={isFirstSync ?? undefined}
     />
   );
 }
