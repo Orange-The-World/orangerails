@@ -174,8 +174,11 @@ async function blinkPost<T>(apiKey: string, query: string, variables?: Record<st
     body: JSON.stringify({ query, variables: variables ?? {} }),
   });
   if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`Blink API ${res.status}: ${detail.slice(0, 200)}`);
+    const text = await res.text().catch(() => '');
+    let gqlMsg: string | undefined;
+    try { gqlMsg = (JSON.parse(text) as { errors?: { message: string }[] }).errors?.[0]?.message; } catch { /* ignore */ }
+    console.error(`[blink] HTTP ${res.status}${gqlMsg ? `: ${gqlMsg}` : ''}`);
+    throw new Error(`Blink API ${res.status}`);
   }
   const json = await res.json() as { data?: T; errors?: { message: string }[] };
   if (json.errors?.length) throw new Error(`Blink GraphQL: ${json.errors[0].message}`);
