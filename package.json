@@ -98,7 +98,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "@vitejs/plugin-react-swc": "^4.3.0",
     "@vitest/ui": "^4.1.4",
-    "ccxt": "4.5.56",
+    "ccxt": "4.4.30",
     "eslint": "^9.32.0",
     "eslint-config-prettier": "^10.1.1",
     "eslint-plugin-prettier": "^5.2.6",
