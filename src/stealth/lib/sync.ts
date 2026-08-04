@@ -707,6 +707,20 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('fetching_filters', 100));
   emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
 
+  // Heights near tip often return null because the filter producer lags the
+  // block source. Returning tip unconditionally as the cursor would mark those
+  // heights as scanned and skip them permanently on the next sync, missing any
+  // transactions they contain. Walk forward from fromHeight and stop at the
+  // first null to find the highest height we can safely advance the cursor to.
+  // This mirrors the reasoning at the early-return path above (req 2 of
+  // issue #335): the chain tip is never an accurate cursor when heights were
+  // skipped because their filters were not yet produced.
+  let lastContiguousScanned = fromHeight - 1;
+  for (let h = fromHeight; h <= tip; h++) {
+    if (filterCache.get(h) === null) break;
+    lastContiguousScanned = h;
+  }
+
   // The concurrent filter fetch above pushes hits in COMPLETION order,
   // not chain order. The UTXO tracker below is order-sensitive: a spend
   // processed before the receive that funded it is silently missed.
@@ -1100,7 +1114,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   return {
     txCount: normalized.length,
-    lastBlockScanned: tip,
+    lastBlockScanned: lastContiguousScanned,
     bytesDownloaded,
     sealedTransactions,
     normalized,
