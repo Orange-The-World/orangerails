@@ -963,3 +963,141 @@ describe('live fetchers', () => {
     expect(h).toBeLessThan(900_000);
   });
 });
+
+describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
+  // sync.tsx:298 guards the or-stealth-envelope-update POST with:
+  //
+  //   if (!useMock && result.lastBlockScanned > (envJson.last_block_scanned ?? -1))
+  //
+  // The correctness of that guard depends entirely on runSync returning the
+  // STORED cursor unchanged when the wallet is already current (fromHeight > tip).
+  // If runSync returned tip instead, the guard would be true and future syncs
+  // would silently skip blocks that were never scanned.
+  //
+  // These tests pin that contract at the library boundary so the route-level
+  // guard can be reasoned about in isolation.
+
+  it('returns stored cursor unchanged when already at tip (fromHeight > tip)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cursor-guard-at-tip',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 850_000;
+    // tip == storedCursor => fromHeight = max(birthdayHeight, storedCursor + 1)
+    //                                   = 850_001 > 850_000 = tip => short-circuit.
+    const fetchFilter = vi.fn();
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => storedCursor,
+      fetchFilter,
+      fetchBlock,
+    });
+
+    // Cursor must be the stored value, not tip. This is what keeps
+    // sync.tsx:298 from firing or-stealth-envelope-update incorrectly.
+    expect(result.lastBlockScanned).toBe(storedCursor);
+    expect(result.txCount).toBe(0);
+    expect(result.sealedTransactions).toHaveLength(0);
+    // Short-circuit must not touch the network.
+    expect(fetchFilter).not.toHaveBeenCalled();
+    expect(fetchBlock).not.toHaveBeenCalled();
+  });
+
+  it('returns stored cursor unchanged when tip is below stored cursor', async () => {
+    // Edge: tip regressed (reorg scenario or test clock). Short-circuit still
+    // fires and cursor must still come back as the stored value.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cursor-guard-tip-below',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 860_000;
+    const fetchFilter = vi.fn();
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => 855_000, // tip < storedCursor
+      fetchFilter,
+      fetchBlock,
+    });
+
+    expect(result.lastBlockScanned).toBe(storedCursor);
+    expect(result.txCount).toBe(0);
+    expect(fetchFilter).not.toHaveBeenCalled();
+    expect(fetchBlock).not.toHaveBeenCalled();
+  });
+
+  it('advances cursor and fetches filters when behind tip (positive path)', async () => {
+    // Complement of the two short-circuit tests: when the wallet is BEHIND
+    // tip the guard must NOT short-circuit. Scanning runs, the filter fetch
+    // is invoked, and the cursor comes back ABOVE the stored value. That is
+    // the case where sync.tsx:298 must fire or-stealth-envelope-update.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cursor-guard-advance',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 800_000;
+    const tip = 800_003;
+    const fakeFilter = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const zeroHashHex = bytesToHex(new Uint8Array(32));
+
+    // fetchFilter returns a fixture for every scanned height; the matcher
+    // rejects all of them, so no block is ever fetched but every height is
+    // still walked and the cursor advances to tip.
+    const fetchFilter = vi.fn(async (h: number) => ({
+      height: h,
+      blockHashHex: zeroHashHex,
+      filter: fakeFilter,
+    }));
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => tip,
+      fetchFilter,
+      fetchBlock,
+      matcher: { matchAny: () => false },
+    });
+
+    // Guard did NOT short-circuit: filters were fetched for the scan range.
+    expect(fetchFilter).toHaveBeenCalled();
+    // No filter matched, so no block fetch happened...
+    expect(fetchBlock).not.toHaveBeenCalled();
+    // ...but the cursor still advanced above the stored value, up to tip.
+    expect(result.lastBlockScanned).toBeGreaterThan(storedCursor);
+    expect(result.lastBlockScanned).toBe(tip);
+    expect(result.txCount).toBe(0);
+  });
+});
