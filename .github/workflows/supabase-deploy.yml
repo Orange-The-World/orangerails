@@ -212,6 +212,8 @@ jobs:
             {
               echo "## :warning: ${PENDING} unapplied migration(s) on \`${SUPABASE_REF}\`"
               echo ""
+              echo ":white_check_mark: Edge functions deployed successfully. Only the schema is out of sync."
+              echo ""
               printf '%b' "${PENDING_NAMES}"
               echo ""
               echo "Schema is **out of sync**. Nothing was applied by this run."
@@ -221,8 +223,16 @@ jobs:
               echo "| dev | DBA applies and verifies |"
               echo "| prod | two-party: founder + CTO |"
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- schema out of sync."
-            exit 1
+            # On a workflow_dispatch with apply_migrations=true the apply step below
+            # handles these migrations. Report as informational and let it proceed.
+            # On any other trigger (push, or dispatch without apply), fail closed.
+            if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ inputs.apply_migrations }}" != "true" ]; then
+              echo "::error::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- schema out of sync."
+              exit 1
+            else
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "Apply step running next -- see below." >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
             echo "Schema in sync on ${SUPABASE_REF}." >> "$GITHUB_STEP_SUMMARY"
           fi
