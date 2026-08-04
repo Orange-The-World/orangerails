@@ -301,3 +301,22 @@ jobs:
 
           echo
           echo "── ${APPLIED_COUNT} migration(s) applied this run ──"
+
+      - name: Notify Zulip on deploy failure
+        if: failure()
+        env:
+          ZULIP_BOT_EMAIL: ${{ secrets.ZULIP_BOT_EMAIL }}
+          ZULIP_BOT_KEY: ${{ secrets.ZULIP_BOT_KEY }}
+          ZULIP_BASE_URL: ${{ vars.ZULIP_BASE_URL }}
+          ZULIP_ALERT_STREAM: ${{ vars.ZULIP_ALERT_STREAM }}
+        run: |
+          if [ -z "${ZULIP_BOT_EMAIL}" ] || [ -z "${ZULIP_BOT_KEY}" ] || [ -z "${ZULIP_BASE_URL}" ] || [ -z "${ZULIP_ALERT_STREAM}" ]; then
+            echo "::error::ZULIP_BOT_EMAIL, ZULIP_BOT_KEY, ZULIP_BASE_URL, or ZULIP_ALERT_STREAM is unset; cannot send failure alert"
+            exit 1
+          fi
+          curl -sSf -X POST "${ZULIP_BASE_URL}/api/v1/messages" \
+            -u "${ZULIP_BOT_EMAIL}:${ZULIP_BOT_KEY}" \
+            --data-urlencode "type=stream" \
+            --data-urlencode "to=${ZULIP_ALERT_STREAM}" \
+            --data-urlencode "topic=supabase-deploy failure (${{ github.ref_name }})" \
+            --data-urlencode "content=:red_circle: **supabase-deploy / ${{ github.job }}** failed on \`${{ github.ref_name }}\` sha \`${{ github.sha }}\`. [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
