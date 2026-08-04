@@ -39,6 +39,18 @@ export default defineConfig({
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
+  // webServer is only active when PLAYWRIGHT_WITH_VITE_DEV=1.
+  // The stealth cursor-write spec overrides baseURL to http://localhost:5173
+  // so only that suite hits the local server; other suites keep their
+  // configured PLAYWRIGHT_BASE_URL (dev.orangerails.com or a CF Pages preview).
+  webServer: WITH_VITE_DEV ? {
+    // VITE_OR_STEALTH_ALLOWED_ORIGINS must include the parent-page origin
+    // so the widget accepts the OR_STEALTH_INIT postMessage from localhost.
+    command: 'VITE_OR_STEALTH_ALLOWED_ORIGINS=http://localhost:5173 bun run dev',
+    url: 'http://localhost:5173',
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+  } : undefined,
   projects: [
     {
       name: 'chromium',
