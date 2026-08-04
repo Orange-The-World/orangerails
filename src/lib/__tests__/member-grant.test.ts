@@ -34,7 +34,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 function makeGrant(wrappedMekCiphertextB64: string) {
   return {
     memberUserId: "co-admin-user-id",
-    workspaceKeyId: "ws-key-1",
+    dataKeyId: "data-key-1",
     wrappedMekCiphertextB64,
   };
 }
