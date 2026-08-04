@@ -44,6 +44,7 @@ import { HKDF_CONTEXTS, derivePqcSecretWrapKey } from "./key-derivation";
 import { base64ToBytes } from "./key-wrapping";
 import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } from "./pqc";
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
+import { signToBase64, verifyFromBase64 } from "./signatures";
 
 // ------------------------------------------------------------------
 // Encoding helpers
@@ -245,12 +246,13 @@ export async function grantCoAdmin(params: {
   ownerUserId: string;
   ownerSaltB64: string;
   ownerPassword: string;
+  ownerSigSecretWrapped: string;
   targetUserId: string;
   targetKemPubB64: string;
   existingKeyId: string | null;
   supabase: CoAdminSupabaseLike;
 }): Promise<GrantResult> {
-  const { ownerUserId, ownerSaltB64, ownerPassword, targetUserId, targetKemPubB64, supabase } =
+  const { ownerUserId, ownerSaltB64, ownerPassword, ownerSigSecretWrapped, targetUserId, targetKemPubB64, supabase } =
     params;
 
   // Step a , derive raw MEK bytes from the re-confirmed password.
@@ -287,13 +289,36 @@ export async function grantCoAdmin(params: {
   // Step e , wrap the 64-byte blob for the recipient's KEM public key.
   const recipientPub = base64ToBytes(targetKemPubB64);
   const wrappedBytes = await wrapBlob64(blob, recipientPub);
+  const wrappedCt = bytesToBase64(wrappedBytes);
+
+  // Step e.1 , ML-DSA-65 sign the grant binding so neither the recipient nor
+  // the wrapped ciphertext can be swapped after the fact. The signed payload
+  // binds all four fields: context, grantee user id, workspace key id, and the
+  // wrapped ciphertext bytes. All four must match at verify time.
+  const mekHkdf = await crypto.subtle.importKey(
+    "raw",
+    mekRaw,
+    { name: "HKDF" },
+    false,
+    ["deriveBits"],
+  );
+  const pqcWrapKey = await derivePqcSecretWrapKey(mekHkdf, ownerSaltB64);
+  const ownerSigSecretBytes = await unwrapPqcSecretKey(pqcWrapKey, ownerSigSecretWrapped);
+  const sigPayload = JSON.stringify({
+    ctx: "orangerails:add-member:mek-wrap:v1",
+    granteeUserId: targetUserId,
+    workspaceKeyId,
+    wrappedCt,
+  });
+  const { signature: grantSig } = await signToBase64(ownerSigSecretBytes, sigPayload);
 
   // Step f , insert wrapped_data_keys row.
   const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
     data_key_id: workspaceKeyId,
     recipient_user_id: targetUserId,
-    wrapped_ciphertext: bytesToBase64(wrappedBytes),
+    wrapped_ciphertext: wrappedCt,
     algorithm: "hybrid-x25519-mlkem768-blob64",
+    grant_sig: grantSig,
   });
   if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${wdkErr}`);
 
@@ -328,8 +353,40 @@ export async function loadAdminSubkeysDirect(params: {
   kemSecretWrapped: string;
   adminMek: CryptoKey;
   adminSaltB64: string;
+  grantSigB64?: string | null;
+  ownerSigPubB64?: string;
+  granteeUserId?: string;
+  ownerWorkspaceKeyId?: string;
 }): Promise<AdminSubkeys> {
-  const { wrappedCiphertextB64, kemSecretWrapped, adminMek, adminSaltB64 } = params;
+  const { wrappedCiphertextB64, kemSecretWrapped, adminMek, adminSaltB64,
+          grantSigB64, ownerSigPubB64, granteeUserId, ownerWorkspaceKeyId } = params;
+
+  // Step 0 , verify the grant signature before any decryption (fail-closed).
+  // Both a missing signature and an invalid signature cause an immediate throw.
+  // Decryption only proceeds AFTER a verified signature. Reject is the default
+  // branch, not an else.
+  if (!grantSigB64) {
+    throw new Error(
+      "Co-admin grant signature missing: refusing to decrypt wrapped subkeys.",
+    );
+  }
+  if (!ownerSigPubB64 || !granteeUserId || !ownerWorkspaceKeyId) {
+    throw new Error(
+      "Co-admin grant binding fields missing: ownerSigPubB64, granteeUserId, and ownerWorkspaceKeyId are required.",
+    );
+  }
+  const verifyPayload = JSON.stringify({
+    ctx: "orangerails:add-member:mek-wrap:v1",
+    granteeUserId,
+    workspaceKeyId: ownerWorkspaceKeyId,
+    wrappedCt: wrappedCiphertextB64,
+  });
+  const sigValid = await verifyFromBase64(ownerSigPubB64, verifyPayload, grantSigB64);
+  if (!sigValid) {
+    throw new Error(
+      "Co-admin grant signature invalid: refusing to decrypt wrapped subkeys.",
+    );
+  }
 
   // Unwrap the admin's PQC secret key from their own vault.
   const wrapKey = await derivePqcSecretWrapKey(adminMek, adminSaltB64);
