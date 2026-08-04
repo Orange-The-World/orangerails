@@ -41,8 +41,15 @@ on:
   workflow_dispatch:
 
 # Least privilege, and explicit because the repository default for the
-# workflow token is read-only. contents: write pushes the automation branch,
-# pull-requests: write opens/updates the pull request and enables auto-merge.
+# workflow token is read-only. contents: write pushes the automation branch.
+#
+# pull-requests: write is NOT enough to OPEN the pull request. This repository
+# reports can_approve_pull_request_reviews=false - the setting "Allow GitHub
+# Actions to create and approve pull requests" - and it governs CREATE as well
+# as approve. With it off, gh pr create on the built-in GITHUB_TOKEN is refused
+# no matter what permissions: says. So the pull-request steps below run on
+# FLEET_PAT (the the-Orange-Juicer machine user) and the toggle stays off,
+# which is the safer of the two states.
 permissions:
   contents: write
   pull-requests: write
@@ -186,11 +193,31 @@ jobs:
           } > "${body}"
           echo "path=${body}" >> "$GITHUB_OUTPUT"
 
+      - name: Require FLEET_PAT
+        if: steps.compare.outputs.count != '0'
+        env:
+          FLEET_PAT: ${{ secrets.FLEET_PAT }}
+        run: |
+          set -euo pipefail
+          # Fail here, loudly, rather than two steps later inside gh pr create
+          # where the same failure reads like a permissions bug in this file.
+          if [ -z "${FLEET_PAT:-}" ]; then
+            echo "::error title=FLEET_PAT is not set::There is work to back-merge but this workflow cannot open the pull request."
+            {
+              echo "### FLEET_PAT is missing"
+              echo
+              echo "There are commits on prod that dev does not have, but the repository secret"
+              echo "FLEET_PAT is not set, so the back-merge pull request cannot be opened."
+              echo "Add it under Settings, Secrets and variables, Actions."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
       - name: Open or update the back-merge pull request
         id: pr
         if: steps.compare.outputs.count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.FLEET_PAT }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -212,9 +239,9 @@ jobs:
                 echo "### Could not open the back-merge pull request"
                 echo
                 echo "The branch \`${BACKMERGE_BRANCH}\` was pushed and is up to date with \`${SOURCE_BRANCH}\`,"
-                echo "but opening the pull request failed. The usual cause is the repository"
-                echo "setting **Allow GitHub Actions to create and approve pull requests** being"
-                echo "off. Open the pull request by hand from that branch into \`${BASE_BRANCH}\`."
+                echo "but opening the pull request failed. FLEET_PAT is present, so the usual"
+                echo "cause is that its account lost write access here, or the token expired."
+                echo "Open the pull request by hand from that branch into \`${BASE_BRANCH}\`."
               } >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
@@ -227,7 +254,7 @@ jobs:
       - name: Enable auto-merge when the back-merge is clean
         if: steps.compare.outputs.count != '0' && steps.trial.outputs.clean == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.FLEET_PAT }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
