@@ -1,21 +1,16 @@
 /**
- * DL-0619 proof-only RED test.
+ * DL-0619 - member grant signature contract.
  *
  * Requirement: when an admin adds a co-admin, the wrapped MEK grant handed to
  * that co-admin must be signed with the granting admin's ML-DSA-65 key, and the
- * read path must verify that signature before trusting the wrapped MEK.
+ * read path must verify that signature before trusting the wrapped MEK. The
+ * wrapped MEK must be bound to the signature, so it cannot be swapped for a
+ * different wrapped MEK of the same length without invalidating the signature.
  *
- * Today `signToBase64` has zero production callers and the co-admin wrap is
- * stored unsigned, so a party who can write the grant row can SUBSTITUTE a
- * different wrapped MEK and the app would accept it. That is the hole this test
- * closes.
- *
- * This pins the contract of the not-yet-built seam in `src/lib/member-grant.ts`.
- * It is RED until that helper and its production call sites land. When they do,
- * the substitution and unsigned cases below must fail for exactly one reason:
- * ML-DSA-65 signature verification returning false. The substituted grant uses a
- * wrapped MEK of the SAME LENGTH as the honest one, so no shape or length guard
- * can be what rejects it.
+ * These cases pin that contract for `src/lib/member-grant.ts`: a correctly
+ * signed grant is accepted; a substituted wrapped MEK of the SAME LENGTH is
+ * rejected, so no shape or length guard can be the reason, only ML-DSA-65
+ * signature verification returning false; and an empty signature is rejected.
  */
 import { describe, expect, it } from "vitest";
 import { generateSigKeyPair } from "../signatures";
