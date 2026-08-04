@@ -253,6 +253,31 @@ Distinguish these three cases by the console:
    and remember the first sync of an old wallet legitimately downloads a
    lot of filters (§5).
 
+## 9b. The cursor write fell back past your proxy
+
+When the widget runs with `proxy_base_url`, the end-of-sync cursor write
+goes through your `OR_STEALTH_PROXY_REQUEST` handler like every other
+call. A handler set up before `or-stealth-envelope-update` existed will
+not recognise the message and will never answer it, so that request is
+capped at 15 seconds rather than the normal two-minute timeout: the
+cursor write is a single lightweight row update, and failing fast leaves
+room to try a second path.
+
+That second path is a direct call to `or-stealth-envelope-update`,
+authenticated with the signed-in user's JWT (the edge function accepts
+user-JWT auth as well as the platform key). It runs only when a user
+token is present, and it announces itself once on the console:
+
+    [stealth/sync] proxy cursor write failed (...); falling back to a
+    direct user-JWT call to or-stealth-envelope-update. This bypasses
+    your OR_STEALTH_PROXY_REQUEST handler.
+
+If you see that line, sync is working but your proxy is not carrying
+this function. Add `or-stealth-envelope-update` to the handler's
+allowlist and the warning stops. If both paths fail, the thrown error
+carries both causes: the proxy error and the fallback status or network
+error, in one message.
+
 ## 10. Mock mode: reproduce without a real wallet
 
 Append `?mock=1` to the widget URL to run the sync loop against built-in
