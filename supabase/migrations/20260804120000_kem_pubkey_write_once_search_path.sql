@@ -1,6 +1,7 @@
--- Pin search_path on enforce_kem_public_key_write_once.
--- The original migration applied without SET search_path, leaving proconfig NULL.
--- This replacement adds the pin without touching the already-applied migration file.
+-- DL-0610: harden enforce_kem_public_key_write_once with explicit search_path
+-- Verified on dev (fzwmnzmtqidumdqjdddz): proconfig was NULL, no search_path set.
+-- New migration rather than editing the already-applied original.
+
 CREATE OR REPLACE FUNCTION public.enforce_kem_public_key_write_once()
   RETURNS trigger
   LANGUAGE plpgsql
