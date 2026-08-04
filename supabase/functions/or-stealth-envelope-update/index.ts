@@ -31,6 +31,7 @@ import {
   getCallerPlatformId,
 } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { advanceCursor, isAdvanceCursorError } from './cursor.ts';
 
 interface EnvelopeUpdateRequestBody {
   connection_id?: string;
@@ -114,55 +115,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
-    // Advance the cursor atomically. The UPDATE includes the forward-only
-    // condition as a PostgREST filter so the write fires only when the stored
-    // value is NULL (never set) or strictly less than the incoming tip.
-    // Two concurrent callers carrying different tips cannot both advance the
-    // cursor to their own values: the one that arrives second finds stored >=
-    // its tip and the UPDATE is a no-op, leaving the cursor at max(both).
-    // A read-then-unconditional-write pair cannot give this guarantee because
-    // nothing locks the row between the SELECT and the UPDATE: both callers
-    // can pass an application-level comparison and the later UPDATE wins
-    // regardless of which tip it carries.
-    const { data: updatedRow, error: updErr } = await ctx.serviceClient
-      .from('stealth_connections')
-      .update({
-        last_block_scanned: body.last_block_scanned,
-        last_sync_at: new Date().toISOString(),
-      })
-      .eq('platform_id', callerPlatformId)
-      .eq('id', body.connection_id)
-      .or(`last_block_scanned.lt.${body.last_block_scanned},last_block_scanned.is.null`)
-      .select('last_block_scanned')
-      .maybeSingle();
-    if (updErr) {
-      console.error('[or-stealth-envelope-update] update failed:', updErr);
-      return jsonResponse({ error: 'Failed to update cursor' }, 500, cors);
+    const cursorResult = await advanceCursor(
+      ctx.serviceClient,
+      callerPlatformId,
+      body.connection_id,
+      body.last_block_scanned,
+    );
+    if (isAdvanceCursorError(cursorResult)) {
+      return jsonResponse({ error: cursorResult.error }, cursorResult.status, cors);
     }
-
-    // When 0 rows matched the conditional filter, the stored cursor was already
-    // at or above the incoming tip. Re-read the current row so the response
-    // reflects the actual stored cursor, not the pre-UPDATE snapshot which may
-    // have been advanced further by a concurrent caller between our SELECT and
-    // this UPDATE.
-    let effectiveCursor: number;
-    if (updatedRow !== null) {
-      effectiveCursor = body.last_block_scanned;
-    } else {
-      const { data: freshRow, error: freshErr } = await ctx.serviceClient
-        .from('stealth_connections')
-        .select('last_block_scanned')
-        .eq('platform_id', callerPlatformId)
-        .eq('id', body.connection_id)
-        .maybeSingle();
-      if (freshErr || !freshRow) {
-        console.error('[or-stealth-envelope-update] post-update read failed:', freshErr);
-        return jsonResponse({ error: 'Failed to read cursor after update' }, 500, cors);
-      }
-      // NULL is impossible here: the UPDATE filter includes last_block_scanned.is.null,
-      // so a null cursor always triggers the UPDATE and updatedRow is non-null.
-      effectiveCursor = (freshRow.last_block_scanned as number | null) ?? 0;
-    }
+    const effectiveCursor = cursorResult.effectiveCursor;
 
     const resp: EnvelopeUpdateResponseBody = {
       connection_id: body.connection_id,
