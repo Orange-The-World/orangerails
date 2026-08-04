@@ -707,6 +707,18 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('fetching_filters', 100));
   emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
 
+  // Determine the highest block we can claim to have fully scanned.
+  // If any filter fetch returned null (CDN 404), we must not advance the
+  // cursor past that point: the next sync must retry from the first gap.
+  // Walk forward from fromHeight and stop at the first null entry.
+  let lastClean = tip;
+  for (let h = fromHeight; h <= tip; h++) {
+    if (filterCache.get(h) === null) {
+      lastClean = h - 1;
+      break;
+    }
+  }
+
   // The concurrent filter fetch above pushes hits in COMPLETION order,
   // not chain order. The UTXO tracker below is order-sensitive: a spend
   // processed before the receive that funded it is silently missed.
@@ -1100,7 +1112,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   return {
     txCount: normalized.length,
-    lastBlockScanned: tip,
+    lastBlockScanned: lastClean,
     bytesDownloaded,
     sealedTransactions,
     normalized,
