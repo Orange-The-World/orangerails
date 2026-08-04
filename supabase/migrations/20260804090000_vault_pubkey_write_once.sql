@@ -79,3 +79,8 @@ CREATE TRIGGER trg_vault_meta_no_direct_delete
   BEFORE DELETE ON public.user_vault_meta
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_vault_meta_no_direct_delete();
+
+-- Drop the predecessor that guarded kem_public_key only; superseded by this migration.
+-- #542 targeted enforce_kem_public_key_write_once() which is removed here; close that PR.
+DROP TRIGGER IF EXISTS trg_user_vault_meta_kem_write_once ON public.user_vault_meta;
+DROP FUNCTION IF EXISTS public.enforce_kem_public_key_write_once();
