@@ -194,6 +194,7 @@ jobs:
             --data-binary "@$PAYLOAD" | jq -r '.[].version' | sort -u)
 
           PENDING=0
+          PENDING_NAMES=""
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
             BASENAME=$(basename "$FILE")
             VERSION="${BASENAME%%_*}"
@@ -201,17 +202,29 @@ jobs:
               continue
             fi
             echo "PENDING on ${SUPABASE_REF}: ${BASENAME}"
+            PENDING_NAMES="${PENDING_NAMES}- \`${BASENAME}\`\n"
             PENDING=$((PENDING + 1))
           done
 
           echo
           echo "${PENDING} migration(s) pending on ${SUPABASE_REF}."
           if [ "$PENDING" -gt 0 ]; then
-            echo "Nothing was applied. Schema changes are applied by hand:"
-            echo "  dev  -> the DBA applies and verifies."
-            echo "  prod -> two party, the founder plus the CTO."
-            echo "To apply from CI instead, re-run this workflow via workflow_dispatch"
-            echo "with apply_migrations = true."
+            {
+              echo "## :warning: ${PENDING} unapplied migration(s) on \`${SUPABASE_REF}\`"
+              echo ""
+              printf '%b' "${PENDING_NAMES}"
+              echo ""
+              echo "Schema is **out of sync**. Nothing was applied by this run."
+              echo ""
+              echo "| env | who applies |"
+              echo "| --- | --- |"
+              echo "| dev | DBA applies and verifies |"
+              echo "| prod | two-party: founder + CTO |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- schema out of sync."
+            exit 1
+          else
+            echo "Schema in sync on ${SUPABASE_REF}." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Apply pending DB migrations via Management API
