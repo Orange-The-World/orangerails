@@ -1048,4 +1048,56 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(fetchFilter).not.toHaveBeenCalled();
     expect(fetchBlock).not.toHaveBeenCalled();
   });
+
+  it('advances cursor and fetches filters when behind tip (positive path)', async () => {
+    // Complement of the two short-circuit tests: when the wallet is BEHIND
+    // tip the guard must NOT short-circuit. Scanning runs, the filter fetch
+    // is invoked, and the cursor comes back ABOVE the stored value. That is
+    // the case where sync.tsx:298 must fire or-stealth-envelope-update.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cursor-guard-advance',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 800_000;
+    const tip = 800_003;
+    const fakeFilter = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const zeroHashHex = bytesToHex(new Uint8Array(32));
+
+    // fetchFilter returns a fixture for every scanned height; the matcher
+    // rejects all of them, so no block is ever fetched but every height is
+    // still walked and the cursor advances to tip.
+    const fetchFilter = vi.fn(async (h: number) => ({
+      height: h,
+      blockHashHex: zeroHashHex,
+      filter: fakeFilter,
+    }));
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => tip,
+      fetchFilter,
+      fetchBlock,
+      matcher: { matchAny: () => false },
+    });
+
+    // Guard did NOT short-circuit: filters were fetched for the scan range.
+    expect(fetchFilter).toHaveBeenCalled();
+    // No filter matched, so no block fetch happened...
+    expect(fetchBlock).not.toHaveBeenCalled();
+    // ...but the cursor still advanced above the stored value, up to tip.
+    expect(result.lastBlockScanned).toBeGreaterThan(storedCursor);
+    expect(result.lastBlockScanned).toBe(tip);
+    expect(result.txCount).toBe(0);
+  });
 });
