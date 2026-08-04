@@ -226,6 +226,9 @@ interface VaultContextValue {
     ownerWorkspaceKeyId: string;
     wrappedCiphertextB64: string;
     kemSecretWrapped: string;
+    grantSignature: string | null;
+    grantSigAlg: string | null;
+    ownerSigPubKeyB64: string | null;
   }): Promise<AdminSubkeys>;
 
   /**
@@ -636,10 +639,31 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const targetUserId = row.user_id;
       const targetKemPubB64 = row.kem_public_key;
 
+      // Fetch owner's signing keys from user_vault_meta (needed for ML-DSA-65 grant signing).
+      const { data: ownerMeta, error: metaErr } = await supabase
+        .from("user_vault_meta")
+        .select("sig_public_key,sig_secret_wrapped")
+        .eq("user_id", params.ownerUserId)
+        .maybeSingle();
+      if (metaErr || !ownerMeta) {
+        throw new Error(
+          "Failed to fetch owner signing keys. Ensure PQC keypairs are initialized.",
+        );
+      }
+      const ownerSigPubKeyB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
+      const ownerSigSecretWrapped = (ownerMeta as Record<string, unknown>).sig_secret_wrapped as string | null;
+      if (!ownerSigPubKeyB64 || !ownerSigSecretWrapped) {
+        throw new Error(
+          "Owner has no signing keys. Lock and unlock the vault to generate them, then try again.",
+        );
+      }
+
       return grantCoAdminImpl({
         ...rest,
         targetUserId,
         targetKemPubB64,
+        ownerSigSecretWrapped,
+        ownerSigPubKeyB64,
         supabase: supabase as unknown as Parameters<typeof grantCoAdminImpl>[0]["supabase"],
       });
     },
@@ -673,6 +697,9 @@ export function VaultProvider({ children }: VaultProviderProps) {
       ownerWorkspaceKeyId: string;
       wrappedCiphertextB64: string;
       kemSecretWrapped: string;
+      grantSignature: string | null;
+      grantSigAlg: string | null;
+      ownerSigPubKeyB64: string | null;
     }): Promise<AdminSubkeys> => {
       const { mek, saltB64: s } = requireUnlocked();
       return loadAdminSubkeysDirect({
@@ -680,6 +707,9 @@ export function VaultProvider({ children }: VaultProviderProps) {
         kemSecretWrapped: params.kemSecretWrapped,
         adminMek: mek,
         adminSaltB64: s,
+        grantSignature: params.grantSignature,
+        grantSigAlg: params.grantSigAlg,
+        ownerSigPubKeyB64: params.ownerSigPubKeyB64,
       });
     },
     [saltB64],
