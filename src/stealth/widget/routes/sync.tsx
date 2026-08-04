@@ -80,6 +80,17 @@ function isMockMode(): boolean {
   return params.get("mock") === "1";
 }
 
+// Dev-only escape hatch: ?force_cursor=1 bypasses the !useMock guard so
+// Playwright tests can assert the cursor-write path without hitting the live
+// block source. import.meta.env.DEV is tree-shaken to false in production
+// builds by Vite, so this can never be activated in prod.
+function isForceCursor(): boolean {
+  if (!import.meta.env.DEV) return false;
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.get("force_cursor") === "1";
+}
+
 // ── Live fetchers ──────────────────────────────────────────────────────
 // Bound to the production base URLs (overridable via Vite env). The actual
 // HTTP work, gzip decompression of the .gcs.gz body, and sidecar JSON read
@@ -297,7 +308,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    returns the previous cursor unchanged when fromHeight > tip
         //    (short-circuit path). Persisting that value would falsely mark
         //    the wallet as synced to a height it never scanned.
-        if (!useMock && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
+        if ((!useMock || isForceCursor()) && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
