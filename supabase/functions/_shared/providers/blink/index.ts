@@ -67,7 +67,6 @@ const TX_QUERY = `
               }
               settlementVia {
                 __typename
-                ... on SettlementViaLn { preImage }
                 ... on SettlementViaOnChain { transactionHash }
                 ... on SettlementViaIntraLedger { counterPartyUsername }
               }
@@ -115,7 +114,6 @@ const TX_QUERY_BY_WALLETS = `
                 }
                 settlementVia {
                   __typename
-                  ... on SettlementViaLn { preImage }
                   ... on SettlementViaOnChain { transactionHash }
                   ... on SettlementViaIntraLedger { counterPartyUsername }
                 }
