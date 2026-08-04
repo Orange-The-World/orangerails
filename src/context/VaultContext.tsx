@@ -636,8 +636,23 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const targetUserId = row.user_id;
       const targetKemPubB64 = row.kem_public_key;
 
+      // Fetch the owner's ML-DSA-65 signing secret (wrapped) to sign the grant
+      // binding. This keeps app.tsx free of sig_secret_wrapped handling.
+      const { data: sigRow } = await (supabase as any)
+        .from("user_vault_meta")
+        .select("sig_secret_wrapped")
+        .eq("user_id", params.ownerUserId)
+        .single();
+      const ownerSigSecretWrapped = (sigRow as Record<string, unknown> | null)?.sig_secret_wrapped as string | undefined;
+      if (!ownerSigSecretWrapped) {
+        throw new Error(
+          "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
+        );
+      }
+
       return grantCoAdminImpl({
         ...rest,
+        ownerSigSecretWrapped,
         targetUserId,
         targetKemPubB64,
         supabase: supabase as unknown as Parameters<typeof grantCoAdminImpl>[0]["supabase"],
@@ -673,6 +688,9 @@ export function VaultProvider({ children }: VaultProviderProps) {
       ownerWorkspaceKeyId: string;
       wrappedCiphertextB64: string;
       kemSecretWrapped: string;
+      grantSigB64?: string | null;
+      ownerSigPubB64?: string;
+      granteeUserId?: string;
     }): Promise<AdminSubkeys> => {
       const { mek, saltB64: s } = requireUnlocked();
       return loadAdminSubkeysDirect({
@@ -680,6 +698,10 @@ export function VaultProvider({ children }: VaultProviderProps) {
         kemSecretWrapped: params.kemSecretWrapped,
         adminMek: mek,
         adminSaltB64: s,
+        grantSigB64: params.grantSigB64,
+        ownerSigPubB64: params.ownerSigPubB64,
+        granteeUserId: params.granteeUserId,
+        ownerWorkspaceKeyId: params.ownerWorkspaceKeyId,
       });
     },
     [saltB64],
