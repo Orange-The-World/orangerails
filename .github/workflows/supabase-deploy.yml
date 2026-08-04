@@ -310,8 +310,8 @@ jobs:
           ZULIP_BASE_URL: ${{ vars.ZULIP_BASE_URL }}
           ZULIP_ALERT_STREAM: ${{ vars.ZULIP_ALERT_STREAM }}
         run: |
-          if [ -z "${ZULIP_BOT_EMAIL}" ] || [ -z "${ZULIP_BOT_KEY}" ]; then
-            echo "::error::ZULIP_BOT_EMAIL or ZULIP_BOT_KEY is unset; cannot send failure alert"
+          if [ -z "${ZULIP_BOT_EMAIL}" ] || [ -z "${ZULIP_BOT_KEY}" ] || [ -z "${ZULIP_BASE_URL}" ] || [ -z "${ZULIP_ALERT_STREAM}" ]; then
+            echo "::error::ZULIP_BOT_EMAIL, ZULIP_BOT_KEY, ZULIP_BASE_URL, or ZULIP_ALERT_STREAM is unset; cannot send failure alert"
             exit 1
           fi
           curl -sSf -X POST "${ZULIP_BASE_URL}/api/v1/messages" \
