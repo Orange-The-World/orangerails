@@ -433,3 +433,53 @@ jobs:
           path: tests/e2e/screenshots/
           retention-days: 14
           if-no-files-found: ignore
+
+  rls-test:
+    name: RLS isolation test (OR-21)
+    runs-on: ubuntu-latest
+    # Why this job exists: audit_entries cross-tenant RLS isolation had zero
+    # test coverage after agent-membership retirement removed the only fixture
+    # that seeded the table. The test lives at tests/security/rls.test.ts and
+    # uses describe.runIf() gated on three env vars. A silently skipped suite
+    # exits 0 -- a green tick that proves nothing. This job fails loudly when
+    # secrets are absent so the gate cannot silently report green.
+    # OR-21 QA gate: read the check result here rather than a pasted terminal
+    # run. Green = isolation holds. Red = either policy is broken or secrets
+    # are missing (named explicitly in the failing step).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Require Supabase test credentials
+        # Hard gate: if any secret is missing, fail loudly with the names of
+        # what is absent. A skip that exits 0 is not a passing test -- it is
+        # a hole in the gate. Route missing secrets to CTO for repo settings.
+        env:
+          ORANGERAILS_TEST_SUPABASE_URL: ${{ secrets.ORANGERAILS_TEST_SUPABASE_URL }}
+          ORANGERAILS_TEST_SERVICE_ROLE_KEY: ${{ secrets.ORANGERAILS_TEST_SERVICE_ROLE_KEY }}
+          ORANGERAILS_TEST_ANON_KEY: ${{ secrets.ORANGERAILS_TEST_ANON_KEY }}
+        run: |
+          missing=""
+          [ -z "$ORANGERAILS_TEST_SUPABASE_URL" ]     && missing="$missing ORANGERAILS_TEST_SUPABASE_URL"
+          [ -z "$ORANGERAILS_TEST_SERVICE_ROLE_KEY" ] && missing="$missing ORANGERAILS_TEST_SERVICE_ROLE_KEY"
+          [ -z "$ORANGERAILS_TEST_ANON_KEY" ]         && missing="$missing ORANGERAILS_TEST_ANON_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::OR-21 RLS test cannot run: missing secrets$missing"
+            echo "A skipped suite must not report pass. Add the missing repo secrets and retry."
+            exit 1
+          fi
+
+      - name: Run RLS isolation test
+        env:
+          ORANGERAILS_TEST_SUPABASE_URL: ${{ secrets.ORANGERAILS_TEST_SUPABASE_URL }}
+          ORANGERAILS_TEST_SERVICE_ROLE_KEY: ${{ secrets.ORANGERAILS_TEST_SERVICE_ROLE_KEY }}
+          ORANGERAILS_TEST_ANON_KEY: ${{ secrets.ORANGERAILS_TEST_ANON_KEY }}
+        run: npx vitest run tests/security/rls.test.ts
