@@ -333,14 +333,32 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             // auth in addition to platform-key auth, so this succeeds even when
             // the consumer proxy does not handle this function.
             if (!cursorWritten && init.access_token) {
+              console.warn(
+                `[stealth/sync] proxy cursor write failed (${proxyErr}); falling back to a ` +
+                `direct user-JWT call to or-stealth-envelope-update. This bypasses your ` +
+                `OR_STEALTH_PROXY_REQUEST handler. Add or-stealth-envelope-update to that ` +
+                `handler to restore the proxy path.`,
+              );
               const fbHeaders: Record<string, string> = {
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${init.access_token}`,
               };
-              const fbResp = await fetch(
-                resolveFunctionUrl("or-stealth-envelope-update", undefined),
-                { method: "POST", headers: fbHeaders, body: JSON.stringify(cursorBody) },
-              );
+              let fbResp: Response;
+              try {
+                fbResp = await fetch(
+                  resolveFunctionUrl("or-stealth-envelope-update", undefined),
+                  { method: "POST", headers: fbHeaders, body: JSON.stringify(cursorBody) },
+                );
+              } catch (err) {
+                // A network-layer rejection (DNS, CORS, offline) would otherwise
+                // escape as a bare TypeError and drop proxyErr, hiding why we were
+                // in the fallback at all. Fold both causes into one error.
+                const fbErr = err instanceof Error ? err.message : String(err);
+                throw new Error(
+                  `[stealth/sync] cursor update failed (proxy: ${proxyErr}; direct fallback: ${fbErr}). ` +
+                  `Add or-stealth-envelope-update to your OR_STEALTH_PROXY_REQUEST handler to fix the proxy path.`,
+                );
+              }
               if (fbResp.ok) {
                 cursorWritten = true;
               } else {
