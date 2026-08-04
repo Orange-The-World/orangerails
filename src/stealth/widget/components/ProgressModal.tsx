@@ -112,9 +112,8 @@ export function ProgressModal({ stage, percent, detailOverride, isFirstSync }: P
         </div>
 
         <p className="mt-3 text-sm text-muted-foreground">
-          Your xpub stays on your device. This takes longer than a regular
-          bank connection because the math runs in your browser, not on our
-          servers. This is what zero-knowledge looks like.
+          This takes a bit longer than a regular bank connection because all
+          the math runs in your browser, not on our servers.
         </p>
 
         {/* Completed + active stages */}
