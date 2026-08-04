@@ -307,10 +307,16 @@ jobs:
         env:
           ZULIP_BOT_EMAIL: ${{ secrets.ZULIP_BOT_EMAIL }}
           ZULIP_BOT_KEY: ${{ secrets.ZULIP_BOT_KEY }}
+          ZULIP_BASE_URL: ${{ vars.ZULIP_BASE_URL }}
+          ZULIP_ALERT_STREAM: ${{ vars.ZULIP_ALERT_STREAM }}
         run: |
-          curl -sS -X POST "https://waggle.orangerails.com/api/v1/messages" \
+          if [ -z "${ZULIP_BOT_EMAIL}" ] || [ -z "${ZULIP_BOT_KEY}" ]; then
+            echo "::error::ZULIP_BOT_EMAIL or ZULIP_BOT_KEY is unset; cannot send failure alert"
+            exit 1
+          fi
+          curl -sSf -X POST "${ZULIP_BASE_URL}/api/v1/messages" \
             -u "${ZULIP_BOT_EMAIL}:${ZULIP_BOT_KEY}" \
             --data-urlencode "type=stream" \
-            --data-urlencode "to=Releases" \
+            --data-urlencode "to=${ZULIP_ALERT_STREAM}" \
             --data-urlencode "topic=supabase-deploy failure (${{ github.ref_name }})" \
             --data-urlencode "content=:red_circle: **supabase-deploy / ${{ github.job }}** failed on \`${{ github.ref_name }}\` sha \`${{ github.sha }}\`. [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
