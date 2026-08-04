@@ -49,6 +49,7 @@ const MAX_ATTEMPTS = 25;
 // Covers most banks' full available history (Quiltt typically caps at ~2y).
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
 const MAX_PAGES = 50;
+const REDRIVE_SWEEP_SIZE = 500;  // max rows fetched in step 1 of reDriveReadyDeferrals per tick
 
 // Per-event wall-clock budget. A pathological profile (many bound
 // connections, slow Quiltt responses, or hostile fanout) can otherwise
@@ -123,10 +124,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   if (pendErr) {
     console.error('[or-quiltt-sync] inbox query failed:', pendErr.message);
-    return jsonResponse({ error: 'inbox query failed' }, 500);
+    return jsonResponse({ error: 'inbox query failed', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 500);
   }
   if (!pending || pending.length === 0) {
-    return jsonResponse({ processed: 0, failed: 0, skipped: 0, message: 'inbox empty' }, 200);
+    return jsonResponse({ processed: 0, failed: 0, skipped: 0, message: 'inbox empty', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 200);
   }
 
   for (const ev of pending as PendingEvent[]) {
@@ -252,7 +253,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
   }
 
-  return jsonResponse({ processed, failed, skipped, reDriven, batch: pending.length }, 200);
+  return jsonResponse({ processed, failed, skipped, reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}), batch: pending.length }, 200);
 }, 'or-quiltt-sync'));
 
 // ─── event dispatch ──────────────────────────────────────────────────
@@ -798,11 +799,17 @@ export async function reDriveReadyDeferrals(
   client: SupabaseClient,
 ): Promise<{ reDriven: number; error: string | null }> {
   // Step 1: collect distinct subaccount IDs with live deferred rows.
+  // Ordered by opk_deferred_at ASC so the oldest-deferred subaccounts are swept
+  // first. Bounded by REDRIVE_SWEEP_SIZE: without a bound the query fetches every
+  // deferred row on every tick; without ordering a cap silently re-fetches the
+  // same arbitrary prefix and the tail is never reached.
   const { data: deferredRows, error: deferredErr } = await client
     .from('quiltt_webhook_inbox')
     .select('subaccount_id')
     .is('processed_at', null)
-    .not('opk_deferred_at', 'is', null);
+    .not('opk_deferred_at', 'is', null)
+    .order('opk_deferred_at', { ascending: true })
+    .limit(REDRIVE_SWEEP_SIZE);
   if (deferredErr) {
     return { reDriven: 0, error: `deferred rows query failed: ${deferredErr.message}` };
   }
@@ -814,6 +821,12 @@ export async function reDriveReadyDeferrals(
     ),
   ];
   if (allSubIds.length === 0) return { reDriven: 0, error: null };
+  if ((deferredRows ?? []).length >= REDRIVE_SWEEP_SIZE) {
+    console.warn(
+      `[or-quiltt-sync] reDriveReadyDeferrals: hit REDRIVE_SWEEP_SIZE cap (${REDRIVE_SWEEP_SIZE}); ` +
+        `some deferred rows were not swept this tick and will be reached on the next`,
+    );
+  }
 
   // Step 2: of those subaccounts, find which now have opk_public set.
   const { data: opkSubs, error: opkErr } = await client
