@@ -4,13 +4,15 @@
  * When an admin adds a co-admin, the co-admin is handed a wrapped MEK (the
  * master encryption key, re-wrapped to the co-admin's key). That wrapped MEK
  * must be signed with the granting admin's ML-DSA-65 key, and the read path
- * must verify that signature before trusting the wrapped MEK. Without this, a
- * party who can write the grant row can substitute a different wrapped MEK of
- * the same length and the app would accept it.
+ * must verify that signature before trusting the wrapped MEK. The signature
+ * covers a domain-separated canonical message that binds the wrapped MEK to
+ * the member id and the workspace key id together, so a wrapped MEK the
+ * granting admin did not sign does not verify, whatever its length.
  *
  * The granting admin's secret key is client-side only (same custody as every
- * other user key). The server stores only the admin's public key and the
- * signature, so no server-readable path can forge a valid grant.
+ * other user key). Verification needs the admin's public key and the signature
+ * and nothing else, so no secret that could produce a valid grant is required
+ * outside the client.
  */
 
 import { signToBase64, verifyFromBase64 } from "./signatures";
