@@ -6,10 +6,21 @@ import { defineConfig, devices } from '@playwright/test';
  * Default target: dev.orangerails.com (the deployed dev application).
  * Override with: PLAYWRIGHT_BASE_URL=https://localhost:8080 npx playwright test
  *
- * Tests live in tests/e2e/. They are intentionally shallow — page loads,
+ * Tests live in tests/e2e/. They are intentionally shallow -- page loads,
  * no console errors, key routes return 200. Deeper integration tests
  * (auth, dashboard, MCP flow) come later in the implementation plan.
+ *
+ * Stealth cursor-write harness (tests/e2e/stealth-cursor-write.spec.ts):
+ * Requires import.meta.env.DEV = true so isForceCursor() is active (it is
+ * tree-shaken to false in production builds). Set PLAYWRIGHT_WITH_VITE_DEV=1
+ * to activate the webServer below; the suite skips otherwise. Also set:
+ *   OR_API_BASE_URL, OR_TEST_PLATFORM_API_KEY,
+ *   VITE_OR_STEALTH_ALLOWED_ORIGINS=http://localhost:5173
  */
+
+// When set, start a local vite dev server for the stealth cursor test.
+const WITH_VITE_DEV = !!process.env.PLAYWRIGHT_WITH_VITE_DEV;
+
 export default defineConfig({
   testDir: './tests/e2e',
   // Only pick up real Playwright spec files. The audit-*.audit.mjs files
