@@ -75,7 +75,7 @@ const STAGE_COPY: Record<StealthStage, StageCopy> = {
   uploading: {
     message: 'Saving encrypted records to Orange Rails',
     detail:
-      'Orange Rails stores only the encrypted bytes as a backup. They cannot read your transactions , only your browser holds the key.',
+      'Orange Rails stores only the encrypted bytes as a backup. They cannot read your transactions; only your browser holds the key.',
     shortLabel: 'Ship it to your app',
   },
 };
