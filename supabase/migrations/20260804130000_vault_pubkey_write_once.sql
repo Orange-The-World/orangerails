@@ -1,5 +1,5 @@
 -- ============================================================
--- DL-0610: write-once guard on user_vault_meta public key columns.
+-- DL-0610: write-once guard on vault public key columns.
 -- ============================================================
 -- The ML-DSA-65 signing public key (sig_public_key) and the hybrid KEM
 -- public key (kem_public_key) are the trust root for signature
@@ -21,15 +21,24 @@
 -- auth.users, which runs at trigger depth greater than zero; a direct
 -- DELETE runs at depth zero and is rejected.
 --
--- search_path is pinned on both functions so an unqualified name cannot
+-- customer_vault_meta carries the same two public key columns and shared
+-- the predecessor kem-only function via
+-- trg_customer_vault_meta_kem_write_once. That shared function is dropped
+-- at the end of this migration, so customer_vault_meta gets its own
+-- both-column write-once guard here first. (Direct-delete parity for
+-- customer_vault_meta is tracked under a separate ticket.)
+--
+-- search_path is pinned on every function so an unqualified name cannot
 -- be resolved against a caller-controlled search_path.
 --
 -- Idempotent: CREATE OR REPLACE plus DROP TRIGGER IF EXISTS, so a
 -- re-apply is a no-op. Restore path:
 --   DROP TRIGGER trg_vault_pubkey_write_once ON public.user_vault_meta;
 --   DROP TRIGGER trg_vault_meta_no_direct_delete ON public.user_vault_meta;
+--   DROP TRIGGER trg_customer_vault_pubkey_write_once ON public.customer_vault_meta;
 --   DROP FUNCTION public.enforce_vault_pubkey_write_once();
 --   DROP FUNCTION public.enforce_vault_meta_no_direct_delete();
+--   DROP FUNCTION public.enforce_customer_vault_pubkey_write_once();
 
 CREATE OR REPLACE FUNCTION public.enforce_vault_pubkey_write_once()
   RETURNS TRIGGER
@@ -80,7 +89,46 @@ CREATE TRIGGER trg_vault_meta_no_direct_delete
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_vault_meta_no_direct_delete();
 
--- Drop the predecessor that guarded kem_public_key only; superseded by this migration.
+-- customer_vault_meta both-column write-once guard. It carries the same
+-- sig_public_key and kem_public_key columns and, before this migration,
+-- shared enforce_kem_public_key_write_once() through
+-- trg_customer_vault_meta_kem_write_once. That kem-only trigger is
+-- replaced here with a both-column guard on its own function so the
+-- shared predecessor function can be dropped below without a dependency
+-- error (PG 2BP01).
+CREATE OR REPLACE FUNCTION public.enforce_customer_vault_pubkey_write_once()
+  RETURNS TRIGGER
+  LANGUAGE plpgsql
+  SET search_path = public, pg_catalog
+AS $$
+BEGIN
+  IF OLD.sig_public_key IS NOT NULL
+     AND NEW.sig_public_key IS DISTINCT FROM OLD.sig_public_key THEN
+    RAISE EXCEPTION
+      'customer_vault_meta.sig_public_key is write-once and cannot be changed once set';
+  END IF;
+
+  IF OLD.kem_public_key IS NOT NULL
+     AND NEW.kem_public_key IS DISTINCT FROM OLD.kem_public_key THEN
+    RAISE EXCEPTION
+      'customer_vault_meta.kem_public_key is write-once and cannot be changed once set';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_customer_vault_meta_kem_write_once ON public.customer_vault_meta;
+DROP TRIGGER IF EXISTS trg_customer_vault_pubkey_write_once ON public.customer_vault_meta;
+CREATE TRIGGER trg_customer_vault_pubkey_write_once
+  BEFORE UPDATE ON public.customer_vault_meta
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_customer_vault_pubkey_write_once();
+
+-- Drop the predecessor that guarded kem_public_key only on both tables;
+-- superseded by the per-table both-column guards above. Both dependent
+-- triggers (user and customer) are now replaced, so the shared function
+-- drops cleanly.
 -- #542 targeted enforce_kem_public_key_write_once() which is removed here; close that PR.
 DROP TRIGGER IF EXISTS trg_user_vault_meta_kem_write_once ON public.user_vault_meta;
 DROP FUNCTION IF EXISTS public.enforce_kem_public_key_write_once();
