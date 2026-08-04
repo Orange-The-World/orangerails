@@ -17,7 +17,7 @@
  */
 
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   ArrowRight,
   CheckCircle2,
@@ -122,6 +122,29 @@ function launchStealthSync(onRefused: (message: string) => void) {
 
 function SparrowConnectPage() {
   const [refusedError, setRefusedError] = useState<string | null>(null);
+
+  // DL-0448: when a consuming app deep-links here with a trusted app_url,
+  // navigate on mount without requiring a button click. The user should never
+  // see this marketing page in that flow. Three cases:
+  //   - No app_url: render normally, button works as before.
+  //   - Trusted app_url: navigate immediately, page stays blank.
+  //   - Untrusted app_url: do nothing here; the button click still shows
+  //     the refusal alert so the customer understands what happened.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const appUrl = params.get("app_url");
+    if (!appUrl) return;
+    let origin: string | null = null;
+    try {
+      origin = new URL(appUrl).origin;
+    } catch {
+      origin = null;
+    }
+    if (origin && ALLOWED_APP_ORIGINS.has(origin)) {
+      window.location.assign(appUrl);
+    }
+  }, []);
+
   return (
     <div className="min-h-screen bg-background text-foreground antialiased">
       <Navbar />
