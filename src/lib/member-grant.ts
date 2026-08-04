@@ -6,9 +6,9 @@
  * signature; it never sees any plaintext MEK or the admin's secret key
  * (ZKA intact).
  *
- * Canonical message: "v1:{memberUserId}:{workspaceKeyId}:{sha256B64(wrappedMekCiphertextB64)}"
+ * Canonical message: "v1:{memberUserId}:{dataKeyId}:{sha256B64(wrappedMekCiphertextB64)}"
  *   - memberUserId:     the grantee's user id
- *   - workspaceKeyId:   the key slot this grant is for
+ *   - dataKeyId:        the data_key_id of the wrapped_data_keys row
  *   - sha256B64(blob):  SHA-256 of the wrapped-MEK ciphertext (base64),
  *                       binding the ciphertext so a same-length substitution
  *                       changes the message and invalidates the signature
@@ -19,8 +19,8 @@ import { signToBase64, verifyFromBase64 } from "./signatures";
 export interface MemberGrant {
   /** The user id of the co-admin being granted access. */
   memberUserId: string;
-  /** The workspace key slot this grant is for. */
-  workspaceKeyId: string;
+  /** The data_key_id of the wrapped_data_keys row this grant is for. */
+  dataKeyId: string;
   /** The wrapped MEK ciphertext, base64-encoded. */
   wrappedMekCiphertextB64: string;
 }
@@ -43,7 +43,7 @@ async function sha256B64(data: string): Promise<string> {
  */
 async function canonicalMessage(grant: MemberGrant): Promise<string> {
   const ciphertextHash = await sha256B64(grant.wrappedMekCiphertextB64);
-  return `v1:${grant.memberUserId}:${grant.workspaceKeyId}:${ciphertextHash}`;
+  return `v1:${grant.memberUserId}:${grant.dataKeyId}:${ciphertextHash}`;
 }
 
 /**
