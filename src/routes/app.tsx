@@ -99,6 +99,9 @@ interface WorkspaceOption {
   ownerEmail: string;
   workspaceKeyId: string;
   wrappedCiphertextB64: string;
+  grantSignature: string | null;
+  grantSigAlg: string | null;
+  ownerSigPubKeyB64: string | null;
   // No kemSecretWrapped here , the admin's own kem_secret_wrapped is used
   // for all workspace unwraps, stored separately in myKemSecretWrapped state.
 }
@@ -295,15 +298,19 @@ function AppHome() {
           if (!ownerKeyId) continue;
           const { data: wdk } = await supabase
             .from("wrapped_data_keys")
-            .select("wrapped_ciphertext")
+            .select("wrapped_ciphertext,grant_signature,grant_sig_alg,owner_sig_pub_key")
             .eq("data_key_id", ownerKeyId)
             .maybeSingle();
           if (!wdk) continue;
+          const wdkRow = wdk as Record<string, unknown>;
           workspaces.push({
             ownerUserId: ownerId,
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: (wdk as Record<string, unknown>).wrapped_ciphertext as string,
+            wrappedCiphertextB64: wdkRow.wrapped_ciphertext as string,
+            grantSignature: (wdkRow.grant_signature as string | null) ?? null,
+            grantSigAlg: (wdkRow.grant_sig_alg as string | null) ?? null,
+            ownerSigPubKeyB64: (wdkRow.owner_sig_pub_key as string | null) ?? null,
           });
         }
       }
@@ -344,6 +351,9 @@ function AppHome() {
       ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
       wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
       kemSecretWrapped: myKemSecretWrapped,
+      grantSignature: activeWorkspace.grantSignature,
+      grantSigAlg: activeWorkspace.grantSigAlg,
+      ownerSigPubKeyB64: activeWorkspace.ownerSigPubKeyB64,
     });
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.credentialsKey;
@@ -357,6 +367,9 @@ function AppHome() {
       ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
       wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
       kemSecretWrapped: myKemSecretWrapped,
+      grantSignature: activeWorkspace.grantSignature,
+      grantSigAlg: activeWorkspace.grantSigAlg,
+      ownerSigPubKeyB64: activeWorkspace.ownerSigPubKeyB64,
     });
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.transactionsKey;
@@ -869,6 +882,9 @@ function AppHome() {
                           ownerWorkspaceKeyId: ws.workspaceKeyId,
                           wrappedCiphertextB64: ws.wrappedCiphertextB64,
                           kemSecretWrapped: myKemSecretWrapped,
+                          grantSignature: ws.grantSignature,
+                          grantSigAlg: ws.grantSigAlg,
+                          ownerSigPubKeyB64: ws.ownerSigPubKeyB64,
                         });
                       } catch (unwrapErr) {
                         const name =
