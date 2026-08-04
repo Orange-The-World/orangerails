@@ -98,21 +98,19 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     await capture(page, "04-connect-sparrow-landing");
   });
 
-  // DL-0426: app_url redirect and refusal (three paths in launchStealthSync).
-  // Test 1 is fixme until https://dev.orangerails.com is confirmed in
-  // VITE_OR_STEALTH_ALLOWED_ORIGINS on the orangerails-dev Cloudflare Pages
-  // project and a redeploy bakes it into the bundle. Tests 2 and 3 (the
-  // no-app_url window.open path below) are env-independent and run today.
+  // DL-0448: app_url redirect and refusal (three paths in the mount-time check
+  // and launchStealthSync). Test 1 covers the founder's exact failing journey:
+  // platform=bitbooks-v2 arrives with app_url from https://v2.bitbooks.com,
+  // which is on the allowlist. The page must navigate on mount without a click.
 
-  // Test 1: trusted origin -> browser bounces (window.location.assign) to appUrl.
-  // page.route intercepts the navigation before it leaves so the test does not
-  // need the external origin to be reachable. Remove fixme once the origin
-  // literal is confirmed from the deployed sparrow-*.js chunk on dev.orangerails.com
-  // (dev chunk is behind Cloudflare Access; CTO or CoS must supply the value).
-  test.fixme(
-    "app_url with trusted origin bounces to the app (DL-0426)",
+  // Test 1: trusted origin -> browser bounces (window.location.assign) to appUrl
+  // on mount, without any click. page.route intercepts the navigation before it
+  // leaves so the test does not need the external origin to be reachable.
+  // Uses https://v2.bitbooks.com, the platform in the founder's failing URL (DL-0448).
+  test(
+    "app_url with trusted origin bounces to the app on mount (DL-0448)",
     async ({ page }) => {
-      const allowedOrigin = "https://dev.orangerails.com"; // replace with literal from chunk
+      const allowedOrigin = "https://v2.bitbooks.com";
       const appUrl = `${allowedOrigin}/stealth-return`;
 
       let bounced = false;
@@ -122,11 +120,8 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
       });
 
       await page.goto(`/connect/sparrow?app_url=${encodeURIComponent(appUrl)}`);
-      const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
-      await expect(launchButton).toBeVisible();
-      await launchButton.click();
       await page.waitForTimeout(500);
-      expect(bounced, "window.location.assign must fire with the trusted appUrl").toBe(true);
+      expect(bounced, "window.location.assign must fire on mount with the trusted appUrl").toBe(true);
     },
   );
 
