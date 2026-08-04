@@ -891,6 +891,7 @@ export const strikeAdapter: ProviderAdapter = {
   tags: ['lightning', 'us', 'eu', 'fiat-on-ramp', 'custodial'],
   popularity: 88,
   multiWallet: true,
+  custody: 'custodial',
   credentialFields: [
     {
       name: 'api_key',

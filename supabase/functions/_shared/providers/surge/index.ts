@@ -314,6 +314,7 @@ export const surgeAdapter: ProviderAdapter = {
   ],
 
   multiWallet: true,
+  custody: 'custodial',
 
   async discoverWallets(credentials: Record<string, unknown>): Promise<DiscoveredWallet[]> {
     const creds = parseSurgeCredentials(credentials);

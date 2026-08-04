@@ -333,6 +333,7 @@ export const blinkAdapter: ProviderAdapter = {
   tags: ['lightning', 'on-chain', 'custodial', 'galoy'],
   popularity: 90,
   multiWallet: true,
+  custody: 'custodial',
   credentialFields: [
     {
       name: 'api_key',

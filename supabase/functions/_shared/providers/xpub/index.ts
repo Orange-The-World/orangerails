@@ -370,6 +370,7 @@ export const xpubAdapter: ProviderAdapter = {
   tags: ['on-chain', 'watch-only', 'self-custody', 'sparrow', 'specter', 'bluewallet'],
   popularity: 80,
   multiWallet: false,
+  custody: 'non_custodial',
   credentialFields: [
     {
       name: 'xpub',

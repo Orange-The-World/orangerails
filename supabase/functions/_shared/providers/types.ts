@@ -231,6 +231,23 @@ export interface ProviderAdapter {
   multiWallet: boolean;
 
   /**
+   * Whether the provider holds custody of the user's funds.
+   *
+   *   'custodial'     The provider holds the keys or the funds (Lightning
+   *                   custodial wallets, crypto exchanges, lending vaults).
+   *                   Users cannot unilaterally move funds without the
+   *                   provider's cooperation.
+   *
+   *   'non_custodial' The user retains direct control of their keys or
+   *                   on-chain UTXOs (xpub watch-only, self-hosted BTCPay).
+   *                   The adapter only reads; it cannot move funds.
+   *
+   * REQUIRED. validateAdapter() throws at construction time when this field
+   * is absent -- a missing declaration is an error, never a silent default.
+   */
+  custody: 'custodial' | 'non_custodial';
+
+  /**
    * Pure pass-through wallet enumeration. Decrypted credentials are passed
    * in; the adapter calls upstream and returns what it finds. The caller
    * decides what to persist via or-source-wallets-set.
@@ -266,6 +283,33 @@ export interface ProviderAdapter {
     credentials: Record<string, unknown>,
     cursor: string | null,
   ) => Promise<SyncResult>;
+}
+
+/**
+ * Runtime guard: throws if `adapter.custody` is missing or invalid.
+ * Call this when registering an adapter so the failure is loud and early,
+ * not silent at sync time.
+ *
+ * Why runtime and not just the TypeScript type? The type is enforced at
+ * compile time only. Adapters constructed dynamically (e.g. makeCcxtAdapter)
+ * or imported from an untyped path would reach the registry unchecked
+ * without an explicit runtime assertion.
+ */
+export function validateAdapter(adapter: ProviderAdapter): ProviderAdapter {
+  const c = (adapter as Record<string, unknown>).custody;
+  if (c === undefined || c === null) {
+    throw new Error(
+      `[${adapter.slug}] ProviderAdapter.custody is required; ` +
+      `got ${String(c)}. Declare 'custodial' or 'non_custodial'.`,
+    );
+  }
+  if (c !== 'custodial' && c !== 'non_custodial') {
+    throw new Error(
+      `[${adapter.slug}] ProviderAdapter.custody must be 'custodial' or ` +
+      `'non_custodial'; got '${String(c)}'.`,
+    );
+  }
+  return adapter;
 }
 
 /**

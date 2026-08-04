@@ -477,6 +477,7 @@ export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
     tags,
     popularity,
     multiWallet: false, // single synthetic wallet per exchange in v1
+    custody: 'custodial', // exchanges hold the user's funds on their behalf
     credentialFields,
     discoverWallets: buildDiscover(slug, exchangeId),
     syncByWallets,
