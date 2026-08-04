@@ -13,13 +13,28 @@
 -- by anyone, including the owner. The initial NULL to value write is
 -- allowed so vault creation still works.
 --
+-- A write-once UPDATE guard is not enough on its own: a service-role
+-- actor could DELETE the row and re-INSERT it with an attacker key,
+-- laundering a key change through delete plus insert. So direct DELETE
+-- of a user_vault_meta row is also blocked. Legitimate account deletion
+-- still works because it arrives as an ON DELETE CASCADE from
+-- auth.users, which runs at trigger depth greater than zero; a direct
+-- DELETE runs at depth zero and is rejected.
+--
+-- search_path is pinned on both functions so an unqualified name cannot
+-- be resolved against a caller-controlled search_path.
+--
 -- Idempotent: CREATE OR REPLACE plus DROP TRIGGER IF EXISTS, so a
--- re-apply is a no-op. Restore path: DROP TRIGGER trg_vault_pubkey_write_once
--- ON public.user_vault_meta; DROP FUNCTION public.enforce_vault_pubkey_write_once();
+-- re-apply is a no-op. Restore path:
+--   DROP TRIGGER trg_vault_pubkey_write_once ON public.user_vault_meta;
+--   DROP TRIGGER trg_vault_meta_no_direct_delete ON public.user_vault_meta;
+--   DROP FUNCTION public.enforce_vault_pubkey_write_once();
+--   DROP FUNCTION public.enforce_vault_meta_no_direct_delete();
 
 CREATE OR REPLACE FUNCTION public.enforce_vault_pubkey_write_once()
   RETURNS TRIGGER
   LANGUAGE plpgsql
+  SET search_path = public, pg_catalog
 AS $$
 BEGIN
   IF OLD.sig_public_key IS NOT NULL
@@ -43,3 +58,24 @@ CREATE TRIGGER trg_vault_pubkey_write_once
   BEFORE UPDATE ON public.user_vault_meta
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_vault_pubkey_write_once();
+
+CREATE OR REPLACE FUNCTION public.enforce_vault_meta_no_direct_delete()
+  RETURNS TRIGGER
+  LANGUAGE plpgsql
+  SET search_path = public, pg_catalog
+AS $$
+BEGIN
+  IF pg_trigger_depth() = 0 THEN
+    RAISE EXCEPTION
+      'user_vault_meta rows cannot be deleted directly; deletion is only allowed via the account removal cascade';
+  END IF;
+
+  RETURN OLD;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_vault_meta_no_direct_delete ON public.user_vault_meta;
+CREATE TRIGGER trg_vault_meta_no_direct_delete
+  BEFORE DELETE ON public.user_vault_meta
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_vault_meta_no_direct_delete();
