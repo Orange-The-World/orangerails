@@ -11,6 +11,7 @@
 // Updated: Security, 2026-07-23 -- key lookup uses maybeSingle so a bad or revoked key returns 401, not 500
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
+import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -68,7 +69,31 @@ interface RateItem {
 // timezone marker are also rejected.
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 
-Deno.serve(async (req: Request) => {
+// Caller surface and non-200 behavior (required for Auditor sign-off):
+//
+// Callers:
+//   1. External ORBI API consumers holding orbi_api_keys, calling this
+//      endpoint directly.
+//   2. workers/api-gateway (this repo): routes GET /v1/rate and POST /v1/rate
+//      to this function via proxyToSupabase, which returns fetch(upstream)
+//      verbatim without inspecting or rewriting the status. Any non-200
+//      response from this function (including 502) reaches the end consumer
+//      unchanged.
+//
+//   400/401/405/429/503 -- handler returns structured JSON { error, message };
+//     callers act per code (retry 429 with Retry-After, fix request on 4xx,
+//     back off on 503).
+//   500 -- outer try/catch (below) returns structured JSON
+//     { error: 'server_error', message, correlation_id }; callers treat as
+//     transient and may retry.
+//   502 -- wrapSentryHandler catches any exception that escapes the outer
+//     catch, reports it to GlitchTip, then re-throws; Supabase edge runtime
+//     converts the unhandled throw into 502 Bad Gateway. This fires only for
+//     true programming bugs or fatal init failures after module load. Callers
+//     receive a raw Supabase 502 body (no structured JSON); the api-gateway
+//     forwards this verbatim to the end consumer. Treat 502 as a transient
+//     outage and retry with exponential backoff.
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const correlationId = crypto.randomUUID()
   try {
   // ----- Feature flag -----
@@ -98,6 +123,7 @@ Deno.serve(async (req: Request) => {
   // Return 500 so callers can distinguish unavailability from a bad key.
   if (keyErr) {
     console.error(`key-lookup DB error [${correlationId}]:`, keyErr)
+    void reportError(keyErr, 'v1-rate', req)
     return Response.json({ error: 'server_error', message: 'Database error during key lookup', correlation_id: correlationId }, { status: 500 })
   }
   if (!keyRow) return errResponse(401, 'invalid_key', 'API key invalid or revoked')
@@ -204,6 +230,7 @@ Deno.serve(async (req: Request) => {
     // Return 500 so callers can distinguish DB-down from legitimate no-data.
     if (rateErr) {
       console.error(`rate-lookup DB error [${correlationId}]:`, rateErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity, bucketTs }))
+      void reportError(rateErr, 'v1-rate', req)
       return Response.json({ error: 'server_error', message: 'Database error fetching exchange rate', correlation_id: correlationId }, { status: 500 })
     }
 
@@ -242,6 +269,7 @@ Deno.serve(async (req: Request) => {
   return Response.json(items.length === 1 ? results[0] : { results, count: results.length })
   } catch (err) {
     console.error(`v1-rate unhandled error [${correlationId}]:`, err)
+    void reportError(err, 'v1-rate', req)
     return Response.json({ error: 'server_error', message: 'Internal error', correlation_id: correlationId }, { status: 500 })
   }
-})
+}, 'v1-rate'))

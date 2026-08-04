@@ -54,7 +54,7 @@ interface Connection {
   encrypted_label: string | null;
   encrypted_credentials: string;
   credentials_key_version: number;
-  status: "active" | "error" | "disconnected";
+  status: "pending" | "active" | "error" | "disconnected" | "partial";
   last_sync_at: string | null;
   last_sync_cursor: string | null;
   encrypted_last_error: string | null;
@@ -1306,9 +1306,11 @@ function ConnectionRow({
   const statusColor =
     conn.status === "active"
       ? "text-green-600 dark:text-green-400"
-      : conn.status === "error"
-        ? "text-destructive"
-        : "text-muted-foreground";
+      : conn.status === "partial"
+        ? "text-yellow-600 dark:text-yellow-400"
+        : conn.status === "error"
+          ? "text-destructive"
+          : "text-muted-foreground";
 
   return (
     <div className="rounded-md border p-4 flex items-center justify-between gap-4">

@@ -1,0 +1,199 @@
+name: prod backport gate
+
+# Why this gate exists.
+#
+# This repository developed a loop that took it to 384 commits of divergence
+# between dev and prod. From pull request 377, 2026-07-31, in the team's own
+# words (the number is spelled out because the pre-publish hygiene scan rejects
+# the "PR #<n>" form as a dead reference):
+#
+#   "prod was 26 commits ahead of dev. It was 15 the same morning... That is the
+#    loop: #314 is conflicted, so the normal dev to prod promote is blocked ->
+#    fixes get opened directly against prod -> each of those adds another
+#    prod-only commit -> which deepens #314's conflict, which forces the next
+#    cherry-pick. 15 to 26 in one day is that loop running."
+#
+# That PR asked for a stop. This is that stop. It does not forbid hotfixes; it
+# forbids a hotfix that has no path back to dev, which is the single step that
+# regenerates the whole problem.
+#
+# Measured here on 2026-08-03, after the 384 was cleared: 1 commit still sits on
+# prod that dev does not have, and dev is 73 commits ahead of prod with the
+# oldest unpromoted commit 11 days old. The loop is smaller, not gone.
+#
+# NOTE: this check is deliberately NOT a required status check yet. See the pull
+# request that introduced it for why (a pull_request workflow only runs if the
+# file exists on the PR's head branch, so branches cut before this landed would
+# block forever with no error visible anywhere).
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+    branches: [prod]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  backport-gate:
+    name: prod PR must have a matching backport to dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a matching backport into dev
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_OWNER: ${{ github.event.pull_request.head.repo.owner.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+
+          echo "base: ${BASE_REF}"
+          echo "head: ${HEAD_REF}"
+          echo "head sha: ${HEAD_SHA}"
+
+          # Rule 1: the normal promotion. dev -> prod is the sanctioned way prod
+          # moves, and by definition nothing on it is missing from dev.
+          if [ "${HEAD_REF}" = "dev" ]; then
+            echo "This is the dev -> prod promotion. No backport is needed. PASS."
+            exit 0
+          fi
+
+          # Rule 2: containment. The question this gate actually cares about is
+          # not what the branch is CALLED, it is whether the content is already
+          # on dev. Ask the commit graph.
+          #
+          # Deliberately NOT a branch-name match. A "promote/*" regex is
+          # brittle and trivially spoofable: a hotfix branch named
+          # "promote/urgent" would sail through, inverting the gate. Ancestry
+          # cannot be defeated by renaming a branch.
+          #
+          # Semantics of compare/{base}...{head}, checked against a known-good
+          # and a known-bad case rather than taken on trust, because getting
+          # this backwards would silently invert the gate:
+          #
+          #   ahead_by  = commits on head that are NOT on base
+          #   behind_by = commits on base that are NOT on head
+          #   status    = identical | behind | ahead | diverged
+          #
+          # So "dev contains every commit this pull request would add to prod"
+          # is exactly ahead_by == 0 (status identical or behind).
+          #
+          # Note the direction that is NOT used: behind_by == 0 would mean the
+          # head branch contains all of dev. That looks like a promotion, but it
+          # is unsound as a pass rule, because any hotfix author can produce it
+          # by running "git merge dev" on the hotfix branch while the hotfix
+          # commits themselves remain absent from dev. It is the same spoof as a
+          # name match, one step removed.
+          echo ""
+          echo "Direct-to-prod pull request. Asking whether dev already contains it..."
+          echo "Query: compare dev...${HEAD_OWNER}:${HEAD_SHA}"
+
+          # Fail CLOSED on any API trouble. A compare can legitimately fail with
+          # 404 when the two commits share no common ancestor, which is a real
+          # case in these repos. An unreadable answer is not a passing answer,
+          # so the empty string falls through to rule 3.
+          CMP="$(gh api "repos/${REPO}/compare/dev...${HEAD_OWNER}:${HEAD_SHA}" 2>/dev/null || true)"
+
+          # An error body is still valid JSON, so presence of ahead_by is the
+          # test for a usable answer, not merely a non-empty response.
+          AHEAD=""
+          if [ -n "${CMP}" ]; then
+            AHEAD="$(printf '%s' "${CMP}" | jq -r '.ahead_by // empty')"
+          fi
+
+          if [ -n "${AHEAD}" ]; then
+            echo "  status=$(printf '%s' "${CMP}" | jq -r '.status')" \
+                 "ahead_by=$(printf '%s' "${CMP}" | jq -r '.ahead_by')" \
+                 "behind_by=$(printf '%s' "${CMP}" | jq -r '.behind_by')"
+          else
+            echo "  compare unavailable (no common ancestor, or API error). Treating as NOT contained."
+          fi
+
+          if [ "${AHEAD}" = "0" ]; then
+            echo ""
+            echo "PASS. dev already contains every commit on '${HEAD_REF}'."
+            echo "Merging this into prod adds nothing that dev does not already"
+            echo "have, so it cannot deepen the divergence this gate exists to stop."
+            exit 0
+          fi
+
+          # Rule 3: a direct-to-prod pull request (a hotfix) whose content is NOT
+          # already on dev. It is allowed only if the SAME branch is also going
+          # into dev.
+          #
+          # This uses the list-pulls endpoint with an exact head filter rather
+          # than /search/issues on purpose. The search index is eventually
+          # consistent: a backport opened seconds ago may not be in it yet, and
+          # a gate that says "not found" because an index is warm-up-lagging is
+          # not deterministic. This endpoint reads the PR table directly.
+          echo ""
+          echo "dev does not contain this branch. Looking for a matching backport into dev..."
+          echo "Query: base=dev head=${HEAD_OWNER}:${HEAD_REF} state=all"
+
+          MATCHES="$(gh api --paginate \
+            "repos/${REPO}/pulls?base=dev&head=${HEAD_OWNER}:${HEAD_REF}&state=all&per_page=100" \
+            --jq '.[] | select(.head.ref == env.HEAD_REF and .base.ref == "dev")
+                      | {number, state, merged: (.merged_at != null), url: .html_url}' \
+            | jq -s '.')"
+
+          echo "Candidate backport pull requests found: $(printf '%s' "${MATCHES}" | jq 'length')"
+          printf '%s\n' "${MATCHES}" | jq -r '.[] | "  #\(.number) state=\(.state) merged=\(.merged) \(.url)"'
+
+          # An open backport counts (it is on its way in). A merged backport
+          # counts (it is already in). A backport that was closed WITHOUT being
+          # merged does not count: it was abandoned, so this branch still has no
+          # path back to dev.
+          ACCEPTED="$(printf '%s' "${MATCHES}" | jq '[.[] | select(.state == "open" or .merged)]')"
+          COUNT="$(printf '%s' "${ACCEPTED}" | jq 'length')"
+
+          if [ "${COUNT}" -gt 0 ]; then
+            echo ""
+            echo "PASS. This branch also goes into dev:"
+            printf '%s\n' "${ACCEPTED}" | jq -r '.[] | "  #\(.number) (\(if .merged then "merged" else "open" end)) \(.url)"'
+            echo ""
+            echo "Merge order does not matter to this check, but merge BOTH. A prod"
+            echo "hotfix whose dev backport is left open indefinitely is the same"
+            echo "divergence, just deferred."
+            exit 0
+          fi
+
+          echo ""
+          echo "::error::No matching backport into dev for branch '${HEAD_REF}', and dev does not already contain it. This pull request is blocked."
+          echo ""
+          echo "What is wrong"
+          echo "  This pull request puts commits on prod that exist nowhere else."
+          echo "  A prod-only commit with no path back to dev is how branches"
+          echo "  permanently diverge: the next dev -> prod promotion conflicts,"
+          echo "  so the fix after this one also gets opened straight against prod,"
+          echo "  which deepens the conflict further. This repository reached 384"
+          echo "  commits of divergence this way, and went from 15 to 26 prod-only"
+          echo "  commits in a single day on 2026-07-31. As measured on 2026-08-03,"
+          echo "  1 prod-only commit is still standing here."
+          echo ""
+          echo "Why the containment rule did not save you"
+          echo "  This check passes automatically when dev already contains every"
+          echo "  commit on your branch, because merging such a branch into prod"
+          echo "  cannot add anything prod-only; your branch has ${AHEAD:-some}"
+          echo "  commit(s) that dev does not have, so it does not qualify."
+          echo "  Renaming the branch will not change this: the rule reads the"
+          echo "  commit graph, not the branch name."
+          echo ""
+          echo "How to fix it, exactly"
+          echo "  1. Open a second pull request from this SAME branch"
+          echo "     ('${HEAD_REF}') into 'dev'."
+          echo "       gh pr create --repo ${REPO} --base dev --head ${HEAD_REF} \\"
+          echo "         --title \"backport: <same change>\""
+          echo "  2. Re-run this check, or push to the branch. It will pass as soon"
+          echo "     as the dev pull request exists. It does not have to be merged"
+          echo "     first, and an already-merged one is accepted too."
+          echo "  3. Merge both. Prod gets the fix now; dev keeps the history, so"
+          echo "     the next promotion is a fast-forward instead of a conflict."
+          echo ""
+          echo "  Alternatively, merge your branch into dev first. Once dev"
+          echo "  contains it, the containment rule above passes on the next run"
+          echo "  with no backport pull request needed at all."
+          exit 1

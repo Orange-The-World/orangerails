@@ -98,6 +98,68 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     await capture(page, "04-connect-sparrow-landing");
   });
 
+  // DL-0426: app_url redirect and refusal (three paths in launchStealthSync).
+  // Test 1 is fixme until https://dev.orangerails.com is confirmed in
+  // VITE_OR_STEALTH_ALLOWED_ORIGINS on the orangerails-dev Cloudflare Pages
+  // project and a redeploy bakes it into the bundle. Tests 2 and 3 (the
+  // no-app_url window.open path below) are env-independent and run today.
+
+  // Test 1: trusted origin -> browser bounces (window.location.assign) to appUrl.
+  // page.route intercepts the navigation before it leaves so the test does not
+  // need the external origin to be reachable. Remove fixme once the origin
+  // literal is confirmed from the deployed sparrow-*.js chunk on dev.orangerails.com
+  // (dev chunk is behind Cloudflare Access; CTO or CoS must supply the value).
+  test.fixme(
+    "app_url with trusted origin bounces to the app (DL-0426)",
+    async ({ page }) => {
+      const allowedOrigin = "https://dev.orangerails.com"; // replace with literal from chunk
+      const appUrl = `${allowedOrigin}/stealth-return`;
+
+      let bounced = false;
+      await page.route(`${allowedOrigin}/**`, (route) => {
+        bounced = true;
+        route.abort();
+      });
+
+      await page.goto(`/connect/sparrow?app_url=${encodeURIComponent(appUrl)}`);
+      const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
+      await expect(launchButton).toBeVisible();
+      await launchButton.click();
+      await page.waitForTimeout(500);
+      expect(bounced, "window.location.assign must fire with the trusted appUrl").toBe(true);
+    },
+  );
+
+  // Test 2: untrusted origin -> refusal alert shown, no redirect.
+  // evil.example.com is never allowlisted regardless of the env var value,
+  // so this test is fully env-independent and runs in CI today.
+  test("app_url with untrusted origin shows the refusal alert (DL-0426)", async ({ page }) => {
+    await page.goto(
+      "/connect/sparrow?app_url=" + encodeURIComponent("https://evil.example.com/callback"),
+    );
+    const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
+    await expect(launchButton).toBeVisible();
+    await launchButton.click();
+    const alert = page.getByRole("alert");
+    await expect(alert).toBeVisible();
+    await expect(alert).toContainText(/not on our allowlist/i);
+    await capture(page, "06-sparrow-app-url-refused");
+  });
+
+  // Test 3: malformed app_url (URL constructor throws, origin is null) -> same
+  // refusal path as test 2. null can never satisfy Set.has(), so this is
+  // fully env-independent regardless of ALLOWED_APP_ORIGINS content.
+  test("malformed app_url shows the refusal alert (DL-0426)", async ({ page }) => {
+    await page.goto("/connect/sparrow?app_url=not-a-valid-url");
+    const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
+    await expect(launchButton).toBeVisible();
+    await launchButton.click();
+    const alert = page.getByRole("alert");
+    await expect(alert).toBeVisible();
+    await expect(alert).toContainText(/not on our allowlist/i);
+    await capture(page, "07-sparrow-malformed-url-refused");
+  });
+
   test('"Launch Stealth Sync" button opens /connect/stealth via window.open', async ({ page }) => {
     await page.goto("/connect/sparrow");
     const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
