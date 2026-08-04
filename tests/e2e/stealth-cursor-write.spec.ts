@@ -142,18 +142,22 @@ async function fetchConnectionCursor(connectionId: string): Promise<number | nul
 
 // ------ suite -------------------------------------------------------------
 
-test.describe('stealth cursor write (DL-0649 Part 2)', () => {
-  // Requirement 1: must run against a vite dev server.
-  test.skip(!WITH_VITE_DEV,
-    'Set PLAYWRIGHT_WITH_VITE_DEV=1 and run with VITE_OR_STEALTH_ALLOWED_ORIGINS=http://localhost:5173 pnpm dev.');
-  test.skip(!OR_API || !PLATFORM_KEY,
-    'Requires OR_API_BASE_URL and OR_TEST_PLATFORM_API_KEY.');
+// Skip the entire describe when PLAYWRIGHT_WITH_VITE_DEV is unset or
+// credentials are missing. Using test.describe.skip (rather than test.skip()
+// inside the callback) prevents test.use() baseURL overrides from being
+// registered at all in CI jobs where PLAYWRIGHT_WITH_VITE_DEV is unset.
+// A test.skip() inside the callback still executes the rest of the callback
+// (including test.use()), and a registered baseURL override of
+// http://localhost:5173 redirects the smoke-suite page.goto('/') to a port
+// that is not listening -- causing the smoke tests to fail.
+const _testDescribe = !WITH_VITE_DEV || !OR_API || !PLATFORM_KEY
+  ? test.describe.skip
+  : test.describe;
 
+_testDescribe('stealth cursor write (DL-0649 Part 2)', () => {
   // Mock sync is fast (tip = 800010, ~11 blocks). 60s is generous.
   test.setTimeout(60_000);
 
-  // Override baseURL for this suite so page.goto('/') hits the local server.
-  test.use({ baseURL: VITE_BASE });
 
   let connectionId = '';
 
@@ -182,7 +186,8 @@ test.describe('stealth cursor write (DL-0649 Part 2)', () => {
     // Navigate the parent page to the vite dev origin so postMessage from
     // this page has origin http://localhost:5173, which must be in the
     // widget's VITE_OR_STEALTH_ALLOWED_ORIGINS allowlist.
-    await page.goto('/');
+    // Navigate to the vite dev origin directly (no baseURL override needed).
+    await page.goto(VITE_BASE);
 
     // Open the widget popup and keep a reference to it via a window property.
     // Use Promise.all so we are listening for the 'page' event before
