@@ -151,9 +151,12 @@ curl -s -X POST \
 ```
 
 If `last_block_scanned` is `null` after a completed sync, the cursor
-write is failing: check the browser console for
-`[stealth/sync] cursor update failed` warnings (the write is deliberately
-best-effort and will not fail the sync).
+write is failing. The write is **not** best-effort: every failure path
+throws `[stealth/sync] cursor update failed ...`, the widget shows the
+"Sync failed" screen, an `INTERNAL` widget error is posted to the opener,
+and `OR_STEALTH_SYNC_COMPLETE` is never sent. It fails loudly on purpose:
+a silently NULL cursor makes every future sync rescan from the wallet
+birthday. If you are behind a proxy, read section 9b first.
 
 **Cursor rules, so you do not fight them:**
 
@@ -277,6 +280,18 @@ this function. Add `or-stealth-envelope-update` to the handler's
 allowlist and the warning stops. If both paths fail, the thrown error
 carries both causes: the proxy error and the fallback status or network
 error, in one message.
+
+**What the fallback means for your users' IP addresses.** On the proxy
+path the request is made by your backend, so the end user's IP address
+never reaches an Orange Rails host. On the fallback path the browser
+calls `or-stealth-envelope-update` directly, so the end user's IP does
+reach the Orange Rails host and may appear in Supabase Edge Function
+request logs. The request body carries only the connection id, the app
+user id and the block height: no wallet, address, or transaction data.
+If you do not want end user IPs reaching Orange Rails at all, add
+`or-stealth-envelope-update` to your `OR_STEALTH_PROXY_REQUEST` handler
+allowlist, which keeps every call on the proxy path and stops the
+fallback from ever firing.
 
 ## 10. Mock mode: reproduce without a real wallet
 
