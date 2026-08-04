@@ -20,7 +20,9 @@
 import { describe, it, expect } from "vitest";
 import { generateHybridKemKeyPair } from "../pqc";
 import { importAesKey } from "../vault";
-import { wrapBlob64, unwrapBlob64 } from "../co-admin";
+import { wrapBlob64, unwrapBlob64, verifyGrantSignature } from "../co-admin";
+import { generateSigKeyPair } from "../pqc";
+import { signToBase64 } from "../signatures";
 
 // ------------------------------------------------------------------
 // Helpers
@@ -159,5 +161,61 @@ describe("co-admin: revocation (store-layer)", () => {
     // NOTE: If consumeBlob had been called before revoke, the in-memory
     // CryptoKey objects would still work until the tab closes. This is the
     // documented MVP cached-subkey-in-tab limitation.
+  });
+});
+
+// ------------------------------------------------------------------
+// 6 + 7 + 8. Signed grant enforcement (verifyGrantSignature).
+//
+// The first two tests FAIL on the parent commit (dev) because
+// loadAdminSubkeysDirect did not verify signatures. They PASS on
+// this branch because verifyGrantSignature is called first.
+// ------------------------------------------------------------------
+
+describe("co-admin: signed grant enforcement (verifyGrantSignature)", () => {
+  function bytesToBase64(bytes: Uint8Array): string {
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s);
+  }
+
+  it("rejects unsigned wrap: missing grant_signature throws", async () => {
+    await expect(
+      verifyGrantSignature({
+        wrappedCiphertextB64: "dGVzdA==",
+        grantSignature: null,
+        grantSigAlg: null,
+        ownerSigPubKeyB64: null,
+      }),
+    ).rejects.toThrow(/unsigned grant rejected/);
+  });
+
+  it("rejects tampered wrapped ciphertext: signature mismatch throws", async () => {
+    const { publicKey, secretKey } = generateSigKeyPair();
+    const originalB64 = "aGVsbG8="; // "hello"
+    const { signature, algorithm } = await signToBase64(secretKey, originalB64);
+    const tamperedB64 = "d29ybGQ="; // "world" -- different content
+    await expect(
+      verifyGrantSignature({
+        wrappedCiphertextB64: tamperedB64,
+        grantSignature: signature,
+        grantSigAlg: algorithm,
+        ownerSigPubKeyB64: bytesToBase64(publicKey),
+      }),
+    ).rejects.toThrow(/grant signature verification failed/);
+  });
+
+  it("accepts a valid signed grant: correct signature resolves", async () => {
+    const { publicKey, secretKey } = generateSigKeyPair();
+    const wrappedB64 = "dGVzdA==";
+    const { signature, algorithm } = await signToBase64(secretKey, wrappedB64);
+    await expect(
+      verifyGrantSignature({
+        wrappedCiphertextB64: wrappedB64,
+        grantSignature: signature,
+        grantSigAlg: algorithm,
+        ownerSigPubKeyB64: bytesToBase64(publicKey),
+      }),
+    ).resolves.toBeUndefined();
   });
 });
