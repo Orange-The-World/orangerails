@@ -164,20 +164,31 @@ jobs:
           fi
 
           # Deploy each function with retry on esm.sh 522 errors.
+          # Continue past individual failures so all functions are attempted
+          # and the log names every function that failed, not just the first.
+          FAILED_FUNCS=""
           for FUNC in $DEPLOY_FUNCS; do
+            DEPLOYED=false
             for attempt in 1 2 3; do
               if supabase functions deploy "$FUNC" --project-ref ${{ steps.target.outputs.supabase_ref }}; then
                 echo "$FUNC deployed on attempt $attempt"
+                DEPLOYED=true
                 break
               fi
               if [ $attempt -eq 3 ]; then
-                echo "$FUNC deploy failed after 3 attempts"
-                exit 1
+                echo "::error::$FUNC failed after 3 attempts"
+                FAILED_FUNCS="${FAILED_FUNCS} ${FUNC}"
+              else
+                echo "attempt $attempt for $FUNC failed; sleeping 15s and retrying"
+                sleep 15
               fi
-              echo "attempt $attempt for $FUNC failed; sleeping 15s and retrying"
-              sleep 15
             done
           done
+
+          if [ -n "$FAILED_FUNCS" ]; then
+            echo "::error::Functions that failed to deploy:${FAILED_FUNCS}"
+            exit 1
+          fi
 
       - name: Report pending DB migrations (read-only, never applies)
         # Runs on every deploy so schema drift is visible instead of silent.
