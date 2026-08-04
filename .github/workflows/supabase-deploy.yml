@@ -153,7 +153,7 @@ jobs:
               # Skip any function directory deleted in this push.
               DEPLOY_FUNCS=$(echo "$DEPLOY_FUNCS" | while IFS= read -r func; do
                 [ -n "$func" ] && [ -d "supabase/functions/$func" ] && echo "$func"
-              done)
+              done || true)
               echo "Targeted deploy: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
             fi
           fi
