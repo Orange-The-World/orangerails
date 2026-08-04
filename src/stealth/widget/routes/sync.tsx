@@ -303,15 +303,77 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             app_user_id: init.app_user_id,
             last_block_scanned: result.lastBlockScanned,
           };
+          let cursorWritten = false;
           if (init.proxy_base_url && parent) {
-            const r = await proxyFetch({
-              parent,
-              parentOrigin: init.return_callback_origin,
-              fn: "or-stealth-envelope-update",
-              body: cursorBody,
-            });
-            if (!r.ok) {
-              throw new Error(`[stealth/sync] cursor update failed: ${r.status} ${r.bodyText}`);
+            // Proxy path. Use a short timeout: the cursor write is a single-row
+            // lightweight update, not a large sealed-tx upload. Consumer proxy
+            // handlers set up before or-stealth-envelope-update was added will
+            // silently drop the OR_STEALTH_PROXY_REQUEST message and never
+            // respond. Fail fast (15s) so we can try the direct fallback below
+            // rather than blocking the user for two minutes.
+            let proxyErr = "";
+            try {
+              const r = await proxyFetch({
+                parent,
+                parentOrigin: init.return_callback_origin,
+                fn: "or-stealth-envelope-update",
+                body: cursorBody,
+                timeoutMs: 15000,
+              });
+              if (r.ok) {
+                cursorWritten = true;
+              } else {
+                proxyErr = `proxy ${r.status}: ${r.bodyText}`;
+              }
+            } catch (err) {
+              proxyErr = err instanceof Error ? err.message : String(err);
+            }
+            // Direct fallback: if the proxy path failed and we have a user JWT,
+            // call the OR function directly. The edge function accepts user-JWT
+            // auth in addition to platform-key auth, so this succeeds even when
+            // the consumer proxy does not handle this function.
+            if (!cursorWritten && init.access_token) {
+              console.warn(
+                `[stealth/sync] proxy cursor write failed (${proxyErr}); falling back to a ` +
+                `direct user-JWT call to or-stealth-envelope-update. This bypasses your ` +
+                `OR_STEALTH_PROXY_REQUEST handler. Add or-stealth-envelope-update to that ` +
+                `handler to restore the proxy path.`,
+              );
+              const fbHeaders: Record<string, string> = {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${init.access_token}`,
+              };
+              let fbResp: Response;
+              try {
+                fbResp = await fetch(
+                  resolveFunctionUrl("or-stealth-envelope-update", undefined),
+                  { method: "POST", headers: fbHeaders, body: JSON.stringify(cursorBody) },
+                );
+              } catch (err) {
+                // A network-layer rejection (DNS, CORS, offline) would otherwise
+                // escape as a bare TypeError and drop proxyErr, hiding why we were
+                // in the fallback at all. Fold both causes into one error.
+                const fbErr = err instanceof Error ? err.message : String(err);
+                throw new Error(
+                  `[stealth/sync] cursor update failed (proxy: ${proxyErr}; direct fallback: ${fbErr}). ` +
+                  `Add or-stealth-envelope-update to your OR_STEALTH_PROXY_REQUEST handler to fix the proxy path.`,
+                );
+              }
+              if (fbResp.ok) {
+                cursorWritten = true;
+              } else {
+                const fbText = await fbResp.text().catch(() => "");
+                throw new Error(
+                  `[stealth/sync] cursor update failed (proxy: ${proxyErr}; direct fallback: ${fbResp.status} ${fbText}). ` +
+                  `Add or-stealth-envelope-update to your OR_STEALTH_PROXY_REQUEST handler to fix the proxy path.`,
+                );
+              }
+            }
+            if (!cursorWritten) {
+              throw new Error(
+                `[stealth/sync] cursor update failed: ${proxyErr}. ` +
+                `Add or-stealth-envelope-update to your OR_STEALTH_PROXY_REQUEST handler.`,
+              );
             }
           } else {
             const headers: Record<string, string> = {
@@ -329,9 +391,16 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
               },
             );
             if (!cursorResp.ok) {
-              throw new Error(`[stealth/sync] cursor update failed: ${cursorResp.status}`);
+              const errText = await cursorResp.text().catch(() => "");
+              throw new Error(`[stealth/sync] cursor update failed: ${cursorResp.status} ${errText}`);
             }
+            cursorWritten = true;
           }
+          // Satisfy the TypeScript exhaustiveness check: every branch above
+          // either sets cursorWritten = true, throws, or was guarded such that
+          // reaching here with cursorWritten = false is impossible. The variable
+          // exists so the compiler can verify that guarantee.
+          void cursorWritten;
         }
 
         // 5. SYNC_COMPLETE.
