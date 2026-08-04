@@ -39,11 +39,12 @@
  * revocation until the tab is closed. See docs/OrangeRails-CoAdmins.md.
  */
 
-import { deriveMekRaw, importAesKey } from "./vault";
+import { deriveMekRaw, importAesKey, importMekAsHkdf } from "./vault";
 import { HKDF_CONTEXTS, derivePqcSecretWrapKey } from "./key-derivation";
 import { base64ToBytes } from "./key-wrapping";
 import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } from "./pqc";
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
+import { signToBase64, verifyFromBase64 } from "./signatures";
 
 // ------------------------------------------------------------------
 // Encoding helpers
@@ -176,6 +177,41 @@ export async function unwrapBlob64(
 }
 
 // ------------------------------------------------------------------
+// Grant signature helpers
+// ------------------------------------------------------------------
+
+/**
+ * Verify the ML-DSA-65 grant signature on a wrapped_data_keys row.
+ *
+ * Called by loadAdminSubkeysDirect before any decryption. Throws on
+ * missing or invalid signature so the caller fails closed.
+ * A NULL grant_signature (rows from before this change) is also rejected.
+ */
+export async function verifyGrantSignature(params: {
+  wrappedCiphertextB64: string;
+  grantSignature: string | null | undefined;
+  grantSigAlg: string | null | undefined;
+  ownerSigPubKeyB64: string | null | undefined;
+}): Promise<void> {
+  if (!params.grantSignature || !params.ownerSigPubKeyB64) {
+    throw new Error(
+      "unsigned grant rejected: grant_signature and owner_sig_pub_key are required",
+    );
+  }
+  const ok = await verifyFromBase64(
+    params.ownerSigPubKeyB64,
+    params.wrappedCiphertextB64,
+    params.grantSignature,
+    params.grantSigAlg ?? undefined,
+  );
+  if (!ok) {
+    throw new Error(
+      "grant signature verification failed: wrapped ciphertext may have been tampered",
+    );
+  }
+}
+
+// ------------------------------------------------------------------
 // Public types
 // ------------------------------------------------------------------
 
@@ -248,10 +284,20 @@ export async function grantCoAdmin(params: {
   targetUserId: string;
   targetKemPubB64: string;
   existingKeyId: string | null;
+  ownerSigSecretWrapped: string;
+  ownerSigPubKeyB64: string;
   supabase: CoAdminSupabaseLike;
 }): Promise<GrantResult> {
-  const { ownerUserId, ownerSaltB64, ownerPassword, targetUserId, targetKemPubB64, supabase } =
-    params;
+  const {
+    ownerUserId,
+    ownerSaltB64,
+    ownerPassword,
+    targetUserId,
+    targetKemPubB64,
+    ownerSigSecretWrapped,
+    ownerSigPubKeyB64,
+    supabase,
+  } = params;
 
   // Step a , derive raw MEK bytes from the re-confirmed password.
   const mekRaw = await deriveMekRaw(ownerPassword, ownerSaltB64);
@@ -287,13 +333,27 @@ export async function grantCoAdmin(params: {
   // Step e , wrap the 64-byte blob for the recipient's KEM public key.
   const recipientPub = base64ToBytes(targetKemPubB64);
   const wrappedBytes = await wrapBlob64(blob, recipientPub);
+  const wrappedCiphertextB64 = bytesToBase64(wrappedBytes);
+
+  // Step e(bis) , sign the wrapped ciphertext with the owner's ML-DSA-65 signing key.
+  // Import raw MEK bytes as a non-extractable HKDF CryptoKey for key derivation.
+  const mekForSign = await importMekAsHkdf(mekRaw);
+  const pqcWrapKey = await derivePqcSecretWrapKey(mekForSign, ownerSaltB64);
+  const ownerSigSecretKey = await unwrapPqcSecretKey(pqcWrapKey, ownerSigSecretWrapped);
+  const { signature: grantSignature, algorithm: grantSigAlg } = await signToBase64(
+    ownerSigSecretKey,
+    wrappedCiphertextB64,
+  );
 
   // Step f , insert wrapped_data_keys row.
   const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
     data_key_id: workspaceKeyId,
     recipient_user_id: targetUserId,
-    wrapped_ciphertext: bytesToBase64(wrappedBytes),
+    wrapped_ciphertext: wrappedCiphertextB64,
     algorithm: "hybrid-x25519-mlkem768-blob64",
+    grant_signature: grantSignature,
+    grant_sig_alg: grantSigAlg,
+    owner_sig_pub_key: ownerSigPubKeyB64,
   });
   if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${wdkErr}`);
 
@@ -328,8 +388,19 @@ export async function loadAdminSubkeysDirect(params: {
   kemSecretWrapped: string;
   adminMek: CryptoKey;
   adminSaltB64: string;
+  grantSignature: string | null;
+  grantSigAlg: string | null;
+  ownerSigPubKeyB64: string | null;
 }): Promise<AdminSubkeys> {
   const { wrappedCiphertextB64, kemSecretWrapped, adminMek, adminSaltB64 } = params;
+
+  // Verify grant signature first , fail closed if missing or invalid.
+  await verifyGrantSignature({
+    wrappedCiphertextB64,
+    grantSignature: params.grantSignature,
+    grantSigAlg: params.grantSigAlg,
+    ownerSigPubKeyB64: params.ownerSigPubKeyB64,
+  });
 
   // Unwrap the admin's PQC secret key from their own vault.
   const wrapKey = await derivePqcSecretWrapKey(adminMek, adminSaltB64);
