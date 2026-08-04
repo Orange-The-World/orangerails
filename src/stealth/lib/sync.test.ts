@@ -330,6 +330,39 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     ]);
   });
 
+  it('stops cursor before first null-filter block, not at tip (DL-0516)', async () => {
+    // Blocks 800_000-800_004 return a valid non-matching filter; 800_005+
+    // return null (CDN gap). The cursor must land at 800_004, not tip
+    // (800_010), so the next sync retries the gap from 800_005.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'null-filter-cursor',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: null,
+      fetchTip: async () => 800_010,
+      fetchFilter: async (h) => {
+        if (h >= 800_005) return null;
+        return { height: h, blockHashHex: '00'.repeat(32), filter: new Uint8Array(0) };
+      },
+      fetchBlock: async () => { throw new Error('should not be called'); },
+      matcher: { matchAny: () => false },
+    });
+
+    expect(result.lastBlockScanned).toBe(800_004);
+    expect(result.txCount).toBe(0);
+  });
+
   // Condition 4 of issue #335: birthdayHeight outside [0, tip] must REJECT,
   // never clamp. Clamping would silently claim a scan range the user never
   // requested and is not recoverable; rejection is.
