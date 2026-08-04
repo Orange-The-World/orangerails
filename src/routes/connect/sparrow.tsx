@@ -17,7 +17,7 @@
  */
 
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   CheckCircle2,
@@ -62,6 +62,25 @@ const ALLOWED_APP_ORIGINS: ReadonlySet<string> = new Set(
     .filter((s) => s.length > 0),
 );
 
+// DL-0448: one place that decides what an inbound app_url is, so the mount
+// effect and the button can never disagree about which origins are trusted.
+// Returns null when there is no app_url at all, which is the bare
+// /connect/sparrow case a customer reaches from docs or marketing.
+const REFUSED_MESSAGE =
+  "We could not open the app that sent you here: its address is not on our allowlist. If you are testing an integration, register its origin first. Otherwise, start Stealth Sync from that app.";
+
+function resolveAppUrl(): { appUrl: string; trusted: boolean } | null {
+  const appUrl = new URLSearchParams(window.location.search).get("app_url");
+  if (!appUrl) return null;
+  let origin: string | null = null;
+  try {
+    origin = new URL(appUrl).origin;
+  } catch {
+    origin = null;
+  }
+  return { appUrl, trusted: origin !== null && ALLOWED_APP_ORIGINS.has(origin) };
+}
+
 function launchStealthSync(onRefused: (message: string) => void) {
   // Option B, the bounce (DL-0426). When a consuming app deep-links here
   // with its own app_url, hand the flow straight back to that app. The
@@ -99,9 +118,7 @@ function launchStealthSync(onRefused: (message: string) => void) {
         (origin ?? "invalid URL") +
         ". Add it to VITE_OR_STEALTH_ALLOWED_ORIGINS if it is a registered app.",
     );
-    onRefused(
-      "We could not open the app that sent you here: its address is not on our allowlist. If you are testing an integration, register its origin first. Otherwise, start Stealth Sync from that app.",
-    );
+    onRefused(REFUSED_MESSAGE);
     return;
   }
 
@@ -122,6 +139,44 @@ function launchStealthSync(onRefused: (message: string) => void) {
 
 function SparrowConnectPage() {
   const [refusedError, setRefusedError] = useState<string | null>(null);
+  // DL-0448: a customer who arrived from a registered app already chose
+  // Sparrow in that app. Making them read a landing page and press a button
+  // to continue is a detour through our marketing for a decision they have
+  // already made. So when the inbound app_url is trusted, hand the flow on
+  // during mount instead of rendering. The typeof guard keeps this safe if
+  // the route is ever prerendered, where window does not exist.
+  const [bouncing] = useState(
+    () => typeof window !== "undefined" && resolveAppUrl()?.trusted === true,
+  );
+
+  useEffect(() => {
+    const inbound = resolveAppUrl();
+    if (!inbound) return; // bare /connect/sparrow, the landing page is correct
+    if (inbound.trusted) {
+      window.location.assign(inbound.appUrl);
+      return;
+    }
+    // An app_url we cannot trust must never fail silently, and it must not
+    // wait for a click to say so either. Same refusal the button produces.
+    console.warn(
+      "[sparrow] Refused app_url with untrusted origin on arrival. " +
+        "Add it to VITE_OR_STEALTH_ALLOWED_ORIGINS if it is a registered app.",
+    );
+    setRefusedError(REFUSED_MESSAGE);
+  }, []);
+
+  if (bouncing) {
+    return (
+      <div className="min-h-screen bg-background text-foreground antialiased">
+        <main className="mx-auto flex min-h-screen max-w-4xl items-center justify-center px-6">
+          <p className="text-base text-muted-foreground" role="status">
+            Opening Stealth Sync...
+          </p>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-background text-foreground antialiased">
       <Navbar />
