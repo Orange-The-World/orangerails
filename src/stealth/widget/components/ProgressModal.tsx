@@ -173,7 +173,7 @@ export function ProgressModal({ stage, percent, detailOverride, isFirstSync }: P
         {isFirstSync !== undefined && (
           <p className="mt-3 text-[11px] text-muted-foreground">
             {isFirstSync
-              ? 'How long depends on how far back your wallet goes and your connection speed. The bar shows blocks remaining.'
+              ? 'Sync time depends on how far back your wallet scans and your connection speed. The bar shows blocks remaining.'
               : 'After the first sync, later syncs take seconds.'}
           </p>
         )}
