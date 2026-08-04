@@ -301,3 +301,16 @@ jobs:
 
           echo
           echo "── ${APPLIED_COUNT} migration(s) applied this run ──"
+
+      - name: Notify Zulip on deploy failure
+        if: failure()
+        env:
+          ZULIP_BOT_EMAIL: ${{ secrets.ZULIP_BOT_EMAIL }}
+          ZULIP_BOT_KEY: ${{ secrets.ZULIP_BOT_KEY }}
+        run: |
+          curl -sS -X POST "https://waggle.orangerails.com/api/v1/messages" \
+            -u "${ZULIP_BOT_EMAIL}:${ZULIP_BOT_KEY}" \
+            --data-urlencode "type=stream" \
+            --data-urlencode "to=Releases" \
+            --data-urlencode "topic=supabase-deploy failure (${{ github.ref_name }})" \
+            --data-urlencode "content=:red_circle: **supabase-deploy failed** on \`${{ github.ref_name }}\` sha \`${{ github.sha }}\`. [View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
