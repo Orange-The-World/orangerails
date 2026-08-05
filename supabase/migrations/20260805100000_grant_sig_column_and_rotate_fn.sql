@@ -3,16 +3,17 @@
 --          + rotate_data_key function update
 -- ============================================================
 -- grant_sig stores the admin's ML-DSA-65 signature over a
--- canonical envelope payload, binding: data_key_id,
--- recipient_user_id, wrapped_ciphertext (or its hash),
--- algorithm, granting admin user id, and a fixed
--- domain-separation prefix. Produced client-side, verified
--- at consume time. The server never derives or reads the key.
+-- canonical envelope payload binding four length-prefixed fields:
+-- domain-separation prefix ("orangerails:add-member:mek-wrap:v1"),
+-- recipient_user_id, workspace_key_id, and wrapped_ciphertext.
+-- Produced client-side, verified at consume time before any unwrap.
+-- The server never derives or reads the key.
 --
 -- Idempotency:
 --   ADD COLUMN IF NOT EXISTS is a no-op on dev (column already
 --   present as text NOT NULL from out-of-band apply).
 --   SET NOT NULL is a no-op on dev (already NOT NULL).
+--   CHECK constraint uses DROP IF EXISTS then ADD so re-runs are safe.
 --   Both targets have 0 rows so no backfill is required.
 --
 -- Session: 2026-08-05-DL-0619
@@ -25,7 +26,15 @@ ALTER TABLE public.wrapped_data_keys
 ALTER TABLE public.wrapped_data_keys
   ALTER COLUMN grant_sig SET NOT NULL;
 
--- Step 3: update rotate_data_key to accept and persist grant_sig
+-- Step 3: enforce non-empty (idempotent: drop-if-exists then add)
+ALTER TABLE public.wrapped_data_keys
+  DROP CONSTRAINT IF EXISTS wrapped_data_keys_grant_sig_nonempty;
+
+ALTER TABLE public.wrapped_data_keys
+  ADD CONSTRAINT wrapped_data_keys_grant_sig_nonempty
+  CHECK (length(grant_sig) > 0);
+
+-- Step 4: update rotate_data_key to accept and persist grant_sig
 -- ============================================================
 -- INPUT shape for p_envelopes (updated):
 --   [{
@@ -129,4 +138,4 @@ REVOKE ALL ON FUNCTION public.rotate_data_key(UUID, UUID, JSONB, TEXT) FROM PUBL
 GRANT EXECUTE ON FUNCTION public.rotate_data_key(UUID, UUID, JSONB, TEXT) TO authenticated;
 
 COMMENT ON FUNCTION public.rotate_data_key IS
-  'Atomic insert of new wrapped_data_keys envelopes + audit entry after a data key rotation. Called by the browser after revoke when remaining members need a fresh wrapped envelope. Each envelope must include grant_sig: the admin ML-DSA-65 signature over the canonical envelope payload (data_key_id, recipient_user_id, wrapped_ciphertext, algorithm, granting admin user id, domain prefix).';
+  'Atomic insert of new wrapped_data_keys envelopes + audit entry after a data key rotation. Called by the browser after revoke when remaining members need a fresh wrapped envelope. Each envelope must include grant_sig: the admin ML-DSA-65 signature over the canonical envelope payload binding four length-prefixed fields: domain-separation prefix (orangerails:add-member:mek-wrap:v1), recipient_user_id, workspace_key_id, and wrapped_ciphertext. Produced client-side, verified before any unwrap.';
