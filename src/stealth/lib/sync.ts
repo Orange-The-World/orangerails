@@ -756,8 +756,26 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // loop below; used after block parsing to detect exhaustion (#352).
   const maxMatchedIndexPerChain: [number, number] = [-1, -1];
 
+  // Prefetch block bytes while parsing previous ones.
+  // UTXO tracking is order-sensitive so we process blocks strictly in
+  // ascending height order; but fetching them in parallel hides network
+  // round-trip latency. A sliding window of BLOCK_FETCH_LOOKAHEAD
+  // concurrent requests keeps at most ~16 MB in flight at once and gives
+  // up to 8x speedup on the block phase.
+  const BLOCK_FETCH_LOOKAHEAD = 8;
+  const blockFetches: Array<Promise<BlockRecord>> = [];
+  for (let pi = 0; pi < Math.min(BLOCK_FETCH_LOOKAHEAD, hits.length); pi++) {
+    blockFetches[pi] = opts.fetchBlock(hits[pi].blockHashHex);
+  }
+
   for (let i = 0; i < hits.length; i++) {
-    const block = await opts.fetchBlock(hits[i].blockHashHex);
+    // Kick off the next prefetch at the trailing edge of the sliding
+    // window before awaiting the block at the front.
+    const nextPrefetch = i + BLOCK_FETCH_LOOKAHEAD;
+    if (nextPrefetch < hits.length) {
+      blockFetches[nextPrefetch] = opts.fetchBlock(hits[nextPrefetch].blockHashHex);
+    }
+    const block = await blockFetches[i];
     bytesDownloaded += block.raw.length;
     // Height comes from the filter match, not the block record: the
     // X-Block-Height response header is invisible to browsers unless the
@@ -983,8 +1001,17 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // (passNewDerived), but inputs are checked against the full UTXO map so a
     // spend of a previously-received UTXO is detected correctly even when the
     // spending tx appears in an extension pass.
+    // Same sliding-window prefetch as the main block loop.
+    const extBlockFetches: Array<Promise<BlockRecord>> = [];
+    for (let pi = 0; pi < Math.min(BLOCK_FETCH_LOOKAHEAD, extHits.length); pi++) {
+      extBlockFetches[pi] = opts.fetchBlock(extHits[pi].blockHashHex);
+    }
     for (let ei = 0; ei < extHits.length; ei++) {
-      const block = await opts.fetchBlock(extHits[ei].blockHashHex);
+      const nextExtPrefetch = ei + BLOCK_FETCH_LOOKAHEAD;
+      if (nextExtPrefetch < extHits.length) {
+        extBlockFetches[nextExtPrefetch] = opts.fetchBlock(extHits[nextExtPrefetch].blockHashHex);
+      }
+      const block = await extBlockFetches[ei];
       bytesDownloaded += block.raw.length;
       const blockHeight = extHits[ei].height;
       const header = parseBlockHeader(block.raw);
