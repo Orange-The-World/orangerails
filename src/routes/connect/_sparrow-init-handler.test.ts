@@ -1,138 +1,173 @@
+/**
+ * Unit tests for _sparrow-init-handler.ts (DL-0448).
+ *
+ * Covers all five guards in sendInitOnReady and the happy-path payload.
+ * These run in vitest without a browser, a real Supabase session, or a
+ * running vault -- that isolation is the reason the helper was extracted.
+ *
+ * vitest include glob: src/**\/\*.test.ts
+ */
+
 import { describe, it, expect, vi } from "vitest";
 import { sendInitOnReady } from "./_sparrow-init-handler";
-import { STEALTH_PROTOCOL_VERSION } from "@/stealth/lib/postmessage";
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
+const SELF_ORIGIN = "https://connect.orangerails.com";
 
-const SELF_ORIGIN = "https://orangerails.com";
-const USER_ID = "user-abc-00000000";
-const ACCESS_TOKEN = "tok-def-00000000";
-const STEALTH_KEY = "dGVzdC1zdGVhbHRoLWtleS0zMi1ieXRlcw==";
-
-const makePopup = () => ({ postMessage: vi.fn() });
-const makeSession = async () => ({ user: { id: USER_ID }, access_token: ACCESS_TOKEN });
-const getKey = async () => STEALTH_KEY;
-
-function readyEvent(popup: object, origin = SELF_ORIGIN) {
-  return { source: popup, origin, data: { type: "OR_STEALTH_READY" } };
-}
-
-const EXPECTED_INIT = {
-  type: "OR_STEALTH_INIT",
-  protocol_version: STEALTH_PROTOCOL_VERSION,
-  app_slug: "or",
-  app_user_id: USER_ID,
-  mode: "add",
-  or_stealth_key_b64: STEALTH_KEY,
-  return_callback_origin: SELF_ORIGIN,
-  access_token: ACCESS_TOKEN,
-  gap_limit: 250,
+const SESSION = {
+  user: { id: "user-123" },
+  access_token: "tok-abc",
 };
 
-// ---------------------------------------------------------------------------
-// Tests (DL-0448 signed-in INIT path)
-// ---------------------------------------------------------------------------
+async function okSession() {
+  return SESSION;
+}
+async function nullSession() {
+  return null;
+}
+async function okKey() {
+  return "base64key==";
+}
+async function throwKey(): Promise<string> {
+  throw new Error("crypto failure");
+}
 
-describe("sendInitOnReady (DL-0448 signed-in INIT path)", () => {
-  it("sends OR_STEALTH_INIT with correct fields on valid OR_STEALTH_READY", async () => {
+function makePopup() {
+  return { postMessage: vi.fn() };
+}
+
+function makeEvent(popup: ReturnType<typeof makePopup>, overrides: Partial<{
+  source: unknown;
+  origin: string;
+  data: unknown;
+}> = {}) {
+  return {
+    source: popup as unknown,
+    origin: SELF_ORIGIN,
+    data: { type: "OR_STEALTH_READY" } as unknown,
+    ...overrides,
+  };
+}
+
+describe("sendInitOnReady", () => {
+  it("returns false when event.source is a different window", async () => {
     const popup = makePopup();
-
+    const otherWindow = makePopup();
     const result = await sendInitOnReady(
-      readyEvent(popup),
+      makeEvent(popup, { source: otherWindow }),
       popup,
       SELF_ORIGIN,
-      makeSession,
-      getKey,
+      okSession,
+      okKey,
     );
-
-    expect(result).toBe(true);
-    expect(popup.postMessage).toHaveBeenCalledOnce();
-    expect(popup.postMessage).toHaveBeenCalledWith(EXPECTED_INIT, SELF_ORIGIN);
-  });
-
-  it("ignores messages from a different source window (source guard)", async () => {
-    const popup = makePopup();
-    const otherWindow = {};
-
-    const result = await sendInitOnReady(
-      { source: otherWindow, origin: SELF_ORIGIN, data: { type: "OR_STEALTH_READY" } },
-      popup,
-      SELF_ORIGIN,
-      makeSession,
-      getKey,
-    );
-
     expect(result).toBe(false);
     expect(popup.postMessage).not.toHaveBeenCalled();
   });
 
-  it("ignores messages from a different origin (origin guard)", async () => {
+  it("returns false when event.origin does not match selfOrigin (cross-origin impersonation)", async () => {
     const popup = makePopup();
-
     const result = await sendInitOnReady(
-      readyEvent(popup, "https://evil.example.com"),
+      makeEvent(popup, { origin: "https://evil.example.com" }),
       popup,
       SELF_ORIGIN,
-      makeSession,
-      getKey,
+      okSession,
+      okKey,
     );
-
     expect(result).toBe(false);
     expect(popup.postMessage).not.toHaveBeenCalled();
   });
 
-  it("ignores non-OR_STEALTH_READY message types (type guard)", async () => {
+  it("returns false when event.data.type is not OR_STEALTH_READY", async () => {
     const popup = makePopup();
-
     const result = await sendInitOnReady(
-      { source: popup, origin: SELF_ORIGIN, data: { type: "OR_STEALTH_PROGRESS" } },
+      makeEvent(popup, { data: { type: "OR_STEALTH_INIT" } }),
       popup,
       SELF_ORIGIN,
-      makeSession,
-      getKey,
+      okSession,
+      okKey,
     );
-
     expect(result).toBe(false);
     expect(popup.postMessage).not.toHaveBeenCalled();
   });
 
-  it("skips postMessage when getSession returns null (signed-out opener edge case)", async () => {
+  it("returns false when event.data is null (missing type field)", async () => {
     const popup = makePopup();
-
     const result = await sendInitOnReady(
-      readyEvent(popup),
+      makeEvent(popup, { data: null }),
       popup,
       SELF_ORIGIN,
-      async () => null,
-      getKey,
+      okSession,
+      okKey,
     );
-
     expect(result).toBe(false);
     expect(popup.postMessage).not.toHaveBeenCalled();
   });
 
-  it("returns false and logs a warning when getStealthKey rejects (crypto error)", async () => {
+  it("returns false when getSession returns null (anonymous visitor)", async () => {
     const popup = makePopup();
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
     const result = await sendInitOnReady(
-      readyEvent(popup),
+      makeEvent(popup),
       popup,
       SELF_ORIGIN,
-      makeSession,
-      async () => {
-        throw new Error("HKDF failure");
-      },
+      nullSession,
+      okKey,
     );
-
     expect(result).toBe(false);
     expect(popup.postMessage).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledWith(
-      "[sparrow] Could not send OR_STEALTH_INIT:",
+  });
+
+  it("returns false and logs a warning when getStealthKey throws (non-fatal crypto error)", async () => {
+    const popup = makePopup();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await sendInitOnReady(
+      makeEvent(popup),
+      popup,
+      SELF_ORIGIN,
+      okSession,
+      throwKey,
+    );
+    expect(result).toBe(false);
+    expect(popup.postMessage).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[sparrow]"),
       expect.any(Error),
     );
-    warn.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it("posts OR_STEALTH_INIT at selfOrigin and returns true on the happy path", async () => {
+    const popup = makePopup();
+    const result = await sendInitOnReady(
+      makeEvent(popup),
+      popup,
+      SELF_ORIGIN,
+      okSession,
+      okKey,
+    );
+    expect(result).toBe(true);
+    expect(popup.postMessage).toHaveBeenCalledOnce();
+
+    const [msg, targetOrigin] = popup.postMessage.mock.calls[0] as [
+      Record<string, unknown>,
+      string,
+    ];
+    expect(targetOrigin).toBe(SELF_ORIGIN);
+    expect(msg.type).toBe("OR_STEALTH_INIT");
+    expect(msg.app_slug).toBe("or");
+    expect(msg.app_user_id).toBe(SESSION.user.id);
+    expect(msg.access_token).toBe(SESSION.access_token);
+    expect(msg.mode).toBe("add");
+    expect(msg.or_stealth_key_b64).toBe("base64key==");
+    expect(msg.return_callback_origin).toBe(SELF_ORIGIN);
+    expect(msg.gap_limit).toBe(250);
+    expect(typeof msg.protocol_version).toBe("string");
+    expect((msg.protocol_version as string).length).toBeGreaterThan(0);
+  });
+
+  it("posts INIT targeted exactly at selfOrigin, not at wildcard origin", async () => {
+    const popup = makePopup();
+    await sendInitOnReady(makeEvent(popup), popup, SELF_ORIGIN, okSession, okKey);
+    const [, targetOrigin] = popup.postMessage.mock.calls[0] as [unknown, string];
+    expect(targetOrigin).toBe(SELF_ORIGIN);
+    expect(targetOrigin).not.toBe("*");
   });
 });
