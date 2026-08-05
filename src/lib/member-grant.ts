@@ -15,7 +15,7 @@
  * outside the client.
  */
 
-import { signToBase64, verifyFromBase64 } from "./signatures";
+import { signBytesToBase64, verifyBytesFromBase64 } from "./signatures";
 
 /** A co-admin grant: the wrapped MEK plus the identifiers it is bound to. */
 export interface MemberGrant {
@@ -29,22 +29,46 @@ export interface SignedMemberGrant {
   algorithm: string;
 }
 
+const _enc = new TextEncoder();
+
+/**
+ * encode(s) = uint32BE(utf8ByteLength(s)) || utf8Bytes(s)
+ * A zero-length field produces a 4-byte 0x00000000 prefix,
+ * distinguishable from absence and not silently dropped.
+ */
+function _lenField(s: string): Uint8Array {
+  const utf8 = _enc.encode(s);
+  const field = new Uint8Array(4 + utf8.length);
+  new DataView(field.buffer).setUint32(0, utf8.length, false /* big-endian */);
+  field.set(utf8, 4);
+  return field;
+}
+
 /**
  * Canonical, domain-separated bytes that a grant signature covers.
  *
- * JSON.stringify of a fixed-order array gives a deterministic, injection-safe
- * encoding: field order is pinned, and JSON escaping means no field value can
- * spoof a delimiter or bleed into an adjacent field. The leading domain tag
- * stops a signature over this payload from ever being replayed as a signature
- * over some other ml-dsa-65 message in the app.
+ * Length-prefixed raw-byte encoding: no JSON, no library trust beyond
+ * TextEncoder. Fields are fixed-order; each is prefixed by its 4-byte
+ * big-endian UTF-8 byte-length so no field value can spoof a delimiter
+ * or bleed into an adjacent field.
+ *
+ * Layout: encode(ctx) || encode(memberUserId) || encode(workspaceKeyId) || encode(wrappedMekCiphertextB64)
  */
-function canonicalGrantMessage(grant: MemberGrant): string {
-  return JSON.stringify([
-    "orangerails.member-grant.v1",
-    grant.memberUserId,
-    grant.workspaceKeyId,
-    grant.wrappedMekCiphertextB64,
-  ]);
+function canonicalGrantBytes(grant: MemberGrant): Uint8Array {
+  const parts = [
+    _lenField("orangerails:add-member:mek-wrap:v1"),
+    _lenField(grant.memberUserId),
+    _lenField(grant.workspaceKeyId),
+    _lenField(grant.wrappedMekCiphertextB64),
+  ];
+  const total = parts.reduce((sum, p) => sum + p.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
 }
 
 /** Sign a co-admin grant with the granting admin's ML-DSA-65 secret key. */
@@ -52,7 +76,7 @@ export async function signMemberGrant(
   secretKey: Uint8Array,
   grant: MemberGrant,
 ): Promise<SignedMemberGrant> {
-  return signToBase64(secretKey, canonicalGrantMessage(grant));
+  return signBytesToBase64(secretKey, canonicalGrantBytes(grant));
 }
 
 /**
@@ -69,9 +93,9 @@ export async function verifyMemberGrant(
 ): Promise<boolean> {
   if (!signatureB64) return false;
   try {
-    return await verifyFromBase64(
+    return await verifyBytesFromBase64(
       adminPublicKeyB64,
-      canonicalGrantMessage(grant),
+      canonicalGrantBytes(grant),
       signatureB64,
     );
   } catch {
