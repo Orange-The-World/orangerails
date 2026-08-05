@@ -40,7 +40,7 @@ uses for `or-quiltt-session` and other platform-mode endpoints.
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `app_user_id` | string | Yes | Your user ID. Must match `subaccounts.external_user_id`. Max 256 chars. |
-| `opk_public` | string | Yes | Base64-encoded X25519 public key (ORIGINAL variant, 44 chars for a 32-byte key). |
+| `opk_public` | string | Yes | Base64-encoded X25519 public key (ORIGINAL variant; a 32-byte X25519 key encodes to 44 chars, enforced input max is 128 chars). |
 | `opk_alg` | string | Yes | Crypto suite ID. Currently the only accepted value is `libsodium-crypto_box_seal-v1`. |
 | `confirm_rotation` | boolean | No | Must be literal `true` when rotating an existing OPK (see Rotation below). Absent or false blocks rotation. |
 | `rotation_reason` | string | No | Free-text reason recorded on the rotation audit row. |
@@ -97,7 +97,7 @@ unchanged` and a 200. It is safe to retry on network failure.
 OPK (for example if the user linked an account but has not yet opted in to background sync). When
 that happens, sync defers the inbox row by setting `opk_deferred_at` on it rather than dropping it.
 
-When `or-sync-key-register` succeeds (status `registered` or `unchanged`), it clears
+When `or-sync-key-register` succeeds (status `registered`, `unchanged`, or `rotated`), it clears
 `opk_deferred_at` on all deferred inbox rows for that subaccount. The next `or-quiltt-sync` tick
 then picks them up and seals them normally.
 
@@ -133,7 +133,8 @@ migrating them.
 | Status | Meaning |
 |--------|---------|
 | 400 | Missing or malformed field. Body contains `error` describing which field. |
-| 403 | Not platform-mode auth. Use `X-Platform-API-Key`, not a user JWT. |
+| 401 | Missing, unrecognized, or invalid credentials (missing auth header, invalid platform API key, or bad Supabase JWT). |
+| 403 | Credentials valid but not platform mode. Caller authenticated in direct/user mode. Use `X-Platform-API-Key`. |
 | 405 | Not a POST request. |
 | 409 | OPK rotation attempted without `confirm_rotation: true`. |
 | 413 | Request body too large. |
