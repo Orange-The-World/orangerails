@@ -99,6 +99,12 @@ interface WorkspaceOption {
   ownerEmail: string;
   workspaceKeyId: string;
   wrappedCiphertextB64: string;
+  // Grant-signature binding fields (DL-0619). loadAdminSubkeys verifies the
+  // owner's ML-DSA-65 signature over (granteeUserId, workspaceKeyId, wrapped
+  // ciphertext) before any decryption, so all three must travel with the row.
+  grantSigB64: string | null;
+  ownerSigPubB64: string;
+  granteeUserId: string;
   // No kemSecretWrapped here , the admin's own kem_secret_wrapped is used
   // for all workspace unwraps, stored separately in myKemSecretWrapped state.
 }
@@ -287,15 +293,20 @@ function AppHome() {
         for (const ownerId of ownerIds) {
           const { data: ownerMeta } = await supabase
             .from("user_vault_meta")
-            .select("workspace_key_id")
+            .select("workspace_key_id, sig_public_key")
             .eq("user_id", ownerId)
             .single();
           if (!ownerMeta) continue;
           const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
           if (!ownerKeyId) continue;
+          // Owner's ML-DSA-65 public signing key, needed to verify the grant
+          // signature before decrypting. Fail closed: skip a workspace we cannot
+          // verify rather than surface one the co-admin cannot safely open.
+          const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
+          if (!ownerSigPubB64) continue;
           const { data: wdk } = await supabase
             .from("wrapped_data_keys")
-            .select("wrapped_ciphertext")
+            .select("wrapped_ciphertext, grant_sig")
             .eq("data_key_id", ownerKeyId)
             .maybeSingle();
           if (!wdk) continue;
@@ -304,6 +315,9 @@ function AppHome() {
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
             wrappedCiphertextB64: (wdk as Record<string, unknown>).wrapped_ciphertext as string,
+            grantSigB64: ((wdk as Record<string, unknown>).grant_sig as string | null) ?? null,
+            ownerSigPubB64,
+            granteeUserId: session.user.id,
           });
         }
       }
@@ -344,6 +358,9 @@ function AppHome() {
       ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
       wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
       kemSecretWrapped: myKemSecretWrapped,
+      grantSigB64: activeWorkspace.grantSigB64,
+      ownerSigPubB64: activeWorkspace.ownerSigPubB64,
+      granteeUserId: activeWorkspace.granteeUserId,
     });
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.credentialsKey;
@@ -357,6 +374,9 @@ function AppHome() {
       ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
       wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
       kemSecretWrapped: myKemSecretWrapped,
+      grantSigB64: activeWorkspace.grantSigB64,
+      ownerSigPubB64: activeWorkspace.ownerSigPubB64,
+      granteeUserId: activeWorkspace.granteeUserId,
     });
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.transactionsKey;
