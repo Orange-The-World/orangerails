@@ -31,6 +31,9 @@ jobs:
     permissions:
       contents: read
       deployments: write
+    outputs:
+      supabase_ref: ${{ steps.target.outputs.supabase_ref }}
+      environment_name: ${{ steps.target.outputs.environment_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -73,6 +76,7 @@ jobs:
           VITE_SUPABASE_PROJECT_ID: ${{ steps.sb.outputs.project_id }}
           VITE_SUPABASE_URL: ${{ steps.sb.outputs.url }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ steps.sb.outputs.key }}
+
       - name: Pick Supabase target for this branch
         id: target
         run: |
@@ -97,8 +101,10 @@ jobs:
           # outside this repo's two Supabase projects.
           if [ "${{ github.ref_name }}" = "prod" ]; then
             echo "supabase_ref=lcdicqalreskibdfxkzb" >> "$GITHUB_OUTPUT"
+            echo "environment_name=supabase-prod" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_name }}" = "dev" ]; then
             echo "supabase_ref=fzwmnzmtqidumdqjdddz" >> "$GITHUB_OUTPUT"
+            echo "environment_name=supabase-dev" >> "$GITHUB_OUTPUT"
           else
             # Refuse to deploy from any non-prod, non-dev branch. The earlier
             # "Pick Supabase project" step falls through to DEV creds for any
@@ -128,7 +134,9 @@ jobs:
           # - git diff fails for any reason: fail closed, deploy all.
           # - Otherwise: only deploy functions whose directory changed and still exists.
           BEFORE="${{ github.event.before }}"
-          ALL_FUNCS=$(ls supabase/functions/ | grep -v '^_' || true)
+          # Directories only. `ls` also returns plain files that live in this
+          # directory, and a file name is not a valid Supabase function name.
+          ALL_FUNCS=$(find supabase/functions -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -v '^_' | sort || true)
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [[ "$BEFORE" =~ ^0+$ ]]; then
             DEPLOY_FUNCS="$ALL_FUNCS"
@@ -145,7 +153,7 @@ jobs:
               # Skip any function directory deleted in this push.
               DEPLOY_FUNCS=$(echo "$DEPLOY_FUNCS" | while IFS= read -r func; do
                 [ -n "$func" ] && [ -d "supabase/functions/$func" ] && echo "$func"
-              done)
+              done || true)
               echo "Targeted deploy: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
             fi
           fi
@@ -156,24 +164,35 @@ jobs:
           fi
 
           # Deploy each function with retry on esm.sh 522 errors.
+          # Continue past individual failures so all functions are attempted
+          # and the log names every function that failed, not just the first.
+          FAILED_FUNCS=""
           for FUNC in $DEPLOY_FUNCS; do
+            DEPLOYED=false
             for attempt in 1 2 3; do
               if supabase functions deploy "$FUNC" --project-ref ${{ steps.target.outputs.supabase_ref }}; then
                 echo "$FUNC deployed on attempt $attempt"
+                DEPLOYED=true
                 break
               fi
               if [ $attempt -eq 3 ]; then
-                echo "$FUNC deploy failed after 3 attempts"
-                exit 1
+                echo "::error::$FUNC failed after 3 attempts"
+                FAILED_FUNCS="${FAILED_FUNCS} ${FUNC}"
+              else
+                echo "attempt $attempt for $FUNC failed; sleeping 15s and retrying"
+                sleep 15
               fi
-              echo "attempt $attempt for $FUNC failed; sleeping 15s and retrying"
-              sleep 15
             done
           done
 
+          if [ -n "$FAILED_FUNCS" ]; then
+            echo "::error::Functions that failed to deploy:${FAILED_FUNCS}"
+            exit 1
+          fi
+
       - name: Report pending DB migrations (read-only, never applies)
         # Runs on every deploy so schema drift is visible instead of silent.
-        # Applying is a separate, opt-in step below.
+        # Applying is a separate, opt-in job (apply-migrations) below.
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ steps.target.outputs.supabase_ref }}
@@ -194,6 +213,7 @@ jobs:
             --data-binary "@$PAYLOAD" | jq -r '.[].version' | sort -u)
 
           PENDING=0
+          PENDING_NAMES=""
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
             BASENAME=$(basename "$FILE")
             VERSION="${BASENAME%%_*}"
@@ -201,37 +221,102 @@ jobs:
               continue
             fi
             echo "PENDING on ${SUPABASE_REF}: ${BASENAME}"
+            PENDING_NAMES="${PENDING_NAMES}- \`${BASENAME}\`\n"
             PENDING=$((PENDING + 1))
           done
 
           echo
           echo "${PENDING} migration(s) pending on ${SUPABASE_REF}."
           if [ "$PENDING" -gt 0 ]; then
-            echo "Nothing was applied. Schema changes are applied by hand:"
-            echo "  dev  -> the DBA applies and verifies."
-            echo "  prod -> two party, the founder plus the CTO."
-            echo "To apply from CI instead, re-run this workflow via workflow_dispatch"
-            echo "with apply_migrations = true."
+            {
+              echo "## :warning: ${PENDING} unapplied migration(s) on \`${SUPABASE_REF}\`"
+              echo ""
+              echo ":white_check_mark: Edge functions deployed successfully. Only the schema is out of sync."
+              echo ""
+              printf '%b' "${PENDING_NAMES}"
+              echo ""
+              echo "Schema is **out of sync**. Nothing was applied by this run."
+              echo ""
+              echo "| env | who applies |"
+              echo "| --- | --- |"
+              echo "| dev | DBA applies and verifies |"
+              echo "| prod | two-party: founder + CTO |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            # On a workflow_dispatch with apply_migrations=true the apply-migrations job
+            # handles these migrations. Report as informational and let it proceed.
+            # On any other trigger (push, or dispatch without apply), fail closed.
+            if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ inputs.apply_migrations }}" != "true" ]; then
+              echo "::error::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- schema out of sync."
+              exit 1
+            else
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "Apply job running next -- see below." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "Schema in sync on ${SUPABASE_REF}." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Apply pending DB migrations via Management API
-        # Only ever runs on an explicit workflow_dispatch with apply_migrations
-        # checked. A push CANNOT reach this step: `inputs` is null on a push
-        # event, so the condition is false. Deploying code and changing a schema
-        # are different acts with different blast radii, and merging a PR must
-        # never be the thing that silently rewrites a database.
+  apply-migrations:
+    needs: [deploy]
+    # Only ever runs on an explicit workflow_dispatch with apply_migrations checked
+    # AND the deploy job must have succeeded. A push CANNOT reach this job: `inputs`
+    # is null on a push event, so the condition is false. Deploying code and changing
+    # a schema are different acts with different blast radii; merging a PR must never
+    # silently rewrite a database.
+    if: ${{ needs.deploy.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.apply_migrations }}
+    runs-on: ubuntu-latest
+    # environment: binds this job to a GitHub Environment whose required-reviewer list
+    # is set in repo Settings -> Environments. prod dispatches bind to supabase-prod
+    # (configure required reviewers there); dev dispatches bind to supabase-dev (open
+    # for DBA applies). The environment name is resolved from the deploy job output so
+    # the right project is always protected. Add reviewers to supabase-prod in repo
+    # Settings -> Environments once this PR merges -- the job will pause for approval
+    # before any steps run.
+    environment: ${{ needs.deploy.outputs.environment_name }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Actor allowlist gate
+        # Interim hard stop until the supabase-prod environment required-reviewer list
+        # is configured in repo Settings -> Environments. Once that gate is live this
+        # step is belt-and-suspenders fallback, not the primary gate.
         #
-        # The Supabase CLI's `db push` requires a linked project + DB
-        # password we don't have in CI. The Management API SQL endpoint
-        # (POST /v1/projects/{ref}/database/query) does NOT need the DB
-        # password, it auths with SUPABASE_ACCESS_TOKEN, so we use it
-        # directly. We track applied versions in
-        # supabase_migrations.schema_migrations the same way `supabase db
-        # push` would, so manual recovery via the CLI later stays clean.
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_migrations }}
+        # Set MIGRATION_APPLY_ALLOWED_ACTORS in repo Settings -> Variables as a
+        # comma-separated list of GitHub login names (e.g. "alice,bob"). If the
+        # variable is absent or empty this step fails closed: no one can apply.
+        run: |
+          ALLOWED="${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS }}"
+          if [ -z "$ALLOWED" ]; then
+            echo "::error::MIGRATION_APPLY_ALLOWED_ACTORS repo variable is not set. Configure it in Settings -> Variables before running apply."
+            exit 1
+          fi
+          ACTOR="${{ github.actor }}"
+          IFS=',' read -ra LIST <<< "$ALLOWED"
+          for A in "${LIST[@]}"; do
+            TRIMMED=$(echo "$A" | tr -d ' ')
+            if [ "$TRIMMED" = "$ACTOR" ]; then
+              echo "Actor '$ACTOR' is on the allowlist. Proceeding."
+              exit 0
+            fi
+          done
+          echo "::error::Actor '$ACTOR' is not on MIGRATION_APPLY_ALLOWED_ACTORS. Refusing apply."
+          exit 1
+
+      - name: Apply pending DB migrations via Management API
+        # The Supabase CLI's db push requires a linked project + DB password we do not
+        # have in CI. The Management API SQL endpoint
+        # (POST /v1/projects/{ref}/database/query) auths with SUPABASE_ACCESS_TOKEN and
+        # does NOT need the DB password. We track applied versions in
+        # supabase_migrations.schema_migrations the same way supabase db push would, so
+        # manual recovery via the CLI later stays clean.
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_REF: ${{ steps.target.outputs.supabase_ref }}
+          SUPABASE_REF: ${{ needs.deploy.outputs.supabase_ref }}
         run: |
           set -euo pipefail
           MIG_DIR="supabase/migrations"
@@ -248,7 +333,7 @@ jobs:
             -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
             --data-binary "@$PAYLOAD" | jq -r '.[].version' | sort -u)
-          echo "── already applied versions on ${SUPABASE_REF} ──"
+          echo "-- already applied versions on ${SUPABASE_REF} --"
           echo "$APPLIED" | tail -10
           echo
 
@@ -260,7 +345,7 @@ jobs:
             if echo "$APPLIED" | grep -qx "$VERSION"; then
               continue
             fi
-            echo "── applying ${BASENAME} ──"
+            echo "-- applying ${BASENAME} --"
 
             SQL_PAYLOAD=$(mktemp); chmod 600 "$SQL_PAYLOAD"
             jq -Rs --arg q "$(cat "$FILE")" '{query:$q}' < /dev/null > "$SQL_PAYLOAD"
@@ -272,11 +357,11 @@ jobs:
             rm -f "$SQL_PAYLOAD"
 
             if [[ ! "$CODE" =~ ^2 ]]; then
-              echo "  ✗ FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
+              echo "  x FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
               rm -f /tmp/mig.resp
               exit 1
             fi
-            echo "  ✓ SQL applied (HTTP $CODE)"
+            echo "  v SQL applied (HTTP $CODE)"
 
             # Record in schema_migrations
             REC=$(mktemp); chmod 600 "$REC"
@@ -300,4 +385,4 @@ jobs:
           done
 
           echo
-          echo "── ${APPLIED_COUNT} migration(s) applied this run ──"
+          echo "-- ${APPLIED_COUNT} migration(s) applied this run --"

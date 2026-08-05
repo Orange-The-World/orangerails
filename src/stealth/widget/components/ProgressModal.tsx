@@ -19,6 +19,9 @@ interface StageCopy {
   /** Short-form label for the upcoming-steps list. Plain English; matches
    *  the modal mock in master plan §5.1. */
   shortLabel: string;
+  /** Optional muted sub-line shown below shortLabel in the upcoming-steps
+   *  list. Rendered inside the same li (inside the touch target). */
+  shortSubtext?: string;
 }
 
 const STAGE_ORDER: StealthStage[] = [
@@ -66,12 +69,13 @@ const STAGE_COPY: Record<StealthStage, StageCopy> = {
   sealing: {
     message: 'Sealing your transactions',
     detail: 'Encrypted with your vault key, only you can open them.',
-    shortLabel: 'Seal it for storage',
+    shortLabel: 'Encrypt your history in your browser',
+    shortSubtext: 'Your key never leaves your device',
   },
   uploading: {
     message: 'Saving encrypted records to Orange Rails',
     detail:
-      'Orange Rails stores only the encrypted bytes as a backup. They cannot read your transactions , only your browser holds the key.',
+      'Orange Rails stores only the encrypted bytes as a backup. They cannot read your transactions; only your browser holds the key.',
     shortLabel: 'Ship it to your app',
   },
 };
@@ -82,9 +86,12 @@ export interface ProgressModalProps {
   percent?: number;
   /** Optional override for the active stage's detail line. */
   detailOverride?: string;
+  /** True = first sync (last_block_scanned was null). False = repeat sync.
+   *  Omit to suppress the timing footer entirely. */
+  isFirstSync?: boolean;
 }
 
-export function ProgressModal({ stage, percent, detailOverride }: ProgressModalProps) {
+export function ProgressModal({ stage, percent, detailOverride, isFirstSync }: ProgressModalProps) {
   const activeIdx = STAGE_ORDER.indexOf(stage);
   const copy = STAGE_COPY[stage];
   const pct = Math.max(0, Math.min(100, Math.round(percent ?? 0)));
@@ -105,9 +112,8 @@ export function ProgressModal({ stage, percent, detailOverride }: ProgressModalP
         </div>
 
         <p className="mt-3 text-sm text-muted-foreground">
-          Your xpub stays on your device. We are taking a few seconds longer
-          than a regular bank connection because the math runs in your
-          browser, not on our servers. This is what zero-knowledge looks like.
+          This takes a bit longer than a regular bank connection because all
+          the math runs in your browser, not on our servers.
         </p>
 
         {/* Completed + active stages */}
@@ -148,14 +154,28 @@ export function ProgressModal({ stage, percent, detailOverride }: ProgressModalP
             <p className="text-xs font-medium text-foreground">
               Next steps (your browser will do these):
             </p>
-            <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+            <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
               {STAGE_ORDER.slice(activeIdx + 1).map((s) => (
-                <li key={s}>· {STAGE_COPY[s].shortLabel}</li>
+                <li key={s}>
+                  <span>· {STAGE_COPY[s].shortLabel}</span>
+                  {STAGE_COPY[s].shortSubtext && (
+                    <p className="mt-0.5 pl-3 leading-snug">
+                      {STAGE_COPY[s].shortSubtext}
+                    </p>
+                  )}
+                </li>
               ))}
             </ul>
           </div>
         )}
 
+        {isFirstSync !== undefined && (
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            {isFirstSync
+              ? 'Sync time depends on how far back your wallet scans and your connection speed. The bar shows blocks remaining.'
+              : 'After the first sync, later syncs take seconds.'}
+          </p>
+        )}
         <p className="mt-4 text-[10px] text-muted-foreground">
           Why is this slower than a regular bank connection? Stealth Sync
           runs the math in your browser so your xpub never reaches our

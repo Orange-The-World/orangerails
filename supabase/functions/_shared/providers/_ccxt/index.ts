@@ -89,6 +89,11 @@ export interface CcxtAdapterConfig {
    * CCXT_CREDENTIAL_FIELDS map below (legacy path).
    */
   credentialShape?: 'apiKey+secret' | 'apiKey+password+secret' | 'apiKey+secret+uid';
+  /**
+   * Exchange capabilities from the CCXT manifest, introspected at manifest
+   * generation time. Optional: absent means unknown, not false.
+   */
+  capabilities?: { trades: boolean; deposits: boolean; withdrawals: boolean };
 }
 
 // --- Credential field schemas --------------------------------------------
@@ -429,7 +434,7 @@ function normalizeTransfer(
 // --- Adapter factory -----------------------------------------------------
 
 export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
-  const { slug, exchangeId, displayName, description, tags, popularity, credentialShape } = config;
+  const { slug, exchangeId, displayName, description, tags, popularity, credentialShape, capabilities } = config;
   const credentialFields = buildCredentialFields(exchangeId, credentialShape);
 
   async function syncByWallets(
@@ -477,6 +482,7 @@ export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
     tags,
     popularity,
     multiWallet: false, // single synthetic wallet per exchange in v1
+    ...(capabilities !== undefined ? { capabilities } : {}),
     credentialFields,
     discoverWallets: buildDiscover(slug, exchangeId),
     syncByWallets,

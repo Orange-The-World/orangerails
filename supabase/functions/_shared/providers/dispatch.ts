@@ -42,6 +42,7 @@ const ccxtAdapters: ProviderAdapter[] = CCXT_MANIFEST.map((entry) =>
     tags: entry.tags,
     popularity: entry.popularity,
     credentialShape: entry.credentialShape,
+    capabilities: entry.capabilities,
   }),
 );
 
@@ -102,6 +103,18 @@ export interface ProviderManifest {
    * future client-side providers can adopt the same pattern.
    */
   connectUrl?: string;
+  /**
+   * Exchange-level sync capabilities, sourced from CCXT manifest introspection.
+   * Present only for CCXT-backed exchanges (98 today). Absent for native
+   * adapters (blink, xpub, btcpay, strike, surge) and client-side manifests
+   * (quiltt, sparrow). Never defaults to false: absent means unknown or
+   * not applicable, not "cannot do this".
+   */
+  capabilities?: {
+    trades: boolean;
+    deposits: boolean;
+    withdrawals: boolean;
+  };
 }
 
 /**
@@ -166,6 +179,7 @@ export function listProviderManifests(): ProviderManifest[] {
     popularity: p.popularity,
     multiWallet: p.multiWallet,
     credentialFields: p.credentialFields,
+    ...(p.capabilities !== undefined ? { capabilities: p.capabilities } : {}),
   }));
   return [...live, ...CLIENT_SIDE_MANIFESTS, ...ROADMAP_MANIFESTS];
 }

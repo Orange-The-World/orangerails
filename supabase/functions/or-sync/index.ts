@@ -567,7 +567,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
             await ctx.serviceClient
               .from('connections')
-              .update({ last_sync_at: new Date().toISOString(), status: 'active' })
+              .update({ last_sync_at: new Date().toISOString(), status: (pendingSink?.length ?? 0) > 0 && quilttSinkSynced === 0 ? 'partial' : 'active' })
               .eq('id', conn.id);
 
             results.push({ connection_id: conn.id, synced: quilttSinkSynced, next_cursor: null });
@@ -726,7 +726,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
           await ctx.serviceClient
             .from('connections')
-            .update({ last_sync_at: new Date().toISOString(), status: 'active' })
+            .update({ last_sync_at: new Date().toISOString(), status: (pending?.length ?? 0) > 0 && synced === 0 ? 'partial' : 'active' })
             .eq('id', conn.id);
 
           results.push({ connection_id: conn.id, synced, next_cursor: null });
