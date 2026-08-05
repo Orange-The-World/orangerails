@@ -17,7 +17,7 @@
  *
  * Full invocation (local or a dedicated CI job with PLAYWRIGHT_WITH_VITE_DEV=1):
  *   PLAYWRIGHT_WITH_VITE_DEV=1 \
- *   OR_API_BASE_URL=https://fzwmnzmtqidumdqjdddz.supabase.co \
+ *   OR_API_BASE_URL=https://<project-ref>.supabase.co \
  *   OR_TEST_PLATFORM_API_KEY=<key> \
  *   VITE_OR_STEALTH_ALLOWED_ORIGINS=http://localhost:5173 \
  *   pnpm test:e2e --grep "stealth cursor write"
@@ -142,17 +142,22 @@ async function fetchConnectionCursor(connectionId: string): Promise<number | nul
 
 // ------ suite -------------------------------------------------------------
 
-// Skip the entire describe when PLAYWRIGHT_WITH_VITE_DEV is unset or
-// credentials are missing. Using test.describe.skip (rather than test.skip()
-// inside the callback) prevents test.use() baseURL overrides from being
-// registered at all in CI jobs where PLAYWRIGHT_WITH_VITE_DEV is unset.
-// A test.skip() inside the callback still executes the rest of the callback
-// (including test.use()), and a registered baseURL override of
-// http://localhost:5173 redirects the smoke-suite page.goto('/') to a port
-// that is not listening -- causing the smoke tests to fail.
-const _testDescribe = !WITH_VITE_DEV || !OR_API || !PLATFORM_KEY
-  ? test.describe.skip
-  : test.describe;
+// When PLAYWRIGHT_WITH_VITE_DEV is set, credentials must also be present.
+// Fail loudly so a dedicated CI job with an expired or missing key cannot
+// silently report green having run zero assertions.
+if (WITH_VITE_DEV && (!OR_API || !PLATFORM_KEY)) {
+  throw new Error(
+    '[stealth-cursor-write] PLAYWRIGHT_WITH_VITE_DEV=1 is set but required credentials ' +
+    'are missing: set both OR_API_BASE_URL and OR_TEST_PLATFORM_API_KEY.',
+  );
+}
+
+// Use test.describe.skip (not test.skip() inside the callback) when
+// PLAYWRIGHT_WITH_VITE_DEV is unset. test.describe.skip prevents the
+// test.use() baseURL override from being registered in CI jobs targeting the
+// deployed CF Pages build -- a registered http://localhost:5173 override would
+// redirect smoke-suite page.goto('/') to a port that is not listening.
+const _testDescribe = !WITH_VITE_DEV ? test.describe.skip : test.describe;
 
 _testDescribe('stealth cursor write (DL-0649 Part 2)', () => {
   // Mock sync is fast (tip = 800010, ~11 blocks). 60s is generous.
