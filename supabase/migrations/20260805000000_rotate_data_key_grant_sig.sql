@@ -4,20 +4,40 @@
 -- 2026-08-05
 -- ============================================================
 
--- 1. Add grant_sig_alg column to record the signing scheme per row.
+-- 1. Ensure grant_sig column exists on all environments. Prod does not have
+--    it; dev got it out of band with no migration. ADD COLUMN IF NOT EXISTS
+--    is re-runnable. SET NOT NULL is safe: both dev and prod have 0 rows
+--    (verified 2026-08-05), so no backfill is needed.
+ALTER TABLE public.wrapped_data_keys
+  ADD COLUMN IF NOT EXISTS grant_sig TEXT;
+ALTER TABLE public.wrapped_data_keys
+  ALTER COLUMN grant_sig SET NOT NULL;
+
+-- 2. Add grant_sig_alg column to record the signing scheme per row.
 --    Default 'ml-dsa-65-v1' is the only scheme in use today.
 --    Stored per-row so a future algorithm migration can identify old rows.
 ALTER TABLE public.wrapped_data_keys
   ADD COLUMN IF NOT EXISTS grant_sig_alg TEXT NOT NULL DEFAULT 'ml-dsa-65-v1';
 
--- 2. Enforce that grant_sig is never empty.
---    The column is already NOT NULL (no default); this adds the
---    non-empty check as a named constraint for clear error messages.
-ALTER TABLE public.wrapped_data_keys
-  ADD CONSTRAINT wrapped_data_keys_grant_sig_nonempty
-    CHECK (grant_sig <> '');
+-- 3. Enforce that grant_sig is never empty.
+--    NOT NULL was set in step 1; this adds a named non-empty check for
+--    clear error messages. Wrapped in a DO block: ADD CONSTRAINT has no
+--    IF NOT EXISTS, so a plain ALTER would error on re-runs.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'public.wrapped_data_keys'::regclass
+      AND conname = 'wrapped_data_keys_grant_sig_nonempty'
+  ) THEN
+    ALTER TABLE public.wrapped_data_keys
+      ADD CONSTRAINT wrapped_data_keys_grant_sig_nonempty
+        CHECK (grant_sig <> '');
+  END IF;
+END;
+$$;
 
--- 3. Replace rotate_data_key to require and write grant_sig + grant_sig_alg
+-- 4. Replace rotate_data_key to require and write grant_sig + grant_sig_alg
 --    from each envelope. Pre-flight: refuse any batch missing a signature
 --    before inserting a single row (fail-closed, same posture as
 --    loadAdminSubkeysDirect on the client).
