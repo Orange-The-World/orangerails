@@ -1158,4 +1158,50 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(result.lastBlockScanned).toBe(tip);
     expect(result.txCount).toBe(0);
   });
+
+  it('stops cursor at last contiguous height when filter producer lags (404 -> null)', async () => {
+    // The filter producer lags the block source: heights near tip return null
+    // from fetchFilter. runSync must NOT advance the cursor past the last
+    // contiguous non-null height; doing so would permanently skip those
+    // heights on the next sync and miss any transactions they contain (DL-0516).
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'filter-lag-cursor',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 800_000;
+    const tip = 800_005;
+    // Heights 800001 and 800002 have filters; 800003-800005 are not yet
+    // produced by the filter service (404 -> null). The cursor must stop at
+    // 800002 so the next sync retries 800003-800005 once they are available.
+    const lastAvailable = 800_002;
+    const fakeFilter = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const zeroHashHex = bytesToHex(new Uint8Array(32));
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => tip,
+      fetchFilter: async (h: number) =>
+        h <= lastAvailable
+          ? { height: h, blockHashHex: zeroHashHex, filter: fakeFilter }
+          : null,
+      fetchBlock: async () => { throw new Error('no block fetch expected'); },
+      matcher: { matchAny: () => false },
+    });
+
+    // Cursor must stop at lastAvailable, NOT at tip. The three heights that
+    // returned null are not permanently skipped; the next sync retries them.
+    expect(result.lastBlockScanned).toBe(lastAvailable);
+    expect(result.lastBlockScanned).not.toBe(tip);
+    expect(result.txCount).toBe(0);
+  });
 });
