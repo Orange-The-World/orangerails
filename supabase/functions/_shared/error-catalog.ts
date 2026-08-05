@@ -92,3 +92,6 @@ export const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
 export function lookupErrorCopy(code: string): ErrorCatalogEntry {
   return ERROR_CATALOG[code] ?? ERROR_CATALOG.UPSTREAM_OTHER;
 }
+
+// DL-0669 diagnostic: forces full edge-function redeploy to verify pinned CLI 2.111.0
+// behaviour across all 36 functions. Remove when DL-0669 is resolved.
