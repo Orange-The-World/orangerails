@@ -461,7 +461,7 @@ export function TransactionsPanel({ rows, connections, onNotice }: TransactionsP
                     <td className="px-3 py-2 text-right font-mono whitespace-nowrap">
                       <span className="inline-flex items-center justify-end gap-1">
                         {formatAmountDisplay(tx)}
-                        {isStablecoin(info?.currency) && (
+                        {isStablecoin(info?.currency) && typeof tx.amount_sats !== "number" && (
                           <span
                             title="Displayed at 1:1 USD peg. Actual market value may differ."
                             className="text-muted-foreground cursor-help"
