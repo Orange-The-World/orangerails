@@ -889,6 +889,9 @@ function AppHome() {
                           ownerWorkspaceKeyId: ws.workspaceKeyId,
                           wrappedCiphertextB64: ws.wrappedCiphertextB64,
                           kemSecretWrapped: myKemSecretWrapped,
+                          grantSigB64: ws.grantSigB64,
+                          ownerSigPubB64: ws.ownerSigPubB64,
+                          granteeUserId: ws.granteeUserId,
                         });
                       } catch (unwrapErr) {
                         const name =
