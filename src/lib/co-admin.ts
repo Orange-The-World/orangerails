@@ -351,10 +351,10 @@ export async function loadAdminSubkeysDirect(params: {
   kemSecretWrapped: string;
   adminMek: CryptoKey;
   adminSaltB64: string;
-  grantSigB64?: string | null;
-  ownerSigPubB64?: string;
-  granteeUserId?: string;
-  ownerWorkspaceKeyId?: string;
+  grantSigB64: string | null;
+  ownerSigPubB64: string;
+  granteeUserId: string;
+  ownerWorkspaceKeyId: string;
 }): Promise<AdminSubkeys> {
   const { wrappedCiphertextB64, kemSecretWrapped, adminMek, adminSaltB64,
           grantSigB64, ownerSigPubB64, granteeUserId, ownerWorkspaceKeyId } = params;
