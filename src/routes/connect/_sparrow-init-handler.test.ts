@@ -159,8 +159,8 @@ describe("sendInitOnReady", () => {
     expect(msg.or_stealth_key_b64).toBe("base64key==");
     expect(msg.return_callback_origin).toBe(SELF_ORIGIN);
     expect(msg.gap_limit).toBe(250);
-    expect(typeof msg.protocol_version).toBe("string");
-    expect((msg.protocol_version as string).length).toBeGreaterThan(0);
+    expect(typeof msg.protocol_version).toBe("number");
+    expect(msg.protocol_version as number).toBeGreaterThan(0);
   });
 
   it("posts INIT targeted exactly at selfOrigin, not at wildcard origin", async () => {
