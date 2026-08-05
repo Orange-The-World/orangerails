@@ -688,9 +688,9 @@ export function VaultProvider({ children }: VaultProviderProps) {
       ownerWorkspaceKeyId: string;
       wrappedCiphertextB64: string;
       kemSecretWrapped: string;
-      grantSigB64?: string | null;
-      ownerSigPubB64?: string;
-      granteeUserId?: string;
+      grantSigB64: string | null;
+      ownerSigPubB64: string;
+      granteeUserId: string;
     }): Promise<AdminSubkeys> => {
       const { mek, saltB64: s } = requireUnlocked();
       return loadAdminSubkeysDirect({
