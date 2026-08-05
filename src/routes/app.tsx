@@ -1289,6 +1289,17 @@ function AppHome() {
 }
 
 // ------------------------------------------------------------------
+// Connection staleness helpers
+// ------------------------------------------------------------------
+
+const STALE_THRESHOLD_DAYS = 7;
+
+function isStaleConnection(lastSyncAt: string): boolean {
+  const ageMs = Date.now() - new Date(lastSyncAt).getTime();
+  return ageMs > STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
+}
+
+// ------------------------------------------------------------------
 // Sub-components
 // ------------------------------------------------------------------
 
@@ -1312,10 +1323,29 @@ function ConnectionRow({
           ? "text-destructive"
           : "text-muted-foreground";
 
+  const neverSynced = conn.last_sync_at === null;
+  const stale = !neverSynced && isStaleConnection(conn.last_sync_at!);
+
   return (
-    <div className="rounded-md border p-4 flex items-center justify-between gap-4">
-      <div className="flex-1 min-w-0 space-y-2">
+    <div className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
+      {stale && (
+        <span
+          aria-hidden="true"
+          className="shrink-0 w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400"
+        />
+      )}
+      <div className="flex-1 min-w-0 space-y-1">
         <div className="font-medium truncate">{conn.decrypted_label || conn.provider_type}</div>
+        {stale && (
+          <div className="text-xs text-amber-600 dark:text-amber-400">
+            Not syncing. Select to reconnect.
+          </div>
+        )}
+        {neverSynced && (
+          <div className="text-xs text-muted-foreground">
+            Not yet active
+          </div>
+        )}
         <div className="text-xs text-muted-foreground flex items-center gap-2">
           <span className="uppercase">{conn.provider_type}</span>
           <span>·</span>
