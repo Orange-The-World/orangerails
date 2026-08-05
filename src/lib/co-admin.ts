@@ -44,7 +44,7 @@ import { HKDF_CONTEXTS, derivePqcSecretWrapKey } from "./key-derivation";
 import { base64ToBytes } from "./key-wrapping";
 import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } from "./pqc";
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
-import { signToBase64, verifyFromBase64 } from "./signatures";
+import { signMemberGrant, verifyMemberGrant } from "./member-grant";
 
 // ------------------------------------------------------------------
 // Encoding helpers
@@ -304,13 +304,11 @@ export async function grantCoAdmin(params: {
   );
   const pqcWrapKey = await derivePqcSecretWrapKey(mekHkdf, ownerSaltB64);
   const ownerSigSecretBytes = await unwrapPqcSecretKey(pqcWrapKey, ownerSigSecretWrapped);
-  const sigPayload = JSON.stringify({
-    ctx: "orangerails:add-member:mek-wrap:v1",
-    granteeUserId: targetUserId,
+  const { signature: grantSig } = await signMemberGrant(ownerSigSecretBytes, {
+    memberUserId: targetUserId,
     workspaceKeyId,
-    wrappedCt,
+    wrappedMekCiphertextB64: wrappedCt,
   });
-  const { signature: grantSig } = await signToBase64(ownerSigSecretBytes, sigPayload);
 
   // Step f , insert wrapped_data_keys row.
   const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
@@ -375,13 +373,11 @@ export async function loadAdminSubkeysDirect(params: {
       "Co-admin grant binding fields missing: ownerSigPubB64, granteeUserId, and ownerWorkspaceKeyId are required.",
     );
   }
-  const verifyPayload = JSON.stringify({
-    ctx: "orangerails:add-member:mek-wrap:v1",
-    granteeUserId,
+  const sigValid = await verifyMemberGrant(ownerSigPubB64, {
+    memberUserId: granteeUserId,
     workspaceKeyId: ownerWorkspaceKeyId,
-    wrappedCt: wrappedCiphertextB64,
-  });
-  const sigValid = await verifyFromBase64(ownerSigPubB64, verifyPayload, grantSigB64);
+    wrappedMekCiphertextB64: wrappedCiphertextB64,
+  }, grantSigB64);
   if (!sigValid) {
     throw new Error(
       "Co-admin grant signature invalid: refusing to decrypt wrapped subkeys.",
