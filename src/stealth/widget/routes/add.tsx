@@ -101,9 +101,18 @@ function shapeForCompletion(parsed: ParsedDescriptor): {
  *    2. VITE_OR_FUNCTIONS_BASE_URL build-time env , direct Supabase
  *       functions host (typically requires the consumer to also pass
  *       access_token in INIT for Bearer auth).
- *    3. Same-origin /functions/v1/* , relies on a reverse proxy at the
- *       widget host.
+ * If neither 1 nor 2 is configured, this throws instead of falling back to
+ * a same-origin /functions/v1 path, which produced a 405 at the widget host.
  */
+class StealthFunctionsConfigError extends Error {
+  constructor(fnName: string) {
+    super(
+      `Stealth widget is misconfigured: no proxy_base_url was provided and VITE_OR_FUNCTIONS_BASE_URL is not set, so edge function '${fnName}' has no base URL. Set VITE_OR_FUNCTIONS_BASE_URL at build time.`,
+    );
+    this.name = "StealthFunctionsConfigError";
+  }
+}
+
 function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): string {
   if (proxyBaseUrl) {
     return `${proxyBaseUrl.replace(/\/$/, "")}/${name}`;
@@ -113,7 +122,7 @@ function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): str
     "",
   );
   if (base) return `${base}/${name}`;
-  return `/functions/v1/${name}`;
+  throw new StealthFunctionsConfigError(name);
 }
 
 interface AccessTokenInit extends StealthInitWidgetMessage {
