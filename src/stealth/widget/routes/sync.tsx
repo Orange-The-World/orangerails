@@ -62,6 +62,15 @@ const BLOCK_SOURCE_BASE =
   (import.meta.env.VITE_OR_BLOCK_SOURCE_BASE_URL as string | undefined) ??
   "https://blocks.orangerails.com";
 
+class StealthFunctionsConfigError extends Error {
+  constructor(fnName: string) {
+    super(
+      `Stealth widget is misconfigured: no proxy_base_url was provided and VITE_OR_FUNCTIONS_BASE_URL is not set, so edge function '${fnName}' has no base URL. Set VITE_OR_FUNCTIONS_BASE_URL at build time.`,
+    );
+    this.name = "StealthFunctionsConfigError";
+  }
+}
+
 function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): string {
   if (proxyBaseUrl) {
     return `${proxyBaseUrl.replace(/\/$/, "")}/${name}`;
@@ -71,7 +80,7 @@ function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): str
     "",
   );
   if (base) return `${base}/${name}`;
-  return `/functions/v1/${name}`;
+  throw new StealthFunctionsConfigError(name);
 }
 
 function isMockMode(): boolean {
