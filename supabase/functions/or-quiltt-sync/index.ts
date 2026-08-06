@@ -419,6 +419,29 @@ export async function handleEvent(
     conn = legacy.data as { id: string };
   }
 
+  // DL-0442: load account selection for this connection once, before paging.
+  // A connection with no source_wallets rows keeps the all-sync fallback (pre-feature behaviour).
+  // A connection with rows syncs only accounts where is_synced=true.
+  const { data: swRows, error: swErr } = await client
+    .from('source_wallets')
+    .select('external_wallet_id, is_synced')
+    .eq('connection_id', conn.id);
+  if (swErr) {
+    console.error(
+      `[or-quiltt-sync] source_wallets lookup failed for connection ${conn.id}:`,
+      swErr.message,
+    );
+  }
+  // selectedAccountIds === null means no rows present: sync everything (all-sync fallback)
+  const selectedAccountIds: Set<string> | null =
+    swRows && swRows.length > 0
+      ? new Set(
+          swRows
+            .filter((r: { is_synced: boolean }) => r.is_synced)
+            .map((r: { external_wallet_id: string }) => r.external_wallet_id),
+        )
+      : null;
+
   let after: string | null = null;
   let pages = 0;
   let newRows = 0;
@@ -498,6 +521,16 @@ export async function handleEvent(
     const pageInfo = json?.data?.transactions?.pageInfo;
 
     for (const tx of txs) {
+      // DL-0442: skip transactions for accounts the user has not selected.
+      // selectedAccountIds === null means no source_wallets rows: sync all accounts.
+      if (
+        selectedAccountIds !== null &&
+        tx.account?.id != null &&
+        !selectedAccountIds.has(tx.account.id as string)
+      ) {
+        continue;
+      }
+
       const cleartext = JSON.stringify({
         amount:        tx.amount,
         currency:      tx.currencyCode,
