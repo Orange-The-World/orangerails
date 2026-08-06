@@ -54,10 +54,14 @@ jobs:
             count=$((count + 1))
           done < <(echo "$prs" | jq -c '.[]')
 
-          echo "Scanned $(echo "$prs" | jq 'length') open PRs, ${count} are approved and green."
-          [ "$count" -gt 0 ] || exit 0
+          total=$(echo "$prs" | jq 'length')
+          echo "Scanned ${total} open PRs, ${count} are approved and green."
 
-          body="**Approved and green PRs waiting to merge (${count}):**"$'\n'"${report}"
+          if [ "$count" -gt 0 ]; then
+            body="**Approved and green PRs waiting to merge (${count}):**"$'\n'"${report}"
+          else
+            body="Scanned ${total} open PRs. None are approved and green right now."
+          fi
 
           curl -s --fail -X POST "${ZULIP_SITE}/api/v1/messages" \
             -u "${ZULIP_BOT_EMAIL}:${ZULIP_API_KEY}" \
