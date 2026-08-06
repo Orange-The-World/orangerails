@@ -58,12 +58,20 @@ import { wrapSentryHandler } from '../_shared/sentry.ts';
 const ENCRYPTED_LABEL_MAX = 4096;
 const QUILTT_CREDENTIALS_SENTINEL = 'quiltt-managed';
 
+interface SourceWalletInput {
+  external_wallet_id: string;
+  is_synced: boolean;
+  encrypted_metadata: string;
+  encrypted_metadata_key_version?: number;
+}
+
 interface LinkCompleteBody {
   platform_slug?: string;
   app_user_id?: string;
   widget_token?: string;
   encrypted_label?: string;
   quiltt_connection_id?: string;
+  accounts?: SourceWalletInput[];
 }
 
 function makeServiceClient(): SupabaseClient {
@@ -105,6 +113,43 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         return jsonResponse({ error: 'quiltt_connection_id must be a string ≤256 chars' }, 400, cors);
       }
     }
+    if (body.accounts !== undefined) {
+      if (!Array.isArray(body.accounts)) {
+        return jsonResponse({ error: 'accounts must be an array' }, 400, cors);
+      }
+      // Cap matches MAX_WALLETS_PER_CONNECTION in or-source-wallets-set.
+      // Banks can have more accounts than crypto wallets (DL-0326 user had 18);
+      // revisit deliberately rather than discovering this limit in a 400 (DL-0442).
+      if (body.accounts.length > 50) {
+        return jsonResponse({ error: 'accounts: max 50 entries per connection' }, 400, cors);
+      }
+      for (const acc of body.accounts) {
+        if (
+          !acc.external_wallet_id ||
+          typeof acc.external_wallet_id !== 'string' ||
+          acc.external_wallet_id.length > 256
+        ) {
+          return jsonResponse({ error: 'accounts[].external_wallet_id required (string, <=256 chars)' }, 400, cors);
+        }
+        if (typeof acc.is_synced !== 'boolean') {
+          return jsonResponse({ error: 'accounts[].is_synced required (boolean)' }, 400, cors);
+        }
+        // encrypted_metadata is NOT NULL in source_wallets; the client must seal
+        // { currency, label? } under the user's key before passing it here.
+        if (
+          !acc.encrypted_metadata ||
+          typeof acc.encrypted_metadata !== 'string' ||
+          acc.encrypted_metadata.length > 65536
+        ) {
+          return jsonResponse(
+            { error: 'accounts[].encrypted_metadata required (base64 ciphertext, <=64 KB)' },
+            400,
+            cors,
+          );
+        }
+      }
+    }
+
     const quilttConnectionId = body.quiltt_connection_id ?? null;
 
     const service = makeServiceClient();
@@ -257,6 +302,28 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           return jsonResponse({ error: 'Failed to create connection' }, 500, cors);
         }
         connectionId = insertConn.data.id as string;
+      }
+    }
+
+    // DL-0442: persist account selection at link time.
+    // The client encrypts { currency, label? } per account under the user's key
+    // (encrypted_metadata is NOT NULL in source_wallets; the server cannot fill it).
+    // Subsequent selection changes go through or-source-wallets-set.
+    if (body.accounts && body.accounts.length > 0) {
+      const walletRows = body.accounts.map((acc) => ({
+        connection_id:                  connectionId,
+        external_wallet_id:             acc.external_wallet_id,
+        is_synced:                      acc.is_synced,
+        encrypted_metadata:             acc.encrypted_metadata,
+        encrypted_metadata_key_version: acc.encrypted_metadata_key_version ?? 1,
+      }));
+      const { error: walletErr } = await service
+        .from('source_wallets')
+        .upsert(walletRows, { onConflict: 'connection_id,external_wallet_id' });
+      if (walletErr) {
+        // Non-fatal: the connection was created successfully. User can retry
+        // selection via or-source-wallets-set. Log but do not fail the request.
+        console.error('[or-quiltt-link-complete] source_wallets upsert failed:', walletErr.message);
       }
     }
 
