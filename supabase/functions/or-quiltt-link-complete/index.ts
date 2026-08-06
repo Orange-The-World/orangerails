@@ -321,9 +321,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         .from('source_wallets')
         .upsert(walletRows, { onConflict: 'connection_id,external_wallet_id' });
       if (walletErr) {
-        // Non-fatal: the connection was created successfully. User can retry
-        // selection via or-source-wallets-set. Log but do not fail the request.
         console.error('[or-quiltt-link-complete] source_wallets upsert failed:', walletErr.message);
+        return jsonResponse({ error: 'Failed to persist account selection' }, 500, cors);
       }
     }
 
