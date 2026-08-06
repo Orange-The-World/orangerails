@@ -75,7 +75,14 @@ export async function advanceCursor(
     return { error: 'Failed to read cursor after update', status: 500 };
   }
 
-  return {
-    effectiveCursor: (freshRow.last_block_scanned as number | null) ?? 0,
-  };
+  // The UPDATE filter includes last_block_scanned.is.null, so null here means
+  // the forward-only invariant has been violated: a null cursor should have
+  // triggered the UPDATE and been handled in the branch above. Returning 0
+  // silently would hide the bug; raise instead so it surfaces in logs.
+  const storedCursor = freshRow.last_block_scanned as number | null;
+  if (storedCursor === null) {
+    console.error('[advanceCursor] invariant violated: cursor is null on no-op re-read path');
+    return { error: 'Cursor invariant violated', status: 500 };
+  }
+  return { effectiveCursor: storedCursor };
 }
