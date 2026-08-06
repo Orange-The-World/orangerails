@@ -760,12 +760,24 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // UTXO tracking is order-sensitive so we process blocks strictly in
   // ascending height order; but fetching them in parallel hides network
   // round-trip latency. A sliding window of BLOCK_FETCH_LOOKAHEAD
-  // concurrent requests keeps at most ~16 MB in flight at once and gives
-  // up to 8x speedup on the block phase.
+  // concurrent requests keeps ~16 MB in flight at most at any one time
+  // (each slot is released immediately after parsing); gives up to 8x
+  // speedup on the block phase.
+  //
+  // Rejection handling: a no-op .catch() is attached at creation so that
+  // if the loop exits early (an awaited block throws), outstanding
+  // in-flight Promises already have a handler and do NOT fire
+  // unhandledrejection in the browser or terminate the process on a
+  // server runtime.
   const BLOCK_FETCH_LOOKAHEAD = 8;
-  const blockFetches: Array<Promise<BlockRecord>> = [];
+  const _prefetchBlock = (hash: string): Promise<BlockRecord> => {
+    const p = opts.fetchBlock(hash);
+    p.catch(() => {}); // suppress unhandledrejection if slot is abandoned on throw
+    return p;
+  };
+  const blockFetches: Array<Promise<BlockRecord> | undefined> = [];
   for (let pi = 0; pi < Math.min(BLOCK_FETCH_LOOKAHEAD, hits.length); pi++) {
-    blockFetches[pi] = opts.fetchBlock(hits[pi].blockHashHex);
+    blockFetches[pi] = _prefetchBlock(hits[pi].blockHashHex);
   }
 
   for (let i = 0; i < hits.length; i++) {
@@ -773,9 +785,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // window before awaiting the block at the front.
     const nextPrefetch = i + BLOCK_FETCH_LOOKAHEAD;
     if (nextPrefetch < hits.length) {
-      blockFetches[nextPrefetch] = opts.fetchBlock(hits[nextPrefetch].blockHashHex);
+      blockFetches[nextPrefetch] = _prefetchBlock(hits[nextPrefetch].blockHashHex);
     }
-    const block = await blockFetches[i];
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const block = await blockFetches[i]!;
+    // Release the slot so block.raw is GC-eligible once this iteration ends.
+    // Without this, every resolved Promise stays reachable for the whole run.
+    blockFetches[i] = undefined;
     bytesDownloaded += block.raw.length;
     // Height comes from the filter match, not the block record: the
     // X-Block-Height response header is invisible to browsers unless the
@@ -1002,16 +1018,19 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // spend of a previously-received UTXO is detected correctly even when the
     // spending tx appears in an extension pass.
     // Same sliding-window prefetch as the main block loop.
-    const extBlockFetches: Array<Promise<BlockRecord>> = [];
+    const extBlockFetches: Array<Promise<BlockRecord> | undefined> = [];
     for (let pi = 0; pi < Math.min(BLOCK_FETCH_LOOKAHEAD, extHits.length); pi++) {
-      extBlockFetches[pi] = opts.fetchBlock(extHits[pi].blockHashHex);
+      extBlockFetches[pi] = _prefetchBlock(extHits[pi].blockHashHex);
     }
     for (let ei = 0; ei < extHits.length; ei++) {
       const nextExtPrefetch = ei + BLOCK_FETCH_LOOKAHEAD;
       if (nextExtPrefetch < extHits.length) {
-        extBlockFetches[nextExtPrefetch] = opts.fetchBlock(extHits[nextExtPrefetch].blockHashHex);
+        extBlockFetches[nextExtPrefetch] = _prefetchBlock(extHits[nextExtPrefetch].blockHashHex);
       }
-      const block = await extBlockFetches[ei];
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const block = await extBlockFetches[ei]!;
+      // Release the slot so block.raw is GC-eligible once this iteration ends.
+      extBlockFetches[ei] = undefined;
       bytesDownloaded += block.raw.length;
       const blockHeight = extHits[ei].height;
       const header = parseBlockHeader(block.raw);
