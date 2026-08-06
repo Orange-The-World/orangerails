@@ -32,12 +32,14 @@ function makeMockClient(opts: {
   freshRow?: Record<string, unknown> | null;
 }): any {
   let callCount = 0;
+  let orFilter: string | null = null;
   // deno-lint-ignore no-explicit-any
   const chain: Record<string, any> = {
     select(_cols: string) { return chain; },
     update(_patch: Record<string, unknown>) { return chain; },
     eq(_col: string, _val: unknown) { return chain; },
-    or(_filter: string) { return chain; },
+    // Capture the filter string so tests can assert the exact predicate.
+    or(filter: string) { orFilter = filter; return chain; },
     maybeSingle() {
       callCount += 1;
       if (callCount === 1) {
@@ -46,7 +48,13 @@ function makeMockClient(opts: {
       return Promise.resolve({ data: opts.freshRow ?? null, error: null });
     },
   };
-  return { from(_table: string) { return chain; } };
+  // Expose capturedOrFilter() so tests can verify the .or() predicate passed
+  // to the client. A wrong column name or missing null guard fails here rather
+  // than silently passing because the mock never filtered anyway.
+  return {
+    from(_table: string) { return chain; },
+    capturedOrFilter() { return orFilter; },
+  };
 }
 
 Deno.test(
@@ -97,6 +105,42 @@ Deno.test(
     if (!isAdvanceCursorError(result)) {
       // Must return 200 (the concurrent max), not 150 (our incoming tip)
       assertEquals(result.effectiveCursor, 200);
+    }
+  },
+);
+
+Deno.test(
+  '.or() predicate contains the correct column, comparator, and null guard',
+  async () => {
+    // This test exists specifically to catch a broken .or() filter string.
+    // The mock previously swallowed the filter without capturing it, so a
+    // typo in the column name would pass all forward-only tests silently.
+    const client = makeMockClient({
+      updateResult: { last_block_scanned: 300 },
+    });
+    await advanceCursor(client, PLATFORM_ID, CONN_ID, 300);
+    assertEquals(
+      client.capturedOrFilter(),
+      'last_block_scanned.lt.300,last_block_scanned.is.null',
+    );
+  },
+);
+
+Deno.test(
+  'null cursor on no-op re-read returns 500 (invariant violation, not silent 0)',
+  async () => {
+    // The UPDATE predicate includes last_block_scanned.is.null, so a null
+    // cursor always triggers the write and lands in the forward-advance branch.
+    // If the re-read somehow returns null, the invariant has been violated and
+    // cursor.ts must raise a 500 rather than returning 0 silently.
+    const client = makeMockClient({
+      updateResult: null,
+      freshRow: { last_block_scanned: null },
+    });
+    const result = await advanceCursor(client, PLATFORM_ID, CONN_ID, 50);
+    assertEquals(isAdvanceCursorError(result), true);
+    if (isAdvanceCursorError(result)) {
+      assertEquals(result.status, 500);
     }
   },
 );
