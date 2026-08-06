@@ -1342,6 +1342,15 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
           },
           matcher: { matchAny: () => true },
         });
+        // Attach a rejection handler to syncPromise NOW so it is never a
+        // briefly-unhandled rejected Promise during the scenario setup below.
+        // rejectFns[0] causes syncPromise to reject; the 10ms gap before
+        // await expect(syncPromise).rejects would leave it unhandled, firing
+        // unhandledRejection and corrupting the unhandled[] collector.
+        // This line only guards syncPromise -- it does not affect whether
+        // blockFetches[1] and [2] fire their own unhandledRejection events,
+        // which is what the test is actually verifying.
+        syncPromise.catch(() => {});
 
         // Let the filter scan complete and all 3 prefetches be set up with
         // .catch(() => {}) already attached by _prefetchBlock.
