@@ -31,6 +31,13 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 function makeGrant(wrappedMekCiphertextB64: string) {
   return {
     memberUserId: "co-admin-user-id",
@@ -75,6 +82,36 @@ describe("DL-0619 co-admin wrapped-MEK grant must be ML-DSA-65 signed", () => {
 
     await expect(
       verifyMemberGrant(bytesToBase64(admin.publicKey), grant, ""),
+    ).resolves.toBe(false);
+  });
+
+  it("REJECTS a grant whose signature has one byte flipped (tampered grant_sig)", async () => {
+    const admin = generateSigKeyPair();
+    const grant = makeGrant(bytesToBase64(randomBytes(WRAPPED_MEK_BYTES)));
+
+    const { signature } = await signMemberGrant(admin.secretKey, grant);
+
+    // Flip one byte in the middle of the decoded signature bytes.
+    const sigBytes = base64ToBytes(signature);
+    sigBytes[Math.floor(sigBytes.length / 2)] ^= 0xff;
+    const tamperedSig = bytesToBase64(sigBytes);
+
+    await expect(
+      verifyMemberGrant(bytesToBase64(admin.publicKey), grant, tamperedSig),
+    ).resolves.toBe(false);
+  });
+
+  it("REJECTS a grant whose granteeUserId was swapped (everything else valid)", async () => {
+    const admin = generateSigKeyPair();
+    const grant = makeGrant(bytesToBase64(randomBytes(WRAPPED_MEK_BYTES)));
+
+    const { signature } = await signMemberGrant(admin.secretKey, grant);
+
+    // Different member user id with the honest signature; bound memberUserId no longer matches.
+    const swapped = { ...grant, memberUserId: "different-user-id-abcdef-0000" };
+
+    await expect(
+      verifyMemberGrant(bytesToBase64(admin.publicKey), swapped, signature),
     ).resolves.toBe(false);
   });
 });
