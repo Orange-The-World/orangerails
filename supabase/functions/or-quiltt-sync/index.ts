@@ -54,8 +54,9 @@ const REDRIVE_SWEEP_SIZE = 500;  // max rows fetched in step 1 of reDriveReadyDe
 // Per-event wall-clock budget. A pathological profile (many bound
 // connections, slow Quiltt responses, or hostile fanout) can otherwise
 // exhaust the Supabase edge-runtime ~150s wall and starve the rest of
-// the batch. Cap each event at 60s; if we run over, mark `partial` and
-// let the next cron tick pick up the remainder.
+// the batch. Cap each event at 60s; if we run over, mark the connection
+// `partial` and consume the event. The cursor is not persisted; the
+// next Quiltt webhook for this connection drives a fresh full pull.
 const PER_EVENT_BUDGET_MS = 60_000;
 
 // Quiltt PROD geo-blocks Canada (and other non-US) at the GraphQL
@@ -534,6 +535,13 @@ export async function handleEvent(
     if (!pageInfo?.hasNextPage) break;
     after = pageInfo.endCursor ?? null;
     pages++;
+    if (pages >= MAX_PAGES) {
+      // Page cap reached with more data remaining. Same outcome as the
+      // wall-clock exit: mark partial so callers see the incomplete state.
+      // The cursor is not persisted; the next Quiltt webhook drives a fresh
+      // full pull.
+      budgetExhausted = true;
+    }
   }
 
   if (budgetExhausted) {
@@ -701,7 +709,7 @@ async function reconcileConnectionSuccess(
     .from('connections')
     .update({ status: 'active', updated_at: new Date().toISOString() })
     .eq('id', orConnId)
-    .eq('status', 'error');
+    .in('status', ['error', 'partial']);
   if (statusErr) return `connection status update failed: ${statusErr.message}`;
   console.log(
     `[or-quiltt-sync] connection ${orConnId} reconciled to active`,
