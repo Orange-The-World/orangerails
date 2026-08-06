@@ -422,6 +422,7 @@ export async function handleEvent(
   let after: string | null = null;
   let pages = 0;
   let newRows = 0;
+  let budgetExhausted = false;
   const eventStartMs = Date.now();
 
   while (pages < MAX_PAGES) {
@@ -434,6 +435,7 @@ export async function handleEvent(
       console.warn(
         `[or-quiltt-sync] event ${connectionId}: per-event budget exhausted after ${pages} pages, ${newRows} rows`,
       );
+      budgetExhausted = true;
       break;
     }
 
@@ -532,6 +534,24 @@ export async function handleEvent(
     if (!pageInfo?.hasNextPage) break;
     after = pageInfo.endCursor ?? null;
     pages++;
+  }
+
+  if (budgetExhausted) {
+    const { error: partialErr } = await client
+      .from('connections')
+      .update({ status: 'partial', updated_at: new Date().toISOString() })
+      .eq('id', conn.id);
+    if (partialErr) {
+      console.error(
+        `[or-quiltt-sync] event ${ev.event_id}: failed to set partial status:`,
+        partialErr.message,
+      );
+    } else {
+      console.log(
+        `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} set to partial ` +
+          `(budget exhausted after ${pages} pages, ${newRows} rows)`,
+      );
+    }
   }
 
   console.log(`[or-quiltt-sync] event ${ev.event_id}: ${newRows} new tx rows across ${pages + 1} pages`);
