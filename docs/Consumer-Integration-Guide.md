@@ -258,7 +258,7 @@ Body: {
 }
 200 / 207 / 422: {
   synced?:     number,        // omitted when error is set on all connections
-  connections: [{ connection_id, synced?, next_cursor?, error? }],
+  connections: [{ connection_id, synced?, next_cursor?, error?, partial?, denied_sources? }],
   rows: {
     Wallet:       [...],
     Transaction:  [...],
@@ -274,6 +274,31 @@ Body: {
 ```
 
 OR fetches transactions from the upstream provider, runs your sink adapter on each `NormalizedTransaction`, returns app-shaped rows. No transactions are persisted server-side.
+
+#### Partial syncs — `partial` and `denied_sources`
+
+A connection can succeed and still be incomplete. When it is, `partial: true`
+is set on that connection, and `denied_sources` names the kinds of history the
+provider refused, using OR's own vocabulary: `trades`, `deposits`,
+`withdrawals`.
+
+```jsonc
+{ "connection_id": "…", "synced": 128, "partial": true, "denied_sources": ["withdrawals"] }
+```
+
+The usual cause is an API key that is valid but scoped narrowly. A read-only
+Bitstamp key carries Account Balance and User Transactions but not Withdrawals,
+so trades read fine and withdrawal history is refused. That is a state the
+customer can fix, which is why it is reported as data rather than as an error.
+
+**Both fields are additive and appear only when there is something to report.**
+A complete sync returns exactly the shape it always did, so a consumer that
+ignores them keeps working unchanged. A consumer that reads them can tell the
+customer which half of their history is missing and why, instead of showing a
+sync that looks successful but silently under-reports.
+
+Treat `partial: true` as "do not mark this connection healthy". OR does the
+same: it writes `status='partial'` on the connection rather than `'active'`.
 
 The credentials_key is in OR memory only for the duration of the request (used to decrypt the stored API key, then discarded).
 
