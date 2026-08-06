@@ -16,6 +16,9 @@
  * Query errors surface as alert_firing = true (absence of evidence is not green).
  * Returns HTTP 200 always with a JSON health report.
  * When alert_firing, POSTs to Zulip #Delivery mentioning CTO Rails and SRE.
+ * Repost suppression: when firing continuously, posts at most once per
+ * SUPPRESSION_COOLDOWN_MINUTES (60 min, ~6 posts/day instead of 144).
+ * zulip_post_sent in the report reflects whether the post actually went out.
  *
  * Env vars:
  *   OR_INTERNAL_WORKER_TOKEN  -- caller auth (required)
@@ -28,10 +31,11 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
-const FAILURE_WINDOW_MINUTES  = 30;
-const SUCCESS_WINDOW_MINUTES  = 60;
-const FAILURE_RATE_THRESHOLD  = 0.10; // 10%
-const STALL_HOURS             = 2;
+const FAILURE_WINDOW_MINUTES      = 30;
+const SUCCESS_WINDOW_MINUTES      = 60;
+const FAILURE_RATE_THRESHOLD      = 0.10; // 10%
+const STALL_HOURS                 = 2;
+const SUPPRESSION_COOLDOWN_MINUTES = 60;
 
 interface DrainCronStats {
   failed_count:    number;
@@ -40,9 +44,11 @@ interface DrainCronStats {
 }
 
 interface HealthReport {
-  checked_at:   string;
-  alert_firing: boolean;
-  error?:       string;
+  checked_at:      string;
+  alert_firing:    boolean;
+  /** true = Zulip post sent this run; false = suppressed or env vars missing; null = not firing */
+  zulip_post_sent: boolean | null;
+  error?:          string;
   signals: {
     failure_rate: {
       failed:         number | null;
@@ -72,14 +78,15 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-async function postZulipAlert(message: string): Promise<void> {
+/** Returns true if the message was sent successfully, false otherwise. */
+async function postZulipAlert(message: string): Promise<boolean> {
   const botEmail = Deno.env.get('ZULIP_BOT_EMAIL');
   const apiKey   = Deno.env.get('ZULIP_API_KEY');
   const apiUrl   = Deno.env.get('ZULIP_API_URL');
 
   if (!botEmail || !apiKey || !apiUrl) {
     console.error('[or-quiltt-drain-alert] Zulip env vars missing; alert not posted to chat');
-    return;
+    return false;
   }
 
   const credentials = btoa(`${botEmail}:${apiKey}`);
@@ -105,12 +112,15 @@ async function postZulipAlert(message: string): Promise<void> {
       console.error(
         `[or-quiltt-drain-alert] Zulip post failed (${res.status}): ${text.slice(0, 200)}`,
       );
+      return false;
     }
+    return true;
   } catch (err) {
     console.error(
       '[or-quiltt-drain-alert] Zulip post threw:',
       err instanceof Error ? err.message : String(err),
     );
+    return false;
   }
 }
 
@@ -209,41 +219,74 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   const alertFiring = failureRateFiring || zeroCompletionsFiring || stallFiring ||
     queryError !== undefined;
 
+  // zulip_post_sent: null when not firing, true/false when firing based on outcome.
+  let zulipPostSent: boolean | null = null;
+
   if (alertFiring) {
-    const parts: string[] = [];
-    if (failureRateFiring) {
-      parts.push(
-        `:x: **Signal A (failure rate):** ${failedCount}/${totalCount} drain runs failed ` +
-        `(${((failureRate ?? 0) * 100).toFixed(1)}%) in the last ${FAILURE_WINDOW_MINUTES} min`,
-      );
-    }
-    if (zeroCompletionsFiring) {
-      parts.push(
-        `:x: **Signal B (zero completions):** 0 succeeded runs in the last ` +
-        `${SUCCESS_WINDOW_MINUTES} min`,
-      );
-    }
-    if (stallFiring) {
-      parts.push(
-        `:x: **Signal C (queue stall):** ${stalled} unprocessed row(s) older than ` +
-        `${STALL_HOURS}h`,
-      );
-    }
-    if (queryError) {
-      parts.push(`:warning: **Query error (probe could not run):** ${queryError}`);
-    }
+    // Suppression: only post if we have never posted, or cooldown has elapsed.
+    // Prevents ~144 posts/day (every 10 min) when alerts fire continuously.
+    const { data: stateRow } = await client
+      .from('drain_alert_state')
+      .select('last_notified_at')
+      .eq('id', 1)
+      .maybeSingle();
 
-    const message =
-      `:warning: **or_quiltt_sync_drain alert** @**CTO Rails** @**SRE**\n\n` +
-      parts.join('\n') +
-      `\n\nChecked at: ${checkedAt}`;
+    const lastNotifiedAt: string | null = stateRow?.last_notified_at ?? null;
+    const cooldownMs   = SUPPRESSION_COOLDOWN_MINUTES * 60 * 1000;
+    const withinCooldown =
+      lastNotifiedAt !== null &&
+      Date.now() - new Date(lastNotifiedAt).getTime() < cooldownMs;
 
-    await postZulipAlert(message);
+    if (withinCooldown) {
+      console.log(
+        `[or-quiltt-drain-alert] alert firing but suppressed ` +
+        `(last post: ${lastNotifiedAt}, cooldown: ${SUPPRESSION_COOLDOWN_MINUTES} min)`,
+      );
+      zulipPostSent = false;
+    } else {
+      const parts: string[] = [];
+      if (failureRateFiring) {
+        parts.push(
+          `:x: **Signal A (failure rate):** ${failedCount}/${totalCount} drain runs failed ` +
+          `(${((failureRate ?? 0) * 100).toFixed(1)}%) in the last ${FAILURE_WINDOW_MINUTES} min`,
+        );
+      }
+      if (zeroCompletionsFiring) {
+        parts.push(
+          `:x: **Signal B (zero completions):** 0 succeeded runs in the last ` +
+          `${SUCCESS_WINDOW_MINUTES} min`,
+        );
+      }
+      if (stallFiring) {
+        parts.push(
+          `:x: **Signal C (queue stall):** ${stalled} unprocessed row(s) older than ` +
+          `${STALL_HOURS}h`,
+        );
+      }
+      if (queryError) {
+        parts.push(`:warning: **Query error (probe could not run):** ${queryError}`);
+      }
+
+      const message =
+        `:warning: **or_quiltt_sync_drain alert** @**CTO Rails** @**SRE**\n\n` +
+        parts.join('\n') +
+        `\n\nChecked at: ${checkedAt}`;
+
+      zulipPostSent = await postZulipAlert(message);
+
+      if (zulipPostSent) {
+        // Update suppression state so next run within cooldown is skipped.
+        await client
+          .from('drain_alert_state')
+          .upsert({ id: 1, last_notified_at: checkedAt });
+      }
+    }
   }
 
   const report: HealthReport = {
-    checked_at:   checkedAt,
-    alert_firing: alertFiring,
+    checked_at:      checkedAt,
+    alert_firing:    alertFiring,
+    zulip_post_sent: zulipPostSent,
     ...(queryError !== undefined ? { error: queryError } : {}),
     signals: {
       failure_rate: {
