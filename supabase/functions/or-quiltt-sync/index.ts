@@ -431,6 +431,9 @@ export async function handleEvent(
       `[or-quiltt-sync] source_wallets lookup failed for connection ${conn.id}:`,
       swErr.message,
     );
+    // Fail closed: we cannot determine which accounts are selected, so do
+    // not fall through to all-sync. The event will retry on the next tick.
+    return `source_wallets lookup failed: ${swErr.message}`;
   }
   // selectedAccountIds === null means no rows present: sync everything (all-sync fallback)
   const selectedAccountIds: Set<string> | null =
@@ -523,12 +526,15 @@ export async function handleEvent(
     for (const tx of txs) {
       // DL-0442: skip transactions for accounts the user has not selected.
       // selectedAccountIds === null means no source_wallets rows: sync all accounts.
-      if (
-        selectedAccountIds !== null &&
-        tx.account?.id != null &&
-        !selectedAccountIds.has(tx.account.id as string)
-      ) {
-        continue;
+      // When selection is active, a null account.id is unidentifiable and therefore
+      // unselectable: skip it rather than letting it bypass the filter silently.
+      if (selectedAccountIds !== null) {
+        if (
+          tx.account?.id == null ||
+          !selectedAccountIds.has(tx.account.id as string)
+        ) {
+          continue;
+        }
       }
 
       const cleartext = JSON.stringify({
