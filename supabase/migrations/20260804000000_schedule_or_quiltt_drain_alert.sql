@@ -1,3 +1,0 @@
--- intentionally blank: version 20260804000000 is already applied on dev
--- as or_quiltt_sync_vault_rpc. All DDL for DL-0640 drain alerting lives in
--- 20260806000000_schedule_or_quiltt_drain_alert.sql.
