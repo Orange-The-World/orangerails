@@ -25,7 +25,7 @@ import { deriveResponseCursor } from './index.ts';
 //
 // These tests are the canonical regression guard for this class of bug.
 // They cover all three functions that shared the validator:
-//   - or-stealth-transactions-store (fixed in PR #608)
+//   - or-stealth-transactions-store (fixed, DL-0608)
 //   - or-stealth-connection-list    (fixed in this PR)
 //   - or-stealth-connection-delete  (fixed in this PR)
 //
@@ -90,7 +90,7 @@ Deno.test('DL-0608: or-stealth-connection-delete -- cuid passes validator (not U
 Deno.test('DL-0608: or-stealth-transactions-store -- cuid passes validator (not UUID-only)', () => {
   // or-stealth-transactions-store/index.ts line 105 was:
   //   if (!body.app_user_id || !UUID_RE.test(body.app_user_id))
-  // Fixed in PR #608 to:
+  // Fixed (DL-0608) to:
   //   if (!body.app_user_id || typeof body.app_user_id !== 'string')
   for (const cuid of CUID_EXAMPLES) {
     const passes = !(!cuid || typeof cuid !== 'string');
