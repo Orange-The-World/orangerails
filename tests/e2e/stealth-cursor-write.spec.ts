@@ -63,8 +63,11 @@ async function sealFixtureEnvelope() {
   const iv = new Uint8Array(12); // 12 zero bytes, fixed
   const payload = {
     kind: 'xpub_stealth',
-    // Dummy xpub. Never decoded by a real scanner in this test (mock mode).
-    xpub: 'xpub661MyMwAqRbcGnMkATKEFRjSHaHYh9FqMzQ3jRXBD2Z9KB',
+    // BIP84 test-vector xpub (same key as BIP84_ZPUB, re-encoded with the
+    // standard xpub prefix). runSync derives from this unconditionally even in
+    // mock mode (sync.ts deriving phase has no mock bypass), so a full 111-char
+    // key is required or derive.ts throws "wrong length, expected 78".
+    xpub: 'xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V',
     label: 'e2e cursor-write fixture',
     wallet_birthday: '2020-01-01',
     gap_limit: 20,
