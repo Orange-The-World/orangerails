@@ -19,6 +19,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   Download,
+  Info,
 } from "lucide-react";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { buildCsv, downloadCsv, todayStamp } from "@/lib/csv";
@@ -70,6 +71,15 @@ const DEFAULT_PAGE_SIZE = 25;
 const PAGE_SIZE_STORAGE_KEY = "or_app_tx_page_size";
 const ALL_WALLETS = "__all__";
 const NO_WALLET = "__legacy__"; // for source_wallet_id = null/undefined
+
+// Fixed stablecoin set: assets displayed at 1:1 USD peg in ORBI (DL-0431).
+const STABLECOINS = new Set(["USDT", "USDC", "DAI", "BUSD"]);
+
+/** Returns true when a wallet currency is a known stablecoin. */
+function isStablecoin(currency: string | null | undefined): boolean {
+  if (!currency) return false;
+  return STABLECOINS.has(currency.toUpperCase());
+}
 
 // ------------------------------------------------------------------
 // Helpers
@@ -449,7 +459,18 @@ export function TransactionsPanel({ rows, connections, onNotice }: TransactionsP
                       </span>
                     </td>
                     <td className="px-3 py-2 text-right font-mono whitespace-nowrap">
-                      {formatAmountDisplay(tx)}
+                      <span className="inline-flex items-center justify-end gap-1">
+                        {formatAmountDisplay(tx)}
+                        {isStablecoin(info?.currency) && typeof tx.amount_sats !== "number" && (
+                          <span
+                            title="Displayed at 1:1 USD peg. Actual market value may differ."
+                            className="text-muted-foreground cursor-help"
+                            aria-label="Peg disclaimer"
+                          >
+                            <Info className="h-3 w-3" aria-hidden="true" />
+                          </span>
+                        )}
+                      </span>
                     </td>
                     <td className="px-3 py-2 max-w-xs truncate">
                       {tx.description ?? ","}

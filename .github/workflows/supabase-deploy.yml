@@ -119,7 +119,11 @@ jobs:
       - name: Setup Supabase CLI
         uses: supabase/setup-cli@v2
         with:
-          version: latest
+          # Pinned deliberately. `latest` let the toolchain float under a
+          # production deploy: the same commit could succeed or fail
+          # depending on what upstream published that hour. Bump this on
+          # purpose, in its own PR, after a dev deploy proves the version.
+          version: 2.111.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -142,12 +146,17 @@ jobs:
             DEPLOY_FUNCS="$ALL_FUNCS"
             echo "Full deploy (workflow_dispatch or force push): $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
           else
-            if ! CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/'); then
+            # The pathspec MUST include supabase/config.toml. The branch below
+            # tests $CHANGED for it, and a diff limited to supabase/functions/
+            # can never produce that path: the test was unreachable, and a push
+            # touching only config.toml produced an empty $CHANGED, skipped the
+            # deploy and exited 0 green having shipped nothing.
+            if ! CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'supabase/functions/' 'supabase/config.toml'); then
               DEPLOY_FUNCS="$ALL_FUNCS"
               echo "git diff failed; falling back to full deploy: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
-            elif echo "$CHANGED" | grep -qE 'supabase/functions/_[^/]+/'; then
+            elif echo "$CHANGED" | grep -qE 'supabase/functions/_[^/]+/|supabase/config\.toml'; then
               DEPLOY_FUNCS="$ALL_FUNCS"
-              echo "Shared directory changed; redeploying all functions: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
+              echo "Shared directory or config changed; redeploying all functions: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
             else
               DEPLOY_FUNCS=$(echo "$CHANGED" | grep -oP 'supabase/functions/\K[^/]+' | grep -v '^_' | sort -u || true)
               # Skip any function directory deleted in this push.
@@ -170,7 +179,14 @@ jobs:
           for FUNC in $DEPLOY_FUNCS; do
             DEPLOYED=false
             for attempt in 1 2 3; do
-              if supabase functions deploy "$FUNC" --project-ref ${{ steps.target.outputs.supabase_ref }}; then
+              # The CLI truncates its own errors and tells you to rerun with
+              # --debug, which is impossible after the fact in CI. Run only the
+              # LAST attempt with --debug: a transient retry stays quiet, and a
+              # real failure names the key or path it choked on. Actions masks
+              # registered secrets in the log.
+              DEBUG_FLAG=""
+              if [ "$attempt" -eq 3 ]; then DEBUG_FLAG="--debug"; fi
+              if supabase functions deploy "$FUNC" --project-ref ${{ steps.target.outputs.supabase_ref }} --import-map supabase/functions/import_map.json $DEBUG_FLAG; then
                 echo "$FUNC deployed on attempt $attempt"
                 DEPLOYED=true
                 break

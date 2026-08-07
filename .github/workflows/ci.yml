@@ -255,8 +255,8 @@ jobs:
           # branch this job is running against, and it is PER BRANCH because
           # the two branches genuinely differ.
           #
-          # MEASURED 2026-07-31 with this job's own find pattern:
-          #   dev  15 files
+          # MEASURED 2026-08-03 with this job's own find pattern:
+          #   dev  16 files
           #   prod  9 files
           #
           # The value shipped when this guard landed was 3, which was the count
@@ -273,7 +273,7 @@ jobs:
           #
           # When you add or remove a test file, change the number for that
           # branch in the same PR, and say why in the message if it goes down.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '15' }}
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '16' }}
         run: |
           set -euo pipefail
 

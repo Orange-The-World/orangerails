@@ -1,10 +1,5 @@
 project_id = "fzwmnzmtqidumdqjdddz"
 
-# Shared import map: pins all esm.sh CDN specifiers to immutable npm: versions
-# so edge functions never resolve live CDN bytes at deploy time. (DL-0506)
-[functions]
-import_map = "./functions/import_map.json"
-
 # Functions deployed with verify_jwt = false do their OWN auth at the
 # function-code level (X-Platform-API-Key via _shared/platform-auth.ts,
 # widget_token validation against pending_widget_sessions, or Ed25519

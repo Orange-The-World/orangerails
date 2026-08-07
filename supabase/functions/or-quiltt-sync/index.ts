@@ -49,6 +49,7 @@ const MAX_ATTEMPTS = 25;
 // Covers most banks' full available history (Quiltt typically caps at ~2y).
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
 const MAX_PAGES = 50;
+const REDRIVE_SWEEP_SIZE = 500;  // max rows fetched in step 1 of reDriveReadyDeferrals per tick
 
 // Per-event wall-clock budget. A pathological profile (many bound
 // connections, slow Quiltt responses, or hostile fanout) can otherwise
@@ -104,6 +105,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   let failed    = 0;
   let skipped   = 0;
 
+  // DL-0643: Re-admit OPK-deferred rows whose subaccounts have since
+  // registered a public key. Runs each tick so subaccounts that registered
+  // before or-sync-key-register's clearDeferredRows shipped are unblocked
+  // without waiting for a new registration event.
+  const { reDriven, error: reDriveErr } = await reDriveReadyDeferrals(client);
+  if (reDriveErr) {
+    console.error('[or-quiltt-sync] reDriveReadyDeferrals failed:', reDriveErr);
+  }
+  if (reDriven > 0) {
+    console.log(`[or-quiltt-sync] re-admitted ${reDriven} OPK-deferred rows`);
+  }
+
   // Pull a batch of pending, non-deferred events.
   // fetchPendingBatch filters both processed_at IS NULL and opk_deferred_at IS NULL
   // so opk-deferred rows never pile up at the head and starve drainable events.
@@ -111,10 +124,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   if (pendErr) {
     console.error('[or-quiltt-sync] inbox query failed:', pendErr.message);
-    return jsonResponse({ error: 'inbox query failed' }, 500);
+    return jsonResponse({ error: 'inbox query failed', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 500);
   }
   if (!pending || pending.length === 0) {
-    return jsonResponse({ processed: 0, failed: 0, skipped: 0, message: 'inbox empty' }, 200);
+    return jsonResponse({ processed: 0, failed: 0, skipped: 0, message: 'inbox empty', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 200);
   }
 
   for (const ev of pending as PendingEvent[]) {
@@ -240,7 +253,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
   }
 
-  return jsonResponse({ processed, failed, skipped, batch: pending.length }, 200);
+  return jsonResponse({ processed, failed, skipped, reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}), batch: pending.length }, 200);
 }, 'or-quiltt-sync'));
 
 // ─── event dispatch ──────────────────────────────────────────────────
@@ -764,6 +777,80 @@ export async function markDeferred(client: SupabaseClient, eventId: string) {
     .from('quiltt_webhook_inbox')
     .update({ opk_deferred_at: new Date().toISOString() })
     .eq('event_id', eventId);
+}
+
+/**
+ * Re-admit OPK-deferred rows whose subaccount now has opk_public set.
+ *
+ * Rows sit in deferred state (opk_deferred_at IS NOT NULL) when a
+ * connection.synced.successful event arrived before the subaccount
+ * registered its OPK. Normally or-sync-key-register clears them at
+ * key-registration time. Subaccounts that registered their key before
+ * that code shipped, or that registered while holding no pending deferred
+ * rows, are never unblocked by that path. This sweep finds them each
+ * drain tick and nulls opk_deferred_at so fetchPendingBatch can pick
+ * them up (DL-0643).
+ *
+ * Returns { reDriven, error } where reDriven is the number of rows
+ * re-admitted and error is a non-fatal message string (null on success).
+ * Exported for unit testing.
+ */
+export async function reDriveReadyDeferrals(
+  client: SupabaseClient,
+): Promise<{ reDriven: number; error: string | null }> {
+  // Step 1: collect distinct subaccount IDs with live deferred rows.
+  // Ordered by opk_deferred_at ASC so the oldest-deferred subaccounts are swept
+  // first. Bounded by REDRIVE_SWEEP_SIZE: without a bound the query fetches every
+  // deferred row on every tick; without ordering a cap silently re-fetches the
+  // same arbitrary prefix and the tail is never reached.
+  const { data: deferredRows, error: deferredErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select('subaccount_id')
+    .is('processed_at', null)
+    .not('opk_deferred_at', 'is', null)
+    .order('opk_deferred_at', { ascending: true })
+    .limit(REDRIVE_SWEEP_SIZE);
+  if (deferredErr) {
+    return { reDriven: 0, error: `deferred rows query failed: ${deferredErr.message}` };
+  }
+  const allSubIds = [
+    ...new Set(
+      (deferredRows ?? [])
+        .map((r: { subaccount_id: string | null }) => r.subaccount_id)
+        .filter((id): id is string => id !== null),
+    ),
+  ];
+  if (allSubIds.length === 0) return { reDriven: 0, error: null };
+  if ((deferredRows ?? []).length >= REDRIVE_SWEEP_SIZE) {
+    console.warn(
+      `[or-quiltt-sync] reDriveReadyDeferrals: hit REDRIVE_SWEEP_SIZE cap (${REDRIVE_SWEEP_SIZE}); ` +
+        `some deferred rows were not swept this tick and will be reached on the next`,
+    );
+  }
+
+  // Step 2: of those subaccounts, find which now have opk_public set.
+  const { data: opkSubs, error: opkErr } = await client
+    .from('subaccounts')
+    .select('id')
+    .in('id', allSubIds)
+    .not('opk_public', 'is', null);
+  if (opkErr) {
+    return { reDriven: 0, error: `subaccounts OPK query failed: ${opkErr.message}` };
+  }
+  const readyIds = (opkSubs ?? []).map((r: { id: string }) => r.id);
+  if (readyIds.length === 0) return { reDriven: 0, error: null };
+
+  // Step 3: clear opk_deferred_at on their unprocessed deferred rows.
+  const { count, error: clearErr } = await client
+    .from('quiltt_webhook_inbox')
+    .update({ opk_deferred_at: null }, { count: 'exact' })
+    .in('subaccount_id', readyIds)
+    .is('processed_at', null)
+    .not('opk_deferred_at', 'is', null);
+  if (clearErr) {
+    return { reDriven: 0, error: `clear deferred rows failed: ${clearErr.message}` };
+  }
+  return { reDriven: count ?? 0, error: null };
 }
 
 function jsonResponse(body: unknown, status: number): Response {
