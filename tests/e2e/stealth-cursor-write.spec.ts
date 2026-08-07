@@ -33,7 +33,7 @@ const OR_API        = (process.env.OR_API_BASE_URL ?? '').replace(/\/$/, '');
 const FN            = `${OR_API}/functions/v1`;
 const PLATFORM_KEY  = process.env.OR_TEST_PLATFORM_API_KEY ?? '';
 
-const VITE_BASE   = 'http://localhost:5173';
+const VITE_BASE   = 'http://localhost:8080';
 const WIDGET_PATH = '/connect/stealth';
 
 // 32 zero bytes, base64-encoded. Fixture key described in Option B spec.
