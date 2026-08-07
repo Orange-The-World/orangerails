@@ -54,6 +54,7 @@ import type {
 import { ProgressModal } from "../components/ProgressModal";
 import { useStealthInit } from "../StealthInitContext";
 import { proxyFetch } from "../lib/proxyFetch";
+import { resolveFunctionUrl } from "../lib/resolveFunctionUrl";
 
 const STEALTH_FILTER_BASE =
   (import.meta.env.VITE_OR_STEALTH_FILTER_BASE_URL as string | undefined) ??
@@ -61,18 +62,6 @@ const STEALTH_FILTER_BASE =
 const BLOCK_SOURCE_BASE =
   (import.meta.env.VITE_OR_BLOCK_SOURCE_BASE_URL as string | undefined) ??
   "https://blocks.orangerails.com";
-
-function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): string {
-  if (proxyBaseUrl) {
-    return `${proxyBaseUrl.replace(/\/$/, "")}/${name}`;
-  }
-  const base = ((import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? "").replace(
-    /\/$/,
-    "",
-  );
-  if (base) return `${base}/${name}`;
-  return `/functions/v1/${name}`;
-}
 
 function isMockMode(): boolean {
   if (typeof window === "undefined") return false;
