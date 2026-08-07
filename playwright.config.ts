@@ -48,7 +48,7 @@ export default defineConfig({
     // so the widget accepts the OR_STEALTH_INIT postMessage from localhost.
     command: 'VITE_OR_STEALTH_ALLOWED_ORIGINS=http://localhost:5173 bun run dev',
     url: 'http://localhost:5173',
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: true,
     timeout: 120_000,
   } : undefined,
   projects: [
