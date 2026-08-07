@@ -402,7 +402,7 @@ function makeQuilttSyncMock(opts: {
   swError?: string;
   txNodes: Array<{ id: string; account: { id: string } | null }>;
   opkPublic?: string;
-}): { client: any; inserted: string[] } {
+}): { client: any; inserted: string[]; cleanup: () => void } {
   const inserted: string[] = [];
   const client = {
     from(table: string) {
@@ -413,10 +413,11 @@ function makeQuilttSyncMock(opts: {
         is(_c: string, _v: unknown) { return chain; },
         order(_c: string, _o: unknown) { return chain; },
         limit(_n: number) { return chain; },
+        update(_patch: unknown, _opts?: unknown) { return chain; },
         single() {
           if (table === 'subaccounts') {
             return Promise.resolve({
-              data: { id: 'sub-1', opk_public: opts.opkPublic ?? 'fakepub', opk_alg: 'x25519' },
+              data: { id: 'sub-1', opk_public: opts.opkPublic ?? 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', opk_alg: 'libsodium-crypto_box_seal-v1' },
               error: null,
             });
           }
@@ -461,8 +462,9 @@ function makeQuilttSyncMock(opts: {
       return Promise.resolve({ data: 'stubtoken', error: null });
     },
   };
+  const origFetch = (globalThis as any).fetch;
   // Patch global fetch for the Quiltt GraphQL call.
-  (globalThis as any).__quilttFetchStub = () =>
+  (globalThis as any).fetch = () =>
     Promise.resolve(
       new Response(
         JSON.stringify({
@@ -485,7 +487,8 @@ function makeQuilttSyncMock(opts: {
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
     );
-  return { client, inserted };
+  const cleanup = () => { (globalThis as any).fetch = origFetch; };
+  return { client, inserted, cleanup };
 }
 
 Deno.test('DL-0442 account filter: subset selected -- only matching accounts sync', async () => {
