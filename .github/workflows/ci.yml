@@ -453,22 +453,15 @@ jobs:
       - name: Install Playwright browsers
         run: bunx playwright install --with-deps chromium
 
-      # Leg 2: run with PLAYWRIGHT_WITH_VITE_DEV=1 but no credentials.
-      # The module-level guard in stealth-cursor-write.spec.ts throws at
-      # eval time, so Playwright exits non-zero immediately (no vite server
-      # needed). If it exits 0 the guard is broken and we fail loudly.
-      - name: Guard proof (leg 2 -- guard throws without credentials)
-        run: |
-          if PLAYWRIGHT_WITH_VITE_DEV=1 bunx playwright test --grep 'stealth cursor write' 2>&1; then
-            echo "::error::Guard did not throw -- test exited 0 without credentials. The module-level guard is broken."
-            exit 1
-          fi
-          echo "Leg 2 PASS: guard threw as expected (non-zero exit confirmed)"
-
-      # Start the vite dev server for leg 1. OR_STEALTH_ALLOWED_ORIGINS must
-      # match the origin of the parent page (http://localhost:5173) so the
-      # widget accepts the postMessage. VITE_SUPABASE_URL and PROJECT_ID are
-      # the public dev-project values already in .env.example.
+      # Start vite before either leg. playwright.config.ts has
+      # reuseExistingServer: true, so both Leg 2 and Leg 1 reuse this process
+      # rather than starting their own. A server Playwright did NOT start is
+      # not killed when Playwright exits -- so the Leg 2 guard-throw exit
+      # cannot kill the server that Leg 1 needs. Previous order (Leg 2 first)
+      # let Playwright start and kill vite before this step could restart it,
+      # causing a racy cold-restart that timed out on slow CI runners.
+      # VITE_OR_STEALTH_ALLOWED_ORIGINS must match the parent-page origin
+      # (http://localhost:5173) so the widget accepts the postMessage.
       - name: Start vite dev server
         env:
           VITE_SUPABASE_URL: https://fzwmnzmtqidumdqjdddz.supabase.co
@@ -477,14 +470,29 @@ jobs:
           VITE_OR_STEALTH_ALLOWED_ORIGINS: http://localhost:5173
         run: |
           bun run dev &
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             curl -sf http://localhost:5173 -o /dev/null && echo "Vite ready after ${i}s" && break
             sleep 1
           done
           curl -sf http://localhost:5173 -o /dev/null || {
-            echo "::error::Vite dev server did not start within 30s"
+            echo "::error::Vite dev server did not start within 60s"
             exit 1
           }
+
+      # Leg 2: run with PLAYWRIGHT_WITH_VITE_DEV=1 but no credentials.
+      # The module-level guard in stealth-cursor-write.spec.ts throws at
+      # eval time, so Playwright exits non-zero immediately. With vite already
+      # running above, reuseExistingServer: true means Playwright finds port
+      # 5173 up and does not start a second server -- so the guard-throw exit
+      # does not kill the server Leg 1 needs.
+      # If it exits 0 the guard is broken and we fail loudly.
+      - name: Guard proof (leg 2 -- guard throws without credentials)
+        run: |
+          if PLAYWRIGHT_WITH_VITE_DEV=1 bunx playwright test --grep 'stealth cursor write' 2>&1; then
+            echo "::error::Guard did not throw -- test exited 0 without credentials. The module-level guard is broken."
+            exit 1
+          fi
+          echo "Leg 2 PASS: guard threw as expected (non-zero exit confirmed)"
 
       # Leg 1: full test run with vite dev server and real credentials.
       # Route intercepts handle or-stealth-envelope-fetch (mock response);
