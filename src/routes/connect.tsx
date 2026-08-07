@@ -355,6 +355,17 @@ interface ProviderManifest {
    * of going to enter-credentials.
    */
   connectUrl?: string;
+  /**
+   * Exchange-level sync capabilities from CCXT manifest introspection.
+   * Absent for native adapters (blink, xpub, btcpay, strike) and
+   * client-side manifests (quiltt, sparrow). Kept in sync with the
+   * backend ProviderManifest shape in dispatch.ts.
+   */
+  capabilities?: {
+    trades: boolean;
+    deposits: boolean;
+    withdrawals: boolean;
+  };
 }
 
 interface ManifestField {
@@ -1900,6 +1911,22 @@ const TILE_PALETTE = [
   "bg-yellow-500",
 ];
 
+/**
+ * Small indicator dot for one exchange capability (trades, deposits, withdrawals).
+ * Only rendered when the manifest carries a capabilities object (CCXT exchanges).
+ * Green = supported per CCXT introspection. Grey = not supported.
+ * Never shown for native adapters or client-side manifests (capabilities absent).
+ */
+function CapabilityDot({ label, enabled }: { label: string; enabled: boolean }) {
+  return (
+    <span
+      title={enabled ? `${label}: supported` : `${label}: not supported`}
+      aria-label={enabled ? `${label} supported` : `${label} not supported`}
+      className={`h-1.5 w-1.5 rounded-full ${enabled ? "bg-emerald-500" : "bg-slate-300"}`}
+    />
+  );
+}
+
 function tileColor(slug: string): string {
   // Cheap djb2-style hash for stable per-slug color.
   let h = 5381;
@@ -1943,6 +1970,13 @@ function ProviderTile({
           </span>
         )}
       </div>
+      {provider.capabilities && (
+        <div className="flex items-center gap-1" aria-label="Sync capabilities">
+          <CapabilityDot label="Trades" enabled={provider.capabilities.trades} />
+          <CapabilityDot label="Deposits" enabled={provider.capabilities.deposits} />
+          <CapabilityDot label="Withdrawals" enabled={provider.capabilities.withdrawals} />
+        </div>
+      )}
     </button>
   );
 }

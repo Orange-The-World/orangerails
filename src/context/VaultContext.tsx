@@ -178,6 +178,20 @@ interface VaultContextValue {
   exportTransactionsKeyForSync(): Promise<string>;
 
   /**
+   * Derive the per-app Stealth Sync subkey for the widget.
+   *
+   * Uses HKDF-SHA-256 on the in-memory MEK (salt='', info='or-stealth-v1',
+   * 32 bytes), matching STEALTH_HKDF_INFO in src/stealth/lib/postmessage.ts.
+   * The MEK is a non-extractable HKDF CryptoKey, so the derivation is done
+   * directly via deriveBits without exporting the MEK as raw bytes.
+   *
+   * Returns the base64-encoded 32-byte subkey. Safe to send as
+   * OR_STEALTH_INIT.or_stealth_key_b64 to the /connect/stealth popup.
+   * Throws if the vault is locked.
+   */
+  exportStealthKeyForWidget(): Promise<string>;
+
+  /**
    * Generate the user's hybrid KEM + ML-DSA signing keypairs if they
    * don't exist yet, then publish public keys + MEK-wrapped secrets to
    * user_vault_meta. Idempotent , a second call is a no-op.
@@ -601,6 +615,25 @@ export function VaultProvider({ children }: VaultProviderProps) {
     return arrayBufferToBase64(raw);
   }, [saltB64]);
 
+  const exportStealthKeyForWidget = useCallback(async (): Promise<string> => {
+    const { mek } = requireUnlocked();
+    // mek is a non-extractable HKDF CryptoKey (importMekAsHkdf). Derive the
+    // stealth subkey directly via deriveBits without exporting the MEK.
+    // Wire contract: HKDF-SHA-256, salt='', info='or-stealth-v1', 256 bits.
+    // Matches STEALTH_HKDF_INFO in src/stealth/lib/postmessage.ts.
+    const derived = await crypto.subtle.deriveBits(
+      {
+        name: "HKDF",
+        hash: "SHA-256",
+        salt: new Uint8Array(0),
+        info: new TextEncoder().encode("or-stealth-v1"),
+      },
+      mek,
+      256,
+    );
+    return arrayBufferToBase64(derived);
+  }, []);
+
   const ensurePqcKeypairs = useCallback(
     async (supabase: PqcSupabaseLike, userId: string): Promise<EnsurePqcKeypairsResult> => {
       const { mek, saltB64 } = requireUnlocked();
@@ -636,8 +669,23 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const targetUserId = row.user_id;
       const targetKemPubB64 = row.kem_public_key;
 
+      // Fetch the owner's ML-DSA-65 signing secret (wrapped) to sign the grant
+      // binding. This keeps app.tsx free of sig_secret_wrapped handling.
+      const { data: sigRow } = await (supabase as any)
+        .from("user_vault_meta")
+        .select("sig_secret_wrapped")
+        .eq("user_id", params.ownerUserId)
+        .single();
+      const ownerSigSecretWrapped = (sigRow as Record<string, unknown> | null)?.sig_secret_wrapped as string | undefined;
+      if (!ownerSigSecretWrapped) {
+        throw new Error(
+          "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
+        );
+      }
+
       return grantCoAdminImpl({
         ...rest,
+        ownerSigSecretWrapped,
         targetUserId,
         targetKemPubB64,
         supabase: supabase as unknown as Parameters<typeof grantCoAdminImpl>[0]["supabase"],
@@ -673,6 +721,9 @@ export function VaultProvider({ children }: VaultProviderProps) {
       ownerWorkspaceKeyId: string;
       wrappedCiphertextB64: string;
       kemSecretWrapped: string;
+      grantSigB64: string | null;
+      ownerSigPubB64: string;
+      granteeUserId: string;
     }): Promise<AdminSubkeys> => {
       const { mek, saltB64: s } = requireUnlocked();
       return loadAdminSubkeysDirect({
@@ -680,6 +731,10 @@ export function VaultProvider({ children }: VaultProviderProps) {
         kemSecretWrapped: params.kemSecretWrapped,
         adminMek: mek,
         adminSaltB64: s,
+        grantSigB64: params.grantSigB64,
+        ownerSigPubB64: params.ownerSigPubB64,
+        granteeUserId: params.granteeUserId,
+        ownerWorkspaceKeyId: params.ownerWorkspaceKeyId,
       });
     },
     [saltB64],
@@ -715,6 +770,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
     decryptTransaction,
     exportCredentialsKeyForSync,
     exportTransactionsKeyForSync,
+    exportStealthKeyForWidget,
     ensurePqcKeypairs,
     grantCoAdmin,
     revokeCoAdmin,

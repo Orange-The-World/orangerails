@@ -1,0 +1,7 @@
+-- SUPERSEDED: this file was renumbered to 20260804140000_or_quiltt_sync_fail_loudly.sql
+-- because version 20260803120000 was already occupied in schema_migrations by
+-- converge_duplicate_version_20260713120000 (primary key collision).
+--
+-- The Supabase runner skips this file because version 20260803120000 is already
+-- recorded in schema_migrations. This no-op content prevents any accidental re-apply.
+-- The actual migration content lives in 20260804140000_or_quiltt_sync_fail_loudly.sql.

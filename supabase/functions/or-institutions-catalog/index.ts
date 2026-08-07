@@ -208,12 +208,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         connector_id: connectorId,
         q,
         institutions: [],
-        // Diagnostic , surfaces upstream Quiltt errors so consumers can
-        // tell apart "Quiltt down" vs "no banks matched". Includes the
-        // upstream HTTP code when available; never includes secrets.
+        // Surfaces upstream Quiltt errors so callers can distinguish
+        // "Quiltt down" from "no banks matched". Returns 502, not 200,
+        // so callers detect failure via HTTP status (not body scanning).
+        error: 'upstream_failure',
         warning: `Catalog search failed: ${errMsg.slice(0, 250)}`,
       },
-      200,
+      502,
       { ...cors, 'cache-control': 'no-store' },
     );
   }

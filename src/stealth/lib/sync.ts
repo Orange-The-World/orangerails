@@ -150,6 +150,9 @@ export interface RunSyncOptions {
   /** PROGRESS pump. The orchestrator emits one event per stage and at
    *  most a handful of intra-stage updates. */
   onProgress?: (ev: SyncProgressEvent) => void;
+  /** Override the maximum number of rolling-window extension passes.
+   *  Defaults to 10. Exposed for tests; production callers should omit it. */
+  maxWindowPasses?: number;
 }
 
 export interface SyncResult {
@@ -527,7 +530,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // lands within gapLimit slots of the edge. Cap prevents unbounded work;
   // windowExhausted signals when it fires. The final value should come from
   // the three-point GCS benchmark described in the #353 open question.
-  const MAX_WINDOW_PASSES = 10;
+  const MAX_WINDOW_PASSES = opts.maxWindowPasses ?? 10;
 
   // Per-chain window end index (exclusive). Starts at gapLimit * 2 per chain
   // (same initial window as before). Each chain can extend independently:
@@ -630,8 +633,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   // req 4: cache filter records during the initial scan so extension passes
   // can re-match locally without re-downloading from the CDN on every pass.
-  // Stores null explicitly for heights that returned 404 so the extension
-  // loop never falls through to a redundant network fetch for known-missing heights.
+  // null entries arrive only from mock fetchFilter implementations in tests;
+  // liveFetchFilter (the real implementation) throws on 404 rather than
+  // returning null, so the extension loop never sees a cached null in prod.
   const filterCache = new Map<number, FilterRecord | null>();
 
   // Parallel filter fetch with bounded concurrency. Sequential
@@ -703,6 +707,20 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emitFetchProgress(true);
   emit(opts, progress('fetching_filters', 100));
   emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
+
+  // Heights near tip often return null because the filter producer lags the
+  // block source. Returning tip unconditionally as the cursor would mark those
+  // heights as scanned and skip them permanently on the next sync, missing any
+  // transactions they contain. Walk forward from fromHeight and stop at the
+  // first null to find the highest height we can safely advance the cursor to.
+  // This mirrors the reasoning at the early-return path above (req 2 of
+  // issue #335): the chain tip is never an accurate cursor when heights were
+  // skipped because their filters were not yet produced.
+  let lastContiguousScanned = fromHeight - 1;
+  for (let h = fromHeight; h <= tip; h++) {
+    if (filterCache.get(h) === null) break;
+    lastContiguousScanned = h;
+  }
 
   // The concurrent filter fetch above pushes hits in COMPLETION order,
   // not chain order. The UTXO tracker below is order-sensitive: a spend
@@ -1052,6 +1070,21 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // Outer while re-checks maxMatchedIndexPerChain against updated chainWindowEnd.
   }
 
+  // Loud-fail (DL-0512): if the extension loop consumed all passes and the
+  // window is still near its edge on either chain, wallet history beyond the
+  // scanned window may be missing. Throw explicitly so the caller cannot
+  // silently succeed with a truncated result.
+  if (windowPass >= MAX_WINDOW_PASSES) {
+    const chain0StillNear = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
+    const chain1StillNear = maxMatchedIndexPerChain[1] >= chainWindowEnd[1] - gapLimit;
+    if (chain0StillNear || chain1StillNear) {
+      throw new Error(
+        `stealth/sync: address window exhausted after ${MAX_WINDOW_PASSES} extension passes` +
+        ` -- wallet history beyond the scanned window may be missing`,
+      );
+    }
+  }
+
   // ── sealing (runs after extension so all extension transactions are sealed) ──
   emit(opts, progress('sealing', 0));
   const sealedTransactions: SealedTransaction[] = [];
@@ -1082,7 +1115,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   return {
     txCount: normalized.length,
-    lastBlockScanned: tip,
+    lastBlockScanned: lastContiguousScanned,
     bytesDownloaded,
     sealedTransactions,
     normalized,
@@ -1165,18 +1198,30 @@ export async function liveFetchTip(
  * Fetch a BIP158 filter for the given block height, plus the sidecar JSON
  * that names which block hash that filter is bound to.
  *
- * Returns null if the producer does not yet have a filter for that height
- * (404 from either resource); the orchestrator treats that as "skip".
+ * Throws on 404 from either resource. Every height up to tip should have a
+ * filter; a 404 is a fetch failure (transient CDN outage, rate limit, or a
+ * race on a freshly produced block), NOT a signal that the height has no
+ * transactions. Returning null for a 404 let callers silently skip the
+ * height, dropping all transactions in it with zero signal.
+ *
+ * Callers that need a null-safe interface (e.g. mock fetchFilter in tests)
+ * may still use the FetchFilter type with a null return; this function
+ * itself never returns null.
  */
 export async function liveFetchFilter(
   height: number,
   baseUrl: string = DEFAULT_FILTER_BASE,
-): Promise<FilterRecord | null> {
+): Promise<FilterRecord> {
   const [gzResp, jsonResp] = await Promise.all([
     fetch(`${baseUrl}/${height}.gcs.gz`),
     fetch(`${baseUrl}/${height}.json`),
   ]);
-  if (gzResp.status === 404 || jsonResp.status === 404) return null;
+  if (gzResp.status === 404 || jsonResp.status === 404) {
+    throw new Error(
+      `liveFetchFilter: 404 at height ${height} -- filter should exist for all heights up to tip; ` +
+      `this is a fetch failure, not an empty result. Do not silently skip this height.`,
+    );
+  }
   if (!gzResp.ok) throw new Error(`fetchFilter ${height} gz failed: ${gzResp.status}`);
   if (!jsonResp.ok) throw new Error(`fetchFilter ${height} json failed: ${jsonResp.status}`);
 

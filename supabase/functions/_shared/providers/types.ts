@@ -117,6 +117,14 @@ export interface SyncResult {
    * and hands it back unchanged on the next call.
    */
   next_cursor: string | null;
+  /**
+   * When true, the adapter completed but its results are known to be
+   * incomplete (e.g. address window exhausted, a wallet subset unreachable).
+   * or-sync writes status='partial' instead of 'active' so connections are
+   * never reported healthy when only part of the history was synced.
+   * Absent or false means the sync was complete.
+   */
+  partial?: boolean;
 }
 
 // --- Adapter contract ---------------------------------------------------
@@ -210,6 +218,18 @@ export interface ProviderAdapter {
    * the most popular options surface first. Defaults to 50.
    */
   popularity?: number;
+
+  /**
+   * Exchange capabilities introspected from the CCXT manifest.
+   * Present only for CCXT-backed exchanges; omitted entirely for native
+   * adapters (blink, xpub, btcpay, strike, surge). Never defaults to false
+   * because a missing capability is not the same as a known-false one.
+   */
+  capabilities?: {
+    trades: boolean;
+    deposits: boolean;
+    withdrawals: boolean;
+  };
 
   /** Schema for the credential blob the adapter expects. */
   credentialFields: CredentialField[];

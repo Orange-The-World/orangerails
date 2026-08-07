@@ -112,3 +112,35 @@ export async function verifyFromBase64(
     base64ToBytes(signatureB64),
   );
 }
+
+/** Sign raw bytes; return row-ready base64 + algorithm identifier. */
+export async function signBytesToBase64(
+  secretKey: Uint8Array,
+  messageBytes: Uint8Array,
+  algorithm: string = DEFAULT_SIG_ALGORITHM,
+): Promise<SignedPayload> {
+  const strategy = SIG_STRATEGIES[algorithm];
+  if (!strategy) {
+    throw new Error(`unknown signature algorithm: ${algorithm}`);
+  }
+  const sig = await strategy.sign(secretKey, messageBytes);
+  return { signature: bytesToBase64(sig), algorithm: strategy.algorithm };
+}
+
+/** Verify a row-stored base64 public key + signature against raw bytes. */
+export async function verifyBytesFromBase64(
+  publicKeyB64: string,
+  messageBytes: Uint8Array,
+  signatureB64: string,
+  algorithm: string = DEFAULT_SIG_ALGORITHM,
+): Promise<boolean> {
+  const strategy = SIG_STRATEGIES[algorithm];
+  if (!strategy) {
+    throw new Error(`unknown signature algorithm: ${algorithm}`);
+  }
+  return strategy.verify(
+    base64ToBytes(publicKeyB64),
+    messageBytes,
+    base64ToBytes(signatureB64),
+  );
+}

@@ -385,6 +385,38 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     ).rejects.toThrow(/out of range/);
   });
 
+  it('rejects when fetchBlock rejects, does not silently advance lastBlockScanned (DL-0629)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'fetchBlock-rejection',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 850_000,
+        lastBlockScanned: 850_000,
+        fetchTip: async () => 850_001,
+        fetchFilter: async (h) => ({
+          height: h,
+          blockHashHex: 'ab'.repeat(32),
+          filter: new Uint8Array([1, 2, 3]),
+        }),
+        fetchBlock: async () => {
+          throw new Error('block-fetch-network-error');
+        },
+        matcher: { matchAny: () => true },
+      }),
+    ).rejects.toThrow('block-fetch-network-error');
+  });
+
   it('skips transactions whose outputs do not pay any of our scripts', async () => {
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
@@ -666,6 +698,105 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     // twice in fetchFilterCalls, revealing the defect.
     expect(fetchFilterCalls).toEqual([800_001]);
   });
+
+  it('rejects when fetchFilter throws a fetch-failure error rather than silently skipping the height', async () => {
+    // RED -> GREEN guard for DL-0489.
+    //
+    // Before the fix: liveFetchFilter returned null on 404, the orchestrator
+    // stored the null in filterCache and moved on -- all transactions at that
+    // height were silently dropped with zero signal to the caller.
+    //
+    // After the fix: liveFetchFilter throws, the error propagates through the
+    // worker's Promise.all, and runSync rejects so the caller cannot silently
+    // succeed with a wrong result.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'fetchfilter-404-guard',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 3,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const fetchFilterError = new Error(
+      'liveFetchFilter: 404 at height 900001 -- filter should exist for all heights up to tip; ' +
+      'this is a fetch failure, not an empty result. Do not silently skip this height.',
+    );
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 900_000,
+        lastBlockScanned: 900_000,
+        fetchTip: async () => 900_001,
+        // Simulate liveFetchFilter throwing on 404 for the only height in range.
+        fetchFilter: async (_h) => { throw fetchFilterError; },
+        fetchBlock: async () => { throw new Error('should not be reached'); },
+        matcher: { matchAny: () => true },
+      }),
+    ).rejects.toThrow('liveFetchFilter: 404 at height 900001');
+  });
+
+  it('throws when extension passes are exhausted and window is still near its edge', async () => {
+    // gap_limit=1 means chainWindowEnd starts at [2, 2]; near-edge threshold
+    // is index >= windowEnd - 1 on each chain.
+    //
+    // height 900_001: pays to chain=0 index=1 (at threshold 1 >= 2-1=1).
+    //   Triggers extension pass 0: chain 0 extends from [2, 2] to [3, 2].
+    // height 900_002: pays to chain=0 index=2 (the extension-window address).
+    //   Extension pass 0 finds this match, window still near edge (2 >= 3-1=2).
+    // maxWindowPasses=1: windowPass reaches 1 == MAX_WINDOW_PASSES, loop exits.
+    // Loud-fail check fires: chain0StillNear is true -> throw.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'loud-fail',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 1,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const ts = Math.floor(new Date('2024-07-01T00:00:00Z').getTime() / 1000);
+
+    // Block paying to chain=0, index=1 (triggers initial near-edge).
+    const script1 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 1, 'p2wpkh');
+    const block1 = buildFixtureBlock({ payToScript: script1, amountSats: 1_000n, timestamp: ts });
+    const hash1Hex = bytesToHex(reverseBytes(await dsha256Async(block1.raw.subarray(0, 80))));
+
+    // Block paying to chain=0, index=2 (the extension-window address).
+    const script2 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 2, 'p2wpkh');
+    const block2 = buildFixtureBlock({ payToScript: script2, amountSats: 1_000n, timestamp: ts + 600 });
+    const hash2Hex = bytesToHex(reverseBytes(await dsha256Async(block2.raw.subarray(0, 80))));
+
+    const fakeFilter = new Uint8Array([0xdd]);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 900_001,
+        lastBlockScanned: null,
+        fetchTip: async () => 900_002,
+        fetchFilter: async (h) => {
+          if (h === 900_001) return { height: h, blockHashHex: hash1Hex, filter: fakeFilter };
+          if (h === 900_002) return { height: h, blockHashHex: hash2Hex, filter: fakeFilter };
+          return null;
+        },
+        fetchBlock: async (hashHex) => {
+          if (hashHex === hash1Hex) return { height: 900_001, blockHashHex: hash1Hex, raw: block1.raw };
+          if (hashHex === hash2Hex) return { height: 900_002, blockHashHex: hash2Hex, raw: block2.raw };
+          throw new Error(`unexpected block hash ${hashHex}`);
+        },
+        matcher: { matchAny: () => true },
+        maxWindowPasses: 1,
+      }),
+    ).rejects.toThrow(/address window exhausted/);
+  });
 });
 
 // ─── Live fetcher unit tests ────────────────────────────────────────────
@@ -849,7 +980,10 @@ describe('live fetchers', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('liveFetchFilter returns null on 404 from either resource', async () => {
+  it('liveFetchFilter rejects with a fetch-failure error on 404 from either resource', async () => {
+    // A 404 from the filter CDN is a fetch failure, not "no data at this
+    // height". liveFetchFilter must throw so the orchestrator cannot silently
+    // skip the height and drop its transactions.
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url.endsWith('.gcs.gz')) {
         return new Response('', { status: 404 });
@@ -857,8 +991,22 @@ describe('live fetchers', () => {
       return jsonResponse({});
     }));
 
-    const rec = await liveFetchFilter(1, 'https://stealth.example');
-    expect(rec).toBeNull();
+    await expect(liveFetchFilter(1, 'https://stealth.example')).rejects.toThrow(
+      'liveFetchFilter: 404 at height 1',
+    );
+  });
+
+  it('liveFetchFilter rejects when the sidecar JSON returns 404', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('.json')) {
+        return new Response('', { status: 404 });
+      }
+      return new Response(new Uint8Array([0x1f, 0x8b]) as BodyInit, { status: 200 });
+    }));
+
+    await expect(liveFetchFilter(2, 'https://stealth.example')).rejects.toThrow(
+      'liveFetchFilter: 404 at height 2',
+    );
   });
 
   it('liveFetchBlock reads the X-Block-Height header', async () => {
@@ -903,5 +1051,189 @@ describe('live fetchers', () => {
     // it is a positive number above 700k and below 900k.
     expect(h).toBeGreaterThan(700_000);
     expect(h).toBeLessThan(900_000);
+  });
+});
+
+describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
+  // sync.tsx:298 guards the or-stealth-envelope-update POST with:
+  //
+  //   if (!useMock && result.lastBlockScanned > (envJson.last_block_scanned ?? -1))
+  //
+  // The correctness of that guard depends entirely on runSync returning the
+  // STORED cursor unchanged when the wallet is already current (fromHeight > tip).
+  // If runSync returned tip instead, the guard would be true and future syncs
+  // would silently skip blocks that were never scanned.
+  //
+  // These tests pin that contract at the library boundary so the route-level
+  // guard can be reasoned about in isolation.
+
+  it('returns stored cursor unchanged when already at tip (fromHeight > tip)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cursor-guard-at-tip',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 850_000;
+    // tip == storedCursor => fromHeight = max(birthdayHeight, storedCursor + 1)
+    //                                   = 850_001 > 850_000 = tip => short-circuit.
+    const fetchFilter = vi.fn();
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => storedCursor,
+      fetchFilter,
+      fetchBlock,
+    });
+
+    // Cursor must be the stored value, not tip. This is what keeps
+    // sync.tsx:298 from firing or-stealth-envelope-update incorrectly.
+    expect(result.lastBlockScanned).toBe(storedCursor);
+    expect(result.txCount).toBe(0);
+    expect(result.sealedTransactions).toHaveLength(0);
+    // Short-circuit must not touch the network.
+    expect(fetchFilter).not.toHaveBeenCalled();
+    expect(fetchBlock).not.toHaveBeenCalled();
+  });
+
+  it('returns stored cursor unchanged when tip is below stored cursor', async () => {
+    // Edge: tip regressed (reorg scenario or test clock). Short-circuit still
+    // fires and cursor must still come back as the stored value.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cursor-guard-tip-below',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 860_000;
+    const fetchFilter = vi.fn();
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => 855_000, // tip < storedCursor
+      fetchFilter,
+      fetchBlock,
+    });
+
+    expect(result.lastBlockScanned).toBe(storedCursor);
+    expect(result.txCount).toBe(0);
+    expect(fetchFilter).not.toHaveBeenCalled();
+    expect(fetchBlock).not.toHaveBeenCalled();
+  });
+
+  it('advances cursor and fetches filters when behind tip (positive path)', async () => {
+    // Complement of the two short-circuit tests: when the wallet is BEHIND
+    // tip the guard must NOT short-circuit. Scanning runs, the filter fetch
+    // is invoked, and the cursor comes back ABOVE the stored value. That is
+    // the case where sync.tsx:298 must fire or-stealth-envelope-update.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cursor-guard-advance',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 800_000;
+    const tip = 800_003;
+    const fakeFilter = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const zeroHashHex = bytesToHex(new Uint8Array(32));
+
+    // fetchFilter returns a fixture for every scanned height; the matcher
+    // rejects all of them, so no block is ever fetched but every height is
+    // still walked and the cursor advances to tip.
+    const fetchFilter = vi.fn(async (h: number) => ({
+      height: h,
+      blockHashHex: zeroHashHex,
+      filter: fakeFilter,
+    }));
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => tip,
+      fetchFilter,
+      fetchBlock,
+      matcher: { matchAny: () => false },
+    });
+
+    // Guard did NOT short-circuit: filters were fetched for the scan range.
+    expect(fetchFilter).toHaveBeenCalled();
+    // No filter matched, so no block fetch happened...
+    expect(fetchBlock).not.toHaveBeenCalled();
+    // ...but the cursor still advanced above the stored value, up to tip.
+    expect(result.lastBlockScanned).toBeGreaterThan(storedCursor);
+    expect(result.lastBlockScanned).toBe(tip);
+    expect(result.txCount).toBe(0);
+  });
+
+  it('stops cursor at last contiguous height when filter producer lags (404 -> null)', async () => {
+    // The filter producer lags the block source: heights near tip return null
+    // from fetchFilter. runSync must NOT advance the cursor past the last
+    // contiguous non-null height; doing so would permanently skip those
+    // heights on the next sync and miss any transactions they contain (DL-0516).
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'filter-lag-cursor',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 800_000;
+    const tip = 800_005;
+    // Heights 800001 and 800002 have filters; 800003-800005 are not yet
+    // produced by the filter service (404 -> null). The cursor must stop at
+    // 800002 so the next sync retries 800003-800005 once they are available.
+    const lastAvailable = 800_002;
+    const fakeFilter = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const zeroHashHex = bytesToHex(new Uint8Array(32));
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => tip,
+      fetchFilter: async (h: number) =>
+        h <= lastAvailable
+          ? { height: h, blockHashHex: zeroHashHex, filter: fakeFilter }
+          : null,
+      fetchBlock: async () => { throw new Error('no block fetch expected'); },
+      matcher: { matchAny: () => false },
+    });
+
+    // Cursor must stop at lastAvailable, NOT at tip. The three heights that
+    // returned null are not permanently skipped; the next sync retries them.
+    expect(result.lastBlockScanned).toBe(lastAvailable);
+    expect(result.lastBlockScanned).not.toBe(tip);
+    expect(result.txCount).toBe(0);
   });
 });

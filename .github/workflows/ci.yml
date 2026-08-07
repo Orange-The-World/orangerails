@@ -112,7 +112,7 @@ jobs:
           # runtime, which the Supabase CLI provisions as edge-runtime v1.74.2
           # == deno 2.1.4; typecheck with the tsc the runtime actually ships.
           # Floating on latest would also move the number for reasons unrelated
-          # to our code: the orangerails tree reports 19 errors on 2.1.4 and 21
+          # to our code: the orangerails tree reports 15 errors on 2.1.4 and 21
           # on 2.9.4, purely from the newer bundled tsc.
           deno-version: v2.1.4
 
@@ -255,8 +255,8 @@ jobs:
           # branch this job is running against, and it is PER BRANCH because
           # the two branches genuinely differ.
           #
-          # MEASURED 2026-07-31 with this job's own find pattern:
-          #   dev  15 files
+          # MEASURED 2026-08-03 with this job's own find pattern:
+          #   dev  16 files
           #   prod  9 files
           #
           # The value shipped when this guard landed was 3, which was the count
@@ -273,7 +273,7 @@ jobs:
           #
           # When you add or remove a test file, change the number for that
           # branch in the same PR, and say why in the message if it goes down.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '15' }}
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '16' }}
         run: |
           set -euo pipefail
 
@@ -382,9 +382,31 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve Playwright base URL
+        # On pull_request: build the Cloudflare Pages branch-preview URL from
+        # the head ref so Playwright tests against the actual branch build.
+        # On push to dev/prod: keep the static deployment URL unchanged.
+        # CF Pages branch-alias slug rules: lowercase, non-alphanumeric to
+        # hyphen, collapse consecutive hyphens, strip trailing hyphens,
+        # truncate at 28 chars.
+        run: |
+          # dev and prod branches have no Cloudflare branch preview; their
+          # builds go to the static host. Only feature-branch PRs get
+          # a per-branch preview URL.
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$GITHUB_HEAD_REF" != "dev" ] && [ "$GITHUB_HEAD_REF" != "prod" ]; then
+            SLUG=$(echo "$GITHUB_HEAD_REF" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed 's/[^a-z0-9]/-/g' \
+              | sed 's/-\+/-/g' \
+              | cut -c1-28 \
+              | sed 's/-$//')
+            echo "PLAYWRIGHT_BASE_URL=https://${SLUG}.orangerails-dev.pages.dev" >> "$GITHUB_ENV"
+          else
+            echo "PLAYWRIGHT_BASE_URL=https://dev.orangerails.com" >> "$GITHUB_ENV"
+          fi
+
       - name: Run Playwright
         env:
-          PLAYWRIGHT_BASE_URL: https://dev.orangerails.com
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
           ACCOUNT_A: ${{ secrets.ACCOUNT_A }}
           ACCOUNT_B: ${{ secrets.ACCOUNT_B }}

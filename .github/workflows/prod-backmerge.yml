@@ -1,0 +1,276 @@
+name: back-merge prod into dev
+
+# Why this workflow exists (DL-0565, Gate 3).
+#
+# Nothing has ever back-merged prod into dev automatically. When a promotion
+# from dev to prod is blocked, the fix gets opened directly against prod, so
+# prod accumulates commits that dev does not have. Every one of those commits
+# makes the NEXT promotion harder, and a promotion that is hard to land gets
+# worked around with another direct-to-prod fix. That is a loop, and it is
+# measurable here. From pull
+# request 377, opened 2026-07-31: "prod was 26 commits ahead of dev. It was 15
+# the same morning... 15 to 26 in one day is that loop running." This
+# repository reached 384 commits of drift that way before it was cleared.
+#
+# This workflow closes the loop by carrying prod back to dev on every prod
+# push, so the drift is always near zero and the next promotion is a clean
+# fast diff instead of a conflict archaeology session.
+#
+# Direction is one way, always: prod -> dev. This workflow never pushes to
+# dev, never pushes to prod, never force-pushes, and never merges dev into
+# prod. The only ref it writes is the automation branch below.
+#
+# Why this cannot trigger itself (three independent reasons, any one is
+# sufficient):
+#   1. The only push trigger is the prod branch. This job pushes exactly one
+#      ref, automation/backmerge-prod-to-dev, and opens a pull request whose
+#      BASE is dev. When that pull request lands it produces a push to dev.
+#      A push to dev is not a trigger for this workflow.
+#   2. Pushes made with the built-in GITHUB_TOKEN do not start new workflow
+#      runs. GitHub suppresses that recursion by design.
+#   3. The run is convergent. After a back-merge lands, dev contains every
+#      prod commit, so the next run counts zero prod-only commits and exits
+#      at the first step. There is no state in which it re-arms itself.
+#
+# This is NOT a required check and is deliberately not in any ruleset. It
+# opens a pull request; Release reviews it like any other.
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch:
+
+# Least privilege, and explicit because the repository default for the
+# workflow token is read-only. contents: write pushes the automation branch,
+# pull-requests: write opens/updates the pull request and enables auto-merge.
+permissions:
+  contents: write
+  pull-requests: write
+
+# Serialize runs so two prod pushes in quick succession cannot race each
+# other while updating the same automation branch.
+concurrency:
+  group: prod-backmerge
+  cancel-in-progress: true
+
+env:
+  BACKMERGE_BRANCH: automation/backmerge-prod-to-dev
+  BASE_BRANCH: dev
+  SOURCE_BRANCH: prod
+
+jobs:
+  back-merge:
+    name: Open prod to dev back-merge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v7
+        with:
+          # Full history: the comparison and the trial merge both need real
+          # ancestry, not a shallow clone.
+          fetch-depth: 0
+
+      - name: Count commits on prod that dev does not have
+        id: compare
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}" \
+            "+refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
+
+          count="$(git rev-list --count "origin/${BASE_BRANCH}..origin/${SOURCE_BRANCH}")"
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          echo "prod_sha=$(git rev-parse "origin/${SOURCE_BRANCH}")" >> "$GITHUB_OUTPUT"
+
+          if [ "${count}" -eq 0 ]; then
+            echo "Nothing to back-merge: ${BASE_BRANCH} already contains every commit on ${SOURCE_BRANCH}."
+            {
+              echo "### Nothing to back-merge"
+              echo
+              echo "\`${BASE_BRANCH}\` already contains every commit on \`${SOURCE_BRANCH}\`. This is the healthy state."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "${count} commit(s) exist on ${SOURCE_BRANCH} but not on ${BASE_BRANCH}."
+          fi
+
+      - name: Trial-merge prod into dev to detect conflicts
+        id: trial
+        if: steps.compare.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Local only. Nothing from this step is ever pushed. It exists so
+          # the job can say, in the summary, whether a human is needed.
+          git checkout --quiet -B backmerge-trial "origin/${BASE_BRANCH}"
+          set +e
+          git merge --no-commit --no-ff "origin/${SOURCE_BRANCH}" >/dev/null 2>&1
+          rc=$?
+          set -e
+          if [ "${rc}" -eq 0 ]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+            echo "Back-merge is clean."
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > "${RUNNER_TEMP}/conflicts.txt" || true
+            echo "Back-merge CONFLICTS. Conflicted paths:"
+            cat "${RUNNER_TEMP}/conflicts.txt" || true
+          fi
+          git merge --abort 2>/dev/null || true
+          git checkout --quiet --detach "origin/${SOURCE_BRANCH}"
+
+      - name: Update the automation branch to the prod tip
+        if: steps.compare.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          # Fast-forward only. No --force, ever. The branch is always exactly
+          # the prod tip, and prod only moves forward, so this is a
+          # fast-forward. If it is ever rejected, prod was rewritten, and a
+          # loud failure here is the correct outcome rather than a force-push
+          # that would hide it.
+          git push origin "${{ steps.compare.outputs.prod_sha }}:refs/heads/${BACKMERGE_BRANCH}"
+
+      - name: Build the pull request body
+        id: body
+        if: steps.compare.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          body="${RUNNER_TEMP}/backmerge-body.md"
+          {
+            echo "Automated back-merge opened by \`.github/workflows/prod-backmerge.yml\` (DL-0565, Gate 3)."
+            echo
+            echo "## Why this exists"
+            echo
+            echo "\`${SOURCE_BRANCH}\` has **${{ steps.compare.outputs.count }}** commit(s) that \`${BASE_BRANCH}\` does not have."
+            echo "Commits that live only on \`${SOURCE_BRANCH}\` are exactly what makes the next"
+            echo "promotion conflict. They appear whenever a promotion is blocked and the fix is"
+            echo "opened straight against \`${SOURCE_BRANCH}\`; each one raises the cost of the next"
+            echo "promotion, which produces more of them. Landing this pull request returns the"
+            echo "drift to zero."
+            echo
+            echo "## Commits being brought back"
+            echo
+            git log --no-merges --reverse --date=short \
+              --pretty=format:'- \`%h\` %ad %s' \
+              "origin/${BASE_BRANCH}..origin/${SOURCE_BRANCH}"
+            echo
+            echo
+            if [ "${{ steps.trial.outputs.clean }}" = "true" ]; then
+              echo "## Merge status: clean"
+              echo
+              echo "Auto-merge is requested, so this lands on its own once the required checks"
+              echo "(and any required approval on \`${BASE_BRANCH}\`) are satisfied."
+            else
+              echo "## Merge status: CONFLICTS, a human is needed"
+              echo
+              echo "This back-merge does not apply cleanly. Auto-merge is deliberately NOT"
+              echo "requested. Resolve the conflicts on \`${BACKMERGE_BRANCH}\` and land it."
+              echo "A conflicted back-merge is the signal, not the failure: it is the same"
+              echo "conflict the next promotion would have hit, surfaced early and in isolation."
+              echo
+              echo "Conflicted paths:"
+              echo
+              echo '```'
+              cat "${RUNNER_TEMP}/conflicts.txt" 2>/dev/null || echo "(none recorded)"
+              echo '```'
+            fi
+            echo
+            echo "## Rules this automation follows"
+            echo
+            echo "- One direction only: \`${SOURCE_BRANCH}\` -> \`${BASE_BRANCH}\`. It never merges \`${BASE_BRANCH}\` into \`${SOURCE_BRANCH}\`."
+            echo "- It never force-pushes and never pushes directly to \`${BASE_BRANCH}\` or \`${SOURCE_BRANCH}\`."
+            echo "- Merge this with a **merge commit**, not a squash. A squash creates new commit"
+            echo "  identities, so \`${BASE_BRANCH}\` would still read as missing the \`${SOURCE_BRANCH}\` commits and the"
+            echo "  drift count would never go down."
+          } > "${body}"
+          echo "path=${body}" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the back-merge pull request
+        id: pr
+        if: steps.compare.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Reuse an open pull request from the automation branch. This fires
+          # on every prod push, so opening a second one would be spam.
+          number="$(gh pr list --head "${BACKMERGE_BRANCH}" --base "${BASE_BRANCH}" \
+                      --state open --json number --jq '.[0].number // empty')"
+
+          if [ -n "${number}" ]; then
+            echo "Reusing open pull request ${number}."
+            gh pr edit "${number}" --body-file "${{ steps.body.outputs.path }}"
+          else
+            if ! gh pr create \
+                  --base "${BASE_BRANCH}" \
+                  --head "${BACKMERGE_BRANCH}" \
+                  --title "back-merge: prod into dev" \
+                  --body-file "${{ steps.body.outputs.path }}"; then
+              {
+                echo "### Could not open the back-merge pull request"
+                echo
+                echo "The branch \`${BACKMERGE_BRANCH}\` was pushed and is up to date with \`${SOURCE_BRANCH}\`,"
+                echo "but opening the pull request failed. The usual cause is the repository"
+                echo "setting **Allow GitHub Actions to create and approve pull requests** being"
+                echo "off. Open the pull request by hand from that branch into \`${BASE_BRANCH}\`."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            number="$(gh pr list --head "${BACKMERGE_BRANCH}" --base "${BASE_BRANCH}" \
+                        --state open --json number --jq '.[0].number // empty')"
+          fi
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+          echo "url=$(gh pr view "${number}" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge when the back-merge is clean
+        if: steps.compare.outputs.count != '0' && steps.trial.outputs.clean == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Merge commit, never squash: see the note in the pull request body.
+          # A failure here is not fatal. Auto-merge has to be enabled on the
+          # repository first, and the pull request being open is the point.
+          if gh pr merge "${{ steps.pr.outputs.number }}" --merge --auto; then
+            echo "auto-merge requested"
+          else
+            {
+              echo "> Auto-merge could not be requested. Enable **Allow auto-merge** in the"
+              echo "> repository settings, or land the back-merge by hand. The pull request is open"
+              echo "> and clean either way."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Job summary
+        if: steps.compare.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.trial.outputs.clean }}" = "true" ]; then
+            {
+              echo "### Back-merge open and clean"
+              echo
+              echo "${{ steps.compare.outputs.count }} commit(s) from \`${SOURCE_BRANCH}\` are on their way back to \`${BASE_BRANCH}\`."
+              echo
+              echo "${{ steps.pr.outputs.url }}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## BACK-MERGE CONFLICTS: a human is needed"
+              echo
+              echo "\`${SOURCE_BRANCH}\` has ${{ steps.compare.outputs.count }} commit(s) that \`${BASE_BRANCH}\` lacks, and they do NOT merge cleanly."
+              echo "The pull request is open and auto-merge was deliberately not requested."
+              echo "This is the same conflict the next promotion would hit. Resolving it here"
+              echo "is cheaper than resolving it inside a release."
+              echo
+              echo "${{ steps.pr.outputs.url }}"
+              echo
+              echo "Conflicted paths:"
+              echo
+              echo '```'
+              cat "${RUNNER_TEMP}/conflicts.txt" 2>/dev/null || echo "(none recorded)"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

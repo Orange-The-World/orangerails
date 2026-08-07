@@ -15,12 +15,12 @@
  *     processed without action; or wired into the dispatcher later.
  *
  * Auth: requires X-Internal-Worker-Token (constant-time compared to
- * OR_INTERNAL_WORKER_TOKEN env). This endpoint is for OR ops + cron
+ * Vault (or_internal_worker_token, read at invocation via service_role). This endpoint is for OR ops + cron
  * only; never callable from integrators or browsers.
  *
  * Env vars:
  *   QUILTT_API_KEY              — Model A master key
- *   OR_INTERNAL_WORKER_TOKEN    — caller auth for this endpoint
+ *   vault: or_internal_worker_token — caller auth token, read from Vault at invocation via service_role
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY — standard
  */
 
@@ -49,6 +49,7 @@ const MAX_ATTEMPTS = 25;
 // Covers most banks' full available history (Quiltt typically caps at ~2y).
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
 const MAX_PAGES = 50;
+const REDRIVE_SWEEP_SIZE = 500;  // max rows fetched in step 1 of reDriveReadyDeferrals per tick
 
 // Per-event wall-clock budget. A pathological profile (many bound
 // connections, slow Quiltt responses, or hostile fanout) can otherwise
@@ -75,8 +76,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
   const callerToken = req.headers.get('X-Internal-Worker-Token');
-  const expected = Deno.env.get('OR_INTERNAL_WORKER_TOKEN');
-  if (!expected) return new Response('worker token not configured', { status: 503 });
+  // Read expected token via SECURITY DEFINER RPC.
+  // Accept-Profile: vault over PostgREST fails at runtime (DL-0599): the vault
+  // schema is not exposed via the REST API in the deployed edge runtime. The RPC
+  // get_or_internal_worker_token() runs as its owner (postgres), reads
+  // vault.decrypted_secrets, and returns the value. service_role can call it;
+  // anon and authenticated cannot. Migration: 20260804000000_or_quiltt_sync_vault_rpc.sql
+  const client = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+  );
+  const { data: expected, error: _vaultErr } = await client.rpc('get_or_internal_worker_token');
+  if (_vaultErr) {
+    console.error('[or-quiltt-sync] vault RPC failed:', _vaultErr.code, _vaultErr.message);
+    return new Response('vault read error', { status: 503 });
+  }
+  if (!expected) {
+    return new Response('worker token missing from vault', { status: 503 });
+  }
   if (!callerToken || !timingSafeEqual(callerToken, expected)) {
     return new Response('unauthorized', { status: 401 });
   }
@@ -84,14 +101,21 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
   if (!quilttApiKey) return new Response('QUILTT_API_KEY missing', { status: 503 });
 
-  const client = createClient(
-    Deno.env.get('SUPABASE_URL')!,
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
-  );
-
   let processed = 0;
   let failed    = 0;
   let skipped   = 0;
+
+  // DL-0643: Re-admit OPK-deferred rows whose subaccounts have since
+  // registered a public key. Runs each tick so subaccounts that registered
+  // before or-sync-key-register's clearDeferredRows shipped are unblocked
+  // without waiting for a new registration event.
+  const { reDriven, error: reDriveErr } = await reDriveReadyDeferrals(client);
+  if (reDriveErr) {
+    console.error('[or-quiltt-sync] reDriveReadyDeferrals failed:', reDriveErr);
+  }
+  if (reDriven > 0) {
+    console.log(`[or-quiltt-sync] re-admitted ${reDriven} OPK-deferred rows`);
+  }
 
   // Pull a batch of pending, non-deferred events.
   // fetchPendingBatch filters both processed_at IS NULL and opk_deferred_at IS NULL
@@ -100,14 +124,47 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   if (pendErr) {
     console.error('[or-quiltt-sync] inbox query failed:', pendErr.message);
-    return jsonResponse({ error: 'inbox query failed' }, 500);
+    return jsonResponse({ error: 'inbox query failed', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 500);
   }
   if (!pending || pending.length === 0) {
-    return jsonResponse({ processed: 0, failed: 0, skipped: 0, message: 'inbox empty' }, 200);
+    return jsonResponse({ processed: 0, failed: 0, skipped: 0, message: 'inbox empty', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 200);
   }
 
   for (const ev of pending as PendingEvent[]) {
     try {
+      // DL-0596: pre-dispatch cap guard. A row at or above MAX_ATTEMPTS must
+      // be retired here, unconditionally, before any routing or dispatch.
+      // Without this check, a row that succeeds on a high-attempt tick passes
+      // through markProcessed with no retirement_reason, leaving the audit slot
+      // NULL.
+      //
+      // Do NOT call bumpAttempts here. bumpAttempts always writes the error
+      // string argument into last_error, which would destroy the real error
+      // that drove the row to the cap -- precisely the data someone will need
+      // to diagnose these rows. Write processed_at and retirement_reason
+      // directly so last_error is preserved untouched.
+      if ((ev.attempts ?? 0) >= MAX_ATTEMPTS) {
+        const { error: retireErr } = await client
+          .from('quiltt_webhook_inbox')
+          .update({
+            processed_at:      new Date().toISOString(),
+            retirement_reason: 'max-attempts-pre-dispatch',
+          })
+          .eq('event_id', ev.event_id);
+        if (retireErr) {
+          console.error(
+            `[or-quiltt-sync] event ${ev.event_id}: pre-dispatch retirement UPDATE failed (retirement_reason=max-attempts-pre-dispatch): ${retireErr.message}`,
+          );
+        } else {
+          console.warn(
+            `[or-quiltt-sync] event ${ev.event_id}: retired pre-dispatch after ` +
+              `${ev.attempts ?? 0} attempts (last_error preserved)`,
+          );
+        }
+        failed++;
+        continue;
+      }
+
       // Re-resolve routing if missing (link-race tolerance).
       //
       // Two sources, in order of authority. The second one is the point:
@@ -196,7 +253,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
   }
 
-  return jsonResponse({ processed, failed, skipped, batch: pending.length }, 200);
+  return jsonResponse({ processed, failed, skipped, reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}), batch: pending.length }, 200);
 }, 'or-quiltt-sync'));
 
 // ─── event dispatch ──────────────────────────────────────────────────
@@ -208,7 +265,19 @@ export async function handleEvent(
   subaccountId: string,
   apiKey: string,
 ): Promise<'processed' | 'skipped' | string> {
-  // Only act on sync.successful.* for now
+  // Reconcile connection status on Quiltt error events without pulling data (DL-0441).
+  // These events mean Quiltt's own bank connection is broken; the OR connections table
+  // must reflect that so callers (e.g. the app's connection health UI) see the truth.
+  // Match on the shared prefix rather than an enumeration of subtypes: Quiltt's full
+  // errored taxonomy is not guaranteed to be bounded, and a subtype not listed here
+  // would fall through to 'skipped' without reconciling, which is the gap this fix closes.
+  if (ev.event_type.startsWith('connection.synced.errored')) {
+    const reconcileErr = await reconcileConnectionError(client, ev, subaccountId);
+    if (reconcileErr) return reconcileErr;
+    return 'processed';
+  }
+
+  // Only act on sync.successful.* for data pulls
   if (!ev.event_type.startsWith('connection.synced.successful')) {
     return 'skipped';
   }
@@ -220,10 +289,19 @@ export async function handleEvent(
     .eq('id', subaccountId)
     .single();
   if (subErr || !sub) return `subaccount lookup failed: ${subErr?.message}`;
+  // Extract connectionId and reconcile success status BEFORE the OPK gate so that
+  // every subaccount (not just OPK-opted-in ones) can recover from error state.
+  // Placing this after the OPK gate made error a terminal state for non-opted-in subaccounts.
+  const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
+  if (!connectionId) return 'event missing record.id';
+
+  // Quiltt confirms successful sync: clear any error state so the connection shows active.
+  // Called before the OPK gate so the status fix covers ALL subaccounts.
+  const successErr = await reconcileConnectionSuccess(client, connectionId, subaccountId);
+  if (successErr) return successErr;
+
   if (!sub.opk_public) {
-    // No OPK registered. Return deferred so the main loop stamps
-    // opk_deferred_at and the batch query skips this row until a
-    // key is registered and the flag is cleared.
+    // No opt-in. Status already reconciled above. Defer data pull until user opens app.
     return 'deferred';
   }
   if (sub.opk_alg !== OPK_SEAL_ALG) {
@@ -300,11 +378,6 @@ export async function handleEvent(
   } catch (e) {
     return `invalid opk_public: ${e instanceof Error ? e.message : String(e)}`;
   }
-
-  // Pull transactions paginated. We need the connection id from the
-  // event payload to scope the pull.
-  const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
-  if (!connectionId) return 'event missing record.id';
 
   // Find the OR-side connection row tied to this Quiltt link. For Phase
   // 1 we expect or-link-complete (Quiltt branch) to have created it; if
@@ -501,6 +574,121 @@ export async function handleEvent(
   return 'processed';
 }
 
+// ─── Quiltt error reconciliation ────────────────────────────────────
+
+/**
+ * Handle connection.synced.errored.repairable and .provider events.
+ * Finds the OR-side connection row and flips status to 'error' so the
+ * connections table reflects Quiltt's own view of the connection health.
+ * No transaction data is pulled. No DDL required (DL-0441).
+ */
+async function reconcileConnectionError(
+  client: SupabaseClient,
+  ev: PendingEvent,
+  subaccountId: string,
+): Promise<string | null> {
+  const connectionId = typeof ev.payload?.record?.id === 'string'
+    ? ev.payload.record.id
+    : null;
+  if (!connectionId) return 'event missing record.id';
+
+  // Prefer an exact quiltt_connection_id match; fall back to the legacy
+  // NULL-id row only if no exact match exists -- same pattern as handleEvent.
+  let conn: { id: string } | null = null;
+  const exactMatch = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', connectionId)
+    .maybeSingle();
+  if (exactMatch.error) return `connection lookup failed: ${exactMatch.error.message}`;
+  if (exactMatch.data) {
+    conn = exactMatch.data as { id: string };
+  } else {
+    const legacy = await client
+      .from('connections')
+      .select('id')
+      .eq('subaccount_id', subaccountId)
+      .eq('provider_type', 'quiltt')
+      .is('quiltt_connection_id', null)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
+    if (!legacy.data) {
+      // No OR-side connection row yet; nothing to reconcile.
+      // Mark processed so the event does not retry forever.
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: error event for Quiltt connection ` +
+          `(type: ${ev.event_type}), no OR connection row found -- marking processed`,
+      );
+      return null;
+    }
+    conn = legacy.data as { id: string };
+  }
+
+  const { error } = await client
+    .from('connections')
+    .update({ status: 'error', updated_at: new Date().toISOString() })
+    .eq('id', conn.id);
+  if (error) return `connection status update failed: ${error.message}`;
+
+  console.log(
+    `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} ` +
+      `reconciled to error (event_type: ${ev.event_type})`,
+  );
+  return null;
+}
+
+/**
+ * When Quiltt reports a successful connection sync, flip any error row back to active.
+ * Uses the same lookup pattern as reconcileConnectionError: exact quiltt_connection_id
+ * match first, legacy NULL-id fallback for pre-migration rows.
+ * Only transitions error -> active; leaves pending/active rows untouched.
+ */
+async function reconcileConnectionSuccess(
+  client: SupabaseClient,
+  connectionId: string,
+  subaccountId: string,
+): Promise<string | null> {
+  let orConnId: string | null = null;
+  const { data: exact, error: exactErr } = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', connectionId)
+    .maybeSingle();
+  if (exactErr) return `connection lookup failed: ${exactErr.message}`;
+  if (exact) {
+    orConnId = exact.id;
+  } else {
+    const { data: legacy, error: legacyErr } = await client
+      .from('connections')
+      .select('id')
+      .eq('subaccount_id', subaccountId)
+      .eq('provider_type', 'quiltt')
+      .is('quiltt_connection_id', null)
+      .order('created_at', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (legacyErr) return `connection lookup failed: ${legacyErr.message}`;
+    if (legacy) orConnId = legacy.id;
+  }
+  if (!orConnId) return null;
+  const { error: statusErr } = await client
+    .from('connections')
+    .update({ status: 'active', updated_at: new Date().toISOString() })
+    .eq('id', orConnId)
+    .eq('status', 'error');
+  if (statusErr) return `connection status update failed: ${statusErr.message}`;
+  console.log(
+    `[or-quiltt-sync] connection ${orConnId} reconciled to active`,
+  );
+  return null;
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────
 
 async function markProcessed(client: SupabaseClient, eventId: string) {
@@ -548,18 +736,13 @@ async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, rawErrMsg:
       `[or-quiltt-sync] bumpAttempts UPDATE failed for event ${ev.event_id}: ${error.message}`,
     );
     if (terminal) {
-      // The terminal write includes retirement_reason which may not yet exist
-      // in prod. The column reaches prod only via the two-party hand-apply
-      // (SQLA-00069), not by merging #316: apply_migrations is workflow_dispatch
-      // only and is never triggered by a branch push.
-      // If the column is absent the whole UPDATE is rejected and attempts freezes
-      // at its current count. Fall back to a counter-only bump to preserve
-      // attempts and last_error so the row is not stuck at a stale count.
-      // Note: bumping attempts does NOT advance the row in the batch - ordering
-      // is by received_at, not attempts. The real guard against a frozen queue
-      // is that SQLA-00069 must be applied to prod before this code promotes.
-      // Merging #316 alone does not apply the column; only the two-party
-      // hand-apply does.
+      // retirement_reason column is confirmed present in prod (SQLA-00069
+      // applied; verified by Auditor 2026-08-03). This fallback fires only if
+      // the combined UPDATE fails for any reason other than column absence
+      // (transient DB error, constraint violation, etc.). It preserves attempts
+      // and last_error so the row is not stuck at a stale count. Batch ordering
+      // is by received_at, not attempts, so this fallback does not shift queue
+      // head position in either direction.
       const { error: fbErr } = await client
         .from('quiltt_webhook_inbox')
         .update({ attempts: newAttempts, last_error: errMsg.slice(0, 500) })
@@ -594,6 +777,80 @@ export async function markDeferred(client: SupabaseClient, eventId: string) {
     .from('quiltt_webhook_inbox')
     .update({ opk_deferred_at: new Date().toISOString() })
     .eq('event_id', eventId);
+}
+
+/**
+ * Re-admit OPK-deferred rows whose subaccount now has opk_public set.
+ *
+ * Rows sit in deferred state (opk_deferred_at IS NOT NULL) when a
+ * connection.synced.successful event arrived before the subaccount
+ * registered its OPK. Normally or-sync-key-register clears them at
+ * key-registration time. Subaccounts that registered their key before
+ * that code shipped, or that registered while holding no pending deferred
+ * rows, are never unblocked by that path. This sweep finds them each
+ * drain tick and nulls opk_deferred_at so fetchPendingBatch can pick
+ * them up (DL-0643).
+ *
+ * Returns { reDriven, error } where reDriven is the number of rows
+ * re-admitted and error is a non-fatal message string (null on success).
+ * Exported for unit testing.
+ */
+export async function reDriveReadyDeferrals(
+  client: SupabaseClient,
+): Promise<{ reDriven: number; error: string | null }> {
+  // Step 1: collect distinct subaccount IDs with live deferred rows.
+  // Ordered by opk_deferred_at ASC so the oldest-deferred subaccounts are swept
+  // first. Bounded by REDRIVE_SWEEP_SIZE: without a bound the query fetches every
+  // deferred row on every tick; without ordering a cap silently re-fetches the
+  // same arbitrary prefix and the tail is never reached.
+  const { data: deferredRows, error: deferredErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select('subaccount_id')
+    .is('processed_at', null)
+    .not('opk_deferred_at', 'is', null)
+    .order('opk_deferred_at', { ascending: true })
+    .limit(REDRIVE_SWEEP_SIZE);
+  if (deferredErr) {
+    return { reDriven: 0, error: `deferred rows query failed: ${deferredErr.message}` };
+  }
+  const allSubIds = [
+    ...new Set(
+      (deferredRows ?? [])
+        .map((r: { subaccount_id: string | null }) => r.subaccount_id)
+        .filter((id): id is string => id !== null),
+    ),
+  ];
+  if (allSubIds.length === 0) return { reDriven: 0, error: null };
+  if ((deferredRows ?? []).length >= REDRIVE_SWEEP_SIZE) {
+    console.warn(
+      `[or-quiltt-sync] reDriveReadyDeferrals: hit REDRIVE_SWEEP_SIZE cap (${REDRIVE_SWEEP_SIZE}); ` +
+        `some deferred rows were not swept this tick and will be reached on the next`,
+    );
+  }
+
+  // Step 2: of those subaccounts, find which now have opk_public set.
+  const { data: opkSubs, error: opkErr } = await client
+    .from('subaccounts')
+    .select('id')
+    .in('id', allSubIds)
+    .not('opk_public', 'is', null);
+  if (opkErr) {
+    return { reDriven: 0, error: `subaccounts OPK query failed: ${opkErr.message}` };
+  }
+  const readyIds = (opkSubs ?? []).map((r: { id: string }) => r.id);
+  if (readyIds.length === 0) return { reDriven: 0, error: null };
+
+  // Step 3: clear opk_deferred_at on their unprocessed deferred rows.
+  const { count, error: clearErr } = await client
+    .from('quiltt_webhook_inbox')
+    .update({ opk_deferred_at: null }, { count: 'exact' })
+    .in('subaccount_id', readyIds)
+    .is('processed_at', null)
+    .not('opk_deferred_at', 'is', null);
+  if (clearErr) {
+    return { reDriven: 0, error: `clear deferred rows failed: ${clearErr.message}` };
+  }
+  return { reDriven: count ?? 0, error: null };
 }
 
 function jsonResponse(body: unknown, status: number): Response {

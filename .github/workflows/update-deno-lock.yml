@@ -12,6 +12,13 @@ name: Update Deno lockfile
 
 on:
   workflow_dispatch:
+  # Also starts from a branch push, because the seats that own this work
+  # have no workflow_dispatch tool. Creating a chore/deno-lock-* branch
+  # starts the run. The branch this job pushes is fix/deno-lock-*, which
+  # does not match, so the workflow cannot retrigger itself.
+  push:
+    branches:
+      - 'chore/deno-lock-*'
 
 permissions:
   contents: write
@@ -64,13 +71,10 @@ jobs:
             echo "::notice::deno.lock is unchanged -- no branch pushed, no PR needed."
             exit 0
           fi
-          git commit -m "fix: commit real deno.lock from pinned imports (DL-0534)
-
-Replaces the stub lockfile with the real content generated from
-supabase/functions after esm.sh import pinning (DL-0510 Phase 2).
-
-CI now verifies future imports against committed hashes instead
-of regenerating the lock on every run."
+          git commit \
+            -m "fix: commit real deno.lock from pinned imports (DL-0534)" \
+            -m "Replaces the stub lockfile with the real content generated from supabase/functions after esm.sh import pinning (DL-0510 Phase 2)." \
+            -m "CI now verifies future imports against committed hashes instead of regenerating the lock on every run."
           git push origin "$BRANCH"
           echo "::notice::Branch pushed: $BRANCH"
           echo ""

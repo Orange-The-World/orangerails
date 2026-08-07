@@ -1,0 +1,15 @@
+-- ============================================================
+-- DL-0610: SUPERSEDED and intentionally inert.
+-- ============================================================
+-- The write-once guard DDL that lived here has moved to
+--   20260804130000_vault_pubkey_write_once.sql
+-- because this 090000 timestamp sorts BEFORE the already-applied dev
+-- migration 20260804120000 (kem_pubkey_write_once_search_path), which
+-- makes it an out-of-order migration on dev.
+--
+-- This file creates, alters and drops NOTHING. A fresh migration run
+-- therefore creates each object exactly once, in 130000, and this path
+-- can never apply the DDL a second time.
+--
+-- It remains in the tree only because the applying seat has no
+-- delete/move tool; a git ride would git mv this path away entirely.
