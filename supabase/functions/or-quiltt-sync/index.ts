@@ -296,8 +296,9 @@ export async function handleEvent(
   const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
   if (!connectionId) return 'event missing record.id';
 
-  // Quiltt confirms successful sync: clear any error state so the connection shows active.
-  // Called before the OPK gate so the status fix covers ALL subaccounts.
+  // Clear error state before the OPK gate so all subaccounts can recover from error.
+  // Partial is intentionally NOT cleared here: if the data pull fails below, the
+  // connection must stay partial. The partial -> active transition happens post-pull.
   const successErr = await reconcileConnectionSuccess(client, connectionId, subaccountId);
   if (successErr) return successErr;
 
@@ -562,6 +563,25 @@ export async function handleEvent(
     }
   }
 
+  if (!budgetExhausted) {
+    // Pull completed in full; clear any previous partial flag now that data is complete.
+    const { error: clearPartialErr } = await client
+      .from('connections')
+      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .eq('id', conn.id)
+      .eq('status', 'partial');
+    if (clearPartialErr) {
+      console.error(
+        `[or-quiltt-sync] event ${ev.event_id}: failed to clear partial status:`,
+        clearPartialErr.message,
+      );
+    } else {
+      console.log(
+        `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} cleared from partial to active (full pull)`,
+      );
+    }
+  }
+
   console.log(`[or-quiltt-sync] event ${ev.event_id}: ${newRows} new tx rows across ${pages + 1} pages`);
 
   // Outbound webhook fan-out. Mirrors or-sync's enqueue pattern: insert a
@@ -673,7 +693,8 @@ async function reconcileConnectionError(
  * When Quiltt reports a successful connection sync, flip any error row back to active.
  * Uses the same lookup pattern as reconcileConnectionError: exact quiltt_connection_id
  * match first, legacy NULL-id fallback for pre-migration rows.
- * Only transitions error -> active; leaves pending/active rows untouched.
+ * Only transitions error -> active; leaves partial/pending/active rows untouched.
+ * Callers that confirmed a full data pull should also clear partial -> active post-pull.
  */
 async function reconcileConnectionSuccess(
   client: SupabaseClient,
@@ -709,7 +730,7 @@ async function reconcileConnectionSuccess(
     .from('connections')
     .update({ status: 'active', updated_at: new Date().toISOString() })
     .eq('id', orConnId)
-    .in('status', ['error', 'partial']);
+    .in('status', ['error']);
   if (statusErr) return `connection status update failed: ${statusErr.message}`;
   console.log(
     `[or-quiltt-sync] connection ${orConnId} reconciled to active`,
