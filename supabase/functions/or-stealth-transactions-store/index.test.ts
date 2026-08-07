@@ -42,3 +42,31 @@ Deno.test('stored cursor of 0 is a real cursor, not treated as absent', () => {
   // Genesis-adjacent edge: 0 is a valid scanned height, distinct from null.
   assertEquals(deriveResponseCursor(0, 0, -1), 0);
 });
+
+// ── app_user_id validation ──────────────────────────────────────────────────
+// Mirrors the guard at index.ts (post-fix):
+//   if (!body.app_user_id || typeof body.app_user_id !== 'string')
+//
+// The old UUID format check was wrong: real host user ids are cuids.
+// Any non-empty string is valid; the ownership check (line 194-209) is the
+// real authorization boundary.
+
+function rejectsAppUserId(value: unknown): boolean {
+  return !value || typeof value !== 'string';
+}
+
+Deno.test('app_user_id: cuid passes validation', () => {
+  assertEquals(rejectsAppUserId('cl9ebqhxk000008l2rz7r5nqk'), false);
+});
+
+Deno.test('app_user_id: empty string is rejected (400)', () => {
+  assertEquals(rejectsAppUserId(''), true);
+});
+
+Deno.test('app_user_id: missing (undefined) is rejected (400)', () => {
+  assertEquals(rejectsAppUserId(undefined), true);
+});
+
+Deno.test('app_user_id: null is rejected (400)', () => {
+  assertEquals(rejectsAppUserId(null), true);
+});
