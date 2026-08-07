@@ -54,6 +54,7 @@ import type {
 } from "@/stealth/lib/postmessage";
 import { useStealthInit } from "../StealthInitContext";
 import { proxyFetch } from "../lib/proxyFetch";
+import { resolveFunctionUrl } from "../lib/resolveFunctionUrl";
 
 // Default wallet-birthday: today minus one year. Master plan §14: most
 // active wallets are well under a year old. Older wallets get nudged to
@@ -92,28 +93,6 @@ function shapeForCompletion(parsed: ParsedDescriptor): {
   }
   const t: ScriptType = parsed.keys[0].scriptType;
   return { kind: "xpub_stealth", scriptType: t };
-}
-
-/** Get the URL endpoint for the stealth functions. Order of preference:
- *    1. proxy_base_url from INIT , when the consuming app provides a
- *       server-side proxy (V2 pattern). The proxy attaches the platform
- *       API key, keeping that secret off the browser.
- *    2. VITE_OR_FUNCTIONS_BASE_URL build-time env , direct Supabase
- *       functions host (typically requires the consumer to also pass
- *       access_token in INIT for Bearer auth).
- *    3. Same-origin /functions/v1/* , relies on a reverse proxy at the
- *       widget host.
- */
-function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): string {
-  if (proxyBaseUrl) {
-    return `${proxyBaseUrl.replace(/\/$/, "")}/${name}`;
-  }
-  const base = ((import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? "").replace(
-    /\/$/,
-    "",
-  );
-  if (base) return `${base}/${name}`;
-  return `/functions/v1/${name}`;
 }
 
 interface AccessTokenInit extends StealthInitWidgetMessage {
