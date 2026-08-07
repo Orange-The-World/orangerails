@@ -450,7 +450,10 @@ function makeQuilttSyncMock(opts: {
       }
       if (table === 'encrypted_transactions') {
         return {
-          upsert(rows: Array<{ external_id: string }>, _opts: unknown) {
+          upsert(row: unknown, _opts: unknown) {
+            const rows = Array.isArray(row)
+              ? (row as Array<{ external_id: string }>)
+              : [(row as { external_id: string })];
             for (const r of rows) inserted.push(r.external_id);
             return Promise.resolve({ data: null, error: null });
           },
