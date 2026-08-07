@@ -438,6 +438,13 @@ jobs:
     name: Playwright stealth cursor-write proof (DL-0649)
     runs-on: ubuntu-latest
     needs: lint-and-build
+    # Explicit, because the reporting step below is the ONLY way the assertion
+    # output leaves this runner. Without this block the job inherits the
+    # repository default token scope, and if that default is read-only then
+    # `gh pr comment` is refused and the failure text is trapped in the run log.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -534,7 +541,15 @@ jobs:
             echo ""
             echo "Full report: playwright-stealth-cursor-report artifact on run ${{ github.run_id }}."
           } > /tmp/pr-body.md
-          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr-body.md
+          # Print it locally FIRST. A post that gets refused must not also lose
+          # the evidence: stdout and the job summary are written before the
+          # network call, so the text exists in three places or at worst two.
+          cat /tmp/pr-body.md
+          cat /tmp/pr-body.md >> "$GITHUB_STEP_SUMMARY"
+          if ! gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr-body.md; then
+            echo "::error::gh pr comment was refused. Token scope or API. The assertion output printed above is the same text that would have been posted."
+            exit 1
+          fi
 
       - name: Upload stealth cursor-write report
         if: always()
