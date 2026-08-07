@@ -9,7 +9,7 @@
  * keep in the clear (created_at, last_sync_at, status, etc.).
  *
  * POST body:
- *   app_user_id:  string (uuid, required)
+ *   app_user_id:  string (required)
  *   app_slug:     string (optional defense-in-depth filter)
  *
  * Response:
@@ -42,8 +42,6 @@ interface ListResponseBody {
   connections: ListedConnection[];
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -57,8 +55,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
     const body = JSON.parse(raw || '{}') as ListRequestBody;
 
-    if (!body.app_user_id || typeof body.app_user_id !== 'string' || !UUID_RE.test(body.app_user_id)) {
-      return jsonResponse({ error: 'app_user_id (uuid) required' }, 400, cors);
+    if (!body.app_user_id || typeof body.app_user_id !== 'string') {
+      return jsonResponse({ error: 'app_user_id required' }, 400, cors);
     }
     if (body.app_slug !== undefined && typeof body.app_slug !== 'string') {
       return jsonResponse({ error: 'app_slug must be a string when provided' }, 400, cors);
