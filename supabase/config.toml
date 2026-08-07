@@ -59,6 +59,9 @@ verify_jwt = false
 [functions.or-stealth-envelope-fetch]
 verify_jwt = false
 
+[functions.or-stealth-envelope-update]
+verify_jwt = false
+
 [functions.or-stealth-transactions-store]
 verify_jwt = false
 

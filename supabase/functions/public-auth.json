@@ -36,6 +36,7 @@
     "or-stealth-connection-delete": "platform-api-key",
     "or-stealth-connection-list": "platform-api-key",
     "or-stealth-envelope-fetch": "platform-api-key",
+    "or-stealth-envelope-update": "platform-api-key",
     "or-stealth-transactions-store": "platform-api-key",
     "or-strike-webhook": "hmac",
     "or-sync": "platform-api-key",
