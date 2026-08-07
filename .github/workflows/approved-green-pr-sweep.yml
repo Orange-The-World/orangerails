@@ -2,7 +2,7 @@ name: Approved and green PR sweep
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '0 9 * * *'
   workflow_dispatch:
 
 jobs:
@@ -37,13 +37,20 @@ jobs:
             --json number,title,url,reviewDecision,statusCheckRollup,createdAt \
             --limit 100)
 
+          total=$(echo "$prs" | jq 'length')
+
+          partial=""
+          if [ "$total" -ge 100 ]; then
+            partial=" **(partial scan: reached the 100-PR limit; older PRs may not appear)**"
+          fi
+
           while IFS= read -r pr; do
             review=$(echo "$pr" | jq -r '.reviewDecision')
             [ "$review" = "APPROVED" ] || continue
 
             non_green=$(echo "$pr" | jq '[.statusCheckRollup[] | select((.conclusion // .state) as $s | $s != "SUCCESS" and $s != "NEUTRAL" and $s != "SKIPPED")] | length')
-            total=$(echo "$pr" | jq '.statusCheckRollup | length')
-            [ "$non_green" = "0" ] && [ "$total" -gt "0" ] || continue
+            total_checks=$(echo "$pr" | jq '.statusCheckRollup | length')
+            [ "$non_green" = "0" ] && [ "$total_checks" -gt "0" ] || continue
 
             number=$(echo "$pr" | jq -r '.number')
             title=$(echo "$pr" | jq -r '.title')
@@ -54,13 +61,12 @@ jobs:
             count=$((count + 1))
           done < <(echo "$prs" | jq -c '.[]')
 
-          total=$(echo "$prs" | jq 'length')
           echo "Scanned ${total} open PRs, ${count} are approved and green."
 
           if [ "$count" -gt 0 ]; then
-            body="**Approved and green PRs waiting to merge (${count}):**"$'\n'"${report}"
+            body="@**Release** **Approved and green PRs waiting to merge (${count}):**${partial}"$'\n'"${report}"
           else
-            body="Scanned ${total} open PRs. None are approved and green right now."
+            body="Scanned ${total} open PRs. None are approved and green right now.${partial}"
           fi
 
           curl -s --fail -X POST "${ZULIP_SITE}/api/v1/messages" \
