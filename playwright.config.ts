@@ -15,7 +15,7 @@ import { defineConfig, devices } from '@playwright/test';
  * tree-shaken to false in production builds). Set PLAYWRIGHT_WITH_VITE_DEV=1
  * to activate the webServer below; the suite skips otherwise. Also set:
  *   OR_API_BASE_URL, OR_TEST_PLATFORM_API_KEY,
- *   VITE_OR_STEALTH_ALLOWED_ORIGINS=http://localhost:5173
+ *   VITE_OR_STEALTH_ALLOWED_ORIGINS=http://localhost:8080
  */
 
 // When set, start a local vite dev server for the stealth cursor test.
@@ -40,14 +40,14 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   // webServer is only active when PLAYWRIGHT_WITH_VITE_DEV=1.
-  // The stealth cursor-write spec overrides baseURL to http://localhost:5173
+  // The stealth cursor-write spec overrides baseURL to http://localhost:8080
   // so only that suite hits the local server; other suites keep their
   // configured PLAYWRIGHT_BASE_URL (dev.orangerails.com or a CF Pages preview).
   webServer: WITH_VITE_DEV ? {
     // VITE_OR_STEALTH_ALLOWED_ORIGINS must include the parent-page origin
     // so the widget accepts the OR_STEALTH_INIT postMessage from localhost.
-    command: 'VITE_OR_STEALTH_ALLOWED_ORIGINS=http://localhost:5173 bun run dev',
-    url: 'http://localhost:5173',
+    command: 'VITE_OR_STEALTH_ALLOWED_ORIGINS=http://localhost:8080 bun run dev',
+    url: 'http://localhost:8080',
     reuseExistingServer: true,
     timeout: 120_000,
   } : undefined,
