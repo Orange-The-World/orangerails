@@ -504,7 +504,37 @@ jobs:
           PLAYWRIGHT_WITH_VITE_DEV: '1'
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
           OR_TEST_PLATFORM_API_KEY: ${{ secrets.OR_TEST_PLATFORM_API_KEY }}
-        run: bunx playwright test --grep 'stealth cursor write'
+        run: |
+          bunx playwright test --grep 'stealth cursor write' 2>&1 | tee /tmp/pw-leg1.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Report Leg 1 failure as PR comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR="${{ github.event.pull_request.number }}"
+          if [ -z "$PR" ] || [ "$PR" = "0" ]; then
+            echo "Not a PR run -- skipping comment"
+            exit 0
+          fi
+          if [ -f /tmp/pw-leg1.log ]; then
+            LINES=$(grep -E '(Error:|Expected|Received|AssertionError|FAILED)' \
+              /tmp/pw-leg1.log | head -40 || true)
+          else
+            LINES="(leg 1 log not found -- see playwright-stealth-cursor-report artifact)"
+          fi
+          {
+            echo "**CI: stealth cursor-write proof -- Leg 1 failure (run ${{ github.run_id }})**"
+            echo ""
+            echo "Assertion output (error lines only, no credentials):"
+            printf '```\n'
+            echo "${LINES}"
+            printf '```\n'
+            echo ""
+            echo "Full report: playwright-stealth-cursor-report artifact on run ${{ github.run_id }}."
+          } > /tmp/pr-body.md
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr-body.md
 
       - name: Upload stealth cursor-write report
         if: always()
