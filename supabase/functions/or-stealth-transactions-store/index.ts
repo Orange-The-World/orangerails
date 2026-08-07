@@ -25,7 +25,7 @@
  *
  * POST body:
  *   connection_id:        string (uuid)
- *   app_user_id:          string (uuid)
+ *   app_user_id:          string (opaque host-app user id, not necessarily a uuid)
  *   sealed_transactions:  SealedTransactionInput[]
  *   last_block_scanned:   number (kept for backward compat, not used for cursor)
  *
@@ -132,8 +132,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (!body.connection_id || !UUID_RE.test(body.connection_id)) {
       return jsonResponse({ error: 'connection_id (uuid) required' }, 400, cors);
     }
-    if (!body.app_user_id || !UUID_RE.test(body.app_user_id)) {
-      return jsonResponse({ error: 'app_user_id (uuid) required' }, 400, cors);
+    // app_user_id is an opaque host-application identifier stored in a TEXT
+    // column (migration 20260624000000). It is NOT a uuid: real host user ids
+    // are cuids. Any non-empty string is valid, matching the validation in
+    // or-stealth-connection-create and or-stealth-envelope-update.
+    if (!body.app_user_id || typeof body.app_user_id !== 'string') {
+      return jsonResponse({ error: 'app_user_id required' }, 400, cors);
     }
     if (!Array.isArray(body.sealed_transactions)) {
       return jsonResponse({ error: 'sealed_transactions must be an array' }, 400, cors);
