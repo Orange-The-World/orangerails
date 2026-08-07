@@ -1,7 +1,7 @@
 /**
  * GENERATED FILE — do not edit by hand.
  * Source: scripts/generate-ccxt-manifest.mjs introspecting ccxt@4.4.30
- * Regenerated: 2026-08-04
+ * Regenerated: 2026-08-07
  * Total exchanges: 98
  */
 
