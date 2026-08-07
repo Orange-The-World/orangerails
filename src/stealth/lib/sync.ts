@@ -772,7 +772,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   const BLOCK_FETCH_LOOKAHEAD = 8;
   const _prefetchBlock = (hash: string): Promise<BlockRecord> => {
     const p = opts.fetchBlock(hash);
-    p.catch(() => {}); // suppress unhandledrejection if slot is abandoned on throw
+    void p.catch(() => {}); // suppress unhandledrejection if slot is abandoned on throw
     return p;
   };
   const blockFetches: Array<Promise<BlockRecord> | undefined> = [];
