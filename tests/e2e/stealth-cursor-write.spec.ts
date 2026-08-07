@@ -291,14 +291,16 @@ _testDescribe('stealth cursor write (DL-0649 Part 2)', () => {
       { connId: capturedId, userId: APP_USER_ID, keyB64: ZERO_KEY_B64, base: VITE_BASE },
     );
 
-    // Wait for the outbound or-stealth-envelope-update request to appear.
-    // Mock sync is ~11 blocks at 800000-800010, so this completes quickly.
-    await widgetPage.waitForRequest(
-      (req) => req.url().includes('or-stealth-envelope-update'),
-      { timeout: 30_000 },
+    // Wait for the outbound or-stealth-envelope-update request AND response.
+    // waitForResponse (not waitForRequest + sleep) ensures the async route
+    // handler has completed the Supabase proxy call before the DB check below.
+    // Root cause of prior failures: waitForRequest resolved on dispatch; the
+    // 300ms sleep that followed raced against edge-function cold starts
+    // (200-2000ms). fetchConnectionCursor ran before the cursor was written.
+    const envelopeUpdateResp = await widgetPage.waitForResponse(
+      (resp) => resp.url().includes('or-stealth-envelope-update'),
+      { timeout: 35_000 },
     );
-    // Give the async route handler one tick to finish capturing updateBody.
-    await widgetPage.waitForTimeout(300);
 
     // Requirement 2: assert the POST was made and carried a numeric cursor.
     expect(updateBody, 'or-stealth-envelope-update was not called').not.toBeNull();
@@ -311,6 +313,14 @@ _testDescribe('stealth cursor write (DL-0649 Part 2)', () => {
       sentCursor as number,
       'last_block_scanned must be positive (mock tip = 800010)',
     ).toBeGreaterThan(0);
+
+    // Verify proxy returned 200 before the DB check. If Supabase returned
+    // non-200 the cursor was not written; naming the status here is clearer
+    // than letting the DB-null assertion below be the first indication.
+    expect(
+      envelopeUpdateResp.status(),
+      `Supabase cursor-write returned HTTP ${envelopeUpdateResp.status()} -- check playwright-stealth-cursor-report artifact for proxy error`,
+    ).toBe(200);
 
     // Requirement 3: verify stealth_connections via the Supabase test client
     // (or-stealth-envelope-fetch, which reads the real DB row).
