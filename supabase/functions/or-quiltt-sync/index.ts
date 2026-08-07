@@ -434,7 +434,7 @@ export async function handleEvent(
     // killed at ~150s for the whole invocation.
     if (Date.now() - eventStartMs > PER_EVENT_BUDGET_MS) {
       console.warn(
-        `[or-quiltt-sync] event ${connectionId}: per-event budget exhausted after ${pages} pages, ${newRows} rows`,
+        `[or-quiltt-sync] event ${ev.event_id}: per-event budget exhausted after ${pages} pages, ${newRows} rows`,
       );
       budgetExhausted = true;
       break;
