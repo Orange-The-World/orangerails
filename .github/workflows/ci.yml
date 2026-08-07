@@ -461,20 +461,20 @@ jobs:
       # let Playwright start and kill vite before this step could restart it,
       # causing a racy cold-restart that timed out on slow CI runners.
       # VITE_OR_STEALTH_ALLOWED_ORIGINS must match the parent-page origin
-      # (http://localhost:5173) so the widget accepts the postMessage.
+      # (http://localhost:8080) so the widget accepts the postMessage.
       - name: Start vite dev server
         env:
           VITE_SUPABASE_URL: https://fzwmnzmtqidumdqjdddz.supabase.co
           VITE_SUPABASE_PROJECT_ID: fzwmnzmtqidumdqjdddz
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
-          VITE_OR_STEALTH_ALLOWED_ORIGINS: http://localhost:5173
+          VITE_OR_STEALTH_ALLOWED_ORIGINS: http://localhost:8080
         run: |
           bun run dev &
           for i in $(seq 1 60); do
-            curl -sf http://localhost:5173 -o /dev/null && echo "Vite ready after ${i}s" && break
+            curl -sf http://localhost:8080 -o /dev/null && echo "Vite ready after ${i}s" && break
             sleep 1
           done
-          curl -sf http://localhost:5173 -o /dev/null || {
+          curl -sf http://localhost:8080 -o /dev/null || {
             echo "::error::Vite dev server did not start within 60s"
             exit 1
           }
