@@ -1,4 +1,5 @@
 name: CI
+# noop: synchronize trigger (DL-0696)
 
 on:
   pull_request:
