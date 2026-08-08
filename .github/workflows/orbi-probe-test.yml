@@ -67,8 +67,11 @@ jobs:
         run: |
           psql -h localhost -U testuser -d testdb -c "
             CREATE TABLE IF NOT EXISTS public.exchange_rates (
-              bucket_ts  timestamptz NOT NULL,
-              granularity text        NOT NULL
+              bucket_ts       timestamptz NOT NULL,
+              granularity     text        NOT NULL,
+              source_currency text        NOT NULL,
+              target_currency text        NOT NULL,
+              status          text        NOT NULL DEFAULT 'CONFIRMED'
             );
           "
 
@@ -82,8 +85,8 @@ jobs:
         run: |
           psql -h localhost -U testuser -d testdb -c "
             TRUNCATE public.exchange_rates;
-            INSERT INTO public.exchange_rates (bucket_ts, granularity)
-            VALUES (now() - interval '1 minute', '1m');
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            VALUES (now() - interval '1 minute', '1m', 'BTC', 'USD');
           "
 
       - name: "[staleness] path 1 -- fresh -> expect exit 0"
@@ -103,8 +106,8 @@ jobs:
         run: |
           psql -h localhost -U testuser -d testdb -c "
             TRUNCATE public.exchange_rates;
-            INSERT INTO public.exchange_rates (bucket_ts, granularity)
-            VALUES (now() - interval '20 minutes', '1m');
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            VALUES (now() - interval '20 minutes', '1m', 'BTC', 'USD');
           "
 
       - name: "[staleness] path 2 -- stale -> expect exit 1"
