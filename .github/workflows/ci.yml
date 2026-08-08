@@ -528,7 +528,7 @@ jobs:
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
           OR_TEST_PLATFORM_API_KEY: ${{ secrets.OR_TEST_PLATFORM_API_KEY }}
         run: |
-          bunx playwright test --grep 'stealth cursor write' 2>&1 | tee /tmp/pw-leg1.log
+          bunx playwright test --grep 'stealth cursor write|DL-0448' 2>&1 | tee /tmp/pw-leg1.log
           exit ${PIPESTATUS[0]}
 
       - name: Report Leg 1 failure as PR comment
