@@ -18,6 +18,10 @@ on:
   check_run:
     types: [completed]
 
+concurrency:
+  group: stale-ci-${{ github.event.check_run.head_sha }}
+  cancel-in-progress: true
+
 permissions:
   checks: read
   contents: read
@@ -33,6 +37,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           HEAD_SHA="${{ github.event.check_run.head_sha }}"
           PR_NUMBER=$(gh api \
             "repos/${{ github.repository }}/commits/${HEAD_SHA}/pulls" \
@@ -58,7 +63,7 @@ jobs:
             "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
             --paginate \
             -H "Accept: application/vnd.github+json" \
-            --jq '[.check_runs[] | select(.status != "completed")] | length')
+            --jq '[.check_runs[] | select(.status != "completed" and .name != "Evaluate STALE CI label")] | length')
           if [ "$RUNNING" -gt 0 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "${RUNNING} check(s) still running -- deferring STALE CI evaluation"
@@ -98,7 +103,7 @@ jobs:
             "repos/${{ github.repository }}/commits/dev/check-runs" \
             --paginate \
             -H "Accept: application/vnd.github+json" \
-            --jq '[.check_runs[] | select(.conclusion != "skipped") | .name] | sort | unique | .[]')
+            --jq '[.check_runs[] | select(.conclusion != "skipped" and .name != "Evaluate STALE CI label") | .name] | sort | unique | .[]')
 
           if [ -z "$TRUNK_CHECKS" ]; then
             echo "::error::Trunk check-run list is empty -- refusing to label (empty baseline would produce false positives on every PR)"
@@ -117,7 +122,7 @@ jobs:
             "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
             --paginate \
             -H "Accept: application/vnd.github+json" \
-            --jq '[.check_runs[] | .name] | sort | unique | .[]' || echo "")
+            --jq '[.check_runs[] | select(.name != "Evaluate STALE CI label") | .name] | sort | unique | .[]' || echo "")
 
           PR_COUNT=$(echo "$PR_CHECKS" | grep -c . || true)
           echo "PR head checks (${PR_COUNT}):"
