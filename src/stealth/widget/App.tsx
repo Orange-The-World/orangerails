@@ -44,7 +44,7 @@ import { DirectLoadCard } from "./components/DirectLoadCard";
 import { StealthInitProvider } from "./StealthInitContext";
 
 const DEFAULT_ALLOWED_ORIGINS =
-  (import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ??
+  (import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ||
   "https://app.orangerails.com";
 
 const DIRECT_LOAD_GRACE_MS = 1500;
@@ -57,9 +57,7 @@ const DIRECT_LOAD_GRACE_MS = 1500;
 const APP_MODE_IMPLEMENTED_MODES: ReadonlySet<string> = new Set<string>();
 
 function parseAllowedOrigins(): ReadonlySet<string> {
-  const raw =
-    (import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ??
-    DEFAULT_ALLOWED_ORIGINS;
+  const raw = DEFAULT_ALLOWED_ORIGINS;
   return new Set(
     raw
       .split(",")
