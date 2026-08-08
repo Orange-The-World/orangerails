@@ -1,6 +1,6 @@
 # CCXT exchange support matrix
 
-**Generated:** 2026-08-08 from `ccxt@4.5.55` introspection.
+**Generated:** 2026-08-08 from `ccxt@4.5.56` introspection.
 
 **Total wired:** 94 exchanges using OR's standard CCXT adapter.
 
