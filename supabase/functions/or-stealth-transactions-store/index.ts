@@ -79,7 +79,12 @@ const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
 const MAX_TX_PER_REQUEST = 10_000;
 const MAX_SEALED_RECORD_BYTES = 16_384;
 
-function isSealedTx(x: unknown): x is SealedTransactionInput {
+/** Validates app_user_id: any non-empty string is valid (opaque host-app user id, not necessarily a uuid). */
+export function isValidAppUserId(x: unknown): x is string {
+  return typeof x === 'string' && x.length > 0;
+}
+
+export function isSealedTx(x: unknown): x is SealedTransactionInput {
   if (!x || typeof x !== 'object') return false;
   const o = x as Record<string, unknown>;
   return (
@@ -136,7 +141,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // column (migration 20260624000000). It is NOT a uuid: real host user ids
     // are cuids. Any non-empty string is valid, matching the validation in
     // or-stealth-connection-create and or-stealth-envelope-update.
-    if (!body.app_user_id || typeof body.app_user_id !== 'string') {
+    if (!isValidAppUserId(body.app_user_id)) {
       return jsonResponse({ error: 'app_user_id required' }, 400, cors);
     }
     if (!Array.isArray(body.sealed_transactions)) {
