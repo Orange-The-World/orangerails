@@ -890,6 +890,7 @@ export const strikeAdapter: ProviderAdapter = {
   description: 'Lightning + USD',
   category: 'lightning_wallet',
   tags: ['lightning', 'us', 'eu', 'fiat-on-ramp', 'custodial'],
+  custody: 'custodial',
   popularity: 88,
   multiWallet: true,
   credentialFields: [

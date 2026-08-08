@@ -233,4 +233,4 @@ export type {
   SyncResult,
   CredentialField,
 } from './types.ts';
-export { parseCredentials } from './types.ts';
+export { parseCredentials, resolveCustody } from './types.ts';

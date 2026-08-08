@@ -368,6 +368,7 @@ export const xpubAdapter: ProviderAdapter = {
   status: 'live',
   category: 'on_chain_wallet',
   tags: ['on-chain', 'watch-only', 'self-custody', 'sparrow', 'specter', 'bluewallet'],
+  custody: 'self_custody',
   popularity: 80,
   multiWallet: false,
   credentialFields: [
