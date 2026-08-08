@@ -1099,7 +1099,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       ciphertext_b64: env.ciphertext_b64,
       occurred_at: tx.occurred_at,
       block_height: tx.block_height,
-      txid_blind_index_b64: blind,
+      txid_blind_index_hex: blind,
     });
     if (i % 8 === 0 || i === normalized.length - 1) {
       const pct = ((i + 1) / Math.max(1, normalized.length)) * 100;
