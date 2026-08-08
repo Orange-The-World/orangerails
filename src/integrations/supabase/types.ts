@@ -728,7 +728,7 @@ export type Database = {
           id: string
           occurred_at: string
           sealed_record: Json
-          txid_blind_index_b64: string
+          txid_blind_index_hex: string
         }
         Insert: {
           block_height: number
@@ -737,7 +737,7 @@ export type Database = {
           id?: string
           occurred_at: string
           sealed_record: Json
-          txid_blind_index_b64: string
+          txid_blind_index_hex: string
         }
         Update: {
           block_height?: number
@@ -746,7 +746,7 @@ export type Database = {
           id?: string
           occurred_at?: string
           sealed_record?: Json
-          txid_blind_index_b64?: string
+          txid_blind_index_hex?: string
         }
         Relationships: [
           {
