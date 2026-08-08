@@ -1,0 +1,145 @@
+name: STALE CI label
+
+# Fires on every completed check_run. We use this to compare the set of
+# check names on the PR head against the trunk (dev) baseline. A PR whose
+# head SHA is missing any non-skipped trunk check name is labeled STALE CI
+# so the review queue and reviewers can see it at a glance.
+#
+# Why check_run and not pull_request:
+#   pull_request fires when the PR is created or updated, before checks have
+#   run. We need the checks to have (or not have) fired before we can compare.
+#   check_run fires each time one check completes, which is exactly the moment
+#   we can re-evaluate the set.
+#
+# False-positive guard: if any check on the PR head is still in-progress or
+# queued, we skip the evaluation. Only a fully-settled head can be scored.
+
+on:
+  check_run:
+    types: [completed]
+
+permissions:
+  checks: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  label-stale-ci:
+    name: Evaluate STALE CI label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find open PR targeting dev for this commit
+        id: find-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HEAD_SHA="${{ github.event.check_run.head_sha }}"
+          PR_NUMBER=$(gh api \
+            "repos/${{ github.repository }}/commits/${HEAD_SHA}/pulls" \
+            -H "Accept: application/vnd.github+json" \
+            --jq '[.[] | select(.state == "open" and .base.ref == "dev")] | first | .number // empty')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No open PR targeting dev for ${HEAD_SHA} -- nothing to label"
+          fi
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if any checks still in progress
+        id: settled
+        if: steps.find-pr.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.find-pr.outputs.head_sha }}
+        run: |
+          # Count check_runs on this head that are not yet in a terminal state.
+          # A head that still has pending/in_progress checks cannot be evaluated:
+          # a missing check might simply not have started yet.
+          RUNNING=$(gh api \
+            "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
+            --paginate \
+            -H "Accept: application/vnd.github+json" \
+            --jq '[.check_runs[] | select(.status != "completed")] | length')
+          if [ "$RUNNING" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "${RUNNING} check(s) still running -- deferring STALE CI evaluation"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "All checks settled -- proceeding with STALE CI evaluation"
+          fi
+
+      - name: Ensure STALE CI label exists
+        if: >
+          steps.find-pr.outputs.pr_number != '' &&
+          steps.settled.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create "STALE CI" \
+            --repo "${{ github.repository }}" \
+            --description "PR head is missing CI checks present on trunk (dev)" \
+            --color "e4e669" 2>/dev/null || true
+
+      - name: Compare check sets and apply or remove label
+        if: >
+          steps.find-pr.outputs.pr_number != '' &&
+          steps.settled.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.find-pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          # --- Trunk baseline ---
+          # Non-skipped check names on dev HEAD. apply-migrations is always
+          # skipped on dev (it requires a manual dispatch flag) and is not a
+          # real gate, so excluding skipped conclusions gives us the real set.
+          TRUNK_CHECKS=$(gh api \
+            "repos/${{ github.repository }}/commits/dev/check-runs" \
+            --paginate \
+            -H "Accept: application/vnd.github+json" \
+            --jq '[.check_runs[] | select(.conclusion != "skipped") | .name] | sort | unique | .[]')
+
+          if [ -z "$TRUNK_CHECKS" ]; then
+            echo "::error::Trunk check-run list is empty -- refusing to label (empty baseline would produce false positives on every PR)"
+            exit 1
+          fi
+
+          TRUNK_COUNT=$(echo "$TRUNK_CHECKS" | wc -l | tr -d ' ')
+          echo "Trunk baseline (${TRUNK_COUNT} checks):"
+          echo "$TRUNK_CHECKS" | sed 's/^/  /'
+
+          # --- PR head set ---
+          # All check names that have any run on this SHA (any state or conclusion).
+          # A name absent here will never appear: checks are bound to the SHA they
+          # were triggered against.
+          PR_CHECKS=$(gh api \
+            "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
+            --paginate \
+            -H "Accept: application/vnd.github+json" \
+            --jq '[.check_runs[] | .name] | sort | unique | .[]' || echo "")
+
+          PR_COUNT=$(echo "$PR_CHECKS" | grep -c . || true)
+          echo "PR head checks (${PR_COUNT}):"
+          echo "$PR_CHECKS" | sed 's/^/  /'
+
+          # --- Compare ---
+          # comm -23: lines in trunk (sorted A) not in PR head (sorted B) = missing.
+          MISSING=$(comm -23 \
+            <(echo "$TRUNK_CHECKS") \
+            <(echo "$PR_CHECKS"))
+
+          if [ -n "$MISSING" ]; then
+            MISSING_COUNT=$(echo "$MISSING" | grep -c . || true)
+            echo "STALE CI: ${MISSING_COUNT} trunk check(s) never ran on this PR head:"
+            echo "$MISSING" | sed 's/^/  MISSING: /'
+            gh pr edit "$PR_NUMBER" \
+              --repo "${{ github.repository }}" \
+              --add-label "STALE CI"
+            echo "Label STALE CI applied to PR #${PR_NUMBER}"
+          else
+            echo "All ${TRUNK_COUNT} trunk checks present on PR head -- clearing STALE CI label if set"
+            gh pr edit "$PR_NUMBER" \
+              --repo "${{ github.repository }}" \
+              --remove-label "STALE CI" 2>/dev/null || true
+          fi
