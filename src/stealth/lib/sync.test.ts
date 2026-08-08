@@ -8,7 +8,7 @@
  *   1. Verify the orchestrator emits all eight PROGRESS stages in order.
  *   2. Verify the final SealedTransaction array round-trips through the
  *      seal helpers back to the expected NormalizedTransaction shape.
- *   3. Verify the txid_blind_index_b64 is derived from the txid (not
+ *   3. Verify the txid_blind_index_hex is derived from the txid (not
  *      something else) so the server can dedup on retry.
  *
  * We avoid loading the WASM matcher in node-vitest by injecting a custom
@@ -269,7 +269,13 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     const sealed = result.sealedTransactions[0];
     expect(sealed.occurred_at).toBe('2024-06-01');
     expect(sealed.block_height).toBe(700_001);
-    expect(sealed.txid_blind_index_b64).toMatch(/^[0-9a-f]+$/);
+    // The wire contract in postmessage.ts, the or-stealth-transactions-store
+    // validator and the stealth_transactions column all name this field _hex.
+    // Assert the contract name and reject the old one, so producer drift fails
+    // here instead of at input validation in production.
+    expect(Object.keys(sealed)).toContain('txid_blind_index_hex');
+    expect(Object.keys(sealed)).not.toContain('txid_blind_index_b64');
+    expect(sealed.txid_blind_index_hex).toMatch(/^[0-9a-f]{64}$/);
     const decrypted = await unsealEnvelope<typeof tx>(sealed, orStealthKey);
     expect(decrypted).toEqual(tx);
   });
