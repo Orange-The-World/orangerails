@@ -433,3 +433,128 @@ jobs:
           path: tests/e2e/screenshots/
           retention-days: 14
           if-no-files-found: ignore
+
+  playwright-stealth-cursor:
+    name: Playwright stealth cursor-write proof (DL-0649)
+    runs-on: ubuntu-latest
+    needs: lint-and-build
+    # Explicit, because the reporting step below is the ONLY way the assertion
+    # output leaves this runner. Without this block the job inherits the
+    # repository default token scope, and if that default is read-only then
+    # `gh pr comment` is refused and the failure text is trapped in the run log.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium
+
+      # Start vite before either leg. playwright.config.ts has
+      # reuseExistingServer: true, so both Leg 2 and Leg 1 reuse this process
+      # rather than starting their own. A server Playwright did NOT start is
+      # not killed when Playwright exits -- so the Leg 2 guard-throw exit
+      # cannot kill the server that Leg 1 needs. Previous order (Leg 2 first)
+      # let Playwright start and kill vite before this step could restart it,
+      # causing a racy cold-restart that timed out on slow CI runners.
+      # VITE_OR_STEALTH_ALLOWED_ORIGINS must match the parent-page origin
+      # (http://localhost:8080) so the widget accepts the postMessage.
+      - name: Start vite dev server
+        env:
+          VITE_SUPABASE_URL: https://fzwmnzmtqidumdqjdddz.supabase.co
+          VITE_SUPABASE_PROJECT_ID: fzwmnzmtqidumdqjdddz
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          VITE_OR_STEALTH_ALLOWED_ORIGINS: http://localhost:8080
+        run: |
+          bun run dev &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8080 -o /dev/null && echo "Vite ready after ${i}s" && break
+            sleep 1
+          done
+          curl -sf http://localhost:8080 -o /dev/null || {
+            echo "::error::Vite dev server did not start within 60s"
+            exit 1
+          }
+
+      # Leg 2: run with PLAYWRIGHT_WITH_VITE_DEV=1 but no credentials.
+      # The module-level guard in stealth-cursor-write.spec.ts throws at
+      # eval time, so Playwright exits non-zero immediately. With vite already
+      # running above, reuseExistingServer: true means Playwright finds port
+      # 5173 up and does not start a second server -- so the guard-throw exit
+      # does not kill the server Leg 1 needs.
+      # If it exits 0 the guard is broken and we fail loudly.
+      - name: Guard proof (leg 2 -- guard throws without credentials)
+        run: |
+          if PLAYWRIGHT_WITH_VITE_DEV=1 bunx playwright test --grep 'stealth cursor write' 2>&1; then
+            echo "::error::Guard did not throw -- test exited 0 without credentials. The module-level guard is broken."
+            exit 1
+          fi
+          echo "Leg 2 PASS: guard threw as expected (non-zero exit confirmed)"
+
+      # Leg 1: full test run with vite dev server and real credentials.
+      # Route intercepts handle or-stealth-envelope-fetch (mock response);
+      # or-stealth-envelope-update is proxied through Node.js with
+      # OR_TEST_PLATFORM_API_KEY so the real DB row is written and verified.
+      # Expected result: 1 passed, 0 skipped.
+      - name: Stealth cursor-write proof (leg 1 -- 1 passed, 0 skipped)
+        env:
+          PLAYWRIGHT_WITH_VITE_DEV: '1'
+          OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
+          OR_TEST_PLATFORM_API_KEY: ${{ secrets.OR_TEST_PLATFORM_API_KEY }}
+        run: |
+          bunx playwright test --grep 'stealth cursor write' 2>&1 | tee /tmp/pw-leg1.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Report Leg 1 failure as PR comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR="${{ github.event.pull_request.number }}"
+          if [ -z "$PR" ] || [ "$PR" = "0" ]; then
+            echo "Not a PR run -- skipping comment"
+            exit 0
+          fi
+          if [ -f /tmp/pw-leg1.log ]; then
+            LINES=$(grep -E '(Error:|Expected|Received|AssertionError|FAILED)' \
+              /tmp/pw-leg1.log | head -40 || true)
+          else
+            LINES="(leg 1 log not found -- see playwright-stealth-cursor-report artifact)"
+          fi
+          {
+            echo "**CI: stealth cursor-write proof -- Leg 1 failure (run ${{ github.run_id }})**"
+            echo ""
+            echo "Assertion output (error lines only, no credentials):"
+            printf '```\n'
+            echo "${LINES}"
+            printf '```\n'
+            echo ""
+            echo "Full report: playwright-stealth-cursor-report artifact on run ${{ github.run_id }}."
+          } > /tmp/pr-body.md
+          # Print it locally FIRST. A post that gets refused must not also lose
+          # the evidence: stdout and the job summary are written before the
+          # network call, so the text exists in three places or at worst two.
+          cat /tmp/pr-body.md
+          cat /tmp/pr-body.md >> "$GITHUB_STEP_SUMMARY"
+          if ! gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr-body.md; then
+            echo "::error::gh pr comment was refused. Token scope or API. The assertion output printed above is the same text that would have been posted."
+            exit 1
+          fi
+
+      - name: Upload stealth cursor-write report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-stealth-cursor-report
+          path: playwright-report/
+          retention-days: 14
