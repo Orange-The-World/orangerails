@@ -27,6 +27,7 @@ import {
   liveFetchTip,
   liveResolveBirthdayHeight,
   runSync,
+  type BlockRecord,
   type WalletEnvelopePayload,
 } from './sync';
 import { deriveScriptPubkeyBytes } from './derive';
@@ -1236,5 +1237,177 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(result.lastBlockScanned).toBe(lastAvailable);
     expect(result.lastBlockScanned).not.toBe(tip);
     expect(result.txCount).toBe(0);
+  });
+
+  describe('block-prefetch sliding window', () => {
+    it('processes blocks in ascending height order when fetches resolve out of order', async () => {
+      const orStealthKey = randomKeyB64();
+      const payload: WalletEnvelopePayload = {
+        kind: 'xpub_stealth',
+        xpub: BIP84_XPUB,
+        label: 'out-of-order-prefetch',
+        wallet_birthday: '2024-01-01',
+        gap_limit: 5,
+        script_type: 'p2wpkh',
+      };
+      const envelope = await sealEnvelope(payload, orStealthKey);
+
+      // Derive scripts for receive addresses 0, 1, 2.
+      const scripts = [0, 1, 2].map(idx =>
+        deriveScriptPubkeyBytes(BIP84_XPUB, 0, idx, 'p2wpkh'),
+      );
+
+      // Build 3 fixture blocks, one per address, at consecutive heights.
+      const BASE_HEIGHT = 900_001;
+      const BASE_TS = Math.floor(new Date('2024-07-01T00:00:00Z').getTime() / 1000);
+      const blockBuilds = scripts.map((script, i) =>
+        buildFixtureBlock({
+          payToScript: script,
+          amountSats: BigInt(i + 1),
+          timestamp: BASE_TS + i * 600,
+        }),
+      );
+      const blockHashes = await Promise.all(
+        blockBuilds.map(async b => {
+          const hash = reverseBytes(await dsha256Async(b.raw.subarray(0, 80)));
+          return bytesToHex(hash);
+        }),
+      );
+
+      // Manual resolvers: control fetch resolution order.
+      const resolvers: Array<(b: BlockRecord) => void> = [];
+      const blockPromises: Array<Promise<BlockRecord>> = blockBuilds.map((_, i) =>
+        new Promise<BlockRecord>(resolve => { resolvers[i] = resolve; }),
+      );
+
+      const fakeFilter = new Uint8Array([0xaa, 0xbb]);
+
+      const syncPromise = runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: BASE_HEIGHT - 1,
+        lastBlockScanned: BASE_HEIGHT - 1,
+        fetchTip: async () => BASE_HEIGHT + 2,
+        fetchFilter: async (h: number) => {
+          const idx = h - BASE_HEIGHT;
+          if (idx >= 0 && idx < 3) {
+            return { height: h, blockHashHex: blockHashes[idx], filter: fakeFilter };
+          }
+          return null;
+        },
+        fetchBlock: async (hashHex: string) => {
+          const idx = blockHashes.indexOf(hashHex);
+          return blockPromises[idx];
+        },
+        matcher: { matchAny: () => true },
+      });
+
+      // Wait for the filter scan to complete and runSync to start awaiting block[0].
+      await new Promise(r => setTimeout(r, 10));
+
+      // Resolve out of order: [2] first, then [0], then [1].
+      // runSync awaits blockFetches[0] first, so it blocks until resolver[0]
+      // fires regardless of when [1] and [2] settle.
+      resolvers[2]({ height: BASE_HEIGHT + 2, blockHashHex: blockHashes[2], raw: blockBuilds[2].raw });
+      await new Promise(r => setTimeout(r, 0));
+      resolvers[0]({ height: BASE_HEIGHT, blockHashHex: blockHashes[0], raw: blockBuilds[0].raw });
+      await new Promise(r => setTimeout(r, 0));
+      resolvers[1]({ height: BASE_HEIGHT + 1, blockHashHex: blockHashes[1], raw: blockBuilds[1].raw });
+
+      const result = await syncPromise;
+
+      // All 3 transactions in ascending height order.
+      expect(result.txCount).toBe(3);
+      expect(result.normalized).toHaveLength(3);
+      const heights = result.normalized.map(tx => tx.block_height);
+      expect(heights).toEqual([BASE_HEIGHT, BASE_HEIGHT + 1, BASE_HEIGHT + 2]);
+      expect(result.normalized[0].amount_sats).toBe(1);
+      expect(result.normalized[1].amount_sats).toBe(2);
+      expect(result.normalized[2].amount_sats).toBe(3);
+    });
+
+    it('produces a single rejection with no unhandled rejections when a prefetched block fails', async () => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+      process.on('unhandledRejection', onUnhandled);
+
+      try {
+        const orStealthKey = randomKeyB64();
+        const payload: WalletEnvelopePayload = {
+          kind: 'xpub_stealth',
+          xpub: BIP84_XPUB,
+          label: 'mid-window-failure',
+          wallet_birthday: '2024-01-01',
+          gap_limit: 5,
+          script_type: 'p2wpkh',
+        };
+        const envelope = await sealEnvelope(payload, orStealthKey);
+
+        // 3 hits: all 3 prefetched at once (BLOCK_FETCH_LOOKAHEAD=8 > 3).
+        const BASE_HEIGHT = 910_001;
+        const fakeFilter = new Uint8Array([0xcc]);
+        // 64-char hex hashes, last digit encodes index 0-2 for lookup.
+        const fakeHash = (i: number) => '0'.repeat(63) + String(i);
+        const errMsg = 'network-timeout';
+
+        // Manual reject controllers: one per block.
+        const rejectFns: Array<(e: Error) => void> = [];
+        const blockPromises: Array<Promise<BlockRecord>> = [0, 1, 2].map(() =>
+          new Promise<BlockRecord>((_, reject) => { rejectFns.push(reject); }),
+        );
+
+        const syncPromise = runSync({
+          envelope,
+          orStealthKey,
+          birthdayHeight: BASE_HEIGHT - 1,
+          lastBlockScanned: BASE_HEIGHT - 1,
+          fetchTip: async () => BASE_HEIGHT + 2,
+          fetchFilter: async (h: number) => {
+            const idx = h - BASE_HEIGHT;
+            if (idx >= 0 && idx < 3) {
+              return { height: h, blockHashHex: fakeHash(idx), filter: fakeFilter };
+            }
+            return null;
+          },
+          fetchBlock: async (hashHex: string) => {
+            const idx = parseInt(hashHex.at(-1) as string, 10);
+            return blockPromises[idx];
+          },
+          matcher: { matchAny: () => true },
+        });
+        // Attach a rejection handler to syncPromise NOW so it is never a
+        // briefly-unhandled rejected Promise during the scenario setup below.
+        // rejectFns[0] causes syncPromise to reject; the 10ms gap before
+        // await expect(syncPromise).rejects would leave it unhandled, firing
+        // unhandledRejection and corrupting the unhandled[] collector.
+        // This line only guards syncPromise -- it does not affect whether
+        // blockFetches[1] and [2] fire their own unhandledRejection events,
+        // which is what the test is actually verifying.
+        syncPromise.catch(() => {});
+
+        // Let the filter scan complete and all 3 prefetches be set up with
+        // .catch(() => {}) already attached by _prefetchBlock.
+        await new Promise(r => setTimeout(r, 10));
+
+        // Reject block[0]: runSync is awaiting this and will throw.
+        rejectFns[0](new Error(errMsg));
+        await new Promise(r => setTimeout(r, 10));
+
+        // Reject blocks[1] and [2]: without the fix these have no rejection
+        // handler and would fire unhandledrejection. With the fix, the
+        // .catch(()=>{}) attached at prefetch creation handles them.
+        rejectFns[1](new Error(errMsg));
+        rejectFns[2](new Error(errMsg));
+
+        await expect(syncPromise).rejects.toThrow(errMsg);
+
+        // Give the event loop time to surface any unhandled rejection events.
+        await new Promise(r => setTimeout(r, 30));
+
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled);
+      }
+    });
   });
 });
