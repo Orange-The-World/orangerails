@@ -43,7 +43,9 @@ import { DeleteRoute } from "./routes/delete";
 import { DirectLoadCard } from "./components/DirectLoadCard";
 import { StealthInitProvider } from "./StealthInitContext";
 
-const DEFAULT_ALLOWED_ORIGINS = import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS ?? "";
+const DEFAULT_ALLOWED_ORIGINS =
+  (import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ??
+  "https://app.orangerails.com";
 
 const DIRECT_LOAD_GRACE_MS = 1500;
 
