@@ -42,10 +42,7 @@ import { ListRoute } from "./routes/list";
 import { DeleteRoute } from "./routes/delete";
 import { DirectLoadCard } from "./components/DirectLoadCard";
 import { StealthInitProvider } from "./StealthInitContext";
-
-const DEFAULT_ALLOWED_ORIGINS =
-  (import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ||
-  "https://app.orangerails.com";
+import { parseAllowedOrigins, isAllowedOrigin } from "./allowed-origins";
 
 const DIRECT_LOAD_GRACE_MS = 1500;
 
@@ -56,19 +53,7 @@ const DIRECT_LOAD_GRACE_MS = 1500;
  */
 const APP_MODE_IMPLEMENTED_MODES: ReadonlySet<string> = new Set<string>();
 
-function parseAllowedOrigins(): ReadonlySet<string> {
-  const raw = DEFAULT_ALLOWED_ORIGINS;
-  return new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0),
-  );
-}
 
-function isAllowedOrigin(origin: string, allowlist: ReadonlySet<string>): boolean {
-  return allowlist.has(origin);
-}
 
 /**
  * Resolve the most specific origin we can target the READY message at.
