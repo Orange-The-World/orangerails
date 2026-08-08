@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   update-lockfile:
-    name: Regenerate deno.lock and open PR
+    name: Regenerate deno.lock and push branch
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -61,6 +61,7 @@ jobs:
           echo "deno.lock written ($(wc -c < deno.lock) bytes)"
 
       - name: Push branch with updated lockfile
+        id: push-branch
         run: |
           BRANCH="fix/deno-lock-$(date -u +%Y%m%d-%H%M)"
           git config user.name "github-actions[bot]"
