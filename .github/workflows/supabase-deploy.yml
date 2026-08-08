@@ -117,15 +117,15 @@ jobs:
           fi
 
       - name: Setup Supabase CLI
-        uses: supabase/setup-cli@v2
+        uses: supabase/setup-cli@v3
         with:
           # Pinned deliberately. `latest` let the toolchain float under a
           # production deploy: the same commit could succeed or fail
           # depending on what upstream published that hour. Bump this on
           # purpose, in its own PR, after a dev deploy proves the version.
+          # v3 resolves via npm, not the GitHub API, so GITHUB_TOKEN is no
+          # longer needed and has been removed.
           version: 2.111.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Deploy Supabase edge functions
         env:
