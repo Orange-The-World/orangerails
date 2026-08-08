@@ -49,9 +49,13 @@ fi
 # ---- query ------------------------------------------------------------------
 
 PSQL_OUT=$(psql "$DSN" --no-password -t -A \
-  --command "SELECT EXTRACT(EPOCH FROM (now() - max(bucket_ts)))::bigint \
+  --command "SELECT EXTRACT(EPOCH FROM (now() - bucket_ts))::bigint \
              FROM public.exchange_rates \
-             WHERE granularity = '1m';" 2>&1)
+             WHERE source_currency = 'BTC' \
+               AND target_currency = 'USD' \
+               AND granularity = '1m' \
+               AND status = 'CONFIRMED' \
+             ORDER BY bucket_ts DESC LIMIT 1;" 2>&1)
 PSQL_RC=$?
 
 if [[ $PSQL_RC -ne 0 ]]; then
