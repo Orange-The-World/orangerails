@@ -228,4 +228,45 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     ).toBeVisible();
     await capture(page, "05-stealth-iframe-load-guidance-card");
   });
+
+  // DL-0448: widget receives OR_STEALTH_INIT before the grace window and skips
+  // DirectLoadCard, rendering AddRoute. This is the signed-in OR user path.
+  // Testing via iframe + postMessage keeps this env-independent (no Supabase auth needed).
+  test("widget receives OR_STEALTH_INIT and renders AddRoute (DL-0448 signed-in path)", async ({ page }) => {
+    await page.goto("/connect/sparrow");
+
+    await page.evaluate(() => {
+      const frame = document.createElement("iframe");
+      frame.id = "stealth-frame-init";
+      frame.src = "/connect/stealth";
+      frame.style.cssText = "width:480px;height:640px";
+      document.body.appendChild(frame);
+    });
+
+    // Generate a synthetic 32-byte key (same shape HKDF produces) and post
+    // OR_STEALTH_INIT to the widget as soon as it signals OR_STEALTH_READY.
+    await page.evaluate(async () => {
+      const frame = document.getElementById("stealth-frame-init") as HTMLIFrameElement;
+      const rawKey = crypto.getRandomValues(new Uint8Array(32));
+      const keyB64 = btoa(String.fromCharCode(...Array.from(rawKey)));
+      await new Promise<void>((resolve) => {
+        function onMsg(ev: MessageEvent) {
+          if (ev.data?.type !== "OR_STEALTH_READY") return;
+          window.removeEventListener("message", onMsg);
+          frame.contentWindow?.postMessage(
+            { type: "OR_STEALTH_INIT", app_slug: "test-sparrow", app_user_id: "test-e2e", or_stealth_key_b64: keyB64, mode: "add" },
+            window.location.origin,
+          );
+          resolve();
+        }
+        window.addEventListener("message", onMsg);
+      });
+    });
+
+    const widget = page.frameLocator("#stealth-frame-init");
+    await expect(
+      widget.getByRole("heading", { name: /stealth sync.*add wallet/i, level: 1 }),
+    ).toBeVisible({ timeout: 5_000 });
+    await capture(page, "08-stealth-widget-add-route");
+  });
 });
