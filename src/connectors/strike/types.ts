@@ -46,6 +46,8 @@ export type StrikeApiTransaction = {
   destination?: string;
   fee?: string;
   reference?: string;
+  /** Opaque Strike account identifier for the invoice recipient. */
+  receiverId?: string;
 };
 
 /**

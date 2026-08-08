@@ -438,6 +438,7 @@ export function normalizeInvoice(
     status: invoice.state,
     timestamp: new Date(ts).toISOString(),
     source_wallet_id: accountId,
+    receiverId: invoice.receiverId ?? null,
     ...packAmount(amount, invoice.amount?.currency || 'USD'),
   };
 }
