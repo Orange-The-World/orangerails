@@ -269,7 +269,8 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     const sealed = result.sealedTransactions[0];
     expect(sealed.occurred_at).toBe('2024-06-01');
     expect(sealed.block_height).toBe(700_001);
-    expect(sealed.txid_blind_index_hex).toMatch(/^[0-9a-f]+$/);
+    expect(sealed.txid_blind_index_hex).toMatch(/^[0-9a-f]{64}$/);
+    expect(sealed).not.toHaveProperty('txid_blind_index_b64');
     const decrypted = await unsealEnvelope<typeof tx>(sealed, orStealthKey);
     expect(decrypted).toEqual(tx);
   });
