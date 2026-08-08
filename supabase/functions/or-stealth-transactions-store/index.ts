@@ -81,7 +81,7 @@ const MAX_SEALED_RECORD_BYTES = 16_384;
 
 /** Validates app_user_id: any non-empty string is valid (opaque host-app user id, not necessarily a uuid). */
 export function isValidAppUserId(x: unknown): x is string {
-  return typeof x === 'string' && x.length > 0;
+  return typeof x === 'string' && UUID_RE.test(x);
 }
 
 export function isSealedTx(x: unknown): x is SealedTransactionInput {
@@ -90,7 +90,7 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
   return (
     o.version === 1 &&
     o.algorithm === 'AES-256-GCM' &&
-    typeof o.iv_b64 === 'string' &&
+    typeof o.iv === 'string' &&
     typeof o.ciphertext_b64 === 'string' &&
     typeof o.occurred_at === 'string' &&
     ISO_DATE_RE.test(o.occurred_at as string) &&
