@@ -277,7 +277,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t TEST_FILES < <(find supabase/functions \( -name '*_test.ts' -o -name '*.test.ts' \) | sort)
+          # Guard: find must not fail silently. A non-zero exit (missing dir,
+          # permission error) must not collapse to count=0 and must not read
+          # as OK. Exit 2 means "find failed", separate from exit 1 ("no files
+          # found" or "count too low"). The || prevents set -e from aborting
+          # before we can emit a useful error message.
+          find_exit=0
+          find_out=$(find supabase/functions \( -name '*_test.ts' -o -name '*.test.ts' \) | sort) || find_exit=$?
+          if [ "$find_exit" -ne 0 ]; then
+            echo "::error::find command failed (exit ${find_exit}) -- cannot enumerate test files. Check that supabase/functions exists and is readable."
+            exit 2
+          fi
+
+          if [[ -n "$find_out" ]]; then
+            mapfile -t TEST_FILES <<< "$find_out"
+          else
+            TEST_FILES=()
+          fi
           FILE_COUNT="${#TEST_FILES[@]}"
 
           if [ "$FILE_COUNT" -eq 0 ]; then
