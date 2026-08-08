@@ -221,8 +221,7 @@ function ProvidersPage() {
             <h1 className="text-3xl font-semibold tracking-tight">Providers</h1>
             <p className="mt-2 text-base text-muted-foreground">
               Connect your Bitcoin wallets, Lightning nodes, and exchange
-              accounts. Every connection is end-to-end encrypted in your browser
-              before it reaches our servers.
+              accounts.
             </p>
 
             <div className="mt-6">
