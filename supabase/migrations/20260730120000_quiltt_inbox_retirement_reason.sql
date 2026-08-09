@@ -1,8 +1,8 @@
--- SUPERSEDED: content moved to 20260809120000_quiltt_inbox_retirement_reason.sql
+-- SUPERSEDED: content moved to 20260809130000_quiltt_inbox_retirement_reason.sql
 --
 -- This file is an intentional no-op stub. Two files shared the 20260730120000
 -- version prefix; Supabase silently skips the second alphabetically. Real content
--- (ADD COLUMN retirement_reason on quiltt_webhook_inbox) lives in the 20260809
+-- (ADD COLUMN retirement_reason on quiltt_webhook_inbox) lives in the 20260809130000
 -- file. Supabase will skip this stub; that is harmless by design.
 --
 -- Refs: DL-0326, DL-0465, DL-0647
