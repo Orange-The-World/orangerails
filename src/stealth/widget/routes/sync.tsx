@@ -297,7 +297,9 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    returns the previous cursor unchanged when fromHeight > tip
         //    (short-circuit path). Persisting that value would falsely mark
         //    the wallet as synced to a height it never scanned.
+        let cursorFailed = false;
         if ((!useMock || isForceCursor()) && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
+          try {
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
@@ -401,6 +403,10 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           // reaching here with cursorWritten = false is impossible. The variable
           // exists so the compiler can verify that guarantee.
           void cursorWritten;
+          } catch (e) {
+            console.error('[stealth/sync] cursor update failed: next sync will rescan from stored cursor:', e);
+            cursorFailed = true;
+          }
         }
 
         // 5. SYNC_COMPLETE.
@@ -414,6 +420,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             bytes_downloaded: result.bytesDownloaded,
             duration_seconds: (Date.now() - startedAt) / 1000,
             address_window_exhausted: result.windowExhausted || undefined,
+            cursor_update_failed: cursorFailed ? true : undefined,
           };
           try {
             parent.postMessage(msg, init.return_callback_origin);
