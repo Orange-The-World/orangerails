@@ -72,7 +72,7 @@ interface PendingEvent {
   attempts:      number;
 }
 
-Deno.serve(wrapSentryHandler(async (req: Request) => {
+const _drainHandler = wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
   const callerToken = req.headers.get('X-Internal-Worker-Token');
@@ -254,7 +254,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   }
 
   return jsonResponse({ processed, failed, skipped, reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}), batch: pending.length }, 200);
-}, 'or-quiltt-sync'));
+}, 'or-quiltt-sync');
+if (import.meta.main) Deno.serve(_drainHandler);
 
 // ─── event dispatch ──────────────────────────────────────────────────
 
