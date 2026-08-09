@@ -1,35 +1,20 @@
 -- ============================================================
--- data_keys ownership record + rotate_data_key current-membership authz
+-- data_keys ownership record (DDL only)
 -- ============================================================
--- Security fix: rotate_data_key authorization gap on the authenticated path.
---
--- Requirement (signed by CTO + Auditor in Security & Privacy):
---   The authorization predicate must check CURRENT membership at call time.
---   The CALLER must be the owner or a human co-admin (workspace_admins) only:
---   least privilege, since rotation is owner-browser driven and there is no
---   agent-initiated rotation path. Every named RECIPIENT must be a current
---   member of the owner's scope, and the owner must be among the recipients.
---   Membership must never be inferred
---   from existing wrapped_data_keys rows: those are the mutable artifact a
---   rotation removes, so a just-removed member still co-holds the old key and
---   would pass an old-key co-recipiency check.
---
--- What "current member of an owner's scope" means, bound to the live schema:
---   * the owner            -> owner_user_id itself
---   * human co-admins      -> workspace_admins.admin_user_id (owner_user_id = owner)
---   * active agents        -> agent_members.shadow_user_id
---                             (owner_user_id = owner AND revoked_at IS NULL)
---   The agent recipient identity is shadow_user_id: revoke_agent_member deletes
---   wrapped_data_keys WHERE recipient_user_id = shadow_user_id, so that is the
---   verified mapping between an agent member and its envelope recipient id.
+-- Creates the data_keys table: server-authoritative data_key_id -> owner_user_id
+-- map. Written only by SECURITY DEFINER functions; client writes blocked by RLS
+-- so ownership cannot be forged.
 --
 -- ZKA: data_keys(owner_user_id) is an ownership mapping, not key plaintext.
 -- The envelope crypto model is unchanged; the server never sees a plaintext key.
 --
+-- The rotate_data_key function (current-membership authz + grant_sig) lives in
+-- 20260806200000_rotate_data_key_current_membership_and_grant_sig.sql so this
+-- file applies cleanly before 20260805000000 / 20260805100000 in date order.
+--
 -- Reversibility (down-path):
 --   ALTER TABLE public.wrapped_data_keys DROP CONSTRAINT IF EXISTS wrapped_data_keys_data_key_id_fk;
 --   DROP TABLE IF EXISTS public.data_keys;
---   then re-apply 20260521030000_rotate_data_key_fn.sql to restore the prior body.
 
 -- ------------------------------------------------------------
 -- 1. Server-authoritative ownership record
