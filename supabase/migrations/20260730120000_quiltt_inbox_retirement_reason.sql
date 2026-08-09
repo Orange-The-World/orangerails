@@ -1,15 +1,8 @@
--- quiltt_webhook_inbox.retirement_reason (DL-0326 / DL-0465)
+-- SUPERSEDED: content moved to 20260809120000_quiltt_inbox_retirement_reason.sql
 --
--- Records the reason a webhook row was permanently retired by the drain's
--- terminal guard (e.g. "max-attempts:<err>"). NULL until a row is retired.
+-- This file is an intentional no-op stub. Two files shared the 20260730120000
+-- version prefix; Supabase silently skips the second alphabetically. Real content
+-- (ADD COLUMN retirement_reason on quiltt_webhook_inbox) lives in the 20260809
+-- file. Supabase will skip this stub; that is harmless by design.
 --
--- Idempotent: safe to re-run. Metadata-only add (nullable, no default) so it
--- takes no table rewrite and no lock of consequence on a live table.
---
--- Undo: ALTER TABLE public.quiltt_webhook_inbox DROP COLUMN IF EXISTS retirement_reason;
-
-ALTER TABLE public.quiltt_webhook_inbox
-  ADD COLUMN IF NOT EXISTS retirement_reason text;
-
-COMMENT ON COLUMN public.quiltt_webhook_inbox.retirement_reason IS
-  'Reason a webhook row was permanently retired by the drain terminal guard (e.g. max-attempts:<err>). NULL until retirement.';
+-- Refs: DL-0326, DL-0465, DL-0647
