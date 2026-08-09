@@ -417,7 +417,7 @@ function makeQuilttSyncMock(opts: {
         single() {
           if (table === 'subaccounts') {
             return Promise.resolve({
-              data: { id: 'sub-1', opk_public: opts.opkPublic ?? 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', opk_alg: 'libsodium-crypto_box_seal-v1' },
+              data: { id: 'sub-1', opk_public: opts.opkPublic ?? 'CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', opk_alg: 'libsodium-crypto_box_seal-v1' },
               error: null,
             });
           }
