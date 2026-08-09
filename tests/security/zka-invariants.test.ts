@@ -200,8 +200,8 @@ describe('ZKA invariant CR-07 , per-domain subkeys are isolated via HKDF', () =>
 
 describe('Defense in depth , Argon2id parameters meet OWASP 2023', () => {
   test('ARGON2ID_V1 parameters are at or above the OWASP minimum', () => {
-    expect(ARGON2ID_V1.m).toBeGreaterThanOrEqual(46 * 1024); // 46 MiB minimum
-    expect(ARGON2ID_V1.t).toBeGreaterThanOrEqual(1);
-    expect(ARGON2ID_V1.p).toBeGreaterThanOrEqual(1);
+    expect(ARGON2ID_V1.memorySize).toBeGreaterThanOrEqual(46 * 1024); // 46 MiB minimum (OWASP 2023)
+    expect(ARGON2ID_V1.iterations).toBeGreaterThanOrEqual(1);
+    expect(ARGON2ID_V1.parallelism).toBeGreaterThanOrEqual(1);
   });
 });
