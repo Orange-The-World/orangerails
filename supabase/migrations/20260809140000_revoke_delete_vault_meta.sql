@@ -7,8 +7,9 @@
 -- even when RLS is bypassed, so an RLS FOR DELETE USING(false) policy would not
 -- close this; the REVOKE does.
 --
--- Fix: revoke DELETE from PUBLIC, anon, authenticated and service_role on both
--- tables. PUBLIC is included so no DELETE inherited via PUBLIC can survive a
+-- Fix: revoke DELETE and TRUNCATE from PUBLIC, anon, authenticated and
+-- service_role on both tables. TRUNCATE is a second row-removal path: a role
+-- holding it can empty either table with no DELETE grant at all. PUBLIC is included so no DELETE inherited via PUBLIC can survive a
 -- revoke that only names the three roles. The owner (postgres) keeps implicit
 -- rights and the application never connects as owner, so no legitimate path is
 -- affected.
@@ -23,8 +24,8 @@
 -- Idempotent: REVOKE of a privilege not held emits a notice and changes nothing,
 -- so a re-run is a no-op.
 -- Reversible: yes. Down path:
---   GRANT DELETE ON public.user_vault_meta TO anon, authenticated, service_role;
---   GRANT DELETE ON public.customer_vault_meta TO anon, authenticated, service_role;
+--   GRANT DELETE, TRUNCATE ON public.user_vault_meta TO anon, authenticated, service_role;
+--   GRANT DELETE, TRUNCATE ON public.customer_vault_meta TO anon, authenticated, service_role;
 
-REVOKE DELETE ON public.user_vault_meta FROM PUBLIC, anon, authenticated, service_role;
-REVOKE DELETE ON public.customer_vault_meta FROM PUBLIC, anon, authenticated, service_role;
+REVOKE DELETE, TRUNCATE ON public.user_vault_meta FROM PUBLIC, anon, authenticated, service_role;
+REVOKE DELETE, TRUNCATE ON public.customer_vault_meta FROM PUBLIC, anon, authenticated, service_role;
