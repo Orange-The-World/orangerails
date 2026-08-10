@@ -126,7 +126,7 @@ jobs:
           # Self-test 1: a bare CGNAT address in a non-documentation context must
           # still match PATTERN after doc-strip runs. If doc-strip silences it,
           # the strip has grown too broad.
-          _ST1="AUTHOR Someone <someone@example.com> COMMITTER git <git@example.com> 100.125.78.24"
+          _ST1="AUTHOR Someone <someone@example.com> COMMITTER git <git@example.com> 100.64.0.1"
           if ! echo "$_ST1" | grep -qEi "$PATTERN"; then
             echo "::error::Self-test 1 FAIL: PATTERN does not match a bare CGNAT address. Scanner is broken."
             exit 1
@@ -141,7 +141,7 @@ jobs:
           # Self-test 2: a tailnet pattern is NOT exempted by cleared-list logic,
           # even on a cleared SHA. Exemption covers CGNAT bare-address matches only;
           # a different match class on the same SHA must still fail.
-          _ST2_LINE="AUTHOR Test <user@badhost.tail62f91a.ts.net> COMMITTER test <ci@example.com>"
+          _ST2_LINE="AUTHOR Test <user@badhost.tailtest.ts.net> COMMITTER test <ci@example.com>"
           _ST2_CLEAN=$(echo "$_ST2_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
           if ! echo "$_ST2_CLEAN" | grep -qEi "$PATTERN"; then
             echo "::error::Self-test 2 FAIL: PATTERN does not match the tailnet test line. Scanner is broken."
@@ -154,13 +154,37 @@ jobs:
             exit 1
           fi
           echo "Self-test 2 passed: tailnet pattern correctly not exempted by cleared-list logic."
+
+          # Self-test 3: cleared-list exemption must NOT apply to un-cleared SHAs.
+          # Simulates the exemption decision for a synthetic SHA absent from the cleared
+          # map and asserts the exemption does NOT fire for it.
+          _ST3_SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+          _st3_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST3_SHA]+set}" ]]; then
+            _c=$(echo "100.64.0.1" | grep -cEi "$_CGNAT_BARE" || true)
+            _t=$(echo "100.64.0.1" | grep -cEi "$_TAILNET_PAT" || true)
+            if [ "$_c" -gt 0 ] && [ "$_t" -eq 0 ]; then
+              _st3_would_exempt=1
+            fi
+          fi
+          if [ "$_st3_would_exempt" -ne 0 ]; then
+            echo "::error::Self-test 3 FAIL: exemption logic fired on an un-cleared SHA. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 3 passed: un-cleared SHA CGNAT match correctly not exempted."
           MATCHES=0
           CURRENT_SHA="(unknown)"
           while IFS= read -r line; do
             # Each record starts with the commit SHA (see --format below).
             # Track it so a match on a BODY line attributes to the right
             # commit, not the first word of that body line.
-            if [[ "$line" =~ ^([0-9a-f]{40})\  ]]; then
+            # Anchored to "AUTHOR" so a body line beginning with 40 hex chars
+            # cannot spoof CURRENT_SHA and gain a cleared-list exemption.
+            if [[ "$line" == "--END--" ]]; then
+              CURRENT_SHA="(unknown)"
+              continue
+            fi
+            if [[ "$line" =~ ^([0-9a-f]{40})\ AUTHOR\  ]]; then
               CURRENT_SHA="${BASH_REMATCH[1]}"
             fi
             if echo "$line" | grep -qEi "$PATTERN"; then
