@@ -79,6 +79,10 @@ jobs:
           # a stray reference. If it still matches, a real match co-exists with the docs.
           DOC_STRIP_CGNAT: '100\.64\.0\.0/10'
           DOC_STRIP_REGEX_ALT: '\([0-9]+(\|[0-9]+)+\)'
+          # Synthetic tailnet sentinel used in self-test fixtures only.
+          # A commit message describing a fixture change to this sentinel value
+          # is correctly stripped and cleared; all other tail-net forms are caught.
+          DOC_STRIP_TAILNET: 'tailtest\.ts\.net'
           RANGE: ${{ steps.range.outputs.range }}
         run: |
           set -euo pipefail
@@ -131,7 +135,7 @@ jobs:
             echo "::error::Self-test 1 FAIL: PATTERN does not match a bare CGNAT address. Scanner is broken."
             exit 1
           fi
-          _ST1_CLEAN=$(echo "$_ST1" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          _ST1_CLEAN=$(echo "$_ST1" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g; s|${DOC_STRIP_TAILNET}|[TAILNET-DOC]|g")
           if ! echo "$_ST1_CLEAN" | grep -qEi "$PATTERN"; then
             echo "::error::Self-test 1 FAIL: doc-strip incorrectly cleared a bare CGNAT address. Scanner is broken."
             exit 1
@@ -141,8 +145,8 @@ jobs:
           # Self-test 2: a tailnet pattern is NOT exempted by cleared-list logic,
           # even on a cleared SHA. Exemption covers CGNAT bare-address matches only;
           # a different match class on the same SHA must still fail.
-          _ST2_LINE="AUTHOR Test <user@badhost.tailtest.ts.net> COMMITTER test <ci@example.com>"
-          _ST2_CLEAN=$(echo "$_ST2_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          _ST2_LINE="AUTHOR Test <user@badhost.tailab123xyz.ts.net> COMMITTER test <ci@example.com>"
+          _ST2_CLEAN=$(echo "$_ST2_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g; s|${DOC_STRIP_TAILNET}|[TAILNET-DOC]|g")
           if ! echo "$_ST2_CLEAN" | grep -qEi "$PATTERN"; then
             echo "::error::Self-test 2 FAIL: PATTERN does not match the tailnet test line. Scanner is broken."
             exit 1
@@ -153,7 +157,7 @@ jobs:
             echo "::error::Self-test 2 FAIL: exemption logic would incorrectly clear a tailnet match. Scanner is broken."
             exit 1
           fi
-          echo "Self-test 2 passed: tailnet pattern correctly not exempted by cleared-list logic."
+          echo "Self-test 2 passed: non-documentation tailnet hostname survives tailnet doc-strip and is not exempted."
 
           # Self-test 3: cleared-list exemption must NOT apply to un-cleared SHAs.
           # Simulates the exemption decision for a synthetic SHA absent from the cleared
@@ -172,6 +176,18 @@ jobs:
             exit 1
           fi
           echo "Self-test 3 passed: un-cleared SHA CGNAT match correctly not exempted."
+
+          # Self-test 4: the tailnet documentation sentinel (DOC_STRIP_TAILNET) is stripped
+          # only for the named synthetic sentinel value; a different synthetic tailnet
+          # hostname survives the strip and still triggers PATTERN. Proves the strip
+          # is narrow: an uncleared commit carrying any other tailnet form still fails.
+          _ST4_LINE="AUTHOR Test <user@tailab123xyz.ts.net> COMMITTER test <ci@example.com>"
+          _ST4_CLEAN=$(echo "$_ST4_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g; s|${DOC_STRIP_TAILNET}|[TAILNET-DOC]|g")
+          if ! echo "$_ST4_CLEAN" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 4 FAIL: doc-strip incorrectly cleared a non-documentation tailnet address. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 4 passed: non-documentation tailnet address survives tailnet doc-strip."
           MATCHES=0
           CURRENT_SHA="(unknown)"
           while IFS= read -r line; do
@@ -190,9 +206,9 @@ jobs:
             if echo "$line" | grep -qEi "$PATTERN"; then
               # Strip documentation tokens and re-scan; a still-matching line
               # has a real match co-existing with the docs.
-              cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+              cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g; s|${DOC_STRIP_TAILNET}|[TAILNET-DOC]|g")
               if ! echo "$cleaned" | grep -qEi "$PATTERN"; then
-                echo "::notice::Allowlisted documentation line (CGNAT block or regex syntax)."
+                echo "::notice::Allowlisted documentation line (CGNAT block, regex syntax, or tailnet sentinel)."
                 continue
               fi
               # Cleared-list check: exempts CGNAT bare-address matches on known SHAs.
