@@ -29,8 +29,6 @@ import {
   Eye,
   AlertTriangle,
 } from "lucide-react";
-import { Navbar } from "@/components/landing/Navbar";
-import { Footer } from "@/components/landing/Footer";
 
 export const Route = createFileRoute("/connect/sparrow")({
   head: () => ({
@@ -160,8 +158,6 @@ function SparrowConnectPage() {
 
   return (
     <div className="min-h-screen bg-background text-foreground antialiased">
-      <Navbar />
-
       <main>
         <section className="relative overflow-hidden border-b border-border/60">
           <div className="pointer-events-none absolute inset-0 grid-bg opacity-50 [mask-image:radial-gradient(ellipse_at_top,black,transparent_70%)]" />
@@ -379,8 +375,6 @@ function SparrowConnectPage() {
           </div>
         </section>
       </main>
-
-      <Footer />
     </div>
   );
 }
