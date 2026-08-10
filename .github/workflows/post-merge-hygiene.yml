@@ -78,6 +78,9 @@ jobs:
           # describing the regex (e.g. "widened CIDR to 100.64.0.0/10"), not
           # a stray reference. If it still matches, a real match co-exists with the docs.
           DOC_STRIP_CGNAT: '100\.64\.0\.0/10'
+          # Host-address form: an individual address within the reserved CGNAT block
+          # (e.g. 100.64.5.3) cited in documentation context only.
+          DOC_STRIP_CGNAT_HOST: '100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}'
           DOC_STRIP_REGEX_ALT: '\([0-9]+(\|[0-9]+)+\)'
           RANGE: ${{ steps.range.outputs.range }}
         run: |
@@ -89,6 +92,20 @@ jobs:
           else
             echo "::notice::OR_RESERVED_TERMS secret not set : scanning generic structural patterns only."
           fi
+          # Self-test: verify the scanner still catches a known-bad tail-net address
+          # after all doc-strip substitutions run. Exits non-zero immediately if the
+          # strip logic has grown broad enough to silence real matches.
+          _ST="AUTHOR Test <user@badhost.tail62f91a.ts.net> COMMITTER test <ci@example.com>"
+          if ! echo "$_ST" | grep -nEi "$PATTERN" >/dev/null; then
+            echo "::error::Self-test FAIL: PATTERN no longer matches a tail-net address. Scanner is broken."
+            exit 1
+          fi
+          _ST_CLEAN=$(echo "$_ST" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s,${DOC_STRIP_CGNAT_HOST},[CGNAT-HOST],g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          if ! echo "$_ST_CLEAN" | grep -nEi "$PATTERN" >/dev/null; then
+            echo "::error::Self-test FAIL: strip logic cleared a tail-net match it must not clear. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test passed: scanner still catches tail-net addresses after strip."
           MATCHES=0
           CURRENT_SHA="(unknown)"
           while IFS= read -r line; do
@@ -101,7 +118,7 @@ jobs:
             if echo "$line" | grep -nEi "$PATTERN" >/dev/null; then
               # Strip documentation tokens and re-scan; a still-matching line
               # has a real match co-existing with the docs.
-              cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+              cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s,${DOC_STRIP_CGNAT_HOST},[CGNAT-HOST],g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
               if ! echo "$cleaned" | grep -nEi "$PATTERN" >/dev/null; then
                 echo "::notice::Allowlisted documentation line (CGNAT block or regex syntax)."
                 continue
