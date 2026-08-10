@@ -308,31 +308,62 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Actor allowlist gate
-        # Interim hard stop until the supabase-prod environment required-reviewer list
-        # is configured in repo Settings -> Environments. Once that gate is live this
-        # step is belt-and-suspenders fallback, not the primary gate.
+      - name: Actor allowlist gate (per target, no inheritance)
+        # Fallback gate. The primary gate is meant to be the required-reviewer list on
+        # the GitHub Environment this job binds to; until reviewers are configured on
+        # supabase-prod, this step is the only thing standing in front of the prod
+        # database, so it must not be looser than the prod path deserves.
         #
-        # Set MIGRATION_APPLY_ALLOWED_ACTORS in repo Settings -> Variables as a
-        # comma-separated list of GitHub login names (e.g. "alice,bob"). If the
-        # variable is absent or empty this step fails closed: no one can apply.
+        # ONE allowlist per target, resolved from the environment the deploy job
+        # computed. There is deliberately NO fallback from prod to dev: a single shared
+        # variable meant that adding a login so it could apply on dev also let it
+        # rewrite production in one dispatch.
+        #
+        # Set both in repo Settings -> Variables, comma-separated GitHub login names:
+        #   MIGRATION_APPLY_ALLOWED_ACTORS_DEV    (dev project)
+        #   MIGRATION_APPLY_ALLOWED_ACTORS_PROD   (prod project)
+        # Either one absent or empty fails closed on that path only.
+        env:
+          TARGET_ENV: ${{ needs.deploy.outputs.environment_name }}
+          ALLOWED_DEV: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_DEV }}
+          ALLOWED_PROD: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD }}
+          ACTOR: ${{ github.actor }}
         run: |
-          ALLOWED="${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS }}"
+          set -uo pipefail
+          case "$TARGET_ENV" in
+            supabase-prod)
+              ALLOWED="$ALLOWED_PROD"
+              VAR_NAME="MIGRATION_APPLY_ALLOWED_ACTORS_PROD"
+              ;;
+            supabase-dev)
+              ALLOWED="$ALLOWED_DEV"
+              VAR_NAME="MIGRATION_APPLY_ALLOWED_ACTORS_DEV"
+              ;;
+            *)
+              echo "::error::Unrecognised apply target '$TARGET_ENV'. Refusing apply."
+              exit 1
+              ;;
+          esac
+
           if [ -z "$ALLOWED" ]; then
-            echo "::error::MIGRATION_APPLY_ALLOWED_ACTORS repo variable is not set. Configure it in Settings -> Variables before running apply."
+            echo "::error::$VAR_NAME is not set. Configure it in Settings -> Variables before applying to $TARGET_ENV."
             exit 1
           fi
-          ACTOR="${{ github.actor }}"
+
+          MATCHED=0
           IFS=',' read -ra LIST <<< "$ALLOWED"
           for A in "${LIST[@]}"; do
-            TRIMMED=$(echo "$A" | tr -d ' ')
-            if [ "$TRIMMED" = "$ACTOR" ]; then
-              echo "Actor '$ACTOR' is on the allowlist. Proceeding."
-              exit 0
+            TRIMMED=$(echo "$A" | tr -d '[:space:]')
+            if [ -n "$TRIMMED" ] && [ "$TRIMMED" = "$ACTOR" ]; then
+              MATCHED=1
             fi
           done
-          echo "::error::Actor '$ACTOR' is not on MIGRATION_APPLY_ALLOWED_ACTORS. Refusing apply."
-          exit 1
+
+          if [ "$MATCHED" -ne 1 ]; then
+            echo "::error::Actor '$ACTOR' is not on $VAR_NAME. Refusing apply on $TARGET_ENV."
+            exit 1
+          fi
+          echo "Actor '$ACTOR' is on $VAR_NAME. Proceeding on $TARGET_ENV."
 
       - name: Apply pending DB migrations via Management API
         # The Supabase CLI's db push requires a linked project + DB password we do not
