@@ -88,6 +88,25 @@ Deno.test('blocks hostname when resolver throws (fail-closed, not fail-open)', a
   );
 });
 
+Deno.test('accepts A-only host when AAAA resolver throws NotFound (IPv4-only is valid)', async () => {
+  const aOnlyResolve = async (_host: string, rt: 'A' | 'AAAA'): Promise<string[]> => {
+    if (rt === 'AAAA') throw new Deno.errors.NotFound('No AAAA records');
+    return ['93.184.216.34'];
+  };
+  const url = await assertPublicHttpUrl('https://example.com/api', { resolveDns: aOnlyResolve });
+  assertEquals(url.hostname, 'example.com');
+});
+
+Deno.test('blocks hostname when resolver throws a non-NotFound error', async () => {
+  const networkErrResolve = async (_host: string, _rt: 'A' | 'AAAA'): Promise<string[]> => {
+    throw new Deno.errors.TimedOut('resolver timeout');
+  };
+  await assertRejects(
+    () => assertPublicHttpUrl('https://example.com/api', { resolveDns: networkErrResolve }),
+    NetGuardError,
+  );
+});
+
 Deno.test('blocks hostname when both A and AAAA return empty (unresolvable host)', async () => {
   const emptyResolve = async (_host: string, _rt: 'A' | 'AAAA'): Promise<string[]> => [];
   await assertRejects(
