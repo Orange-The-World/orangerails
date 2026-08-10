@@ -433,6 +433,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               });
               if (!acctRespSink.ok) throw new Error(`Quiltt accounts fetch ${acctRespSink.status}`);
               const acctJsonSink = await acctRespSink.json();
+              if (Array.isArray(acctJsonSink?.errors) && acctJsonSink.errors.length > 0) {
+                const msgs = (acctJsonSink.errors as Array<any>)
+                  .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+                  .filter((m: string) => m.length > 0)
+                  .join('; ');
+                throw new Error(`Quiltt accounts fetch errors: ${msgs}`);
+              }
               const filterAccountIdsSink: string[] = (
                 (acctJsonSink?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
               ).map((a) => a.id);
@@ -692,6 +699,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             });
             if (!acctRespMain.ok) throw new Error(`Quiltt accounts fetch ${acctRespMain.status}`);
             const acctJsonMain = await acctRespMain.json();
+            if (Array.isArray(acctJsonMain?.errors) && acctJsonMain.errors.length > 0) {
+              const msgs = (acctJsonMain.errors as Array<any>)
+                .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+                .filter((m: string) => m.length > 0)
+                .join('; ');
+              throw new Error(`Quiltt accounts fetch errors: ${msgs}`);
+            }
             const filterAccountIdsMain: string[] = (
               (acctJsonMain?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
             ).map((a) => a.id);
