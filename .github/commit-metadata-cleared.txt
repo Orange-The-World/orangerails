@@ -1,2 +1,2 @@
 9c9aa7f58c30f17ee7230f8a000917dfaac26156 commit removed an internal address from source; the removal is quoted in its own message body.
-7576e88891f1224f73d8265ba43bb678e56c1577 PR #666 fix branch HEAD; restricted term appears only in removal context, reviewed and approved by Auditor.
+7576e88891f1224f73d8265ba43bb678e56c1577 fix-branch HEAD merged to dev as dba315e3; restricted term in removal context only, Auditor-reviewed.
