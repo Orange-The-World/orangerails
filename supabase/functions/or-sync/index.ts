@@ -444,6 +444,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 (acctJsonSink?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
               ).map((a) => a.id);
 
+              if (filterAccountIdsSink.length === 0) {
+                // No accounts on this connection: nothing to sync. Mark processed and move on.
+                await ctx.serviceClient
+                  .from('quiltt_webhook_inbox')
+                  .update({ processed_at: new Date().toISOString() })
+                  .eq('event_id', ev.event_id);
+                continue;
+              }
+
               let afterSink: string | null = null;
               let pagesSink = 0;
 
@@ -474,6 +483,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                   throw new Error(`Quiltt GraphQL ${resp.status}`);
                 }
                 const json = await resp.json();
+                if (Array.isArray(json?.errors) && json.errors.length > 0) {
+                  const msgs = (json.errors as Array<any>)
+                    .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+                    .filter((m: string) => m.length > 0)
+                    .join('; ');
+                  throw new Error(`Quiltt transactions fetch errors: ${msgs}`);
+                }
                 const txs = (json?.data?.transactions?.nodes ?? []) as Array<{
                   id: string; amount: number; currencyCode: string; date: string;
                   description: string; entryType: string; status: string;
@@ -710,6 +726,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               (acctJsonMain?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
             ).map((a) => a.id);
 
+            if (filterAccountIdsMain.length === 0) {
+              // No accounts on this connection: nothing to sync. Mark processed and move on.
+              await ctx.serviceClient
+                .from('quiltt_webhook_inbox')
+                .update({ processed_at: new Date().toISOString() })
+                .eq('event_id', ev.event_id);
+              continue;
+            }
+
             let after: string | null = null;
             let pages = 0;
             const rowsToInsert: Array<{ connection_id: string; external_id: string; encrypted_payload: string; payload_key_version: number; occurred_at: string | null }> = [];
@@ -741,6 +766,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 throw new Error(`Quiltt GraphQL ${resp.status}`);
               }
               const json = await resp.json();
+              if (Array.isArray(json?.errors) && json.errors.length > 0) {
+                const msgs = (json.errors as Array<any>)
+                  .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+                  .filter((m: string) => m.length > 0)
+                  .join('; ');
+                throw new Error(`Quiltt transactions fetch errors: ${msgs}`);
+              }
               const txs = (json?.data?.transactions?.nodes ?? []) as Array<{
                 id: string; amount: number; currencyCode: string; date: string;
                 description: string; entryType: string; status: string;
