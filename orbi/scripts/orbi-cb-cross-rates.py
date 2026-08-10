@@ -59,15 +59,48 @@ TIER3_CROSSES = [
     ("FED", "USD", "CHF"),
 ]
 
-# Pairs that also need a companion row under source_authority='ORBI' so
-# the v1-rate serving path can find them. Only pairs with no existing
-# ORBI writer are listed here. Checked 2026-08-10 18:38 UTC: KES, TWD,
-# PKR, JMD, KWD, LBP, CAD, CHF already carry fresh ORBI rows from
-# another path and are intentionally excluded.
-NEEDS_ORBI_ROW = frozenset({
+# Last-known set of TIER3_CROSSES targets that have no other ORBI writer.
+# Used as a fallback when the DB query in derive_needs_orbi_row() fails.
+_FALLBACK_NEEDS_ORBI_ROW = frozenset({
     "RUB", "UAH", "KZT", "MAD", "NGN", "DZD", "VND", "BDT", "EGP", "GHS",
     "BGN",
 })
+
+
+def derive_needs_orbi_row():
+    """Derive at startup which TIER3_CROSSES targets need a companion ORBI row.
+
+    For each target currency in TIER3_CROSSES, emit the companion row only
+    when no other writer has supplied a recent non-composite ORBI row in
+    exchange_rates. This avoids two failure modes of a hardcoded list:
+      - a pair that gains another ORBI writer no longer gets a duplicate write
+      - a pair that loses its only ORBI writer continues to be served
+
+    Falls back to _FALLBACK_NEEDS_ORBI_ROW on query failure so the script
+    keeps running during transient DB issues. Logs a drift warning whenever
+    the derived set diverges from the fallback so the constant stays current.
+    """
+    tier3_targets = {target_ccy for _, _, target_ccy in TIER3_CROSSES}
+    ccys = ",".join(f"'{c}'" for c in sorted(tier3_targets))
+    res = q(
+        "SELECT DISTINCT target_currency FROM exchange_rates "
+        "WHERE source_currency='BTC' AND source_authority='ORBI' "
+        "AND composite = false "
+        f"AND target_currency IN ({ccys}) "
+        "AND bucket_ts > NOW() - INTERVAL '2 hours'"
+    )
+    if res is None:
+        log("WARNING: derive_needs_orbi_row query failed; using fallback constant")
+        return _FALLBACK_NEEDS_ORBI_ROW
+    has_writer = frozenset(line.strip() for line in res.splitlines() if line.strip())
+    derived = tier3_targets - has_writer
+    if derived != _FALLBACK_NEEDS_ORBI_ROW:
+        added = sorted(derived - _FALLBACK_NEEDS_ORBI_ROW)
+        removed = sorted(_FALLBACK_NEEDS_ORBI_ROW - derived)
+        log(
+            f"NEEDS_ORBI_ROW drift: added={added or 'none'} removed={removed or 'none'}"
+        )
+    return derived
 
 
 def _load_local_dsn():
@@ -144,6 +177,9 @@ def main():
         log("no BTC/USD anchor, aborting")
         sys.exit(1)
 
+    needs_orbi_row = derive_needs_orbi_row()
+    log(f"companion-ORBI targets: {sorted(needs_orbi_row)}")
+
     rows = []
     for authority, source_ccy, target_ccy in TIER3_CROSSES:
         usd_x = fetch_usd_x(authority, target_ccy)
@@ -160,7 +196,7 @@ def main():
         # Companion ORBI row for pairs the v1-rate serving path queries by
         # source_authority='ORBI'. Only emitted for pairs that have no other
         # ORBI writer; distinct key (different source_authority), no conflict.
-        if target_ccy in NEEDS_ORBI_ROW:
+        if target_ccy in needs_orbi_row:
             rows.append(
                 "('BTC', '" + target_ccy + "', '" + btc_usd_ts + "', "
                 f"'1m', 'ORBI-M', {btc_x}, 'C-composite', true, "
