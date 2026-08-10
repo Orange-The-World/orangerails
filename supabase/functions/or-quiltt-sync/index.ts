@@ -453,6 +453,15 @@ export async function handleEvent(
   let filterAccountIds: string[];
   if (selectedAccountIds !== null) {
     filterAccountIds = [...selectedAccountIds];
+    if (filterAccountIds.length === 0) {
+      // All accounts deselected by the user. No data to pull. Mark the event processed
+      // so it does not retry: the selection is the user's intent and will not change
+      // until they update source_wallets. reconcileConnectionSuccess already ran above.
+      console.log(
+        `[or-quiltt-sync] event ${ev.event_id}: all accounts deselected, skipping data pull`,
+      );
+      return 'processed';
+    }
   } else {
     const acctResp = await fetch(QUILTT_GRAPHQL, {
       method: 'POST',
