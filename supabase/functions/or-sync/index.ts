@@ -414,13 +414,36 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 continue;
               }
 
+              // DL-0741: Quiltt's TransactionFilter accepts accountIds ([ID!]) but not
+              // connectionId. Pre-fetch account ids for the connection once before paging.
+              const acctRespSink = await fetch('https://api.quiltt.io/v1/graphql', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Basic ${basicSink}`,
+                  'Content-Type':  'application/json',
+                },
+                body: JSON.stringify({
+                  query: `query GetAccounts($connId: ID!) {
+                    connection(id: $connId) {
+                      accounts { nodes { id } }
+                    }
+                  }`,
+                  variables: { connId: quilttConnIdSink },
+                }),
+              });
+              if (!acctRespSink.ok) throw new Error(`Quiltt accounts fetch ${acctRespSink.status}`);
+              const acctJsonSink = await acctRespSink.json();
+              const filterAccountIdsSink: string[] = (
+                (acctJsonSink?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+              ).map((a) => a.id);
+
               let afterSink: string | null = null;
               let pagesSink = 0;
 
               while (pagesSink < QUILTT_SINK_MAX_PAGES) {
                 const query = `
-                  query Q($connId: ID!, $first: Int!, $after: String) {
-                    transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+                  query Q($accountIds: [ID!]!, $first: Int!, $after: String) {
+                    transactions(filter: { accountIds: $accountIds }, first: $first, after: $after) {
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         id amount currencyCode date description entryType status
@@ -437,7 +460,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                   },
                   body: JSON.stringify({
                     query,
-                    variables: { connId: quilttConnIdSink, first: QUILTT_SINK_TX_PAGE_SIZE, after: afterSink },
+                    variables: { accountIds: filterAccountIdsSink, first: QUILTT_SINK_TX_PAGE_SIZE, after: afterSink },
                   }),
                 });
                 if (!resp.ok) {
@@ -650,14 +673,37 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               continue;
             }
 
+            // DL-0741: Quiltt's TransactionFilter accepts accountIds ([ID!]) but not
+            // connectionId. Pre-fetch account ids for the connection once before paging.
+            const acctRespMain = await fetch('https://api.quiltt.io/v1/graphql', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Basic ${basic}`,
+                'Content-Type':  'application/json',
+              },
+              body: JSON.stringify({
+                query: `query GetAccounts($connId: ID!) {
+                  connection(id: $connId) {
+                    accounts { nodes { id } }
+                  }
+                }`,
+                variables: { connId: quilttConnId },
+              }),
+            });
+            if (!acctRespMain.ok) throw new Error(`Quiltt accounts fetch ${acctRespMain.status}`);
+            const acctJsonMain = await acctRespMain.json();
+            const filterAccountIdsMain: string[] = (
+              (acctJsonMain?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+            ).map((a) => a.id);
+
             let after: string | null = null;
             let pages = 0;
             const rowsToInsert: Array<{ connection_id: string; external_id: string; encrypted_payload: string; payload_key_version: number; occurred_at: string | null }> = [];
 
             while (pages < QUILTT_MAX_PAGES) {
               const query = `
-                query Q($connId: ID!, $first: Int!, $after: String) {
-                  transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+                query Q($accountIds: [ID!]!, $first: Int!, $after: String) {
+                  transactions(filter: { accountIds: $accountIds }, first: $first, after: $after) {
                     pageInfo { hasNextPage endCursor }
                     nodes {
                       id amount currencyCode date description entryType status
@@ -674,7 +720,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 },
                 body: JSON.stringify({
                   query,
-                  variables: { connId: quilttConnId, first: QUILTT_TX_PAGE_SIZE, after },
+                  variables: { accountIds: filterAccountIdsMain, first: QUILTT_TX_PAGE_SIZE, after },
                 }),
               });
               if (!resp.ok) {
