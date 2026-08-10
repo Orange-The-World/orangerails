@@ -148,6 +148,18 @@ export interface SyncResult {
    * account-identifying, so they are safe to return and to log.
    *
    * Always accompanied by `partial: true`. Absent when nothing was refused.
+   *
+   * **MANDATORY once an adapter can refuse a source.** or-sync reads a missing
+   * field as "this adapter cannot under-report", which is correct for every
+   * adapter written before these fields existed and silently wrong for one
+   * written afterwards that can deny a source and does not say so. There is no
+   * way to tell those two cases apart from the outside, so the obligation sits
+   * here rather than in a runtime check: if your adapter can skip a source for
+   * any reason, it MUST name it, and MUST set `partial`.
+   *
+   * Setting `denied_sources` without `partial` is corrected rather than
+   * trusted, because the alternative is writing status='active' over history
+   * nobody was allowed to read.
    */
   denied_sources?: string[];
 }
