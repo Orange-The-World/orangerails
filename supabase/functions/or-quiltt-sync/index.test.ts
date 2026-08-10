@@ -466,9 +466,27 @@ function makeQuilttSyncMock(opts: {
     },
   };
   const origFetch = (globalThis as any).fetch;
-  // Patch global fetch for the Quiltt GraphQL call.
-  (globalThis as any).fetch = () =>
-    Promise.resolve(
+  // Patch global fetch for Quiltt GraphQL calls.
+  // When source_wallets is empty the code does a GetAccounts pre-fetch (DL-0741)
+  // before the transactions paging loop, so the mock must handle two distinct
+  // query shapes. Distinguish by the request body: GetAccounts vs the Q transactions query.
+  (globalThis as any).fetch = (_url: string, fetchOpts?: RequestInit) => {
+    const body = typeof fetchOpts?.body === 'string' ? fetchOpts.body : '';
+    if (body.includes('GetAccounts')) {
+      // Accounts pre-fetch: return unique account ids derived from txNodes.
+      const uniqueIds = [...new Set(
+        opts.txNodes.map((tx) => tx.account?.id).filter((id): id is string => id != null),
+      )];
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: { connection: { accounts: { nodes: uniqueIds.map((id) => ({ id })) } } },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+    }
+    return Promise.resolve(
       new Response(
         JSON.stringify({
           data: {
@@ -490,6 +508,7 @@ function makeQuilttSyncMock(opts: {
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
     );
+  };
   const cleanup = () => { (globalThis as any).fetch = origFetch; };
   return { client, inserted, cleanup };
 }
