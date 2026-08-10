@@ -12,7 +12,8 @@ export const Route = createFileRoute("/recover")({
 
 function RecoverPage() {
   const navigate = useNavigate();
-  const { recoverWithCode } = useVault();
+  const { recoverWithCode, migrateCredentialsCiphertext, migrateTransactionCiphertext, clearMigrationKeys } =
+    useVault();
 
   const [recoveryCode, setRecoveryCode] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -64,7 +65,7 @@ function RecoverPage() {
         );
       }
 
-      const { newEncMekCiphertext, newRecoveryCode: freshCode, newRecoveryCiphertext } =
+      const { newEncMekCiphertext, newRecoveryCode: freshCode, newRecoveryCiphertext, newVerifierCiphertext } =
         await recoverWithCode({
           recoveryCode,
           recoveryCiphertext: meta.recovery_ciphertext,
@@ -73,16 +74,83 @@ function RecoverPage() {
           newPassword,
         });
 
-      // Persist the updated key material.
+      // Persist rotated vault meta. vault_verifier_ciphertext MUST be updated
+      // because it is derived from the MEK, which just rotated.
       const { error: updateErr } = await (supabase as any)
         .from("user_vault_meta")
         .update({
           enc_mek_ciphertext: newEncMekCiphertext,
           recovery_ciphertext: newRecoveryCiphertext,
+          vault_verifier_ciphertext: newVerifierCiphertext,
           vault_key_version: CURRENT_VAULT_KEY_VERSION,
         })
         .eq("user_id", session.user.id);
       if (updateErr) throw updateErr;
+
+      // Re-encrypt connections. The credentials and label columns use the
+      // credentials subkey which changes with the MEK.
+      const { data: conns, error: connsErr } = await (supabase as any)
+        .from("connections")
+        .select("id, encrypted_credentials, encrypted_label");
+      if (connsErr) throw connsErr;
+
+      for (const conn of (conns ?? []) as Array<{
+        id: string;
+        encrypted_credentials: string;
+        encrypted_label: string | null;
+      }>) {
+        const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
+        const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
+        if (conn.encrypted_label) {
+          try {
+            connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
+          } catch {
+            try {
+              connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
+            } catch {
+              // Label migration failed with both keys. Leave the stale ciphertext.
+              // encrypted_label is cosmetic and the connection remains usable.
+            }
+          }
+        }
+        const { error: connErr } = await (supabase as any)
+          .from("connections")
+          .update(connUpdate)
+          .eq("id", conn.id);
+        if (connErr) throw connErr;
+      }
+
+      // Re-encrypt transactions in pages of 500.
+      // encrypted_payload uses the transactions subkey, which changes with the MEK.
+      const PAGE_SIZE = 500;
+      let offset = 0;
+      for (;;) {
+        const { data: txns, error: txnsErr } = await (supabase as any)
+          .from("encrypted_transactions")
+          .select("id, encrypted_payload")
+          .range(offset, offset + PAGE_SIZE - 1);
+        if (txnsErr) throw txnsErr;
+        if (!txns || (txns as unknown[]).length === 0) break;
+
+        await Promise.all(
+          (txns as Array<{ id: string; encrypted_payload: string }>).map(async (txn) => {
+            const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
+            const { error: txnErr } = await (supabase as any)
+              .from("encrypted_transactions")
+              .update({ encrypted_payload: newPayload })
+              .eq("id", txn.id);
+            if (txnErr) throw txnErr;
+          }),
+        );
+
+        if ((txns as unknown[]).length < PAGE_SIZE) break;
+        offset += PAGE_SIZE;
+      }
+
+      // All ciphertexts migrated. Zero old key material.
+      // clearMigrationKeys is intentionally NOT called in the catch branch below
+      // so in-session retry can reuse the stashed old keys.
+      clearMigrationKeys();
 
       void logSecurityEvent(supabase, session.user.id, "vault_recover");
 
