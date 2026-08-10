@@ -234,8 +234,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return Response.json({ error: 'server_error', message: 'Database error fetching exchange rate', correlation_id: correlationId }, { status: 500 })
     }
 
-    const resolvedTs = row ? new Date(row.bucket_ts).toISOString() : bucketTs
-    const fillType = !row ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
+    if (!row) {
+      return errResponse(
+        404,
+        'unsupported_pair',
+        `No rate coverage for ${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on product ${product}`,
+      )
+    }
+
+    const resolvedTs = new Date(row.bucket_ts).toISOString()
+    const fillType = resolvedTs === bucketTs ? 'exact' : 'forward_fill'
 
     results.push({
       asset: item.asset.toUpperCase(),
@@ -243,10 +251,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       product,
       requested_at: item.at,
       resolved_at: resolvedTs,
-      rate: row?.rate ?? null,
-      provenance: row?.provenance ?? null,
-      tier: row?.tier ?? null,
-      source_authority: row?.source_authority ?? null,
+      rate: row.rate,
+      provenance: row.provenance ?? null,
+      tier: row.tier ?? null,
+      source_authority: row.source_authority ?? null,
       fill_type: fillType
     })
 
