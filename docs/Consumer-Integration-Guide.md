@@ -258,7 +258,7 @@ Body: {
 }
 200 / 207 / 422: {
   synced?:     number,        // omitted when error is set on all connections
-  connections: [{ connection_id, synced?, next_cursor?, error? }],
+  connections: [{ connection_id, synced?, next_cursor?, partial?, denied_sources?, error? }],
   rows: {
     Wallet:       [...],
     Transaction:  [...],
@@ -274,6 +274,13 @@ Body: {
 ```
 
 OR fetches transactions from the upstream provider, runs your sink adapter on each `NormalizedTransaction`, returns app-shaped rows. No transactions are persisted server-side.
+
+**Partial syncs.** When a connection's API key lacks permission to read one or more transaction types, or-sync still returns whatever it could read and marks the connection:
+
+- `partial: true` -- at least one source was refused; the returned rows are incomplete.
+- `denied_sources: string[]` -- the names of the refused sources (e.g. `["withdrawals"]` when a Bitstamp read-only key cannot fetch withdrawal history).
+
+Both fields are **additive**: a complete sync returns exactly `connection_id`, `synced` and `next_cursor`. A consumer that only reads those three fields is unaffected. When `denied_sources` is present, show the customer which permissions their API key is missing so they can reconnect with a broader key.
 
 The credentials_key is in OR memory only for the duration of the request (used to decrypt the stored API key, then discarded).
 

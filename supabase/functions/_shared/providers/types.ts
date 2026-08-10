@@ -130,6 +130,14 @@ export interface SyncResult {
    * Absent or false means the sync was complete.
    */
   partial?: boolean;
+  /**
+   * Sources that were refused during this sync pass (e.g. 'withdrawals' when
+   * the API key lacks the withdrawal-history scope). A non-empty list forces
+   * status='partial' on the connection even when the adapter does not set
+   * partial: true explicitly. Absent or empty means all attempted sources
+   * replied. Only emitted when non-empty.
+   */
+  denied_sources?: string[];
 }
 
 // --- Adapter contract ---------------------------------------------------

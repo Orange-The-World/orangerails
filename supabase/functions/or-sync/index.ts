@@ -17,7 +17,7 @@
  *      OR fetches transactions, encrypts each with transactions_key, stores
  *      ciphertext in encrypted_transactions. Caller fetches via
  *      or-transactions-list and decrypts in-browser.
- *      Response: { synced: number, connections: [{ connection_id, synced?, next_cursor, error? }] }
+ *      Response: { synced: number, connections: [{ connection_id, synced?, next_cursor, partial?, denied_sources?, error? }] }
  *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *
  *   2. Protocol-driven sink mode (V2 today, V3 future):
@@ -27,7 +27,7 @@
  *      storage. transactions_key is NOT required.
  *      Response: {
  *        synced: number,
- *        connections: [{ connection_id, synced?, next_cursor, error? }],
+ *        connections: [{ connection_id, synced?, next_cursor, partial?, denied_sources?, error? }],
  *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *        rows: { <table-name>: [...rows] },
  *        metadata: { format, requires_encryption: string[] }
@@ -54,6 +54,7 @@ import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
+import { readSyncCompleteness } from './_connection-result.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //
@@ -340,6 +341,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       action?: string;
       help_url?: string | null;
       skip_reason?: string;
+      partial?: boolean;
+      denied_sources?: string[];
     }> = [];
     // Sink-mode-only: collect per-connection sink outputs to merge into
     // a single `rows` map at the end. Empty in legacy mode.
@@ -810,7 +813,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
         let newTxs: NormalizedTransaction[];
         let next_cursor: string | null;
-        let isPartial = false;
+        let completeness: { status: 'active' | 'partial'; denied_sources?: string[] } = { status: 'active' };
 
         if (conn.provider_type === 'strike') {
           // Strike uses BOTH paths now (V3 ADR 2026-05-25):
@@ -912,12 +915,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           const out = await adapter.syncByWallets(credentials, walletIds, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
-          isPartial = out.partial ?? false;
+          completeness = readSyncCompleteness(out);
         } else {
           const out = await adapter.syncAccountWide(credentials, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
-          isPartial = out.partial ?? false;
+          completeness = readSyncCompleteness(out);
         }
 
         if (sinkMode) {
@@ -973,7 +976,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // Liveness and health reporting are refreshed on every pass regardless.
         const connUpdate: Record<string, unknown> = {
           last_sync_at: new Date().toISOString(),
-          status: isPartial ? 'partial' : 'active',
+          status: completeness.status,
           encrypted_last_error: null,
         };
         if (newTxs.length > 0 && next_cursor != null) {
@@ -985,7 +988,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .eq('id', conn.id);
         throwOnDbError(connUpdateErr);
 
-        results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
+        results.push({
+          connection_id: conn.id,
+          synced: newTxs.length,
+          next_cursor,
+          ...(completeness.status === 'partial' ? { partial: true } : {}),
+          ...(completeness.denied_sources ? { denied_sources: completeness.denied_sources } : {}),
+        });
 
         // ─── sync.completed webhook enqueue ──────────────────────────
         // Out-of-band: insert a webhook_delivery row that or-webhook-dispatch
