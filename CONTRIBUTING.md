@@ -108,6 +108,8 @@ chore(deps): upgrade @noble/hashes to 1.4.0
 
 Scope is optional but encouraged. Use the present tense ("add Strike adapter", not "added Strike adapter").
 
+When a commit removes a restricted value (an internal hostname, reserved term, or sensitive string), describe it in the message rather than quoting the literal value. Write `fix: remove CGNAT host references from workflow docs`, not the actual string. Quoting a restricted value puts it back into git history.
+
 ---
 
 ## Pull requests
@@ -145,7 +147,7 @@ git commit -s -m "feat: add Strike adapter"
 
 The `-s` flag appends `Signed-off-by: Your Name <your.email@example.com>`. By signing off, you certify the DCO , you have the right to submit the contribution under Apache 2.0.
 
-This is not a legal document but a lightweight guarantee that every commit's provenance is traceable.
+This is not a legal document but a lightweight guarantee that every commit's provenance is marked with provenance.
 
 ---
 
