@@ -107,9 +107,11 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
  *
  * Exported so the pure logic can be unit-tested without a Deno.serve mock.
  */
-export function batchHttpStatus(results: Array<{ synced?: number; error?: string }>): number {
+export function batchHttpStatus(results: Array<{ synced?: number; error?: string; skip_reason?: string }>): number {
   if (results.length === 0) return 200;
-  const errCount = results.filter(r => r.error != null).length;
+  // Count both hard errors and soft skips (e.g. no_quiltt_profile_map) as
+  // non-success so the HTTP status is honest. A skip is not a clean sync.
+  const errCount = results.filter(r => r.error != null || r.skip_reason != null).length;
   if (errCount === 0) return 200;
   if (errCount === results.length) return 422;
   return 207;
