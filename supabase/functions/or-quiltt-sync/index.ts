@@ -446,6 +446,64 @@ export async function handleEvent(
         )
       : null;
 
+  // DL-0741: Quiltt's TransactionFilter accepts accountIds ([ID!]) but not
+  // connectionId. When source_wallets has an account selection (DL-0442), use
+  // those ids directly. Otherwise pre-fetch all account ids for the connection
+  // once before the paging loop so subsequent pages can use the correct filter.
+  let filterAccountIds: string[];
+  if (selectedAccountIds !== null) {
+    filterAccountIds = [...selectedAccountIds];
+    if (filterAccountIds.length === 0) {
+      // All accounts deselected by the user. No data to pull. Mark the event processed
+      // so it does not retry: the selection is the user's intent and will not change
+      // until they update source_wallets. reconcileConnectionSuccess already ran above.
+      console.log(
+        `[or-quiltt-sync] event ${ev.event_id}: all accounts deselected, skipping data pull`,
+      );
+      return 'processed';
+    }
+  } else {
+    const acctResp = await fetch(QUILTT_GRAPHQL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${basic}`,
+        'Content-Type':  'application/json',
+        'x-region':      QUILTT_REGION_HEADER,
+      },
+      body: JSON.stringify({
+        query: `query GetAccounts($connId: ID!) {
+          connection(id: $connId) {
+            accounts { nodes { id } }
+          }
+        }`,
+        variables: { connId: connectionId },
+      }),
+    });
+    if (!acctResp.ok) {
+      const errBody = await acctResp.text().catch(() => '');
+      return `Quiltt accounts fetch ${acctResp.status}: ${redactProviderError(errBody, 300)}`;
+    }
+    const acctJson = await acctResp.json();
+    if (Array.isArray(acctJson?.errors) && acctJson.errors.length > 0) {
+      const msgs = acctJson.errors
+        .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+        .filter((m: string) => m.length > 0)
+        .join('; ');
+      return `Quiltt accounts fetch errors: ${redactProviderError(msgs, 400)}`;
+    }
+    filterAccountIds = (
+      (acctJson?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+    ).map((a) => a.id);
+    if (filterAccountIds.length === 0) {
+      // Connection has no accounts yet -- possibly still provisioning.
+      // Return an error so the event stays in the inbox and retries next tick.
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: connection ${connectionId} has no accounts, will retry`,
+      );
+      return 'connection has no accounts at Quiltt';
+    }
+  }
+
   let after: string | null = null;
   let pages = 0;
   let newRows = 0;
@@ -465,9 +523,8 @@ export async function handleEvent(
     }
 
     const query = `
-      query Q($connId: ID!, $first: Int!, $after: String) {
-        connection(id: $connId) { id }
-        transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+      query Q($accountIds: [ID!]!, $first: Int!, $after: String) {
+        transactions(filter: { accountIds: $accountIds }, first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
             id amount currencyCode date description entryType status
@@ -485,7 +542,7 @@ export async function handleEvent(
       },
       body: JSON.stringify({
         query,
-        variables: { connId: connectionId, first: TX_PAGE_SIZE, after },
+        variables: { accountIds: filterAccountIds, first: TX_PAGE_SIZE, after },
       }),
     });
     if (!resp.ok) {

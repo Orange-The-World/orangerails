@@ -161,6 +161,62 @@ Deno.test('merge: empty inputs produce an empty batch (no upsert)', () => {
   assert(mergeStrikeTransactions([], [], [WALLET_A]).length === 0);
 });
 
+// ── Quiltt accountIds guard and GraphQL errors check (DL-0741) ────────
+//
+// The PR switches the Quiltt transaction filter from connectionId to
+// accountIds. Two regressions are now possible:
+//   1. Empty accountIds list -> accountIds: [] sent to the API, same
+//      rejection shape as the original bug, just with a different arg.
+//   2. GraphQL errors on the tx response silently drained as processed,
+//      hiding failures the same way 95 rows were hidden originally.
+//
+// Source inspection, same rationale as the upstream-errors wiring tests:
+// a unit test over an extracted pure helper cannot detect that the guard
+// was removed from the live call site. These fail immediately if the
+// guard disappears from either path.
+
+const readSelf = (rel: string) =>
+  Deno.readTextFileSync(new URL(rel, import.meta.url));
+
+Deno.test('quiltt inbox drain (sink): empty-accountIds guard is present', () => {
+  const src = readSelf('./index.ts');
+  assertEquals(
+    src.includes('filterAccountIdsSink.length === 0'),
+    true,
+    'sink path must short-circuit and stamp processed_at when account list is empty',
+  );
+});
+
+Deno.test('quiltt inbox drain (legacy): empty-accountIds guard is present', () => {
+  const src = readSelf('./index.ts');
+  assertEquals(
+    src.includes('filterAccountIdsMain.length === 0'),
+    true,
+    'legacy path must short-circuit and stamp processed_at when account list is empty',
+  );
+});
+
+Deno.test('quiltt inbox drain: transactions response checked for GraphQL errors on both paths', () => {
+  const src = readSelf('./index.ts');
+  const sinkGuardIdx = src.indexOf('filterAccountIdsSink.length === 0');
+  const legacyGuardIdx = src.indexOf('filterAccountIdsMain.length === 0');
+  const allTxErrMatches = [...src.matchAll(/Quiltt transactions fetch errors/g)];
+  assert(sinkGuardIdx !== -1, 'sink empty-account guard must be present');
+  assert(legacyGuardIdx !== -1, 'legacy empty-account guard must be present');
+  // At least two throws: one for sink path and one for legacy path.
+  assert(
+    allTxErrMatches.length >= 2,
+    'transactions errors check must be present on both sink and legacy paths',
+  );
+  // The tx errors check must appear after each empty-account guard (proves it
+  // is on the tx fetch response, not the accounts prefetch).
+  const firstTxErrIdx = allTxErrMatches[0]?.index ?? -1;
+  assert(
+    firstTxErrIdx > sinkGuardIdx,
+    'first transactions errors check must appear after the sink empty-account guard',
+  );
+});
+
 // ── batchHttpStatus: response contract for issue #364 ───────────────
 
 Deno.test('batchHttpStatus: empty results -> 200', () => {
