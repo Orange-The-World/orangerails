@@ -78,6 +78,24 @@ Deno.test('blocks hostname resolving to private IP (injected resolver)', async (
   );
 });
 
+Deno.test('blocks hostname when resolver throws (fail-closed, not fail-open)', async () => {
+  const throwingResolve = async (_host: string, _rt: 'A' | 'AAAA'): Promise<string[]> => {
+    throw new Error('DNS unavailable');
+  };
+  await assertRejects(
+    () => assertPublicHttpUrl('https://example.com/api', { resolveDns: throwingResolve }),
+    NetGuardError,
+  );
+});
+
+Deno.test('blocks hostname when both A and AAAA return empty (unresolvable host)', async () => {
+  const emptyResolve = async (_host: string, _rt: 'A' | 'AAAA'): Promise<string[]> => [];
+  await assertRejects(
+    () => assertPublicHttpUrl('https://unresolvable.example/api', { resolveDns: emptyResolve }),
+    NetGuardError,
+  );
+});
+
 // --------------- btcpay integration: guard fires before fetch ------------
 // Proves assertPublicHttpUrl is called before any network I/O in btcpayGet.
 
