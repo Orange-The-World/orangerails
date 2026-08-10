@@ -120,17 +120,23 @@ export async function assertPublicHttpUrl(
     // with only A records (AAAA empty) is still valid -- guard is on BOTH
     // being empty, not either.
     const resolve = opts?.resolveDns ?? defaultResolveDns;
-    let aRecords: string[], aaaaRecords: string[];
-    try {
-      [aRecords, aaaaRecords] = await Promise.all([
-        resolve(host, 'A'),
-        resolve(host, 'AAAA'),
-      ]);
-    } catch (err) {
+    const [aResult, aaaaResult] = await Promise.allSettled([
+      resolve(host, 'A'),
+      resolve(host, 'AAAA'),
+    ]);
+    const pickRecords = (result: PromiseSettledResult<string[]>, type: string): string[] => {
+      if (result.status === 'fulfilled') return result.value;
+      const err = result.reason;
+      // Deno.resolveDns throws NotFound when the record type has no records
+      // (e.g. AAAA on an IPv4-only host). Treat as empty; the both-empty check
+      // below rejects genuinely unresolvable hostnames.
+      if (err instanceof Deno.errors.NotFound) return [];
       throw new NetGuardError(
-        `DNS resolution failed for ${host}: ${err instanceof Error ? err.message : String(err)}`,
+        `DNS resolution failed for ${host} (${type}): ${err instanceof Error ? err.message : String(err)}`,
       );
-    }
+    };
+    const aRecords = pickRecords(aResult, 'A');
+    const aaaaRecords = pickRecords(aaaaResult, 'AAAA');
     if (aRecords.length === 0 && aaaaRecords.length === 0) {
       throw new NetGuardError(
         `Hostname ${host} has no DNS records; cannot verify it is safe to contact`,
