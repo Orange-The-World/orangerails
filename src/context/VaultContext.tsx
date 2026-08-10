@@ -89,12 +89,18 @@ interface VaultSetupResult {
 }
 
 interface RecoveryResult {
-  /** Updated MEK wrapper under the new password + existing salt. */
+  /** Updated MEK wrapper under the new (rotated) MEK + new password KEK. */
   newEncMekCiphertext: string;
   /** New recovery code (the old one is invalidated). */
   newRecoveryCode: string;
-  /** Updated recovery ciphertext for the new code. */
+  /** Updated recovery ciphertext wrapping the new MEK. */
   newRecoveryCiphertext: string;
+  /**
+   * New verifier ciphertext derived from the new MEK + same salt.
+   * The caller MUST persist this alongside enc_mek_ciphertext; if it is
+   * not updated, unlock() will fail on the next page load.
+   */
+  newVerifierCiphertext: string;
 }
 
 interface VaultContextValue {
@@ -141,6 +147,27 @@ interface VaultContextValue {
     verifierCiphertext: string;
     newPassword: string;
   }): Promise<RecoveryResult>;
+
+  /**
+   * Re-encrypt a credentials-subkey ciphertext using old-MEK material for
+   * decryption and the current (rotated) MEK subkey for re-encryption.
+   * Only callable between recoverWithCode() and clearMigrationKeys().
+   * Throws if migration keys are not loaded.
+   */
+  migrateCredentialsCiphertext(oldCiphertext: string): Promise<string>;
+
+  /**
+   * Same as migrateCredentialsCiphertext but for the transactions subkey.
+   * Use for encrypted_transactions.encrypted_payload.
+   */
+  migrateTransactionCiphertext(oldCiphertext: string): Promise<string>;
+
+  /**
+   * Zero the old-MEK migration subkeys from memory. Call once all ciphertexts
+   * have been re-encrypted and persisted. After this call the migrate* methods
+   * throw.
+   */
+  clearMigrationKeys(): void;
 
   /** Clear the MEK from memory. Subsequent encrypt/decrypt calls will throw. */
   lock(): void;
@@ -329,6 +356,12 @@ export function VaultProvider({ children }: VaultProviderProps) {
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [saltB64, setSaltB64] = useState<string | null>(null);
 
+  // Old-MEK subkeys held transiently during the post-recovery re-encryption
+  // window. Populated by recoverWithCode(), zeroed by clearMigrationKeys().
+  // Must be zeroed before the user navigates away from the recovery page.
+  const migrationOldCredsKeyRef = useRef<CryptoKey | null>(null);
+  const migrationOldTxnKeyRef = useRef<CryptoKey | null>(null);
+
   // ------------------------------------------------------------------
   // Setup: first-time vault creation (v2 architecture).
   // MEK is random; password + recovery code each independently wrap it.
@@ -416,7 +449,15 @@ export function VaultProvider({ children }: VaultProviderProps) {
 
   // ------------------------------------------------------------------
   // Recovery: regain access via the 12-word recovery code.
-  // The vault salt is preserved so all existing HKDF subkeys stay valid.
+  //
+  // TRUE MEK ROTATION: a fresh random MEK is generated. The old MEK is
+  // discarded after stashing old-derived subkeys in migration refs so the
+  // caller (recover.tsx) can re-encrypt all existing ciphertexts before
+  // clearing the old key material via clearMigrationKeys().
+  //
+  // The vault salt is preserved so the user does not need to re-register.
+  // All HKDF subkeys change with the MEK and every ciphertext must be
+  // migrated before clearMigrationKeys() is called.
   // ------------------------------------------------------------------
   const recoverWithCode = useCallback(
     async ({
@@ -432,32 +473,50 @@ export function VaultProvider({ children }: VaultProviderProps) {
       verifierCiphertext: string;
       newPassword: string;
     }): Promise<RecoveryResult> => {
-      // 1. Unwrap MEK with recovery code , throws if code is wrong.
+      // 1. Unwrap OLD MEK with recovery code: proves the caller holds the code.
       const recoveryKek = await deriveRecoveryKek(recoveryCode);
-      const mekRaw = await unwrapMekBytes(recoveryCiphertext, recoveryKek);
-      const mek = await importMekAsHkdf(mekRaw);
+      const oldMekRaw = await unwrapMekBytes(recoveryCiphertext, recoveryKek);
+      const oldMek = await importMekAsHkdf(oldMekRaw);
 
-      // 2. Verify MEK matches the stored verifier (guards against swapped ciphertexts).
-      const verifierKey = await deriveVerifierKey(mek, storedSalt);
-      const ok = await verifyVaultPassword(verifierKey, verifierCiphertext);
+      // 2. Verify OLD MEK matches the stored verifier (guards against swapped ciphertexts).
+      const oldVerifierKey = await deriveVerifierKey(oldMek, storedSalt);
+      const ok = await verifyVaultPassword(oldVerifierKey, verifierCiphertext);
       if (!ok) throw new Error("Recovery code does not match this vault.");
 
-      // 3. Re-wrap MEK with the new password (same salt , subkeys stay valid).
-      const newKek = await deriveKek(newPassword, storedSalt);
-      const newEncMekCiphertext = await wrapMekBytes(mekRaw, newKek);
+      // 3. Stash old subkeys before discarding the old MEK. The caller must
+      //    migrate every ciphertext using these keys and then call clearMigrationKeys().
+      migrationOldCredsKeyRef.current = await deriveCredentialsKey(oldMek, storedSalt);
+      migrationOldTxnKeyRef.current = await deriveTransactionsKey(oldMek, storedSalt);
 
-      // 4. Generate a fresh recovery code (old one is consumed/invalidated).
+      // 4. TRUE ROTATION: generate a fresh random MEK.
+      //    Every prior kit (old recovery blob or old password KEK) now wraps
+      //    the old discarded MEK and cannot reach any new-MEK-encrypted data.
+      const newMekRaw = generateMekBytes();
+      const newMek = await importMekAsHkdf(newMekRaw);
+
+      // 5. New verifier under the NEW MEK + same salt.
+      //    Caller MUST persist this or unlock() fails on next page load.
+      const newVerifierKey = await deriveVerifierKey(newMek, storedSalt);
+      const newVerifierCiphertext = await createVaultVerifier(newVerifierKey);
+
+      // 6. Wrap new MEK under the new password (same salt, new KEK).
+      const newKek = await deriveKek(newPassword, storedSalt);
+      const newEncMekCiphertext = await wrapMekBytes(newMekRaw, newKek);
+
+      // 7. Fresh recovery code wrapping the NEW MEK.
+      //    The old recovery code is now useless: it decrypts to the old MEK
+      //    which does not match any ciphertext in the database after migration.
       const newRecoveryCode = generateRecoveryCode();
       const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
-      const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
+      const newRecoveryCiphertext = await wrapMekBytes(newMekRaw, newRecoveryKek);
 
-      // 5. Load MEK into memory , vault is now unlocked.
-      mekRef.current = mek;
+      // 8. Load NEW MEK. Vault is now unlocked with the rotated key.
+      mekRef.current = newMek;
       saltRef.current = storedSalt;
       setSaltB64(storedSalt);
       setIsUnlocked(true);
 
-      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext };
+      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext, newVerifierCiphertext };
     },
     [],
   );
@@ -514,6 +573,52 @@ export function VaultProvider({ children }: VaultProviderProps) {
     },
     [],
   );
+
+  // ------------------------------------------------------------------
+  // Migration helpers: re-encrypt ciphertexts after MEK rotation.
+  //
+  // These are only valid in the window between recoverWithCode() returning
+  // and clearMigrationKeys() being called. The caller (recover.tsx) must:
+  //   1. Migrate every ciphertext owned by this user.
+  //   2. Persist all migrated ciphertexts to the database.
+  //   3. Call clearMigrationKeys() to zero the old key material.
+  // If any step fails, clearMigrationKeys() must NOT be called so the
+  // in-session retry can re-use the stashed old keys.
+  // ------------------------------------------------------------------
+  const migrateCredentialsCiphertext = useCallback(
+    async (oldCiphertext: string): Promise<string> => {
+      const oldKey = migrationOldCredsKeyRef.current;
+      if (!oldKey || !mekRef.current || !saltRef.current) {
+        throw new Error(
+          "No migration keys available. Call recoverWithCode() before migrating ciphertexts.",
+        );
+      }
+      const newCredsKey = await deriveCredentialsKey(mekRef.current, saltRef.current);
+      const plaintext = await decryptString(oldCiphertext, oldKey);
+      return encryptString(plaintext, newCredsKey);
+    },
+    [saltB64],
+  );
+
+  const migrateTransactionCiphertext = useCallback(
+    async (oldCiphertext: string): Promise<string> => {
+      const oldKey = migrationOldTxnKeyRef.current;
+      if (!oldKey || !mekRef.current || !saltRef.current) {
+        throw new Error(
+          "No migration keys available. Call recoverWithCode() before migrating ciphertexts.",
+        );
+      }
+      const newTxnKey = await deriveTransactionsKey(mekRef.current, saltRef.current);
+      const plaintext = await decryptString(oldCiphertext, oldKey);
+      return encryptString(plaintext, newTxnKey);
+    },
+    [saltB64],
+  );
+
+  const clearMigrationKeys = useCallback(() => {
+    migrationOldCredsKeyRef.current = null;
+    migrationOldTxnKeyRef.current = null;
+  }, []);
 
   // ------------------------------------------------------------------
   // Lock: clear the MEK.
@@ -722,6 +827,9 @@ export function VaultProvider({ children }: VaultProviderProps) {
     loadAdminSubkeys,
     blindIndex,
     changeVaultPassword,
+    migrateCredentialsCiphertext,
+    migrateTransactionCiphertext,
+    clearMigrationKeys,
   };
 
   return <VaultContext.Provider value={value}>{children}</VaultContext.Provider>;
