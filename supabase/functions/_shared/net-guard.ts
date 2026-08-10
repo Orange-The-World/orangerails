@@ -67,11 +67,7 @@ function assertPublicIPv6(addr: string): void {
 }
 
 async function defaultResolveDns(host: string, recordType: 'A' | 'AAAA'): Promise<string[]> {
-  try {
-    return await Deno.resolveDns(host, recordType);
-  } catch {
-    return [];
-  }
+  return await Deno.resolveDns(host, recordType);
 }
 
 /**
@@ -116,12 +112,30 @@ export async function assertPublicHttpUrl(
     // IPv6 literal (url.hostname already stripped brackets)
     assertPublicIPv6(host);
   } else {
-    // Hostname: resolve DNS and check every resolved address (A + AAAA)
+    // Hostname: resolve DNS and check every resolved address (A + AAAA).
+    // Fail closed: if the resolver throws (e.g. Deno.resolveDns unavailable
+    // or a network error), surface a NetGuardError rather than allowing the
+    // URL through. Also fail closed when both lookups return zero records:
+    // a hostname that cannot be resolved at all must be rejected. A host
+    // with only A records (AAAA empty) is still valid -- guard is on BOTH
+    // being empty, not either.
     const resolve = opts?.resolveDns ?? defaultResolveDns;
-    const [aRecords, aaaaRecords] = await Promise.all([
-      resolve(host, 'A'),
-      resolve(host, 'AAAA'),
-    ]);
+    let aRecords: string[], aaaaRecords: string[];
+    try {
+      [aRecords, aaaaRecords] = await Promise.all([
+        resolve(host, 'A'),
+        resolve(host, 'AAAA'),
+      ]);
+    } catch (err) {
+      throw new NetGuardError(
+        `DNS resolution failed for ${host}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (aRecords.length === 0 && aaaaRecords.length === 0) {
+      throw new NetGuardError(
+        `Hostname ${host} has no DNS records; cannot verify it is safe to contact`,
+      );
+    }
     for (const ip of aRecords) {
       assertPublicIPv4(ip);
     }
