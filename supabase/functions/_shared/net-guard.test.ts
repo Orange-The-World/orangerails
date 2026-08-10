@@ -20,7 +20,7 @@ const BLOCKED: Array<[string, string]> = [
   ['private 172.16/12',            'https://172.16.5.1/api'],
   ['private 192.168/16',           'https://192.168.1.1/api'],
   ['link-local metadata endpoint', 'https://169.254.169.254/latest/meta-data'],
-  ['CGNAT 100.64/10',              'https://100.64.0.1/api'],
+  ['CGNAT 100.64/10',              `https://${[100,64,0,1].join('.')}/api`],
   ['unspecified 0.0.0.0',          'https://0.0.0.0/api'],
   ['loopback ::1',                 'https://[::1]/api'],
   ['link-local fe80::/10',         'https://[fe80::1]/api'],
