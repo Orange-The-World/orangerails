@@ -1,3 +1,16 @@
+-- SUPERSEDED: content moved to 20260811000000_schedule_or_quiltt_drain_alert.sql
+--
+-- This file is an intentional no-op stub. 20260807000000 sorts before
+-- the latest applied dev migration (20260809120000); supabase db push
+-- refuses an unapplied out-of-order migration regardless of content.
+--
+-- Resolution (one of):
+--   a) DBA inserts '20260807000000' into supabase_migrations.schema_migrations
+--      on dev so the push runner treats this file as already applied and skips it.
+--   b) Ride session: git rm this file from the branch entirely.
+--
+-- Refs: DL-0640
+--
 -- ============================================================
 -- Wire or-quiltt-drain-alert to pg_cron for drain health monitoring.
 -- Closes monitoring gap for or_quiltt_sync_drain (DL-0640).
