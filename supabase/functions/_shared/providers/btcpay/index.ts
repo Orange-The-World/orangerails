@@ -47,6 +47,7 @@ import type {
   NormalizedTransaction,
   SyncResult,
 } from '../types.ts';
+import { assertPublicHttpUrl } from '../../net-guard.ts';
 
 const PAGE_SIZE = 100;
 const MAX_PAGES_PER_STORE = 50; // safety cap , 5,000 invoices per store per sync
@@ -108,16 +109,21 @@ function parseBtcPayCredentials(c: Record<string, unknown>): BtcPayCredentials {
 }
 
 async function btcpayGet<T>(creds: BtcPayCredentials, path: string): Promise<T> {
+  // Validate per-request (not just at credential parse time) to defeat DNS
+  // rebinding. Throws NetGuardError for loopback, RFC-1918, link-local (incl.
+  // 169.254 metadata), CGNAT, and IPv4-mapped-IPv6 of any of those.
+  const url = await assertPublicHttpUrl(`${creds.btcpay_url}${path}`);
   // Identify as a real client to bypass any Cloudflare / WAF bot heuristics
   // on self-hosted BTCPay instances. Same fix shape as Strike / Blink , see
   // diagnosis 2026-05-22 (Strike's CF was rejecting Deno's default fetch UA).
-  const res = await fetch(`${creds.btcpay_url}${path}`, {
+  const res = await fetch(url, {
     headers: {
       'Authorization': `token ${creds.api_key}`,
       'Accept': 'application/json',
       'Accept-Language': 'en-US,en;q=0.9',
       'User-Agent': 'OrangeRails/1.0 (+https://orangerails.com; sync-agent)',
     },
+    signal: AbortSignal.timeout(15000),
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
