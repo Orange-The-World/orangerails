@@ -96,8 +96,8 @@ interface BtcPayInvoice {
 function parseBtcPayCredentials(c: Record<string, unknown>): BtcPayCredentials {
   const btcpay_url = c.btcpay_url;
   const api_key = c.api_key;
-  if (typeof btcpay_url !== 'string' || !/^https?:\/\//.test(btcpay_url)) {
-    throw new Error('[btcpay] credentials.btcpay_url required (https://your-btcpay.example.com)');
+  if (typeof btcpay_url !== 'string' || !/^https:\/\//.test(btcpay_url)) {
+    throw new Error('[btcpay] credentials.btcpay_url must start with https:// (e.g. https://your-btcpay.example.com)');
   }
   if (typeof api_key !== 'string' || !api_key) {
     throw new Error('[btcpay] credentials.api_key required');
