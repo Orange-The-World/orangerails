@@ -59,6 +59,16 @@ TIER3_CROSSES = [
     ("FED", "USD", "CHF"),
 ]
 
+# Pairs that also need a companion row under source_authority='ORBI' so
+# the v1-rate serving path can find them. Only pairs with no existing
+# ORBI writer are listed here. Checked 2026-08-10 18:38 UTC: KES, TWD,
+# PKR, JMD, KWD, LBP, CAD, CHF already carry fresh ORBI rows from
+# another path and are intentionally excluded.
+NEEDS_ORBI_ROW = frozenset({
+    "RUB", "UAH", "KZT", "MAD", "NGN", "DZD", "VND", "BDT", "EGP", "GHS",
+    "BGN",
+})
+
 
 def _load_local_dsn():
     for line in open(ENV_FILE):
@@ -147,6 +157,15 @@ def main():
             f"'1m', 'ORBI-M', {btc_x}, 'C-composite', true, "
             f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', '{authority}')"
         )
+        # Companion ORBI row for pairs the v1-rate serving path queries by
+        # source_authority='ORBI'. Only emitted for pairs that have no other
+        # ORBI writer; distinct key (different source_authority), no conflict.
+        if target_ccy in NEEDS_ORBI_ROW:
+            rows.append(
+                "('BTC', '" + target_ccy + "', '" + btc_usd_ts + "', "
+                f"'1m', 'ORBI-M', {btc_x}, 'C-composite', true, "
+                f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', 'ORBI')"
+            )
 
     if not rows:
         log("no cross-rate rows to write")
