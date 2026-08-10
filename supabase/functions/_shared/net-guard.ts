@@ -24,7 +24,7 @@ function isBlockedIPv4(a: number, b: number, c: number, d: number): boolean {
   if (a === 172 && b >= 16 && b <= 31) return true;           // private 172.16.0.0/12
   if (a === 192 && b === 168) return true;                     // private 192.168.0.0/16
   if (a === 169 && b === 254) return true;                     // link-local + metadata 169.254.0.0/16
-  if (a === 100 && (b & 0xc0) === 64) return true;            // CGNAT 100.64.0.0/10
+  if (a === 100 && (b & 0xc0) === 64) return true;            // CGNAT per RFC 6598
   if (a === 0 && b === 0 && c === 0 && d === 0) return true;  // unspecified 0.0.0.0
   return false;
 }
@@ -106,8 +106,8 @@ export async function assertPublicHttpUrl(
     throw new NetGuardError('URL must not contain userinfo (user:pass@host)');
   }
 
-  // url.hostname strips brackets from IPv6 literals: [::1] becomes ::1
-  const host = url.hostname;
+  // Deno keeps brackets on IPv6 literals ([::1] stays [::1]); strip them before parsing.
+  const host = url.hostname.replace(/^\[|\]$/g, '');
   const ipv4Re = /^\d+\.\d+\.\d+\.\d+$/;
 
   if (ipv4Re.test(host)) {
