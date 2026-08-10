@@ -130,6 +130,26 @@ export interface SyncResult {
    * Absent or false means the sync was complete.
    */
   partial?: boolean;
+  /**
+   * Which kinds of history the provider refused on this pass, in OR's own
+   * vocabulary: 'trades', 'deposits', 'withdrawals'.
+   *
+   * Set when the credential is valid but lacks the scope one endpoint needs,
+   * which is a state the customer can fix and `partial` alone cannot explain.
+   * A read-only Bitstamp key is the worked example: Account Balance and User
+   * Transactions are enabled, Withdrawals is not, so trades read fine and
+   * withdrawal history is refused.
+   *
+   * The CCXT adapter has emitted this since the partial-sync fix, but nothing
+   * declared or read it, so it was computed and discarded. This is the
+   * declaration.
+   *
+   * These are OR's own words, never upstream error text, and carry nothing
+   * account-identifying, so they are safe to return and to log.
+   *
+   * Always accompanied by `partial: true`. Absent when nothing was refused.
+   */
+  denied_sources?: string[];
 }
 
 // --- Adapter contract ---------------------------------------------------

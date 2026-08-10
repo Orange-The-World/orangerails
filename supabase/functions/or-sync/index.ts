@@ -54,6 +54,8 @@ import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
+import { readSyncCompleteness, buildConnectionResult } from './_connection-result.ts';
+import type { SyncCompleteness } from './_connection-result.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //
@@ -810,7 +812,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
         let newTxs: NormalizedTransaction[];
         let next_cursor: string | null;
-        let isPartial = false;
+        // What the adapter said about completeness. Shaped by
+        // _connection-result.ts so the logic is unit-testable: this module
+        // calls Deno.serve at scope, so a test cannot import it.
+        let completeness: SyncCompleteness = { partial: false, deniedSources: [] };
 
         if (conn.provider_type === 'strike') {
           // Strike uses BOTH paths now (V3 ADR 2026-05-25):
@@ -912,12 +917,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           const out = await adapter.syncByWallets(credentials, walletIds, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
-          isPartial = out.partial ?? false;
+          completeness = readSyncCompleteness(out);
         } else {
           const out = await adapter.syncAccountWide(credentials, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
-          isPartial = out.partial ?? false;
+          completeness = readSyncCompleteness(out);
         }
 
         if (sinkMode) {
@@ -973,7 +978,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // Liveness and health reporting are refreshed on every pass regardless.
         const connUpdate: Record<string, unknown> = {
           last_sync_at: new Date().toISOString(),
-          status: isPartial ? 'partial' : 'active',
+          status: completeness.partial ? 'partial' : 'active',
           encrypted_last_error: null,
         };
         if (newTxs.length > 0 && next_cursor != null) {
@@ -985,7 +990,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .eq('id', conn.id);
         throwOnDbError(connUpdateErr);
 
-        results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
+        results.push(buildConnectionResult(conn.id, newTxs.length, next_cursor, completeness));
 
         // ─── sync.completed webhook enqueue ──────────────────────────
         // Out-of-band: insert a webhook_delivery row that or-webhook-dispatch
