@@ -89,22 +89,121 @@ jobs:
           else
             echo "::notice::OR_RESERVED_TERMS secret not set : scanning generic structural patterns only."
           fi
+
+          # Cleared-list: per-SHA exemptions for commits whose metadata contains a
+          # bare CGNAT address the doc-strip cannot remove (e.g. the address appears
+          # without surrounding context because the commit itself was removing it).
+          # Format (one entry per line): <40-char-sha> <one-line reason>
+          # A SHA with no reason is a hard validation error, not a silent skip.
+          CLEARED_LIST_FILE=".github/commit-metadata-cleared.txt"
+          declare -A CLEARED_SHA_MAP
+          if [ -f "$CLEARED_LIST_FILE" ]; then
+            while IFS= read -r entry; do
+              [[ -z "$entry" || "$entry" =~ ^# ]] && continue
+              sha="${entry:0:40}"
+              reason="${entry:41}"
+              if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::error::$CLEARED_LIST_FILE: invalid entry -- not a 40-char lowercase hex SHA"
+                exit 1
+              fi
+              if [[ ! "$reason" =~ [^[:space:]] ]]; then
+                echo "::error::$CLEARED_LIST_FILE: SHA $sha has no reason (required -- a reason-free entry is a hard error)"
+                exit 1
+              fi
+              CLEARED_SHA_MAP["$sha"]=1
+            done < "$CLEARED_LIST_FILE"
+            echo "Cleared list loaded: ${#CLEARED_SHA_MAP[@]} SHA(s) from $CLEARED_LIST_FILE"
+          fi
+
+          # Sub-patterns used by the cleared-list exemption check (bash inline,
+          # single-backslash ERE syntax -- not YAML env vars).
+          # The exemption covers CGNAT bare-address matches only. Tailnet and all
+          # other patterns on a cleared SHA are NOT exempted: a cleared SHA is not
+          # a blanket skip, only the documented match class is exempt.
+          _CGNAT_BARE='100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          _TAILNET_PAT='tail[a-z0-9]+\.ts\.net|\.tailnet\b'
+
+          # Self-test 1: a bare CGNAT address in a non-documentation context must
+          # still match PATTERN after doc-strip runs. If doc-strip silences it,
+          # the strip has grown too broad.
+          _ST1="AUTHOR Someone <someone@example.com> COMMITTER git <git@example.com> 100.64.0.1"
+          if ! echo "$_ST1" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 1 FAIL: PATTERN does not match a bare CGNAT address. Scanner is broken."
+            exit 1
+          fi
+          _ST1_CLEAN=$(echo "$_ST1" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          if ! echo "$_ST1_CLEAN" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 1 FAIL: doc-strip incorrectly cleared a bare CGNAT address. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 1 passed: bare CGNAT address survives doc-strip."
+
+          # Self-test 2: a tailnet pattern is NOT exempted by cleared-list logic,
+          # even on a cleared SHA. Exemption covers CGNAT bare-address matches only;
+          # a different match class on the same SHA must still fail.
+          _ST2_LINE="AUTHOR Test <user@badhost.tailtest.ts.net> COMMITTER test <ci@example.com>"
+          _ST2_CLEAN=$(echo "$_ST2_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          if ! echo "$_ST2_CLEAN" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 2 FAIL: PATTERN does not match the tailnet test line. Scanner is broken."
+            exit 1
+          fi
+          _st2_cgnat=$(echo "$_ST2_CLEAN" | grep -cEi "$_CGNAT_BARE" || true)
+          _st2_tailnet=$(echo "$_ST2_CLEAN" | grep -cEi "$_TAILNET_PAT" || true)
+          if [ "$_st2_cgnat" -gt 0 ] && [ "$_st2_tailnet" -eq 0 ]; then
+            echo "::error::Self-test 2 FAIL: exemption logic would incorrectly clear a tailnet match. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 2 passed: tailnet pattern correctly not exempted by cleared-list logic."
+
+          # Self-test 3: cleared-list exemption must NOT apply to un-cleared SHAs.
+          # Simulates the exemption decision for a synthetic SHA absent from the cleared
+          # map and asserts the exemption does NOT fire for it.
+          _ST3_SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+          _st3_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST3_SHA]+set}" ]]; then
+            _c=$(echo "100.64.0.1" | grep -cEi "$_CGNAT_BARE" || true)
+            _t=$(echo "100.64.0.1" | grep -cEi "$_TAILNET_PAT" || true)
+            if [ "$_c" -gt 0 ] && [ "$_t" -eq 0 ]; then
+              _st3_would_exempt=1
+            fi
+          fi
+          if [ "$_st3_would_exempt" -ne 0 ]; then
+            echo "::error::Self-test 3 FAIL: exemption logic fired on an un-cleared SHA. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 3 passed: un-cleared SHA CGNAT match correctly not exempted."
           MATCHES=0
           CURRENT_SHA="(unknown)"
           while IFS= read -r line; do
             # Each record starts with the commit SHA (see --format below).
             # Track it so a match on a BODY line attributes to the right
             # commit, not the first word of that body line.
-            if [[ "$line" =~ ^([0-9a-f]{40})\  ]]; then
+            # Anchored to "AUTHOR" so a body line beginning with 40 hex chars
+            # cannot spoof CURRENT_SHA and gain a cleared-list exemption.
+            if [[ "$line" == "--END--" ]]; then
+              CURRENT_SHA="(unknown)"
+              continue
+            fi
+            if [[ "$line" =~ ^([0-9a-f]{40})\ AUTHOR\  ]]; then
               CURRENT_SHA="${BASH_REMATCH[1]}"
             fi
-            if echo "$line" | grep -nEi "$PATTERN" >/dev/null; then
+            if echo "$line" | grep -qEi "$PATTERN"; then
               # Strip documentation tokens and re-scan; a still-matching line
               # has a real match co-existing with the docs.
               cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
-              if ! echo "$cleaned" | grep -nEi "$PATTERN" >/dev/null; then
+              if ! echo "$cleaned" | grep -qEi "$PATTERN"; then
                 echo "::notice::Allowlisted documentation line (CGNAT block or regex syntax)."
                 continue
+              fi
+              # Cleared-list check: exempts CGNAT bare-address matches on known SHAs.
+              # Tailnet and other patterns are NOT exempted by this mechanism.
+              if [[ -n "${CLEARED_SHA_MAP[$CURRENT_SHA]+set}" ]]; then
+                _is_cgnat=$(echo "$cleaned" | grep -cEi "$_CGNAT_BARE" || true)
+                _is_tailnet=$(echo "$cleaned" | grep -cEi "$_TAILNET_PAT" || true)
+                if [ "$_is_cgnat" -gt 0 ] && [ "$_is_tailnet" -eq 0 ]; then
+                  echo "::notice::SHA $CURRENT_SHA is on the cleared list; CGNAT bare-address match exempted."
+                  continue
+                fi
               fi
               # Do NOT echo the matched content: Actions logs are world-readable
               # on a public repo. Print only the commit SHA (already public in
