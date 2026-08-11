@@ -23,6 +23,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminIndexRouteImport } from './routes/admin/index'
 import { Route as DocsXpubExportRouteImport } from './routes/docs/xpub-export'
 import { Route as ConnectStealthRouteImport } from './routes/connect/stealth'
+import { Route as ConnectBitcoinRouteImport } from './routes/connect/bitcoin'
 import { Route as ConnectSparrowRouteImport } from './routes/connect/sparrow'
 import { Route as ConnectQuilttRouteImport } from './routes/connect/quiltt'
 import { Route as AdminCustomerIdRouteImport } from './routes/admin/$customerId'
@@ -97,6 +98,11 @@ const ConnectStealthRoute = ConnectStealthRouteImport.update({
   path: '/stealth',
   getParentRoute: () => ConnectRoute,
 } as any)
+const ConnectBitcoinRoute = ConnectBitcoinRouteImport.update({
+  id: '/bitcoin',
+  path: '/bitcoin',
+  getParentRoute: () => ConnectRoute,
+} as any)
 const ConnectSparrowRoute = ConnectSparrowRouteImport.update({
   id: '/sparrow',
   path: '/sparrow',
@@ -126,6 +132,7 @@ export interface FileRoutesByFullPath {
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
   '/admin/$customerId': typeof AdminCustomerIdRoute
+  '/connect/bitcoin': typeof ConnectBitcoinRoute
   '/connect/quiltt': typeof ConnectQuilttRoute
   '/connect/sparrow': typeof ConnectSparrowRoute
   '/connect/stealth': typeof ConnectStealthRoute
@@ -144,6 +151,7 @@ export interface FileRoutesByTo {
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
   '/admin/$customerId': typeof AdminCustomerIdRoute
+  '/connect/bitcoin': typeof ConnectBitcoinRoute
   '/connect/quiltt': typeof ConnectQuilttRoute
   '/connect/sparrow': typeof ConnectSparrowRoute
   '/connect/stealth': typeof ConnectStealthRoute
@@ -164,6 +172,7 @@ export interface FileRoutesById {
   '/signup': typeof SignupRoute
   '/unlock': typeof UnlockRoute
   '/admin/$customerId': typeof AdminCustomerIdRoute
+  '/connect/bitcoin': typeof ConnectBitcoinRoute
   '/connect/quiltt': typeof ConnectQuilttRoute
   '/connect/sparrow': typeof ConnectSparrowRoute
   '/connect/stealth': typeof ConnectStealthRoute
@@ -185,6 +194,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/unlock'
     | '/admin/$customerId'
+    | '/connect/bitcoin'
     | '/connect/quiltt'
     | '/connect/sparrow'
     | '/connect/stealth'
@@ -203,6 +213,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/unlock'
     | '/admin/$customerId'
+    | '/connect/bitcoin'
     | '/connect/quiltt'
     | '/connect/sparrow'
     | '/connect/stealth'
@@ -222,6 +233,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/unlock'
     | '/admin/$customerId'
+    | '/connect/bitcoin'
     | '/connect/quiltt'
     | '/connect/sparrow'
     | '/connect/stealth'
@@ -343,6 +355,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConnectStealthRouteImport
       parentRoute: typeof ConnectRoute
     }
+    '/connect/bitcoin': {
+      id: '/connect/bitcoin'
+      path: '/bitcoin'
+      fullPath: '/connect/bitcoin'
+      preLoaderRoute: typeof ConnectBitcoinRouteImport
+      parentRoute: typeof ConnectRoute
+    }
     '/connect/sparrow': {
       id: '/connect/sparrow'
       path: '/sparrow'
@@ -380,12 +399,14 @@ const AdminRouteChildren: AdminRouteChildren = {
 const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)
 
 interface ConnectRouteChildren {
+  ConnectBitcoinRoute: typeof ConnectBitcoinRoute
   ConnectQuilttRoute: typeof ConnectQuilttRoute
   ConnectSparrowRoute: typeof ConnectSparrowRoute
   ConnectStealthRoute: typeof ConnectStealthRoute
 }
 
 const ConnectRouteChildren: ConnectRouteChildren = {
+  ConnectBitcoinRoute: ConnectBitcoinRoute,
   ConnectQuilttRoute: ConnectQuilttRoute,
   ConnectSparrowRoute: ConnectSparrowRoute,
   ConnectStealthRoute: ConnectStealthRoute,
