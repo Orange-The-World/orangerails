@@ -11,30 +11,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-
-// --- inlined from index.ts (keep in sync) ----------------------------------------
-
-interface SessionBody {
-  app_user_id?: string;
-  mode?: string;
-  existing_connection_id?: string;
-}
-
-type ValidationResult = { ok: true } | { ok: false; status: number; error: string };
-
-function validateBody(body: SessionBody): ValidationResult {
-  if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-    return { ok: false, status: 400, error: 'app_user_id required (string, <=256 chars)' };
-  }
-  const mode = body.mode ?? 'link';
-  if (mode !== 'link' && mode !== 'reconnect') {
-    return { ok: false, status: 400, error: "mode must be 'link' or 'reconnect'" };
-  }
-  if (mode === 'reconnect' && !body.existing_connection_id) {
-    return { ok: false, status: 400, error: "existing_connection_id required when mode='reconnect'" };
-  }
-  return { ok: true };
-}
+import { validateBody } from './validate.ts';
 
 // --- tests ---------------------------------------------------------------------------
 
