@@ -1,16 +1,19 @@
 /**
- * or-sync-key-register — register a subaccount's OPK (delivery key).
+ * or-sync-key-register: register a subaccount's OPK (delivery key).
  *
  * Called by an integrator backend (platform mode) when their user opts
- * in to background sync. The browser derives the X25519 keypair from
- * the user's vault password, posts the public half to the integrator
- * backend, which forwards it here. We persist it on the subaccount row;
- * from that moment on, or-quiltt-sync (and any future background writer)
- * can seal new transactions under this key.
+ * in to background sync. In the BitBooks platform integration, the
+ * browser derives the X25519 keypair from the integrator's master key
+ * held behind the vault (not from the vault password), and posts the
+ * public half to the integrator backend, which forwards it here. We
+ * persist it on the subaccount row; from that moment on, or-quiltt-sync
+ * (and any future background writer) can seal new transactions under
+ * this key.
  *
- * The private half (OSK) never touches OR. Lost vault password = lost
- * ability to unseal OPK-sealed rows, same threat model as every other
- * vault-derived key in the system.
+ * OR receives only an opaque X25519 public key and derives nothing from
+ * it. The private half (OSK) never touches OR.
+ *
+ * This derivation applies to the BitBooks platform integration only.
  *
  * Auth: X-Platform-API-Key (platform mode only).
  *
