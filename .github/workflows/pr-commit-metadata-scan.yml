@@ -197,8 +197,10 @@ jobs:
           # reserved-term-only line.
           _ST5_SHA="5555aaaa5555aaaa5555aaaa5555aaaa5555aaaa"
           CLEARED_SHA_MAP["$_ST5_SHA"]="cgnat,tailnet"
-          _st5_cgnat=0
-          _st5_tailnet=0
+          _ST5_LINE="AUTHOR Internal User <user@example.com> COMMITTER git <git@example.com>"
+          _ST5_CLEAN=$(echo "$_ST5_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          _st5_cgnat=$(echo "$_ST5_CLEAN" | grep -cEi "$_CGNAT_BARE" || true)
+          _st5_tailnet=$(echo "$_ST5_CLEAN" | grep -cEi "$_TAILNET_PAT" || true)
           _st5_would_exempt=0
           if [[ -n "${CLEARED_SHA_MAP[$_ST5_SHA]+set}" ]]; then
             _st5_cleared="${CLEARED_SHA_MAP[$_ST5_SHA]}"
