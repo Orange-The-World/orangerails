@@ -46,6 +46,7 @@
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { validateBody } from './validate.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 
@@ -76,12 +77,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
     const body = JSON.parse(raw || '{}') as DisconnectBody;
 
-    if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-      return jsonResponse({ error: 'app_user_id required (string, ≤256 chars)' }, 400, cors);
-    }
-    if (body.connection_id !== undefined && (typeof body.connection_id !== 'string' || body.connection_id.length > 256)) {
-      return jsonResponse({ error: 'connection_id must be a string ≤256 chars' }, 400, cors);
-    }
+    const bodyCheck = validateBody(body);
+    if (!bodyCheck.ok) return jsonResponse({ error: bodyCheck.error }, bodyCheck.status, cors);
 
     // Resolve the OR subaccount.
     const sub = await auth.serviceClient
