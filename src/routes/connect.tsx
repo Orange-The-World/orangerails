@@ -1655,7 +1655,11 @@ function EnterCredentialsStep({
             tooltip="This exchange's API does not expose deposit history. Trades and current balance will sync normally."
           />
           <CapabilityRow label="Trades" supported={capabilities.trades} />
-          <CapabilityRow label="Balances" supported={true} />
+          <CapabilityRow
+            label="Withdrawals"
+            supported={capabilities.withdrawals}
+            tooltip="This exchange's API does not expose withdrawal history."
+          />
         </div>
       )}
 
