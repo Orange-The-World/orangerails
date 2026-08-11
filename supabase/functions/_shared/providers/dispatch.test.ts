@@ -24,22 +24,15 @@ Deno.test('listProviderManifests: client-side manifest carries connectUrl throug
   );
 });
 
-Deno.test('listProviderManifests: server-side adapter without connectUrl emits no connectUrl key', () => {
-  // xpub is a server-side adapter with no connectUrl declared (yet; PR 2
-  // will set it to /connect/bitcoin). Guards against a spread pattern that
-  // would emit { connectUrl: undefined } on every server-side manifest
-  // entry -- the key must be absent entirely, not present-and-undefined.
+Deno.test('listProviderManifests: server-side adapter connectUrl flows through to manifest', () => {
+  // xpub now declares connectUrl: '/connect/bitcoin'. Guards that the spread
+  // inside listProviderManifests() carries it through -- the key must be
+  // present with the correct value, not silently dropped.
   const manifests = listProviderManifests();
   const xpub = manifests.find(m => m.slug === 'xpub');
-  const hasKey = xpub !== undefined && 'connectUrl' in xpub;
   assertEquals(
-    hasKey,
-    false,
-    'xpub manifest must not have a connectUrl key before the adapter declares it',
+    xpub?.connectUrl,
+    '/connect/bitcoin',
+    'xpub manifest must carry connectUrl through listProviderManifests',
   );
 });
-
-// NOTE: The third regression case -- a server-side adapter WITH connectUrl
-// declared flows through to its manifest entry -- is covered in PR 2 (sets
-// xpub.connectUrl = '/connect/bitcoin') where the above test is updated to
-// assert xpub?.connectUrl === '/connect/bitcoin'.
