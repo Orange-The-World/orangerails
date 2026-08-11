@@ -371,6 +371,12 @@ export const xpubAdapter: ProviderAdapter = {
   custody: 'self_custody',
   popularity: 80,
   multiWallet: false,
+  // Route the tile to the Stealth Sync flow, which scans in the browser and
+  // never sends addresses to the server. Reuses the path the Sparrow tile
+  // already takes: /connect/sparrow opens /connect/stealth in a popup.
+  // Without this the tile falls through to the credential form and creates a
+  // server side connection on the legacy path.
+  connectUrl: '/connect/sparrow',
   credentialFields: [
     {
       name: 'xpub',
