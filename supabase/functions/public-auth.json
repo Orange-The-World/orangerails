@@ -7,6 +7,7 @@
     "Modes: hmac = verifies a signature itself. platform-api-key = checks a platform key header.",
     "orbi-api-key = checks against orbi_api_keys table (SHA-256 hash, revoked_at IS NULL).",
     "none = intentionally public, no auth at all.",
+    "internal-worker-token = checks X-Internal-Worker-Token header against a vault secret (service-internal callers only, never exposed to integrators).",
     "CI (scripts/check-public-auth.mjs) asserts this file and config.toml agree in both directions."
   ],
   "functions": {
@@ -25,6 +26,7 @@
     "or-provision": "platform-api-key",
     "or-quiltt-accounts": "platform-api-key",
     "or-quiltt-disconnect": "platform-api-key",
+    "or-quiltt-drain-alert": "internal-worker-token",
     "or-quiltt-link-complete": "platform-api-key",
     "or-quiltt-session": "platform-api-key",
     "or-quiltt-session-revoke": "platform-api-key",
