@@ -51,6 +51,7 @@ import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
 import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { validateBody } from './validate.ts';
 
 const QUILTT_AUTH_URL = 'https://auth.quiltt.io/v1/users/sessions';
 
@@ -92,16 +93,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
     const body = JSON.parse(raw || '{}') as SessionBody;
 
-    if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-      return jsonResponse({ error: 'app_user_id required (string, ≤256 chars)' }, 400, cors);
-    }
+    const bodyCheck = validateBody(body);
+    if (!bodyCheck.ok) return jsonResponse({ error: bodyCheck.error }, bodyCheck.status, cors);
     const mode = body.mode ?? 'link';
-    if (mode !== 'link' && mode !== 'reconnect') {
-      return jsonResponse({ error: "mode must be 'link' or 'reconnect'" }, 400, cors);
-    }
-    if (mode === 'reconnect' && !body.existing_connection_id) {
-      return jsonResponse({ error: "existing_connection_id required when mode='reconnect'" }, 400, cors);
-    }
 
     // Per-platform Quiltt config resolution (env fallback during transition).
     let quilttCfg;
