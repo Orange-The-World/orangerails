@@ -83,32 +83,6 @@ jobs:
           fi
           echo "Canary self-test passed: both patterns match their canary and do not false-positive on safe strings."
 
-      - name: Regex self-test (canary)
-        # Proves each pattern actually fires before any real comment is
-        # evaluated. If a regex is broken the workflow still exits 0 and
-        # provides false confidence. This step fails with exit code 2 so
-        # a breakage is immediately visible rather than silently green.
-        # Mirrors the self_test() guard in scripts/pre-publish-scan.sh.
-        run: |
-          set -euo pipefail
-
-          TAILNET='\btail[a-z0-9]+\.ts\.net\b'
-          CGNAT='\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+\b'
-
-          ok=1
-          if ! printf '%s' 'probe.tail99canary.ts.net' | grep -Eq "$TAILNET"; then
-            echo "::error::Canary FAILED: TAILNET regex did not match known-bad token. Scan results are not trustworthy."
-            ok=0
-          fi
-          if ! printf '%s' '100.64.0.1' | grep -Eq "$CGNAT"; then
-            echo "::error::Canary FAILED: CGNAT regex did not match known-bad token. Scan results are not trustworthy."
-            ok=0
-          fi
-          if [ "$ok" -eq 0 ]; then
-            exit 2
-          fi
-          echo "Canary OK: both patterns match their known-bad tokens."
-
       - name: Scan for internal-infrastructure references
         # The comment/review body and its URL are passed through env, NEVER
         # interpolated into the run script. Inlining a user-controlled
