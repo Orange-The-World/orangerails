@@ -1,0 +1,9 @@
+[Unit]
+Description=ORBI probe failure notifier for %i
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/orbi/orbi-staleness-probe.env
+ExecStart=/bin/sh -c 'curl -s -o /dev/null -H "Authorization: Bearer $ZULIP_ALARM_KEY" -H "Content-Type: application/json" -d "{\"to\":\"${ZULIP_ALARM_TO:-Delivery|orbi-staleness-probe}\",\"level\":\"ERROR\",\"body\":\"unit %i failed, see journal\"}" "$ZULIP_ALARM_URL"'
+StandardOutput=journal
+StandardError=journal
