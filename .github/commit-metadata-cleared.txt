@@ -1,1 +1,2 @@
 9c9aa7f58c30f17ee7230f8a000917dfaac26156 commit removed an internal address from source; the removal is quoted in its own message body.
+7576e88891f1224f73d8265ba43bb678e56c1577 +tailnet commit message quotes both the CGNAT structural pattern and the tailnet hostname shape as documentation of scanner coverage; both classes are documented references, not stray internal values; Auditor-reviewed.
