@@ -121,6 +121,26 @@ export interface SyncProgressEvent {
   detail?: string;
 }
 
+/**
+ * Thrown by runSync when the rolling-window extension passes are exhausted and
+ * matched addresses are still at the top of the derived window on either chain,
+ * meaning wallet history beyond the scanned window may be missing.
+ *
+ * The widget catch maps this to OR_STEALTH_ERROR code WINDOW_EXHAUSTED so an
+ * embedder can tell a genuine "history may be incomplete, re-sync with a wider
+ * gap_limit" failure apart from an unexpected INTERNAL error. Not retryable as
+ * is: repeating the sync repeats the same result; the app must widen gap_limit.
+ * See DL-0584 and issue #352.
+ */
+export class WindowExhaustedError extends Error {
+  readonly code = 'WINDOW_EXHAUSTED' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'WindowExhaustedError';
+    Object.setPrototypeOf(this, WindowExhaustedError.prototype);
+  }
+}
+
 export interface RunSyncOptions {
   envelope: SealedEnvelope;
   orStealthKey: string;
@@ -1124,7 +1144,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     const chain0StillNear = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
     const chain1StillNear = maxMatchedIndexPerChain[1] >= chainWindowEnd[1] - gapLimit;
     if (chain0StillNear || chain1StillNear) {
-      throw new Error(
+      throw new WindowExhaustedError(
         `stealth/sync: address window exhausted after ${MAX_WINDOW_PASSES} extension passes` +
         ` -- wallet history beyond the scanned window may be missing`,
       );
