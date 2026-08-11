@@ -1,2 +1,4 @@
 9c9aa7f58c30f17ee7230f8a000917dfaac26156 cgnat commit removed an internal address from source; the removal is quoted in its own message body.
 7576e88891f1224f73d8265ba43bb678e56c1577 cgnat,tailnet commit message quotes both the CGNAT structural pattern and the tailnet hostname shape as documentation of scanner coverage; both classes are documented references, not stray internal values; Auditor-reviewed.
+ce2cfca0da54325bbc0158dfa5270b65e4e5dc6e reserved commit message describes the original host-specific paths in the initial service unit; the references document the initial implementation spec, corrected in the following commit.
+72a5e17756659c5dd481b7689d3e49194fbbc85f reserved commit message quotes the host-specific paths and username it removed; the references document the old state being corrected, not a current stray value.
