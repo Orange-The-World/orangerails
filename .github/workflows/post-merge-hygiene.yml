@@ -97,14 +97,24 @@ jobs:
           # A SHA with no reason is a hard validation error, not a silent skip.
           CLEARED_LIST_FILE=".github/commit-metadata-cleared.txt"
           declare -A CLEARED_SHA_MAP
+          declare -A CLEARED_TAILNET_MAP
           if [ -f "$CLEARED_LIST_FILE" ]; then
             while IFS= read -r entry; do
               [[ -z "$entry" || "$entry" =~ ^# ]] && continue
               sha="${entry:0:40}"
-              reason="${entry:41}"
+              rest="${entry:41}"
               if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
                 echo "::error::$CLEARED_LIST_FILE: invalid entry -- not a 40-char lowercase hex SHA"
                 exit 1
+              fi
+              # Class specifier: a reason starting with "+tailnet " also clears the
+              # tailnet match class for this SHA. Without the specifier only the
+              # CGNAT bare-address class is cleared (backward-compatible default).
+              if [[ "$rest" == "+tailnet "* ]]; then
+                CLEARED_TAILNET_MAP["$sha"]=1
+                reason="${rest#+tailnet }"
+              else
+                reason="$rest"
               fi
               if [[ ! "$reason" =~ [^[:space:]] ]]; then
                 echo "::error::$CLEARED_LIST_FILE: SHA $sha has no reason (required -- a reason-free entry is a hard error)"
@@ -112,14 +122,15 @@ jobs:
               fi
               CLEARED_SHA_MAP["$sha"]=1
             done < "$CLEARED_LIST_FILE"
-            echo "Cleared list loaded: ${#CLEARED_SHA_MAP[@]} SHA(s) from $CLEARED_LIST_FILE"
+            echo "Cleared list loaded: ${#CLEARED_SHA_MAP[@]} SHA(s) from $CLEARED_LIST_FILE (${#CLEARED_TAILNET_MAP[@]} with +tailnet class)"
           fi
 
           # Sub-patterns used by the cleared-list exemption check (bash inline,
           # single-backslash ERE syntax -- not YAML env vars).
-          # The exemption covers CGNAT bare-address matches only. Tailnet and all
-          # other patterns on a cleared SHA are NOT exempted: a cleared SHA is not
-          # a blanket skip, only the documented match class is exempt.
+          # The default exemption covers CGNAT bare-address matches only. A SHA
+          # also present in CLEARED_TAILNET_MAP (set by "+tailnet" in the cleared
+          # list) additionally exempts tailnet-form matches. Any other pattern on
+          # a cleared SHA is still NOT exempted.
           _CGNAT_BARE='100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
           _TAILNET_PAT='tail[a-z0-9]+\.ts\.net|\.tailnet\b'
 
@@ -172,6 +183,53 @@ jobs:
             exit 1
           fi
           echo "Self-test 3 passed: un-cleared SHA CGNAT match correctly not exempted."
+
+          # Self-test 2b: tailnet match NOT exempted for SHA in CLEARED_SHA_MAP
+          # without +tailnet. Proves the both-class path requires the tailnet map
+          # entry and not just the sha map entry.
+          _ST2B_SHA="eeeeffff0000eeeeffff0000eeeeffff00001234"
+          CLEARED_SHA_MAP["$_ST2B_SHA"]=1
+          _ST2B_LINE="AUTHOR Test <user@host.tailfake2b.ts.net> COMMITTER git <ci@example.com>"
+          _ST2B_CLEAN=$(echo "$_ST2B_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          _st2b_cgnat=$(echo "$_ST2B_CLEAN" | grep -cEi "$_CGNAT_BARE" || true)
+          _st2b_tailnet=$(echo "$_ST2B_CLEAN" | grep -cEi "$_TAILNET_PAT" || true)
+          _st2b_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST2B_SHA]+set}" ]]; then
+            if [ "$_st2b_tailnet" -gt 0 ] && [[ -n "${CLEARED_TAILNET_MAP[$_ST2B_SHA]+set}" ]]; then
+              _st2b_would_exempt=1
+            fi
+            if [ "$_st2b_cgnat" -gt 0 ] && [ "$_st2b_tailnet" -eq 0 ]; then
+              _st2b_would_exempt=1
+            fi
+          fi
+          unset "CLEARED_SHA_MAP[$_ST2B_SHA]"
+          if [ "$_st2b_would_exempt" -ne 0 ]; then
+            echo "::error::Self-test 2b FAIL: exemption incorrectly fired for SHA in CLEARED_SHA_MAP without +tailnet. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 2b passed: tailnet match correctly not exempted for SHA without +tailnet class."
+
+          # Self-test 4: both-class exemption fires correctly for a SHA in
+          # CLEARED_TAILNET_MAP. Proves the new code path reaches 'continue' when
+          # the SHA has +tailnet and the line carries a tailnet match.
+          _ST4_SHA="cccc1111cccc1111cccc1111cccc1111cccc1111"
+          CLEARED_SHA_MAP["$_ST4_SHA"]=1
+          CLEARED_TAILNET_MAP["$_ST4_SHA"]=1
+          _ST4_LINE="AUTHOR Test <ci@100.64.0.1> COMMITTER ci <git@host.tailfake4.ts.net>"
+          _ST4_CLEAN=$(echo "$_ST4_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          _st4_tailnet=$(echo "$_ST4_CLEAN" | grep -cEi "$_TAILNET_PAT" || true)
+          _st4_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST4_SHA]+set}" ]]; then
+            if [ "$_st4_tailnet" -gt 0 ] && [[ -n "${CLEARED_TAILNET_MAP[$_ST4_SHA]+set}" ]]; then
+              _st4_would_exempt=1
+            fi
+          fi
+          unset "CLEARED_SHA_MAP[$_ST4_SHA]" "CLEARED_TAILNET_MAP[$_ST4_SHA]"
+          if [ "$_st4_would_exempt" -eq 0 ]; then
+            echo "::error::Self-test 4 FAIL: both-class exemption did not fire for SHA in CLEARED_TAILNET_MAP. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 4 passed: both-class exemption fires correctly for SHA in CLEARED_TAILNET_MAP."
           MATCHES=0
           CURRENT_SHA="(unknown)"
           while IFS= read -r line; do
@@ -195,11 +253,17 @@ jobs:
                 echo "::notice::Allowlisted documentation line (CGNAT block or regex syntax)."
                 continue
               fi
-              # Cleared-list check: exempts CGNAT bare-address matches on known SHAs.
-              # Tailnet and other patterns are NOT exempted by this mechanism.
+              # Cleared-list check: exempts match classes on known SHAs.
+              # Default: CGNAT bare-address only. A SHA also in CLEARED_TAILNET_MAP
+              # (set by +tailnet in the cleared list) additionally exempts tailnet.
               if [[ -n "${CLEARED_SHA_MAP[$CURRENT_SHA]+set}" ]]; then
                 _is_cgnat=$(echo "$cleaned" | grep -cEi "$_CGNAT_BARE" || true)
                 _is_tailnet=$(echo "$cleaned" | grep -cEi "$_TAILNET_PAT" || true)
+                # Both-class exemption: SHA also cleared for tailnet via +tailnet.
+                if [ "$_is_tailnet" -gt 0 ] && [[ -n "${CLEARED_TAILNET_MAP[$CURRENT_SHA]+set}" ]]; then
+                  echo "::notice::SHA $CURRENT_SHA is on the cleared list with +tailnet; both-class match exempted."
+                  continue
+                fi
                 if [ "$_is_cgnat" -gt 0 ] && [ "$_is_tailnet" -eq 0 ]; then
                   echo "::notice::SHA $CURRENT_SHA is on the cleared list; CGNAT bare-address match exempted."
                   continue
