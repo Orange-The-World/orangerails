@@ -13,9 +13,6 @@
 #
 # Optional env:
 #   STALE_THRESHOLD_MINUTES   integer, default 10
-#   ZULIP_ALARM_URL           webhook endpoint (alarm fires only when set)
-#   ZULIP_ALARM_KEY           bearer token for that endpoint
-#   ZULIP_ALARM_TO            destination stream:topic for alarm message
 
 set -uo pipefail
 
@@ -29,14 +26,7 @@ alarm() {
   local level="$1"
   local body="$2"
   echo "[$PROBE] $level: $body" >&2
-  if [[ -n "${ZULIP_ALARM_URL:-}" && -n "${ZULIP_ALARM_KEY:-}" ]]; then
-    local to="${ZULIP_ALARM_TO:-Delivery|orbi-staleness-probe}"
-    curl -s -o /dev/null \
-      -H "Authorization: Bearer ${ZULIP_ALARM_KEY}" \
-      -H "Content-Type: application/json" \
-      -d "{\"to\":\"${to}\",\"level\":\"${level}\",\"body\":\"${body}\"}" \
-      "${ZULIP_ALARM_URL}" || true
-  fi
+  /opt/bb-support/scripts/orbi-zulip-alert.sh "$level" "$body"
 }
 
 # ---- validate env -----------------------------------------------------------
