@@ -1,6 +1,7 @@
 [Unit]
 Description=ORBI BTC/USD staleness probe
 After=network.target
+OnFailure=orbi-probe-failed@%n.service
 
 [Service]
 Type=oneshot
