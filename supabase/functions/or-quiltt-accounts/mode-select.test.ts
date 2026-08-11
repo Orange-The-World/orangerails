@@ -20,47 +20,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-
-// --- body validation (inlined from index.ts, keep in sync) ---------------------------
-
-interface AccountsBody {
-  app_user_id?: string;
-  quiltt_connection_id?: unknown;
-}
-
-type ValidationResult = { ok: true } | { ok: false; status: number; error: string };
-
-function validateBody(body: AccountsBody): ValidationResult {
-  if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-    return { ok: false, status: 400, error: 'app_user_id required (string, <=256 chars)' };
-  }
-  return { ok: true };
-}
-
-// --- auth mode check (inlined from index.ts, keep in sync) ---------------------------
-// Source: index.ts ~line 130 -- `if (auth.mode !== 'platform') return 403`.
-
-function validatePlatformAuth(mode: string): ValidationResult {
-  if (mode !== 'platform') {
-    return { ok: false, status: 403, error: 'platform API key required' };
-  }
-  return { ok: true };
-}
-
-// --- mode selection (inlined from index.ts, keep in sync) ----------------------------
-// Source: index.ts ~lines 138-140.
-// connectionId is the trimmed quiltt_connection_id from the body
-// (empty string when the field was absent or non-string).
-
-type QueryMode = 'single_connection' | 'profile_wide';
-
-function resolveQueryMode(body: AccountsBody): QueryMode {
-  const connectionId =
-    typeof body.quiltt_connection_id === 'string'
-      ? body.quiltt_connection_id.trim()
-      : '';
-  return connectionId ? 'single_connection' : 'profile_wide';
-}
+import { validateBody, validatePlatformAuth, resolveQueryMode } from './validate.ts';
 
 // --- tests: auth contract ------------------------------------------------------------
 
