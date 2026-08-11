@@ -18,7 +18,7 @@
  *      ciphertext in encrypted_transactions. Caller fetches via
  *      or-transactions-list and decrypts in-browser.
  *      Response: { synced: number, connections: [{ connection_id, synced?, next_cursor, partial?, denied_sources?, error? }] }
- *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all non-success (error or skip).
  *
  *   2. Protocol-driven sink mode (V2 today, V3 future):
  *        { subaccount_id?, connection_ids?, credentials_key, format }
@@ -28,7 +28,7 @@
  *      Response: {
  *        synced: number,
  *        connections: [{ connection_id, synced?, next_cursor, partial?, denied_sources?, error? }],
- *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all non-success (error or skip).
  *        rows: { <table-name>: [...rows] },
  *        metadata: { format, requires_encryption: string[] }
  *      }
@@ -102,8 +102,8 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
 /**
  * Determine the HTTP status for a batch sync response.
  *   200 -- every connection succeeded (or the batch was empty).
- *   207 -- some connections succeeded, some failed.
- *   422 -- every connection in the batch failed.
+ *   207 -- some connections succeeded; at least one failed or was skipped.
+ *   422 -- every connection in the batch failed or was skipped (e.g. no_quiltt_profile_map).
  *
  * Exported so the pure logic can be unit-tested without a Deno.serve mock.
  */
