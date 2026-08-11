@@ -250,6 +250,14 @@ export interface ProviderAdapter {
   popularity?: number;
 
   /**
+   * Where the picker should send the user when this tile is clicked, instead
+   * of the generic credential form. Set it when the connect flow runs in the
+   * browser (Stealth Sync) rather than as a server-side credential exchange.
+   * Mirrors ProviderManifest.connectUrl in dispatch.ts.
+   */
+  connectUrl?: string;
+
+  /**
    * Exchange capabilities introspected from the CCXT manifest.
    * Present only for CCXT-backed exchanges; omitted entirely for native
    * adapters (blink, xpub, btcpay, strike, surge). Never defaults to false
