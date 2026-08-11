@@ -54,8 +54,8 @@
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { validateBody, ENCRYPTED_LABEL_MAX } from './validate.ts';
 
-const ENCRYPTED_LABEL_MAX = 4096;
 const QUILTT_CREDENTIALS_SENTINEL = 'quiltt-managed';
 
 interface SourceWalletInput {
@@ -94,61 +94,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     const body = JSON.parse(raw || '{}') as LinkCompleteBody;
 
-    if (!body.platform_slug || typeof body.platform_slug !== 'string') {
-      return jsonResponse({ error: 'platform_slug required' }, 400, cors);
-    }
-    if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-      return jsonResponse({ error: 'app_user_id required (string, ≤256 chars)' }, 400, cors);
-    }
-    if (!body.widget_token || typeof body.widget_token !== 'string') {
-      return jsonResponse({ error: 'widget_token required' }, 401, cors);
-    }
-    if (body.encrypted_label !== undefined) {
-      if (typeof body.encrypted_label !== 'string' || body.encrypted_label.length > ENCRYPTED_LABEL_MAX) {
-        return jsonResponse({ error: 'encrypted_label must be base64 ciphertext ≤4 KB' }, 400, cors);
-      }
-    }
-    if (body.quiltt_connection_id !== undefined) {
-      if (typeof body.quiltt_connection_id !== 'string' || body.quiltt_connection_id.length > 256) {
-        return jsonResponse({ error: 'quiltt_connection_id must be a string ≤256 chars' }, 400, cors);
-      }
-    }
-    if (body.accounts !== undefined) {
-      if (!Array.isArray(body.accounts)) {
-        return jsonResponse({ error: 'accounts must be an array' }, 400, cors);
-      }
-      // Cap matches MAX_WALLETS_PER_CONNECTION in or-source-wallets-set.
-      // Banks can have more accounts than crypto wallets (DL-0326 user had 18);
-      // revisit deliberately rather than discovering this limit in a 400 (DL-0442).
-      if (body.accounts.length > 50) {
-        return jsonResponse({ error: 'accounts: max 50 entries per connection' }, 400, cors);
-      }
-      for (const acc of body.accounts) {
-        if (
-          !acc.external_wallet_id ||
-          typeof acc.external_wallet_id !== 'string' ||
-          acc.external_wallet_id.length > 256
-        ) {
-          return jsonResponse({ error: 'accounts[].external_wallet_id required (string, <=256 chars)' }, 400, cors);
-        }
-        if (typeof acc.is_synced !== 'boolean') {
-          return jsonResponse({ error: 'accounts[].is_synced required (boolean)' }, 400, cors);
-        }
-        // encrypted_metadata is NOT NULL in source_wallets; the client must seal
-        // { currency, label? } under the user's key before passing it here.
-        if (
-          !acc.encrypted_metadata ||
-          typeof acc.encrypted_metadata !== 'string' ||
-          acc.encrypted_metadata.length > 65536
-        ) {
-          return jsonResponse(
-            { error: 'accounts[].encrypted_metadata required (base64 ciphertext, <=64 KB)' },
-            400,
-            cors,
-          );
-        }
-      }
-    }
+    const bodyCheck = validateBody(body);
+    if (!bodyCheck.ok) return jsonResponse({ error: bodyCheck.error }, bodyCheck.status, cors);
 
     const quilttConnectionId = body.quiltt_connection_id ?? null;
 
