@@ -4,8 +4,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=/opt/bb-support/.env.orbi-probe
-ExecStart=/opt/bb-support/scripts/ops/orbi-staleness-probe.sh
-User=ubuntu
+EnvironmentFile=/etc/orbi/orbi-staleness-probe.env
+ExecStart=/usr/local/bin/orbi-staleness-probe.sh
 StandardOutput=journal
 StandardError=journal
