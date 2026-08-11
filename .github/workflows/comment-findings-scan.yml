@@ -1,0 +1,89 @@
+name: Comment findings-boundary scan
+
+# Detects internal-infrastructure references in PR/issue comment bodies, PR
+# review comments, and PR review summaries on this public repo, so a maintainer
+# can remove them. scripts/pre-publish-scan.sh already keeps these out of
+# shipping FILES; this covers the comment surface, which nothing scanned before.
+#
+# It DETECTS ONLY. It never edits or deletes a comment: removing already
+# published content is a maintainer decision, not an automated one. It never
+# echoes the matched text, because printing the match into the public run log
+# would republish the reference it is flagging. A failed run here is the signal.
+
+on:
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+
+# Least privilege. This job only reads the event payload it is handed: it needs
+# no repo contents and no write scope. A comment-triggered workflow that holds
+# write permissions is the classic pwn-request foot-gun, so deny everything.
+permissions: {}
+
+concurrency:
+  group: comment-scan-${{ github.event.comment.id || github.event.review.id }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: Scan comment body
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan for internal-infrastructure references
+        # The comment/review body and its URL are passed through env, NEVER
+        # interpolated into the run script. Inlining a user-controlled
+        # ${{ github.event.*.body }} into a shell would let a crafted comment
+        # inject commands; env keeps the body inert data.
+        env:
+          BODY: ${{ github.event.comment.body || github.event.review.body }}
+          COMMENT_URL: ${{ github.event.comment.html_url || github.event.review.html_url }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BODY:-}" ]; then
+            echo "No comment/review body on this event; nothing to scan."
+            exit 0
+          fi
+
+          # Two generic STRUCTURAL patterns, identical to Category 3 of
+          # scripts/pre-publish-scan.sh. Each names a CLASS of internal
+          # reference (any Tailscale tail-net hostname, any address in the CGNAT
+          # /10), never a specific host, so this file publishes no value.
+          TAILNET='\btail[a-z0-9]+\.ts\.net\b'
+          CGNAT='\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+\b'
+
+          hit=0
+          if printf '%s' "$BODY" | grep -Eq "$TAILNET"; then
+            echo "::error::Comment matches a Tailscale tail-net hostname pattern (internal-infrastructure reference)."
+            hit=1
+          fi
+          if printf '%s' "$BODY" | grep -Eq "$CGNAT"; then
+            echo "::error::Comment matches a CGNAT-range address pattern (internal-infrastructure reference)."
+            hit=1
+          fi
+
+          # The matched text is deliberately NOT printed: echoing it would
+          # republish the reference in this public run log. The pattern class and
+          # the comment URL are enough for a maintainer to find and remove it.
+          {
+            echo "## Comment findings-boundary scan"
+            echo
+            if [ "$hit" -eq 1 ]; then
+              echo "A comment matched an internal-infrastructure reference class."
+              echo
+              echo "- Event: ${EVENT_NAME}"
+              echo "- Comment: ${COMMENT_URL}"
+              echo
+              echo "The matched text is intentionally not shown here. A maintainer should open the linked comment and remove the reference if confirmed."
+            else
+              echo "No internal-infrastructure reference found."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$hit" -eq 1 ]; then
+            exit 1
+          fi
