@@ -261,6 +261,16 @@ export interface ProviderAdapter {
     withdrawals: boolean;
   };
 
+  /**
+   * Optional in-app route for this provider's connect flow. When set,
+   * pickers route the tile's "Connect" action to this URL instead of
+   * opening the generic credential-entry dialog. Propagated unchanged
+   * into ProviderManifest.connectUrl by listProviderManifests().
+   *
+   * Leave unset for providers that use the standard credential form.
+   */
+  connectUrl?: string;
+
   /** Schema for the credential blob the adapter expects. */
   credentialFields: CredentialField[];
 
