@@ -27,6 +27,7 @@ import { useEffect, useState } from "react";
 import { parseDescriptor, type ParsedDescriptor } from "@/stealth/lib/derive";
 import {
   runSync,
+  WindowExhaustedError,
   liveFetchBlock as libLiveFetchBlock,
   liveFetchFilter as libLiveFetchFilter,
   liveFetchTip as libLiveFetchTip,
@@ -435,7 +436,15 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
         setError(msg);
-        postWidgetError("INTERNAL", msg, true);
+        if (e instanceof WindowExhaustedError) {
+          // Address window exhausted: wallet history beyond the scanned window
+          // may be missing. Not retryable as is; the embedder must prompt a
+          // re-sync with a wider gap_limit. Its own code so this is
+          // distinguishable from an unexpected INTERNAL failure. DL-0584.
+          postWidgetError("WINDOW_EXHAUSTED", msg, false);
+        } else {
+          postWidgetError("INTERNAL", msg, true);
+        }
       }
     })();
 
