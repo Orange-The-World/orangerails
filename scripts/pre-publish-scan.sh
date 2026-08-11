@@ -94,6 +94,7 @@ EXEMPT_GENERIC=(
   # The companion workflows carry the structural PATTERN as a literal (they
   # are detectors). Exempt them the same way the scanner exempts itself.
   ".github/workflows/post-merge-hygiene.yml"
+  ".github/workflows/pr-commit-metadata-scan.yml"
   ".github/PULL_REQUEST_TEMPLATE.md"
   ".github/workflows/repo-hygiene.yml"
   "CONTRIBUTING.md"
