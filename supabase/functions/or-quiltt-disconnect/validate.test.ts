@@ -9,29 +9,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-
-// --- inlined from index.ts (keep in sync) ----------------------------------------
-
-interface DisconnectBody {
-  app_user_id?: string;
-  connection_id?: unknown;
-  full_unlink?:  unknown;
-}
-
-type ValidationResult = { ok: true } | { ok: false; status: number; error: string };
-
-function validateBody(body: DisconnectBody): ValidationResult {
-  if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-    return { ok: false, status: 400, error: 'app_user_id required (string, <=256 chars)' };
-  }
-  if (
-    body.connection_id !== undefined &&
-    (typeof body.connection_id !== 'string' || (body.connection_id as string).length > 256)
-  ) {
-    return { ok: false, status: 400, error: 'connection_id must be a string <=256 chars' };
-  }
-  return { ok: true };
-}
+import { validateBody } from './validate.ts';
 
 // --- tests ---------------------------------------------------------------------------
 
