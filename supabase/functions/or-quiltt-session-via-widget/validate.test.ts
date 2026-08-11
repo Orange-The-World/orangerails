@@ -9,43 +9,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-
-// --- body validation (inlined from index.ts, keep in sync) ---------------------------
-
-type ValidationResult = { ok: true } | { ok: false; status: number; error: string };
-
-function validateBody(body: { widget_token?: unknown }): ValidationResult {
-  if (!body.widget_token || typeof body.widget_token !== 'string') {
-    return { ok: false, status: 400, error: 'widget_token required' };
-  }
-  return { ok: true };
-}
-
-// --- widget_token state checks (inlined from index.ts, keep in sync) -----------------
-
-interface PendingWidgetSession {
-  id: string;
-  platform_id: string;
-  app_user_id: string;
-  expires_at: string;
-  used_at: string | null;
-}
-
-type TokenCheckResult =
-  | { ok: true; session: PendingWidgetSession }
-  | { ok: false; status: 401; error: string };
-
-function checkTokenState(
-  session: PendingWidgetSession | null,
-  nowMs: number,
-): TokenCheckResult {
-  if (!session) return { ok: false, status: 401, error: 'Invalid widget token' };
-  if (session.used_at) return { ok: false, status: 401, error: 'Invalid widget token' };
-  if (new Date(session.expires_at).getTime() < nowMs) {
-    return { ok: false, status: 401, error: 'Invalid widget token' };
-  }
-  return { ok: true, session };
-}
+import { validateBody, checkTokenState } from './validate.ts';
 
 // --- tests: body validation ----------------------------------------------------------
 
