@@ -18,10 +18,11 @@ on:
   pull_request_review:
     types: [submitted, edited]
 
-# Least privilege. This job only reads the event payload it is handed: it needs
-# no repo contents and no write scope. A comment-triggered workflow that holds
-# write permissions is the classic pwn-request foot-gun, so deny everything.
-permissions: {}
+# Minimum privilege required across all jobs. The scan job further restricts
+# itself to permissions: {} (no scope at all). Only the notify-on-failure job
+# needs issues: write, and only when the scan job fails.
+permissions:
+  issues: write
 
 concurrency:
   group: comment-scan-${{ github.event.comment.id || github.event.review.id }}
@@ -31,7 +32,57 @@ jobs:
   scan:
     name: Scan comment body
     runs-on: ubuntu-latest
+    # Deny all permissions for this job. A comment-triggered workflow that holds
+    # write permissions is the classic pwn-request foot-gun. The scan job reads
+    # only the event payload passed through env -- it needs no repo contents and
+    # no write scope.
+    permissions: {}
     steps:
+      - name: Canary self-test (prove patterns match before trusting results)
+        # Routes known-matching and known-safe literals through the exact grep
+        # calls used in the scan step below. If either pattern fails to match
+        # its canary, or matches a safe string it should not, the mechanism is
+        # broken and a green scan would be a false negative -- hard-fail (exit 2)
+        # before scanning anything. Mirrors self_test() in pre-publish-scan.sh
+        # (lines 258-278), which exists because a silent no-op here already
+        # happened once and the canary was what would have caught it.
+        run: |
+          set -euo pipefail
+          TAILNET='\btail[a-z0-9]+\.ts\.net\b'
+          CGNAT='\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+\b'
+
+          # Known-matching canary strings: structurally valid, not real hosts.
+          CANARY_TAILNET='tail1a2b3c4d.ts.net'
+          CANARY_CGNAT='100.100.100.100'
+
+          # Known-safe strings: must NOT match (false-positive guard).
+          SAFE_TAILNET='example.com'
+          SAFE_CGNAT='10.0.0.1'
+
+          ok=1
+          if ! printf '%s' "$CANARY_TAILNET" | grep -Eq "$TAILNET"; then
+            echo "::error::Canary FAILED: TAILNET pattern does not match '$CANARY_TAILNET'. Scanner is broken."
+            ok=0
+          fi
+          if ! printf '%s' "$CANARY_CGNAT" | grep -Eq "$CGNAT"; then
+            echo "::error::Canary FAILED: CGNAT pattern does not match '$CANARY_CGNAT'. Scanner is broken."
+            ok=0
+          fi
+          if printf '%s' "$SAFE_TAILNET" | grep -Eq "$TAILNET"; then
+            echo "::error::Canary FAILED: TAILNET pattern incorrectly matched '$SAFE_TAILNET'. False positive."
+            ok=0
+          fi
+          if printf '%s' "$SAFE_CGNAT" | grep -Eq "$CGNAT"; then
+            echo "::error::Canary FAILED: CGNAT pattern incorrectly matched '$SAFE_CGNAT'. False positive."
+            ok=0
+          fi
+
+          if [ "$ok" -eq 0 ]; then
+            echo "::error::Scanner self-test failed. Results are not trustworthy; aborting scan."
+            exit 2
+          fi
+          echo "Canary self-test passed: both patterns match their canary and do not false-positive on safe strings."
+
       - name: Scan for internal-infrastructure references
         # The comment/review body and its URL are passed through env, NEVER
         # interpolated into the run script. Inlining a user-controlled
@@ -87,3 +138,38 @@ jobs:
           if [ "$hit" -eq 1 ]; then
             exit 1
           fi
+
+  # issue_comment-triggered runs do NOT appear in a PR's check list. A failure
+  # is therefore invisible to reviewers unless actively watched in the Actions
+  # tab. This job opens a GitHub issue on failure so maintainers are notified
+  # without requiring any external secret -- only GITHUB_TOKEN (issues: write).
+  #
+  # Note: the scheduled-workflow-failure monitor (PR #660) covers scheduled and
+  # dispatched workflows via workflow_run. It does NOT cover event-triggered runs
+  # like this one, so this job is the alarm path for this workflow specifically.
+  notify-on-failure:
+    name: Open issue on scan failure
+    runs-on: ubuntu-latest
+    needs: scan
+    if: failure()
+    steps:
+      - name: Open maintainer-alert issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_URL: ${{ github.event.comment.html_url || github.event.review.html_url }}
+        run: |
+          set -euo pipefail
+          BODY="The comment findings-boundary scan failed.
+
+          - **Run:** ${RUN_URL}
+          - **Event:** ${EVENT_NAME}
+          - **Comment/review:** ${COMMENT_URL}
+
+          Either a comment matched an internal-infrastructure reference class, or the scanner self-test failed (pattern broken). A maintainer should open the linked comment, verify, and remove any reference found. Close this issue once resolved."
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "[findings-scan] Comment scan failure: ${EVENT_NAME}" \
+            --body "$BODY"
