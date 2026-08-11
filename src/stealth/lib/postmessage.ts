@@ -425,6 +425,7 @@ export type StealthErrorCode =
   | 'CONNECTION_NOT_FOUND'
   | 'ORIGIN_NOT_ALLOWED'
   | 'PROTOCOL_VERSION_MISMATCH'
+  | 'WINDOW_EXHAUSTED'
   | 'INTERNAL';
 
 export interface StealthErrorMessage {
