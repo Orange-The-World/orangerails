@@ -1,0 +1,263 @@
+name: PR commit-metadata scan (pre-merge gate)
+
+# Scans every commit in a pull request targeting prod for non-public
+# references in commit metadata (author name/email, committer name/email,
+# commit message body) BEFORE the merge is allowed.
+#
+# This is the pre-merge companion to post-merge-hygiene.yml.  The post-merge
+# workflow fires after code is live and therefore cannot block a merge.  This
+# workflow runs as a required PR check so a promotion is rejected if any commit
+# in the PR range carries a non-public reference.
+#
+# Two pattern sources (same as post-merge-hygiene.yml):
+#   - GENERIC_PATTERN: structural classes (tailnet hostnames, CGNAT CIDR),
+#     safe to commit because it names a class, not a person.
+#   - RESERVED_PATTERN: specific internal references, read from the
+#     OR_RESERVED_TERMS repo secret so this file never publishes the list.
+#     If the secret is unset the reserved-term half is skipped.
+#
+# Tree-content scanning is owned by repo-hygiene.yml.  This workflow stays
+# focused on commit metadata only.
+
+on:
+  pull_request:
+    branches: [prod]
+
+# Least privilege: this job only reads the repo to inspect commit metadata.
+permissions:
+  contents: read
+
+jobs:
+  pr-metadata-scan:
+    name: Commit metadata scan (PR range)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan author + committer + body for non-public references
+        env:
+          # GENERIC structural pattern: safe to commit (names a class, not a
+          # person): tail-net hostnames and the CGNAT /10 block Tailscale
+          # assigns. Bare ".local" is intentionally NOT here: it
+          # false-positives on .env.local / *.local.json. The specific
+          # internal *.local host is carried in the reserved-term list.
+          GENERIC_PATTERN: 'tail[a-z0-9]+\.ts\.net|\.tailnet\b|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          # Reserved-term pattern: sourced from a secret so this file never
+          # stores them; empty when the secret is unset (generic half runs).
+          RESERVED_PATTERN: ${{ secrets.OR_RESERVED_TERMS }}
+          # Documentation strip-patterns: tokens that only appear in regex /
+          # network documentation, never an accidental match. A matching line
+          # is re-scanned with these stripped; if it comes back clean it was
+          # describing the regex, not a stray reference.
+          DOC_STRIP_CGNAT: '100\.64\.0\.0/10'
+          DOC_STRIP_REGEX_ALT: '\([0-9]+(\|[0-9]+)+\)'
+          # PR range: all commits that will land on prod if this PR merges.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          RANGE="$BASE_SHA..$HEAD_SHA"
+          echo "Scanning PR range: $RANGE"
+
+          PATTERN="$GENERIC_PATTERN"
+          if [ -n "${RESERVED_PATTERN:-}" ]; then
+            PATTERN="$PATTERN|$RESERVED_PATTERN"
+          else
+            echo "::notice::OR_RESERVED_TERMS secret not set : scanning generic structural patterns only."
+          fi
+
+          # Cleared-list: per-SHA exemptions for commits whose metadata contains
+          # a structural pattern the doc-strip cannot remove.
+          # Format (one entry per line): <40-hex-sha> <classes> <reason>
+          # <classes> is a mandatory comma-separated subset of: cgnat, tailnet
+          CLEARED_LIST_FILE=".github/commit-metadata-cleared.txt"
+          declare -A CLEARED_SHA_MAP
+          if [ -f "$CLEARED_LIST_FILE" ]; then
+            while IFS= read -r entry; do
+              [[ -z "$entry" || "$entry" =~ ^# ]] && continue
+              sha="${entry:0:40}"
+              rest="${entry:41}"
+              if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::error::$CLEARED_LIST_FILE: invalid entry -- not a 40-char lowercase hex SHA"
+                exit 1
+              fi
+              classes="${rest%% *}"
+              if [[ -z "$classes" ]]; then
+                echo "::error::$CLEARED_LIST_FILE: SHA $sha missing class field (required: non-empty comma-separated subset of cgnat,tailnet)"
+                exit 1
+              fi
+              if [[ "$classes" == "$rest" ]]; then
+                echo "::error::$CLEARED_LIST_FILE: SHA $sha has no reason (format: <sha> <classes> <reason>)"
+                exit 1
+              fi
+              reason="${rest#"$classes" }"
+              if [[ ! "$reason" =~ [^[:space:]] ]]; then
+                echo "::error::$CLEARED_LIST_FILE: SHA $sha has blank reason (required)"
+                exit 1
+              fi
+              IFS=',' read -ra _class_tokens <<< "$classes"
+              for _tok in "${_class_tokens[@]}"; do
+                case "$_tok" in
+                  cgnat|tailnet) ;;
+                  *) echo "::error::$CLEARED_LIST_FILE: SHA $sha has unknown class '$_tok' (must be cgnat or tailnet)"; exit 1 ;;
+                esac
+              done
+              CLEARED_SHA_MAP["$sha"]="$classes"
+            done < "$CLEARED_LIST_FILE"
+            echo "Cleared list loaded: ${#CLEARED_SHA_MAP[@]} SHA(s) from $CLEARED_LIST_FILE"
+          fi
+
+          # Sub-patterns used by the cleared-list exemption check.
+          _CGNAT_BARE='100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          _TAILNET_PAT='tail[a-z0-9]+\.ts\.net|\.tailnet\b'
+
+          # Self-test 1: a bare CGNAT address must still match PATTERN after
+          # doc-strip. If doc-strip silences it, the strip is too broad.
+          _ST1="AUTHOR Someone <someone@example.com> COMMITTER git <git@example.com> 100.64.0.1"
+          if ! echo "$_ST1" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 1 FAIL: PATTERN does not match a bare CGNAT address. Scanner is broken."
+            exit 1
+          fi
+          _ST1_CLEAN=$(echo "$_ST1" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          if ! echo "$_ST1_CLEAN" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 1 FAIL: doc-strip incorrectly cleared a bare CGNAT address. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 1 passed: bare CGNAT address survives doc-strip."
+
+          # Self-test 2: cgnat-only cleared SHA must still FAIL a tailnet line.
+          _ST2_SHA="aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000"
+          CLEARED_SHA_MAP["$_ST2_SHA"]="cgnat"
+          _ST2_LINE="AUTHOR Test <user@badhost.tailtest.ts.net> COMMITTER test <ci@example.com>"
+          _ST2_CLEAN=$(echo "$_ST2_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          _st2_cgnat=$(echo "$_ST2_CLEAN" | grep -cEi "$_CGNAT_BARE" || true)
+          _st2_tailnet=$(echo "$_ST2_CLEAN" | grep -cEi "$_TAILNET_PAT" || true)
+          _st2_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST2_SHA]+set}" ]]; then
+            _st2_cleared="${CLEARED_SHA_MAP[$_ST2_SHA]}"
+            if [ "$_st2_cgnat" -gt 0 ] || [ "$_st2_tailnet" -gt 0 ]; then
+              _st2_subset=1
+              if [ "$_st2_cgnat" -gt 0 ] && ! echo "$_st2_cleared" | grep -qE '(^|,)cgnat(,|$)'; then _st2_subset=0; fi
+              if [ "$_st2_tailnet" -gt 0 ] && ! echo "$_st2_cleared" | grep -qE '(^|,)tailnet(,|$)'; then _st2_subset=0; fi
+              if [ "$_st2_subset" -eq 1 ]; then _st2_would_exempt=1; fi
+            fi
+          fi
+          unset "CLEARED_SHA_MAP[$_ST2_SHA]"
+          if [ "$_st2_would_exempt" -ne 0 ]; then
+            echo "::error::Self-test 2 FAIL: cgnat-only cleared SHA incorrectly exempted a tailnet line. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 2 passed: cleared SHA with cgnat only correctly fails a tailnet line."
+
+          # Self-test 3: cleared-list exemption must NOT apply to un-cleared SHAs.
+          _ST3_SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+          _st3_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST3_SHA]+set}" ]]; then
+            _c=$(echo "100.64.0.1" | grep -cEi "$_CGNAT_BARE" || true)
+            _t=$(echo "100.64.0.1" | grep -cEi "$_TAILNET_PAT" || true)
+            if [ "$_c" -gt 0 ] && [ "$_t" -eq 0 ]; then
+              _st3_would_exempt=1
+            fi
+          fi
+          if [ "$_st3_would_exempt" -ne 0 ]; then
+            echo "::error::Self-test 3 FAIL: exemption logic fired on an un-cleared SHA. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 3 passed: un-cleared SHA CGNAT match correctly not exempted."
+
+          # Self-test 4: cleared SHA with cgnat,tailnet must EXEMPT a line
+          # matching both.
+          _ST4_SHA="cccc1111cccc1111cccc1111cccc1111cccc1111"
+          CLEARED_SHA_MAP["$_ST4_SHA"]="cgnat,tailnet"
+          _ST4_LINE="AUTHOR Test <ci@100.64.0.1> COMMITTER ci <git@host.tailfake4.ts.net>"
+          _ST4_CLEAN=$(echo "$_ST4_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          _st4_cgnat=$(echo "$_ST4_CLEAN" | grep -cEi "$_CGNAT_BARE" || true)
+          _st4_tailnet=$(echo "$_ST4_CLEAN" | grep -cEi "$_TAILNET_PAT" || true)
+          _st4_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST4_SHA]+set}" ]]; then
+            _st4_cleared="${CLEARED_SHA_MAP[$_ST4_SHA]}"
+            if [ "$_st4_cgnat" -gt 0 ] || [ "$_st4_tailnet" -gt 0 ]; then
+              _st4_subset=1
+              if [ "$_st4_cgnat" -gt 0 ] && ! echo "$_st4_cleared" | grep -qE '(^|,)cgnat(,|$)'; then _st4_subset=0; fi
+              if [ "$_st4_tailnet" -gt 0 ] && ! echo "$_st4_cleared" | grep -qE '(^|,)tailnet(,|$)'; then _st4_subset=0; fi
+              if [ "$_st4_subset" -eq 1 ]; then _st4_would_exempt=1; fi
+            fi
+          fi
+          unset "CLEARED_SHA_MAP[$_ST4_SHA]"
+          if [ "$_st4_would_exempt" -eq 0 ]; then
+            echo "::error::Self-test 4 FAIL: both-class cleared SHA did not exempt a matching line. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 4 passed: cleared SHA with cgnat,tailnet correctly exempts a line matching both."
+
+          # Self-test 5: cleared SHA with both classes still FAILS a
+          # reserved-term-only line.
+          _ST5_SHA="5555aaaa5555aaaa5555aaaa5555aaaa5555aaaa"
+          CLEARED_SHA_MAP["$_ST5_SHA"]="cgnat,tailnet"
+          _ST5_LINE="AUTHOR Internal User <user@example.com> COMMITTER git <git@example.com>"
+          _ST5_CLEAN=$(echo "$_ST5_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+          _st5_cgnat=$(echo "$_ST5_CLEAN" | grep -cEi "$_CGNAT_BARE" || true)
+          _st5_tailnet=$(echo "$_ST5_CLEAN" | grep -cEi "$_TAILNET_PAT" || true)
+          _st5_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST5_SHA]+set}" ]]; then
+            _st5_cleared="${CLEARED_SHA_MAP[$_ST5_SHA]}"
+            if [ "$_st5_cgnat" -gt 0 ] || [ "$_st5_tailnet" -gt 0 ]; then
+              _st5_subset=1
+              if [ "$_st5_cgnat" -gt 0 ] && ! echo "$_st5_cleared" | grep -qE '(^|,)cgnat(,|$)'; then _st5_subset=0; fi
+              if [ "$_st5_tailnet" -gt 0 ] && ! echo "$_st5_cleared" | grep -qE '(^|,)tailnet(,|$)'; then _st5_subset=0; fi
+              if [ "$_st5_subset" -eq 1 ]; then _st5_would_exempt=1; fi
+            fi
+          fi
+          unset "CLEARED_SHA_MAP[$_ST5_SHA]"
+          if [ "$_st5_would_exempt" -ne 0 ]; then
+            echo "::error::Self-test 5 FAIL: reserved-term-only match incorrectly exempted. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 5 passed: reserved-term-only match correctly not exempted by cleared list."
+
+          MATCHES=0
+          CURRENT_SHA="(unknown)"
+          while IFS= read -r line; do
+            if [[ "$line" == "--END--" ]]; then
+              CURRENT_SHA="(unknown)"
+              continue
+            fi
+            if [[ "$line" =~ ^([0-9a-f]{40})\ AUTHOR\  ]]; then
+              CURRENT_SHA="${BASH_REMATCH[1]}"
+            fi
+            if echo "$line" | grep -qEi "$PATTERN"; then
+              cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+              if ! echo "$cleaned" | grep -qEi "$PATTERN"; then
+                echo "::notice::Allowlisted documentation line (CGNAT block or regex syntax)."
+                continue
+              fi
+              # Cleared-list check.
+              if [[ -n "${CLEARED_SHA_MAP[$CURRENT_SHA]+set}" ]]; then
+                _cleared="${CLEARED_SHA_MAP[$CURRENT_SHA]}"
+                _is_cgnat=$(echo "$cleaned" | grep -cEi "$_CGNAT_BARE" || true)
+                _is_tailnet=$(echo "$cleaned" | grep -cEi "$_TAILNET_PAT" || true)
+                if [ "$_is_cgnat" -gt 0 ] || [ "$_is_tailnet" -gt 0 ]; then
+                  _subset=1
+                  if [ "$_is_cgnat" -gt 0 ] && ! echo "$_cleared" | grep -qE '(^|,)cgnat(,|$)'; then _subset=0; fi
+                  if [ "$_is_tailnet" -gt 0 ] && ! echo "$_cleared" | grep -qE '(^|,)tailnet(,|$)'; then _subset=0; fi
+                  if [ "$_subset" -eq 1 ]; then
+                    echo "::notice::SHA $CURRENT_SHA cleared for structural classes ($_cleared); match exempted."
+                    continue
+                  fi
+                fi
+              fi
+              # Do NOT echo the matched content: Actions logs are world-readable
+              # on a public repo.
+              echo "::error::Reserved internal term in commit ${CURRENT_SHA}'s metadata; a maintainer should clear it. (Matched text withheld from logs.)"
+              MATCHES=$((MATCHES + 1))
+            fi
+          done < <(git log $RANGE --format='%H AUTHOR %an <%ae> COMMITTER %cn <%ce>%n%B%n--END--')
+
+          if [ "$MATCHES" -gt 0 ]; then
+            echo "::error::PR metadata scan failed: $MATCHES line(s) carry non-public references. The merge is blocked."
+            exit 1
+          fi
+          echo "PR metadata scan clean: 0 lines carry non-public references in range $RANGE."
