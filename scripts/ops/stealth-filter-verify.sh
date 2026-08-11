@@ -66,17 +66,37 @@ command -v jq &>/dev/null \
 
 # ---- property 1: path from unit env, never a guessed literal ----------------
 #
-# Read BTC_FILTER_DATA_DIR from the systemd unit environment, not from
-# a hard-coded path. A wrong path that happens to exist would silently
-# check the wrong thing; pulling from the unit makes that impossible.
+# BTC_FILTER_DATA_DIR is always resolved from the systemd unit environment.
+# If the caller also supplies a non-empty value it is validated against the
+# unit value so a wrong-but-existing directory cannot silently pass.
+# An empty caller-supplied value (BTC_FILTER_DATA_DIR="" ./script) skips the
+# unit lookup and immediately fails the non-empty guard below -- use this for
+# the Property 1 force-test.
 
-if [[ -z "${BTC_FILTER_DATA_DIR:-}" ]]; then
-  BTC_FILTER_DATA_DIR=$(
-    systemctl show btc-filter-worker.service -p Environment 2>/dev/null \
-      | tr ' ' '\n' \
-      | sed -n 's/^BTC_FILTER_DATA_DIR=//p'
-  )
+_read_unit_dir() {
+  # --value strips the leading "Environment=" prefix so each space-delimited
+  # token is a plain KEY=VALUE pair.  Values containing spaces are not
+  # supported; a filter data-dir path should never need them.
+  systemctl show btc-filter-worker.service \
+    --property=Environment --value 2>/dev/null \
+    | tr ' ' '\n' \
+    | sed -n 's/^BTC_FILTER_DATA_DIR=//p' \
+    | head -1
+}
+
+if [[ ! -v BTC_FILTER_DATA_DIR ]]; then
+  # Variable unset by caller: pull from the unit environment.
+  BTC_FILTER_DATA_DIR=$(_read_unit_dir)
+elif [[ -n "${BTC_FILTER_DATA_DIR}" ]]; then
+  # Variable set to a non-empty value by caller: validate it matches the unit
+  # environment to prevent checking a wrong-but-existing directory.
+  _UNIT_DIR=$(_read_unit_dir)
+  if [[ -n "$_UNIT_DIR" && "${BTC_FILTER_DATA_DIR%/}" != "${_UNIT_DIR%/}" ]]; then
+    die 2 "caller-supplied BTC_FILTER_DATA_DIR does not match unit env value -- aborting to avoid checking the wrong directory"
+  fi
 fi
+# If BTC_FILTER_DATA_DIR is set but empty (force-test), fall through to the
+# non-empty guard below.
 
 [[ -n "${BTC_FILTER_DATA_DIR:-}" ]] \
   || die 2 "BTC_FILTER_DATA_DIR not declared in btc-filter-worker.service unit environment"
