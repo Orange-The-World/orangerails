@@ -34,6 +34,40 @@ and exits with the appropriate severity code.
 */2 * * * * ORBI_PROBE_DSN="<dsn>" /opt/orbi/scripts/orbi-staleness-probe.sh >> /var/log/orbi-staleness-probe.log 2>&1
 ```
 
+### systemd install set (preferred over cron)
+
+Install all four files. Order matters: the handler must exist before the probe
+unit is enabled, or `OnFailure=` resolves to nothing and a probe crash pages
+nobody.
+
+| # | File in repo | Install to |
+|---|--------------|------------|
+| 1 | `scripts/ops/orbi-probe-failed.sh` | `/usr/local/bin/orbi-probe-failed.sh` (chmod +x) |
+| 2 | `systemd/orbi-probe-failed@.service` | `/etc/systemd/system/orbi-probe-failed@.service` |
+| 3 | `scripts/ops/orbi-staleness-probe.sh` | `/usr/local/bin/orbi-staleness-probe.sh` (chmod +x) |
+| 4 | `systemd/orbi-staleness-probe.service` | `/etc/systemd/system/orbi-staleness-probe.service` |
+| 5 | `systemd/orbi-staleness-probe.timer` | `/etc/systemd/system/orbi-staleness-probe.timer` |
+
+The probe env lives at `/etc/orbi/orbi-staleness-probe.env` and is read by both
+the probe unit and the handler, so the alarm webhook is configured once.
+
+Then `systemctl daemon-reload` and `systemctl enable --now orbi-staleness-probe.timer`.
+
+### Acceptance: both tests must be watched going red
+
+A probe nobody has seen fail is not a probe. Neither of these is optional.
+
+1. **Alarm path.** Run the probe once with `STALE_THRESHOLD_MINUTES=0` and
+   confirm the message actually arrives in the destination topic. The unit
+   going red in the journal is not the test; the message landing is.
+2. **OnFailure path.** Rename `/usr/local/bin/orbi-staleness-probe.sh`, start
+   the unit, and confirm a message arrives naming the failed unit. Restore the
+   script afterwards. This proves the backstop fires when the probe cannot
+   report for itself.
+
+If the handler exits 3, the alarm transport is not configured on that host and
+neither test above can pass: fix the env file before reading anything as green.
+
 ---
 
 ## scripts/ops/orbi-forward-fill-liveness.sh
