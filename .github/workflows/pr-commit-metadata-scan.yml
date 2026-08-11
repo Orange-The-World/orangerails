@@ -72,7 +72,7 @@ jobs:
           # Cleared-list: per-SHA exemptions for commits whose metadata contains
           # a structural pattern the doc-strip cannot remove.
           # Format (one entry per line): <40-hex-sha> <classes> <reason>
-          # <classes> is a mandatory comma-separated subset of: cgnat, tailnet
+          # <classes> is a mandatory comma-separated subset of: cgnat, tailnet, reserved
           CLEARED_LIST_FILE=".github/commit-metadata-cleared.txt"
           declare -A CLEARED_SHA_MAP
           if [ -f "$CLEARED_LIST_FILE" ]; then
@@ -86,7 +86,7 @@ jobs:
               fi
               classes="${rest%% *}"
               if [[ -z "$classes" ]]; then
-                echo "::error::$CLEARED_LIST_FILE: SHA $sha missing class field (required: non-empty comma-separated subset of cgnat,tailnet)"
+                echo "::error::$CLEARED_LIST_FILE: SHA $sha missing class field (required: non-empty comma-separated subset of cgnat,tailnet,reserved)"
                 exit 1
               fi
               if [[ "$classes" == "$rest" ]]; then
@@ -101,8 +101,8 @@ jobs:
               IFS=',' read -ra _class_tokens <<< "$classes"
               for _tok in "${_class_tokens[@]}"; do
                 case "$_tok" in
-                  cgnat|tailnet) ;;
-                  *) echo "::error::$CLEARED_LIST_FILE: SHA $sha has unknown class '$_tok' (must be cgnat or tailnet)"; exit 1 ;;
+                  cgnat|tailnet|reserved) ;;
+                  *) echo "::error::$CLEARED_LIST_FILE: SHA $sha has unknown class '$_tok' (must be cgnat, tailnet, or reserved)"; exit 1 ;;
                 esac
               done
               CLEARED_SHA_MAP["$sha"]="$classes"
@@ -193,30 +193,57 @@ jobs:
           fi
           echo "Self-test 4 passed: cleared SHA with cgnat,tailnet correctly exempts a line matching both."
 
-          # Self-test 5: cleared SHA with both classes still FAILS a
-          # reserved-term-only line.
-          _ST5_SHA="5555aaaa5555aaaa5555aaaa5555aaaa5555aaaa"
-          CLEARED_SHA_MAP["$_ST5_SHA"]="cgnat,tailnet"
-          _ST5_LINE="AUTHOR Internal User <user@example.com> COMMITTER git <git@example.com>"
-          _ST5_CLEAN=$(echo "$_ST5_LINE" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
-          _st5_cgnat=$(echo "$_ST5_CLEAN" | grep -cEi "$_CGNAT_BARE" || true)
-          _st5_tailnet=$(echo "$_ST5_CLEAN" | grep -cEi "$_TAILNET_PAT" || true)
-          _st5_would_exempt=0
-          if [[ -n "${CLEARED_SHA_MAP[$_ST5_SHA]+set}" ]]; then
-            _st5_cleared="${CLEARED_SHA_MAP[$_ST5_SHA]}"
-            if [ "$_st5_cgnat" -gt 0 ] || [ "$_st5_tailnet" -gt 0 ]; then
-              _st5_subset=1
-              if [ "$_st5_cgnat" -gt 0 ] && ! echo "$_st5_cleared" | grep -qE '(^|,)cgnat(,|$)'; then _st5_subset=0; fi
-              if [ "$_st5_tailnet" -gt 0 ] && ! echo "$_st5_cleared" | grep -qE '(^|,)tailnet(,|$)'; then _st5_subset=0; fi
-              if [ "$_st5_subset" -eq 1 ]; then _st5_would_exempt=1; fi
+          # Self-test 5a: cleared SHA with cgnat,tailnet does NOT exempt a reserved-term-only match.
+          # A match that triggers neither structural sub-pattern is not covered by structural classes,
+          # even when the SHA is on the cleared list with all known structural classes.
+          _ST5A_SHA="5555aaaa5555aaaa5555aaaa5555aaaa5555aaaa"
+          CLEARED_SHA_MAP["$_ST5A_SHA"]="cgnat,tailnet"
+          # Simulate a reserved-term-only match: neither structural sub-pattern fires.
+          _st5a_cgnat=0
+          _st5a_tailnet=0
+          _st5a_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST5A_SHA]+set}" ]]; then
+            _st5a_cleared="${CLEARED_SHA_MAP[$_ST5A_SHA]}"
+            if [ "$_st5a_cgnat" -gt 0 ] || [ "$_st5a_tailnet" -gt 0 ]; then
+              _st5a_subset=1
+              if [ "$_st5a_cgnat" -gt 0 ] && ! echo "$_st5a_cleared" | grep -qE '(^|,)cgnat(,|$)'; then _st5a_subset=0; fi
+              if [ "$_st5a_tailnet" -gt 0 ] && ! echo "$_st5a_cleared" | grep -qE '(^|,)tailnet(,|$)'; then _st5a_subset=0; fi
+              if [ "$_st5a_subset" -eq 1 ]; then _st5a_would_exempt=1; fi
+            else
+              if echo "$_st5a_cleared" | grep -qE '(^|,)reserved(,|$)'; then _st5a_would_exempt=1; fi
             fi
           fi
-          unset "CLEARED_SHA_MAP[$_ST5_SHA]"
-          if [ "$_st5_would_exempt" -ne 0 ]; then
-            echo "::error::Self-test 5 FAIL: reserved-term-only match incorrectly exempted. Scanner is broken."
+          unset "CLEARED_SHA_MAP[$_ST5A_SHA]"
+          if [ "$_st5a_would_exempt" -ne 0 ]; then
+            echo "::error::Self-test 5a FAIL: cgnat,tailnet cleared SHA incorrectly exempted a reserved-term-only match. Scanner is broken."
             exit 1
           fi
-          echo "Self-test 5 passed: reserved-term-only match correctly not exempted by cleared list."
+          echo "Self-test 5a passed: cleared SHA with cgnat,tailnet correctly fails a reserved-term-only match."
+
+          # Self-test 5b: cleared SHA with 'reserved' class DOES exempt a reserved-term-only match.
+          # Proves the reserved-class path fires when neither structural sub-pattern matched.
+          _ST5B_SHA="6666bbbb6666bbbb6666bbbb6666bbbb6666bbbb"
+          CLEARED_SHA_MAP["$_ST5B_SHA"]="reserved"
+          _st5b_cgnat=0
+          _st5b_tailnet=0
+          _st5b_would_exempt=0
+          if [[ -n "${CLEARED_SHA_MAP[$_ST5B_SHA]+set}" ]]; then
+            _st5b_cleared="${CLEARED_SHA_MAP[$_ST5B_SHA]}"
+            if [ "$_st5b_cgnat" -gt 0 ] || [ "$_st5b_tailnet" -gt 0 ]; then
+              _st5b_subset=1
+              if [ "$_st5b_cgnat" -gt 0 ] && ! echo "$_st5b_cleared" | grep -qE '(^|,)cgnat(,|$)'; then _st5b_subset=0; fi
+              if [ "$_st5b_tailnet" -gt 0 ] && ! echo "$_st5b_cleared" | grep -qE '(^|,)tailnet(,|$)'; then _st5b_subset=0; fi
+              if [ "$_st5b_subset" -eq 1 ]; then _st5b_would_exempt=1; fi
+            else
+              if echo "$_st5b_cleared" | grep -qE '(^|,)reserved(,|$)'; then _st5b_would_exempt=1; fi
+            fi
+          fi
+          unset "CLEARED_SHA_MAP[$_ST5B_SHA]"
+          if [ "$_st5b_would_exempt" -eq 0 ]; then
+            echo "::error::Self-test 5b FAIL: 'reserved' cleared SHA did not exempt a reserved-term-only match. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 5b passed: cleared SHA with 'reserved' class correctly exempts a reserved-term-only match."
 
           MATCHES=0
           CURRENT_SHA="(unknown)"
@@ -234,12 +261,14 @@ jobs:
                 echo "::notice::Allowlisted documentation line (CGNAT block or regex syntax)."
                 continue
               fi
-              # Cleared-list check.
+              # Cleared-list check: exempts structural match classes on known SHAs,
+              # and reserved-term matches when the cleared entry carries the 'reserved' class.
               if [[ -n "${CLEARED_SHA_MAP[$CURRENT_SHA]+set}" ]]; then
                 _cleared="${CLEARED_SHA_MAP[$CURRENT_SHA]}"
                 _is_cgnat=$(echo "$cleaned" | grep -cEi "$_CGNAT_BARE" || true)
                 _is_tailnet=$(echo "$cleaned" | grep -cEi "$_TAILNET_PAT" || true)
                 if [ "$_is_cgnat" -gt 0 ] || [ "$_is_tailnet" -gt 0 ]; then
+                  # Structural match: all triggered structural classes must be in the cleared entry.
                   _subset=1
                   if [ "$_is_cgnat" -gt 0 ] && ! echo "$_cleared" | grep -qE '(^|,)cgnat(,|$)'; then _subset=0; fi
                   if [ "$_is_tailnet" -gt 0 ] && ! echo "$_cleared" | grep -qE '(^|,)tailnet(,|$)'; then _subset=0; fi
@@ -247,11 +276,17 @@ jobs:
                     echo "::notice::SHA $CURRENT_SHA cleared for structural classes ($_cleared); match exempted."
                     continue
                   fi
+                else
+                  # Reserved-term-only match: exempt only when the cleared entry carries 'reserved'.
+                  if echo "$_cleared" | grep -qE '(^|,)reserved(,|$)'; then
+                    echo "::notice::SHA $CURRENT_SHA cleared for reserved class; reserved-term match exempted."
+                    continue
+                  fi
                 fi
               fi
               # Do NOT echo the matched content: Actions logs are world-readable
               # on a public repo.
-              echo "::error::Reserved internal term in commit ${CURRENT_SHA}'s metadata; a maintainer should clear it. (Matched text withheld from logs.)"
+              echo "::error::Non-public reference in commit ${CURRENT_SHA}'s metadata. Add to .github/commit-metadata-cleared.txt with class 'cgnat', 'tailnet', or 'reserved' ('reserved' when the commit message quotes a term to describe its own removal). (Matched text withheld.)"
               MATCHES=$((MATCHES + 1))
             fi
           done < <(git log $RANGE --format='%H AUTHOR %an <%ae> COMMITTER %cn <%ce>%n%B%n--END--')
