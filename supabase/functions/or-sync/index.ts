@@ -88,12 +88,20 @@ function randomCorrelationId(): string {
 // (e.g. same Strike error returns the same fp regardless of correlation IDs
 // in the upstream body). Audit 2026-05-16 finding #1: no plaintext content
 // in logs -- only a deterministic hash. Operator greps to correlate.
-async function errorFingerprint(raw: string, errorClass: string): Promise<string> {
+// Redact a raw error's first line: strip UUIDs, long tokens, and long
+// numbers so nothing customer-identifying survives. This is the SAME
+// string errorFingerprint hashes, so logging it adds no sensitive surface
+// beyond what is already fingerprinted (DL-0751).
+function redactedFirstLine(raw: string): string {
   const firstLine = raw.split('\n')[0] ?? raw;
-  const redacted = firstLine
+  return firstLine
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
     .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
     .replace(/\b\d{10,}\b/g, '<num>');
+}
+
+async function errorFingerprint(raw: string, errorClass: string): Promise<string> {
+  const redacted = redactedFirstLine(raw);
   const bytes = new TextEncoder().encode(`${errorClass}|${redacted}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
@@ -1272,6 +1280,13 @@ export async function handleConnectionError(
   const correlationId = randomCorrelationId();
   const fp = await errorFingerprint(raw, errorClass);
   console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
+  // DL-0751: UPSTREAM_OTHER is our catch-all, and its raw upstream reason is
+  // otherwise discarded, so every such incident is undiagnosable. For THIS
+  // code only, log the redacted first line (the exact string errorFingerprint
+  // hashes, so no new sensitive surface), keyed to the same correlation id.
+  if (code === 'UPSTREAM_OTHER') {
+    console.error(`[or-sync] connection ${conn.id} cid=${correlationId} upstream_detail="${redactedFirstLine(raw)}"`);
+  }
 
   // Persist the taxonomy code on the connection row. In legacy
   // (non-sink) mode we still want it encrypted at rest so the column
