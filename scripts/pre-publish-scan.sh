@@ -91,8 +91,9 @@ EXCLUDE_FILES=(
 
 EXEMPT_GENERIC=(
   "scripts/pre-publish-scan.sh"
-  # The companion workflows carry the structural PATTERN as a literal (they
-  # are detectors). Exempt them the same way the scanner exempts itself.
+  # Detector files: a detector file is trusted by path and reviewed by humans.
+  # These carry internal patterns as literals and are unscanned for real
+  # internal terms too, not just structural patterns.
   ".github/workflows/post-merge-hygiene.yml"
   ".github/workflows/pr-commit-metadata-scan.yml"
   ".github/PULL_REQUEST_TEMPLATE.md"
