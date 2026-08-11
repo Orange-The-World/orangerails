@@ -16,52 +16,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-
-// --- JWT extraction (inlined from index.ts, keep in sync) ----------------------------
-// Source: or-quiltt-session-revoke/index.ts, try block at ~lines 121-129.
-
-function extractJwtUserId(sessionToken: string): string | null {
-  try {
-    const parts = sessionToken.split('.');
-    if (parts.length !== 3) return null;
-    const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const json = JSON.parse(atob(padded + '==='.slice((padded.length + 3) % 4)));
-    if (typeof json.userId === 'string') return json.userId;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// --- widget_token state checks (inlined from index.ts, keep in sync) -----------------
-
-interface PendingWidgetSession {
-  id: string;
-  platform_id: string;
-  app_user_id: string;
-  expires_at: string;
-  used_at: string | null;
-}
-
-type TokenCheckResult =
-  | { ok: true; session: PendingWidgetSession }
-  | { ok: false; status: 401; error: string; code: string };
-
-function checkTokenState(
-  session: PendingWidgetSession | null,
-  nowMs: number,
-): TokenCheckResult {
-  if (!session) {
-    return { ok: false, status: 401, error: 'Invalid widget token', code: 'widget_token_unknown' };
-  }
-  if (session.used_at) {
-    return { ok: false, status: 401, error: 'Invalid widget token', code: 'widget_token_used' };
-  }
-  if (new Date(session.expires_at).getTime() < nowMs) {
-    return { ok: false, status: 401, error: 'Invalid widget token', code: 'widget_token_expired' };
-  }
-  return { ok: true, session };
-}
+import { extractJwtUserId, checkTokenState } from './validate.ts';
 
 // --- helpers: build test JWTs --------------------------------------------------------
 
