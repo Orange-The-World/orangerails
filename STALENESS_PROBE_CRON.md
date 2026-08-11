@@ -36,7 +36,7 @@ and exits with the appropriate severity code.
 
 ### systemd install set (preferred over cron)
 
-Install all four files. Order matters: the handler must exist before the probe
+Install all five files. Order matters: the handler must exist before the probe
 unit is enabled, or `OnFailure=` resolves to nothing and a probe crash pages
 nobody.
 
