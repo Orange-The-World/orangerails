@@ -160,7 +160,23 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     await capture(page, "07-sparrow-malformed-url-refused");
   });
 
-  test('"Launch Stealth Sync" button opens /connect/stealth via window.open', async ({ page }) => {
+  // PR #697 added an isUnlocked guard before window.open. CI is anonymous
+  // (vault locked), so clicking the button now shows the refusal panel
+  // instead of opening a popup. This test covers that correct path.
+  test("clicking Launch Stealth Sync with vault locked shows the refusal message", async ({ page }) => {
+    await page.goto("/connect/sparrow");
+    const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
+    await expect(launchButton).toBeVisible();
+    await launchButton.click();
+    const alert = page.getByRole("alert");
+    await expect(alert).toBeVisible();
+    await expect(alert).toContainText(/return to the app that sent you here/i);
+    await capture(page, "08-sparrow-locked-vault-refusal");
+  });
+
+  // fixme: requires isUnlocked = true (authenticated session) to reach the
+  // window.open path. Remove fixme once E2E can log in with a test account.
+  test.fixme('"Launch Stealth Sync" button opens /connect/stealth via window.open when vault is unlocked', async ({ page }) => {
     await page.goto("/connect/sparrow");
     const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
     await expect(launchButton).toBeVisible();
