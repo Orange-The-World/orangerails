@@ -160,9 +160,8 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     await capture(page, "07-sparrow-malformed-url-refused");
   });
 
-  // PR #697 added an isUnlocked guard before window.open. CI is anonymous
-  // (vault locked), so clicking the button now shows the refusal panel
-  // instead of opening a popup. This test covers that correct path.
+  // DL-0426: the isUnlocked guard before window.open means CI (vault locked)
+  // shows the refusal panel instead of opening a popup. This covers that path.
   test("clicking Launch Stealth Sync with vault locked shows the refusal message", async ({ page }) => {
     await page.goto("/connect/sparrow");
     const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
