@@ -99,9 +99,19 @@ function SparrowConnectPage() {
       return;
     }
 
-    // Bare /connect/sparrow. Open the Stealth Sync widget in a popup.
-    // Append parent_origin so the widget targets OR_STEALTH_READY at this
-    // exact origin instead of broadcasting to '*'.
+    // No app_url and vault is locked: we cannot drive the stealth flow.
+    // Opening the popup and abandoning it is worse than a clear message.
+    // Tell the customer to start from the app that sent them here.
+    if (!isUnlocked) {
+      setRefusedError(
+        "To connect your wallet, return to the app that sent you here and start the connection from there. It will open Stealth Sync for you.",
+      );
+      return;
+    }
+
+    // Bare /connect/sparrow, vault unlocked. Open the Stealth Sync widget in
+    // a popup. Append parent_origin so the widget targets OR_STEALTH_READY at
+    // this exact origin instead of broadcasting to '*'.
     const selfOrigin = window.location.origin;
     const url =
       "/connect/stealth?parent_origin=" + encodeURIComponent(selfOrigin);
@@ -113,11 +123,6 @@ function SparrowConnectPage() {
     if (!w) {
       // Popup blocked. Fall back to same-tab navigation; INIT cannot be sent.
       window.location.href = "/connect/stealth";
-      return;
-    }
-
-    if (!isUnlocked) {
-      // Anonymous visitor. Popup shows DirectLoadCard after the grace window.
       return;
     }
 
