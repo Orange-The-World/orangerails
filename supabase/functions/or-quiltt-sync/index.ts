@@ -1064,7 +1064,7 @@ export async function reDriveReadyDeferrals(
   // same arbitrary prefix and the tail is never reached.
   const { data: deferredRows, error: deferredErr } = await client
     .from('quiltt_webhook_inbox')
-    .select('subaccount_id')
+    .select('subaccount_id, platform_id')
     .is('processed_at', null)
     .not('opk_deferred_at', 'is', null)
     .order('opk_deferred_at', { ascending: true })
@@ -1075,7 +1075,7 @@ export async function reDriveReadyDeferrals(
   const allSubIds = [
     ...new Set(
       (deferredRows ?? [])
-        .map((r: { subaccount_id: string | null }) => r.subaccount_id)
+        .map((r: { subaccount_id: string | null; platform_id: string | null }) => r.subaccount_id)
         .filter((id): id is string => id !== null),
     ),
   ];
@@ -1096,7 +1096,41 @@ export async function reDriveReadyDeferrals(
   if (opkErr) {
     return { reDriven: 0, error: `subaccounts OPK query failed: ${opkErr.message}` };
   }
-  const readyIds = (opkSubs ?? []).map((r: { id: string }) => r.id);
+  const opkReadyIds = (opkSubs ?? []).map((r: { id: string }) => r.id);
+
+  // Step 2b: also re-drive subaccounts on sink platforms. Sink customers have no
+  // opk_public by design and forever, so the step-2 query never surfaces them. A
+  // sink subaccount's deferred events can be re-admitted as soon as its platform
+  // slug is in SINK_DELIVERY_PLATFORMS -- no key registration is required (DL-0853).
+  const sinkPlatformIds = [
+    ...new Set(
+      (deferredRows ?? [])
+        .map((r: { subaccount_id: string | null; platform_id: string | null }) => r.platform_id)
+        .filter((id): id is string => id !== null),
+    ),
+  ];
+  let sinkSubIds: string[] = [];
+  if (sinkPlatformIds.length > 0) {
+    const { data: sinkPlats, error: sinkPlatErr } = await client
+      .from('platforms')
+      .select('id')
+      .in('id', sinkPlatformIds)
+      .in('slug', [...SINK_DELIVERY_PLATFORMS]);
+    if (sinkPlatErr) {
+      return { reDriven: 0, error: `platforms sink query failed: ${sinkPlatErr.message}` };
+    }
+    const sinkPlatSet = new Set((sinkPlats ?? []).map((p: { id: string }) => p.id));
+    sinkSubIds = [
+      ...new Set(
+        (deferredRows ?? [])
+          .filter((r: { subaccount_id: string | null; platform_id: string | null }) =>
+            r.subaccount_id !== null && r.platform_id !== null && sinkPlatSet.has(r.platform_id!)
+          )
+          .map((r: { subaccount_id: string | null }) => r.subaccount_id as string),
+      ),
+    ];
+  }
+  const readyIds = [...new Set([...opkReadyIds, ...sinkSubIds])];
   if (readyIds.length === 0) return { reDriven: 0, error: null };
 
   // Step 3: clear opk_deferred_at on their unprocessed deferred rows.
