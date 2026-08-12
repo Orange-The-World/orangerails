@@ -4,24 +4,45 @@
 # Checks whether the ORBI 1-minute exchange-rate table has fresh data.
 # Exit codes (see STALENESS_PROBE_CRON.md for the full spec):
 #   0  -- OK: newest bucket_ts is within the threshold
-#   1  -- STALE: newest bucket_ts is older than STALE_THRESHOLD_MINUTES
-#   2  -- ERROR: could not reach the database, or query failed
+#   1  -- STALE: newest bucket_ts is older than STALE_THRESHOLD_MINUTES AND the
+#         page was delivered
+#   2  -- ERROR: could not reach the database, query failed, the alert script is
+#         unusable, or the page could not be delivered. Exit 1 therefore always
+#         means someone was actually told; every other failure is 2.
 #
 # Required env:
 #   ORBI_PROBE_DSN       postgres DSN (postgres://user:pass@host:port/db)
 #   -or- DATABASE_URL    fallback if ORBI_PROBE_DSN is unset
 #
+#   ORBI_ALERT_SCRIPT    absolute path to the host's Zulip alert script, called
+#                        as "$ORBI_ALERT_SCRIPT" <level> <body>. Supplied by the
+#                        systemd unit environment so no host path lives in this
+#                        repo. The probe refuses to start (exit 2) if it is unset,
+#                        missing, or not executable.
+#
 # Optional env:
 #   STALE_THRESHOLD_MINUTES   integer, default 10
-#   ZULIP_ALARM_URL           webhook endpoint (alarm fires only when set)
-#   ZULIP_ALARM_KEY           bearer token for that endpoint
-#   ZULIP_ALARM_TO            destination stream:topic for alarm message
 
 set -uo pipefail
 
 PROBE="orbi-staleness-probe"
 DSN="${ORBI_PROBE_DSN:-${DATABASE_URL:-}}"
 THRESHOLD="${STALE_THRESHOLD_MINUTES:-10}"
+ALERT_SCRIPT="${ORBI_ALERT_SCRIPT:-}"
+
+# The alert script must be usable BEFORE anything else runs. A probe that can
+# detect staleness and page nobody is the defect this whole change exists to fix.
+# These exit 2 (ERROR), never 1, because 1 is the STALE code and a misconfigured
+# host must not look like a stale table.
+if [[ -z "$ALERT_SCRIPT" ]]; then
+  echo "[$PROBE] ERROR: ORBI_ALERT_SCRIPT is not set; the probe would detect staleness and page nobody" >&2
+  exit 2
+fi
+
+if [[ ! -f "$ALERT_SCRIPT" || ! -x "$ALERT_SCRIPT" ]]; then
+  echo "[$PROBE] ERROR: ORBI_ALERT_SCRIPT does not point at an executable file; the probe would detect staleness and page nobody" >&2
+  exit 2
+fi
 
 # ---- helpers ----------------------------------------------------------------
 
@@ -29,13 +50,9 @@ alarm() {
   local level="$1"
   local body="$2"
   echo "[$PROBE] $level: $body" >&2
-  if [[ -n "${ZULIP_ALARM_URL:-}" && -n "${ZULIP_ALARM_KEY:-}" ]]; then
-    local to="${ZULIP_ALARM_TO:-Delivery|orbi-staleness-probe}"
-    curl -s -o /dev/null \
-      -H "Authorization: Bearer ${ZULIP_ALARM_KEY}" \
-      -H "Content-Type: application/json" \
-      -d "{\"to\":\"${to}\",\"level\":\"${level}\",\"body\":\"${body}\"}" \
-      "${ZULIP_ALARM_URL}" || true
+  if ! "$ALERT_SCRIPT" "$level" "$body"; then
+    echo "[$PROBE] ALERT DELIVERY FAILED: $ALERT_SCRIPT exited non-zero" >&2
+    return 1
   fi
 }
 
@@ -82,7 +99,10 @@ fi
 THRESHOLD_SECONDS=$(( THRESHOLD * 60 ))
 
 if (( AGE_SECONDS > THRESHOLD_SECONDS )); then
-  alarm STALE "max(bucket_ts) is ${AGE_SECONDS}s old (threshold ${THRESHOLD_SECONDS}s / ${THRESHOLD}m)"
+  if ! alarm STALE "max(bucket_ts) is ${AGE_SECONDS}s old (threshold ${THRESHOLD_SECONDS}s / ${THRESHOLD}m)"; then
+    echo "[$PROBE] ERROR: table is STALE and the page could NOT be delivered; exiting 2 so an undelivered STALE never reads as a delivered one" >&2
+    exit 2
+  fi
   exit 1
 fi
 
