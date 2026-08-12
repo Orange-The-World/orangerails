@@ -763,25 +763,25 @@ async function handleEventSinkDelivery(
   platformId: string,
   subaccountId: string,
 ): Promise<'processed' | string> {
-  // Step 1: idempotent upsert of the connections row.
-  // Unique index: (subaccount_id, quiltt_connection_id) WHERE provider_type = 'quiltt'
-  // AND quiltt_connection_id IS NOT NULL. ignoreDuplicates leaves a pre-existing
-  // row (from or-quiltt-link-complete) unchanged.
-  const { error: upsertErr } = await client
+  // Step 1: idempotent insert of the connections row.
+  // The unique index on (subaccount_id, quiltt_connection_id) is PARTIAL
+  // (WHERE provider_type = 'quiltt' AND quiltt_connection_id IS NOT NULL).
+  // PostgREST's onConflict string cannot express a partial-index predicate, so
+  // upsert with onConflict throws every time. Use plain insert and treat 23505
+  // (unique_violation) as success -- row already exists from or-quiltt-link-complete.
+  const { error: insertErr } = await client
     .from('connections')
-    .upsert(
-      {
-        subaccount_id:           subaccountId,
-        provider_type:           'quiltt',
-        quiltt_connection_id:    quilttConnectionId,
-        encrypted_credentials:   'quiltt-managed',
-        credentials_key_version: 1,
-        status:                  'pending',
-      },
-      { onConflict: 'subaccount_id,quiltt_connection_id', ignoreDuplicates: true },
-    );
-  if (upsertErr) {
-    return `sink connection upsert failed: ${upsertErr.message}`;
+    .insert({
+      subaccount_id:           subaccountId,
+      provider_type:           'quiltt',
+      quiltt_connection_id:    quilttConnectionId,
+      encrypted_credentials:   'quiltt-managed',
+      credentials_key_version: 1,
+      status:                  'pending',
+    });
+  // 23505 = unique_violation: connection row already exists, which is fine.
+  if (insertErr && insertErr.code !== '23505') {
+    return `sink connection insert failed: ${insertErr.message}`;
   }
 
   // Step 2: resolve the connection row id (pre-existing or just created).
