@@ -213,6 +213,51 @@ jobs:
           echo "confirmed: exit 2 (alert path not executable)"
 
       # -----------------------------------------------------------------------
+      # Staleness probe -- path 6: stale data, alert script FAILS, expect exit 2
+      # A STALE that paged and a STALE that paged nobody must not share an exit
+      # code. Exit 1 means someone was actually told; an undelivered page is an
+      # ERROR like any other. Without the probe fix this step sees 1 and fails.
+      # -----------------------------------------------------------------------
+      - name: Create failing alert stub
+        run: |
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'echo "failing-alert called with: $*, refusing to deliver" >&2' \
+            'exit 1' \
+            > "$RUNNER_TEMP/failing-alert.sh"
+          chmod +x "$RUNNER_TEMP/failing-alert.sh"
+          ls -l "$RUNNER_TEMP/failing-alert.sh"
+
+      - name: "[staleness] re-seed stale data (20 minutes old)"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            TRUNCATE public.exchange_rates;
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            VALUES (now() - interval '20 minutes', '1m', 'BTC', 'USD');
+          "
+
+      - name: "[staleness] path 6 -- stale + page undeliverable -> expect exit 2"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/failing-alert.sh
+        run: |
+          set +e
+          ./scripts/ops/orbi-staleness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -eq 1 ]]; then
+            echo "ERROR: undelivered STALE exited 1, identical to a delivered STALE; that is the silent-success bug" >&2
+            exit 1
+          fi
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (stale, page undeliverable), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (stale, alert script exited non-zero)"
+
+      # -----------------------------------------------------------------------
       # Liveness check -- path 1: service active, expect exit 0
       # -----------------------------------------------------------------------
       - name: "[liveness] path 1 -- active -> expect exit 0"
