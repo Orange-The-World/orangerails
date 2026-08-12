@@ -64,7 +64,11 @@ jobs:
       # is visible in the job log rather than inferred.
       - name: Create stub alert script
         run: |
-          printf '%s\n' '#!/usr/bin/env bash' 'echo "stub-alert called with: $*"' 'exit 0' \
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'echo "stub-alert called with: $*"' \
+            'echo "$*" >> "${RUNNER_TEMP:?stub-alert needs RUNNER_TEMP}/alert-calls.log"' \
+            'exit 0' \
             > "$RUNNER_TEMP/stub-alert.sh"
           chmod +x "$RUNNER_TEMP/stub-alert.sh"
           ls -l "$RUNNER_TEMP/stub-alert.sh"
@@ -106,8 +110,13 @@ jobs:
           ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
           ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
         run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
           ./scripts/ops/orbi-staleness-probe.sh
-          echo "confirmed: exit 0 (fresh data)"
+          if [[ -e "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: healthy data paged someone: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0 (fresh data), alert script NOT invoked"
 
       # -----------------------------------------------------------------------
       # Staleness probe -- path 2: stale data, expect exit 1
@@ -128,6 +137,7 @@ jobs:
           ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
           ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
         run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
           set +e
           ./scripts/ops/orbi-staleness-probe.sh
           EXIT=$?
@@ -136,7 +146,11 @@ jobs:
             echo "ERROR: expected exit 1 (stale), got $EXIT" >&2
             exit 1
           fi
-          echo "confirmed: exit 1 (stale data)"
+          if [[ ! -s "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: probe exited 1 but the alert script was never invoked; nobody was paged" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 1 (stale data), alert invoked: $(cat "$RUNNER_TEMP/alert-calls.log")"
 
       # -----------------------------------------------------------------------
       # Staleness probe -- path 3: bad DSN, expect exit 2
