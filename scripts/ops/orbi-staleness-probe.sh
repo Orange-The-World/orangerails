@@ -4,8 +4,11 @@
 # Checks whether the ORBI 1-minute exchange-rate table has fresh data.
 # Exit codes (see STALENESS_PROBE_CRON.md for the full spec):
 #   0  -- OK: newest bucket_ts is within the threshold
-#   1  -- STALE: newest bucket_ts is older than STALE_THRESHOLD_MINUTES
-#   2  -- ERROR: could not reach the database, or query failed
+#   1  -- STALE: newest bucket_ts is older than STALE_THRESHOLD_MINUTES AND the
+#         page was delivered
+#   2  -- ERROR: could not reach the database, query failed, the alert script is
+#         unusable, or the page could not be delivered. Exit 1 therefore always
+#         means someone was actually told; every other failure is 2.
 #
 # Required env:
 #   ORBI_PROBE_DSN       postgres DSN (postgres://user:pass@host:port/db)
@@ -96,7 +99,10 @@ fi
 THRESHOLD_SECONDS=$(( THRESHOLD * 60 ))
 
 if (( AGE_SECONDS > THRESHOLD_SECONDS )); then
-  alarm STALE "max(bucket_ts) is ${AGE_SECONDS}s old (threshold ${THRESHOLD_SECONDS}s / ${THRESHOLD}m)"
+  if ! alarm STALE "max(bucket_ts) is ${AGE_SECONDS}s old (threshold ${THRESHOLD_SECONDS}s / ${THRESHOLD}m)"; then
+    echo "[$PROBE] ERROR: table is STALE and the page could NOT be delivered; exiting 2 so an undelivered STALE never reads as a delivered one" >&2
+    exit 2
+  fi
   exit 1
 fi
 
