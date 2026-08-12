@@ -249,8 +249,8 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred subac
           limit()  {
             return Promise.resolve({
               data: [
-                { subaccount_id: 'sub-a' },
-                { subaccount_id: 'sub-b' },
+                { subaccount_id: 'sub-a', platform_id: null },
+                { subaccount_id: 'sub-b', platform_id: null },
               ],
               error: null,
             });
@@ -300,7 +300,7 @@ Deno.test('reDriveReadyDeferrals: clears opk_deferred_at for OPK-ready subaccoun
           order()  { return this; },
           limit()  {
             return Promise.resolve({
-              data: [{ subaccount_id: 'sub-a' }, { subaccount_id: 'sub-b' }],
+              data: [{ subaccount_id: 'sub-a', platform_id: null }, { subaccount_id: 'sub-b', platform_id: null }],
               error: null,
             });
           },
@@ -384,6 +384,101 @@ Deno.test('reDriveReadyDeferrals: returns error string when first query fails, d
     typeof result.error === 'string' && result.error.includes('connection timeout'),
     true,
     'error must surface the DB error message',
+  );
+});
+
+Deno.test('reDriveReadyDeferrals: re-drives sink platform subaccounts with no opk_public', async () => {
+  // sub-sink is on plat-sink, a platform whose slug is in SINK_DELIVERY_PLATFORMS.
+  // sub-sink has NO opk_public by design. Step-2 (OPK check) finds nothing; step-2b
+  // (sink platform check) must surface it and include it in readyIds so step-3 clears
+  // its opk_deferred_at. GUARD: the subaccount deliberately lacks opk_public -- a
+  // test that passes because the subaccount has a key proves the OPK path, not the sink path.
+  const updates: Array<{ patch: Record<string, unknown> }> = [];
+  const step3Ids: string[] = [];
+  let callSeq = 0;
+
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(table: string) {
+      callSeq++;
+      const seq = callSeq;
+
+      if (table === 'quiltt_webhook_inbox' && seq === 1) {
+        return {
+          select() { return this; },
+          is()     { return this; },
+          not()    { return this; },
+          order()  { return this; },
+          limit()  {
+            return Promise.resolve({
+              data: [{ subaccount_id: 'sub-sink', platform_id: 'plat-sink' }],
+              error: null,
+            });
+          },
+        };
+      }
+
+      if (table === 'subaccounts') {
+        // sub-sink has no opk_public: step-2 returns empty, proving this test covers the sink path
+        return {
+          select() { return this; },
+          in()     { return this; },
+          not()    { return Promise.resolve({ data: [], error: null }); },
+        };
+      }
+
+      if (table === 'platforms') {
+        // step-2b: plat-sink slug is in SINK_DELIVERY_PLATFORMS
+        let platInCalls = 0;
+        // deno-lint-ignore no-explicit-any
+        const platChain: any = {
+          select() { return platChain; },
+          in() {
+            platInCalls++;
+            return platInCalls === 2
+              ? Promise.resolve({ data: [{ id: 'plat-sink' }], error: null })
+              : platChain;
+          },
+        };
+        return platChain;
+      }
+
+      if (table === 'quiltt_webhook_inbox' && seq === 4) {
+        // step-3: clear opk_deferred_at for the sink subaccount
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          update(patch: Record<string, unknown>, _opts: unknown) {
+            updates.push({ patch });
+            return ch;
+          },
+          in(_col: string, ids: string[]) {
+            step3Ids.push(...ids);
+            return ch;
+          },
+          is()  { return ch; },
+          not() { return Promise.resolve({ count: 1, error: null }); },
+        };
+        return ch;
+      }
+
+      // deno-lint-ignore no-explicit-any
+      return { select() { return this as any; }, is() { return this as any; }, not() { return Promise.resolve({ data: [], error: null }); } };
+    },
+  };
+
+  const result = await reDriveReadyDeferrals(mockClient);
+  assertEquals(result.reDriven, 1, 'reDriven must be 1: the sink event is cleared');
+  assertEquals(result.error, null, 'error must be null');
+  assertEquals(updates.length, 1, 'exactly one UPDATE must fire');
+  assertEquals(
+    updates[0].patch['opk_deferred_at'],
+    null,
+    'patch must null opk_deferred_at',
+  );
+  assertEquals(
+    step3Ids.includes('sub-sink'),
+    true,
+    'step-3 IN filter must include sub-sink (sink subaccount with no opk_public)',
   );
 });
 
