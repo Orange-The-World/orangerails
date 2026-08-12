@@ -74,21 +74,9 @@ function RecoverPage() {
           newPassword,
         });
 
-      // Persist rotated vault meta. vault_verifier_ciphertext MUST be updated
-      // because it is derived from the MEK, which just rotated.
-      const { error: updateErr } = await (supabase as any)
-        .from("user_vault_meta")
-        .update({
-          enc_mek_ciphertext: newEncMekCiphertext,
-          recovery_ciphertext: newRecoveryCiphertext,
-          vault_verifier_ciphertext: newVerifierCiphertext,
-          vault_key_version: CURRENT_VAULT_KEY_VERSION,
-        })
-        .eq("user_id", session.user.id);
-      if (updateErr) throw updateErr;
-
-      // Re-encrypt connections. The credentials and label columns use the
-      // credentials subkey which changes with the MEK.
+      // Re-encrypt connections first. Meta is written only after all rows
+      // are migrated so a partial failure leaves the old MEK wrappers intact.
+      // credentials subkey changes with the MEK.
       const { data: conns, error: connsErr } = await (supabase as any)
         .from("connections")
         .select("id, encrypted_credentials, encrypted_label");
@@ -147,7 +135,24 @@ function RecoverPage() {
         offset += PAGE_SIZE;
       }
 
-      // All ciphertexts migrated. Zero old key material.
+      // All ciphertexts migrated. Persist rotated vault meta now that every
+      // row is safely under the new MEK. Writing meta last means the old
+      // enc_mek_ciphertext and recovery_ciphertext remain valid for a retry
+      // if any row migration above threw -- the user is never left with
+      // invalidated wrappers and un-migrated rows simultaneously.
+      // vault_verifier_ciphertext MUST be updated: it is derived from the MEK.
+      const { error: updateErr } = await (supabase as any)
+        .from("user_vault_meta")
+        .update({
+          enc_mek_ciphertext: newEncMekCiphertext,
+          recovery_ciphertext: newRecoveryCiphertext,
+          vault_verifier_ciphertext: newVerifierCiphertext,
+          vault_key_version: CURRENT_VAULT_KEY_VERSION,
+        })
+        .eq("user_id", session.user.id);
+      if (updateErr) throw updateErr;
+
+      // Zero old key material.
       // clearMigrationKeys is intentionally NOT called in the catch branch below
       // so in-session retry can reuse the stashed old keys.
       clearMigrationKeys();
