@@ -756,7 +756,7 @@ export async function handleEvent(
  *
  * Returns 'processed' so the inbox event is consumed and not retried.
  */
-async function handleEventSinkDelivery(
+export async function handleEventSinkDelivery(
   client: SupabaseClient,
   ev: PendingEvent,
   quilttConnectionId: string,
