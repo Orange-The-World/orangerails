@@ -14,7 +14,8 @@
 #   ORBI_ALERT_SCRIPT    absolute path to the host's Zulip alert script, called
 #                        as "$ORBI_ALERT_SCRIPT" <level> <body>. Supplied by the
 #                        systemd unit environment so no host path lives in this
-#                        repo. The probe refuses to start if it is unset.
+#                        repo. The probe refuses to start (exit 2) if it is unset,
+#                        missing, or not executable.
 #
 # Optional env:
 #   STALE_THRESHOLD_MINUTES   integer, default 10
@@ -24,7 +25,21 @@ set -uo pipefail
 PROBE="orbi-staleness-probe"
 DSN="${ORBI_PROBE_DSN:-${DATABASE_URL:-}}"
 THRESHOLD="${STALE_THRESHOLD_MINUTES:-10}"
-ALERT_SCRIPT="${ORBI_ALERT_SCRIPT:?ORBI_ALERT_SCRIPT is not set; the probe would detect staleness and page nobody}"
+ALERT_SCRIPT="${ORBI_ALERT_SCRIPT:-}"
+
+# The alert script must be usable BEFORE anything else runs. A probe that can
+# detect staleness and page nobody is the defect this whole change exists to fix.
+# These exit 2 (ERROR), never 1, because 1 is the STALE code and a misconfigured
+# host must not look like a stale table.
+if [[ -z "$ALERT_SCRIPT" ]]; then
+  echo "[$PROBE] ERROR: ORBI_ALERT_SCRIPT is not set; the probe would detect staleness and page nobody" >&2
+  exit 2
+fi
+
+if [[ ! -f "$ALERT_SCRIPT" || ! -x "$ALERT_SCRIPT" ]]; then
+  echo "[$PROBE] ERROR: ORBI_ALERT_SCRIPT does not point at an executable file; the probe would detect staleness and page nobody" >&2
+  exit 2
+fi
 
 # ---- helpers ----------------------------------------------------------------
 
