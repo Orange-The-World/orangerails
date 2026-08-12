@@ -128,3 +128,9 @@ verify_jwt = false
 # Gateway must pass through so the function's own auth block can run.
 [functions.v1-rate]
 verify_jwt = false
+
+# --- Internal worker token auth (X-Internal-Worker-Token header) ------
+# or-quiltt-drain-alert is invoked by pg_cron via net.http_post and
+# validates X-Internal-Worker-Token itself. Gateway must pass through.
+[functions.or-quiltt-drain-alert]
+verify_jwt = false
