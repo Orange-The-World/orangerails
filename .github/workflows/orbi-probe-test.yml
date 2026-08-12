@@ -57,6 +57,18 @@ jobs:
           chmod +x scripts/ops/orbi-forward-fill-liveness.sh
           chmod +x scripts/ops/tests/mock-systemctl.sh
 
+      # The probe refuses to start unless ORBI_ALERT_SCRIPT points at an
+      # executable file (DL-0812). Every path below that is not deliberately
+      # testing a misconfigured host therefore needs a real alert target. This
+      # stub records the call and succeeds, so a page that would have been sent
+      # is visible in the job log rather than inferred.
+      - name: Create stub alert script
+        run: |
+          printf '%s\n' '#!/usr/bin/env bash' 'echo "stub-alert called with: $*"' 'exit 0' \
+            > "$RUNNER_TEMP/stub-alert.sh"
+          chmod +x "$RUNNER_TEMP/stub-alert.sh"
+          ls -l "$RUNNER_TEMP/stub-alert.sh"
+
       # -----------------------------------------------------------------------
       # Fixture: create the exchange_rates table the probe queries.
       # This mirrors the production schema (bucket_ts, granularity).
@@ -92,6 +104,7 @@ jobs:
       - name: "[staleness] path 1 -- fresh -> expect exit 0"
         env:
           ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
         run: |
           ./scripts/ops/orbi-staleness-probe.sh
           echo "confirmed: exit 0 (fresh data)"
@@ -113,6 +126,7 @@ jobs:
       - name: "[staleness] path 2 -- stale -> expect exit 1"
         env:
           ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
         run: |
           set +e
           ./scripts/ops/orbi-staleness-probe.sh
@@ -129,6 +143,8 @@ jobs:
       # Proves the probe is loud when the DB is unreachable.
       # -----------------------------------------------------------------------
       - name: "[staleness] path 3 -- bad DSN -> expect exit 2"
+        env:
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
         run: |
           set +e
           ORBI_PROBE_DSN="postgres://nobody:wrong@unreachable-host:5432/db" \
@@ -140,6 +156,47 @@ jobs:
             exit 1
           fi
           echo "confirmed: exit 2 (bad DSN)"
+
+      # -----------------------------------------------------------------------
+      # Staleness probe -- path 4: alert path unset, expect exit 2
+      # The data is FRESH here on purpose. Without the guard this run would exit
+      # 0 and the job would report a healthy probe that can page nobody. Exit 2,
+      # never 1: a misconfigured host must not look like a stale table.
+      # -----------------------------------------------------------------------
+      - name: "[staleness] path 4 -- alert path unset -> expect exit 2"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ""
+        run: |
+          set +e
+          ./scripts/ops/orbi-staleness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (alert path unset), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (alert path unset)"
+
+      # -----------------------------------------------------------------------
+      # Staleness probe -- path 5: alert path set but not executable, expect 2
+      # A path that is merely SET is not a path that can page. This is the case
+      # a typo in the unit environment produces.
+      # -----------------------------------------------------------------------
+      - name: "[staleness] path 5 -- alert path not executable -> expect exit 2"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/no-such-alert.sh
+        run: |
+          set +e
+          ./scripts/ops/orbi-staleness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (alert path not executable), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (alert path not executable)"
 
       # -----------------------------------------------------------------------
       # Liveness check -- path 1: service active, expect exit 0
