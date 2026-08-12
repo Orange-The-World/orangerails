@@ -124,12 +124,15 @@ initPostHogIfConsented();
   }, []);
 
   return (
-    <PostHogProvider client={posthog}>
-      <VaultProvider>
-        <Outlet />
-        <AnalyticsNotice />
-      </VaultProvider>
-    </PostHogProvider>
+    <>
+      <HeadContent />
+      <PostHogProvider client={posthog}>
+        <VaultProvider>
+          <Outlet />
+          <AnalyticsNotice />
+        </VaultProvider>
+      </PostHogProvider>
+    </>
   );
 }
 
