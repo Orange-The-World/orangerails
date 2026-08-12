@@ -11,6 +11,11 @@
 #   ORBI_PROBE_DSN       postgres DSN (postgres://user:pass@host:port/db)
 #   -or- DATABASE_URL    fallback if ORBI_PROBE_DSN is unset
 #
+#   ORBI_ALERT_SCRIPT    absolute path to the host's Zulip alert script, called
+#                        as "$ORBI_ALERT_SCRIPT" <level> <body>. Supplied by the
+#                        systemd unit environment so no host path lives in this
+#                        repo. The probe refuses to start if it is unset.
+#
 # Optional env:
 #   STALE_THRESHOLD_MINUTES   integer, default 10
 
@@ -19,6 +24,7 @@ set -uo pipefail
 PROBE="orbi-staleness-probe"
 DSN="${ORBI_PROBE_DSN:-${DATABASE_URL:-}}"
 THRESHOLD="${STALE_THRESHOLD_MINUTES:-10}"
+ALERT_SCRIPT="${ORBI_ALERT_SCRIPT:?ORBI_ALERT_SCRIPT is not set; the probe would detect staleness and page nobody}"
 
 # ---- helpers ----------------------------------------------------------------
 
@@ -26,7 +32,10 @@ alarm() {
   local level="$1"
   local body="$2"
   echo "[$PROBE] $level: $body" >&2
-  /opt/bb-support/scripts/orbi-zulip-alert.sh "$level" "$body"
+  if ! "$ALERT_SCRIPT" "$level" "$body"; then
+    echo "[$PROBE] ALERT DELIVERY FAILED: $ALERT_SCRIPT exited non-zero" >&2
+    return 1
+  fi
 }
 
 # ---- validate env -----------------------------------------------------------
