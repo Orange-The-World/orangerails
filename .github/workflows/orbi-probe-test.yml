@@ -11,6 +11,7 @@ on:
     paths:
       - 'scripts/ops/orbi-staleness-probe.sh'
       - 'scripts/ops/orbi-forward-fill-liveness.sh'
+      - 'scripts/ops/orbi-probe-failed.sh'
       - 'scripts/ops/tests/mock-systemctl.sh'
       - '.github/workflows/orbi-probe-test.yml'
       - 'STALENESS_PROBE_CRON.md'
@@ -19,6 +20,7 @@ on:
     paths:
       - 'scripts/ops/orbi-staleness-probe.sh'
       - 'scripts/ops/orbi-forward-fill-liveness.sh'
+      - 'scripts/ops/orbi-probe-failed.sh'
       - 'scripts/ops/tests/mock-systemctl.sh'
       - '.github/workflows/orbi-probe-test.yml'
       - 'STALENESS_PROBE_CRON.md'
@@ -55,6 +57,7 @@ jobs:
         run: |
           chmod +x scripts/ops/orbi-staleness-probe.sh
           chmod +x scripts/ops/orbi-forward-fill-liveness.sh
+          chmod +x scripts/ops/orbi-probe-failed.sh
           chmod +x scripts/ops/tests/mock-systemctl.sh
 
       # -----------------------------------------------------------------------
@@ -188,3 +191,77 @@ jobs:
             exit 1
           fi
           echo "confirmed: exit 1 (service failed)"
+
+      # -----------------------------------------------------------------------
+      # OnFailure handler. The handler is what pages when a probe unit dies
+      # before it can report for itself, so what must be proved is that it exits
+      # NON-ZERO when it cannot deliver. These four steps cover every exit the
+      # script documents, including the success path: a handler that always
+      # exited 3 would satisfy the failure cases alone and still page nobody.
+      # -----------------------------------------------------------------------
+      - name: "[onfailure] path 1 -- ORBI_ALERT_SCRIPT unset -> expect exit 3"
+        run: |
+          set +e
+          env -u ORBI_ALERT_SCRIPT ./scripts/ops/orbi-probe-failed.sh orbi-staleness-probe.service
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 3 ]]; then
+            echo "ERROR: expected exit 3 (no transport), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 3 (ORBI_ALERT_SCRIPT unset)"
+
+      - name: "[onfailure] path 2 -- ORBI_ALERT_SCRIPT names a bad path -> expect exit 3"
+        env:
+          ORBI_ALERT_SCRIPT: /nonexistent/no-such-alert.sh
+        run: |
+          set +e
+          ./scripts/ops/orbi-probe-failed.sh orbi-staleness-probe.service
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 3 ]]; then
+            echo "ERROR: expected exit 3 (alert script missing), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 3 (alert script missing or not executable)"
+
+      - name: "[onfailure] path 3 -- alert script runs and fails -> expect exit 4"
+        run: |
+          cat > /tmp/failing-alert.sh <<'EOF'
+          #!/usr/bin/env bash
+          exit 1
+          EOF
+          chmod +x /tmp/failing-alert.sh
+          set +e
+          ORBI_ALERT_SCRIPT=/tmp/failing-alert.sh ./scripts/ops/orbi-probe-failed.sh orbi-staleness-probe.service
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 4 ]]; then
+            echo "ERROR: expected exit 4 (delivery failed), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 4 (alert script failed and the handler did not swallow it)"
+
+      - name: "[onfailure] path 4 -- alarm delivered -> expect exit 0 and a correct payload"
+        run: |
+          cat > /tmp/ok-alert.sh <<'EOF'
+          #!/usr/bin/env bash
+          printf '%s' "$1" > /tmp/alert-level
+          printf '%s' "$2" > /tmp/alert-body
+          exit 0
+          EOF
+          chmod +x /tmp/ok-alert.sh
+          ORBI_ALERT_SCRIPT=/tmp/ok-alert.sh ./scripts/ops/orbi-probe-failed.sh orbi-staleness-probe.service
+          LEVEL="$(cat /tmp/alert-level)"
+          BODY="$(cat /tmp/alert-body)"
+          echo "level=${LEVEL}"
+          echo "body=${BODY}"
+          if [[ "$LEVEL" != "ERROR" ]]; then
+            echo "ERROR: expected level ERROR, got ${LEVEL}" >&2
+            exit 1
+          fi
+          case "$BODY" in
+            *orbi-staleness-probe.service*) ;;
+            *) echo "ERROR: alarm body does not name the failed unit: ${BODY}" >&2; exit 1 ;;
+          esac
+          echo "confirmed: exit 0, level ERROR, body names the failed unit"
