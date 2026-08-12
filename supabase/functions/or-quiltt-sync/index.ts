@@ -54,8 +54,9 @@ const REDRIVE_SWEEP_SIZE = 500;  // max rows fetched in step 1 of reDriveReadyDe
 // Per-event wall-clock budget. A pathological profile (many bound
 // connections, slow Quiltt responses, or hostile fanout) can otherwise
 // exhaust the Supabase edge-runtime ~150s wall and starve the rest of
-// the batch. Cap each event at 60s; if we run over, mark `partial` and
-// let the next cron tick pick up the remainder.
+// the batch. Cap each event at 60s; if we run over, mark the connection
+// `partial` and consume the event. The cursor is not persisted; the
+// next Quiltt webhook for this connection drives a fresh full pull.
 const PER_EVENT_BUDGET_MS = 60_000;
 
 // Quiltt PROD geo-blocks Canada (and other non-US) at the GraphQL
@@ -296,8 +297,9 @@ export async function handleEvent(
   const connectionId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
   if (!connectionId) return 'event missing record.id';
 
-  // Quiltt confirms successful sync: clear any error state so the connection shows active.
-  // Called before the OPK gate so the status fix covers ALL subaccounts.
+  // Clear error state before the OPK gate so all subaccounts can recover from error.
+  // Partial is intentionally NOT cleared here: if the data pull fails below, the
+  // connection must stay partial. The partial -> active transition happens post-pull.
   const successErr = await reconcileConnectionSuccess(client, connectionId, subaccountId);
   if (successErr) return successErr;
 
@@ -507,6 +509,7 @@ export async function handleEvent(
   let after: string | null = null;
   let pages = 0;
   let newRows = 0;
+  let budgetExhausted = false;
   const eventStartMs = Date.now();
 
   while (pages < MAX_PAGES) {
@@ -517,8 +520,9 @@ export async function handleEvent(
     // killed at ~150s for the whole invocation.
     if (Date.now() - eventStartMs > PER_EVENT_BUDGET_MS) {
       console.warn(
-        `[or-quiltt-sync] event ${connectionId}: per-event budget exhausted after ${pages} pages, ${newRows} rows`,
+        `[or-quiltt-sync] event ${ev.event_id}: per-event budget exhausted after ${pages} pages, ${newRows} rows`,
       );
+      budgetExhausted = true;
       break;
     }
 
@@ -629,6 +633,50 @@ export async function handleEvent(
     if (!pageInfo?.hasNextPage) break;
     after = pageInfo.endCursor ?? null;
     pages++;
+    if (pages >= MAX_PAGES) {
+      // Page cap reached with more data remaining. Same outcome as the
+      // wall-clock exit: mark partial so callers see the incomplete state.
+      // The cursor is not persisted; the next Quiltt webhook drives a fresh
+      // full pull.
+      budgetExhausted = true;
+    }
+  }
+
+  if (budgetExhausted) {
+    const { error: partialErr } = await client
+      .from('connections')
+      .update({ status: 'partial', updated_at: new Date().toISOString() })
+      .eq('id', conn.id);
+    if (partialErr) {
+      console.error(
+        `[or-quiltt-sync] event ${ev.event_id}: failed to set partial status:`,
+        partialErr.message,
+      );
+    } else {
+      console.log(
+        `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} set to partial ` +
+          `(budget exhausted after ${pages} pages, ${newRows} rows)`,
+      );
+    }
+  }
+
+  if (!budgetExhausted) {
+    // Pull completed in full; clear any previous partial flag now that data is complete.
+    const { error: clearPartialErr } = await client
+      .from('connections')
+      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .eq('id', conn.id)
+      .eq('status', 'partial');
+    if (clearPartialErr) {
+      console.error(
+        `[or-quiltt-sync] event ${ev.event_id}: failed to clear partial status:`,
+        clearPartialErr.message,
+      );
+    } else {
+      console.log(
+        `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} cleared from partial to active (full pull)`,
+      );
+    }
   }
 
   console.log(`[or-quiltt-sync] event ${ev.event_id}: ${newRows} new tx rows across ${pages + 1} pages`);
@@ -742,7 +790,8 @@ async function reconcileConnectionError(
  * When Quiltt reports a successful connection sync, flip any error row back to active.
  * Uses the same lookup pattern as reconcileConnectionError: exact quiltt_connection_id
  * match first, legacy NULL-id fallback for pre-migration rows.
- * Only transitions error -> active; leaves pending/active rows untouched.
+ * Only transitions error -> active; leaves partial/pending/active rows untouched.
+ * Callers that confirmed a full data pull should also clear partial -> active post-pull.
  */
 async function reconcileConnectionSuccess(
   client: SupabaseClient,
@@ -778,7 +827,7 @@ async function reconcileConnectionSuccess(
     .from('connections')
     .update({ status: 'active', updated_at: new Date().toISOString() })
     .eq('id', orConnId)
-    .eq('status', 'error');
+    .in('status', ['error']);
   if (statusErr) return `connection status update failed: ${statusErr.message}`;
   console.log(
     `[or-quiltt-sync] connection ${orConnId} reconciled to active`,
