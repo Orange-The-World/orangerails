@@ -17,7 +17,7 @@
  *      OR fetches transactions, encrypts each with transactions_key, stores
  *      ciphertext in encrypted_transactions. Caller fetches via
  *      or-transactions-list and decrypts in-browser.
- *      Response: { synced: number, connections: [{ connection_id, synced?, next_cursor, error? }] }
+ *      Response: { synced: number, connections: [{ connection_id, synced?, next_cursor, partial?, denied_sources?, error? }] }
  *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *
  *   2. Protocol-driven sink mode (V2 today, V3 future):
@@ -27,7 +27,7 @@
  *      storage. transactions_key is NOT required.
  *      Response: {
  *        synced: number,
- *        connections: [{ connection_id, synced?, next_cursor, error? }],
+ *        connections: [{ connection_id, synced?, next_cursor, partial?, denied_sources?, error? }],
  *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
  *        rows: { <table-name>: [...rows] },
  *        metadata: { format, requires_encryption: string[] }
@@ -54,6 +54,7 @@ import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
+import { readSyncCompleteness } from './_connection-result.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //
@@ -340,6 +341,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       action?: string;
       help_url?: string | null;
       skip_reason?: string;
+      partial?: boolean;
+      denied_sources?: string[];
     }> = [];
     // Sink-mode-only: collect per-connection sink outputs to merge into
     // a single `rows` map at the end. Empty in legacy mode.
@@ -414,13 +417,52 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 continue;
               }
 
+              // DL-0741: Quiltt's TransactionFilter accepts accountIds ([ID!]) but not
+              // connectionId. Pre-fetch account ids for the connection once before paging.
+              const acctRespSink = await fetch('https://api.quiltt.io/v1/graphql', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Basic ${basicSink}`,
+                  'Content-Type':  'application/json',
+                },
+                body: JSON.stringify({
+                  query: `query GetAccounts($connId: ID!) {
+                    connection(id: $connId) {
+                      accounts { nodes { id } }
+                    }
+                  }`,
+                  variables: { connId: quilttConnIdSink },
+                }),
+              });
+              if (!acctRespSink.ok) throw new Error(`Quiltt accounts fetch ${acctRespSink.status}`);
+              const acctJsonSink = await acctRespSink.json();
+              if (Array.isArray(acctJsonSink?.errors) && acctJsonSink.errors.length > 0) {
+                const msgs = (acctJsonSink.errors as Array<any>)
+                  .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+                  .filter((m: string) => m.length > 0)
+                  .join('; ');
+                throw new Error(`Quiltt accounts fetch errors: ${msgs}`);
+              }
+              const filterAccountIdsSink: string[] = (
+                (acctJsonSink?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+              ).map((a) => a.id);
+
+              if (filterAccountIdsSink.length === 0) {
+                // No accounts on this connection: nothing to sync. Mark processed and move on.
+                await ctx.serviceClient
+                  .from('quiltt_webhook_inbox')
+                  .update({ processed_at: new Date().toISOString() })
+                  .eq('event_id', ev.event_id);
+                continue;
+              }
+
               let afterSink: string | null = null;
               let pagesSink = 0;
 
               while (pagesSink < QUILTT_SINK_MAX_PAGES) {
                 const query = `
-                  query Q($connId: ID!, $first: Int!, $after: String) {
-                    transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+                  query Q($accountIds: [ID!]!, $first: Int!, $after: String) {
+                    transactions(filter: { accountIds: $accountIds }, first: $first, after: $after) {
                       pageInfo { hasNextPage endCursor }
                       nodes {
                         id amount currencyCode date description entryType status
@@ -437,13 +479,20 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                   },
                   body: JSON.stringify({
                     query,
-                    variables: { connId: quilttConnIdSink, first: QUILTT_SINK_TX_PAGE_SIZE, after: afterSink },
+                    variables: { accountIds: filterAccountIdsSink, first: QUILTT_SINK_TX_PAGE_SIZE, after: afterSink },
                   }),
                 });
                 if (!resp.ok) {
                   throw new Error(`Quiltt GraphQL ${resp.status}`);
                 }
                 const json = await resp.json();
+                if (Array.isArray(json?.errors) && json.errors.length > 0) {
+                  const msgs = (json.errors as Array<any>)
+                    .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+                    .filter((m: string) => m.length > 0)
+                    .join('; ');
+                  throw new Error(`Quiltt transactions fetch errors: ${msgs}`);
+                }
                 const txs = (json?.data?.transactions?.nodes ?? []) as Array<{
                   id: string; amount: number; currencyCode: string; date: string;
                   description: string; entryType: string; status: string;
@@ -650,14 +699,53 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               continue;
             }
 
+            // DL-0741: Quiltt's TransactionFilter accepts accountIds ([ID!]) but not
+            // connectionId. Pre-fetch account ids for the connection once before paging.
+            const acctRespMain = await fetch('https://api.quiltt.io/v1/graphql', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Basic ${basic}`,
+                'Content-Type':  'application/json',
+              },
+              body: JSON.stringify({
+                query: `query GetAccounts($connId: ID!) {
+                  connection(id: $connId) {
+                    accounts { nodes { id } }
+                  }
+                }`,
+                variables: { connId: quilttConnId },
+              }),
+            });
+            if (!acctRespMain.ok) throw new Error(`Quiltt accounts fetch ${acctRespMain.status}`);
+            const acctJsonMain = await acctRespMain.json();
+            if (Array.isArray(acctJsonMain?.errors) && acctJsonMain.errors.length > 0) {
+              const msgs = (acctJsonMain.errors as Array<any>)
+                .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+                .filter((m: string) => m.length > 0)
+                .join('; ');
+              throw new Error(`Quiltt accounts fetch errors: ${msgs}`);
+            }
+            const filterAccountIdsMain: string[] = (
+              (acctJsonMain?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+            ).map((a) => a.id);
+
+            if (filterAccountIdsMain.length === 0) {
+              // No accounts on this connection: nothing to sync. Mark processed and move on.
+              await ctx.serviceClient
+                .from('quiltt_webhook_inbox')
+                .update({ processed_at: new Date().toISOString() })
+                .eq('event_id', ev.event_id);
+              continue;
+            }
+
             let after: string | null = null;
             let pages = 0;
             const rowsToInsert: Array<{ connection_id: string; external_id: string; encrypted_payload: string; payload_key_version: number; occurred_at: string | null }> = [];
 
             while (pages < QUILTT_MAX_PAGES) {
               const query = `
-                query Q($connId: ID!, $first: Int!, $after: String) {
-                  transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+                query Q($accountIds: [ID!]!, $first: Int!, $after: String) {
+                  transactions(filter: { accountIds: $accountIds }, first: $first, after: $after) {
                     pageInfo { hasNextPage endCursor }
                     nodes {
                       id amount currencyCode date description entryType status
@@ -674,13 +762,20 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 },
                 body: JSON.stringify({
                   query,
-                  variables: { connId: quilttConnId, first: QUILTT_TX_PAGE_SIZE, after },
+                  variables: { accountIds: filterAccountIdsMain, first: QUILTT_TX_PAGE_SIZE, after },
                 }),
               });
               if (!resp.ok) {
                 throw new Error(`Quiltt GraphQL ${resp.status}`);
               }
               const json = await resp.json();
+              if (Array.isArray(json?.errors) && json.errors.length > 0) {
+                const msgs = (json.errors as Array<any>)
+                  .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+                  .filter((m: string) => m.length > 0)
+                  .join('; ');
+                throw new Error(`Quiltt transactions fetch errors: ${msgs}`);
+              }
               const txs = (json?.data?.transactions?.nodes ?? []) as Array<{
                 id: string; amount: number; currencyCode: string; date: string;
                 description: string; entryType: string; status: string;
@@ -810,7 +905,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
         let newTxs: NormalizedTransaction[];
         let next_cursor: string | null;
-        let isPartial = false;
+        let completeness: { status: 'active' | 'partial'; denied_sources?: string[] } = { status: 'active' };
 
         if (conn.provider_type === 'strike') {
           // Strike uses BOTH paths now (V3 ADR 2026-05-25):
@@ -912,12 +1007,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           const out = await adapter.syncByWallets(credentials, walletIds, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
-          isPartial = out.partial ?? false;
+          completeness = readSyncCompleteness(out);
         } else {
           const out = await adapter.syncAccountWide(credentials, conn.last_sync_cursor ?? null);
           newTxs = out.transactions;
           next_cursor = out.next_cursor;
-          isPartial = out.partial ?? false;
+          completeness = readSyncCompleteness(out);
         }
 
         if (sinkMode) {
@@ -973,7 +1068,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // Liveness and health reporting are refreshed on every pass regardless.
         const connUpdate: Record<string, unknown> = {
           last_sync_at: new Date().toISOString(),
-          status: isPartial ? 'partial' : 'active',
+          status: completeness.status,
           encrypted_last_error: null,
         };
         if (newTxs.length > 0 && next_cursor != null) {
@@ -985,7 +1080,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .eq('id', conn.id);
         throwOnDbError(connUpdateErr);
 
-        results.push({ connection_id: conn.id, synced: newTxs.length, next_cursor });
+        results.push({
+          connection_id: conn.id,
+          synced: newTxs.length,
+          next_cursor,
+          ...(completeness.status === 'partial' ? { partial: true } : {}),
+          ...(completeness.denied_sources ? { denied_sources: completeness.denied_sources } : {}),
+        });
 
         // ─── sync.completed webhook enqueue ──────────────────────────
         // Out-of-band: insert a webhook_delivery row that or-webhook-dispatch

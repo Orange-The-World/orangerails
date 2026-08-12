@@ -340,6 +340,15 @@ export interface StealthSyncCompleteWidgetMessage {
    * the current window. See docs/Stealth-Sync.md for full details.
    */
   address_window_exhausted?: boolean;
+  /**
+   * Present when the server-side cursor write (or-stealth-envelope-update)
+   * failed after a successful scan. The sync data is valid and
+   * sealed_transactions is populated, but last_block_scanned was not
+   * persisted to the server. The next sync will re-scan from the stored
+   * cursor. The calling app should surface this as a warning; the data
+   * itself is intact.
+   */
+  cursor_update_failed?: true;
 }
 
 /**
@@ -369,6 +378,12 @@ export interface StealthSyncCompleteAppMessage {
    * widget-mode variant above for full semantics.
    */
   address_window_exhausted?: boolean;
+  /**
+   * Present when the server-side cursor write (or-stealth-envelope-update)
+   * failed. See StealthSyncCompleteWidgetMessage.cursor_update_failed for
+   * full semantics.
+   */
+  cursor_update_failed?: true;
 }
 
 /**
@@ -410,6 +425,7 @@ export type StealthErrorCode =
   | 'CONNECTION_NOT_FOUND'
   | 'ORIGIN_NOT_ALLOWED'
   | 'PROTOCOL_VERSION_MISMATCH'
+  | 'WINDOW_EXHAUSTED'
   | 'INTERNAL';
 
 export interface StealthErrorMessage {

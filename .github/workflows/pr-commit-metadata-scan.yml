@@ -1,88 +1,67 @@
-name: Post-merge metadata hygiene
+name: PR commit-metadata scan (pre-merge gate)
 
-# Scans every commit that just landed on a protected branch for non-public
-# references in:
-#   - commit message body (Co-authored-by trailers, body text)
-#   - author name + email
-#   - committer name + email
+# Scans every commit in a pull request targeting prod for non-public
+# references in commit metadata (author name/email, committer name/email,
+# commit message body) BEFORE the merge is allowed.
 #
-# This catches the class of stray reference a tree scan cannot see: GitHub auto-adds
-# Co-authored-by trailers to squash / rebase merge commits at merge time,
-# and the trailer email comes from each contributor's local git config. If a
-# contributor's user.email carries a Tailscale tail-net hostname or any other internal-only string, the merge commit silently carries it into public
-# history.
+# This is the pre-merge companion to post-merge-hygiene.yml.  The post-merge
+# workflow fires after code is live and therefore cannot block a merge.  This
+# workflow runs as a required PR check so a promotion is rejected if any commit
+# in the PR range carries a non-public reference.
 #
-# Two pattern sources, kept separate on purpose:
-#   - A GENERIC structural pattern (tail-net hostnames, CGNAT CIDR) lives in
-#     this committed file. It names a CLASS of string, never a person, so it
-#     is safe to publish.
-#   - A reserved-term pattern (specific internal references) is read at
-#     runtime from the OR_RESERVED_TERMS repo secret, so this committed
-#     file does not publish the list itself. If the secret is unset the
-#     reserved-term half is skipped and the generic half still runs.
+# Two pattern sources (same as post-merge-hygiene.yml):
+#   - GENERIC_PATTERN: structural classes (tailnet hostnames, CGNAT CIDR),
+#     safe to commit because it names a class, not a person.
+#   - RESERVED_PATTERN: specific internal references, read from the
+#     OR_RESERVED_TERMS repo secret so this file never publishes the list.
+#     If the secret is unset the reserved-term half is skipped.
 #
-# Tree-content scanning is owned by repo-hygiene.yml (it runs
-# scripts/pre-publish-scan.sh on every PR + push). This workflow stays
-# focused on commit metadata so the tree scan does not run twice.
+# Tree-content scanning is owned by repo-hygiene.yml.  This workflow stays
+# focused on commit metadata only.
 
 on:
-  push:
-    branches: [dev, prod]
+  pull_request:
+    branches: [prod]
 
 # Least privilege: this job only reads the repo to inspect commit metadata.
 permissions:
   contents: read
 
 jobs:
-  conventions-scan:
-    name: Commit metadata scan
+  pr-metadata-scan:
+    name: Commit metadata scan (PR range)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout with full history of the just-pushed commits
+      - name: Checkout with full history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Determine range to scan
-        id: range
-        run: |
-          set -euo pipefail
-          BEFORE="${{ github.event.before }}"
-          AFTER="${{ github.event.after }}"
-          # On a brand-new branch creation, github.event.before is all zeros.
-          # Scan only the head commit then, to avoid scanning the entire repo
-          # history every time a new branch lands.
-          ZERO="0000000000000000000000000000000000000000"
-          if [ "$BEFORE" = "$ZERO" ]; then
-            echo "range=$AFTER -1" >> "$GITHUB_OUTPUT"
-          else
-            echo "range=$BEFORE..$AFTER" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Scan author + committer + body for non-public references
         env:
-          # GENERIC structural pattern : safe to commit (names a class, not a
+          # GENERIC structural pattern: safe to commit (names a class, not a
           # person): tail-net hostnames and the CGNAT /10 block Tailscale
-          # assigns. Bare ".local" is intentionally NOT here: it false-positives
-          # on .env.local / *.local.json. The specific internal *.local host is
-          # carried in the reserved-term list instead.
+          # assigns. Bare ".local" is intentionally NOT here: it
+          # false-positives on .env.local / *.local.json. The specific
+          # internal *.local host is carried in the reserved-term list.
           GENERIC_PATTERN: 'tail[a-z0-9]+\.ts\.net|\.tailnet\b|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
-          # Reserved-term pattern: specific internal references, sourced from a
-          # secret so this file never stores them; empty when the secret is unset
-          # (reserved-term half skipped, generic half runs).
-          # GitHub also masks the secret value in these public logs.
+          # Reserved-term pattern: sourced from a secret so this file never
+          # stores them; empty when the secret is unset (generic half runs).
           RESERVED_PATTERN: ${{ secrets.OR_RESERVED_TERMS }}
           # Documentation strip-patterns: tokens that only appear in regex /
-          # network documentation, never an accidental match. A matching line is
-          # re-scanned with these stripped; if it then comes back clean it was
-          # describing the regex (e.g. "widened CIDR to 100.64.0.0/10"), not
-          # a stray reference. If it still matches, a real match co-exists with the docs.
+          # network documentation, never an accidental match. A matching line
+          # is re-scanned with these stripped; if it comes back clean it was
+          # describing the regex, not a stray reference.
           DOC_STRIP_CGNAT: '100\.64\.0\.0/10'
           DOC_STRIP_REGEX_ALT: '\([0-9]+(\|[0-9]+)+\)'
-          RANGE: ${{ steps.range.outputs.range }}
+          # PR range: all commits that will land on prod if this PR merges.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          echo "Scanning range: $RANGE"
+          RANGE="$BASE_SHA..$HEAD_SHA"
+          echo "Scanning PR range: $RANGE"
+
           PATTERN="$GENERIC_PATTERN"
           if [ -n "${RESERVED_PATTERN:-}" ]; then
             PATTERN="$PATTERN|$RESERVED_PATTERN"
@@ -90,12 +69,10 @@ jobs:
             echo "::notice::OR_RESERVED_TERMS secret not set : scanning generic structural patterns only."
           fi
 
-          # Cleared-list: per-SHA exemptions for commits whose metadata contains a
-          # structural pattern the doc-strip cannot remove (e.g. a bare CGNAT address
-          # or tailnet hostname quoted in the commit message itself).
+          # Cleared-list: per-SHA exemptions for commits whose metadata contains
+          # a structural pattern the doc-strip cannot remove.
           # Format (one entry per line): <40-hex-sha> <classes> <reason>
           # <classes> is a mandatory comma-separated subset of: cgnat, tailnet, reserved
-          # Hard errors: unknown class token, empty class list, bad SHA shape, missing reason.
           CLEARED_LIST_FILE=".github/commit-metadata-cleared.txt"
           declare -A CLEARED_SHA_MAP
           if [ -f "$CLEARED_LIST_FILE" ]; then
@@ -107,7 +84,6 @@ jobs:
                 echo "::error::$CLEARED_LIST_FILE: invalid entry -- not a 40-char lowercase hex SHA"
                 exit 1
               fi
-              # Parse mandatory class field (first whitespace-separated token after SHA)
               classes="${rest%% *}"
               if [[ -z "$classes" ]]; then
                 echo "::error::$CLEARED_LIST_FILE: SHA $sha missing class field (required: non-empty comma-separated subset of cgnat,tailnet,reserved)"
@@ -122,7 +98,6 @@ jobs:
                 echo "::error::$CLEARED_LIST_FILE: SHA $sha has blank reason (required)"
                 exit 1
               fi
-              # Validate each class token
               IFS=',' read -ra _class_tokens <<< "$classes"
               for _tok in "${_class_tokens[@]}"; do
                 case "$_tok" in
@@ -135,17 +110,12 @@ jobs:
             echo "Cleared list loaded: ${#CLEARED_SHA_MAP[@]} SHA(s) from $CLEARED_LIST_FILE"
           fi
 
-          # Sub-patterns used by the cleared-list exemption check (bash inline,
-          # single-backslash ERE syntax -- not YAML env vars).
-          # When a line matches PATTERN, these identify which structural class(es)
-          # triggered the match. A match that triggers neither sub-pattern is
-          # reserved-term-only and is NEVER exemptible by the cleared list.
+          # Sub-patterns used by the cleared-list exemption check.
           _CGNAT_BARE='100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
           _TAILNET_PAT='tail[a-z0-9]+\.ts\.net|\.tailnet\b'
 
-          # Self-test 1: a bare CGNAT address in a non-documentation context must
-          # still match PATTERN after doc-strip runs. If doc-strip silences it,
-          # the strip has grown too broad.
+          # Self-test 1: a bare CGNAT address must still match PATTERN after
+          # doc-strip. If doc-strip silences it, the strip is too broad.
           _ST1="AUTHOR Someone <someone@example.com> COMMITTER git <git@example.com> 100.64.0.1"
           if ! echo "$_ST1" | grep -qEi "$PATTERN"; then
             echo "::error::Self-test 1 FAIL: PATTERN does not match a bare CGNAT address. Scanner is broken."
@@ -158,8 +128,7 @@ jobs:
           fi
           echo "Self-test 1 passed: bare CGNAT address survives doc-strip."
 
-          # Self-test 2: cleared SHA with cgnat only must still FAIL a tailnet line.
-          # Proves that a cgnat-only cleared entry does not exempt other match classes.
+          # Self-test 2: cgnat-only cleared SHA must still FAIL a tailnet line.
           _ST2_SHA="aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000"
           CLEARED_SHA_MAP["$_ST2_SHA"]="cgnat"
           _ST2_LINE="AUTHOR Test <user@badhost.tailtest.ts.net> COMMITTER test <ci@example.com>"
@@ -184,8 +153,6 @@ jobs:
           echo "Self-test 2 passed: cleared SHA with cgnat only correctly fails a tailnet line."
 
           # Self-test 3: cleared-list exemption must NOT apply to un-cleared SHAs.
-          # Simulates the exemption decision for a synthetic SHA absent from the cleared
-          # map and asserts the exemption does NOT fire for it.
           _ST3_SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
           _st3_would_exempt=0
           if [[ -n "${CLEARED_SHA_MAP[$_ST3_SHA]+set}" ]]; then
@@ -201,8 +168,8 @@ jobs:
           fi
           echo "Self-test 3 passed: un-cleared SHA CGNAT match correctly not exempted."
 
-          # Self-test 4: cleared SHA with cgnat,tailnet must EXEMPT a line matching both.
-          # Proves the both-class path reaches 'continue' when all matched classes are cleared.
+          # Self-test 4: cleared SHA with cgnat,tailnet must EXEMPT a line
+          # matching both.
           _ST4_SHA="cccc1111cccc1111cccc1111cccc1111cccc1111"
           CLEARED_SHA_MAP["$_ST4_SHA"]="cgnat,tailnet"
           _ST4_LINE="AUTHOR Test <ci@100.64.0.1> COMMITTER ci <git@host.tailfake4.ts.net>"
@@ -231,8 +198,7 @@ jobs:
           # even when the SHA is on the cleared list with all known structural classes.
           _ST5A_SHA="5555aaaa5555aaaa5555aaaa5555aaaa5555aaaa"
           CLEARED_SHA_MAP["$_ST5A_SHA"]="cgnat,tailnet"
-          # Simulate exemption decision for a reserved-term-only match:
-          # _is_cgnat=0 and _is_tailnet=0 (neither structural sub-pattern matched).
+          # Simulate a reserved-term-only match: neither structural sub-pattern fires.
           _st5a_cgnat=0
           _st5a_tailnet=0
           _st5a_would_exempt=0
@@ -278,14 +244,10 @@ jobs:
             exit 1
           fi
           echo "Self-test 5b passed: cleared SHA with 'reserved' class correctly exempts a reserved-term-only match."
+
           MATCHES=0
           CURRENT_SHA="(unknown)"
           while IFS= read -r line; do
-            # Each record starts with the commit SHA (see --format below).
-            # Track it so a match on a BODY line attributes to the right
-            # commit, not the first word of that body line.
-            # Anchored to "AUTHOR" so a body line beginning with 40 hex chars
-            # cannot spoof CURRENT_SHA and gain a cleared-list exemption.
             if [[ "$line" == "--END--" ]]; then
               CURRENT_SHA="(unknown)"
               continue
@@ -294,8 +256,6 @@ jobs:
               CURRENT_SHA="${BASH_REMATCH[1]}"
             fi
             if echo "$line" | grep -qEi "$PATTERN"; then
-              # Strip documentation tokens and re-scan; a still-matching line
-              # has a real match co-existing with the docs.
               cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
               if ! echo "$cleaned" | grep -qEi "$PATTERN"; then
                 echo "::notice::Allowlisted documentation line (CGNAT block or regex syntax)."
@@ -325,15 +285,14 @@ jobs:
                 fi
               fi
               # Do NOT echo the matched content: Actions logs are world-readable
-              # on a public repo. Print only the commit SHA (already public in
-              # git history) so the maintainer can locate it.
+              # on a public repo.
               echo "::error::Non-public reference in commit ${CURRENT_SHA}'s metadata. Add to .github/commit-metadata-cleared.txt with class 'cgnat', 'tailnet', or 'reserved' ('reserved' when the commit message quotes a term to describe its own removal). (Matched text withheld.)"
               MATCHES=$((MATCHES + 1))
             fi
           done < <(git log $RANGE --format='%H AUTHOR %an <%ae> COMMITTER %cn <%ce>%n%B%n--END--')
 
           if [ "$MATCHES" -gt 0 ]; then
-            echo "::error::Conventions-scan failed: $MATCHES line(s) carry non-public references."
+            echo "::error::PR metadata scan failed: $MATCHES line(s) carry non-public references. The merge is blocked."
             exit 1
           fi
-          echo "Conventions-scan clean: 0 lines carry non-public references."
+          echo "PR metadata scan clean: 0 lines carry non-public references in range $RANGE."

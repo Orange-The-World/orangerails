@@ -72,7 +72,7 @@ interface PendingEvent {
   attempts:      number;
 }
 
-Deno.serve(wrapSentryHandler(async (req: Request) => {
+const _drainHandler = wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
   const callerToken = req.headers.get('X-Internal-Worker-Token');
@@ -254,7 +254,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   }
 
   return jsonResponse({ processed, failed, skipped, reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}), batch: pending.length }, 200);
-}, 'or-quiltt-sync'));
+}, 'or-quiltt-sync');
+if (import.meta.main) Deno.serve(_drainHandler);
 
 // ─── event dispatch ──────────────────────────────────────────────────
 
@@ -419,6 +420,90 @@ export async function handleEvent(
     conn = legacy.data as { id: string };
   }
 
+  // DL-0442: load account selection for this connection once, before paging.
+  // A connection with no source_wallets rows keeps the all-sync fallback (pre-feature behaviour).
+  // A connection with rows syncs only accounts where is_synced=true.
+  const { data: swRows, error: swErr } = await client
+    .from('source_wallets')
+    .select('external_wallet_id, is_synced')
+    .eq('connection_id', conn.id);
+  if (swErr) {
+    console.error(
+      `[or-quiltt-sync] source_wallets lookup failed for connection ${conn.id}:`,
+      swErr.message,
+    );
+    // Fail closed: we cannot determine which accounts are selected, so do
+    // not fall through to all-sync. The event will retry on the next tick.
+    return `source_wallets lookup failed: ${swErr.message}`;
+  }
+  // selectedAccountIds === null means no rows present: sync everything (all-sync fallback)
+  const selectedAccountIds: Set<string> | null =
+    swRows && swRows.length > 0
+      ? new Set(
+          swRows
+            .filter((r: { is_synced: boolean }) => r.is_synced)
+            .map((r: { external_wallet_id: string }) => r.external_wallet_id),
+        )
+      : null;
+
+  // DL-0741: Quiltt's TransactionFilter accepts accountIds ([ID!]) but not
+  // connectionId. When source_wallets has an account selection (DL-0442), use
+  // those ids directly. Otherwise pre-fetch all account ids for the connection
+  // once before the paging loop so subsequent pages can use the correct filter.
+  let filterAccountIds: string[];
+  if (selectedAccountIds !== null) {
+    filterAccountIds = [...selectedAccountIds];
+    if (filterAccountIds.length === 0) {
+      // All accounts deselected by the user. No data to pull. Mark the event processed
+      // so it does not retry: the selection is the user's intent and will not change
+      // until they update source_wallets. reconcileConnectionSuccess already ran above.
+      console.log(
+        `[or-quiltt-sync] event ${ev.event_id}: all accounts deselected, skipping data pull`,
+      );
+      return 'processed';
+    }
+  } else {
+    const acctResp = await fetch(QUILTT_GRAPHQL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${basic}`,
+        'Content-Type':  'application/json',
+        'x-region':      QUILTT_REGION_HEADER,
+      },
+      body: JSON.stringify({
+        query: `query GetAccounts($connId: ID!) {
+          connection(id: $connId) {
+            accounts { nodes { id } }
+          }
+        }`,
+        variables: { connId: connectionId },
+      }),
+    });
+    if (!acctResp.ok) {
+      const errBody = await acctResp.text().catch(() => '');
+      return `Quiltt accounts fetch ${acctResp.status}: ${redactProviderError(errBody, 300)}`;
+    }
+    const acctJson = await acctResp.json();
+    if (Array.isArray(acctJson?.errors) && acctJson.errors.length > 0) {
+      const msgs = acctJson.errors
+        .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+        .filter((m: string) => m.length > 0)
+        .join('; ');
+      return `Quiltt accounts fetch errors: ${redactProviderError(msgs, 400)}`;
+    }
+    filterAccountIds = (
+      (acctJson?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+    ).map((a) => a.id);
+    if (filterAccountIds.length === 0) {
+      // Connection has no accounts yet -- possibly still provisioning.
+      // Return an error so the event stays in the inbox and retries next tick.
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: connection ${connectionId} has no accounts, will retry`,
+      );
+      return 'connection has no accounts at Quiltt';
+    }
+  }
+
   let after: string | null = null;
   let pages = 0;
   let newRows = 0;
@@ -438,9 +523,8 @@ export async function handleEvent(
     }
 
     const query = `
-      query Q($connId: ID!, $first: Int!, $after: String) {
-        connection(id: $connId) { id }
-        transactions(filter: { connectionId: $connId }, first: $first, after: $after) {
+      query Q($accountIds: [ID!]!, $first: Int!, $after: String) {
+        transactions(filter: { accountIds: $accountIds }, first: $first, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
             id amount currencyCode date description entryType status
@@ -458,7 +542,7 @@ export async function handleEvent(
       },
       body: JSON.stringify({
         query,
-        variables: { connId: connectionId, first: TX_PAGE_SIZE, after },
+        variables: { accountIds: filterAccountIds, first: TX_PAGE_SIZE, after },
       }),
     });
     if (!resp.ok) {
@@ -498,6 +582,19 @@ export async function handleEvent(
     const pageInfo = json?.data?.transactions?.pageInfo;
 
     for (const tx of txs) {
+      // DL-0442: skip transactions for accounts the user has not selected.
+      // selectedAccountIds === null means no source_wallets rows: sync all accounts.
+      // When selection is active, a null account.id is unidentifiable and therefore
+      // unselectable: skip it rather than letting it bypass the filter silently.
+      if (selectedAccountIds !== null) {
+        if (
+          tx.account?.id == null ||
+          !selectedAccountIds.has(tx.account.id as string)
+        ) {
+          continue;
+        }
+      }
+
       const cleartext = JSON.stringify({
         amount:        tx.amount,
         currency:      tx.currencyCode,

@@ -1,0 +1,10 @@
+[Unit]
+Description=ORBI BTC/USD staleness probe
+After=network.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/orbi/orbi-staleness-probe.env
+ExecStart=/usr/local/bin/orbi-staleness-probe.sh
+StandardOutput=journal
+StandardError=journal

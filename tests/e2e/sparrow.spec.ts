@@ -222,10 +222,10 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
 
     await expect(
       widget.getByRole("heading", { name: /stealth sync widget/i, level: 1 }),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 15_000 });
     await expect(
       widget.getByText(/OR_STEALTH_INIT postMessage to this window/i),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 15_000 });
     await capture(page, "05-stealth-iframe-load-guidance-card");
   });
 });

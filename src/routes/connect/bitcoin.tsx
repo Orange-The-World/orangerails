@@ -1,19 +1,21 @@
 /**
- * /connect/sparrow , Sparrow Wallet landing screen.
+ * /connect/bitcoin - wallet-agnostic xpub connect page.
  *
- * The customer arrives here from a direct link in our docs or from a
- * marketing page. The page explains in plain English what a wallet
- * descriptor is, where in Sparrow to find it, what v0.1 actually
- * delivers (and does not deliver), and launches the Stealth Sync
- * widget when the customer is ready to paste.
+ * Wallet users arrive here from the provider picker after clicking
+ * the "Bitcoin wallet" tile. The page is intentionally wallet-agnostic:
+ * it covers Sparrow, Trezor, Ledger, BlueWallet, Specter, and any
+ * wallet that exports an extended public key (xpub / ypub / zpub).
  *
- * Source of truth: docs/Sparrow.md
+ * The underlying mechanism is the same Stealth Sync widget used by
+ * /connect/sparrow. The widget accepts bare xpub/ypub/zpub as well as
+ * full descriptors, so no separate code path is needed.
  *
- * Why this route exists rather than dropping Sparrow into the generic
- * connect flow: Sparrow needs Sparrow-specific copy (where to click in
- * Sparrow to export the descriptor) and an honesty badge about the
- * receives-only limitation in v0.1. A generic "paste your xpub" widget
- * cannot carry that context.
+ * Why this route exists rather than routing to /connect/sparrow:
+ * The Sparrow page has Sparrow-specific copy and links ("Open Sparrow
+ * on your computer", sparrowwallet.com). Trezor and Ledger users
+ * landing on a Sparrow-branded page is confusing and wrong.
+ *
+ * DL-0680
  */
 
 import { createFileRoute } from "@tanstack/react-router";
@@ -30,32 +32,30 @@ import {
   AlertTriangle,
 } from "lucide-react";
 
-export const Route = createFileRoute("/connect/sparrow")({
+export const Route = createFileRoute("/connect/bitcoin")({
   head: () => ({
     meta: [
-      { title: "Connect Sparrow Wallet | OrangeRails" },
+      { title: "Connect Bitcoin Wallet | OrangeRails" },
       {
         name: "description",
         content:
-          "Paste your Sparrow wallet descriptor into OrangeRails. We scan BIP 158 filters in your browser so the server never sees your addresses.",
+          "Paste your xpub, ypub, or zpub into OrangeRails. Works with Sparrow, Trezor, Ledger, BlueWallet, and any wallet that exports an extended public key.",
       },
-      { property: "og:title", content: "Connect Sparrow Wallet | OrangeRails" },
+      { property: "og:title", content: "Connect Bitcoin Wallet | OrangeRails" },
       {
         property: "og:description",
         content:
-          "Descriptor watch only via Stealth Sync. The xpub never leaves your browser in plaintext.",
+          "Watch-only Bitcoin sync via Stealth Sync. Your xpub stays in your browser; the server never sees your addresses.",
       },
-      { rel: "canonical", href: "https://orangerails.com/connect/sparrow" },
+      { rel: "canonical", href: "https://orangerails.com/connect/bitcoin" },
     ],
   }),
-  component: SparrowConnectPage,
+  component: BitcoinConnectPage,
 });
 
-// Consuming-app origins OR has registered for Stealth Sync. This is the
-// same allowlist the Stealth widget enforces on OR_STEALTH_INIT
-// (src/stealth/widget/App.tsx), reused here so the bounce below can only
-// ever send the browser to an origin we already trust. An unvalidated
-// app_url would be an open redirect.
+// Consuming-app origins OR has registered for Stealth Sync. Same allowlist
+// the Stealth widget enforces on OR_STEALTH_INIT and /connect/sparrow uses.
+// An unvalidated app_url would be an open redirect.
 const ALLOWED_APP_ORIGINS: ReadonlySet<string> = new Set(
   ((import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ?? "")
     .split(",")
@@ -63,7 +63,7 @@ const ALLOWED_APP_ORIGINS: ReadonlySet<string> = new Set(
     .filter((s) => s.length > 0),
 );
 
-function SparrowConnectPage() {
+function BitcoinConnectPage() {
   const [refusedError, setRefusedError] = useState<string | null>(null);
   const { isUnlocked, exportStealthKeyForWidget } = useVault();
 
@@ -89,7 +89,7 @@ function SparrowConnectPage() {
         return;
       }
       console.warn(
-        "[sparrow] Refused app_url with untrusted origin: " +
+        "[bitcoin] Refused app_url with untrusted origin: " +
           (origin ?? "invalid URL") +
           ". Add it to VITE_OR_STEALTH_ALLOWED_ORIGINS if it is a registered app.",
       );
@@ -99,7 +99,7 @@ function SparrowConnectPage() {
       return;
     }
 
-    // Bare /connect/sparrow. Open the Stealth Sync widget in a popup.
+    // Bare /connect/bitcoin. Open the Stealth Sync widget in a popup.
     // Append parent_origin so the widget targets OR_STEALTH_READY at this
     // exact origin instead of broadcasting to '*'.
     const selfOrigin = window.location.origin;
@@ -107,7 +107,7 @@ function SparrowConnectPage() {
       "/connect/stealth?parent_origin=" + encodeURIComponent(selfOrigin);
     const w = window.open(
       url,
-      "or-stealth-sparrow",
+      "or-stealth-bitcoin",
       "width=560,height=720,menubar=no,toolbar=no,location=no,status=no",
     );
     if (!w) {
@@ -164,12 +164,12 @@ function SparrowConnectPage() {
           <div className="relative mx-auto max-w-4xl px-6 py-16">
             <div className="flex items-start gap-4">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-primary-soft font-mono text-lg font-semibold text-primary ring-1 ring-primary/15">
-                SW
+                BTC
               </div>
               <div className="flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-                    Sparrow Wallet
+                    Bitcoin wallet
                   </h1>
                   <span className="inline-flex items-center gap-1 rounded-full bg-tier-t0/15 px-2.5 py-1 text-xs font-medium text-tier-t0 ring-1 ring-tier-t0/30 ring-inset">
                     <span className="inline-block h-1.5 w-1.5 rounded-full bg-tier-t0" />
@@ -181,8 +181,10 @@ function SparrowConnectPage() {
                   </span>
                 </div>
                 <p className="mt-3 max-w-2xl text-base text-muted-foreground sm:text-lg">
-                  Paste your Sparrow wallet descriptor. We scan the chain in
-                  your browser. Our server never sees your addresses.
+                  Paste your extended public key (xpub, ypub, or zpub). Works with
+                  Sparrow, Trezor, Ledger, BlueWallet, Specter, and any wallet that
+                  exports a watch-only key. We scan the chain in your browser. Our
+                  server never sees your addresses.
                 </p>
               </div>
             </div>
@@ -220,35 +222,34 @@ function SparrowConnectPage() {
                   </h2>
                   <ul className="mt-2 space-y-1.5 text-sm text-muted-foreground">
                     <li>
-                      <span className="text-foreground">✓ Confirmed receives.</span>{" "}
+                      <span className="text-foreground">Confirmed receives.</span>{" "}
                       Every incoming Bitcoin payment shows up after the block
                       confirms (~10 minutes).
                     </li>
                     <li>
-                      <span className="text-foreground">✓ Sends.</span>{" "}
-                      Outgoing transactions are detected by tracking the UTXOs
-                      your wallet receives and watching for inputs that spend
-                      them. Works for any UTXO created at or after your wallet
-                      birthday (default: one year ago, editable).
+                      <span className="text-foreground">Sends.</span>{" "}
+                      Outgoing transactions are detected by tracking UTXOs your
+                      wallet receives and watching for inputs that spend them.
+                      Works for any UTXO created at or after your wallet birthday
+                      (default: one year ago, editable).
                     </li>
                     <li>
-                      <span className="text-foreground">✓ Single key + multisig descriptors.</span>{" "}
+                      <span className="text-foreground">xpub / ypub / zpub and descriptors.</span>{" "}
+                      Bare extended public keys and full descriptors:{" "}
                       <span className="font-mono text-xs">wpkh(...)</span>,{" "}
                       <span className="font-mono text-xs">tr(...)</span>,{" "}
                       <span className="font-mono text-xs">sh(wpkh(...))</span>,{" "}
-                      <span className="font-mono text-xs">wsh(multi(...))</span>, plus bare
-                      xpub / ypub / zpub.
+                      <span className="font-mono text-xs">wsh(multi(...))</span>.
                     </li>
                     <li>
-                      <span className="text-foreground">⚠ Pre-birthday UTXO spends.</span>{" "}
-                      A spend of a UTXO older than your wallet birthday will
-                      not be detected. Push the birthday back to capture older
-                      history.
+                      <span className="text-foreground">Pre-birthday UTXO spends (not detected).</span>{" "}
+                      A spend of a UTXO older than your wallet birthday will not
+                      be detected. Push the birthday back to capture older history.
                     </li>
                     <li>
-                      <span className="text-foreground">✗ Pending transactions.</span>{" "}
-                      A payment in the mempool will not appear until the block confirms.
-                      Mempool overlay arrives in v0.3.
+                      <span className="text-foreground">Pending transactions (not yet).</span>{" "}
+                      A payment in the mempool will not appear until the block
+                      confirms. Mempool overlay arrives in v0.3.
                     </li>
                   </ul>
                 </div>
@@ -264,7 +265,7 @@ function SparrowConnectPage() {
               How to connect.
             </h2>
             <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-              Three steps. Sparrow does not need to be running after step 2.
+              Three steps. Your wallet does not need to stay open after step 2.
             </p>
 
             <ol className="mt-8 space-y-6">
@@ -273,20 +274,11 @@ function SparrowConnectPage() {
                   1
                 </div>
                 <div>
-                  <h3 className="font-semibold">Open Sparrow on your computer</h3>
+                  <h3 className="font-semibold">Open your Bitcoin wallet</h3>
                   <p className="mt-1.5 text-sm text-muted-foreground">
-                    Sparrow is a free, open source Bitcoin wallet that runs on
-                    Mac, Windows, and Linux. If you do not have it yet, download
-                    it from{" "}
-                    <a
-                      href="https://sparrowwallet.com"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-primary hover:underline"
-                    >
-                      sparrowwallet.com
-                    </a>
-                    .
+                    Any wallet that can export an extended public key works:
+                    Sparrow, Trezor Suite, Ledger Live, BlueWallet, Specter,
+                    Electrum, and most hardware wallets.
                   </p>
                 </div>
               </li>
@@ -295,22 +287,41 @@ function SparrowConnectPage() {
                   2
                 </div>
                 <div>
-                  <h3 className="font-semibold">Export your wallet descriptor</h3>
+                  <h3 className="font-semibold">Export your extended public key</h3>
                   <p className="mt-1.5 text-sm text-muted-foreground">
-                    Inside Sparrow:{" "}
+                    Look for a setting called{" "}
                     <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
-                      File → Wallet → Export → Wallet Descriptor
+                      Export xpub
                     </span>
-                    . Copy the resulting text. It will look something like{" "}
+                    ,{" "}
                     <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
-                      wpkh([abc12345/84h/0h/0h]xpub6C...)
+                      Extended Public Key
                     </span>
-                    .
+                    , or{" "}
+                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                      Watch-only wallet
+                    </span>
+                    . Common locations: Sparrow{" "}
+                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                      File &rarr; Export &rarr; Wallet Descriptor
+                    </span>
+                    ; Trezor Suite{" "}
+                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                      Coin &rarr; Public Key tab
+                    </span>
+                    ; Ledger Live{" "}
+                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                      Account settings &rarr; Advanced &rarr; Export public key
+                    </span>
+                    ; BlueWallet{" "}
+                    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                      Wallet &rarr; Details &rarr; Export/Backup
+                    </span>
+                    . Copy the resulting key or descriptor.
                   </p>
                   <p className="mt-2 text-xs text-muted-foreground">
-                    The descriptor is watch only. It cannot spend your bitcoin.
-                    It only tells our scanner which addresses belong to your
-                    wallet.
+                    The exported key is watch only. It cannot spend your bitcoin.
+                    It only tells our scanner which addresses belong to your wallet.
                   </p>
                 </div>
               </li>
@@ -322,8 +333,8 @@ function SparrowConnectPage() {
                   <h3 className="font-semibold">Launch Stealth Sync and paste</h3>
                   <p className="mt-1.5 text-sm text-muted-foreground">
                     Click <span className="font-medium">Launch Stealth Sync</span>{" "}
-                    above. A popup opens. Paste the descriptor, pick a label, set
-                    the wallet birthday so we do not scan more blocks than we
+                    above. A popup opens. Paste the key or descriptor, pick a label,
+                    set the wallet birthday so we do not scan more blocks than we
                     need, and click <span className="font-medium">Add</span>.
                     Your browser scans the chain. We see ciphertext only.
                   </p>
@@ -340,12 +351,12 @@ function SparrowConnectPage() {
               <div className="rounded-xl border border-border bg-background p-5">
                 <Lock className="h-5 w-5 text-primary" />
                 <h3 className="mt-4 font-semibold">
-                  Your descriptor never leaves your browser in plaintext
+                  Your key never leaves your browser in plaintext
                 </h3>
                 <p className="mt-2 text-sm text-muted-foreground">
-                  Before the descriptor is sent anywhere, your browser encrypts
-                  it with a key derived from your password. Our server stores
-                  the sealed envelope and could not open it if we tried.
+                  Before the key is sent anywhere, your browser encrypts it with
+                  a key derived from your password. Our server stores the sealed
+                  envelope and could not open it if we tried.
                 </p>
               </div>
               <div className="rounded-xl border border-border bg-background p-5">
@@ -354,10 +365,10 @@ function SparrowConnectPage() {
                   Your addresses never reach our server
                 </h3>
                 <p className="mt-2 text-sm text-muted-foreground">
-                  Stealth Sync downloads small BIP 158 compact filters from
-                  public sources and matches them against your wallet addresses{" "}
-                  <span className="text-foreground">in your browser</span>. We never
-                  see the address list.
+                  Stealth Sync downloads small BIP 158 compact filters from public
+                  sources and matches them against your wallet addresses{" "}
+                  <span className="text-foreground">in your browser</span>. We
+                  never see the address list.
                 </p>
               </div>
               <div className="rounded-xl border border-border bg-background p-5">
@@ -366,9 +377,9 @@ function SparrowConnectPage() {
                   The same is true on every other device
                 </h3>
                 <p className="mt-2 text-sm text-muted-foreground">
-                  Add OR on a second device, sign in with the same password,
-                  and the sealed envelope unwraps locally. Different device,
-                  same privacy boundary.
+                  Add OR on a second device, sign in with the same password, and
+                  the sealed envelope unwraps locally. Different device, same
+                  privacy boundary.
                 </p>
               </div>
             </div>

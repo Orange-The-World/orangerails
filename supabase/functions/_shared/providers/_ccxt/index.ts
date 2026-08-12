@@ -566,6 +566,7 @@ export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
     // gated behind a beta badge that pollutes the picker UI.
     status: 'live',
     category: 'exchange',
+    custody: 'custodial',
     tags,
     popularity,
     multiWallet: false, // single synthetic wallet per exchange in v1

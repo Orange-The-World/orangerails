@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ORBI staleness probe every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Unit=orbi-staleness-probe.service
+
+[Install]
+WantedBy=timers.target

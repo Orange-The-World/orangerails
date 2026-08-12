@@ -121,6 +121,26 @@ export interface SyncProgressEvent {
   detail?: string;
 }
 
+/**
+ * Thrown by runSync when the rolling-window extension passes are exhausted and
+ * matched addresses are still at the top of the derived window on either chain,
+ * meaning wallet history beyond the scanned window may be missing.
+ *
+ * The widget catch maps this to OR_STEALTH_ERROR code WINDOW_EXHAUSTED so an
+ * embedder can tell a genuine "history may be incomplete, re-sync with a wider
+ * gap_limit" failure apart from an unexpected INTERNAL error. Not retryable as
+ * is: repeating the sync repeats the same result; the app must widen gap_limit.
+ * See DL-0584 and issue #352.
+ */
+export class WindowExhaustedError extends Error {
+  readonly code = 'WINDOW_EXHAUSTED' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'WindowExhaustedError';
+    Object.setPrototypeOf(this, WindowExhaustedError.prototype);
+  }
+}
+
 export interface RunSyncOptions {
   envelope: SealedEnvelope;
   orStealthKey: string;
@@ -756,8 +776,42 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // loop below; used after block parsing to detect exhaustion (#352).
   const maxMatchedIndexPerChain: [number, number] = [-1, -1];
 
+  // Prefetch block bytes while parsing previous ones.
+  // UTXO tracking is order-sensitive so we process blocks strictly in
+  // ascending height order; but fetching them in parallel hides network
+  // round-trip latency. A sliding window of BLOCK_FETCH_LOOKAHEAD
+  // concurrent requests keeps ~16 MB in flight at most at any one time
+  // (each slot is released immediately after parsing); gives up to 8x
+  // speedup on the block phase.
+  //
+  // Rejection handling: a no-op .catch() is attached at creation so that
+  // if the loop exits early (an awaited block throws), outstanding
+  // in-flight Promises already have a handler and do NOT fire
+  // unhandledrejection in the browser or terminate the process on a
+  // server runtime.
+  const BLOCK_FETCH_LOOKAHEAD = 8;
+  const _prefetchBlock = (hash: string): Promise<BlockRecord> => {
+    const p = opts.fetchBlock(hash);
+    void p.catch(() => {}); // suppress unhandledrejection if slot is abandoned on throw
+    return p;
+  };
+  const blockFetches: Array<Promise<BlockRecord> | undefined> = [];
+  for (let pi = 0; pi < Math.min(BLOCK_FETCH_LOOKAHEAD, hits.length); pi++) {
+    blockFetches[pi] = _prefetchBlock(hits[pi].blockHashHex);
+  }
+
   for (let i = 0; i < hits.length; i++) {
-    const block = await opts.fetchBlock(hits[i].blockHashHex);
+    // Kick off the next prefetch at the trailing edge of the sliding
+    // window before awaiting the block at the front.
+    const nextPrefetch = i + BLOCK_FETCH_LOOKAHEAD;
+    if (nextPrefetch < hits.length) {
+      blockFetches[nextPrefetch] = _prefetchBlock(hits[nextPrefetch].blockHashHex);
+    }
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const block = await blockFetches[i]!;
+    // Release the slot so block.raw is GC-eligible once this iteration ends.
+    // Without this, every resolved Promise stays reachable for the whole run.
+    blockFetches[i] = undefined;
     bytesDownloaded += block.raw.length;
     // Height comes from the filter match, not the block record: the
     // X-Block-Height response header is invisible to browsers unless the
@@ -983,8 +1037,20 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // (passNewDerived), but inputs are checked against the full UTXO map so a
     // spend of a previously-received UTXO is detected correctly even when the
     // spending tx appears in an extension pass.
+    // Same sliding-window prefetch as the main block loop.
+    const extBlockFetches: Array<Promise<BlockRecord> | undefined> = [];
+    for (let pi = 0; pi < Math.min(BLOCK_FETCH_LOOKAHEAD, extHits.length); pi++) {
+      extBlockFetches[pi] = _prefetchBlock(extHits[pi].blockHashHex);
+    }
     for (let ei = 0; ei < extHits.length; ei++) {
-      const block = await opts.fetchBlock(extHits[ei].blockHashHex);
+      const nextExtPrefetch = ei + BLOCK_FETCH_LOOKAHEAD;
+      if (nextExtPrefetch < extHits.length) {
+        extBlockFetches[nextExtPrefetch] = _prefetchBlock(extHits[nextExtPrefetch].blockHashHex);
+      }
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const block = await extBlockFetches[ei]!;
+      // Release the slot so block.raw is GC-eligible once this iteration ends.
+      extBlockFetches[ei] = undefined;
       bytesDownloaded += block.raw.length;
       const blockHeight = extHits[ei].height;
       const header = parseBlockHeader(block.raw);
@@ -1078,7 +1144,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     const chain0StillNear = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
     const chain1StillNear = maxMatchedIndexPerChain[1] >= chainWindowEnd[1] - gapLimit;
     if (chain0StillNear || chain1StillNear) {
-      throw new Error(
+      throw new WindowExhaustedError(
         `stealth/sync: address window exhausted after ${MAX_WINDOW_PASSES} extension passes` +
         ` -- wallet history beyond the scanned window may be missing`,
       );

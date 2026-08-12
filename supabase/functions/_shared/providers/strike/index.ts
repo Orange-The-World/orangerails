@@ -438,6 +438,7 @@ export function normalizeInvoice(
     status: invoice.state,
     timestamp: new Date(ts).toISOString(),
     source_wallet_id: accountId,
+    receiverId: invoice.receiverId ?? null,
     ...packAmount(amount, invoice.amount?.currency || 'USD'),
   };
 }
@@ -889,6 +890,7 @@ export const strikeAdapter: ProviderAdapter = {
   description: 'Lightning + USD',
   category: 'lightning_wallet',
   tags: ['lightning', 'us', 'eu', 'fiat-on-ramp', 'custodial'],
+  custody: 'custodial',
   popularity: 88,
   multiWallet: true,
   credentialFields: [

@@ -7,15 +7,14 @@
  * Covers:
  *   - deriveResponseCursor semantics (DL-0419 trackMax-inside-guard).
  *   - DL-0608 regression: app_user_id must accept cuids, not just UUIDs.
- *     The three stealth functions that shared the UUID_RE validator on
- *     app_user_id (or-stealth-transactions-store, or-stealth-connection-list,
- *     or-stealth-connection-delete) silently rejected every real customer's
- *     cuid app_user_id since June. These tests fail if UUID-only validation
- *     is re-introduced in any of the three.
+ *     Three stealth functions shared the UUID_RE validator on app_user_id
+ *     and silently rejected every real customer's cuid since June. These
+ *     tests fail if UUID-only validation is re-introduced in THIS function.
+ *     The other two are not covered here, see the note below.
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { deriveResponseCursor } from './index.ts';
+import { deriveResponseCursor, isSealedTx, isValidAppUserId } from './index.ts';
 
 // ── DL-0608: cuid app_user_id must pass validation ────────────────────
 //
@@ -23,15 +22,15 @@ import { deriveResponseCursor } from './index.ts';
 // not UUIDs. The broken validator used UUID_RE which rejects any non-UUID
 // string. The correct check is: typeof x === 'string' && x.length > 0.
 //
-// These tests are the canonical regression guard for this class of bug.
-// They cover all three functions that shared the validator:
-//   - or-stealth-transactions-store (fixed, DL-0608)
-//   - or-stealth-connection-list    (fixed in this PR)
-//   - or-stealth-connection-delete  (fixed in this PR)
+// These tests guard or-stealth-transactions-store ONLY, because that is the
+// only one of the three that exports isValidAppUserId. or-stealth-connection-list
+// and or-stealth-connection-delete carry their own inline checks and never call
+// this helper, so importing it here would prove nothing about them. Real guards
+// for those two need the validator moved to _shared/ and imported by all three;
+// that is tracked separately.
 //
-// If UUID_RE is re-added to any of these validators, the affected function
-// will start rejecting cuids again and the test below that proves
-// "cuid does NOT match UUID_RE" tells you exactly why.
+// If UUID_RE is re-added to this validator, the function starts rejecting cuids
+// again and the assertion proving "cuid does NOT match UUID_RE" tells you why.
 
 // The regex that was the bug. Kept here as a documentary artefact so the
 // test can prove a cuid is rejected by it and therefore prove the old code
@@ -55,46 +54,91 @@ Deno.test('DL-0608: cuids do NOT match UUID_RE -- proves old validator rejected 
   }
 });
 
-Deno.test('DL-0608: cuids pass the correct string-only validator (typeof string && length > 0)', () => {
+// -- isSealedTx guard --
+//
+// These tests call the REAL isSealedTx imported from index.ts.
+// A mutation that loosens the field-name check (e.g. accepting 'iv'
+// in place of 'iv_b64') must cause at least one of these to go red.
+
+Deno.test('isSealedTx: accepts a valid sealed transaction object', () => {
+  assert(isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'AAAAAAAAAAAAAAAA',
+    ciphertext_b64: 'AAAAAAAAAAAAAAAA',
+    occurred_at: '2024-01-01',
+    block_height: 1,
+    txid_blind_index_hex: 'a'.repeat(64),
+  }), 'valid object must pass isSealedTx');
+});
+
+Deno.test('isSealedTx: rejects object with iv instead of iv_b64 (catches _b64 field-name regression)', () => {
+  assert(!isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv: 'AAAAAAAAAAAAAAAA',
+    ciphertext_b64: 'AAAAAAAAAAAAAAAA',
+    occurred_at: '2024-01-01',
+    block_height: 1,
+    txid_blind_index_hex: 'a'.repeat(64),
+  }), 'object with iv (not iv_b64) must fail isSealedTx');
+});
+
+Deno.test('isSealedTx: rejects object with ciphertext instead of ciphertext_b64', () => {
+  assert(!isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'AAAAAAAAAAAAAAAA',
+    ciphertext: 'AAAAAAAAAAAAAAAA',
+    occurred_at: '2024-01-01',
+    block_height: 1,
+    txid_blind_index_hex: 'a'.repeat(64),
+  }), 'object with ciphertext (not ciphertext_b64) must fail isSealedTx');
+});
+
+Deno.test('isSealedTx: rejects null, non-objects, and malformed records', () => {
+  assert(!isSealedTx(null), 'null must fail');
+  assert(!isSealedTx('string'), 'string must fail');
+  assert(!isSealedTx({ version: 2, algorithm: 'AES-256-GCM' }), 'wrong version must fail');
+  assert(!isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'AAAAAAAAAAAAAAAA',
+    ciphertext_b64: 'AAAAAAAAAAAAAAAA',
+    occurred_at: '2024-01-01',
+    block_height: 1,
+    txid_blind_index_hex: 'abc',
+  }), 'short blind index hex must fail');
+});
+
+// -- app_user_id guard: call the real isValidAppUserId --
+//
+// All assertions below call the real isValidAppUserId exported from
+// index.ts. An inline reimplementation would pass even if the shipped
+// code were reverted, so the import is what makes this a genuine guard.
+
+Deno.test('DL-0608: cuids pass isValidAppUserId (real function, not reimplemented)', () => {
   for (const cuid of CUID_EXAMPLES) {
-    const passes = typeof cuid === 'string' && cuid.length > 0;
-    assert(passes, `cuid "${cuid}" must pass the string-only check used in or-stealth-transactions-store`);
+    assert(isValidAppUserId(cuid), `cuid "${cuid}" must pass isValidAppUserId`);
   }
 });
 
-Deno.test('DL-0608: or-stealth-connection-list -- cuid passes validator (not UUID-only)', () => {
-  // or-stealth-connection-list/index.ts line 60 was:
-  //   if (!body.app_user_id || typeof body.app_user_id !== 'string' || !UUID_RE.test(body.app_user_id))
-  // The UUID_RE check has been removed. This test fails if it is re-added.
+Deno.test('DL-0608: isValidAppUserId rejects empty string and non-strings', () => {
+  assert(!isValidAppUserId(''), 'empty string must fail');
+  assert(!isValidAppUserId(null), 'null must fail');
+  assert(!isValidAppUserId(undefined), 'undefined must fail');
+  assert(!isValidAppUserId(42), 'number must fail');
+});
+
+Deno.test('DL-0608: or-stealth-transactions-store -- cuids pass isValidAppUserId', () => {
+  // or-stealth-transactions-store/index.ts: validator extracted to isValidAppUserId.
+  // Reimplementing the check inline instead would not catch a revert.
   for (const cuid of CUID_EXAMPLES) {
-    const passes = !(!cuid || typeof cuid !== 'string');
-    assert(passes, `cuid "${cuid}" must pass or-stealth-connection-list validator`);
-    // Prove the removed check would have caused a 400:
+    assert(isValidAppUserId(cuid), `cuid "${cuid}" must pass isValidAppUserId (or-stealth-transactions-store)`);
     assert(
       !UUID_RE_BROKEN_VALIDATOR.test(cuid),
       `cuid "${cuid}" would have been rejected by UUID_RE -- confirms the removed check was the bug`,
     );
-  }
-});
-
-Deno.test('DL-0608: or-stealth-connection-delete -- cuid passes validator (not UUID-only)', () => {
-  // or-stealth-connection-delete/index.ts line 49 was:
-  //   if (!body.app_user_id || typeof body.app_user_id !== 'string' || !UUID_RE.test(body.app_user_id))
-  // The UUID_RE check has been removed. This test fails if it is re-added.
-  for (const cuid of CUID_EXAMPLES) {
-    const passes = !(!cuid || typeof cuid !== 'string');
-    assert(passes, `cuid "${cuid}" must pass or-stealth-connection-delete validator`);
-  }
-});
-
-Deno.test('DL-0608: or-stealth-transactions-store -- cuid passes validator (not UUID-only)', () => {
-  // or-stealth-transactions-store/index.ts line 105 was:
-  //   if (!body.app_user_id || !UUID_RE.test(body.app_user_id))
-  // Fixed (DL-0608) to:
-  //   if (!body.app_user_id || typeof body.app_user_id !== 'string')
-  for (const cuid of CUID_EXAMPLES) {
-    const passes = !(!cuid || typeof cuid !== 'string');
-    assert(passes, `cuid "${cuid}" must pass or-stealth-transactions-store validator`);
   }
 });
 

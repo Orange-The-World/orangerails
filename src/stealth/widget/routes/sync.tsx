@@ -27,6 +27,7 @@ import { useEffect, useState } from "react";
 import { parseDescriptor, type ParsedDescriptor } from "@/stealth/lib/derive";
 import {
   runSync,
+  WindowExhaustedError,
   liveFetchBlock as libLiveFetchBlock,
   liveFetchFilter as libLiveFetchFilter,
   liveFetchTip as libLiveFetchTip,
@@ -297,7 +298,9 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    returns the previous cursor unchanged when fromHeight > tip
         //    (short-circuit path). Persisting that value would falsely mark
         //    the wallet as synced to a height it never scanned.
+        let cursorFailed = false;
         if ((!useMock || isForceCursor()) && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
+          try {
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
@@ -401,6 +404,10 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           // reaching here with cursorWritten = false is impossible. The variable
           // exists so the compiler can verify that guarantee.
           void cursorWritten;
+          } catch (e) {
+            console.error('[stealth/sync] cursor update failed: next sync will rescan from stored cursor:', e);
+            cursorFailed = true;
+          }
         }
 
         // 5. SYNC_COMPLETE.
@@ -414,6 +421,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             bytes_downloaded: result.bytesDownloaded,
             duration_seconds: (Date.now() - startedAt) / 1000,
             address_window_exhausted: result.windowExhausted || undefined,
+            cursor_update_failed: cursorFailed ? true : undefined,
           };
           try {
             parent.postMessage(msg, init.return_callback_origin);
@@ -428,7 +436,15 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
         setError(msg);
-        postWidgetError("INTERNAL", msg, true);
+        if (e instanceof WindowExhaustedError) {
+          // Address window exhausted: wallet history beyond the scanned window
+          // may be missing. Not retryable as is; the embedder must prompt a
+          // re-sync with a wider gap_limit. Its own code so this is
+          // distinguishable from an unexpected INTERNAL failure. DL-0584.
+          postWidgetError("WINDOW_EXHAUSTED", msg, false);
+        } else {
+          postWidgetError("INTERNAL", msg, true);
+        }
       }
     })();
 

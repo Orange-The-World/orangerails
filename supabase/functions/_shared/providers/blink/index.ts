@@ -328,6 +328,7 @@ export const blinkAdapter: ProviderAdapter = {
   status: 'live',
   category: 'lightning_wallet',
   tags: ['lightning', 'on-chain', 'custodial', 'galoy'],
+  custody: 'custodial',
   popularity: 90,
   multiWallet: true,
   credentialFields: [

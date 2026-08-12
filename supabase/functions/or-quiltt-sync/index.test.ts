@@ -387,6 +387,214 @@ Deno.test('reDriveReadyDeferrals: returns error string when first query fails, d
   );
 });
 
+// ── DL-0442 account selection filter: four unit paths ─────────────────
+//
+// These tests instrument handleEvent with a mock that controls what
+// source_wallets rows are returned and what Quiltt GraphQL returns.
+// They verify the four cases the Auditor flagged as untested:
+//   1. Subset selected: only is_synced=true accounts' transactions land.
+//   2. None selected (all is_synced=false): zero transactions land.
+//   3. No source_wallets rows: all-sync fallback (no filtering).
+//   4. DB error on source_wallets lookup: handleEvent errors, not all-sync.
+
+function makeQuilttSyncMock(opts: {
+  swRows: Array<{ external_wallet_id: string; is_synced: boolean }> | null;
+  swError?: string;
+  txNodes: Array<{ id: string; account: { id: string } | null }>;
+  opkPublic?: string;
+}): { client: any; inserted: string[]; cleanup: () => void } {
+  const inserted: string[] = [];
+  const client = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        update(_patch: unknown, _opts?: unknown) { return chain; },
+        single() {
+          if (table === 'subaccounts') {
+            return Promise.resolve({
+              data: { id: 'sub-1', opk_public: opts.opkPublic ?? 'CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', opk_alg: 'libsodium-crypto_box_seal-v1' },
+              error: null,
+            });
+          }
+          return Promise.resolve({ data: null, error: { message: 'unexpected' } });
+        },
+        maybeSingle() {
+          if (table === 'connections') {
+            return Promise.resolve({ data: { id: 'conn-1' }, error: null });
+          }
+          if (table === 'quiltt_profile_map') {
+            return Promise.resolve({ data: { quiltt_profile_id: 'qp-1' }, error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+        upsert(_rows: unknown[], _opts: unknown) {
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+      if (table === 'source_wallets') {
+        return {
+          select(_c: string) { return this; },
+          eq(_c: string, _v: unknown) {
+            return Promise.resolve(
+              opts.swError
+                ? { data: null, error: { message: opts.swError } }
+                : { data: opts.swRows ?? [], error: null },
+            );
+          },
+        };
+      }
+      if (table === 'encrypted_transactions') {
+        return {
+          upsert(row: unknown, _opts: unknown) {
+            const rows = Array.isArray(row)
+              ? (row as Array<{ external_id: string }>)
+              : [(row as { external_id: string })];
+            for (const r of rows) inserted.push(r.external_id);
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
+      }
+      return chain;
+    },
+    rpc(_name: string) {
+      return Promise.resolve({ data: 'stubtoken', error: null });
+    },
+  };
+  const origFetch = (globalThis as any).fetch;
+  // Patch global fetch for Quiltt GraphQL calls.
+  // When source_wallets is empty the code does a GetAccounts pre-fetch (DL-0741)
+  // before the transactions paging loop, so the mock must handle two distinct
+  // query shapes. Distinguish by the request body: GetAccounts vs the Q transactions query.
+  (globalThis as any).fetch = (_url: string, fetchOpts?: RequestInit) => {
+    const body = typeof fetchOpts?.body === 'string' ? fetchOpts.body : '';
+    if (body.includes('GetAccounts')) {
+      // Accounts pre-fetch: return unique account ids derived from txNodes.
+      const uniqueIds = [...new Set(
+        opts.txNodes.map((tx) => tx.account?.id).filter((id): id is string => id != null),
+      )];
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: { connection: { accounts: { nodes: uniqueIds.map((id) => ({ id })) } } },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      );
+    }
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          data: {
+            transactions: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: opts.txNodes.map((tx) => ({
+                id:          tx.id,
+                amount:      '10.00',
+                currencyCode: 'USD',
+                date:        '2026-01-01',
+                description: 'stub',
+                entryType:   'debit',
+                status:      'posted',
+                account:     tx.account,
+              })),
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+  };
+  const cleanup = () => { (globalThis as any).fetch = origFetch; };
+  return { client, inserted, cleanup };
+}
+
+Deno.test('DL-0442 account filter: subset selected -- only matching accounts sync', async () => {
+  const { client, inserted } = makeQuilttSyncMock({
+    swRows: [
+      { external_wallet_id: 'acct-A', is_synced: true },
+      { external_wallet_id: 'acct-B', is_synced: false },
+    ],
+    txNodes: [
+      { id: 'tx-1', account: { id: 'acct-A' } },
+      { id: 'tx-2', account: { id: 'acct-B' } },
+      { id: 'tx-3', account: { id: 'acct-C' } },
+    ],
+  });
+  const ev = {
+    event_id: 'evt-sel', event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-1' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0,
+  };
+  // deno-lint-ignore no-explicit-any
+  const result = await handleEvent(client as any, ev, 'plat-1', 'sub-1', 'api-key');
+  assertEquals(typeof result, 'string', 'handleEvent must return a string result');
+  assertEquals(inserted.length, 1, 'only the is_synced=true account transaction must be inserted');
+  assertEquals(inserted[0], 'tx-1', 'tx-1 (acct-A, is_synced=true) must land');
+});
+
+Deno.test('DL-0442 account filter: none selected (all is_synced=false) -- zero transactions sync', async () => {
+  const { client, inserted } = makeQuilttSyncMock({
+    swRows: [
+      { external_wallet_id: 'acct-A', is_synced: false },
+      { external_wallet_id: 'acct-B', is_synced: false },
+    ],
+    txNodes: [
+      { id: 'tx-1', account: { id: 'acct-A' } },
+      { id: 'tx-2', account: { id: 'acct-B' } },
+    ],
+  });
+  const ev = {
+    event_id: 'evt-none', event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-1' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0,
+  };
+  // deno-lint-ignore no-explicit-any
+  await handleEvent(client as any, ev, 'plat-1', 'sub-1', 'api-key');
+  assertEquals(inserted.length, 0, 'no transactions must sync when all accounts are deselected');
+});
+
+Deno.test('DL-0442 account filter: no source_wallets rows -- all-sync fallback', async () => {
+  const { client, inserted } = makeQuilttSyncMock({
+    swRows: [],
+    txNodes: [
+      { id: 'tx-1', account: { id: 'acct-A' } },
+      { id: 'tx-2', account: { id: 'acct-B' } },
+    ],
+  });
+  const ev = {
+    event_id: 'evt-allsync', event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-1' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0,
+  };
+  // deno-lint-ignore no-explicit-any
+  await handleEvent(client as any, ev, 'plat-1', 'sub-1', 'api-key');
+  assertEquals(inserted.length, 2, 'all transactions must sync when no source_wallets rows exist');
+});
+
+Deno.test('DL-0442 account filter: source_wallets DB error -- handleEvent errors, not all-sync', async () => {
+  const { client, inserted } = makeQuilttSyncMock({
+    swRows: null,
+    swError: 'connection timeout',
+    txNodes: [
+      { id: 'tx-1', account: { id: 'acct-A' } },
+    ],
+  });
+  const ev = {
+    event_id: 'evt-dberr', event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-1' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0,
+  };
+  // deno-lint-ignore no-explicit-any
+  const result = await handleEvent(client as any, ev, 'plat-1', 'sub-1', 'api-key');
+  assertEquals(
+    typeof result === 'string' && result.includes('source_wallets lookup failed'),
+    true,
+    'handleEvent must return an error string when source_wallets lookup fails',
+  );
+  assertEquals(inserted.length, 0, 'no transactions must sync when the DB lookup fails');
+});
+
 // ── markDeferred: stamps opk_deferred_at, not processed_at ───────────
 
 Deno.test('markDeferred: updates opk_deferred_at field on the correct row', async () => {

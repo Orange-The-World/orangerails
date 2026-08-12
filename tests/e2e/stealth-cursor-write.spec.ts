@@ -43,6 +43,15 @@ const ZERO_KEY_B64 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 // requires UUID format for app_user_id).
 const APP_USER_ID = 'e2e00000-cafe-4000-a000-000000000001';
 
+// Non-UUID app_user_id for the DL-0697 acceptance test. Real host apps use
+// opaque ids such as cuids; this value exercises the isValidAppUserId fix.
+const NON_UUID_APP_USER_ID = 'bitbooks_user_abc123';
+
+// 64-char all-lowercase-hex blind index (valid per BLIND_INDEX_HEX_RE).
+// Safe to reuse across runs: UNIQUE constraint is per (connection_id, txid_blind_index_hex)
+// and each run creates a fresh connection_id in beforeEach.
+const FIXTURE_BLIND_INDEX = '0'.repeat(64);
+
 // ------ crypto helpers ----------------------------------------------------
 
 /**
@@ -123,6 +132,65 @@ async function deleteFixture(connectionId: string): Promise<void> {
   }).catch(() => {});
 }
 
+// ------ DL-0697 helpers (non-UUID fixture, Node.js fetch, no browser) ----------
+
+/** Seal a minimal opaque blob for use as a SealedTransactionInput in tests. */
+async function sealFixtureTx() {
+  const keyBytes = Buffer.from(ZERO_KEY_B64, 'base64');
+  const key = await webcrypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
+  const iv = new Uint8Array(12); // 12 zero bytes, fixed for determinism
+  const plaintext = new TextEncoder().encode(JSON.stringify({ test: 'dl-0697' }));
+  const ciphertext = await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
+  const b64 = (buf: ArrayBuffer | Uint8Array) =>
+    Buffer.from(new Uint8Array(buf)).toString('base64');
+  return {
+    version: 1 as const,
+    algorithm: 'AES-256-GCM' as const,
+    iv_b64: b64(iv),
+    ciphertext_b64: b64(ciphertext),
+    occurred_at: '2024-01-01',
+    block_height: 800_000,
+    txid_blind_index_hex: FIXTURE_BLIND_INDEX,
+  };
+}
+
+async function createNonUuidFixture(): Promise<string> {
+  const sealed = await sealFixtureEnvelope();
+  const resp = await fetch(`${FN}/or-stealth-connection-create`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Platform-API-Key': PLATFORM_KEY,
+    },
+    body: JSON.stringify({
+      app_slug: 'e2e-dl0697-non-uuid-test',
+      app_user_id: NON_UUID_APP_USER_ID,
+      connection_kind: 'xpub_stealth',
+      sealed_envelope: sealed,
+      wallet_birthday_plaintext: '2020-01-01',
+    }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`or-stealth-connection-create (non-uuid id) failed ${resp.status}: ${text}`);
+  }
+  const body = (await resp.json()) as { connection_id: string };
+  return body.connection_id;
+}
+
+async function deleteNonUuidFixture(connectionId: string): Promise<void> {
+  // or-stealth-connection-delete accepts any non-empty string for app_user_id
+  // (typeof check only, no UUID requirement), so this cleanup is safe.
+  await fetch(`${FN}/or-stealth-connection-delete`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Platform-API-Key': PLATFORM_KEY,
+    },
+    body: JSON.stringify({ connection_id: connectionId, app_user_id: NON_UUID_APP_USER_ID }),
+  }).catch(() => {});
+}
+
 // Requirement 3: check stealth_connections.last_block_scanned via the
 // envelope-fetch edge function, which reads the real DB row.
 async function fetchConnectionCursor(connectionId: string): Promise<number | null> {
@@ -161,6 +229,53 @@ if (WITH_VITE_DEV && (!OR_API || !PLATFORM_KEY)) {
 // deployed CF Pages build -- a registered http://localhost:5173 override would
 // redirect smoke-suite page.goto('/') to a port that is not listening.
 const _testDescribe = !WITH_VITE_DEV ? test.describe.skip : test.describe;
+
+// ---- DL-0697: non-UUID app_user_id acceptance (API-only, no browser) --------
+// Runs in normal CI without PLAYWRIGHT_WITH_VITE_DEV. Skips when credentials
+// are absent (same env vars as the cursor-write suite).
+test.describe('or-stealth-transactions-store: non-UUID app_user_id (DL-0697)', () => {
+  test.setTimeout(30_000);
+
+  test.skip(
+    !OR_API || !PLATFORM_KEY,
+    'OR_API_BASE_URL and OR_TEST_PLATFORM_API_KEY are required; skipping DL-0697 acceptance test',
+  );
+
+  let nonUuidConnectionId = '';
+
+  test.beforeEach(async () => {
+    nonUuidConnectionId = await createNonUuidFixture();
+  });
+
+  test.afterEach(async () => {
+    if (nonUuidConnectionId) await deleteNonUuidFixture(nonUuidConnectionId);
+  });
+
+  test('accepts non-UUID app_user_id and stores the transaction row', async () => {
+    const tx = await sealFixtureTx();
+    const resp = await fetch(`${FN}/or-stealth-transactions-store`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Platform-API-Key': PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        connection_id: nonUuidConnectionId,
+        app_user_id: NON_UUID_APP_USER_ID,
+        sealed_transactions: [tx],
+        last_block_scanned: 800_000,
+      }),
+    });
+    const bodyText = await resp.text();
+    expect(
+      resp.status,
+      `or-stealth-transactions-store returned HTTP ${resp.status} for non-UUID app_user_id -- body: ${bodyText}`,
+    ).toBe(200);
+    const body = JSON.parse(bodyText) as { inserted: number; total: number };
+    expect(body.inserted, 'inserted must be 1 (one sealed transaction written)').toBe(1);
+    expect(body.total, 'total must be 1').toBe(1);
+  });
+});
 
 _testDescribe('stealth cursor write (DL-0649 Part 2)', () => {
   // Mock sync is fast (tip = 800010, ~11 blocks). 60s is generous.

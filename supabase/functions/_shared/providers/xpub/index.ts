@@ -368,8 +368,14 @@ export const xpubAdapter: ProviderAdapter = {
   status: 'live',
   category: 'on_chain_wallet',
   tags: ['on-chain', 'watch-only', 'self-custody', 'sparrow', 'specter', 'bluewallet'],
+  custody: 'self_custody',
   popularity: 80,
   multiWallet: false,
+  // Picker routes the tile to the wallet-agnostic connect page (Stealth Sync,
+  // covers Sparrow/Trezor/Ledger/BlueWallet) instead of the inline credential
+  // form. credentialFields below remain: the server still needs them for
+  // credential validation, and API callers who build their own UI read them.
+  connectUrl: '/connect/bitcoin',
   credentialFields: [
     {
       name: 'xpub',

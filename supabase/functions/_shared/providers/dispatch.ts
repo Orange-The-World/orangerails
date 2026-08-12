@@ -180,6 +180,7 @@ export function listProviderManifests(): ProviderManifest[] {
     multiWallet: p.multiWallet,
     credentialFields: p.credentialFields,
     ...(p.capabilities !== undefined ? { capabilities: p.capabilities } : {}),
+    ...(p.connectUrl !== undefined ? { connectUrl: p.connectUrl } : {}),
   }));
   return [...live, ...CLIENT_SIDE_MANIFESTS, ...ROADMAP_MANIFESTS];
 }
@@ -233,4 +234,4 @@ export type {
   SyncResult,
   CredentialField,
 } from './types.ts';
-export { parseCredentials } from './types.ts';
+export { parseCredentials, resolveCustody } from './types.ts';

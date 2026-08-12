@@ -44,7 +44,7 @@
 
 import { createFileRoute, Outlet, useChildMatches, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Info } from "lucide-react";
+import { Check, Info } from "lucide-react";
 import { QuilttProvider } from "@quiltt/react/providers";
 import { useQuilttInstitutions } from "@quiltt/react/hooks";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -1369,6 +1369,7 @@ function ConnectPageInner() {
         <EnterCredentialsStep
           providerLabel={providerLabel}
           providerSlug={manifest.slug}
+          capabilities={manifest.capabilities}
           fields={manifest.credentialFields}
           values={formValues}
           onValueChange={(name, value) => setFormValues((prev) => ({ ...prev, [name]: value }))}
@@ -1436,9 +1437,45 @@ function ConnectPageInner() {
 // Step 1 , enter credential fields
 // --------------------------------------------------------------------
 
+function CapabilityRow({
+  label,
+  supported,
+  tooltip,
+}: {
+  label: string;
+  supported: boolean;
+  tooltip?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between py-0.5">
+      <span className="text-xs text-slate-600">{label}</span>
+      {supported ? (
+        <span className="flex items-center gap-1 text-xs font-medium text-green-600">
+          <Check className="h-3 w-3" />
+          Synced
+        </span>
+      ) : (
+        <TooltipProvider delayDuration={150}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="cursor-default text-xs font-medium text-slate-400">Not synced</span>
+            </TooltipTrigger>
+            {tooltip && (
+              <TooltipContent side="left" className="max-w-xs text-xs leading-snug">
+                {tooltip}
+              </TooltipContent>
+            )}
+          </Tooltip>
+        </TooltipProvider>
+      )}
+    </div>
+  );
+}
+
 function EnterCredentialsStep({
   providerLabel,
   providerSlug,
+  capabilities,
   fields,
   values,
   onValueChange,
@@ -1454,6 +1491,10 @@ function EnterCredentialsStep({
 }: {
   providerLabel: string;
   providerSlug?: string;
+  /** Exchange sync capabilities from the provider manifest. Present only for
+   *  CCXT-backed exchanges. When provided, renders a disclosure row before
+   *  the Continue button so the user knows what will and will not sync. */
+  capabilities?: ProviderManifest["capabilities"];
   fields: ManifestField[];
   values: Record<string, string>;
   onValueChange: (name: string, value: string) => void;
@@ -1603,6 +1644,23 @@ function EnterCredentialsStep({
           Your information is encrypted with your vault password before it leaves your browser.
           OrangeRails stores only ciphertext , you and only you can decrypt it.
         </p>
+      )}
+
+      {capabilities && (
+        <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+          <p className="mb-1.5 text-xs font-medium text-slate-500">What syncs</p>
+          <CapabilityRow
+            label="Deposits"
+            supported={capabilities.deposits}
+            tooltip="This exchange's API does not expose deposit history. Trades and current balance will sync normally."
+          />
+          <CapabilityRow label="Trades" supported={capabilities.trades} />
+          <CapabilityRow
+            label="Withdrawals"
+            supported={capabilities.withdrawals}
+            tooltip="This exchange's API does not expose withdrawal history."
+          />
+        </div>
       )}
 
       {error && (
