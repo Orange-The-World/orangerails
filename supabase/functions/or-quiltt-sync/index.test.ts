@@ -411,6 +411,11 @@ function makeQuilttSyncMock(opts: {
         select(_c: string) { return chain; },
         eq(_c: string, _v: unknown) { return chain; },
         is(_c: string, _v: unknown) { return chain; },
+        // The connections status reconcile ends in .in('status', [...]), and the
+        // partial clear chains a second .eq(). Both must exist here or the call
+        // is a TypeError inside handleEvent instead of a real assertion.
+        in(_c: string, _v: unknown[]) { return chain; },
+        not(_c: string, _op: string, _v: unknown) { return chain; },
         order(_c: string, _o: unknown) { return chain; },
         limit(_n: number) { return chain; },
         update(_patch: unknown, _opts?: unknown) { return chain; },
