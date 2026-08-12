@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { fetchPendingBatch, handleEvent, markDeferred, reDriveReadyDeferrals } from './index.ts';
+import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals } from './index.ts';
 
 // ── fetchPendingBatch: batch query filter ─────────────────────────────
 //
