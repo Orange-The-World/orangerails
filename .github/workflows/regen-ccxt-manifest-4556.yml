@@ -1,0 +1,58 @@
+# TEMPORARY - remove this file before merging the PR.
+# Purpose: regenerate the CCXT exchange manifest and support-matrix doc at
+# the version the runtime actually executes (4.5.56, pinned in deno.lock),
+# then commit both generated files back to the branch so every subsequent
+# CI run finds no substantive drift.
+#
+# Why CI instead of a local shell: the auditable path is a workflow-scoped
+# job that commits the result for everyone to inspect.
+#
+# Anti-loop guards:
+#   paths-ignore: if the only files changed are the two generated files,
+#     this workflow does not retrigger. Combined with the fact that commits
+#     made by github-actions[bot] via GITHUB_TOKEN cannot trigger additional
+#     workflow runs, there is no infinite loop.
+name: Regen CCXT manifest at 4.5.56 (temp, this branch only)
+
+on:
+  push:
+    branches: ['chore/ccxt-manifest-4.5.56']
+    paths-ignore:
+      - 'supabase/functions/_shared/providers/_ccxt-manifest.ts'
+      - 'docs/ccxt-status.md'
+      - 'bun.lock'
+
+jobs:
+  regen:
+    name: Regenerate manifest at ccxt@4.5.56
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Regenerate manifest and status doc
+        # package.json devDependency is already 4.5.56 on dev, matching
+        # the deno.lock runtime pin. No bun add needed.
+        # stderr carries the "Wrote ..." summary lines; redirect to stdout
+        # so the Actions log shows them without an extra step.
+        run: node scripts/generate-ccxt-manifest.mjs 2>&1
+
+      - name: Commit generated files back to branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add \
+            supabase/functions/_shared/providers/_ccxt-manifest.ts \
+            docs/ccxt-status.md
+          if git diff --cached --quiet; then
+            echo "Generated files already match ccxt@4.5.56. No commit needed."
+          else
+            git commit -m "chore: regen ccxt manifest at ccxt@4.5.56 (generated, do not edit)"
+            git push
+          fi
