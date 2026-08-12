@@ -51,6 +51,12 @@ const MAX_ATTEMPTS = 25;
 const MAX_PAGES = 50;
 const REDRIVE_SWEEP_SIZE = 500;  // max rows fetched in step 1 of reDriveReadyDeferrals per tick
 
+// Platforms that use sink delivery instead of OPK encryption (DL-0853).
+// Positive allowlist per DEC-0092 scope: extending to a new platform requires
+// a new founder ruling naming that slug. bitbooks-v3 is NOT in this list:
+// it has NULL sink_format, no Quiltt API key, and zero events on prod.
+const SINK_DELIVERY_PLATFORMS = new Set<string>(['bitbooks-v2', 'bbv2stg']);
+
 // Per-event wall-clock budget. A pathological profile (many bound
 // connections, slow Quiltt responses, or hostile fanout) can otherwise
 // exhaust the Supabase edge-runtime ~150s wall and starve the rest of
@@ -303,7 +309,23 @@ export async function handleEvent(
   const successErr = await reconcileConnectionSuccess(client, connectionId, subaccountId);
   if (successErr) return successErr;
 
+  // DL-0853: determine delivery model from the platform row.
+  // Sink-mode platforms bypass the OPK gate and use handleEventSinkDelivery,
+  // which upserts the connections row and enqueues a webhook so the integrator
+  // calls or-sync for data on demand. The allowlist is explicit per DEC-0092 scope.
+  const { data: platDelivery } = await client
+    .from('platforms')
+    .select('slug')
+    .eq('id', platformId)
+    .maybeSingle();
+  const isSinkPlatform = SINK_DELIVERY_PLATFORMS.has(platDelivery?.slug ?? '');
+
   if (!sub.opk_public) {
+    if (isSinkPlatform) {
+      // Sink-mode platform: no OPK required. Ensure the connections row exists
+      // and fire the webhook so the integrator calls or-sync for data on demand.
+      return await handleEventSinkDelivery(client, ev, connectionId, platformId, subaccountId);
+    }
     // No opt-in. Status already reconciled above. Defer data pull until user opens app.
     return 'deferred';
   }
@@ -719,6 +741,97 @@ export async function handleEvent(
   return 'processed';
 }
 
+/**
+ * Deliver a Quiltt sync event for a sink-mode platform (DL-0853).
+ *
+ * Sink-mode platforms (bitbooks-v2, bbv2stg) do not use OPK encryption.
+ * They pull data on demand via or-sync, which has a direct Quiltt profile
+ * fallback when the inbox is empty. This function:
+ *   1. Upserts the connections row idempotently so or-sync can find it.
+ *      or-quiltt-link-complete normally creates this row from the browser,
+ *      but that callback is optional and may not have fired yet (DL-0853
+ *      root cause: REQUIRED server record behind an OPTIONAL browser callback).
+ *   2. Enqueues a sync.completed webhook so the integrator knows to call
+ *      or-sync for the data.
+ *
+ * Returns 'processed' so the inbox event is consumed and not retried.
+ */
+async function handleEventSinkDelivery(
+  client: SupabaseClient,
+  ev: PendingEvent,
+  quilttConnectionId: string,
+  platformId: string,
+  subaccountId: string,
+): Promise<'processed' | string> {
+  // Step 1: idempotent upsert of the connections row.
+  // Unique index: (subaccount_id, quiltt_connection_id) WHERE provider_type = 'quiltt'
+  // AND quiltt_connection_id IS NOT NULL. ignoreDuplicates leaves a pre-existing
+  // row (from or-quiltt-link-complete) unchanged.
+  const { error: upsertErr } = await client
+    .from('connections')
+    .upsert(
+      {
+        subaccount_id:           subaccountId,
+        provider_type:           'quiltt',
+        quiltt_connection_id:    quilttConnectionId,
+        encrypted_credentials:   'quiltt-managed',
+        credentials_key_version: 1,
+        status:                  'pending',
+      },
+      { onConflict: 'subaccount_id,quiltt_connection_id', ignoreDuplicates: true },
+    );
+  if (upsertErr) {
+    return `sink connection upsert failed: ${upsertErr.message}`;
+  }
+
+  // Step 2: resolve the connection row id (pre-existing or just created).
+  const { data: connRow, error: connLookupErr } = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', quilttConnectionId)
+    .maybeSingle();
+  if (connLookupErr || !connRow) {
+    return `sink connection lookup failed after upsert: ${connLookupErr?.message ?? 'not found'}`;
+  }
+
+  // Step 3: best-effort webhook enqueue. Failure must not block inbox event consumption.
+  try {
+    const { data: platRow } = await client
+      .from('platforms')
+      .select('webhook_url')
+      .eq('id', platformId)
+      .maybeSingle();
+    const url = platRow?.webhook_url;
+    if (typeof url === 'string' && url.length > 0) {
+      await client.from('webhook_delivery').insert({
+        platform_id:   platformId,
+        subaccount_id: subaccountId,
+        event_type:    'sync.completed',
+        payload: {
+          event:         'sync.completed',
+          provider:      'quiltt',
+          subaccount_id: subaccountId,
+          connection_id: connRow.id,
+          ts:            new Date().toISOString(),
+        },
+      });
+    }
+  } catch (whErr) {
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: sink webhook enqueue failed for ` +
+        `platform ${platformId}: ${whErr instanceof Error ? whErr.message : String(whErr)}`,
+    );
+  }
+
+  console.log(
+    `[or-quiltt-sync] event ${ev.event_id}: sink-mode delivery queued ` +
+      `(platform=${platformId}, connection=${connRow.id})`,
+  );
+  return 'processed';
+}
+
 // ─── Quiltt error reconciliation ────────────────────────────────────
 
 /**
@@ -951,7 +1064,7 @@ export async function reDriveReadyDeferrals(
   // same arbitrary prefix and the tail is never reached.
   const { data: deferredRows, error: deferredErr } = await client
     .from('quiltt_webhook_inbox')
-    .select('subaccount_id')
+    .select('subaccount_id, platform_id')
     .is('processed_at', null)
     .not('opk_deferred_at', 'is', null)
     .order('opk_deferred_at', { ascending: true })
@@ -962,7 +1075,7 @@ export async function reDriveReadyDeferrals(
   const allSubIds = [
     ...new Set(
       (deferredRows ?? [])
-        .map((r: { subaccount_id: string | null }) => r.subaccount_id)
+        .map((r: { subaccount_id: string | null; platform_id: string | null }) => r.subaccount_id)
         .filter((id): id is string => id !== null),
     ),
   ];
@@ -983,7 +1096,41 @@ export async function reDriveReadyDeferrals(
   if (opkErr) {
     return { reDriven: 0, error: `subaccounts OPK query failed: ${opkErr.message}` };
   }
-  const readyIds = (opkSubs ?? []).map((r: { id: string }) => r.id);
+  const opkReadyIds = (opkSubs ?? []).map((r: { id: string }) => r.id);
+
+  // Step 2b: also re-drive subaccounts on sink platforms. Sink customers have no
+  // opk_public by design and forever, so the step-2 query never surfaces them. A
+  // sink subaccount's deferred events can be re-admitted as soon as its platform
+  // slug is in SINK_DELIVERY_PLATFORMS -- no key registration is required (DL-0853).
+  const sinkPlatformIds = [
+    ...new Set(
+      (deferredRows ?? [])
+        .map((r: { subaccount_id: string | null; platform_id: string | null }) => r.platform_id)
+        .filter((id): id is string => id !== null),
+    ),
+  ];
+  let sinkSubIds: string[] = [];
+  if (sinkPlatformIds.length > 0) {
+    const { data: sinkPlats, error: sinkPlatErr } = await client
+      .from('platforms')
+      .select('id')
+      .in('id', sinkPlatformIds)
+      .in('slug', [...SINK_DELIVERY_PLATFORMS]);
+    if (sinkPlatErr) {
+      return { reDriven: 0, error: `platforms sink query failed: ${sinkPlatErr.message}` };
+    }
+    const sinkPlatSet = new Set((sinkPlats ?? []).map((p: { id: string }) => p.id));
+    sinkSubIds = [
+      ...new Set(
+        (deferredRows ?? [])
+          .filter((r: { subaccount_id: string | null; platform_id: string | null }) =>
+            r.subaccount_id !== null && r.platform_id !== null && sinkPlatSet.has(r.platform_id!)
+          )
+          .map((r: { subaccount_id: string | null }) => r.subaccount_id as string),
+      ),
+    ];
+  }
+  const readyIds = [...new Set([...opkReadyIds, ...sinkSubIds])];
   if (readyIds.length === 0) return { reDriven: 0, error: null };
 
   // Step 3: clear opk_deferred_at on their unprocessed deferred rows.
