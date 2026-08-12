@@ -125,6 +125,7 @@ initPostHogIfConsented();
 
   return (
     <PostHogProvider client={posthog}>
+      <HeadContent />
       <VaultProvider>
         <Outlet />
         <AnalyticsNotice />
