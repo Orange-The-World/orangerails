@@ -248,7 +248,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       if (failureRateFiring) {
         parts.push(
           `:x: **Signal A (failure rate):** ${failedCount}/${totalCount} drain runs failed ` +
-          `:x: (${((failureRate ?? 0) * 100).toFixed(1)}%) in the last ${FAILURE_WINDOW_MINUTES} min`,
+          `(${((failureRate ?? 0) * 100).toFixed(1)}%) in the last ${FAILURE_WINDOW_MINUTES} min`,
         );
       }
       if (zeroCompletionsFiring) {
