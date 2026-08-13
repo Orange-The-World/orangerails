@@ -121,4 +121,31 @@ describe("waitForDeliveryAck", () => {
     vi.advanceTimersByTime(30_001);
     await expect(p).rejects.toBeInstanceOf(DeliveryAckMissingError);
   });
+
+  it("resolves on re-delivery after a prior timeout: at-least-once delivery guarantee", async () => {
+    // Accepted behaviour (DL-0807): this gate provides at-least-once delivery,
+    // not exactly-once. When no ack arrives within 30 s the cursor is NOT
+    // written and the next sync re-delivers the same block window. Integrators
+    // MUST handle duplicate windows idempotently (e.g. last-write-wins on
+    // connection_id + block range).
+    //
+    // This test proves the gate is stateless: a second call after a timeout
+    // starts a fresh wait with no memory of the prior failure.
+    vi.useFakeTimers();
+    const target = makeTarget();
+
+    // First attempt: integrator stays silent. Cursor cannot advance.
+    const first = waitForDeliveryAck(target, "https://app.example.com", "conn-1", 30_000);
+    vi.advanceTimersByTime(30_001);
+    await expect(first).rejects.toBeInstanceOf(DeliveryAckMissingError);
+
+    // Second attempt: next sync re-delivers the same window. Integrator acks
+    // this time. The gate has no state from the first attempt, so it resolves.
+    const second = waitForDeliveryAck(target, "https://app.example.com", "conn-1", 30_000);
+    target.fire("https://app.example.com", {
+      type: "OR_STEALTH_DELIVERY_ACK",
+      connection_id: "conn-1",
+    });
+    await expect(second).resolves.toBeUndefined();
+  });
 });
