@@ -132,7 +132,15 @@ function ErrorCard({ message }: { message: string }) {
 }
 
 export function App() {
-  const allowlist = useMemo(parseAllowedOrigins, []);
+  // `undefined` for raw so the default parameter reads the env var. The
+  // second argument always allows the origin this widget is served from, so
+  // our own /connect pages can drive it without that hostname having to be
+  // listed in VITE_OR_STEALTH_ALLOWED_ORIGINS on every environment. See the
+  // note on parseAllowedOrigins for why same-origin needs no gate.
+  const allowlist = useMemo(
+    () => parseAllowedOrigins(undefined, window.location.origin),
+    [],
+  );
   const [init, setInit] = useState<StealthInitMessage | null>(null);
   const [parent, setParent] = useState<Window | null>(null);
   const [error, setError] = useState<string | null>(null);
