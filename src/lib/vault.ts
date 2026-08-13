@@ -44,6 +44,15 @@ export const MIN_PASSWORD_LENGTH = 14;
 /** Public string a successful decryption will produce, proving the key is correct. */
 export const VAULT_VERIFIER_PLAINTEXT = "orangerails-vault-verifier-v1";
 
+/**
+ * Current vault key version stored in user_vault_meta.vault_key_version.
+ * Version 1 (legacy): MEK = Argon2id(password, salt) used directly as HKDF key.
+ * Version 2 (current): a random MEK is wrapped by an Argon2id-derived KEK.
+ * Bump this constant whenever the wrapping scheme or KDF parameters change,
+ * and update the unlock() v1/v2 branch in VaultContext accordingly.
+ */
+export const CURRENT_VAULT_KEY_VERSION = 2;
+
 // ------------------------------------------------------------------
 // Encoding helpers , base64 is our on-the-wire format.
 // ------------------------------------------------------------------
