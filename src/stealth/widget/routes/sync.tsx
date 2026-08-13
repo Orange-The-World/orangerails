@@ -327,14 +327,16 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           // 4b. Wait for OR_STEALTH_DELIVERY_ACK. Throws DeliveryAckMissingError
           //     on timeout, which surfaces as DELIVERY_ACK_MISSING via the outer
           //     catch. The cursor is never written when this throws.
-          if (!cancelled) {
-            await waitForDeliveryAck(
-              window,
-              init.return_callback_origin,
-              init.connection_id!,
-              30_000,
-            );
-          }
+          //     Guard: a cancellation between 4a and 4b must abort the run, not
+          //     fall through to the cursor write at step 5. Every other cancelled
+          //     check in this effect returns immediately on true; this one too.
+          if (cancelled) return;
+          await waitForDeliveryAck(
+            window,
+            init.return_callback_origin,
+            init.connection_id!,
+            30_000,
+          );
         }
 
         // 5. Persist the sync cursor, independent of transaction upload.
