@@ -899,7 +899,7 @@ async function navigateToClientSideManifest(
   const params = new URLSearchParams();
   if (search.platform) params.set("platform", search.platform);
   if (search.app_user_id) params.set("app_user_id", search.app_user_id);
-  if (search.return_to) params.set("return_to", search.return_to);
+  if (search.return_to) params.set("app_url", search.return_to);
   const qs = params.toString();
   window.location.assign(qs ? `${manifest.connectUrl}?${qs}` : manifest.connectUrl);
 }
