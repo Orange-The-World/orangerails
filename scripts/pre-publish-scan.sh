@@ -98,6 +98,10 @@ EXEMPT_GENERIC=(
   ".github/workflows/pr-commit-metadata-scan.yml"
   ".github/PULL_REQUEST_TEMPLATE.md"
   ".github/workflows/repo-hygiene.yml"
+  # comment-findings-scan.yml is a detector file: it carries the TAILNET and
+  # CGNAT structural pattern classes as canary literals and is exempt from the
+  # same scan it implements. Reviewed by humans and trusted by path.
+  ".github/workflows/comment-findings-scan.yml"
   "CONTRIBUTING.md"
   "CODE_OF_CONDUCT.md"
   # CHANGELOG can mention "originally created in the MorningRevolution org" as
