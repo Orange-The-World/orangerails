@@ -165,6 +165,20 @@ export interface StealthInitWidgetMessage {
    * a changed default cannot reach into a sealed envelope.
    */
   gap_limit?: number;
+  /**
+   * Delivery acknowledgement gate (DL-0807). Only honoured when
+   * skip_transaction_upload is also true.
+   *
+   * When set, the widget posts SYNC_COMPLETE with pending_delivery_ack: true
+   * BEFORE advancing the sync cursor. The consuming app must then post
+   * OR_STEALTH_DELIVERY_ACK to confirm it saved the sealed transactions. Only
+   * after that ack does the widget write the cursor via
+   * or-stealth-envelope-update. If the ack does not arrive within 30 seconds,
+   * the widget fires OR_STEALTH_ERROR with code DELIVERY_ACK_MISSING
+   * (retryable: true) and leaves the cursor unchanged so the next sync
+   * re-scans safely.
+   */
+  require_delivery_ack?: boolean;
 }
 
 /**
@@ -349,6 +363,14 @@ export interface StealthSyncCompleteWidgetMessage {
    * itself is intact.
    */
   cursor_update_failed?: true;
+  /**
+   * Present when require_delivery_ack was set on the INIT message. Signals
+   * that the cursor has NOT yet been advanced. The consuming app must post
+   * OR_STEALTH_DELIVERY_ACK to the widget to confirm its own save, after
+   * which the widget writes the cursor. Keeping the popup open while this
+   * field is present is the recommended pattern.
+   */
+  pending_delivery_ack?: true;
 }
 
 /**
@@ -426,6 +448,7 @@ export type StealthErrorCode =
   | 'ORIGIN_NOT_ALLOWED'
   | 'PROTOCOL_VERSION_MISMATCH'
   | 'WINDOW_EXHAUSTED'
+  | 'DELIVERY_ACK_MISSING'
   | 'INTERNAL';
 
 export interface StealthErrorMessage {
@@ -439,9 +462,20 @@ export interface StealthErrorMessage {
 // Discriminated unions for type-safe handlers
 // ─────────────────────────────────────────────────────────────────────
 
+/**
+ * App -> Widget: confirms the consuming app has saved the sealed transactions.
+ * Only sent when require_delivery_ack was set on the INIT message.
+ * The widget advances the sync cursor upon receiving this message.
+ */
+export interface StealthDeliveryAckMessage {
+  type: 'OR_STEALTH_DELIVERY_ACK';
+  connection_id: string;
+}
+
 export type StealthMessageFromApp =
   | StealthInitMessage
-  | StealthProxyResponseMessage;
+  | StealthProxyResponseMessage
+  | StealthDeliveryAckMessage;
 
 export type StealthMessageFromWidget =
   | StealthReadyMessage
