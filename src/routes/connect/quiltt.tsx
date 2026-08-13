@@ -289,14 +289,15 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
 
   // Notify the opener when the popup closes without completing the link.
   //
-  // If the integrating app calls popup.close() (or the user clicks the
-  // window X) before onExitSuccess fires, the opener receives no message
-  // and cannot distinguish abandonment from a silent failure. This listener
-  // fires on every page unload; we only postMessage when phase is not
-  // "done" so a clean auto-close (line 267) does not trigger it.
+  // Three cases on unload:
+  //   "done"       -- clean auto-close after OR_QUILTT_LINK_COMPLETE was sent; no message needed.
+  //   "completing" -- keepalive fetch is in flight; it will complete and send OR_QUILTT_LINK_COMPLETE
+  //                   even after the popup closes. Sending CLOSED_INCOMPLETE here would be wrong.
+  //   anything else -- genuine abandonment or error; opener cannot distinguish from silent failure,
+  //                   so we send OR_QUILTT_POPUP_CLOSED_INCOMPLETE.
   useEffect(() => {
     function onPageHide() {
-      if (phase !== "done" && window.opener) {
+      if (phase !== "done" && phase !== "completing" && window.opener) {
         try {
           window.opener.postMessage(
             { type: "OR_QUILTT_POPUP_CLOSED_INCOMPLETE" },
