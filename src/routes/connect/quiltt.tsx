@@ -229,6 +229,11 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
       const resp = await fetch(`${supabaseUrl}/functions/v1/or-quiltt-link-complete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // keepalive: true keeps the request alive even if the popup window
+        // closes before the response arrives (e.g. integrator calls popup.close()
+        // immediately after onExitSuccess fires). Without this flag the browser
+        // cancels the in-flight POST on page unload and no connection row is written.
+        keepalive: true,
         body: JSON.stringify({
           platform_slug: params.platform_slug!,
           app_user_id: params.app_user_id!,
@@ -281,6 +286,30 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
       }
     };
   }, []);
+
+  // Notify the opener when the popup closes without completing the link.
+  //
+  // If the integrating app calls popup.close() (or the user clicks the
+  // window X) before onExitSuccess fires, the opener receives no message
+  // and cannot distinguish abandonment from a silent failure. This listener
+  // fires on every page unload; we only postMessage when phase is not
+  // "done" so a clean auto-close (line 267) does not trigger it.
+  useEffect(() => {
+    function onPageHide() {
+      if (phase !== "done" && window.opener) {
+        try {
+          window.opener.postMessage(
+            { type: "OR_QUILTT_POPUP_CLOSED_INCOMPLETE" },
+            "*",
+          );
+        } catch {
+          // opener may be cross-origin in some embeddings; swallow silently.
+        }
+      }
+    }
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, [phase]);
 
   if (phase === "completing") {
     return (
