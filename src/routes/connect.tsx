@@ -50,6 +50,11 @@ import { useQuilttInstitutions } from "@quiltt/react/hooks";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { encryptString, importAesKey } from "@/lib/vault";
 import { resolveTargetOrigin } from "@/lib/connect-origin";
+import {
+  classifyStealthMessage,
+  isStealthInlineSlug,
+  sendStealthInitOnReady,
+} from "./connect/_stealth-inline-init";
 
 // Same allowlist the Stealth widget and Sparrow path use to pin postMessage
 // targetOrigin. Baked into the bundle at build time from the env var.
@@ -914,6 +919,11 @@ type Step =
   | "discovering"
   | "pick-wallets"
   | "saving"
+  // Stealth Sync (Sparrow, xpub) running in an iframe on this page rather
+  // than as a navigation to /connect/sparrow or /connect/bitcoin. See
+  // ./connect/_stealth-inline-init.ts for why leaving this document is a
+  // dead end for a host app.
+  | "stealth-inline"
   | "done";
 
 function ConnectPage() {
@@ -987,6 +997,106 @@ function ConnectPageInner() {
   // Catalog for the in-widget picker. Loaded lazily when no provider slug
   // arrived in the URL.
   const [providerCatalog, setProviderCatalog] = useState<ProviderManifest[] | null>(null);
+
+  // ---- Inline Stealth Sync step (Sparrow, xpub) --------------------------
+  const [stealthError, setStealthError] = useState<string | null>(null);
+  const stealthFrameRef = useRef<HTMLIFrameElement | null>(null);
+  // Guards against a second READY re-INITing a widget that is already
+  // running. The widget posts READY once on mount, but a reload inside the
+  // iframe would post it again.
+  const stealthInitSentRef = useRef(false);
+
+  useEffect(() => {
+    if (step !== "stealth-inline") return;
+    // The widget seals with this key. Without it there is nothing to INIT
+    // with, and a half-sent INIT is refused by the widget anyway, so say so
+    // plainly rather than mount a frame that can only fail.
+    if (!handoffKeys?.credKeyB64) {
+      setStealthError(
+        "This connection needs the encryption key your app passes in the /connect URL fragment, and it is not present.",
+      );
+      return;
+    }
+    if (!search.app_user_id || !search.platform) {
+      setStealthError("This connection needs platform and app_user_id on the /connect URL.");
+      return;
+    }
+
+    const selfOrigin = window.location.origin;
+    const initArgs = {
+      appSlug: search.platform,
+      appUserId: search.app_user_id,
+      credKeyB64: handoffKeys.credKeyB64,
+      widgetToken: search.widget_token ?? initialFragmentWidgetToken ?? undefined,
+      selfOrigin,
+    };
+
+    function onMessage(event: MessageEvent) {
+      const frame = stealthFrameRef.current?.contentWindow;
+      if (!frame) return;
+
+      if (!stealthInitSentRef.current) {
+        if (sendStealthInitOnReady(event, frame, initArgs)) {
+          stealthInitSentRef.current = true;
+          return;
+        }
+      }
+
+      switch (classifyStealthMessage(event, frame, selfOrigin)) {
+        case "add-complete": {
+          const data = event.data as { connection_id?: string };
+          if (!data.connection_id) return;
+          const targetOrigin = resolveTargetOrigin(search.return_to, CONNECT_ALLOWED_ORIGINS);
+          if (!targetOrigin) {
+            setStealthError(
+              "Connected, but this app's origin is not allowed to receive the result, so it could not be handed back.",
+            );
+            return;
+          }
+          // Posted from this chunk, which is the whole point of running the
+          // widget inline: /connect/sparrow and /connect/bitcoin contain no
+          // or-link-success and can never reach the opener.
+          //
+          // source_wallets is empty by design. A Stealth Sync connection has
+          // no discovered accounts to map; the opener treats an empty list as
+          // "nothing to map" and skips its destination picker. Inventing
+          // entries here would put wallets in front of the user that OR never
+          // discovered.
+          window.opener?.postMessage(
+            {
+              type: "or-link-success",
+              connection_id: data.connection_id,
+              source_wallets: [],
+            },
+            targetOrigin,
+          );
+          setStep("done");
+          return;
+        }
+        case "error": {
+          const data = event.data as { message?: string };
+          setStealthError(data.message || "Stealth Sync reported an error.");
+          return;
+        }
+        default:
+          return;
+      }
+    }
+
+    window.addEventListener("message", onMessage);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      stealthInitSentRef.current = false;
+    };
+  }, [
+    step,
+    handoffKeys?.credKeyB64,
+    search.platform,
+    search.app_user_id,
+    search.return_to,
+    search.widget_token,
+    initialFragmentWidgetToken,
+  ]);
   const [pickingProvider, setPickingProvider] = useState(false);
 
   const providerLabel = manifest?.displayName ?? search.provider ?? "your provider";
@@ -1016,6 +1126,14 @@ function ConnectPageInner() {
           // integrator passing ?provider=quiltt lands on an empty
           // credentials form (no credentialFields).
           if (manifestRes.connectUrl) {
+            // Same split as the picker click path below: Sparrow and xpub
+            // run inline so this chunk stays loaded to post or-link-success.
+            if (isStealthInlineSlug(manifestRes.slug)) {
+              setPlatform(platformRes);
+              setManifest(manifestRes);
+              setStep("stealth-inline");
+              return;
+            }
             navigateToClientSideManifest(manifestRes, search, initialFragmentWidgetToken).catch(
               (err) => setLoadError(err instanceof Error ? err.message : String(err)),
             );
@@ -1049,6 +1167,16 @@ function ConnectPageInner() {
       // connect route rather than the generic credential form. Route there
       // instead of going to enter-credentials.
       if (m.connectUrl) {
+        // Sparrow and xpub run inline. Navigating to their dedicated pages
+        // unloads this chunk, and this chunk is the only place
+        // `or-link-success` is posted from, so the host app could never be
+        // told the connection completed. Quiltt still navigates: it needs a
+        // server-minted session before its page can render.
+        if (isStealthInlineSlug(m.slug)) {
+          setManifest(m);
+          setStep("stealth-inline");
+          return;
+        }
         await navigateToClientSideManifest(m, search, initialFragmentWidgetToken);
         return;
       }
@@ -1428,6 +1556,50 @@ function ConnectPageInner() {
           error={null}
           submitting
         />
+      )}
+
+      {step === "stealth-inline" && (
+        <div className="space-y-3">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">{providerLabel}</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Your keys stay in this browser. OrangeRails never sees your addresses.
+            </p>
+          </div>
+
+          {stealthError ? (
+            <div
+              role="alert"
+              className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+            >
+              {stealthError}
+            </div>
+          ) : (
+            <iframe
+              ref={stealthFrameRef}
+              // Same origin as this document, which is what makes the strict
+              // origin check on both sides of the handshake meaningful and
+              // is why #719 had to add our own origin to the widget's
+              // allowlist.
+              src="/connect/stealth"
+              title={`Connect ${providerLabel}`}
+              className="h-[520px] w-full rounded-md border border-border bg-background"
+            />
+          )}
+
+          <button
+            type="button"
+            className="text-sm text-muted-foreground underline underline-offset-4"
+            onClick={() => {
+              setStealthError(null);
+              stealthInitSentRef.current = false;
+              setManifest(null);
+              setStep("pick-provider");
+            }}
+          >
+            Choose a different source
+          </button>
+        </div>
       )}
     </Shell>
   );
