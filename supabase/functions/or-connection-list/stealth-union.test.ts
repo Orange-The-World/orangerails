@@ -33,9 +33,11 @@
 
 import { assertEquals, assertStrictEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import {
+  buildListResponse,
   isUnmappedStealthStatus,
   mapStealthStatus,
   mergeConnections,
+  STEALTH_UNAVAILABLE_ALARM,
   stealthRowToConnection,
   tagRegularConnection,
 } from './stealth-union.ts';
@@ -47,6 +49,7 @@ function stealthRow(extra: Partial<StealthConnectionRow> = {}): StealthConnectio
     connection_kind: 'xpub_stealth',
     status: 'active',
     last_sync_at: null,
+    last_block_scanned: null,
     created_at: '2026-08-14T15:13:52.000Z',
     ...extra,
   };
@@ -177,6 +180,129 @@ Deno.test('6b. merging with an empty stealth set leaves the regular order untouc
 
   assertEquals(mergeConnections(regular, []).map(c => c.id), ['a', 'b']);
   assertEquals(mergeConnections([], []).length, 0);
+});
+
+Deno.test('8. stealth_unavailable is always a boolean, never omitted on success', () => {
+  const ok = buildListResponse([], false);
+  assertStrictEquals(ok.stealth_unavailable, false);
+  // Present, not merely falsy-by-absence. A key that only shows up on
+  // failure is a key clients forget to check.
+  assertEquals(Object.keys(ok).includes('stealth_unavailable'), true);
+  assertEquals(JSON.parse(JSON.stringify(ok)).stealth_unavailable, false);
+
+  const degraded = buildListResponse([], true);
+  assertStrictEquals(degraded.stealth_unavailable, true);
+});
+
+Deno.test('8b. degradation does not drop the connections that were readable', () => {
+  const regular = [
+    tagRegularConnection({ id: 'bank', created_at: '2026-08-14T11:13:00.000Z' }),
+  ] as unknown as UnifiedConnection[];
+
+  const degraded = buildListResponse(regular, true);
+  // The whole point of degrading rather than failing closed.
+  assertEquals(degraded.connections.map(c => c.id), ['bank']);
+  assertStrictEquals(degraded.stealth_unavailable, true);
+});
+
+Deno.test('9. the alarm token is a bare greppable literal', () => {
+  // One GlitchTip alarm has to catch every degrade site, so this string is a
+  // contract with the alarm, not a message. Changing it silently breaks the
+  // alarm while every test still passes, which is why its exact value is
+  // pinned here.
+  assertEquals(STEALTH_UNAVAILABLE_ALARM, 'STEALTH_UNION_UNAVAILABLE');
+  // No whitespace, punctuation or interpolation, so it survives log
+  // formatting and greps as a literal.
+  assertEquals(/^[A-Z_]+$/.test(STEALTH_UNAVAILABLE_ALARM), true);
+});
+
+Deno.test('10. sync progress is two fields, never one coerced into the other', () => {
+  // A block height stringified into a cursor field is a lying value: a
+  // consumer that treats the cursor as opaque and hands it back to a provider
+  // would ship it a number. Null is honest and branchable. A wrong number is
+  // the one outcome nobody can detect later.
+  const stealth = stealthRowToConnection(stealthRow({ last_block_scanned: 862_144 }));
+  assertStrictEquals(stealth.last_block_scanned, 862_144);
+  assertStrictEquals(stealth.last_sync_cursor, null);
+  // The height must stay a number, not be stringified anywhere en route.
+  assertEquals(typeof stealth.last_block_scanned, 'number');
+
+  const regular = tagRegularConnection({ id: 'bank', last_sync_cursor: 'quiltt-opaque-cursor' });
+  assertStrictEquals(regular.last_block_scanned, null);
+  assertStrictEquals(regular.last_sync_cursor, 'quiltt-opaque-cursor');
+  // Present as an explicit null, not absent.
+  assertEquals(Object.keys(regular).includes('last_block_scanned'), true);
+});
+
+Deno.test('10b. a stealth row that has never scanned reports null, not zero', () => {
+  // Block 0 is the genesis block, so a synthesized 0 would read as "scanned
+  // the whole chain from the start" rather than "no scan has run".
+  const neverScanned = stealthRowToConnection(stealthRow({ last_block_scanned: null }));
+  assertStrictEquals(neverScanned.last_block_scanned, null);
+
+  // And a genuine 0 must survive rather than being nulled by a falsy check.
+  const atGenesis = stealthRowToConnection(stealthRow({ last_block_scanned: 0 }));
+  assertStrictEquals(atGenesis.last_block_scanned, 0);
+});
+
+Deno.test('10c. the handler actually selects last_block_scanned', async () => {
+  // Structural guard, same reasoning as 9b. If the column is dropped from the
+  // SELECT, the field silently becomes null for every stealth row and every
+  // unit test here still passes, because the projection is fed fixtures. A
+  // field that is null because nobody asked for it is indistinguishable from
+  // a field that is null because the row has no value.
+  const source = await Deno.readTextFile(new URL('./index.ts', import.meta.url));
+
+  // Matched inside the stealth select specifically, not merely present
+  // somewhere in the file where a comment mentioning it would satisfy it.
+  const stealthSelect = source.match(/\.from\('stealth_connections'\)\s*\n\s*\.select\('([^']+)'\)/);
+  assertEquals(stealthSelect !== null, true, 'could not locate the stealth_connections select');
+
+  const columns = stealthSelect![1].split(',').map(s => s.trim());
+  assertEquals(
+    columns.includes('last_block_scanned'),
+    true,
+    `last_block_scanned missing from the stealth select: ${stealthSelect![1]}`,
+  );
+  // The other columns the projection reads, for the same reason.
+  for (const required of ['id', 'connection_kind', 'status', 'last_sync_at', 'created_at']) {
+    assertEquals(columns.includes(required), true, `${required} missing from the stealth select`);
+  }
+  // And the envelope must never be added to it.
+  assertEquals(columns.includes('sealed_envelope'), false);
+});
+
+Deno.test('9b. every degrade site in the handler carries the alarm token', async () => {
+  // A structural guard, not a unit test, and deliberately so. The failure it
+  // catches is a future edit that adds a third degrade path and logs it
+  // without the token: the endpoint would degrade silently, the GlitchTip
+  // alarm would never fire, and every other test here would still pass.
+  //
+  // Resolved relative to this module so it does not depend on the cwd the
+  // test runner happens to use.
+  const source = await Deno.readTextFile(new URL('./index.ts', import.meta.url));
+  const lines = source.split('\n');
+
+  const degradeSites = lines
+    .map((line, i) => ({ line, i }))
+    .filter(({ line }) => /\bstealthUnavailable\s*=\s*true\b/.test(line));
+
+  // If this drops to zero the test has stopped testing anything, which is
+  // the failure mode of every source-scanning check.
+  assertEquals(
+    degradeSites.length >= 2,
+    true,
+    `expected at least the 2 known degrade sites, found ${degradeSites.length}`,
+  );
+
+  for (const { i } of degradeSites) {
+    const window = lines.slice(i, i + 6).join('\n');
+    assertEquals(
+      window.includes('STEALTH_UNAVAILABLE_ALARM'),
+      true,
+      `degrade site at index.ts:${i + 1} does not log STEALTH_UNAVAILABLE_ALARM within 6 lines`,
+    );
+  }
 });
 
 Deno.test('7. an unparseable or missing created_at sorts last, never first', () => {

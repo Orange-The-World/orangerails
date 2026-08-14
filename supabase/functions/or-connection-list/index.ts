@@ -14,10 +14,21 @@
  * Response:
  *   { connections: [{
  *       id, provider_type, is_stealth, encrypted_label, encrypted_credentials,
- *       status, last_sync_at, last_sync_cursor, encrypted_last_error,
- *       credentials_key_version, created_at,
+ *       status, last_sync_at, last_sync_cursor, last_block_scanned,
+ *       encrypted_last_error, credentials_key_version, created_at,
  *       source_wallets: [{ id, external_wallet_id, is_synced, encrypted_metadata }]
- *     }] }
+ *     }],
+ *     stealth_unavailable: boolean }
+ *
+ * Sync progress is two fields, never one coerced into the other:
+ * `last_sync_cursor` (text, regular rows) and `last_block_scanned` (integer,
+ * stealth rows), each null on the row kind that does not carry it.
+ *
+ * `stealth_unavailable` is true when the stealth store could not be read, so
+ * the list may be short. It is about the READ, not the result: a user with no
+ * stealth connections gets false. Always present, never omitted on success,
+ * because a key that only appears on failure is a key clients forget to
+ * check.
  *
  * The contract, stated as an outcome: this returns every connection the user
  * completed, in one shape, regardless of provider family. Stealth Sync
@@ -34,8 +45,10 @@ import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import {
+  buildListResponse,
   isUnmappedStealthStatus,
   mergeConnections,
+  STEALTH_UNAVAILABLE_ALARM,
   stealthRowToConnection,
   tagRegularConnection,
 } from './stealth-union.ts';
@@ -134,26 +147,39 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .maybeSingle();
 
     let stealthConnections: UnifiedConnection[] = [];
+    // Tracks whether the stealth store could be READ, not whether it returned
+    // rows. A user with no stealth connections is a successful read of an
+    // empty set and must not raise this.
+    let stealthUnavailable = false;
 
     if (subErr || !subaccountRow) {
       // Non-fatal, and loud. resolveSubaccount already proved this row
       // exists, so reaching here means the second read failed rather than
       // the caller being unauthorized.
-      console.error('[or-connection-list] stealth union skipped, subaccount reread failed:', subErr);
+      stealthUnavailable = true;
+      console.error(
+        `[or-connection-list] ${STEALTH_UNAVAILABLE_ALARM} subaccount reread failed:`,
+        subErr,
+      );
     } else {
       const { data: stealthRows, error: stealthErr } = await ctx.serviceClient
         .from('stealth_connections')
-        .select('id, connection_kind, status, last_sync_at, created_at')
+        .select('id, connection_kind, status, last_sync_at, last_block_scanned, created_at')
         .eq('platform_id', subaccountRow.platform_id)
         .eq('app_user_id', subaccountRow.external_user_id)
         .order('created_at', { ascending: false });
 
       if (stealthErr) {
         // Non-fatal on purpose: a stealth read failure must not blank out a
-        // user's working bank connections. It is logged at error level
+        // user's working bank connections. It is logged at error level, with
+        // the alarm token, and reported to the client on the response,
         // because the visible symptom, a missing connection, is exactly the
         // bug this union exists to fix and must not pass unnoticed.
-        console.error('[or-connection-list] stealth_connections query failed:', stealthErr);
+        stealthUnavailable = true;
+        console.error(
+          `[or-connection-list] ${STEALTH_UNAVAILABLE_ALARM} stealth_connections query failed:`,
+          stealthErr,
+        );
       } else {
         const rows = (stealthRows ?? []) as StealthConnectionRow[];
         for (const r of rows) {
@@ -168,7 +194,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
 
     return jsonResponse(
-      { connections: mergeConnections(enriched, stealthConnections) },
+      buildListResponse(mergeConnections(enriched, stealthConnections), stealthUnavailable),
       200,
       cors,
     );
