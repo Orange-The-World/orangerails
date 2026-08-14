@@ -88,7 +88,13 @@ export function resolveTtlSeconds(raw: unknown): number {
   if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl < 1) {
     return DEFAULT_TTL_SECONDS;
   }
-  return ttl > MAX_TTL_SECONDS ? MAX_TTL_SECONDS : ttl;
+  if (ttl > MAX_TTL_SECONDS) {
+    console.warn(
+      `or-link-mint-token: requested ttl_seconds=${ttl} exceeds ceiling ${MAX_TTL_SECONDS}; clamping`,
+    );
+    return MAX_TTL_SECONDS;
+  }
+  return ttl;
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
