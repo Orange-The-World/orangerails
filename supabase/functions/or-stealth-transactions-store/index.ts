@@ -217,6 +217,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
+    // Stamp last_sync_attempt_at on entry so every sync attempt is recorded,
+    // including runs that find zero new transactions (where last_sync_at would
+    // still advance but the attempt column would otherwise stay NULL forever).
+    // Non-fatal: a failure here must not block the actual sync work.
+    const { error: attemptErr } = await ctx.serviceClient
+      .from('stealth_connections')
+      .update({ last_sync_attempt_at: new Date().toISOString() })
+      .eq('platform_id', callerPlatformId)
+      .eq('id', body.connection_id);
+    if (attemptErr) {
+      console.error('[or-stealth-transactions-store] last_sync_attempt_at stamp failed:', attemptErr);
+    }
+
     const total = body.sealed_transactions.length;
 
     // ── Idempotent insert: ON CONFLICT (connection_id, txid_blind_index_hex) DO NOTHING ──
