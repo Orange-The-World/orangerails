@@ -16,7 +16,7 @@
  * cannot carry that context.
  */
 
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
@@ -167,6 +167,26 @@ function SparrowConnectPage() {
         <section className="relative overflow-hidden border-b border-border/60">
           <div className="pointer-events-none absolute inset-0 grid-bg opacity-50 [mask-image:radial-gradient(ellipse_at_top,black,transparent_70%)]" />
           <div className="relative mx-auto max-w-4xl px-6 py-16">
+            <Link
+              to="/providers"
+              className="mb-6 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+            >
+              <svg
+                className="h-3.5 w-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M15 19l-7-7 7-7"
+                />
+              </svg>
+              All providers
+            </Link>
             <div className="flex items-start gap-4">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-primary-soft font-mono text-lg font-semibold text-primary ring-1 ring-primary/15">
                 SW
