@@ -36,7 +36,9 @@ curl -X POST \
 
 * `exact`: a rate exists at this exact UTC minute (or day for ORBI-D products).
 * `forward_fill`: no rate at this minute; the prior available minute was used. `resolved_at` shows which minute.
-* `gap`: no rate data exists before this timestamp for this pair. `rate` is null. **Do not treat null as zero.**
+* `gap`: no rate can be served for this timestamp. `rate`, `provenance`, `tier`, and `source_authority` are null; `resolved_at` equals `requested_at`. **Do not treat null as zero.** Two conditions produce a gap:
+  1. No data exists before this timestamp for this pair.
+  2. The nearest prior row exists but is older than 2 days relative to the requested timestamp (the staleness cap, tunable via the `FORWARD_FILL_MAX_DAYS` environment variable). A row that stale is suppressed rather than served as a confident answer -- before this cap was added, a 5.5-year data hole in BTC/MXN caused every historical lookup to silently return a rate ~65% too low.
 
 ## Product parameter
 
@@ -68,7 +70,7 @@ POST example mixing products in one batch:
 
 ## Data currency note
 
-The ORBI feed is approximately 4 days behind real time. A "latest rate" call for today will resolve to a row from several days ago with `fill_type: forward_fill`. This is a known data-lag issue tracked separately from this API. Callers should check `resolved_at` and flag any result where the gap between `requested_at` and `resolved_at` exceeds their tolerance.
+The ORBI feed is approximately 4 days behind real time. Because the staleness cap is 2 days, requests for timestamps within the last 2-4 days will return `fill_type: gap` with `rate: null` -- the nearest available row is real but too old to serve. This is a known data-lag issue tracked separately from this API. For near-real-time lookups, use a timestamp from 5 or more days ago, or supplement with a live market feed and fall back to ORBI for historical dates.
 
 ## Auth
 
