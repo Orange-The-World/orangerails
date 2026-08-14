@@ -194,6 +194,13 @@ jobs:
               grep -oE 'TS[0-9]+ \[ERROR\]' "$RUNNER_TEMP/deno-check.log" | sort | uniq -c | sort -rn || true
               echo '```'
             fi
+            if [ "$ERRORS" -gt "$DENO_CHECK_BASELINE" ]; then
+              echo
+              echo "Full deno check output (errors above baseline -- new errors introduced by this change):"
+              echo '```'
+              cat "$RUNNER_TEMP/deno-check.log"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "deno check: ${ERRORS} error(s); ratchet baseline ${DENO_CHECK_BASELINE}"
