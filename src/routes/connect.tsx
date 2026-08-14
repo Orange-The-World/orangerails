@@ -1065,7 +1065,18 @@ function ConnectPageInner() {
       switch (classifyStealthMessage(event, frame, selfOrigin)) {
         case "add-complete": {
           const data = event.data as { connection_id?: string };
-          if (!data.connection_id) return;
+          // A completion with no connection_id used to `return` silently. That
+          // turned every upstream failure into a hang: the user clicked "Add
+          // wallet", nothing moved, and no error was shown anywhere. Observed
+          // on dev 2026-08-14. The widget only reaches add-complete after it
+          // believes it stored the wallet, so a missing id means the create
+          // call did not return one and there is nothing to hand back.
+          if (!data.connection_id) {
+            setStealthError(
+              "Stealth Sync finished but did not return a connection id, so the wallet could not be handed back to the app. Nothing was saved. Please try again.",
+            );
+            return;
+          }
           const targetOrigin = resolveTargetOrigin(search.return_to, CONNECT_ALLOWED_ORIGINS);
           if (!targetOrigin) {
             setStealthError(

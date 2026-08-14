@@ -592,9 +592,17 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
                 Rely on the address preview to confirm.
               </p>
             )}
+            {/*
+              break-all is load-bearing, not styling. A bech32 address is a
+              single unbroken token, so without it the address runs past the
+              container and is clipped at the right edge. This block asks the
+              user to compare these against their wallet's "Receive" tab, so a
+              clipped address makes the check it demands impossible to perform.
+              Observed on dev 2026-08-14.
+            */}
             <ol className="mt-2 space-y-1 font-mono text-[11px] text-foreground">
               {previewAddresses.map((addr, i) => (
-                <li key={addr}>
+                <li key={addr} className="break-all">
                   {i + 1}. {addr}
                 </li>
               ))}
