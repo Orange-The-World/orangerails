@@ -19,7 +19,7 @@
  * POST body:
  *   {
  *     app_user_id: string   // the integrating app's user identifier
- *     ttl_seconds?: number  // optional, default 300 (5 minutes), max 900 (15 min)
+ *     ttl_seconds?: number  // optional, default 300 (5 minutes), max 300 (5 min)
  *   }
  *
  * Response 200:
@@ -42,11 +42,53 @@ import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const DEFAULT_TTL_SECONDS = 300; // 5 minutes
-const MAX_TTL_SECONDS = 900; // 15 minutes
+
+/**
+ * Ceiling on a minted session's lifetime, lowered from 900s to 300s.
+ *
+ * Why. A widget_token is a bearer credential: anyone holding it before it
+ * expires can act as that app_user_id on that platform, and validation does
+ * not consume it, so the exposure is the remaining TTL rather than a single
+ * request. Shrinking the ceiling shrinks that window.
+ *
+ * Why the cap is global rather than scoped to the stealth flow. It cannot be
+ * scoped: the token is minted BEFORE the widget opens, and the user picks a
+ * provider from the catalogue afterwards. At mint time nobody, including this
+ * function, knows whether the session will end up being a Stealth Sync
+ * connection. A `flow` field in the body would not fix that either, because
+ * the caller chooses what to put in it, so a caller wanting 900s would simply
+ * omit it. That would be a convention, not a control.
+ *
+ * Why 300 is safe. Verified before changing it: no caller asks for more.
+ * `pending_widget_sessions` holds 20 rows on dev, every one at ~300s
+ * (max 299.96s, zero above 300), and is empty on prod, so no in-flight
+ * production session can be stranded by the change. No caller in this repo
+ * passes ttl_seconds at all.
+ *
+ * Behaviour is unchanged apart from the ceiling: an over-large request is
+ * still clamped rather than rejected, so this cannot turn a working caller
+ * into a 400.
+ */
+const MAX_TTL_SECONDS = 300; // 5 minutes
 
 interface MintBody {
   app_user_id?: string;
   ttl_seconds?: number;
+}
+
+/**
+ * Resolve the effective TTL for a mint request.
+ *
+ * Extracted so the clamping rules are testable without a request, a platform
+ * key or a database. Anything absent, non-numeric, non-finite or below 1s
+ * falls back to the default; anything above the ceiling is clamped to it.
+ */
+export function resolveTtlSeconds(raw: unknown): number {
+  const ttl = raw ?? DEFAULT_TTL_SECONDS;
+  if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl < 1) {
+    return DEFAULT_TTL_SECONDS;
+  }
+  return ttl > MAX_TTL_SECONDS ? MAX_TTL_SECONDS : ttl;
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -77,11 +119,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'app_user_id required (string, ≤256 chars)' }, 400, cors);
     }
 
-    let ttl = body.ttl_seconds ?? DEFAULT_TTL_SECONDS;
-    if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl < 1) {
-      ttl = DEFAULT_TTL_SECONDS;
-    }
-    if (ttl > MAX_TTL_SECONDS) ttl = MAX_TTL_SECONDS;
+    const ttl = resolveTtlSeconds(body.ttl_seconds);
 
     const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
 
