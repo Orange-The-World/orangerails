@@ -430,7 +430,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 body: JSON.stringify({
                   query: `query GetAccounts($connId: ID!) {
                     connection(id: $connId) {
-                      accounts { nodes { id } }
+                      accounts { id }
                     }
                   }`,
                   variables: { connId: quilttConnIdSink },
@@ -446,7 +446,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 throw new Error(`Quiltt accounts fetch errors: ${msgs}`);
               }
               const filterAccountIdsSink: string[] = (
-                (acctJsonSink?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+                (acctJsonSink?.data?.connection?.accounts ?? []) as Array<{ id: string }>
               ).map((a) => a.id);
 
               if (filterAccountIdsSink.length === 0) {
@@ -712,7 +712,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               body: JSON.stringify({
                 query: `query GetAccounts($connId: ID!) {
                   connection(id: $connId) {
-                    accounts { nodes { id } }
+                    accounts { id }
                   }
                 }`,
                 variables: { connId: quilttConnId },
@@ -728,7 +728,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               throw new Error(`Quiltt accounts fetch errors: ${msgs}`);
             }
             const filterAccountIdsMain: string[] = (
-              (acctJsonMain?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+              (acctJsonMain?.data?.connection?.accounts ?? []) as Array<{ id: string }>
             ).map((a) => a.id);
 
             if (filterAccountIdsMain.length === 0) {
