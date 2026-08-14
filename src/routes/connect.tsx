@@ -899,7 +899,27 @@ async function navigateToClientSideManifest(
   const params = new URLSearchParams();
   if (search.platform) params.set("platform", search.platform);
   if (search.app_user_id) params.set("app_user_id", search.app_user_id);
-  if (search.return_to) params.set("app_url", search.return_to);
+  // Forwarded under its own name, NOT as `app_url`. These two are not
+  // synonyms, and swapping them changes what the receiving page does.
+  //
+  // `app_url` on /connect/sparrow and /connect/bitcoin means "navigate the
+  // browser to this address". That contract exists for integrators who
+  // deep-link into those pages directly and want to be sent home afterwards.
+  //
+  // A picker click is not that case. The picker runs inside a popup the host
+  // app opened and is still waiting on: the host resolves its connect promise
+  // only when it receives an `or-link-success` postMessage from this origin,
+  // and it holds the popup open on a timeout until then. Handing the receiving
+  // page an `app_url` makes it navigate that popup to the host's own origin,
+  // so the popup leaves our origin without ever posting back, the host's
+  // close poll never fires because the window is still open, and the session
+  // hangs until the host's guard expires.
+  //
+  // `return_to` is inert on those pages today, and inert is the correct
+  // behaviour here: the user stays on our origin and the popup session
+  // survives. Making the picker path actually reach Stealth Sync is a
+  // separate change; it is not a matter of which name this line uses.
+  if (search.return_to) params.set("return_to", search.return_to);
   const qs = params.toString();
   window.location.assign(qs ? `${manifest.connectUrl}?${qs}` : manifest.connectUrl);
 }
