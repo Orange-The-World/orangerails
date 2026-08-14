@@ -17,6 +17,10 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const RATE_LIMIT_RPM = parseInt(Deno.env.get('RATE_LIMIT_RPM') ?? '60')
 const BATCH_LIMIT = parseInt(Deno.env.get('BATCH_LIMIT') ?? '50')
+// Maximum time a forward-fill can reach back before the response converts to fill_type:gap.
+// A plausible-looking stale number is worse than an honest null. Default: 30 days.
+// Override with FORWARD_FILL_MAX_DAYS env var (no redeploy needed).
+const FORWARD_FILL_MAX_MS = parseInt(Deno.env.get('FORWARD_FILL_MAX_DAYS') ?? '30') * 24 * 60 * 60 * 1000
 
 // Product registry: each product maps 1:1 to a granularity.
 // ORBI-M   = 1-minute bars, crypto pairs (BTC, USDC, USDT, DAI, EURC, PYUSD)
@@ -235,18 +239,23 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
 
     const resolvedTs = row ? new Date(row.bucket_ts).toISOString() : bucketTs
-    const fillType = !row ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
+    // Refuse to forward-fill across gaps wider than FORWARD_FILL_MAX_MS. A plausible-looking
+    // number spanning years of missing data is worse than an honest null (MXN: 5.5-year hole
+    // caused 65%-low rates across all of 2021-2026, root cause: composite never built for gap).
+    const gapMs = row ? new Date(bucketTs).getTime() - new Date(row.bucket_ts).getTime() : 0
+    const staleGap = row !== null && gapMs > FORWARD_FILL_MAX_MS
+    const fillType = !row || staleGap ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
 
     results.push({
       asset: item.asset.toUpperCase(),
       fiat: item.fiat.toUpperCase(),
       product,
       requested_at: item.at,
-      resolved_at: resolvedTs,
-      rate: row?.rate ?? null,
-      provenance: row?.provenance ?? null,
-      tier: row?.tier ?? null,
-      source_authority: row?.source_authority ?? null,
+      resolved_at: staleGap ? bucketTs : resolvedTs,
+      rate: staleGap ? null : (row?.rate ?? null),
+      provenance: staleGap ? null : (row?.provenance ?? null),
+      tier: staleGap ? null : (row?.tier ?? null),
+      source_authority: staleGap ? null : (row?.source_authority ?? null),
       fill_type: fillType
     })
 
