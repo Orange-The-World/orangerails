@@ -14,11 +14,15 @@
  * Response:
  *   { connections: [{
  *       id, provider_type, is_stealth, encrypted_label, encrypted_credentials,
- *       status, last_sync_at, last_sync_cursor, encrypted_last_error,
- *       credentials_key_version, created_at,
+ *       status, last_sync_at, last_sync_cursor, last_block_scanned,
+ *       encrypted_last_error, credentials_key_version, created_at,
  *       source_wallets: [{ id, external_wallet_id, is_synced, encrypted_metadata }]
  *     }],
  *     stealth_unavailable: boolean }
+ *
+ * Sync progress is two fields, never one coerced into the other:
+ * `last_sync_cursor` (text, regular rows) and `last_block_scanned` (integer,
+ * stealth rows), each null on the row kind that does not carry it.
  *
  * `stealth_unavailable` is true when the stealth store could not be read, so
  * the list may be short. It is about the READ, not the result: a user with no
@@ -160,7 +164,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     } else {
       const { data: stealthRows, error: stealthErr } = await ctx.serviceClient
         .from('stealth_connections')
-        .select('id, connection_kind, status, last_sync_at, created_at')
+        .select('id, connection_kind, status, last_sync_at, last_block_scanned, created_at')
         .eq('platform_id', subaccountRow.platform_id)
         .eq('app_user_id', subaccountRow.external_user_id)
         .order('created_at', { ascending: false });

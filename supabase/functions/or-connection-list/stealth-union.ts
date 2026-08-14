@@ -35,6 +35,7 @@ export interface StealthConnectionRow {
   connection_kind: string;
   status: string;
   last_sync_at: string | null;
+  last_block_scanned: number | null;
   created_at: string;
 }
 
@@ -55,7 +56,23 @@ export interface UnifiedConnection {
   credentials_key_version: number | null;
   status: string;
   last_sync_at: string | null;
+  /**
+   * Sync progress for regular connections. An opaque provider cursor, text.
+   * Null on stealth rows, which do not have one.
+   */
   last_sync_cursor: string | null;
+  /**
+   * Sync progress for stealth connections. A chain block height, integer.
+   * Null on regular rows, which do not have one.
+   *
+   * Deliberately a SECOND field rather than a value coerced into
+   * `last_sync_cursor`. The two are different things with different types: a
+   * consumer that treats the cursor as opaque and hands it back to a provider
+   * would ship it a number, and one that reads it as a height would get a
+   * provider's cursor string. Null is honest and branchable. A wrong number
+   * is the one outcome nobody can detect later.
+   */
+  last_block_scanned: number | null;
   encrypted_last_error: string | null;
   created_at: string;
   source_wallets: unknown[];
@@ -109,10 +126,9 @@ export function isUnmappedStealthStatus(status: string): boolean {
  * server does not know it, and inventing one would put readable text where
  * the whole feature promises there is none.
  *
- * `last_sync_cursor` and `encrypted_last_error` are null. The stealth store
- * has no cursor, and its scan progress lives in `last_block_scanned`, which
- * is a block height and not a cursor. Stuffing a height into a cursor field
- * would be a lie in a field consumers already read.
+ * `last_sync_cursor` and `encrypted_last_error` are null: the stealth store
+ * has neither. Scan progress is surfaced as `last_block_scanned` instead,
+ * side by side rather than coerced into the cursor field.
  */
 export function stealthRowToConnection(row: StealthConnectionRow): UnifiedConnection {
   return {
@@ -125,6 +141,7 @@ export function stealthRowToConnection(row: StealthConnectionRow): UnifiedConnec
     status: mapStealthStatus(row.status),
     last_sync_at: row.last_sync_at ?? null,
     last_sync_cursor: null,
+    last_block_scanned: row.last_block_scanned ?? null,
     encrypted_last_error: null,
     created_at: row.created_at,
     source_wallets: [],
@@ -132,17 +149,20 @@ export function stealthRowToConnection(row: StealthConnectionRow): UnifiedConnec
 }
 
 /**
- * Mark a regular row as non-stealth.
+ * Mark a regular row as non-stealth and give it the stealth-only fields as
+ * null.
  *
- * Emitted explicitly rather than left absent. `undefined` is falsy and would
- * mostly work, but "one shape" means a consumer can read `is_stealth` off
- * any row and get a boolean, not a boolean on some rows and nothing on
- * others.
+ * Both are emitted explicitly rather than left absent. `undefined` is falsy
+ * and would mostly work for `is_stealth`, but "one shape" means a consumer
+ * reads a field off any row and gets a value of the right type, not a value
+ * on some rows and nothing on others. `last_block_scanned` is null here
+ * because the `connections` table has no such column, which is a fact about
+ * the row rather than a gap in the response.
  */
 export function tagRegularConnection<T extends Record<string, unknown>>(
   row: T,
-): T & { is_stealth: boolean } {
-  return { ...row, is_stealth: false };
+): T & { is_stealth: boolean; last_block_scanned: number | null } {
+  return { ...row, is_stealth: false, last_block_scanned: null };
 }
 
 /**

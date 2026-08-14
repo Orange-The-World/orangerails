@@ -49,6 +49,7 @@ function stealthRow(extra: Partial<StealthConnectionRow> = {}): StealthConnectio
     connection_kind: 'xpub_stealth',
     status: 'active',
     last_sync_at: null,
+    last_block_scanned: null,
     created_at: '2026-08-14T15:13:52.000Z',
     ...extra,
   };
@@ -213,6 +214,62 @@ Deno.test('9. the alarm token is a bare greppable literal', () => {
   // No whitespace, punctuation or interpolation, so it survives log
   // formatting and greps as a literal.
   assertEquals(/^[A-Z_]+$/.test(STEALTH_UNAVAILABLE_ALARM), true);
+});
+
+Deno.test('10. sync progress is two fields, never one coerced into the other', () => {
+  // A block height stringified into a cursor field is a lying value: a
+  // consumer that treats the cursor as opaque and hands it back to a provider
+  // would ship it a number. Null is honest and branchable. A wrong number is
+  // the one outcome nobody can detect later.
+  const stealth = stealthRowToConnection(stealthRow({ last_block_scanned: 862_144 }));
+  assertStrictEquals(stealth.last_block_scanned, 862_144);
+  assertStrictEquals(stealth.last_sync_cursor, null);
+  // The height must stay a number, not be stringified anywhere en route.
+  assertEquals(typeof stealth.last_block_scanned, 'number');
+
+  const regular = tagRegularConnection({ id: 'bank', last_sync_cursor: 'quiltt-opaque-cursor' });
+  assertStrictEquals(regular.last_block_scanned, null);
+  assertStrictEquals(regular.last_sync_cursor, 'quiltt-opaque-cursor');
+  // Present as an explicit null, not absent.
+  assertEquals(Object.keys(regular).includes('last_block_scanned'), true);
+});
+
+Deno.test('10b. a stealth row that has never scanned reports null, not zero', () => {
+  // Block 0 is the genesis block, so a synthesized 0 would read as "scanned
+  // the whole chain from the start" rather than "no scan has run".
+  const neverScanned = stealthRowToConnection(stealthRow({ last_block_scanned: null }));
+  assertStrictEquals(neverScanned.last_block_scanned, null);
+
+  // And a genuine 0 must survive rather than being nulled by a falsy check.
+  const atGenesis = stealthRowToConnection(stealthRow({ last_block_scanned: 0 }));
+  assertStrictEquals(atGenesis.last_block_scanned, 0);
+});
+
+Deno.test('10c. the handler actually selects last_block_scanned', async () => {
+  // Structural guard, same reasoning as 9b. If the column is dropped from the
+  // SELECT, the field silently becomes null for every stealth row and every
+  // unit test here still passes, because the projection is fed fixtures. A
+  // field that is null because nobody asked for it is indistinguishable from
+  // a field that is null because the row has no value.
+  const source = await Deno.readTextFile(new URL('./index.ts', import.meta.url));
+
+  // Matched inside the stealth select specifically, not merely present
+  // somewhere in the file where a comment mentioning it would satisfy it.
+  const stealthSelect = source.match(/\.from\('stealth_connections'\)\s*\n\s*\.select\('([^']+)'\)/);
+  assertEquals(stealthSelect !== null, true, 'could not locate the stealth_connections select');
+
+  const columns = stealthSelect![1].split(',').map(s => s.trim());
+  assertEquals(
+    columns.includes('last_block_scanned'),
+    true,
+    `last_block_scanned missing from the stealth select: ${stealthSelect![1]}`,
+  );
+  // The other columns the projection reads, for the same reason.
+  for (const required of ['id', 'connection_kind', 'status', 'last_sync_at', 'created_at']) {
+    assertEquals(columns.includes(required), true, `${required} missing from the stealth select`);
+  }
+  // And the envelope must never be added to it.
+  assertEquals(columns.includes('sealed_envelope'), false);
 });
 
 Deno.test('9b. every degrade site in the handler carries the alarm token', async () => {
