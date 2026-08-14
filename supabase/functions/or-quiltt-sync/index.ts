@@ -497,7 +497,7 @@ export async function handleEvent(
       body: JSON.stringify({
         query: `query GetAccounts($connId: ID!) {
           connection(id: $connId) {
-            accounts { nodes { id } }
+            accounts { id }
           }
         }`,
         variables: { connId: connectionId },
@@ -516,7 +516,7 @@ export async function handleEvent(
       return `Quiltt accounts fetch errors: ${redactProviderError(msgs, 400)}`;
     }
     filterAccountIds = (
-      (acctJson?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+      (acctJson?.data?.connection?.accounts ?? []) as Array<{ id: string }>
     ).map((a) => a.id);
     if (filterAccountIds.length === 0) {
       // Connection has no accounts yet -- possibly still provisioning.
