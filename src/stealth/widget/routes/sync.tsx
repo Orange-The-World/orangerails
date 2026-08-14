@@ -150,10 +150,15 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         // 1. Fetch sealed envelope. Routes through parent postMessage proxy
         //    when proxy_base_url is set in INIT (V2 pattern, keeps platform
         //    key off the browser); falls back to direct fetch otherwise.
+        // Widget-token auth: carried in the body so a host app whose users
+        // have no OrangeRails account can still authenticate. Harmless on the
+        // proxy path, where the platform key attached server-side outranks it,
+        // and absent for every caller that does not send one.
         const envFetchBody = {
           connection_id: init.connection_id,
           app_user_id: init.app_user_id,
           app_slug: init.app_slug,
+          widget_token: init.widget_token,
         };
         let envOk = false;
         let envStatus = 0;
@@ -247,6 +252,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           const uploadBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
+            widget_token: init.widget_token,
             sealed_transactions: result.sealedTransactions,
             last_block_scanned: result.lastBlockScanned,
           };
@@ -362,6 +368,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
+            widget_token: init.widget_token,
             last_block_scanned: result.lastBlockScanned,
           };
           let cursorWritten = false;

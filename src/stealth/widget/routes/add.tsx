@@ -333,6 +333,11 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
       const requestBody = {
         app_user_id: init.app_user_id,
         app_slug: init.app_slug,
+        // Widget-token auth: carried in the body so a host app whose users
+        // have no OrangeRails account can still authenticate. Harmless on the
+        // proxy path, where the platform key attached server-side outranks
+        // it, and absent for every caller that does not send one.
+        widget_token: initWithToken.widget_token,
         connection_kind: shape.kind,
         sealed_envelope: sealed,
         blind_index: blind,

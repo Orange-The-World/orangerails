@@ -14,8 +14,14 @@
  * `stealth_connections_dedup_idx` on (app_user_id, app_slug, blind_index_b64)
  * lets us return the pre-existing row rather than inserting a duplicate.
  *
- * Auth pattern reused from or-connection-create: platform-mode (X-Platform-API-Key)
- * or direct-mode (Supabase JWT). See _shared/platform-auth.ts.
+ * Auth: platform-mode (X-Platform-API-Key), direct-mode (Supabase JWT), or
+ * widget-mode (widget_token in the body). See _shared/platform-auth.ts.
+ *
+ * Widget mode exists because the widget is NOT always a direct-mode caller.
+ * It is one only when the consuming app shares our Supabase project. A
+ * genuine third-party host app's user has no OrangeRails account, so there is
+ * no JWT to send and no platform key a browser may hold, which left this
+ * endpoint with no auth mode that path could ever satisfy.
  *
  * POST body:
  *   app_slug:                  string                     'v2' | 'v3' | 'ow' | <third-party>
@@ -30,7 +36,12 @@
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
+import {
+  authenticateRequestOrWidgetToken,
+  enforceWidgetAppUser,
+  isAuthError,
+  getCallerPlatformId,
+} from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 interface CreateRequestBody {
@@ -40,6 +51,12 @@ interface CreateRequestBody {
   sealed_envelope?: unknown;
   blind_index?: string;
   wallet_birthday_plaintext?: string | null;
+  /**
+   * Widget-mode credential. Present when the caller is browser code inside a
+   * host app's connect session and holds neither a platform API key nor an
+   * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
+   */
+  widget_token?: string;
 }
 
 interface CreateResponseBody {
@@ -77,12 +94,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
 
   try {
-    const ctx = await authenticateRequest(req);
-    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
-
+    // The body is read BEFORE auth because a widget-mode caller presents its
+    // credential in the body rather than in a header. Header-based callers are
+    // resolved exactly as before; see authenticateRequestOrWidgetToken.
     const raw = await readBoundedText(req);
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
-    const body = JSON.parse(raw || '{}') as CreateRequestBody;
+
+    // Parsing now happens before authentication, so malformed JSON from an
+    // unauthenticated caller must answer 400 rather than fall through to the
+    // catch below and answer 500.
+    let body: CreateRequestBody;
+    try {
+      body = JSON.parse(raw || '{}') as CreateRequestBody;
+    } catch {
+      return jsonResponse({ error: 'Request body is not valid JSON' }, 400, cors);
+    }
+
+    const ctx = await authenticateRequestOrWidgetToken(req, body.widget_token);
+    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
     // ── Validate ──────────────────────────────────────────────────────
     if (!body.app_slug || typeof body.app_slug !== 'string') {
@@ -118,15 +147,27 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       );
     }
 
-    // In direct mode, lock app_user_id to the authenticated user. The widget
-    // is a direct-mode caller (it has the user's Supabase JWT from the
-    // consuming app's session). Platform mode is reserved for server-to-server
-    // integrations and will pass app_user_id explicitly.
+    // In direct mode, lock app_user_id to the authenticated user. Platform
+    // mode is reserved for server-to-server integrations and will pass
+    // app_user_id explicitly.
+    //
+    // The widget reaches this endpoint in direct mode only when the consuming
+    // app shares our Supabase project, so its user has an OrangeRails JWT.
+    // When it does not, the widget authenticates in widget mode instead,
+    // locked just below.
     if (ctx.mode === 'direct' && body.app_user_id !== ctx.userId) {
       return jsonResponse(
         { error: 'app_user_id must match the authenticated user' },
         403, cors,
       );
+    }
+
+    // Widget mode gets the same lock for the same reason: the token pins one
+    // app_user_id, so a body naming a different one is an attempt to write
+    // into another user's records.
+    const widgetUserErr = enforceWidgetAppUser(ctx, body.app_user_id);
+    if (widgetUserErr) {
+      return jsonResponse({ error: widgetUserErr.message }, widgetUserErr.status, cors);
     }
 
     // Audit 2026-05-16 High #2: every stealth_connections read/write must be

@@ -145,6 +145,21 @@ export interface StealthInitWidgetMessage {
    * never a key that can unseal anything.
    */
   access_token?: string;
+  /**
+   * Auth mode C (widget token). The short-lived session id the host app's
+   * backend minted via or-link-mint-token before opening the widget. Sent in
+   * the POST BODY, not as a header.
+   *
+   * For a host app whose users have no OrangeRails account there is no
+   * Supabase JWT to put in mode B, and mode A needs a backend proxy the app
+   * may not have. This is the credential that path already holds, and the
+   * same one or-discover-wallets and or-link-complete already accept.
+   *
+   * Ignored when `proxy_base_url` is set: the proxy attaches the platform key
+   * server-side, which outranks it. Like `access_token`, this is an access
+   * credential for OR's API and can unseal nothing.
+   */
+  widget_token?: string;
   /** Optional: when true, the widget skips uploading sealed transactions
    *  to OR's `or-stealth-transactions-store` endpoint. Used by consumer
    *  apps that hold their own source-of-truth copy and do not need OR's
