@@ -9,6 +9,7 @@
 // Updated: Dev 2, 2026-07-22 -- P2 fixes: flag gate, keyErr 5xx, body validation, UTC timestamp, hasOwn, await usage log
 // Updated: Dev 1, 2026-07-22 -- ISO_UTC_RE: Z suffix only (spec says offset timestamps return 400)
 // Updated: Security, 2026-07-23 -- key lookup uses maybeSingle so a bad or revoked key returns 401, not 500
+// Updated: Sr Dev A, 2026-08-14 -- DL-1043: validate FORWARD_FILL_MAX_DAYS; reject NaN/non-positive, fall back to 2d, log on misconfig
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
@@ -23,7 +24,10 @@ const BATCH_LIMIT = parseInt(Deno.env.get('BATCH_LIMIT') ?? '50')
 // (widest legitimate gap observed: 1d 10h 38m). 2 days clears normal operation with ~40%
 // headroom and rejects every stale fill found in the gap audit (10.9-29.1 days old).
 // Override with FORWARD_FILL_MAX_DAYS env var (no redeploy needed).
-const FORWARD_FILL_MAX_MS = parseInt(Deno.env.get('FORWARD_FILL_MAX_DAYS') ?? '2') * 24 * 60 * 60 * 1000
+const _fwdDaysRaw = parseInt(Deno.env.get('FORWARD_FILL_MAX_DAYS') ?? '2')
+const _fwdDaysValid = Number.isFinite(_fwdDaysRaw) && _fwdDaysRaw > 0
+if (!_fwdDaysValid) console.error(`[v1-rate] FORWARD_FILL_MAX_DAYS invalid ("${Deno.env.get('FORWARD_FILL_MAX_DAYS')}"); falling back to 2d default`)
+const FORWARD_FILL_MAX_MS = (_fwdDaysValid ? _fwdDaysRaw : 2) * 24 * 60 * 60 * 1000
 
 // Product registry: each product maps 1:1 to a granularity.
 // ORBI-M   = 1-minute bars, crypto pairs (BTC, USDC, USDT, DAI, EURC, PYUSD)
