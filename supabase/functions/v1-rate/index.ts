@@ -9,6 +9,7 @@
 // Updated: Dev 2, 2026-07-22 -- P2 fixes: flag gate, keyErr 5xx, body validation, UTC timestamp, hasOwn, await usage log
 // Updated: Dev 1, 2026-07-22 -- ISO_UTC_RE: Z suffix only (spec says offset timestamps return 400)
 // Updated: Security, 2026-07-23 -- key lookup uses maybeSingle so a bad or revoked key returns 401, not 500
+// Updated: Sr Dev A, 2026-08-14 -- DL-1043: validate FORWARD_FILL_MAX_DAYS; reject NaN/non-positive, fall back to 2d, log on misconfig
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
@@ -17,6 +18,16 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const RATE_LIMIT_RPM = parseInt(Deno.env.get('RATE_LIMIT_RPM') ?? '60')
 const BATCH_LIMIT = parseInt(Deno.env.get('BATCH_LIMIT') ?? '50')
+// Maximum time a forward-fill can reach back before the response converts to fill_type:gap.
+// A plausible-looking stale number is worse than an honest null. Default: 2 days.
+// Measured across all 72 served pairs: 100% of consecutive-row intervals are under 2 days
+// (widest legitimate gap observed: 1d 10h 38m). 2 days clears normal operation with ~40%
+// headroom and rejects every stale fill found in the gap audit (10.9-29.1 days old).
+// Override with FORWARD_FILL_MAX_DAYS env var (no redeploy needed).
+const _fwdDaysRaw = parseInt(Deno.env.get('FORWARD_FILL_MAX_DAYS') ?? '2')
+const _fwdDaysValid = Number.isFinite(_fwdDaysRaw) && _fwdDaysRaw > 0
+if (!_fwdDaysValid) console.error(`[v1-rate] FORWARD_FILL_MAX_DAYS invalid ("${Deno.env.get('FORWARD_FILL_MAX_DAYS')}"); falling back to 2d default`)
+const FORWARD_FILL_MAX_MS = (_fwdDaysValid ? _fwdDaysRaw : 2) * 24 * 60 * 60 * 1000
 
 // Product registry: each product maps 1:1 to a granularity.
 // ORBI-M   = 1-minute bars, crypto pairs (BTC, USDC, USDT, DAI, EURC, PYUSD)
@@ -235,18 +246,23 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
 
     const resolvedTs = row ? new Date(row.bucket_ts).toISOString() : bucketTs
-    const fillType = !row ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
+    // Refuse to forward-fill across gaps wider than FORWARD_FILL_MAX_MS. A plausible-looking
+    // number spanning years of missing data is worse than an honest null (MXN: 5.5-year hole
+    // caused 65%-low rates across all of 2021-2026, root cause: composite never built for gap).
+    const gapMs = row ? new Date(bucketTs).getTime() - new Date(row.bucket_ts).getTime() : 0
+    const staleGap = row !== null && gapMs > FORWARD_FILL_MAX_MS
+    const fillType = !row || staleGap ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
 
     results.push({
       asset: item.asset.toUpperCase(),
       fiat: item.fiat.toUpperCase(),
       product,
       requested_at: item.at,
-      resolved_at: resolvedTs,
-      rate: row?.rate ?? null,
-      provenance: row?.provenance ?? null,
-      tier: row?.tier ?? null,
-      source_authority: row?.source_authority ?? null,
+      resolved_at: staleGap ? bucketTs : resolvedTs,
+      rate: staleGap ? null : (row?.rate ?? null),
+      provenance: staleGap ? null : (row?.provenance ?? null),
+      tier: staleGap ? null : (row?.tier ?? null),
+      source_authority: staleGap ? null : (row?.source_authority ?? null),
       fill_type: fillType
     })
 
