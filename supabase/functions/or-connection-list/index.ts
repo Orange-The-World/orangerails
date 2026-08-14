@@ -13,16 +13,33 @@
  *
  * Response:
  *   { connections: [{
- *       id, provider_type, encrypted_label, encrypted_credentials,
+ *       id, provider_type, is_stealth, encrypted_label, encrypted_credentials,
  *       status, last_sync_at, last_sync_cursor, encrypted_last_error,
  *       credentials_key_version, created_at,
  *       source_wallets: [{ id, external_wallet_id, is_synced, encrypted_metadata }]
  *     }] }
+ *
+ * The contract, stated as an outcome: this returns every connection the user
+ * completed, in one shape, regardless of provider family. Stealth Sync
+ * connections live in a separate store and are unioned in here. Branch on
+ * `is_stealth`, which is a boolean on every row, never on a provider list.
+ * See ./stealth-union.ts for the field-by-field reasoning and for what is
+ * deliberately never surfaced.
+ *
+ * Newest-first across both families, so a stealth connection made minutes
+ * ago does not render below a bank connection from July.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import {
+  isUnmappedStealthStatus,
+  mergeConnections,
+  stealthRowToConnection,
+  tagRegularConnection,
+} from './stealth-union.ts';
+import type { StealthConnectionRow, UnifiedConnection } from './stealth-union.ts';
 
 interface SourceWalletRow {
   id: string;
@@ -95,10 +112,66 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         is_synced: w.is_synced,
         encrypted_metadata: w.encrypted_metadata,
       }));
-      return { ...c, source_wallets: walletsForConn };
-    });
+      return tagRegularConnection({ ...c, source_wallets: walletsForConn });
+    }) as unknown as UnifiedConnection[];
 
-    return jsonResponse({ connections: enriched }, 200, cors);
+    // Union in the stealth store. See ./stealth-union.ts for why the two
+    // stores are disjoint and what this deliberately does not surface.
+    //
+    // The join needs no migration and no new column. `connections` is scoped
+    // by subaccount_id; `stealth_connections` by (platform_id, app_user_id)
+    // and has no subaccount_id. The subaccount row already carries both
+    // halves: ow-or-proxy provisions with external_user_id = the host app's
+    // user id, and the connect widget is handed that same id as app_user_id.
+    //
+    // Reading the pair off the subaccount row rather than off `ctx` covers
+    // platform and direct mode with one code path, and keeps the lookup
+    // anchored to the subaccount the caller was already authorized for.
+    const { data: subaccountRow, error: subErr } = await ctx.serviceClient
+      .from('subaccounts')
+      .select('platform_id, external_user_id')
+      .eq('id', subaccountId)
+      .maybeSingle();
+
+    let stealthConnections: UnifiedConnection[] = [];
+
+    if (subErr || !subaccountRow) {
+      // Non-fatal, and loud. resolveSubaccount already proved this row
+      // exists, so reaching here means the second read failed rather than
+      // the caller being unauthorized.
+      console.error('[or-connection-list] stealth union skipped, subaccount reread failed:', subErr);
+    } else {
+      const { data: stealthRows, error: stealthErr } = await ctx.serviceClient
+        .from('stealth_connections')
+        .select('id, connection_kind, status, last_sync_at, created_at')
+        .eq('platform_id', subaccountRow.platform_id)
+        .eq('app_user_id', subaccountRow.external_user_id)
+        .order('created_at', { ascending: false });
+
+      if (stealthErr) {
+        // Non-fatal on purpose: a stealth read failure must not blank out a
+        // user's working bank connections. It is logged at error level
+        // because the visible symptom, a missing connection, is exactly the
+        // bug this union exists to fix and must not pass unnoticed.
+        console.error('[or-connection-list] stealth_connections query failed:', stealthErr);
+      } else {
+        const rows = (stealthRows ?? []) as StealthConnectionRow[];
+        for (const r of rows) {
+          if (isUnmappedStealthStatus(r.status)) {
+            console.error(
+              `[or-connection-list] unmapped stealth status "${r.status}" on connection ${r.id}, reported as error`,
+            );
+          }
+        }
+        stealthConnections = rows.map(stealthRowToConnection);
+      }
+    }
+
+    return jsonResponse(
+      { connections: mergeConnections(enriched, stealthConnections) },
+      200,
+      cors,
+    );
   } catch (err) {
     console.error('[or-connection-list] fatal:', err);
     return jsonResponse({ error: 'Internal error' }, 500, cors);
