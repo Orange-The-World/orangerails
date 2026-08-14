@@ -5,7 +5,7 @@
 # is advancing and writing chain-consistent files.
 #
 # Exit codes:
-#   0  -- OK: all four properties satisfied
+#   0  -- OK: properties 1, 2, and 4 satisfied (property 3 not yet implemented)
 #   1  -- FAIL: genuine failure (worker stuck, hash mismatch)
 #   2  -- ERROR: cannot check (unit env missing, dir absent, Blockstream down)
 #
@@ -16,8 +16,12 @@
 #                              used directly. Otherwise read from the
 #                              btc-filter-worker.service unit env block.
 #   STALE_THRESHOLD_MINUTES    Max age of the tip manifest before reporting
-#                              FAIL. Default: 30. (Bitcoin block interval
-#                              is ~10 min; 30 gives 3x natural tolerance.)
+#                              FAIL. Default: 60. Bitcoin block inter-arrival
+#                              is exponential with mean 10 min; P(interval >
+#                              60 min) = e^-6 < 0.003, under 0.5 false
+#                              alarms/day at 144 checks. The old 30 min
+#                              default had P = e^-3 ~ 5%, or ~7 false
+#                              alarms/day on a healthy worker.
 #   BLOCKSTREAM_TIMEOUT        curl timeout in seconds. Default: 15.
 #
 # REQUIRED BEFORE SHIP: force-test every exit 2 path.
@@ -39,7 +43,7 @@
 set -uo pipefail
 
 PROBE="stealth-filter-verify"
-STALE_MINUTES="${STALE_THRESHOLD_MINUTES:-30}"
+STALE_MINUTES="${STALE_THRESHOLD_MINUTES:-60}"
 BS_TIMEOUT="${BLOCKSTREAM_TIMEOUT:-15}"
 
 # ---- helpers ----------------------------------------------------------------
@@ -177,7 +181,7 @@ CHAIN_HASH="${BS_RESPONSE//[[:space:]]/}"
 [[ "$TIP_HASH" == "$CHAIN_HASH" ]] \
   || die 1 "hash mismatch at height ${TIP_HEIGHT}: manifest=${TIP_HASH} blockstream=${CHAIN_HASH} -- possible reorg or wrong chain"
 
-# ---- all four properties satisfied -----------------------------------------
+# ---- properties 1, 2, and 4 satisfied (property 3 not yet implemented) ------
 
 echo "[$PROBE] OK height=${TIP_HEIGHT} (advanced from ${PREV_HEIGHT}) hash=${TIP_HASH} tip_age=${TIP_AGE_SECONDS}s"
 exit 0
