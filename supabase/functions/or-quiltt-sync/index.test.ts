@@ -580,7 +580,7 @@ function makeQuilttSyncMock(opts: {
       return Promise.resolve(
         new Response(
           JSON.stringify({
-            data: { connection: { accounts: { nodes: uniqueIds.map((id) => ({ id })) } } },
+            data: { connection: { accounts: uniqueIds.map((id) => ({ id })) } },
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         ),
@@ -859,4 +859,43 @@ Deno.test('handleEventSinkDelivery: non-23505 insert error surfaces as error str
     true,
     'a non-23505 insert error must surface as an error string, not be silently swallowed',
   );
+});
+
+// ── DL-0747 accounts query shape regression guard ─────────────────────────────
+//
+// Quiltt's Connection.accounts field returns [Account!] directly (a flat array).
+// The correct query is `accounts { id }` and the unwrap is `accounts ?? []`.
+// If the code reverts to `accounts { nodes { id } }` + `accounts?.nodes ?? []`,
+// filterAccountIds will be [] (reading .nodes on a plain array gives undefined),
+// the function returns 'connection has no accounts at Quiltt', and no transactions
+// sync. This test fails in that case because inserted.length would be 0, not 2.
+
+Deno.test('DL-0747 accounts shape: flat [Account] array (no nodes wrapper) -- ids extracted and transactions sync', async () => {
+  // swRows = [] triggers the GetAccounts pre-fetch path.
+  // The mock (updated above) returns accounts as a flat array -- correct Quiltt shape.
+  // If code reads .nodes on a flat array, filterAccountIds is [], handleEvent
+  // returns an error string, and inserted stays empty.
+  const { client, inserted, cleanup } = makeQuilttSyncMock({
+    swRows: [],
+    txNodes: [
+      { id: 'tx-dl0747-a', account: { id: 'acct-flat-1' } },
+      { id: 'tx-dl0747-b', account: { id: 'acct-flat-2' } },
+    ],
+  });
+  const ev = {
+    event_id: 'evt-dl0747-shape',
+    event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-dl0747' } },
+    platform_id: 'plat-1',
+    subaccount_id: 'sub-1',
+    attempts: 0,
+  };
+  // deno-lint-ignore no-explicit-any
+  await handleEvent(client as any, ev, 'plat-1', 'sub-1', 'api-key');
+  assertEquals(
+    inserted.length,
+    2,
+    'DL-0747: both transactions must sync; if 0, the code is reading .nodes on a plain array (regression)',
+  );
+  cleanup();
 });
