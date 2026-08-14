@@ -33,9 +33,11 @@
 
 import { assertEquals, assertStrictEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import {
+  buildListResponse,
   isUnmappedStealthStatus,
   mapStealthStatus,
   mergeConnections,
+  STEALTH_UNAVAILABLE_ALARM,
   stealthRowToConnection,
   tagRegularConnection,
 } from './stealth-union.ts';
@@ -177,6 +179,73 @@ Deno.test('6b. merging with an empty stealth set leaves the regular order untouc
 
   assertEquals(mergeConnections(regular, []).map(c => c.id), ['a', 'b']);
   assertEquals(mergeConnections([], []).length, 0);
+});
+
+Deno.test('8. stealth_unavailable is always a boolean, never omitted on success', () => {
+  const ok = buildListResponse([], false);
+  assertStrictEquals(ok.stealth_unavailable, false);
+  // Present, not merely falsy-by-absence. A key that only shows up on
+  // failure is a key clients forget to check.
+  assertEquals(Object.keys(ok).includes('stealth_unavailable'), true);
+  assertEquals(JSON.parse(JSON.stringify(ok)).stealth_unavailable, false);
+
+  const degraded = buildListResponse([], true);
+  assertStrictEquals(degraded.stealth_unavailable, true);
+});
+
+Deno.test('8b. degradation does not drop the connections that were readable', () => {
+  const regular = [
+    tagRegularConnection({ id: 'bank', created_at: '2026-08-14T11:13:00.000Z' }),
+  ] as unknown as UnifiedConnection[];
+
+  const degraded = buildListResponse(regular, true);
+  // The whole point of degrading rather than failing closed.
+  assertEquals(degraded.connections.map(c => c.id), ['bank']);
+  assertStrictEquals(degraded.stealth_unavailable, true);
+});
+
+Deno.test('9. the alarm token is a bare greppable literal', () => {
+  // One GlitchTip alarm has to catch every degrade site, so this string is a
+  // contract with the alarm, not a message. Changing it silently breaks the
+  // alarm while every test still passes, which is why its exact value is
+  // pinned here.
+  assertEquals(STEALTH_UNAVAILABLE_ALARM, 'STEALTH_UNION_UNAVAILABLE');
+  // No whitespace, punctuation or interpolation, so it survives log
+  // formatting and greps as a literal.
+  assertEquals(/^[A-Z_]+$/.test(STEALTH_UNAVAILABLE_ALARM), true);
+});
+
+Deno.test('9b. every degrade site in the handler carries the alarm token', async () => {
+  // A structural guard, not a unit test, and deliberately so. The failure it
+  // catches is a future edit that adds a third degrade path and logs it
+  // without the token: the endpoint would degrade silently, the GlitchTip
+  // alarm would never fire, and every other test here would still pass.
+  //
+  // Resolved relative to this module so it does not depend on the cwd the
+  // test runner happens to use.
+  const source = await Deno.readTextFile(new URL('./index.ts', import.meta.url));
+  const lines = source.split('\n');
+
+  const degradeSites = lines
+    .map((line, i) => ({ line, i }))
+    .filter(({ line }) => /\bstealthUnavailable\s*=\s*true\b/.test(line));
+
+  // If this drops to zero the test has stopped testing anything, which is
+  // the failure mode of every source-scanning check.
+  assertEquals(
+    degradeSites.length >= 2,
+    true,
+    `expected at least the 2 known degrade sites, found ${degradeSites.length}`,
+  );
+
+  for (const { i } of degradeSites) {
+    const window = lines.slice(i, i + 6).join('\n');
+    assertEquals(
+      window.includes('STEALTH_UNAVAILABLE_ALARM'),
+      true,
+      `degrade site at index.ts:${i + 1} does not log STEALTH_UNAVAILABLE_ALARM within 6 lines`,
+    );
+  }
 });
 
 Deno.test('7. an unparseable or missing created_at sorts last, never first', () => {

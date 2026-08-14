@@ -145,6 +145,55 @@ export function tagRegularConnection<T extends Record<string, unknown>>(
   return { ...row, is_stealth: false };
 }
 
+/**
+ * The single alarmable string for a degraded stealth read.
+ *
+ * The endpoint degrades rather than fails when the stealth store cannot be
+ * read: blanking a user's working bank connections over an unrelated store is
+ * a bigger blast radius than one missing row, on the app's main read path.
+ *
+ * The cost of that choice is that the visible symptom of a degraded read is a
+ * missing connection, which is exactly the bug this union exists to fix. So
+ * degradation must never be silent. Every degrade site emits this exact
+ * token, so one GlitchTip alarm catches all of them, and adding a new degrade
+ * site without the token is the thing to look for in review.
+ *
+ * Deliberately a bare uppercase token with no punctuation or interpolation:
+ * it has to survive log formatting and be greppable as a literal.
+ */
+export const STEALTH_UNAVAILABLE_ALARM = 'STEALTH_UNION_UNAVAILABLE';
+
+/** The endpoint's response body. */
+export interface ListResponse {
+  connections: UnifiedConnection[];
+  /**
+   * True when the stealth store could not be read and the list may therefore
+   * be short. Lets the client say "some connections could not be loaded"
+   * instead of quietly showing an incomplete list.
+   *
+   * Always present as a boolean, never omitted on the happy path. A key that
+   * appears only on failure is a key clients forget to check, and the whole
+   * point of this flag is that the failure stops being invisible.
+   */
+  stealth_unavailable: boolean;
+}
+
+/**
+ * Build the response body.
+ *
+ * `stealth_unavailable` is about whether the stealth store could be READ, not
+ * about whether it returned anything. A user with no stealth connections gets
+ * `false` and an unchanged list; that is a successful read of an empty set,
+ * not a degraded one. Conflating the two would fire the alarm for every
+ * ordinary user who has never used Stealth Sync.
+ */
+export function buildListResponse(
+  connections: UnifiedConnection[],
+  stealthUnavailable: boolean,
+): ListResponse {
+  return { connections, stealth_unavailable: stealthUnavailable };
+}
+
 /** Epoch millis for sorting. Unparseable timestamps sort last, never first. */
 function createdAtMillis(value: string | null | undefined): number {
   if (!value) return Number.NEGATIVE_INFINITY;
