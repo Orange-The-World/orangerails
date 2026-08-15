@@ -314,9 +314,43 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const { data: connections, error: connErr } = await connQuery;
     if (connErr) throw connErr;
     if (!connections?.length) {
-      // Empty-result early-exit must still match the response shape the
-      // caller's mode expects. Sink-mode consumers (V2) parse `rows` +
-      // `metadata` strictly, so skipping those fields blows up the client.
+      // When the caller requested specific IDs and none resolved to a regular
+      // connection, this is a miss, not an empty batch. Fall through to the
+      // stealth store with the same ownership scope or-connection-delete uses:
+      // (id, platform_id, app_user_id). A foreign-subaccount stealth id and a
+      // genuinely unknown id both resolve to 404; a stealth id that belongs to
+      // this subaccount gets a 400 explaining the right endpoint to use.
+      if (connection_ids?.length) {
+        const { data: subRow, error: subErr } = await ctx.serviceClient
+          .from('subaccounts')
+          .select('platform_id, external_user_id')
+          .eq('id', subaccountId)
+          .maybeSingle();
+
+        if (!subErr && subRow) {
+          const { count: stealthCount, error: stealthErr } = await ctx.serviceClient
+            .from('stealth_connections')
+            .select('id', { count: 'exact', head: true })
+            .in('id', connection_ids)
+            .eq('platform_id', subRow.platform_id)
+            .eq('app_user_id', subRow.external_user_id);
+
+          if (!stealthErr && (stealthCount ?? 0) > 0) {
+            return jsonResponse(
+              { error: 'Stealth connections cannot be synced via this endpoint' },
+              400,
+              cors,
+            );
+          }
+        }
+        // Not found in connections or stealth_connections for this subaccount.
+        return jsonResponse({ error: 'Connection not found in this subaccount' }, 404, cors);
+      }
+
+      // Empty-result early-exit (no connection_ids filter) must still match the
+      // response shape the caller's mode expects. Sink-mode consumers (V2)
+      // parse `rows` + `metadata` strictly, so skipping those fields blows up
+      // the client.
       if (sinkMode) {
         return jsonResponse(
           {
