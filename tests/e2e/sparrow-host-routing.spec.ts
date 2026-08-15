@@ -26,18 +26,6 @@ import { test, expect, type Page } from "@playwright/test";
 const CONNECT_HOST_URL = process.env.SMOKE_PROD_CONNECT_URL ?? "";
 const MAIN_DOMAIN_URL = process.env.SMOKE_PROD_MAIN_URL ?? "";
 
-// Module-level guard: throw instead of skip so a missing-var run is a loud
-// failure, not a green tick. The dedicated playwright-prod-smoke CI job sets
-// both vars before invoking Playwright on this file. The regular CI playwright
-// job excludes this file via --grep-invert so dev-PR runs are unaffected.
-if (!CONNECT_HOST_URL || !MAIN_DOMAIN_URL) {
-  throw new Error(
-    "SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL must both be set to run " +
-      "these prod smoke tests. Run via the playwright-prod-smoke CI job, or " +
-      "set both vars locally. A silent skip here would mean green CI with " +
-      "zero prod assertions, which is the bug this guard exists to prevent.",
-  );
-}
 
 /**
  * Strings whose presence in the page title indicates the marketing site was
@@ -62,6 +50,21 @@ async function assertSparrowHeading(page: Page): Promise<void> {
 }
 
 test.describe("Sparrow host-routing smoke (DL-0439)", () => {
+  // beforeAll guard: fires only when tests in this describe block are selected.
+  // --grep-invert in the regular smoke job excludes this suite at runtime so
+  // this never executes there. The playwright-prod-smoke job sets both vars
+  // before running this file directly, so the guard passes and tests run.
+  test.beforeAll(() => {
+    if (!CONNECT_HOST_URL || !MAIN_DOMAIN_URL) {
+      throw new Error(
+        "SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL must both be set to run " +
+          "these prod smoke tests. Run via the playwright-prod-smoke CI job, or " +
+          "set both vars locally. A silent skip here would mean green CI with " +
+          "zero prod assertions, which is the bug this guard exists to prevent.",
+      );
+    }
+  });
+
   test(
     "connect.orangerails.com/sparrow serves the app, not the marketing site",
     async ({ page }) => {
