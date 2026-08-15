@@ -1,0 +1,78 @@
+name: Commit Message Scan
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - prod
+
+jobs:
+  scan:
+    name: Scan commit messages for prohibited values
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract and scan commit messages
+        env:
+          DENY_EXTRA: ${{ secrets.COMMIT_MSG_DENY_PATTERNS }}
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          MESSAGES=$(git log --format=%B "$BASE".."$HEAD")
+
+          if [ -z "$MESSAGES" ]; then
+            echo "No commits in range. Nothing to scan."
+            exit 0
+          fi
+
+          DENY_FILE=".github/commit-msg-denylist.txt"
+
+          # Strip comment lines and blank lines from the file.
+          FILE_PATTERNS=$(grep -vE '^\s*(#|$)' "$DENY_FILE") || true
+
+          # Append literal patterns from the repo secret (base64-encoded, one ERE pattern per line).
+          # The secret keeps identifiers that cannot appear in the public file itself.
+          SECRET_PATTERNS=""
+          if [ -n "$DENY_EXTRA" ]; then
+            SECRET_PATTERNS=$(printf '%s' "$DENY_EXTRA" | base64 -d | grep -vE '^\s*(#|$)') || true
+          fi
+
+          # Combine file patterns and secret patterns, drop blank lines.
+          PATTERNS=$(printf '%s\n%s\n' "$FILE_PATTERNS" "$SECRET_PATTERNS" | grep -vE '^\s*$') || true
+
+          # Assert at least one pattern loaded.
+          # An empty deny-list means every PR silently passes -- that is not a clean bill.
+          PATTERN_COUNT=0
+          PATTERN_COUNT=$(printf '%s\n' "$PATTERNS" | grep -c .) || true
+          if [ "$PATTERN_COUNT" -eq 0 ]; then
+            echo "ERROR: deny-list loaded 0 patterns -- gate cannot function." >&2
+            echo "Add patterns to .github/commit-msg-denylist.txt or set the COMMIT_MSG_DENY_PATTERNS secret." >&2
+            exit 1
+          fi
+          echo "Loaded $PATTERN_COUNT pattern(s) (file + secret)."
+
+          # Scan. grep exit codes: 0=match found, 1=no match, 2=error (bad regex / I/O).
+          # Capture exit code explicitly so exit 2 is never silently treated as a clean scan.
+          HITS=""
+          GREP_RC=0
+          HITS=$(printf '%s' "$MESSAGES" | grep -inEf <(printf '%s\n' "$PATTERNS")) || GREP_RC=$?
+          if [ "$GREP_RC" -eq 2 ]; then
+            echo "ERROR: grep failed (bad pattern or I/O error) -- treating as gate failure." >&2
+            exit 1
+          fi
+
+          if [ -n "$HITS" ]; then
+            echo "BLOCKED: prohibited values found in commit message(s):"
+            printf '%s\n' "$HITS"
+            echo ""
+            echo "Rewrite the flagged commit message(s) to remove internal hostnames,"
+            echo "tailnet IPs, private service URLs, seat names, and message-ID citations."
+            exit 1
+          fi
+
+          COUNT=$(git log --oneline "$BASE".."$HEAD" | wc -l | tr -d ' ')
+          echo "PASS: scanned $COUNT commit message(s), no prohibited values found."
