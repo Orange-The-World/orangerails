@@ -36,9 +36,18 @@ jobs:
 
           # Append literal patterns from the repo secret (base64-encoded, one ERE pattern per line).
           # The secret keeps identifiers that cannot appear in the public file itself.
-          SECRET_PATTERNS=""
-          if [ -n "$DENY_EXTRA" ]; then
-            SECRET_PATTERNS=$(printf '%s' "$DENY_EXTRA" | base64 -d | grep -vE '^\s*(#|$)') || true
+          # Require the literal-identifier secret. Without it the sensitive half
+          # of the gate is absent and every PR silently passes only shape checks.
+          if [ -z "$DENY_EXTRA" ]; then
+            echo "ERROR: COMMIT_MSG_DENY_PATTERNS secret is not set or is empty." >&2
+            echo "Set it under Settings > Secrets and variables > Actions (base64-encoded, one ERE per line)." >&2
+            exit 1
+          fi
+          SECRET_PATTERNS=$(printf '%s' "$DENY_EXTRA" | base64 -d | grep -vE '^\s*(#|$)') || true
+          if [ -z "$SECRET_PATTERNS" ]; then
+            echo "ERROR: COMMIT_MSG_DENY_PATTERNS decoded to zero patterns." >&2
+            echo "The secret must contain at least one non-blank, non-comment ERE pattern." >&2
+            exit 1
           fi
 
           # Combine file patterns and secret patterns, drop blank lines.
