@@ -1,0 +1,48 @@
+name: Commit Message Scan
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - prod
+
+jobs:
+  scan:
+    name: Scan commit messages for prohibited values
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract and scan commit messages
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          MESSAGES=$(git log --format=%B "$BASE".."$HEAD")
+
+          if [ -z "$MESSAGES" ]; then
+            echo "No commits in range. Nothing to scan."
+            exit 0
+          fi
+
+          DENY_FILE=".github/commit-msg-denylist.txt"
+
+          # Strip comment lines and blank lines before passing to grep
+          PATTERNS=$(grep -vE '^\s*(#|$)' "$DENY_FILE")
+
+          HITS=$(printf '%s' "$MESSAGES" | grep -inEf <(echo "$PATTERNS") || true)
+
+          if [ -n "$HITS" ]; then
+            echo "BLOCKED: prohibited values found in commit message(s):"
+            printf '%s\n' "$HITS"
+            echo ""
+            echo "Rewrite the flagged commit message(s) to remove internal hostnames,"
+            echo "tailnet IPs, private wiki URLs, seat names, and message-ID citations."
+            echo "See .github/commit-msg-denylist.txt for the full deny-list."
+            exit 1
+          fi
+
+          COUNT=$(git log --oneline "$BASE".."$HEAD" | wc -l | tr -d ' ')
+          echo "PASS: scanned $COUNT commit message(s), no prohibited values found."
