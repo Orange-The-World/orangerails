@@ -26,6 +26,8 @@ interface MutationCall {
 
 interface MockOpts {
   mutations: MutationCall[];
+  /** Inject a DB error to exercise the failure path of each helper. */
+  returnError?: { message: string } | null;
 }
 
 // Minimal Supabase-builder-shaped stub. Real PostgrestFilterBuilder is
@@ -72,9 +74,9 @@ function makeMockClient(opts: MockOpts): any {
         // Make the chain itself awaitable (.update().eq().eq() with no
         // terminal call). Records the mutation on first await.
         // deno-lint-ignore no-explicit-any
-        then(onResolve: (r: { data: null; error: null }) => unknown): any {
+        then(onResolve: (r: { data: null; error: { message: string } | null }) => unknown): any {
           recordIfMutation();
-          return Promise.resolve({ data: null, error: null }).then(onResolve);
+          return Promise.resolve({ data: null, error: opts.returnError ?? null }).then(onResolve);
         },
       };
       return chain;
@@ -102,6 +104,48 @@ Deno.test('DL-0740: rollbackPendingConnection deletes the pending row scoped by 
     'must guard on status=pending so it cannot delete an already-active row',
   );
 });
+
+// ---- Return-value tests (fail-closed, DL-0740) ----
+
+Deno.test('DL-0740: activateConnection returns null on DB success', async () => {
+  const mutations: MutationCall[] = [];
+  const client = makeMockClient({ mutations });
+  const result = await activateConnection(client, TEST_ID);
+  assertEquals(result, null, 'must return null when no DB error');
+});
+
+Deno.test('DL-0740: activateConnection returns error string on DB failure', async () => {
+  const mutations: MutationCall[] = [];
+  const client = makeMockClient({ mutations, returnError: { message: 'connection timeout' } });
+  const result = await activateConnection(client, TEST_ID);
+  assertEquals(typeof result, 'string', 'must return a string when DB errors');
+  assertEquals(
+    (result as string).includes('connection timeout'),
+    true,
+    'error string must include the DB error message',
+  );
+});
+
+Deno.test('DL-0740: rollbackPendingConnection returns null on DB success', async () => {
+  const mutations: MutationCall[] = [];
+  const client = makeMockClient({ mutations });
+  const result = await rollbackPendingConnection(client, TEST_ID);
+  assertEquals(result, null, 'must return null when no DB error');
+});
+
+Deno.test('DL-0740: rollbackPendingConnection returns error string on DB failure', async () => {
+  const mutations: MutationCall[] = [];
+  const client = makeMockClient({ mutations, returnError: { message: 'row locked' } });
+  const result = await rollbackPendingConnection(client, TEST_ID);
+  assertEquals(typeof result, 'string', 'must return a string when DB errors');
+  assertEquals(
+    (result as string).includes('row locked'),
+    true,
+    'error string must include the DB error message',
+  );
+});
+
+// ---- Mutation-shape tests (original DL-0740 coverage) ----
 
 Deno.test('DL-0740: activateConnection promotes the pending row to active with status guard', async () => {
   const mutations: MutationCall[] = [];
