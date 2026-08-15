@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS public.user_vault_pubkeys (
 ALTER TABLE public.user_vault_pubkeys ENABLE ROW LEVEL SECURITY;
 
 -- Users see only their own keypair
+DROP POLICY IF EXISTS uvp_owner_select ON public.user_vault_pubkeys;
 CREATE POLICY uvp_owner_select ON public.user_vault_pubkeys
   FOR SELECT USING (user_id = auth.uid());
 
@@ -50,16 +51,6 @@ CREATE TABLE IF NOT EXISTS public.org_vault_meta (
 );
 ALTER TABLE public.org_vault_meta ENABLE ROW LEVEL SECURITY;
 
--- Vault members can read org vault metadata for vaults they belong to
-CREATE POLICY ovm_member_select ON public.org_vault_meta
-  FOR SELECT USING (
-    EXISTS (
-      SELECT 1 FROM public.vault_member_slots vms
-      WHERE vms.vault_id = org_vault_meta.vault_id
-        AND vms.member_user_id = auth.uid()
-    )
-  );
-
 -- [DL-0418] Per-vault per-member ECIES-wrapped MEK slot
 -- vault_id FK references org_vault_meta (created above)
 CREATE TABLE IF NOT EXISTS public.vault_member_slots (
@@ -73,14 +64,27 @@ CREATE TABLE IF NOT EXISTS public.vault_member_slots (
 );
 ALTER TABLE public.vault_member_slots ENABLE ROW LEVEL SECURITY;
 
+-- Vault members can read org vault metadata for vaults they belong to
+-- (moved after vault_member_slots creation to resolve forward reference)
+DROP POLICY IF EXISTS ovm_member_select ON public.org_vault_meta;
+CREATE POLICY ovm_member_select ON public.org_vault_meta
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM public.vault_member_slots vms
+      WHERE vms.vault_id = org_vault_meta.vault_id
+        AND vms.member_user_id = auth.uid()
+    )
+  );
+
 -- Each member sees only their own slot (sufficient to decrypt their MEK copy; non-recursive)
+DROP POLICY IF EXISTS vms_member_select ON public.vault_member_slots;
 CREATE POLICY vms_member_select ON public.vault_member_slots
   FOR SELECT USING (member_user_id = auth.uid());
 
 -- [DL-0514 S13] Extend vault_mode on customer_vault_meta
 -- Column added first (idempotent), then CHECK applied
 ALTER TABLE public.customer_vault_meta
-  ADD COLUMN IF NOT EXISTS vault_mode text NOT NULL DEFAULT 'solo';
+  ADD COLUMN IF NOT EXISTS vault_mode text NOT NULL DEFAULT 'single';
 ALTER TABLE public.customer_vault_meta
   DROP CONSTRAINT IF EXISTS vault_mode_values,
   ADD CONSTRAINT vault_mode_values CHECK (vault_mode IN ('single', 'multi', 'org'));
@@ -101,6 +105,7 @@ CREATE TABLE IF NOT EXISTS public.org_recovery_challenges (
 ALTER TABLE public.org_recovery_challenges ENABLE ROW LEVEL SECURITY;
 
 -- Vault members can read recovery challenges for their vaults
+DROP POLICY IF EXISTS orc_member_select ON public.org_recovery_challenges;
 CREATE POLICY orc_member_select ON public.org_recovery_challenges
   FOR SELECT USING (
     EXISTS (
