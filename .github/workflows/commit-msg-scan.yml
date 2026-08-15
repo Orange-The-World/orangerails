@@ -85,3 +85,38 @@ jobs:
 
           COUNT=$(git log --oneline "$BASE".."$HEAD" | wc -l | tr -d ' ')
           echo "PASS: scanned $COUNT commit message(s), no prohibited values found."
+
+  self-test:
+    name: Self-test: gate rejects a planted prohibited value
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Plant a prohibited value and assert the scanner catches it
+        run: |
+          DENY_FILE=".github/commit-msg-denylist.txt"
+          FILE_PATTERNS=$(grep -vE '^\s*(#|$)' "$DENY_FILE") || true
+
+          # Plant a message matching the .ts.net Tailscale domain-shape pattern
+          # from the denylist. This proves the scanner correctly rejects
+          # content that triggers a rule, without exposing real infrastructure.
+          PLANTED="chore: sync to cluster.example.ts.net"
+
+          HITS=""
+          GREP_RC=0
+          HITS=$(printf '%s' "$PLANTED" | grep -inEf <(printf '%s\n' "$FILE_PATTERNS")) || GREP_RC=$?
+
+          if [ "$GREP_RC" -eq 2 ]; then
+            echo "ERROR: grep error during self-test (bad pattern or I/O)." >&2
+            exit 1
+          fi
+
+          if [ -z "$HITS" ]; then
+            echo "FAIL: scanner did NOT catch the planted prohibited value." >&2
+            printf "Planted: %s\n" "$PLANTED" >&2
+            echo "The gate is broken -- do not merge." >&2
+            exit 1
+          fi
+
+          echo "PASS: self-test caught the planted prohibited value as expected."
+          printf '%s\n' "$HITS"
