@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS public.user_vault_pubkeys (
 );
 ALTER TABLE public.user_vault_pubkeys ENABLE ROW LEVEL SECURITY;
 
+-- Users see only their own keypair
+CREATE POLICY uvp_owner_select ON public.user_vault_pubkeys
+  FOR SELECT USING (user_id = auth.uid());
+
 CREATE OR REPLACE FUNCTION public.fn_uvp_pubkey_immutable()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
@@ -21,42 +25,20 @@ BEGIN
   RETURN NEW;
 END;
 $$;
-CREATE TRIGGER trg_uvp_pubkey_immutable
+CREATE OR REPLACE TRIGGER trg_uvp_pubkey_immutable
   BEFORE UPDATE ON public.user_vault_pubkeys
   FOR EACH ROW EXECUTE FUNCTION public.fn_uvp_pubkey_immutable();
 
--- [DL-0418] Per-vault per-member ECIES-wrapped MEK slot
-CREATE TABLE IF NOT EXISTS public.vault_member_slots (
-  vault_id       uuid        NOT NULL,
-  member_user_id uuid        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  role           text        NOT NULL CHECK (role IN ('admin', 'member')),
-  member_slot    bytea       NOT NULL,
-  added_by       uuid        NOT NULL REFERENCES auth.users(id),
-  added_at       timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (vault_id, member_user_id)
-);
-ALTER TABLE public.vault_member_slots ENABLE ROW LEVEL SECURITY;
-
--- [DL-0418] vault_version: optimistic locking CAS
-ALTER TABLE public.subaccount_vault_meta
-  ADD COLUMN IF NOT EXISTS vault_version integer NOT NULL DEFAULT 0;
-
--- [DL-0514 S13] Extend vault_mode
-ALTER TABLE public.subaccount_vault_meta
-  DROP CONSTRAINT IF EXISTS vault_mode_values,
-  ADD CONSTRAINT vault_mode_values CHECK (vault_mode IN ('single', 'multi', 'org'));
-
--- [DL-0514 S13] Admin inactivity tracking
--- @DBA confirm not already present from DL-0418
-ALTER TABLE public.vault_member_slots
-  ADD COLUMN IF NOT EXISTS last_vault_activity_at timestamptz NOT NULL DEFAULT now();
-
 -- [DL-0514 S13] Org vault metadata
-CREATE TABLE public.org_vault_meta (
+-- Created before vault_member_slots so vault_member_slots FK reference resolves.
+-- vault_version: optimistic locking CAS for membership mutations (NOT on customer_vault_meta)
+CREATE TABLE IF NOT EXISTS public.org_vault_meta (
   vault_id                    uuid        PRIMARY KEY,
+  customer_id                 uuid        NOT NULL REFERENCES public.customer_vault_meta(customer_id) ON DELETE CASCADE,
   org_recovery_kem_pubkey     bytea       NOT NULL,
   org_recovery_sig_pubkey     bytea       NOT NULL,
   org_vault_recovery_slot     bytea       NOT NULL,
+  vault_version               integer     NOT NULL DEFAULT 1,
   recovery_slot_version       integer     NOT NULL DEFAULT 0,
   recovery_code_seen_by       uuid[]      NOT NULL DEFAULT '{}',
   break_glass_notify_at       timestamptz,
@@ -66,9 +48,49 @@ CREATE TABLE public.org_vault_meta (
   CHECK (octet_length(org_recovery_kem_pubkey) = 32),
   CHECK (octet_length(org_vault_recovery_slot) BETWEEN 92 AND 1700)
 );
+ALTER TABLE public.org_vault_meta ENABLE ROW LEVEL SECURITY;
+
+-- Vault members can read org vault metadata for vaults they belong to
+CREATE POLICY ovm_member_select ON public.org_vault_meta
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM public.vault_member_slots vms
+      WHERE vms.vault_id = org_vault_meta.vault_id
+        AND vms.member_user_id = auth.uid()
+    )
+  );
+
+-- [DL-0418] Per-vault per-member ECIES-wrapped MEK slot
+-- vault_id FK references org_vault_meta (created above)
+CREATE TABLE IF NOT EXISTS public.vault_member_slots (
+  vault_id       uuid        NOT NULL REFERENCES public.org_vault_meta(vault_id) ON DELETE CASCADE,
+  member_user_id uuid        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  role           text        NOT NULL CHECK (role IN ('admin', 'member')),
+  member_slot    bytea       NOT NULL,
+  added_by       uuid        NOT NULL REFERENCES auth.users(id),
+  added_at       timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (vault_id, member_user_id)
+);
+ALTER TABLE public.vault_member_slots ENABLE ROW LEVEL SECURITY;
+
+-- Each member sees only their own slot (sufficient to decrypt their MEK copy; non-recursive)
+CREATE POLICY vms_member_select ON public.vault_member_slots
+  FOR SELECT USING (member_user_id = auth.uid());
+
+-- [DL-0514 S13] Extend vault_mode on customer_vault_meta
+-- Column added first (idempotent), then CHECK applied
+ALTER TABLE public.customer_vault_meta
+  ADD COLUMN IF NOT EXISTS vault_mode text NOT NULL DEFAULT 'solo';
+ALTER TABLE public.customer_vault_meta
+  DROP CONSTRAINT IF EXISTS vault_mode_values,
+  ADD CONSTRAINT vault_mode_values CHECK (vault_mode IN ('single', 'multi', 'org'));
+
+-- [DL-0514 S13] Admin inactivity tracking
+ALTER TABLE public.vault_member_slots
+  ADD COLUMN IF NOT EXISTS last_vault_activity_at timestamptz NOT NULL DEFAULT now();
 
 -- [DL-0514 S13] Recovery challenge nonces
-CREATE TABLE public.org_recovery_challenges (
+CREATE TABLE IF NOT EXISTS public.org_recovery_challenges (
   nonce_id    uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   vault_id    uuid        NOT NULL REFERENCES public.org_vault_meta(vault_id) ON DELETE CASCADE,
   nonce_bytes bytea       NOT NULL,
@@ -76,5 +98,17 @@ CREATE TABLE public.org_recovery_challenges (
   consumed_at timestamptz,
   source_ip   inet
 );
+ALTER TABLE public.org_recovery_challenges ENABLE ROW LEVEL SECURITY;
+
+-- Vault members can read recovery challenges for their vaults
+CREATE POLICY orc_member_select ON public.org_recovery_challenges
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM public.vault_member_slots vms
+      WHERE vms.vault_id = org_recovery_challenges.vault_id
+        AND vms.member_user_id = auth.uid()
+    )
+  );
+
 CREATE INDEX ON public.org_recovery_challenges(vault_id, issued_at);
 CREATE INDEX ON public.org_recovery_challenges(issued_at) WHERE consumed_at IS NULL;
