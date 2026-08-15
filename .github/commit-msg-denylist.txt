@@ -1,0 +1,34 @@
+# Commit message deny-list for Orange Rails (DL-0855)
+# ERE patterns, one per line. Lines beginning with # are comments.
+# Extend this file as new internal identifiers are added.
+# Workflow: .github/workflows/commit-msg-scan.yml
+
+# ---------- Internal hostnames ----------
+\bruche\b
+\bbb-us\b
+\bjarvis\b
+
+# ---------- Tailnet IPs and MagicDNS ----------
+# Matches any 100.x.x.x address (Tailscale CGNAT range)
+100\.[0-9]+\.[0-9]+\.[0-9]+
+# Tailscale MagicDNS domain suffix
+\.ts\.net
+
+# ---------- Supabase project identifiers ----------
+fzwmnzmtqidumdqjdddz
+lcdicqalreskibdfxkzb
+
+# ---------- Private wiki and Zulip server URLs ----------
+wiki\.orangerails\.dev
+wiki\.orangeway\.dev
+waggle\.orangerails\.com
+waggle\.orangeway\.dev
+
+# ---------- Ride session seat names ----------
+# sp-1 through sp-10 are internal ride seats and must not appear publicly
+\bsp-([1-9]|10)\b
+
+# ---------- Zulip message-ID citations ----------
+# Matches patterns like "msg 2467" or "msg_id: 12345"
+\bmsg\s+[0-9]{4,}\b
+\bmessage[_-]id\s*[:=]\s*[0-9]+\b
