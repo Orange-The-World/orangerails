@@ -24,6 +24,19 @@ import { test, expect, type Page } from "@playwright/test";
 const CONNECT_HOST_URL = process.env.SMOKE_PROD_CONNECT_URL ?? "";
 const MAIN_DOMAIN_URL = process.env.SMOKE_PROD_MAIN_URL ?? "";
 
+// When SMOKE_PROD_ENABLED=1, these tests MUST run. A silent skip in that
+// context is a false green: the prod-smoke job exits 0 having verified
+// nothing. Throw now so CI fails loudly rather than quietly. In regular
+// CI (SMOKE_PROD_ENABLED unset), the describe-level test.skip handles
+// gracefully -- these tests are not expected to run there.
+if (process.env.SMOKE_PROD_ENABLED && (!CONNECT_HOST_URL || !MAIN_DOMAIN_URL)) {
+  throw new Error(
+    "SMOKE_PROD_ENABLED is set but SMOKE_PROD_CONNECT_URL and/or " +
+    "SMOKE_PROD_MAIN_URL are empty. Both URL vars must be set in the " +
+    "prod-smoke workflow step (see .github/workflows/ci.yml).",
+  );
+}
+
 /**
  * Strings whose presence in the page title indicates the marketing site was
  * served instead of the app. Case-insensitive check below.
