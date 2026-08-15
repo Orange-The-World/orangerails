@@ -581,3 +581,47 @@ jobs:
           name: playwright-stealth-cursor-report
           path: playwright-report/
           retention-days: 14
+
+  playwright-prod-smoke:
+    name: Playwright prod smoke -- Sparrow host-routing (DL-0439)
+    runs-on: ubuntu-latest
+    needs: lint-and-build
+    # These tests hit live production URLs. Running them on every CI trigger
+    # (PR and push) lets us catch a routing regression the moment a push
+    # reaches dev or prod, and catches existing prod regressions on any PR.
+    # Both URLs are public and do not require secrets.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # pinned: floating bun-version made CI non-reproducible (DL-0446).
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium
+
+      # SMOKE_PROD_ENABLED=1 activates the module-level guard in
+      # sparrow-host-routing.spec.ts: if either URL var is empty the spec
+      # throws immediately and the job exits non-zero, preventing a silent
+      # all-skipped green. Both vars are set here so the guard never fires
+      # under normal operation.
+      - name: Run Sparrow host-routing prod smoke
+        env:
+          SMOKE_PROD_ENABLED: '1'
+          SMOKE_PROD_CONNECT_URL: 'https://connect.orangerails.com/sparrow'
+          SMOKE_PROD_MAIN_URL: 'https://orangerails.com/connect/sparrow'
+        run: bunx playwright test tests/e2e/sparrow-host-routing.spec.ts
+
+      - name: Upload prod smoke report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-prod-smoke-report
+          path: playwright-report/
+          retention-days: 14
