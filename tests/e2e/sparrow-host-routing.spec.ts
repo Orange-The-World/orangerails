@@ -4,8 +4,10 @@ import { test, expect, type Page } from "@playwright/test";
  * Host-routing smoke tests for the Sparrow entry-point URLs (DL-0439).
  *
  * These tests target live production hosts and must NOT run on dev PRs.
- * Set SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL in a dedicated
- * prod-smoke workflow (or scheduled run) to enable them.
+ * They run in the dedicated playwright-prod-smoke CI job, which sets
+ * SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL. The module-level guard
+ * below throws at eval time when either var is absent, so a run without
+ * the vars is a loud failure, not a silent skip.
  *
  * Acceptance criteria (QA, DL-0439):
  *   1. GET https://connect.orangerails.com/sparrow
@@ -23,6 +25,7 @@ import { test, expect, type Page } from "@playwright/test";
 
 const CONNECT_HOST_URL = process.env.SMOKE_PROD_CONNECT_URL ?? "";
 const MAIN_DOMAIN_URL = process.env.SMOKE_PROD_MAIN_URL ?? "";
+
 
 /**
  * Strings whose presence in the page title indicates the marketing site was
@@ -47,12 +50,20 @@ async function assertSparrowHeading(page: Page): Promise<void> {
 }
 
 test.describe("Sparrow host-routing smoke (DL-0439)", () => {
-  test.skip(
-    !CONNECT_HOST_URL || !MAIN_DOMAIN_URL,
-    "SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL must be set to run " +
-      "prod smoke tests. These tests target live production hosts and must " +
-      "not run on dev PRs; enable them in a dedicated prod-smoke workflow.",
-  );
+  // beforeAll guard: fires only when tests in this describe block are selected.
+  // --grep-invert in the regular smoke job excludes this suite at runtime so
+  // this never executes there. The playwright-prod-smoke job sets both vars
+  // before running this file directly, so the guard passes and tests run.
+  test.beforeAll(() => {
+    if (!CONNECT_HOST_URL || !MAIN_DOMAIN_URL) {
+      throw new Error(
+        "SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL must both be set to run " +
+          "these prod smoke tests. Run via the playwright-prod-smoke CI job, or " +
+          "set both vars locally. A silent skip here would mean green CI with " +
+          "zero prod assertions, which is the bug this guard exists to prevent.",
+      );
+    }
+  });
 
   test(
     "connect.orangerails.com/sparrow serves the app, not the marketing site",
