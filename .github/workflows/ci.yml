@@ -203,6 +203,25 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # Emit per-error workflow annotations (file:line) when above baseline.
+          # Annotations surface in the PR diff view and the Annotations tab
+          # without requiring shell or log access -- readable from gh_checks.
+          # Deno error format:
+          #   error[TSxxxx]: <message>
+          #       --> supabase/functions/<file>:<line>:<col>
+          # We capture message and location, emit one ::error per diagnostic.
+          if [ "$ERRORS" -gt "$DENO_CHECK_BASELINE" ]; then
+            current_msg=""
+            while IFS= read -r ln; do
+              if [[ "$ln" =~ ^error\[TS[0-9]+\]:\ (.+)$ ]]; then
+                current_msg="${BASH_REMATCH[1]}"
+              elif [[ -n "$current_msg" && "$ln" =~ ^[[:space:]]*--\>[[:space:]]([^:]+):([0-9]+):[0-9]+ ]]; then
+                echo "::error file=${BASH_REMATCH[1]},line=${BASH_REMATCH[2]}::${current_msg}"
+                current_msg=""
+              fi
+            done < "$RUNNER_TEMP/deno-check.log"
+          fi
+
           echo "deno check: ${ERRORS} error(s); ratchet baseline ${DENO_CHECK_BASELINE}"
 
           if [ "$ERRORS" -gt "$DENO_CHECK_BASELINE" ]; then
