@@ -1,12 +1,12 @@
 # Commit message deny-list for Orange Rails (DL-0855)
 # ERE patterns, one per line. Lines beginning with # are comments.
-# Extend this file as new internal identifiers are added.
+# IMPORTANT: this file is published to a PUBLIC repo.
+# Use SHAPE patterns only -- no literal internal hostnames, project IDs,
+# or domain names. Literal identifiers belong in the COMMIT_MSG_DENY_PATTERNS
+# repo secret (base64-encoded, one ERE pattern per line). The workflow loads
+# and appends them at runtime without committing them here.
+# Set that secret via: repo Settings > Secrets and variables > Actions.
 # Workflow: .github/workflows/commit-msg-scan.yml
-
-# ---------- Internal hostnames ----------
-\bruche\b
-\bbb-us\b
-\bjarvis\b
 
 # ---------- Tailnet IPs and MagicDNS ----------
 # Matches any 100.x.x.x address (Tailscale CGNAT range)
@@ -14,15 +14,11 @@
 # Tailscale MagicDNS domain suffix
 \.ts\.net
 
-# ---------- Supabase project identifiers ----------
-fzwmnzmtqidumdqjdddz
-lcdicqalreskibdfxkzb
-
-# ---------- Private wiki and Zulip server URLs ----------
-wiki\.orangerails\.dev
-wiki\.orangeway\.dev
-waggle\.orangerails\.com
-waggle\.orangeway\.dev
+# ---------- Internal service domain shapes ----------
+# Matches waggle.<org>.<tld> (internal chat/relay servers)
+waggle\.[a-z][a-z0-9-]+\.(com|dev)
+# Matches wiki.<org>.dev (internal wiki servers)
+wiki\.[a-z][a-z0-9-]+\.dev
 
 # ---------- Ride session seat names ----------
 # sp-1 through sp-10 are internal ride seats and must not appear publicly
