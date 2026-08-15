@@ -438,7 +438,12 @@ jobs:
         # --forbid-only: fail if any test.only() was left in a committed spec.
         # Same failure shape as the skip problem: .only() causes all other
         # tests to skip and the job exits 0. --forbid-only makes that loud too.
-        run: bunx playwright test --forbid-only
+        #
+        # --grep-invert: exclude the sparrow-host-routing prod-smoke suite.
+        # That spec throws at eval time when SMOKE_PROD_CONNECT_URL/MAIN_URL
+        # are unset (which they always are in this job). The dedicated
+        # playwright-prod-smoke job runs it with the vars set from repo secrets.
+        run: bunx playwright test --forbid-only --grep-invert "Sparrow host-routing smoke"
 
       - name: Upload Playwright report
         if: always()
