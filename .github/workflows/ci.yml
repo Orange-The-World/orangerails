@@ -464,12 +464,12 @@ jobs:
             bundle_path=$(printf '%s' "$html" \
               | grep -oE 'src="(/assets/[^"]+\.js)"' \
               | head -1 \
-              | sed 's/src="//;s/"//')
+              | sed 's/src="//;s/"//') || true
 
             if [ -n "$bundle_path" ]; then
               bundle_url="${BASE_URL}${bundle_path}"
               ct=$(curl -sI --max-time 10 "${bundle_url}" 2>/dev/null \
-                    | grep -i '^content-type:' | head -1 | tr -d '\r\n')
+                    | grep -i '^content-type:' | head -1 | tr -d '\r\n' || true)
               last_ct="${ct:-empty}"
               echo "  bundle: ${bundle_path}"
               echo "  content-type: ${last_ct}"
@@ -482,7 +482,7 @@ jobs:
               echo "  No JS bundle path found in HTML -- CF Pages may still be initializing."
             fi
 
-            [ "$attempt" -lt "$MAX_ATTEMPTS" ] && sleep "$INTERVAL"
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then sleep "$INTERVAL"; fi
           done
 
           echo "::error::Readiness gate TIMED OUT after ${MAX_ATTEMPTS} attempt(s) \
