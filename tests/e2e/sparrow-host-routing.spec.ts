@@ -46,13 +46,19 @@ async function assertSparrowHeading(page: Page): Promise<void> {
   ).toBeVisible({ timeout: 10_000 });
 }
 
-test.describe("Sparrow host-routing smoke (DL-0439)", () => {
-  test.skip(
-    !CONNECT_HOST_URL || !MAIN_DOMAIN_URL,
-    "SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL must be set to run " +
-      "prod smoke tests. These tests target live production hosts and must " +
-      "not run on dev PRs; enable them in a dedicated prod-smoke workflow.",
+// Guard: throw at eval time when required vars are missing so the prod-smoke
+// CI job cannot exit 0 on an empty run. The main playwright job excludes
+// this file via --grep-invert; only playwright-prod-smoke runs it with
+// SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL set via repo secrets.
+if (!CONNECT_HOST_URL || !MAIN_DOMAIN_URL) {
+  throw new Error(
+    "SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL must both be set. " +
+      "These tests target live production hosts and must not run on dev PRs. " +
+      "Invoke them via the playwright-prod-smoke CI job only.",
   );
+}
+
+test.describe("Sparrow host-routing smoke (DL-0439)", () => {
 
   test(
     "connect.orangerails.com/sparrow serves the app, not the marketing site",
