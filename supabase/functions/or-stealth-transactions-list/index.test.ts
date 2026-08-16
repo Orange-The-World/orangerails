@@ -94,7 +94,8 @@ function evalTerm(term: string, row: Row): boolean {
   const m = term.match(/^([a-z_]+)\.(lt|gt|eq)\.(.+)$/);
   if (!m) throw new Error(`unsupported PostgREST term: ${term}`);
   const [, col, op, rawVal] = m;
-  const cell = (row as unknown as Record<string, unknown>)[col];
+  const cell: string | number | undefined =
+    (row as unknown as Record<string, string | number | undefined>)[col];
   if (cell === undefined) throw new Error(`unknown column in term: ${col}`);
   const val: string | number = typeof cell === 'number' ? Number(rawVal) : rawVal;
   if (op === 'lt') return cell < val;
@@ -118,13 +119,17 @@ function walkAllPages(table: Row[], limit: number): { rows: Row[]; pages: number
   let pages = 0;
 
   for (;;) {
-    const sorted = [...table].sort(compareByPageOrder);
-    const filtered = cursor
+    // Every local here is annotated. The cursor feeds the next round's filter,
+    // so inference would chase its own tail and Deno reports that as TS7022
+    // "implicitly has type any", which the typecheck ratchet counts as a new
+    // error even though the logic is sound.
+    const sorted: Row[] = [...table].sort(compareByPageOrder);
+    const filtered: Row[] = cursor
       ? sorted.filter((r) => matchesOr(cursorOrExpression(cursor as PageCursor), r))
       : sorted;
-    const fetched = filtered.slice(0, limit + 1);
-    const hasMore = fetched.length > limit;
-    const page = hasMore ? fetched.slice(0, limit) : fetched;
+    const fetched: Row[] = filtered.slice(0, limit + 1);
+    const hasMore: boolean = fetched.length > limit;
+    const page: Row[] = hasMore ? fetched.slice(0, limit) : fetched;
 
     collected.push(...page);
     pages++;
@@ -219,11 +224,12 @@ Deno.test('regression proof: the old block_height-only cursor DOES drop rows', (
   let before: number | null = null;
 
   for (let guard = 0; guard < 10; guard++) {
-    const sorted = [...table].sort((a, b) => b.block_height - a.block_height);
-    const filtered = before === null ? sorted : sorted.filter((r) => r.block_height < before!);
-    const fetched = filtered.slice(0, limit + 1);
-    const hasMore = fetched.length > limit;
-    const page = hasMore ? fetched.slice(0, limit) : fetched;
+    const sorted: Row[] = [...table].sort((a, b) => b.block_height - a.block_height);
+    const filtered: Row[] =
+      before === null ? sorted : sorted.filter((r) => r.block_height < (before as number));
+    const fetched: Row[] = filtered.slice(0, limit + 1);
+    const hasMore: boolean = fetched.length > limit;
+    const page: Row[] = hasMore ? fetched.slice(0, limit) : fetched;
     collected.push(...page);
     if (!hasMore || page.length === 0) break;
     before = page[page.length - 1].block_height;
