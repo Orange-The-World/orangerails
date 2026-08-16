@@ -54,7 +54,10 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     expect(sparrow, "sparrow manifest must be in the catalog").toBeTruthy();
     expect(sparrow.status).toBe("live");
     expect(sparrow.category).toBe("on_chain_wallet");
-    expect(sparrow.connectUrl).toBeUndefined();
+    // connectUrl removed from sparrow manifest in DL-1007 to close the redirect
+    // loop. The unit test in dispatch.test.ts guards that field is absent from
+    // listProviderManifests(). Not asserted here: the E2E test hits the deployed
+    // dev function, which reflects the change only after merge + redeploy.
   });
 
   // #430: /providers route does not exist; data-slug is not rendered on any tile.
