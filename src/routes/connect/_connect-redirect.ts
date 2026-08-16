@@ -14,7 +14,8 @@
  * @returns The full href to redirect to, e.g. "/providers?platform=bitbooks&app_user_id=u123"
  */
 export function resolveConnectRedirectHref(rawSearch: string): string {
-  // Forward every query param unchanged. The picker at /providers reads
-  // platform, app_user_id, app_url, and any other handoff params on mount.
+  // Forward every query param unchanged. /providers validates app_url on mount
+  // and shows a refusal alert for untrusted or malformed origins (DL-0426).
+  // platform and app_user_id are preserved for future picker use.
   return `/providers${rawSearch}`;
 }
