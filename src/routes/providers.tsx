@@ -22,6 +22,15 @@ import {
 } from "@/lib/providers";
 
 export const Route = createFileRoute("/providers")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    app_url: typeof search.app_url === "string" ? search.app_url : undefined,
+    platform:
+      typeof search.platform === "string" ? search.platform : undefined,
+    app_user_id:
+      typeof search.app_user_id === "string"
+        ? search.app_user_id
+        : undefined,
+  }),
   head: () => ({
     meta: [
       { title: "Providers | OrangeRails" },
@@ -64,6 +73,19 @@ function tileColor(slug: string): string {
   for (let i = 0; i < slug.length; i += 1) h = ((h << 5) + h + slug.charCodeAt(i)) | 0;
   return TILE_PALETTE[Math.abs(h) % TILE_PALETTE.length];
 }
+
+// Consuming-app origins registered for Stealth Sync return-to bounce (DL-0426).
+// Same allowlist the Stealth widget enforces on OR_STEALTH_INIT and that the
+// old /connect/sparrow page used. An unvalidated app_url would be an open redirect.
+const ALLOWED_APP_ORIGINS: ReadonlySet<string> = new Set(
+  (
+    (import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ??
+    ""
+  )
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0),
+);
 
 function ProviderTile({
   provider,
@@ -178,10 +200,31 @@ function ProviderPanel({
 }
 
 function ProvidersPage() {
+  const { app_url } = Route.useSearch();
+  const [refusedError, setRefusedError] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderManifest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<ProviderManifest | null>(null);
+
+  // Validate app_url on mount (DL-1007 / DL-0426). Untrusted or malformed origins
+  // get a refusal alert immediately so the user sees a clear error rather than the
+  // picker silently ignoring the handoff parameter. Trusted origins are preserved
+  // in the URL for when the picker completes the Stealth Sync flow (follow-up).
+  useEffect(() => {
+    if (!app_url) return;
+    let origin: string | null = null;
+    try {
+      origin = new URL(app_url).origin;
+    } catch {
+      origin = null;
+    }
+    if (!origin || !ALLOWED_APP_ORIGINS.has(origin)) {
+      setRefusedError(
+        "We could not open the app that sent you here: its address is not on our allowlist. If you are testing an integration, register its origin first. Otherwise, start Stealth Sync from that app.",
+      );
+    }
+  }, [app_url]);
 
   useEffect(() => {
     fetchProviderCatalog()
@@ -223,6 +266,15 @@ function ProvidersPage() {
               Connect your Bitcoin wallets, Lightning nodes, and exchange
               accounts.
             </p>
+
+            {refusedError && (
+              <div
+                role="alert"
+                className="mt-4 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+              >
+                {refusedError}
+              </div>
+            )}
 
             <div className="mt-6">
               <input
