@@ -36,8 +36,9 @@
  * connection_ids miss behaviour (both modes, DL-1033 + DL-1105):
  *   Total miss (zero ids resolve): 404 if unknown, 400 if stealth (DL-1033).
  *   Partial miss (some ids resolve, some do not): the entire request fails with
- *   the same non-2xx shape. Unresolved stealth ids owned by this subaccount:
- *   400 { error, unresolved_ids }. Unresolved unknown ids: 404 { error, unresolved_ids }.
+ *   the same non-2xx shape. When unresolved ids are a mix of stealth and unknown,
+ *   400 wins (stealth is the caller-fixable condition). Body lists both sets
+ *   separately: 400 { error, stealth_ids, unknown_ids }. All-unknown: 404 { error, unresolved_ids }.
  *   Callers must not assume a 200 covers all requested ids -- silent-drop is gone.
  *
  * Mode is selected by presence of `format`. See OrangeRails-Protocol.html §8
@@ -398,10 +399,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .eq('app_user_id', subRow.external_user_id);
 
         if (!stealthErr && stealthRows && stealthRows.length > 0) {
+          const stealthIds = stealthRows.map((r) => r.id);
+          const stealthSet = new Set(stealthIds);
+          const unknownIds = unresolvedIds.filter((id) => !stealthSet.has(id));
           return jsonResponse(
             {
               error: 'Stealth connections cannot be synced via this endpoint',
-              unresolved_ids: stealthRows.map((r) => r.id),
+              stealth_ids: stealthIds,
+              unknown_ids: unknownIds,
             },
             400,
             cors,
