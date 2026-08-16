@@ -11,28 +11,28 @@ import { listProviderManifests } from './dispatch.ts';
 
 // ── DL-0680: connectUrl plumbing ──────────────────────────────────────────
 
-Deno.test('listProviderManifests: client-side manifest carries connectUrl through', () => {
-  // sparrow is in CLIENT_SIDE_MANIFESTS with connectUrl: '/connect/sparrow'.
-  // Guards against a regression where the field is silently dropped in the
-  // merge step inside listProviderManifests().
+Deno.test('listProviderManifests: sparrow manifest has no connectUrl (DL-1007)', () => {
+  // sparrow's connectUrl was removed in DL-1007 because /connect/sparrow now
+  // redirects to /providers, which would create a loop if the manifest pointed
+  // there. ProviderPanel falls back to /connect?provider=sparrow.
   const manifests = listProviderManifests();
   const sparrow = manifests.find(m => m.slug === 'sparrow');
   assertEquals(
     sparrow?.connectUrl,
-    '/connect/sparrow',
-    'sparrow manifest must carry connectUrl through listProviderManifests',
+    undefined,
+    'sparrow manifest must not carry connectUrl (route redirects to /providers)',
   );
 });
 
-Deno.test('listProviderManifests: server-side adapter connectUrl flows through to manifest', () => {
-  // xpub now declares connectUrl: '/connect/bitcoin'. Guards that the spread
-  // inside listProviderManifests() carries it through -- the key must be
-  // present with the correct value, not silently dropped.
+Deno.test('listProviderManifests: xpub manifest has no connectUrl (DL-1007)', () => {
+  // xpub's connectUrl was removed in DL-1007 because /connect/bitcoin now
+  // redirects to /providers, which would create a loop if the manifest pointed
+  // there. ProviderPanel falls back to /connect?provider=xpub.
   const manifests = listProviderManifests();
   const xpub = manifests.find(m => m.slug === 'xpub');
   assertEquals(
     xpub?.connectUrl,
-    '/connect/bitcoin',
-    'xpub manifest must carry connectUrl through listProviderManifests',
+    undefined,
+    'xpub manifest must not carry connectUrl (route redirects to /providers)',
   );
 });
