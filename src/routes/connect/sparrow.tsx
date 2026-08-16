@@ -2,7 +2,7 @@
  * /connect/sparrow - backwards-compat redirect to the provider picker.
  *
  * Previously hosted the Sparrow Wallet setup flow.
- * PR #721 moved that setup inline into the provider picker (/providers).
+ * That setup was moved inline into the provider picker (/providers).
  *
  * External links, bookmarks, and the sparrow provider manifest's connectUrl
  * (supabase/functions/_shared/providers/dispatch.ts) still reference this
