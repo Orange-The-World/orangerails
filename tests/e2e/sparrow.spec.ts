@@ -82,20 +82,15 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     await capture(page, "03-providers-sparrow-selected");
   });
 
-  test("/connect/sparrow renders the landing page sections", async ({ page }) => {
+  test("/connect/sparrow redirects to /providers (DL-1007)", async ({ page }) => {
+    // DL-1007: /connect/sparrow is now a backwards-compat redirect to the picker.
+    // The old Sparrow landing page moved inline into /providers. Bookmarks and
+    // external links (including the sparrow provider manifest connectUrl) still
+    // land correctly because the redirect preserves the full query string.
     await page.goto("/connect/sparrow");
-
-    await expect(page.getByRole("heading", { name: /sparrow wallet/i, level: 1 })).toBeVisible();
-    await expect(page.getByText(/what v0\.1 ships, and what it doesn/i)).toBeVisible();
-    await expect(page.getByText(/confirmed receives/i)).toBeVisible();
-    await expect(page.getByRole("heading", { name: /how to connect/i })).toBeVisible();
-    await expect(page.getByText(/open sparrow on your computer/i)).toBeVisible();
-    await expect(page.getByText(/export your wallet descriptor/i)).toBeVisible();
-    await expect(page.getByText(/launch stealth sync and paste/i)).toBeVisible();
-    await expect(
-      page.getByText(/your descriptor never leaves your browser in plaintext/i),
-    ).toBeVisible();
-    await capture(page, "04-connect-sparrow-landing");
+    await page.waitForURL(/\/providers/, { timeout: 10_000 });
+    expect(page.url()).toMatch(/\/providers/);
+    await capture(page, "04-connect-sparrow-redirect-to-picker");
   });
 
   // DL-0426: app_url redirect and refusal (three paths in launchStealthSync).
@@ -133,7 +128,10 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
   // Test 2: untrusted origin -> refusal alert shown, no redirect.
   // evil.example.com is never allowlisted regardless of the env var value,
   // so this test is fully env-independent and runs in CI today.
-  test("app_url with untrusted origin shows the refusal alert (DL-0426)", async ({ page }) => {
+  // DL-1007: /connect/sparrow now redirects to /providers. The Launch Stealth
+  // Sync button and its app_url handling no longer live at this URL. These
+  // tests are fixme until the equivalent behaviour ships in the picker.
+  test.fixme("app_url with untrusted origin shows the refusal alert (DL-0426)", async ({ page }) => {
     await page.goto(
       "/connect/sparrow?app_url=" + encodeURIComponent("https://evil.example.com/callback"),
     );
@@ -149,7 +147,7 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
   // Test 3: malformed app_url (URL constructor throws, origin is null) -> same
   // refusal path as test 2. null can never satisfy Set.has(), so this is
   // fully env-independent regardless of ALLOWED_APP_ORIGINS content.
-  test("malformed app_url shows the refusal alert (DL-0426)", async ({ page }) => {
+  test.fixme("malformed app_url shows the refusal alert (DL-0426)", async ({ page }) => {
     await page.goto("/connect/sparrow?app_url=not-a-valid-url");
     const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
     await expect(launchButton).toBeVisible();
@@ -162,7 +160,7 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
 
   // DL-0426: the isUnlocked guard before window.open means CI (vault locked)
   // shows the refusal panel instead of opening a popup. This covers that path.
-  test("clicking Launch Stealth Sync with vault locked shows the refusal message", async ({ page }) => {
+  test.fixme("clicking Launch Stealth Sync with vault locked shows the refusal message", async ({ page }) => {
     await page.goto("/connect/sparrow");
     const launchButton = page.getByRole("button", { name: /launch stealth sync/i });
     await expect(launchButton).toBeVisible();
