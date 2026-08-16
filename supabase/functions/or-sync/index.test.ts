@@ -308,14 +308,20 @@ Deno.test('handleConnectionError: classifies error, stamps status=error, returns
 // handler, following the same pattern used for the quiltt accountIds guard above.
 
 Deno.test('partial-miss guard (all-resolve path): boundary condition is correct', () => {
-  // The guard must fire ONLY when resolved < requested, never when they are equal.
-  // Verify the precise comparison operator is in the source so a >= or > edit
-  // that would let the guard fire on the all-resolve path fails here immediately.
+  // The guard uses Set-difference to compute unresolved ids: deduplicates the
+  // requested list (avoiding false miss on duplicate ids), then filters out
+  // resolved ids. Fires only when the result is non-empty. Both the dedup step
+  // and the guard condition must survive future edits.
   const src = readSelf('./index.ts');
   assertEquals(
-    src.includes('connections!.length < connection_ids.length'),
+    src.includes('[...new Set(connection_ids)].filter'),
     true,
-    'guard must use strict-less-than: fires only when fewer resolved than requested',
+    'guard must deduplicate via Set to avoid false miss on duplicate ids',
+  );
+  assertEquals(
+    src.includes('unresolvedIds.length > 0'),
+    true,
+    'guard must fire only when unresolved ids exist after set-difference',
   );
 });
 
@@ -337,7 +343,7 @@ Deno.test('partial-miss guard (partial-resolve path): stealth_ids+unknown_ids in
 
 Deno.test('partial-miss guard (partial-resolve path): stealth 400 and unknown 404 follow the guard', () => {
   const src = readSelf('./index.ts');
-  const guardIdx = src.indexOf('connections!.length < connection_ids.length');
+  const guardIdx = src.indexOf('unresolvedIds.length > 0');
   assert(guardIdx !== -1, 'partial-miss guard must be present in index.ts');
   const afterGuard = src.slice(guardIdx);
   assert(
@@ -355,7 +361,7 @@ Deno.test('partial-miss guard: mixed stealth+unknown -> 400 wins, both id sets l
   // (stealth is the caller-fixable condition). Both sets are listed in separate
   // fields so the caller can act on each independently.
   const src = readSelf('./index.ts');
-  const guardIdx = src.indexOf('connections!.length < connection_ids.length');
+  const guardIdx = src.indexOf('unresolvedIds.length > 0');
   assert(guardIdx !== -1, 'partial-miss guard must be present');
   const afterGuard = src.slice(guardIdx);
   // 400 branch fires when ANY stealth id is present (covers the mixed case).
@@ -376,5 +382,23 @@ Deno.test('partial-miss guard: mixed stealth+unknown -> 400 wins, both id sets l
   assert(
     afterGuard.includes('unknown_ids: unknownIds'),
     '400 body must carry unknown_ids (empty when all unresolved are stealth)',
+  );
+});
+
+Deno.test('total-miss guard: all-disconnected ids return 422 not 404', () => {
+  // When every requested id resolves to a disconnected connection (excluded by
+  // the main query's neq status=disconnected), returning 404 misleads callers:
+  // the id exists, it is just disconnected. 422 matches the partial-miss path.
+  // Verify the disconnected check appears before the first total-miss 404 in source.
+  const src = readSelf('./index.ts');
+  // indexOf returns the FIRST occurrence -- that is the total-miss branch, which
+  // appears before the partial-miss branch in the file.
+  const totalMiss404Idx = src.indexOf("'Connection not found in this subaccount'");
+  assert(totalMiss404Idx !== -1, 'total-miss 404 message must be present');
+  const disconnectedCheckIdx = src.indexOf("'Connection is disconnected and cannot be synced'");
+  assert(disconnectedCheckIdx !== -1, 'disconnected 422 message must be present');
+  assert(
+    disconnectedCheckIdx < totalMiss404Idx,
+    'disconnected 422 check must appear before the total-miss 404 fallback',
   );
 });
