@@ -299,3 +299,46 @@ Deno.test('handleConnectionError: classifies error, stamps status=error, returns
 
   // 4. No re-throw: reaching this line proves handleConnectionError returned normally.
 });
+
+// ── Partial-miss guard: DL-1105 ──────────────────────────────────────────────
+//
+// When some but not all requested connection_ids resolve, the whole request
+// must fail (non-2xx) rather than silently dropping the unresolved ids.
+// Source-inspection tests verify the guard logic survives future edits to the
+// handler, following the same pattern used for the quiltt accountIds guard above.
+
+Deno.test('partial-miss guard (all-resolve path): boundary condition is correct', () => {
+  // The guard must fire ONLY when resolved < requested, never when they are equal.
+  // Verify the precise comparison operator is in the source so a >= or > edit
+  // that would let the guard fire on the all-resolve path fails here immediately.
+  const src = readSelf('./index.ts');
+  assertEquals(
+    src.includes('connections!.length < connection_ids.length'),
+    true,
+    'guard must use strict-less-than: fires only when fewer resolved than requested',
+  );
+});
+
+Deno.test('partial-miss guard (partial-resolve path): unresolved_ids in both error branches', () => {
+  const src = readSelf('./index.ts');
+  const matches = [...src.matchAll(/unresolved_ids/g)];
+  assert(
+    matches.length >= 2,
+    'unresolved_ids must appear in both the stealth-400 and unknown-404 response bodies',
+  );
+});
+
+Deno.test('partial-miss guard (partial-resolve path): stealth 400 and unknown 404 follow the guard', () => {
+  const src = readSelf('./index.ts');
+  const guardIdx = src.indexOf('connections!.length < connection_ids.length');
+  assert(guardIdx !== -1, 'partial-miss guard must be present in index.ts');
+  const afterGuard = src.slice(guardIdx);
+  assert(
+    afterGuard.includes('Stealth connections cannot be synced via this endpoint'),
+    '400 stealth branch must appear after the partial-miss guard',
+  );
+  assert(
+    afterGuard.includes('Connection not found in this subaccount'),
+    '404 unknown branch must appear after the partial-miss guard',
+  );
+});
