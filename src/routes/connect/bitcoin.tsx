@@ -2,7 +2,7 @@
  * /connect/bitcoin - backwards-compat redirect to the provider picker.
  *
  * Previously hosted the Bitcoin wallet (xpub/ypub/zpub) setup flow.
- * PR #721 moved that setup inline into the provider picker (/providers).
+ * That setup was moved inline into the provider picker (/providers).
  *
  * External links, bookmarks, and the xpub provider manifest's connectUrl
  * (supabase/functions/_shared/providers/xpub/index.ts) still reference this
