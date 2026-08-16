@@ -351,7 +351,32 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             );
           }
         }
-        // Not found in connections or stealth_connections for this subaccount.
+        // The main query excludes status='disconnected'. A disconnected id resolves
+        // to nothing in that query but is not "not found". Return 422 so callers
+        // can distinguish it from a genuinely unknown id (consistent with the
+        // partial-miss disconnected branch, DL-1105).
+        const { data: disconnectedRows } = await ctx.serviceClient
+          .from('connections')
+          .select('id')
+          .in('id', connection_ids)
+          .eq('subaccount_id', subaccountId)
+          .eq('status', 'disconnected');
+
+        if (disconnectedRows?.length) {
+          const disconnectedIds = disconnectedRows.map((r) => r.id);
+          const disconnectedSet = new Set(disconnectedIds);
+          const unknownIds = connection_ids.filter((id) => !disconnectedSet.has(id));
+          return jsonResponse(
+            {
+              error: 'Connection is disconnected and cannot be synced',
+              disconnected_ids: disconnectedIds,
+              unknown_ids: unknownIds,
+            },
+            422,
+            cors,
+          );
+        }
+        // Not found in connections, stealth, or disconnected for this subaccount.
         return jsonResponse({ error: 'Connection not found in this subaccount' }, 404, cors);
       }
 
