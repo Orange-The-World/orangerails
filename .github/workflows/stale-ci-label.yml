@@ -18,9 +18,13 @@ on:
   check_run:
     types: [completed]
 
+# This labeler is advisory. It must never leave an unsuccessful check-run
+# on the head, because that holds mergeable_state at 'unstable' and blocks
+# merge tooling. So: queue runs instead of cancelling them (a cancelled run
+# is an unsuccessful conclusion), and let the compare step fail soft.
 concurrency:
   group: stale-ci-${{ github.event.check_run.head_sha }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   checks: read
@@ -85,6 +89,7 @@ jobs:
             --color "e4e669" 2>/dev/null || true
 
       - name: Compare check sets and apply or remove label
+        continue-on-error: true
         if: >
           steps.find-pr.outputs.pr_number != '' &&
           steps.settled.outputs.skip == 'false'
@@ -106,8 +111,8 @@ jobs:
             --jq '[.check_runs[] | select(.conclusion != "skipped" and .name != "Evaluate STALE CI label") | .name] | sort | unique | .[]')
 
           if [ -z "$TRUNK_CHECKS" ]; then
-            echo "::error::Trunk check-run list is empty -- refusing to label (empty baseline would produce false positives on every PR)"
-            exit 1
+            echo "::warning::Trunk check-run list is empty -- refusing to label (empty baseline would produce false positives on every PR)"
+            exit 0
           fi
 
           TRUNK_COUNT=$(echo "$TRUNK_CHECKS" | wc -l | tr -d ' ')
