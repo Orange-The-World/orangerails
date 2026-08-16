@@ -319,12 +319,19 @@ Deno.test('partial-miss guard (all-resolve path): boundary condition is correct'
   );
 });
 
-Deno.test('partial-miss guard (partial-resolve path): unresolved_ids in both error branches', () => {
+Deno.test('partial-miss guard (partial-resolve path): stealth_ids+unknown_ids in 400, unresolved_ids in 404', () => {
   const src = readSelf('./index.ts');
-  const matches = [...src.matchAll(/unresolved_ids/g)];
   assert(
-    matches.length >= 2,
-    'unresolved_ids must appear in both the stealth-400 and unknown-404 response bodies',
+    src.includes('stealth_ids: stealthIds'),
+    'stealth-400 body must include stealth_ids field',
+  );
+  assert(
+    src.includes('unknown_ids: unknownIds'),
+    'stealth-400 body must include unknown_ids field',
+  );
+  assert(
+    src.includes('unresolved_ids: unresolvedIds'),
+    'unknown-404 body must include unresolved_ids field',
   );
 });
 
@@ -340,5 +347,34 @@ Deno.test('partial-miss guard (partial-resolve path): stealth 400 and unknown 40
   assert(
     afterGuard.includes('Connection not found in this subaccount'),
     '404 unknown branch must appear after the partial-miss guard',
+  );
+});
+
+Deno.test('partial-miss guard: mixed stealth+unknown -> 400 wins, both id sets listed separately', () => {
+  // When unresolved ids include both stealth and genuinely unknown, 400 must win
+  // (stealth is the caller-fixable condition). Both sets are listed in separate
+  // fields so the caller can act on each independently.
+  const src = readSelf('./index.ts');
+  const guardIdx = src.indexOf('connections!.length < connection_ids.length');
+  assert(guardIdx !== -1, 'partial-miss guard must be present');
+  const afterGuard = src.slice(guardIdx);
+  // 400 branch fires when ANY stealth id is present (covers the mixed case).
+  assert(
+    afterGuard.includes('stealthRows.length > 0'),
+    'stealth branch must fire on any stealthRows presence, covering the mixed case',
+  );
+  // unknownIds computed as set-difference so genuinely unknown ids are not lost.
+  assert(
+    afterGuard.includes('unresolvedIds.filter((id) => !stealthSet.has(id))'),
+    'unknown_ids must be the diff of unresolvedIds minus the stealth set',
+  );
+  // Both fields present in the 400 body.
+  assert(
+    afterGuard.includes('stealth_ids: stealthIds'),
+    '400 body must carry stealth_ids',
+  );
+  assert(
+    afterGuard.includes('unknown_ids: unknownIds'),
+    '400 body must carry unknown_ids (empty when all unresolved are stealth)',
   );
 });
