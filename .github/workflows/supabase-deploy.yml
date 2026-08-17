@@ -209,12 +209,18 @@ jobs:
 
   check-pending-migrations:
     needs: [deploy]
-    # Runs after every successful deploy so schema drift is its OWN visible
+    # Runs after EVERY deploy attempt so schema drift is its OWN visible
     # check-run. The deploy job stays green when edge functions ship; this job
     # goes red when migrations are pending, making drift impossible to miss
     # without blocking the deploy gate. This job is NOT in branch-protection
     # required checks, so it never prevents a merge on its own.
-    if: always() && needs.deploy.result == 'success'
+    #
+    # `if: always()` with no result condition is deliberate. This job used to be
+    # skipped when deploy failed, and a skipped check-run renders NEUTRAL, not
+    # red -- so a run that learned nothing about the schema looked exactly like a
+    # run that found it clean. Reporting UNKNOWN out loud costs one extra red on
+    # an already-failing run; staying silent costs a migration nobody notices.
+    if: always()
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -228,29 +234,100 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.deploy.outputs.supabase_ref }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
         run: |
           set -uo pipefail
+
+          # One helper for every "we could not find out" exit. UNKNOWN and
+          # PENDING are different facts and must never share a message: the
+          # first means go and look, the second means go and apply.
+          unknown () {
+            {
+              echo "## :grey_question: Drift state UNKNOWN on \`${SUPABASE_REF:-unresolved}\`"
+              echo ""
+              echo "$1"
+              echo ""
+              echo "This is **not** a report that migrations are pending, and **not** a"
+              echo "report that the schema is clean. The check could not determine the"
+              echo "state. Re-run it, or read the schema directly, before promoting."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::drift state UNKNOWN on ${SUPABASE_REF:-unresolved}: $1"
+            exit 1
+          }
+
+          if [ "${DEPLOY_RESULT}" != "success" ]; then
+            unknown "The deploy job ended '${DEPLOY_RESULT}', so no target project was resolved and no schema was read."
+          fi
+          if [ -z "${SUPABASE_REF}" ]; then
+            unknown "The deploy job produced no supabase_ref output."
+          fi
+
           MIG_DIR="supabase/migrations"
           if [ ! -d "$MIG_DIR" ]; then
             echo "no migrations directory; nothing pending"
             exit 0
           fi
 
+          # Two files sharing a version prefix make this report structurally
+          # blind. The ledger holds ONE row per version, so once either file is
+          # recorded the `grep -qx` below matches for BOTH and the other is
+          # counted as applied forever -- no red, on any project, ever. That is
+          # not a drift report failing, it is a drift report that cannot see.
+          # Caught here rather than in a lint job because this is the check
+          # whose answer the duplicate invalidates.
+          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
+          if [ -n "$DUPES" ]; then
+            {
+              echo "## :rotating_light: Duplicate migration version(s)"
+              echo ""
+              for V in $DUPES; do
+                echo "\`${V}\` is used by more than one file:"
+                echo ""
+                ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
+                echo ""
+              done
+              echo "\`supabase_migrations.schema_migrations\` stores one row per"
+              echo "version, so at most one of these can ever be tracked and the"
+              echo "rest are reported as applied whether they ran or not. Rename"
+              echo "the later file to an unused timestamp."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- this report cannot see drift in the shadowed file(s)."
+            exit 1
+          fi
+
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
           jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
+
+          # --fail-with-body, not bare -sS. Without it curl exits 0 on a 401,
+          # 403 or 500: the retry loop breaks on the first attempt, the error
+          # body parses as valid JSON, `.[].version` over an object yields
+          # nothing, APPLIED comes back empty, and every migration on disk is
+          # then reported PENDING. A stale token produced a confident, specific,
+          # wrong answer that was indistinguishable from total drift.
           RESPONSE=""
+          HTTP_OK=0
           for attempt in 1 2 3; do
-            RESPONSE=$(curl -sS -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+            if RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
               -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
               -H "Content-Type: application/json" \
-              --data-binary "@$PAYLOAD") && break
-            echo "curl attempt $attempt failed; sleeping 10s"
-            sleep 10
+              --data-binary "@$PAYLOAD"); then
+              HTTP_OK=1
+              break
+            fi
+            echo "migration query attempt ${attempt}/3 did not return a success status"
+            [ "$attempt" -lt 3 ] && sleep 10
           done
-          if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
-            echo "::error::migration check returned invalid JSON; drift state unknown"
-            exit 1
+          # The response body is not echoed. On an auth failure it is the only
+          # place a token-shaped string could surface in a public build log.
+          [ "$HTTP_OK" -eq 1 ] || unknown "The Supabase Management API did not return a success status after 3 attempts. Most often an expired or rotated SUPABASE_ACCESS_TOKEN, or the project being paused."
+
+          # A success status is still not a usable answer until the shape is
+          # right. Only an array of rows can be trusted to mean "these are the
+          # versions that are applied"; anything else is an unknown, not a zero.
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            unknown "The migration query returned a success status but not a JSON array of rows."
           fi
           APPLIED=$(echo "$RESPONSE" | jq -r '.[].version' | sort -u)
 
