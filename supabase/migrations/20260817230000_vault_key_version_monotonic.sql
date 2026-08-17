@@ -38,7 +38,12 @@ CREATE TRIGGER trg_vault_key_version_monotonic
   FOR EACH ROW
   EXECUTE FUNCTION public.vault_key_version_must_not_decrease();
 
--- DOWN
-DROP TRIGGER IF EXISTS trg_vault_key_version_monotonic ON public.customer_vault_meta;
-DROP TRIGGER IF EXISTS trg_vault_key_version_monotonic ON public.user_vault_meta;
-DROP FUNCTION IF EXISTS public.vault_key_version_must_not_decrease();
+-- DOWN -- these statements are the ROLLBACK. They are commented out on
+-- purpose. Left live they ran as part of the forward migration, dropping the
+-- two triggers and the function this file had just created, so the migration
+-- reported success and left the database exactly as it found it. To roll back,
+-- run these three statements by hand.
+--
+-- DROP TRIGGER IF EXISTS trg_vault_key_version_monotonic ON public.customer_vault_meta;
+-- DROP TRIGGER IF EXISTS trg_vault_key_version_monotonic ON public.user_vault_meta;
+-- DROP FUNCTION IF EXISTS public.vault_key_version_must_not_decrease();
