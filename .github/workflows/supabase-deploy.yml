@@ -270,11 +270,12 @@ jobs:
               echo "| prod | two-party: founder + CTO |"
             } >> "$GITHUB_STEP_SUMMARY"
             # On a workflow_dispatch with apply_migrations=true the apply-migrations job
-            # handles these migrations. Report as informational and let it proceed.
-            # On any other trigger (push, or dispatch without apply), fail closed.
+            # handles these migrations. On any other trigger this step is ADVISORY: it
+            # reports drift, it does not fail the deploy. Applying a migration is a
+            # separate gated act, so a deploy that shipped its edge functions must not
+            # be reported as failed because a schema change has not been approved yet.
             if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ inputs.apply_migrations }}" != "true" ]; then
-              echo "::error::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- schema out of sync."
-              exit 1
+              echo "::warning::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- schema out of sync. Apply via workflow_dispatch with apply_migrations=true."
             else
               echo "" >> "$GITHUB_STEP_SUMMARY"
               echo "Apply job running next -- see below." >> "$GITHUB_STEP_SUMMARY"
