@@ -41,6 +41,14 @@ const MARKETING_TITLE_SIGNALS = ["The private finance app", "marketing"];
  * Poll instead of sampling once: a genuinely misdirected deploy never settles
  * on an app title, so it still fails, just after the timeout rather than
  * instantly.
+ *
+ * LOAD-BEARING ORDERING. This is a negative assertion, so an empty or
+ * not-yet-set title satisfies it on the very first tick. It only means
+ * anything because assertSparrowHeading() runs first and because the static
+ * shell title genuinely carries a marketing signal, which is what gives the
+ * poll something real to wait out. Always call the heading gate before this.
+ * Reordering or dropping it makes this assertion vacuous while it keeps
+ * passing, which is worse than a failure because nobody goes looking.
  */
 async function assertAppTitle(page: Page, label: string): Promise<void> {
   for (const signal of MARKETING_TITLE_SIGNALS) {
@@ -142,6 +150,10 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
         mainRes?.status(),
         `${MAIN_DOMAIN_URL} must return HTTP 200`,
       ).toBe(200);
+      // AC 2 requires the Sparrow h1 to be visible on this host too, not just
+      // on the canonical one. It is also the gate that keeps the assertAppTitle
+      // call below from being satisfied by an empty title on the first tick.
+      await assertSparrowHeading(page);
       await assertAppTitle(page, MAIN_DOMAIN_URL);
       // Poll until the main-domain title matches the canonical. Comparing two
       // captured strings could pass if both reads sampled the shell; polling
