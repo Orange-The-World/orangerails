@@ -33,6 +33,14 @@
  *        metadata: { format, requires_encryption: string[] }
  *      }
  *
+ * connection_ids miss behaviour (both modes, DL-1033 + DL-1105):
+ *   Total miss (zero ids resolve): 404 if unknown, 400 if stealth (DL-1033).
+ *   Partial miss (some ids resolve, some do not): the entire request fails with
+ *   the same non-2xx shape. When unresolved ids are a mix of stealth and unknown,
+ *   400 wins (stealth is the caller-fixable condition). Body lists both sets
+ *   separately: 400 { error, stealth_ids, unknown_ids }. All-unknown: 404 { error, unresolved_ids }.
+ *   Callers must not assume a 200 covers all requested ids -- silent-drop is gone.
+ *
  * Mode is selected by presence of `format`. See OrangeRails-Protocol.html §8
  * for the protocol contract; see _shared/sinks/dispatch.ts for the sink
  * registry; see _shared/providers/dispatch.ts for the source adapter registry.
@@ -343,7 +351,32 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             );
           }
         }
-        // Not found in connections or stealth_connections for this subaccount.
+        // The main query excludes status='disconnected'. A disconnected id resolves
+        // to nothing in that query but is not "not found". Return 422 so callers
+        // can distinguish it from a genuinely unknown id (consistent with the
+        // partial-miss disconnected branch, DL-1105).
+        const { data: disconnectedRows } = await ctx.serviceClient
+          .from('connections')
+          .select('id')
+          .in('id', connection_ids)
+          .eq('subaccount_id', subaccountId)
+          .eq('status', 'disconnected');
+
+        if (disconnectedRows?.length) {
+          const disconnectedIds = disconnectedRows.map((r) => r.id);
+          const disconnectedSet = new Set(disconnectedIds);
+          const unknownIds = connection_ids.filter((id) => !disconnectedSet.has(id));
+          return jsonResponse(
+            {
+              error: 'Connection is disconnected and cannot be synced',
+              disconnected_ids: disconnectedIds,
+              unknown_ids: unknownIds,
+            },
+            422,
+            cors,
+          );
+        }
+        // Not found in connections, stealth, or disconnected for this subaccount.
         return jsonResponse({ error: 'Connection not found in this subaccount' }, 404, cors);
       }
 
@@ -364,6 +397,87 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         );
       }
       return jsonResponse({ synced: 0, connections: [] }, 200, cors);
+    }
+
+    // Partial-miss guard (DL-1105): derive unresolved ids via set difference
+    // over the deduplicated request list. Count comparison is wrong: repeated
+    // ids in the caller's array (e.g. ["a","a"]) trigger count < length even
+    // when every unique id resolved, producing a spurious 404 with
+    // unresolved_ids: []. The main query also excludes status='disconnected';
+    // a disconnected id is real and must not be conflated with "not found".
+    if (connection_ids?.length) {
+      const resolvedSet = new Set(connections!.map((c) => c.id));
+      const unresolvedIds = [...new Set(connection_ids)].filter(
+        (id) => !resolvedSet.has(id),
+      );
+
+      if (unresolvedIds.length > 0) {
+        const { data: subRow, error: subErr } = await ctx.serviceClient
+          .from('subaccounts')
+          .select('platform_id, external_user_id')
+          .eq('id', subaccountId)
+          .maybeSingle();
+
+        if (!subErr && subRow) {
+          const { data: stealthRows, error: stealthErr } = await ctx.serviceClient
+            .from('stealth_connections')
+            .select('id')
+            .in('id', unresolvedIds)
+            .eq('platform_id', subRow.platform_id)
+            .eq('app_user_id', subRow.external_user_id);
+
+          if (!stealthErr && stealthRows && stealthRows.length > 0) {
+            const stealthIds = stealthRows.map((r) => r.id);
+            const stealthSet = new Set(stealthIds);
+            const unknownIds = unresolvedIds.filter((id) => !stealthSet.has(id));
+            return jsonResponse(
+              {
+                error: 'Stealth connections cannot be synced via this endpoint',
+                stealth_ids: stealthIds,
+                unknown_ids: unknownIds,
+              },
+              400,
+              cors,
+            );
+          }
+        }
+
+        // The main query excludes status='disconnected'. A disconnected id
+        // resolves to nothing in that query but is not "not found"; return 422
+        // so callers can differentiate it from a genuinely unknown id.
+        const { data: disconnectedRows } = await ctx.serviceClient
+          .from('connections')
+          .select('id')
+          .in('id', unresolvedIds)
+          .eq('subaccount_id', subaccountId)
+          .eq('status', 'disconnected');
+
+        if (disconnectedRows?.length) {
+          const disconnectedIds = disconnectedRows.map((r) => r.id);
+          const disconnectedSet = new Set(disconnectedIds);
+          const unknownIds = unresolvedIds.filter(
+            (id) => !disconnectedSet.has(id),
+          );
+          return jsonResponse(
+            {
+              error: 'Connection is disconnected and cannot be synced',
+              disconnected_ids: disconnectedIds,
+              unknown_ids: unknownIds,
+            },
+            422,
+            cors,
+          );
+        }
+
+        return jsonResponse(
+          {
+            error: 'Connection not found in this subaccount',
+            unresolved_ids: unresolvedIds,
+          },
+          404,
+          cors,
+        );
+      }
     }
 
     const results: Array<{
