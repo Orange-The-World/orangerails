@@ -13,11 +13,13 @@ import { test, expect, type Page } from "@playwright/test";
  *
  * DL-0439's original criteria asserted a "Sparrow Wallet" h1 at both entry
  * URLs. DL-1007 then made /connect/sparrow and /connect/bitcoin redirect to
- * the /providers picker, because PR #721 had already moved those setup flows
- * inline into the picker and left the standalone pages as dead ends. The two
- * tickets therefore contradict each other, and the contradiction stayed
- * invisible because this file was failing for an unrelated reason at the time
- * (it read <title> before the router had set it, fixed in PR #750).
+ * the /providers picker, because an earlier change had already moved those
+ * setup flows inline into the picker and left the standalone pages as dead
+ * ends. The two tickets therefore contradict each other, and the contradiction
+ * stayed invisible because this file was failing for an unrelated reason at the
+ * time (it read <title> before the router had set it, since fixed). Run
+ * git log on this file for the changes referred to here; the repo is public,
+ * so shipping code does not cite internal PR numbers.
  *
  * The heading string was never the point. DL-0439 exists because the Sparrow
  * entry points once served the MARKETING site instead of the app, on one host
