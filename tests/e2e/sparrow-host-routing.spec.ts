@@ -61,13 +61,32 @@ async function assertSparrowHeading(page: Page): Promise<void> {
 }
 
 /**
- * Read the title only once the route has actually rendered. Every title
- * comparison in this file must go through here, otherwise it compares shell
- * titles and passes for the wrong reason.
+ * Read the title only once the route has fully settled. Polls until the title
+ * is no longer a marketing-signal value, proving both that the heading is
+ * visible AND that the title effect has flushed. A one-shot read after the
+ * heading becomes visible still races the title effect; polling closes that gap.
  */
 async function renderedTitle(page: Page): Promise<string> {
   await assertSparrowHeading(page);
-  return page.title();
+  let settled = "";
+  await expect
+    .poll(
+      async () => {
+        const t = await page.title();
+        const isShell = MARKETING_TITLE_SIGNALS.some((s) =>
+          new RegExp(s, "i").test(t),
+        );
+        if (!isShell) settled = t;
+        return isShell;
+      },
+      {
+        message:
+          "rendered <title> must settle to a non-marketing value after hydration",
+        timeout: 10_000,
+      },
+    )
+    .toBe(false);
+  return settled;
 }
 
 test.describe("Sparrow host-routing smoke (DL-0439)", () => {
@@ -110,11 +129,12 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
         canonicalRes?.status(),
         `${CONNECT_HOST_URL} must return HTTP 200`,
       ).toBe(200);
+      // renderedTitle() polls until the title is no longer a marketing value,
+      // proving hydration completed on the canonical host. assertAppTitle then
+      // validates the settled title, so a canonical host stuck on the shell
+      // still fails rather than seeding a bogus canonicalTitle.
       const canonicalTitle = await renderedTitle(page);
-      expect(
-        canonicalTitle,
-        "connect.orangerails.com/sparrow must set a non-empty rendered <title>",
-      ).toBeTruthy();
+      await assertAppTitle(page, CONNECT_HOST_URL);
 
       // Check the main-domain URL.
       const mainRes = await page.goto(MAIN_DOMAIN_URL);
@@ -122,12 +142,17 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
         mainRes?.status(),
         `${MAIN_DOMAIN_URL} must return HTTP 200`,
       ).toBe(200);
-      const title = await renderedTitle(page);
       await assertAppTitle(page, MAIN_DOMAIN_URL);
-      expect(
-        title,
-        "orangerails.com/connect/sparrow must serve the same rendered <title> as connect.orangerails.com/sparrow",
-      ).toBe(canonicalTitle);
+      // Poll until the main-domain title matches the canonical. Comparing two
+      // captured strings could pass if both reads sampled the shell; polling
+      // here closes that gap.
+      await expect
+        .poll(() => page.title(), {
+          message:
+            "orangerails.com/connect/sparrow must serve the same rendered <title> as connect.orangerails.com/sparrow",
+          timeout: 10_000,
+        })
+        .toBe(canonicalTitle);
     },
   );
 });
