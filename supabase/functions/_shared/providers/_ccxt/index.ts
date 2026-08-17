@@ -276,11 +276,17 @@ function buildDiscover(slug: string, exchangeId: string) {
         throw out;
       }
     } else {
-      // Exchange does not advertise fetchBalance; skip live validation here.
-      // The first sync will surface bad credentials through the sync error path.
-      // This should be rare: fetchBalance is supported by virtually all CCXT
-      // exchanges that require authentication.
-      console.warn(`[ccxt:${exchangeId}] fetchBalance not advertised; skipping discovery credential check`);
+      // Exchange does not advertise fetchBalance. Reject at discovery so callers
+      // get a distinct error code (UPSTREAM_UNSUPPORTED) rather than accepting a
+      // wallet that will fail every subsequent sync. This should be rare:
+      // fetchBalance is supported by virtually all CCXT exchanges that require
+      // authentication. A thrown error at discovery surfaces a meaningful
+      // rejection immediately instead of deferring failure to the first sync.
+      const unsupported = new Error(
+        `[ccxt:${exchangeId}] discover: exchange does not advertise fetchBalance: UPSTREAM_UNSUPPORTED`,
+      );
+      (unsupported as any).upstreamCode = 'UPSTREAM_UNSUPPORTED';
+      throw unsupported;
     }
 
     return [
@@ -297,22 +303,111 @@ function buildDiscover(slug: string, exchangeId: string) {
 // --- Sync ----------------------------------------------------------------
 
 /**
+ * What one pass over the three CCXT sources produced.
+ *
+ * `denied` names the sources that answered but refused to hand over data.
+ * The caller turns a non-empty list into `partial: true` so a connection is
+ * never reported healthy over history nobody was allowed to read.
+ *
+ * Sources skipped as NotSupported are deliberately NOT listed here. CCXT
+ * simply has no implementation for those, it is a fixed property of the
+ * exchange rather than a fault, and it was already being skipped silently.
+ * Counting them would flip a large number of currently healthy connections
+ * to `partial` on deploy for a reason no customer can act on.
+ */
+export interface CcxtSourceSweep {
+  transactions: NormalizedTransaction[];
+  denied: string[];
+}
+
+/**
+ * Decide whether one source's failure should end the whole sync.
+ *
+ * Survivable, and neither says anything about the other two sources:
+ *
+ *   NotSupported      CCXT does not implement this call for this exchange,
+ *                     or not without a symbol. Skipped since the adapter
+ *                     was written.
+ *   PermissionDenied  The credential is valid but lacks the scope this one
+ *                     endpoint needs. A read-only Bitstamp key hits exactly
+ *                     this on `fetchWithdrawals`, which posts to
+ *                     /v2/withdrawal-requests/: Bitstamp answers "No
+ *                     permission found" and CCXT raises PermissionDenied.
+ *
+ * Everything else still throws, deliberately:
+ *
+ *   AuthenticationError  The credential itself is rejected, so every source
+ *                        would fail. "Reconnect this account" is then the
+ *                        right advice, and a partial success would bury it.
+ *   Rate limits, outages Transient. Recording a partial success advances the
+ *                        cursor past rows that were never read, and the next
+ *                        sync starts after them. Failing is what makes the
+ *                        retry fetch them.
+ */
+function isSurvivableSourceError(e: unknown): 'unsupported' | 'denied' | null {
+  const cls = e instanceof Error ? errorClassName(e) : '';
+  const msg = e instanceof Error ? e.message : String(e);
+  if (cls === 'NotSupported' || /NotSupported/i.test(msg)) return 'unsupported';
+  if (cls === 'PermissionDenied') return 'denied';
+  return null;
+}
+
+/**
  * Stream three CCXT data sources (trades, deposits, withdrawals) into one
  * combined NormalizedTransaction list. Each source contributes only what
  * the exchange's `has` map says it supports.
  *
+ * A source that is refused is skipped and named, not fatal. Before this, one
+ * refused source threw and discarded the rows the other sources had already
+ * returned successfully, so a Bitstamp key that could read its whole trade
+ * history synced nothing at all and reported an auth failure.
+ *
+ * The exception is a sweep where EVERY attempted source was refused. Nothing
+ * was read, so there is no data to protect, and a hard failure carries more
+ * information to the customer than an empty partial success.
+ *
  * `since` is unix ms , what CCXT expects as its `since` parameter.
  */
-async function fetchAllSince(
+export async function fetchAllSince(
   exchange: any,
   exchangeId: string,
   since: number | undefined,
-): Promise<NormalizedTransaction[]> {
+): Promise<CcxtSourceSweep> {
   const out: NormalizedTransaction[] = [];
+  const denied: string[] = [];
+  let attempted = 0;
+  let skippedAny = 0;
+  let firstDenial: unknown = null;
+
+  /**
+   * Run one source, absorbing only the failures classified as survivable.
+   *
+   * `source` is the domain word that reaches the wire ("withdrawals"), kept
+   * separate from `method` so the published contract does not pin itself to
+   * a CCXT method name we might one day stop calling. Both are OR's own
+   * vocabulary, never upstream text, so both are safe to log.
+   */
+  async function sweep(source: string, method: string, run: () => Promise<void>): Promise<void> {
+    attempted++;
+    try {
+      await run();
+    } catch (e) {
+      const kind = isSurvivableSourceError(e);
+      if (kind === null) throw e;
+      skippedAny++;
+      if (kind === 'denied') {
+        denied.push(source);
+        if (firstDenial === null) firstDenial = e;
+      }
+      console.warn(
+        `[ccxt:${exchangeId}] ${method} ${kind === 'denied' ? 'refused by the provider (missing key permission)' : 'unsupported'}; skipping`,
+      );
+    }
+  }
 
   // ---- Trades ----------------------------------------------------------
   if (exchange.has?.fetchMyTrades) {
-    try {
+    await sweep('trades', 'fetchMyTrades', async () => {
       // Pass undefined symbol to fetch all symbols at once. Most major
       // exchanges support this (Binance, Coinbase, Kraken, etc.). If a
       // specific exchange requires a symbol, CCXT throws NotSupported and
@@ -322,48 +417,38 @@ async function fetchAllSince(
       for (const t of trades ?? []) {
         out.push(normalizeTrade(t, exchangeId));
       }
-    } catch (e) {
-      const cls = e instanceof Error ? errorClassName(e) : '';
-      const msg = e instanceof Error ? e.message : String(e);
-      if (cls !== 'NotSupported' && !/NotSupported/i.test(msg)) {
-        // Not a "this feature isn't here" error , surface it.
-        throw e;
-      }
-      console.warn(`[ccxt:${exchangeId}] fetchMyTrades unsupported without symbol; skipping`);
-    }
+    });
   }
 
   // ---- Deposits --------------------------------------------------------
   if (exchange.has?.fetchDeposits) {
-    try {
+    await sweep('deposits', 'fetchDeposits', async () => {
       const deposits = await exchange.fetchDeposits(undefined, since, 500);
       for (const d of deposits ?? []) {
         out.push(normalizeTransfer(d, 'deposit', 'in', exchangeId));
       }
-    } catch (e) {
-      const cls = e instanceof Error ? errorClassName(e) : '';
-      const msg = e instanceof Error ? e.message : String(e);
-      if (cls !== 'NotSupported' && !/NotSupported/i.test(msg)) throw e;
-      console.warn(`[ccxt:${exchangeId}] fetchDeposits unsupported; skipping`);
-    }
+    });
   }
 
   // ---- Withdrawals -----------------------------------------------------
   if (exchange.has?.fetchWithdrawals) {
-    try {
+    await sweep('withdrawals', 'fetchWithdrawals', async () => {
       const withdrawals = await exchange.fetchWithdrawals(undefined, since, 500);
       for (const w of withdrawals ?? []) {
         out.push(normalizeTransfer(w, 'withdrawal', 'out', exchangeId));
       }
-    } catch (e) {
-      const cls = e instanceof Error ? errorClassName(e) : '';
-      const msg = e instanceof Error ? e.message : String(e);
-      if (cls !== 'NotSupported' && !/NotSupported/i.test(msg)) throw e;
-      console.warn(`[ccxt:${exchangeId}] fetchWithdrawals unsupported; skipping`);
-    }
+    });
   }
 
-  return out;
+  // Nothing was read at all and at least one source was refused: the key can
+  // see nothing, so rethrow and let the caller classify it rather than
+  // reporting a partial sync of zero rows. There is no data to protect here,
+  // and a real error tells the customer more than an empty success.
+  if (firstDenial !== null && attempted > 0 && skippedAny === attempted && out.length === 0) {
+    throw firstDenial;
+  }
+
+  return { transactions: out, denied };
 }
 
 /**
@@ -446,9 +531,16 @@ export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
     const exchange = await instantiateExchange(exchangeId, credentials);
     const since = cursor ? Number(cursor) : undefined;
 
-    const transactions = await fetchAllSince(exchange, exchangeId, since);
+    const { transactions, denied } = await fetchAllSince(exchange, exchangeId, since);
 
     // Cursor = highest timestamp (unix ms) seen across the batch.
+    //
+    // Note the cursor still advances when a source was skipped, so rows that
+    // source would have returned below the new cursor are not picked up if the
+    // key later gains the missing permission. Re-reading them needs a
+    // reconnect, and `partial` is what makes that visible. Holding the cursor
+    // back instead would re-fetch the full history on every sync forever,
+    // since a read-only key is the steady state rather than a transient one.
     let maxSeen = since ?? 0;
     for (const tx of transactions) {
       const ts = new Date(tx.timestamp).getTime();
@@ -460,6 +552,7 @@ export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
     return {
       transactions,
       next_cursor: maxSeen > 0 ? String(maxSeen) : null,
+      ...(denied.length > 0 ? { partial: true, denied_sources: denied } : {}),
     };
   }
 
@@ -479,6 +572,7 @@ export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
     // gated behind a beta badge that pollutes the picker UI.
     status: 'live',
     category: 'exchange',
+    custody: 'custodial',
     tags,
     popularity,
     multiWallet: false, // single synthetic wallet per exchange in v1
