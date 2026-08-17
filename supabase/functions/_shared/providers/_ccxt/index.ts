@@ -240,63 +240,75 @@ async function instantiateExchange(
  * (or-discover-wallets) maps them to HTTP status and customer copy via the
  * error catalog. A bad key must NOT look like a downed exchange.
  */
+/**
+ * Inner discover credential check, separated from instantiateExchange so
+ * tests can inject fake exchange objects without loading ccxt.
+ *
+ * Exported with a leading underscore to signal test-internal: callers outside
+ * of this module's own test file should not depend on it.
+ */
+export async function _discoverExchange(
+  slug: string,
+  exchangeId: string,
+  exchange: any,
+  credentials: Record<string, unknown>,
+): Promise<DiscoveredWallet[]> {
+  // `accountKey` is set when fetchBalance succeeds. It is a stable fingerprint
+  // for reconnect deduplication: or-link-complete can tell a reconnect from a
+  // new connect. It is NOT a guarantee that credentials were validated for every
+  // exchange: only exchanges that advertise fetchBalance run this path.
+  let accountKey: string | undefined;
+
+  if (exchange.has?.fetchBalance) {
+    try {
+      await exchange.fetchBalance();
+      // fetchBalance succeeded: compute a stable, non-reversible fingerprint for
+      // reconnect dedup. sha256(exchangeId + ":" + apiKey) is unique per account
+      // and never leaves the server (discovery_sessions is service-role only).
+      const keyMaterial = `${exchangeId}:${String(credentials.apiKey ?? '')}`;
+      const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyMaterial));
+      accountKey = Array.from(new Uint8Array(hashBuf))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+    } catch (raw) {
+      const err = raw instanceof Error ? raw : new Error(String(raw));
+      const code = classifyUpstreamError(err.message, errorClassName(err));
+      // Tag the rethrown error so or-discover-wallets can return the right
+      // HTTP status and customer copy without collapsing distinct codes.
+      const out = new Error(`[ccxt:${exchangeId}] discover credential check: ${code}`);
+      (out as any).upstreamCode = code;
+      throw out;
+    }
+  } else {
+    // Exchange does not advertise fetchBalance. Reject at discovery so callers
+    // get a distinct error code (UPSTREAM_UNSUPPORTED) rather than accepting a
+    // wallet that will fail every subsequent sync. This should be rare:
+    // fetchBalance is supported by virtually all CCXT exchanges that require
+    // authentication. A thrown error at discovery surfaces a meaningful
+    // rejection immediately instead of deferring failure to the first sync.
+    const unsupported = new Error(
+      `[ccxt:${exchangeId}] discover: exchange does not advertise fetchBalance: UPSTREAM_UNSUPPORTED`,
+    );
+    (unsupported as any).upstreamCode = 'UPSTREAM_UNSUPPORTED';
+    throw unsupported;
+  }
+
+  return [
+    {
+      external_wallet_id: slug,
+      ...(accountKey !== undefined ? { account_key: accountKey } : {}),
+      currency: 'USD', // exchange wallets are multi-currency; this is the display default
+      label: `${slug} account`,
+    },
+  ];
+}
+
 function buildDiscover(slug: string, exchangeId: string) {
   return async function discoverWallets(
     credentials: Record<string, unknown>,
   ): Promise<DiscoveredWallet[]> {
     const exchange = await instantiateExchange(exchangeId, credentials);
-
-    // `accountKey` is set when fetchBalance succeeds. It is a stable fingerprint
-    // for reconnect deduplication: or-link-complete can tell a reconnect from a
-    // new connect. It is NOT a guarantee that credentials were validated for every
-    // exchange: exchanges that do not advertise fetchBalance skip this path and
-    // return no accountKey (see else-branch below).
-    let accountKey: string | undefined;
-
-    if (exchange.has?.fetchBalance) {
-      try {
-        await exchange.fetchBalance();
-        // fetchBalance succeeded: compute a stable, non-reversible fingerprint for
-        // reconnect dedup. sha256(exchangeId + ":" + apiKey) is unique per account
-        // and never leaves the server (discovery_sessions is service-role only).
-        // This records that fetchBalance ran for this exchange, not that all
-        // exchanges enforce it (see else-branch for those that skip it).
-        const keyMaterial = `${exchangeId}:${String(credentials.apiKey ?? '')}`;
-        const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyMaterial));
-        accountKey = Array.from(new Uint8Array(hashBuf))
-          .map((b) => b.toString(16).padStart(2, '0'))
-          .join('');
-      } catch (raw) {
-        const err = raw instanceof Error ? raw : new Error(String(raw));
-        const code = classifyUpstreamError(err.message, errorClassName(err));
-        // Tag the rethrown error so or-discover-wallets can return the right
-        // HTTP status and customer copy without collapsing distinct codes.
-        const out = new Error(`[ccxt:${exchangeId}] discover credential check: ${code}`);
-        (out as any).upstreamCode = code;
-        throw out;
-      }
-    } else {
-      // Exchange does not advertise fetchBalance. Reject at discovery so callers
-      // get a distinct error code (UPSTREAM_UNSUPPORTED) rather than accepting a
-      // wallet that will fail every subsequent sync. This should be rare:
-      // fetchBalance is supported by virtually all CCXT exchanges that require
-      // authentication. A thrown error at discovery surfaces a meaningful
-      // rejection immediately instead of deferring failure to the first sync.
-      const unsupported = new Error(
-        `[ccxt:${exchangeId}] discover: exchange does not advertise fetchBalance: UPSTREAM_UNSUPPORTED`,
-      );
-      (unsupported as any).upstreamCode = 'UPSTREAM_UNSUPPORTED';
-      throw unsupported;
-    }
-
-    return [
-      {
-        external_wallet_id: slug,
-        ...(accountKey !== undefined ? { account_key: accountKey } : {}),
-        currency: 'USD', // exchange wallets are multi-currency; this is the display default
-        label: `${slug} account`,
-      },
-    ];
+    return _discoverExchange(slug, exchangeId, exchange, credentials);
   };
 }
 
