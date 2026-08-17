@@ -55,6 +55,7 @@ import {
   isStealthInlineSlug,
   sendStealthInitOnReady,
 } from "./connect/_stealth-inline-init";
+import { resolveConnectStep } from "./connect/_connect-routing";
 
 // Same allowlist the Stealth widget and Sparrow path use to pin postMessage
 // targetOrigin. Baked into the bundle at build time from the env var.
@@ -1156,15 +1157,17 @@ function ConnectPageInner() {
           // clicked the tile inside OR's picker. Without this, an
           // integrator passing ?provider=quiltt lands on an empty
           // credentials form (no credentialFields).
-          if (manifestRes.connectUrl) {
-            // Same split as the picker click path below: Sparrow and xpub
-            // run inline so this chunk stays loaded to post or-link-success.
-            if (isStealthInlineSlug(manifestRes.slug)) {
-              setPlatform(platformRes);
-              setManifest(manifestRes);
-              setStep("stealth-inline");
-              return;
-            }
+          // resolveConnectStep checks slug BEFORE connectUrl so stealth-inline
+          // providers (sparrow, xpub) are caught even when their manifests
+          // carry no connectUrl.
+          const deepStep = resolveConnectStep(manifestRes.slug, manifestRes.connectUrl);
+          if (deepStep === "stealth-inline") {
+            setPlatform(platformRes);
+            setManifest(manifestRes);
+            setStep("stealth-inline");
+            return;
+          }
+          if (deepStep === "navigate") {
             navigateToClientSideManifest(manifestRes, search, initialFragmentWidgetToken).catch(
               (err) => setLoadError(err instanceof Error ? err.message : String(err)),
             );
@@ -1197,17 +1200,17 @@ function ConnectPageInner() {
       // Client-side-manifest providers (Quiltt, Sparrow) have a dedicated
       // connect route rather than the generic credential form. Route there
       // instead of going to enter-credentials.
-      if (m.connectUrl) {
-        // Sparrow and xpub run inline. Navigating to their dedicated pages
-        // unloads this chunk, and this chunk is the only place
-        // `or-link-success` is posted from, so the host app could never be
-        // told the connection completed. Quiltt still navigates: it needs a
-        // server-minted session before its page can render.
-        if (isStealthInlineSlug(m.slug)) {
-          setManifest(m);
-          setStep("stealth-inline");
-          return;
-        }
+      // resolveConnectStep checks slug BEFORE connectUrl so stealth-inline
+      // providers (sparrow, xpub) are caught even when their manifests
+      // carry no connectUrl. Quiltt still navigates: it needs a server-minted
+      // session before its page can render.
+      const pickerStep = resolveConnectStep(m.slug, m.connectUrl);
+      if (pickerStep === "stealth-inline") {
+        setManifest(m);
+        setStep("stealth-inline");
+        return;
+      }
+      if (pickerStep === "navigate") {
         await navigateToClientSideManifest(m, search, initialFragmentWidgetToken);
         return;
       }
