@@ -239,9 +239,11 @@ jobs:
           fi
           APPLIED=$(echo "$RESPONSE" | jq -r '.[].version' | sort -u)
 
+          SCANNED=0
           PENDING=0
           PENDING_NAMES=""
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
+            SCANNED=$((SCANNED + 1))
             BASENAME=$(basename "$FILE")
             VERSION="${BASENAME%%_*}"
             if [ -n "$APPLIED" ] && echo "$APPLIED" | grep -qx "$VERSION"; then
@@ -252,6 +254,11 @@ jobs:
             PENDING=$((PENDING + 1))
           done
 
+          echo "scanned ${SCANNED} migration file(s) in ${MIG_DIR}."
+          if [ "$SCANNED" -eq 0 ]; then
+            echo "::error::migrations directory present but no .sql files found; drift state unknown"
+            exit 1
+          fi
           echo
           echo "${PENDING} migration(s) pending on ${SUPABASE_REF}."
           if [ "$PENDING" -gt 0 ]; then
