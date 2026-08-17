@@ -33,12 +33,23 @@ const MAIN_DOMAIN_URL = process.env.SMOKE_PROD_MAIN_URL ?? "";
  */
 const MARKETING_TITLE_SIGNALS = ["The private finance app", "marketing"];
 
-async function assertAppTitle(title: string, label: string): Promise<void> {
+/**
+ * Both hosts serve the same SPA shell, and that shell's static index.html
+ * ships the marketing-flavoured default title. The per-route title is applied
+ * by the client router after hydration, so a one-shot read of page.title()
+ * races the router and sees the shell string instead of the route string.
+ * Poll instead of sampling once: a genuinely misdirected deploy never settles
+ * on an app title, so it still fails, just after the timeout rather than
+ * instantly.
+ */
+async function assertAppTitle(page: Page, label: string): Promise<void> {
   for (const signal of MARKETING_TITLE_SIGNALS) {
-    expect(
-      title,
-      `${label}: <title> must not contain marketing signal "${signal}"`,
-    ).not.toMatch(new RegExp(signal, "i"));
+    await expect
+      .poll(() => page.title(), {
+        message: `${label}: rendered <title> must not contain marketing signal "${signal}"`,
+        timeout: 10_000,
+      })
+      .not.toMatch(new RegExp(signal, "i"));
   }
 }
 
@@ -47,6 +58,16 @@ async function assertSparrowHeading(page: Page): Promise<void> {
     page.getByRole("heading", { name: /sparrow wallet/i, level: 1 }),
     "Sparrow h1 heading must be visible (not a marketing or error page)",
   ).toBeVisible({ timeout: 10_000 });
+}
+
+/**
+ * Read the title only once the route has actually rendered. Every title
+ * comparison in this file must go through here, otherwise it compares shell
+ * titles and passes for the wrong reason.
+ */
+async function renderedTitle(page: Page): Promise<string> {
+  await assertSparrowHeading(page);
+  return page.title();
 }
 
 test.describe("Sparrow host-routing smoke (DL-0439)", () => {
@@ -70,8 +91,8 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
     async ({ page }) => {
       const res = await page.goto(CONNECT_HOST_URL);
       expect(res?.status(), `${CONNECT_HOST_URL} must return HTTP 200`).toBe(200);
-      await assertAppTitle(await page.title(), CONNECT_HOST_URL);
       await assertSparrowHeading(page);
+      await assertAppTitle(page, CONNECT_HOST_URL);
     },
   );
 
@@ -81,14 +102,15 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
       // Navigate to the canonical URL and capture the client-side-rendered
       // title. A raw request.get() returns the static SPA shell before any
       // route title is set, so the regex extraction always returns null and
-      // the parity check silently does nothing. page.goto() waits for the
-      // route to fully render.
+      // the parity check silently does nothing. renderedTitle() waits for the
+      // Sparrow heading first, which is the observable proof that the client
+      // router has taken over and applied the per-route title.
       const canonicalRes = await page.goto(CONNECT_HOST_URL);
       expect(
         canonicalRes?.status(),
         `${CONNECT_HOST_URL} must return HTTP 200`,
       ).toBe(200);
-      const canonicalTitle = await page.title();
+      const canonicalTitle = await renderedTitle(page);
       expect(
         canonicalTitle,
         "connect.orangerails.com/sparrow must set a non-empty rendered <title>",
@@ -100,13 +122,12 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
         mainRes?.status(),
         `${MAIN_DOMAIN_URL} must return HTTP 200`,
       ).toBe(200);
-      const title = await page.title();
-      await assertAppTitle(title, MAIN_DOMAIN_URL);
+      const title = await renderedTitle(page);
+      await assertAppTitle(page, MAIN_DOMAIN_URL);
       expect(
         title,
         "orangerails.com/connect/sparrow must serve the same rendered <title> as connect.orangerails.com/sparrow",
       ).toBe(canonicalTitle);
-      await assertSparrowHeading(page);
     },
   );
 });
