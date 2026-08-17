@@ -206,12 +206,28 @@ jobs:
             exit 1
           fi
 
-      - name: Report pending DB migrations (read-only, never applies)
-        # Runs on every deploy so schema drift is visible instead of silent.
-        # Applying is a separate, opt-in job (apply-migrations) below.
+
+  check-pending-migrations:
+    needs: [deploy]
+    # Runs after every successful deploy so schema drift is its OWN visible
+    # check-run. The deploy job stays green when edge functions ship; this job
+    # goes red when migrations are pending, making drift impossible to miss
+    # without blocking the deploy gate. This job is NOT in branch-protection
+    # required checks, so it never prevents a merge on its own.
+    if: always() && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check pending DB migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_REF: ${{ steps.target.outputs.supabase_ref }}
+          SUPABASE_REF: ${{ needs.deploy.outputs.supabase_ref }}
         run: |
           set -uo pipefail
           MIG_DIR="supabase/migrations"
@@ -233,9 +249,8 @@ jobs:
             sleep 10
           done
           if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
-            echo "::warning::migration check returned invalid JSON"
-            echo "COULD NOT CHECK PENDING MIGRATIONS"
-            exit 0
+            echo "::error::migration check returned invalid JSON; drift state unknown"
+            exit 1
           fi
           APPLIED=$(echo "$RESPONSE" | jq -r '.[].version' | sort -u)
 
@@ -269,17 +284,8 @@ jobs:
               echo "| dev | DBA applies and verifies |"
               echo "| prod | two-party: founder + CTO |"
             } >> "$GITHUB_STEP_SUMMARY"
-            # On a workflow_dispatch with apply_migrations=true the apply-migrations job
-            # handles these migrations. On any other trigger this step is ADVISORY: it
-            # reports drift, it does not fail the deploy. Applying a migration is a
-            # separate gated act, so a deploy that shipped its edge functions must not
-            # be reported as failed because a schema change has not been approved yet.
-            if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ inputs.apply_migrations }}" != "true" ]; then
-              echo "::warning::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- schema out of sync. Apply via workflow_dispatch with apply_migrations=true."
-            else
-              echo "" >> "$GITHUB_STEP_SUMMARY"
-              echo "Apply job running next -- see below." >> "$GITHUB_STEP_SUMMARY"
-            fi
+            echo "::error::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- schema out of sync. Apply via workflow_dispatch with apply_migrations=true."
+            exit 1
           else
             echo "Schema in sync on ${SUPABASE_REF}." >> "$GITHUB_STEP_SUMMARY"
           fi
