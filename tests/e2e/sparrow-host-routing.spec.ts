@@ -33,12 +33,31 @@ const MAIN_DOMAIN_URL = process.env.SMOKE_PROD_MAIN_URL ?? "";
  */
 const MARKETING_TITLE_SIGNALS = ["The private finance app", "marketing"];
 
-async function assertAppTitle(title: string, label: string): Promise<void> {
+/**
+ * Both hosts serve the same SPA shell, and that shell's static index.html
+ * ships the marketing-flavoured default title. The per-route title is applied
+ * by the client router after hydration, so a one-shot read of page.title()
+ * races the router and sees the shell string instead of the route string.
+ * Poll instead of sampling once: a genuinely misdirected deploy never settles
+ * on an app title, so it still fails, just after the timeout rather than
+ * instantly.
+ *
+ * LOAD-BEARING ORDERING. This is a negative assertion, so an empty or
+ * not-yet-set title satisfies it on the very first tick. It only means
+ * anything because assertSparrowHeading() runs first and because the static
+ * shell title genuinely carries a marketing signal, which is what gives the
+ * poll something real to wait out. Always call the heading gate before this.
+ * Reordering or dropping it makes this assertion vacuous while it keeps
+ * passing, which is worse than a failure because nobody goes looking.
+ */
+async function assertAppTitle(page: Page, label: string): Promise<void> {
   for (const signal of MARKETING_TITLE_SIGNALS) {
-    expect(
-      title,
-      `${label}: <title> must not contain marketing signal "${signal}"`,
-    ).not.toMatch(new RegExp(signal, "i"));
+    await expect
+      .poll(() => page.title(), {
+        message: `${label}: rendered <title> must not contain marketing signal "${signal}"`,
+        timeout: 10_000,
+      })
+      .not.toMatch(new RegExp(signal, "i"));
   }
 }
 
@@ -47,6 +66,35 @@ async function assertSparrowHeading(page: Page): Promise<void> {
     page.getByRole("heading", { name: /sparrow wallet/i, level: 1 }),
     "Sparrow h1 heading must be visible (not a marketing or error page)",
   ).toBeVisible({ timeout: 10_000 });
+}
+
+/**
+ * Read the title only once the route has fully settled. Polls until the title
+ * is no longer a marketing-signal value, proving both that the heading is
+ * visible AND that the title effect has flushed. A one-shot read after the
+ * heading becomes visible still races the title effect; polling closes that gap.
+ */
+async function renderedTitle(page: Page): Promise<string> {
+  await assertSparrowHeading(page);
+  let settled = "";
+  await expect
+    .poll(
+      async () => {
+        const t = await page.title();
+        const isShell = MARKETING_TITLE_SIGNALS.some((s) =>
+          new RegExp(s, "i").test(t),
+        );
+        if (!isShell) settled = t;
+        return isShell;
+      },
+      {
+        message:
+          "rendered <title> must settle to a non-marketing value after hydration",
+        timeout: 10_000,
+      },
+    )
+    .toBe(false);
+  return settled;
 }
 
 test.describe("Sparrow host-routing smoke (DL-0439)", () => {
@@ -70,8 +118,8 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
     async ({ page }) => {
       const res = await page.goto(CONNECT_HOST_URL);
       expect(res?.status(), `${CONNECT_HOST_URL} must return HTTP 200`).toBe(200);
-      await assertAppTitle(await page.title(), CONNECT_HOST_URL);
       await assertSparrowHeading(page);
+      await assertAppTitle(page, CONNECT_HOST_URL);
     },
   );
 
@@ -81,18 +129,20 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
       // Navigate to the canonical URL and capture the client-side-rendered
       // title. A raw request.get() returns the static SPA shell before any
       // route title is set, so the regex extraction always returns null and
-      // the parity check silently does nothing. page.goto() waits for the
-      // route to fully render.
+      // the parity check silently does nothing. renderedTitle() waits for the
+      // Sparrow heading first, which is the observable proof that the client
+      // router has taken over and applied the per-route title.
       const canonicalRes = await page.goto(CONNECT_HOST_URL);
       expect(
         canonicalRes?.status(),
         `${CONNECT_HOST_URL} must return HTTP 200`,
       ).toBe(200);
-      const canonicalTitle = await page.title();
-      expect(
-        canonicalTitle,
-        "connect.orangerails.com/sparrow must set a non-empty rendered <title>",
-      ).toBeTruthy();
+      // renderedTitle() polls until the title is no longer a marketing value,
+      // proving hydration completed on the canonical host. assertAppTitle then
+      // validates the settled title, so a canonical host stuck on the shell
+      // still fails rather than seeding a bogus canonicalTitle.
+      const canonicalTitle = await renderedTitle(page);
+      await assertAppTitle(page, CONNECT_HOST_URL);
 
       // Check the main-domain URL.
       const mainRes = await page.goto(MAIN_DOMAIN_URL);
@@ -100,13 +150,21 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
         mainRes?.status(),
         `${MAIN_DOMAIN_URL} must return HTTP 200`,
       ).toBe(200);
-      const title = await page.title();
-      await assertAppTitle(title, MAIN_DOMAIN_URL);
-      expect(
-        title,
-        "orangerails.com/connect/sparrow must serve the same rendered <title> as connect.orangerails.com/sparrow",
-      ).toBe(canonicalTitle);
+      // AC 2 requires the Sparrow h1 to be visible on this host too, not just
+      // on the canonical one. It is also the gate that keeps the assertAppTitle
+      // call below from being satisfied by an empty title on the first tick.
       await assertSparrowHeading(page);
+      await assertAppTitle(page, MAIN_DOMAIN_URL);
+      // Poll until the main-domain title matches the canonical. Comparing two
+      // captured strings could pass if both reads sampled the shell; polling
+      // here closes that gap.
+      await expect
+        .poll(() => page.title(), {
+          message:
+            "orangerails.com/connect/sparrow must serve the same rendered <title> as connect.orangerails.com/sparrow",
+          timeout: 10_000,
+        })
+        .toBe(canonicalTitle);
     },
   );
 });
