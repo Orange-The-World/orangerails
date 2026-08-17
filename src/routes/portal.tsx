@@ -1,5 +1,6 @@
-import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
+import { createFileRoute, Link, redirect } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
+import { supabase } from '@/integrations/supabase/client';
 import { useRole, type RoleState } from '@/hooks/useRole';
 import {
   fetchCustomer,
@@ -15,6 +16,12 @@ import {
 import { formatError } from '@/lib/format-error';
 
 export const Route = createFileRoute('/portal')({
+  beforeLoad: async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      throw redirect({ to: '/login' });
+    }
+  },
   component: PortalPage,
 });
 
@@ -27,13 +34,6 @@ interface PortalBundle {
 
 function PortalPage() {
   const role = useRole();
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    if (!role.loading && role.role === 'anonymous') {
-      navigate({ to: '/login' });
-    }
-  }, [role.loading, role.role, navigate]);
 
   if (role.loading) {
     return <Centered>Loading your account</Centered>;
