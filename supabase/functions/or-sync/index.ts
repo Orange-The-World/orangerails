@@ -446,9 +446,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               }
               const quilttConnIdSink = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
               if (!quilttConnIdSink) {
+                // Do NOT set processed_at here: stamping processed alongside an error
+                // marks the event as done in the health metric even though the sync
+                // never ran (CTO ruling, DL-1198). Leave it null so it retries.
                 await ctx.serviceClient
                   .from('quiltt_webhook_inbox')
-                  .update({ processed_at: new Date().toISOString(), last_error: 'event missing record.id' })
+                  .update({ last_error: 'event missing record.id' })
                   .eq('event_id', ev.event_id);
                 continue;
               }
@@ -728,9 +731,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             }
             const quilttConnId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
             if (!quilttConnId) {
+              // Do NOT set processed_at here: same green-over-failure rule as the
+              // sink path above (CTO ruling, DL-1198). Leave processed_at null.
               await ctx.serviceClient
                 .from('quiltt_webhook_inbox')
-                .update({ processed_at: new Date().toISOString(), last_error: 'event missing record.id' })
+                .update({ last_error: 'event missing record.id' })
                 .eq('event_id', ev.event_id);
               continue;
             }
