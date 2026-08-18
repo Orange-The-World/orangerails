@@ -15,6 +15,7 @@ jobs:
   lint-and-build:
     name: Lint + build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -77,6 +78,7 @@ jobs:
   deno-typecheck:
     name: Typecheck edge functions (Deno)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Why this job exists: until 2026-07-26 CI never looked at supabase/functions
     # at all. `bun run lint` carries continue-on-error (see the note on it above)
     # and `bun run build` only builds the Vite frontend, so every one of the 37
@@ -218,6 +220,7 @@ jobs:
   deno-test:
     name: Test edge functions (Deno)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
@@ -320,6 +323,7 @@ jobs:
   vitest:
     name: Unit tests (vitest)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Why this job exists: src/**/*.test.ts carries discriminating tests for the
     # stealth/sync orchestrator: birthday height rejection and the stored-cursor
     # short-circuit requirement. Without this job those tests sit in the tree
@@ -349,6 +353,7 @@ jobs:
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Runs against the already-deployed dev site. Two separate things deploy
     # that site, and neither of them is this workflow:
     #   frontend      -> Cloudflare Pages, from its own git integration, on
@@ -464,6 +469,7 @@ jobs:
   playwright-prod-smoke:
     name: Playwright prod smoke -- Sparrow host routing (DL-0439)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: lint-and-build
     # Only meaningful on pushes to dev/prod where the live hosts are the target.
     # PR preview URLs are not the production hosts, so this job runs on push
@@ -505,6 +511,7 @@ jobs:
   playwright-stealth-cursor:
     name: Playwright stealth cursor-write proof (DL-0649)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: lint-and-build
     # Explicit, because the reporting step below is the ONLY way the assertion
     # output leaves this runner. Without this block the job inherits the
