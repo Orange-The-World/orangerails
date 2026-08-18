@@ -294,7 +294,7 @@ def main():
         " DO NOTHING;"
     )
     try:
-        r = subprocess.run(["psql", "-q", "-v", "ON_ERROR_STOP=1", "-f", "-"],
+        r = subprocess.run(["psql", "-v", "ON_ERROR_STOP=1", "-f", "-"],
                            input=sql, capture_output=True, text=True, timeout=120, env=PG)
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"INSERT error: {e}")
@@ -302,8 +302,13 @@ def main():
     if r.returncode != 0:
         log(f"INSERT failed: {r.stderr.strip()[:300]}")
         sys.exit(1)
+    # Parse rows actually inserted from the psql command tag ("INSERT 0 N").
+    # Dropping -q makes psql emit the tag to stdout; under DO NOTHING the tag
+    # counts only rows the conflict rule did not skip, not rows offered.
+    tag = r.stdout.strip().split()
+    inserted = int(tag[-1]) if len(tag) >= 3 and tag[0] == "INSERT" else -1
     log(
-        f"wrote {len(rows)} Tier 3 cross-rate rows "
+        f"wrote Tier 3 cross-rate rows: attempted={len(rows)} inserted={inserted} "
         f"({len(btc_usd_buckets)} anchor bucket(s) in 2hr window x {len(TIER3_CROSSES)} pairs; "
         f"DO NOTHING skips already-written per-pair rows)"
     )
