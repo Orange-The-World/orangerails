@@ -119,6 +119,9 @@ def _pg_env():
         "PGUSER": urllib.parse.unquote(p.username or ""),
         "PGPASSWORD": urllib.parse.unquote(p.password or ""),
         "PGDATABASE": (p.path or "/").lstrip("/"),
+        # Covers every psql session this script opens: derive_needs_orbi_row
+        # DISTINCT scan, anchor SELECT, and INSERT. No per-call flag needed.
+        "PGOPTIONS": "-c max_parallel_workers_per_gather=0",
     }
 
 
@@ -139,25 +142,64 @@ def log(msg):
 
 
 def q(sql, timeout=30):
-    r = subprocess.run(["psql", "-At", "-F", "|", "-c", sql],
-                       capture_output=True, text=True, timeout=timeout, env=PG)
+    try:
+        r = subprocess.run(["psql", "-At", "-F", "|", "-c", sql],
+                           capture_output=True, text=True, timeout=timeout, env=PG)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"psql error: {e}")
+        return None
     if r.returncode != 0:
         log(f"psql err: {r.stderr.strip()[:200]}")
         return None
     return r.stdout.strip()
 
 
-def fetch_btc_usd():
-    res = q(
-        "SELECT bucket_ts::text, rate::text FROM exchange_rates "
-        "WHERE source_currency='BTC' AND target_currency='USD' "
-        "AND source_authority='ORBI' AND provenance='forward-fill' "
-        "AND granularity='1m' ORDER BY bucket_ts DESC LIMIT 1"
+def fetch_btc_usd_window():
+    """Fetch BTC/USD anchor buckets from the last 2 hours (DL-1363).
+
+    Returns all buckets in the 2hr window, newest first. The INSERT uses
+    DO NOTHING on (source_currency, target_currency, bucket_ts,
+    source_authority, granularity, product) so already-written rows for a
+    given pair are skipped atomically -- no read-before-write needed.
+
+    Anti-join on product='ORBI-M' was removed because it asked a per-bucket
+    question (any ORBI-M row at this bucket?) rather than a per-pair question
+    (ORBI-M row for this specific target_currency?). Pairs with 100% coverage
+    (CAD, EUR) were excluding every bucket for all other pairs.
+
+    PGOPTIONS (set in _pg_env) carries max_parallel_workers_per_gather=0
+    for the whole session; no per-call SET flag is needed.
+
+    Returns a list of (bucket_ts_str, rate) pairs, newest first.
+    """
+    anchor_sql = (
+        "SELECT a.bucket_ts::text, a.rate::text FROM exchange_rates a "
+        "WHERE a.source_currency='BTC' AND a.target_currency='USD' "
+        "AND a.source_authority='ORBI' AND a.provenance='forward-fill' "
+        "AND a.granularity='1m' AND a.bucket_ts > NOW() - INTERVAL '2 hours' "
+        "ORDER BY a.bucket_ts DESC"
     )
+    try:
+        r = subprocess.run(
+            ["psql", "-At", "-F", "|", "-c", anchor_sql],
+            capture_output=True, text=True, timeout=30, env=PG,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"psql error (fetch_btc_usd_window): {e}")
+        return []
+    if r.returncode != 0:
+        log(f"psql err (fetch_btc_usd_window): {r.stderr.strip()[:200]}")
+        return []
+    res = r.stdout.strip()
     if not res:
-        return None, None
-    parts = res.split("|")
-    return parts[0], float(parts[1])
+        return []
+    buckets = []
+    for line in res.splitlines():
+        line = line.strip()
+        if "|" in line:
+            ts, rate = line.split("|", 1)
+            buckets.append((ts.strip(), float(rate.strip())))
+    return buckets
 
 
 def fetch_usd_x(authority, target):
@@ -188,36 +230,55 @@ def main():
     except OSError as e:
         log(f"WARNING: could not acquire advisory lock ({e}); proceeding without lock")
 
-    btc_usd_ts, btc_usd = fetch_btc_usd()
-    if btc_usd is None:
+    # DL-1363: fetch all BTC/USD anchor buckets in the 2hr window rather than
+    # LIMIT 1. Holes from late-arriving anchors are repaired on next invocation.
+    btc_usd_buckets = fetch_btc_usd_window()
+    if not btc_usd_buckets:
         log("no BTC/USD anchor, aborting")
         sys.exit(1)
+    log(
+        f"BTC/USD anchor: {len(btc_usd_buckets)} bucket(s) in 2hr window, "
+        f"latest {btc_usd_buckets[0][0]}"
+    )
 
     needs_orbi_row = derive_needs_orbi_row()
     log(f"companion-ORBI targets: {sorted(needs_orbi_row)}")
 
-    rows = []
+    # Fetch the latest USD/X rate once per pair. Using the latest available
+    # rate for backfilled buckets is acceptable: rates change slowly, and
+    # fetching per-bucket historical rates would multiply DB round-trips by
+    # the window size (~120x).
+    usd_x_rates = {}
     for authority, source_ccy, target_ccy in TIER3_CROSSES:
-        usd_x = fetch_usd_x(authority, target_ccy)
-        if usd_x is None:
+        rate = fetch_usd_x(authority, target_ccy)
+        if rate is None:
             log(f"no {authority} {source_ccy}/{target_ccy}, skipping")
-            continue
-        btc_x = btc_usd * usd_x
-        composite_via = f"BTC-USD * USD-{target_ccy}-{authority}"
-        rows.append(
-            "('BTC', '" + target_ccy + "', '" + btc_usd_ts + "', "
-            f"'1m', 'ORBI-M', {btc_x}, 'C-composite', true, "
-            f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', '{authority}')"
-        )
-        # Companion ORBI row for pairs the v1-rate serving path queries by
-        # source_authority='ORBI'. Only emitted for pairs that have no other
-        # ORBI writer; distinct key (different source_authority), no conflict.
-        if target_ccy in needs_orbi_row:
+        usd_x_rates[(authority, target_ccy)] = rate
+
+    # Emit rows for every anchor bucket in the 2hr window. Each
+    # (anchor_ts, pair) combination is upserted, repairing existing holes.
+    rows = []
+    for btc_usd_ts, btc_usd in btc_usd_buckets:
+        for authority, source_ccy, target_ccy in TIER3_CROSSES:
+            usd_x = usd_x_rates.get((authority, target_ccy))
+            if usd_x is None:
+                continue
+            btc_x = btc_usd * usd_x
+            composite_via = f"BTC-USD * USD-{target_ccy}-{authority}"
             rows.append(
                 "('BTC', '" + target_ccy + "', '" + btc_usd_ts + "', "
                 f"'1m', 'ORBI-M', {btc_x}, 'C-composite', true, "
-                f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', 'ORBI')"
+                f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', '{authority}')"
             )
+            # Companion ORBI row for pairs the v1-rate serving path queries by
+            # source_authority='ORBI'. Only emitted for pairs that have no other
+            # ORBI writer; distinct key (different source_authority), no conflict.
+            if target_ccy in needs_orbi_row:
+                rows.append(
+                    "('BTC', '" + target_ccy + "', '" + btc_usd_ts + "', "
+                    f"'1m', 'ORBI-M', {btc_x}, 'C-composite', true, "
+                    f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', 'ORBI')"
+                )
 
     if not rows:
         log("no cross-rate rows to write")
@@ -230,15 +291,27 @@ def main():
         " provenance, source_authority) VALUES\n" +
         ",\n".join(rows) +
         " ON CONFLICT (source_currency, target_currency, bucket_ts, source_authority, granularity, product) "
-        " DO UPDATE SET rate = EXCLUDED.rate, composite_via = EXCLUDED.composite_via, "
-        " computed_at = EXCLUDED.computed_at;"
+        " DO NOTHING;"
     )
-    r = subprocess.run(["psql", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql],
-                       capture_output=True, text=True, timeout=30, env=PG)
+    try:
+        r = subprocess.run(["psql", "-v", "ON_ERROR_STOP=1", "-f", "-"],
+                           input=sql, capture_output=True, text=True, timeout=120, env=PG)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"INSERT error: {e}")
+        sys.exit(1)
     if r.returncode != 0:
         log(f"INSERT failed: {r.stderr.strip()[:300]}")
         sys.exit(1)
-    log(f"wrote {len(rows)} Tier 3 cross-rate rows")
+    # Parse rows actually inserted from the psql command tag ("INSERT 0 N").
+    # Dropping -q makes psql emit the tag to stdout; under DO NOTHING the tag
+    # counts only rows the conflict rule did not skip, not rows offered.
+    tag = r.stdout.strip().split()
+    inserted = int(tag[-1]) if len(tag) >= 3 and tag[0] == "INSERT" else -1
+    log(
+        f"wrote Tier 3 cross-rate rows: attempted={len(rows)} inserted={inserted} "
+        f"({len(btc_usd_buckets)} anchor bucket(s) in 2hr window x {len(TIER3_CROSSES)} pairs; "
+        f"DO NOTHING skips already-written per-pair rows)"
+    )
 
 
 if __name__ == "__main__":
