@@ -79,7 +79,7 @@ uses for `or-quiltt-session` and other platform-mode endpoints.
 
 Call `or-sync-key-register` **once per user, after the user opts in to background sync**:
 
-1. Browser derives the X25519 keypair from the vault password (client-side only).
+1. Integrator client derives the X25519 keypair from the integrator master key held behind the vault, not from the vault password (client-side only). Orange Rails receives only the opaque X25519 public key and never sees the private half.
 2. Browser posts the public key to your backend over your own authenticated channel.
 3. Your backend calls `or-sync-key-register` with the platform API key.
 
