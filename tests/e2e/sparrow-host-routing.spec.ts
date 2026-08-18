@@ -5,9 +5,20 @@ import { test, expect, type Page } from "@playwright/test";
  *
  * These tests target live production hosts and must NOT run on dev PRs.
  * They run in the dedicated playwright-prod-smoke CI job, which sets
- * SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL. The module-level guard
- * below throws at eval time when either var is absent, so a run without
- * the vars is a loud failure, not a silent skip.
+ * SMOKE_PROD_CONNECT_URL and SMOKE_PROD_MAIN_URL.
+ *
+ * The guard for those two vars is a test.beforeAll inside the describe block,
+ * NOT a module-level throw, and the distinction is load bearing. Playwright
+ * imports every spec file to enumerate tests, so a module-level throw would
+ * crash the regular `playwright` job, which loads this file and then excludes
+ * it with --grep-invert. beforeAll runs only when this suite is selected: it
+ * fails loudly in the prod-smoke job, which selects the file by path, and stays
+ * correctly quiet in the dev-PR job, which deselects it.
+ *
+ * What the guard does NOT cover: a run where the suite is deselected AND the
+ * vars are absent produces a skip, not a failure. That is the intended path
+ * today, but it is the reason this comment states the scope exactly rather
+ * than claiming a protection the code does not provide.
  *
  * WHAT THIS FILE GUARDS, AND WHY IT WAS REWRITTEN
  *
