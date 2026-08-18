@@ -32,19 +32,22 @@ import { test, expect, type Page } from "@playwright/test";
  *
  * Those hold before and after DL-1007. They are what is asserted below.
  *
- * TRANSITIONAL, REMOVE AFTER THE NEXT PROD DEPLOY
+ * WHY THIS NO LONGER TOLERATES TWO SHAPES
  *
- * This job always runs against LIVE production, including on pushes to dev.
- * During a promotion the spec on dev is therefore necessarily newer than the
- * build it is pointed at: asserting only the new shape goes red on every dev
- * push until prod redeploys, and asserting only the old shape goes red the
- * moment it does. Neither red would indicate a defect.
+ * This job always runs against LIVE production, including on pushes to dev, so
+ * during a promotion the spec on dev is necessarily newer than the build it is
+ * pointed at. While DL-1007 was in flight this file therefore accepted either
+ * the old standalone Sparrow page or the inline picker, and asserted the
+ * invariants above against whichever answered. Neither red would have meant a
+ * defect.
  *
- * So both known-good shapes are accepted, and the invariants above are
- * asserted against whichever one answers. Once prod serves the DL-1007 build,
- * the LEGACY_STANDALONE branch is dead code and should be deleted. Leaving it
- * in permanently would weaken the check, because a regression back to the
- * standalone page would then pass silently.
+ * The promotion has landed and production serves the DL-1007 build, confirmed
+ * in a browser on 2026-08-18: both entry URLs render the picker. The tolerance
+ * is therefore removed, deliberately and not as cleanup. Keeping it would let
+ * a regression back to the standalone page pass silently, which is the exact
+ * failure this file exists to catch, and it also made the AC 2 assertion below
+ * conditional, so the check that a customer can still reach Sparrow setup was
+ * skipped on the very shape that would have needed it most.
  *
  * Full landing-page render assertions live in sparrow.spec.ts. This file only
  * guards host routing so a misdirected deploy is caught immediately.
@@ -74,8 +77,14 @@ const MARKETING_TITLE_SIGNALS = ["The private finance app", "marketing"];
 const APP_PICKER_H1 = /^Providers$/;
 const MARKETING_CATALOG_H1 = /every connection, in one catalog/i;
 
-/** The two renderings this spec tolerates. See the transitional note above. */
-type EntryShape = "LEGACY_STANDALONE" | "PICKER_INLINE";
+/**
+ * The h1 of the pre-DL-1007 standalone Sparrow page. It is no longer a
+ * tolerated rendering at an entry URL, only something to assert the absence
+ * of. Note that this same heading IS expected later, once the picker opens
+ * Sparrow setup inline, which is why the absence check below is scoped to the
+ * entry render and not applied for the whole test.
+ */
+const LEGACY_SPARROW_H1 = /sparrow wallet/i;
 
 /**
  * Both hosts serve the same SPA shell, and that shell's static index.html
@@ -122,43 +131,31 @@ async function assertNotMarketingCatalog(page: Page, label: string): Promise<voi
 }
 
 /**
- * Wait for either known-good rendering and report which one arrived.
+ * Wait for the picker to render at an entry URL.
  *
- * Races the two h1s rather than branching on the URL, because the URL settles
- * before the render does and the question being asked is what the visitor
- * actually sees. A page that is neither shape times out here, which is the
- * correct outcome: an unrecognised render at a Sparrow entry point is exactly
- * what this job exists to catch.
+ * Waits on the h1 rather than the URL, because the URL settles before the
+ * render does and the question being asked is what the visitor actually sees.
+ * Anything else times out here, which is the correct outcome: an unrecognised
+ * render at a Sparrow entry point is exactly what this job exists to catch.
+ *
+ * The standalone-page check is a separate, explicit assertion rather than
+ * being left implicit in the timeout. A regression that restored the old page
+ * would fail either way, but only this way does the failure say so; a bare
+ * timeout on the picker h1 reads like a slow deploy or a broken selector, and
+ * that misreading costs a debugging cycle at exactly the wrong moment.
  */
-async function resolveEntryShape(page: Page, label: string): Promise<EntryShape> {
-  const sparrowH1 = page.getByRole("heading", {
-    name: /sparrow wallet/i,
-    level: 1,
-  });
-  const pickerH1 = page.getByRole("heading", { name: APP_PICKER_H1, level: 1 });
+async function assertPickerRendered(page: Page, label: string): Promise<void> {
+  await expect(
+    page.getByRole("heading", { name: APP_PICKER_H1, level: 1 }),
+    `${label}: must render the app provider picker (h1 "Providers"). It did not, so ` +
+      `this entry point is serving something else entirely.`,
+  ).toBeVisible({ timeout: 15_000 });
 
-  await expect
-    .poll(
-      async () => {
-        if (await sparrowH1.isVisible().catch(() => false)) {
-          return "LEGACY_STANDALONE";
-        }
-        if (await pickerH1.isVisible().catch(() => false)) {
-          return "PICKER_INLINE";
-        }
-        return "NEITHER";
-      },
-      {
-        message:
-          `${label}: must render either the standalone Sparrow page (h1 "Sparrow Wallet") ` +
-          `or the app provider picker (h1 "Providers"). Neither appeared, so this entry ` +
-          `point is serving something else entirely.`,
-        timeout: 15_000,
-      },
-    )
-    .not.toBe("NEITHER");
-
-  return (await sparrowH1.isVisible().catch(() => false)) ? "LEGACY_STANDALONE" : "PICKER_INLINE";
+  await expect(
+    page.getByRole("heading", { name: LEGACY_SPARROW_H1, level: 1 }),
+    `${label}: rendered the pre-DL-1007 standalone Sparrow page. The entry URL must ` +
+      `redirect to the picker; this is a regression, not an old build.`,
+  ).toHaveCount(0);
 }
 
 /**
@@ -204,27 +201,28 @@ async function assertSparrowReachableInPicker(page: Page, label: string): Promis
 }
 
 /**
- * Full contract for one entry URL. Returns the settled shape and title so the
- * parity test can compare the two hosts on both.
+ * Full contract for one entry URL. Returns the title so the parity test can
+ * compare the two hosts on it.
+ *
+ * Shape is no longer returned because there is only one permitted shape now,
+ * and assertPickerRendered has already failed the test if it is not the one
+ * that arrived. Cross-host shape parity is therefore not dropped, it is
+ * subsumed: two hosts that each individually proved they render the picker
+ * cannot disagree.
  */
-async function assertEntryPoint(
-  page: Page,
-  url: string,
-): Promise<{ shape: EntryShape; title: string }> {
+async function assertEntryPoint(page: Page, url: string): Promise<{ title: string }> {
   const res = await page.goto(url);
   expect(res?.status(), `${url} must return HTTP 200`).toBe(200);
 
-  const shape = await resolveEntryShape(page, url);
+  await assertPickerRendered(page, url);
   await assertNotMarketingCatalog(page, url);
-  // Ordering is load-bearing: see assertAppTitle. The shape gate above is what
+  // Ordering is load-bearing: see assertAppTitle. The picker gate above is what
   // proves hydration finished, so the negative title assertion is not vacuous.
   await assertAppTitle(page, url);
 
-  if (shape === "PICKER_INLINE") {
-    await assertSparrowReachableInPicker(page, url);
-  }
+  await assertSparrowReachableInPicker(page, url);
 
-  return { shape, title: await page.title() };
+  return { title: await page.title() };
 }
 
 test.describe("Sparrow host-routing smoke (DL-0439)", () => {
@@ -255,16 +253,13 @@ test.describe("Sparrow host-routing smoke (DL-0439)", () => {
     const canonical = await assertEntryPoint(page, CONNECT_HOST_URL);
     const main = await assertEntryPoint(page, MAIN_DOMAIN_URL);
 
-    // Same rendering, not merely "both are valid renderings". A deploy that
-    // updated one host and not the other would satisfy every assertion above
-    // on each host individually while leaving exactly the split-brain routing
-    // DL-0439 was opened for. This is the assertion that catches that.
-    expect(
-      main.shape,
-      `${MAIN_DOMAIN_URL} rendered ${main.shape} while ${CONNECT_HOST_URL} rendered ${canonical.shape}. ` +
-        `The two hosts are serving different builds.`,
-    ).toBe(canonical.shape);
-
+    // Rendering parity is now enforced inside assertEntryPoint: only one shape
+    // is permitted, so each host proved it independently and they cannot
+    // disagree. Title parity is the remaining cross-host signal, and it is not
+    // redundant. A deploy that updated one host and not the other can still
+    // ship two builds that both render a picker, which is exactly the
+    // split-brain routing DL-0439 was opened for; the title is what tells them
+    // apart.
     expect(
       main.title,
       `${MAIN_DOMAIN_URL} must serve the same rendered <title> as ${CONNECT_HOST_URL}`,
