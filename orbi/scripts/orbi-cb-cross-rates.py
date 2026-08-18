@@ -147,17 +147,46 @@ def q(sql, timeout=30):
     return r.stdout.strip()
 
 
-def fetch_btc_usd():
-    res = q(
+def fetch_btc_usd_window():
+    """Fetch all BTC/USD anchor buckets from the last 2 hours (DL-1363).
+
+    Returns a list of (bucket_ts_str, rate) pairs, newest first.
+
+    Two -c flags share the same psql session: the SET disables parallel query
+    workers before the anchor SELECT runs, avoiding the 64MB shared memory
+    resize abort (DL-1363 Fix 1).
+
+    The 2-hour lookback (no LIMIT) repairs holes caused by late-arriving
+    anchors: a bucket whose BTC/USD row was computed after the cross-rate
+    script ran for that minute will be backfilled on the next invocation.
+    ON CONFLICT DO UPDATE in the INSERT makes this idempotent (DL-1363 Fix 2).
+    """
+    anchor_sql = (
         "SELECT bucket_ts::text, rate::text FROM exchange_rates "
         "WHERE source_currency='BTC' AND target_currency='USD' "
         "AND source_authority='ORBI' AND provenance='forward-fill' "
-        "AND granularity='1m' ORDER BY bucket_ts DESC LIMIT 1"
+        "AND granularity='1m' AND bucket_ts > NOW() - INTERVAL '2 hours' "
+        "ORDER BY bucket_ts DESC"
     )
+    r = subprocess.run(
+        ["psql", "-At", "-F", "|",
+         "-c", "SET max_parallel_workers_per_gather = 0",
+         "-c", anchor_sql],
+        capture_output=True, text=True, timeout=30, env=PG,
+    )
+    if r.returncode != 0:
+        log(f"psql err (fetch_btc_usd_window): {r.stderr.strip()[:200]}")
+        return []
+    res = r.stdout.strip()
     if not res:
-        return None, None
-    parts = res.split("|")
-    return parts[0], float(parts[1])
+        return []
+    buckets = []
+    for line in res.splitlines():
+        line = line.strip()
+        if "|" in line:
+            ts, rate = line.split("|", 1)
+            buckets.append((ts.strip(), float(rate.strip())))
+    return buckets
 
 
 def fetch_usd_x(authority, target):
@@ -188,36 +217,55 @@ def main():
     except OSError as e:
         log(f"WARNING: could not acquire advisory lock ({e}); proceeding without lock")
 
-    btc_usd_ts, btc_usd = fetch_btc_usd()
-    if btc_usd is None:
+    # DL-1363: fetch all BTC/USD anchor buckets in the 2hr window rather than
+    # LIMIT 1. Holes from late-arriving anchors are repaired on next invocation.
+    btc_usd_buckets = fetch_btc_usd_window()
+    if not btc_usd_buckets:
         log("no BTC/USD anchor, aborting")
         sys.exit(1)
+    log(
+        f"BTC/USD anchor: {len(btc_usd_buckets)} bucket(s) in 2hr window, "
+        f"latest {btc_usd_buckets[0][0]}"
+    )
 
     needs_orbi_row = derive_needs_orbi_row()
     log(f"companion-ORBI targets: {sorted(needs_orbi_row)}")
 
-    rows = []
+    # Fetch the latest USD/X rate once per pair. Using the latest available
+    # rate for backfilled buckets is acceptable: rates change slowly, and
+    # fetching per-bucket historical rates would multiply DB round-trips by
+    # the window size (~120x).
+    usd_x_rates = {}
     for authority, source_ccy, target_ccy in TIER3_CROSSES:
-        usd_x = fetch_usd_x(authority, target_ccy)
-        if usd_x is None:
+        rate = fetch_usd_x(authority, target_ccy)
+        if rate is None:
             log(f"no {authority} {source_ccy}/{target_ccy}, skipping")
-            continue
-        btc_x = btc_usd * usd_x
-        composite_via = f"BTC-USD * USD-{target_ccy}-{authority}"
-        rows.append(
-            "('BTC', '" + target_ccy + "', '" + btc_usd_ts + "', "
-            f"'1m', 'ORBI-M', {btc_x}, 'C-composite', true, "
-            f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', '{authority}')"
-        )
-        # Companion ORBI row for pairs the v1-rate serving path queries by
-        # source_authority='ORBI'. Only emitted for pairs that have no other
-        # ORBI writer; distinct key (different source_authority), no conflict.
-        if target_ccy in needs_orbi_row:
+        usd_x_rates[(authority, target_ccy)] = rate
+
+    # Emit rows for every anchor bucket in the 2hr window. Each
+    # (anchor_ts, pair) combination is upserted, repairing existing holes.
+    rows = []
+    for btc_usd_ts, btc_usd in btc_usd_buckets:
+        for authority, source_ccy, target_ccy in TIER3_CROSSES:
+            usd_x = usd_x_rates.get((authority, target_ccy))
+            if usd_x is None:
+                continue
+            btc_x = btc_usd * usd_x
+            composite_via = f"BTC-USD * USD-{target_ccy}-{authority}"
             rows.append(
                 "('BTC', '" + target_ccy + "', '" + btc_usd_ts + "', "
                 f"'1m', 'ORBI-M', {btc_x}, 'C-composite', true, "
-                f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', 'ORBI')"
+                f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', '{authority}')"
             )
+            # Companion ORBI row for pairs the v1-rate serving path queries by
+            # source_authority='ORBI'. Only emitted for pairs that have no other
+            # ORBI writer; distinct key (different source_authority), no conflict.
+            if target_ccy in needs_orbi_row:
+                rows.append(
+                    "('BTC', '" + target_ccy + "', '" + btc_usd_ts + "', "
+                    f"'1m', 'ORBI-M', {btc_x}, 'C-composite', true, "
+                    f"'{composite_via}', 1, 'CONFIRMED', NOW(), NOW(), 'forward-fill', 'ORBI')"
+                )
 
     if not rows:
         log("no cross-rate rows to write")
@@ -238,7 +286,10 @@ def main():
     if r.returncode != 0:
         log(f"INSERT failed: {r.stderr.strip()[:300]}")
         sys.exit(1)
-    log(f"wrote {len(rows)} Tier 3 cross-rate rows")
+    log(
+        f"wrote {len(rows)} Tier 3 cross-rate rows "
+        f"({len(btc_usd_buckets)} anchor bucket(s) x {len(TIER3_CROSSES)} pairs)"
+    )
 
 
 if __name__ == "__main__":
