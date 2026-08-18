@@ -10,6 +10,7 @@
 // Updated: Dev 1, 2026-07-22 -- ISO_UTC_RE: Z suffix only (spec says offset timestamps return 400)
 // Updated: Security, 2026-07-23 -- key lookup uses maybeSingle so a bad or revoked key returns 401, not 500
 // Updated: Sr Dev A, 2026-08-14 -- DL-1043: validate FORWARD_FILL_MAX_DAYS; reject NaN/non-positive, fall back to 2d, log on misconfig
+// Updated: Sr Dev A, 2026-08-18 -- DL-0505: return 404 unsupported_pair when pair has no coverage; stale forward-fill continues to return fill_type:gap
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
@@ -91,9 +92,12 @@ const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 //      response from this function (including 502) reaches the end consumer
 //      unchanged.
 //
-//   400/401/405/429/503 -- handler returns structured JSON { error, message };
+//   400/401/404/405/429/503 -- handler returns structured JSON { error, message };
 //     callers act per code (retry 429 with Retry-After, fix request on 4xx,
 //     back off on 503).
+//   404 unsupported_pair -- the requested asset/fiat pair has no rate coverage
+//     on the given product; this pair is not ingested and will never forward-fill.
+//     Distinguish from fill_type:gap (pair IS covered, data temporarily missing).
 //   500 -- outer try/catch (below) returns structured JSON
 //     { error: 'server_error', message, correlation_id }; callers treat as
 //     transient and may retry.
@@ -245,13 +249,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return Response.json({ error: 'server_error', message: 'Database error fetching exchange rate', correlation_id: correlationId }, { status: 500 })
     }
 
-    const resolvedTs = row ? new Date(row.bucket_ts).toISOString() : bucketTs
+    // No rows at all: this pair is not covered on this product. Distinguish from
+    // fill_type:gap (pair IS ingested, data temporarily absent). Callers should
+    // not retry a 404; fix the asset/fiat/product combination.
+    if (!row) {
+      return errResponse(
+        404,
+        'unsupported_pair',
+        `No rate coverage for ${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on product ${product}`,
+      )
+    }
+
+    const resolvedTs = new Date(row.bucket_ts).toISOString()
     // Refuse to forward-fill across gaps wider than FORWARD_FILL_MAX_MS. A plausible-looking
     // number spanning years of missing data is worse than an honest null (MXN: 5.5-year hole
     // caused 65%-low rates across all of 2021-2026, root cause: composite never built for gap).
-    const gapMs = row ? new Date(bucketTs).getTime() - new Date(row.bucket_ts).getTime() : 0
-    const staleGap = row !== null && gapMs > FORWARD_FILL_MAX_MS
-    const fillType = !row || staleGap ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
+    const gapMs = new Date(bucketTs).getTime() - new Date(row.bucket_ts).getTime()
+    const staleGap = gapMs > FORWARD_FILL_MAX_MS
+    const fillType = staleGap ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
 
     results.push({
       asset: item.asset.toUpperCase(),
@@ -259,10 +274,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       product,
       requested_at: item.at,
       resolved_at: staleGap ? bucketTs : resolvedTs,
-      rate: staleGap ? null : (row?.rate ?? null),
-      provenance: staleGap ? null : (row?.provenance ?? null),
-      tier: staleGap ? null : (row?.tier ?? null),
-      source_authority: staleGap ? null : (row?.source_authority ?? null),
+      rate: staleGap ? null : row.rate,
+      provenance: staleGap ? null : (row.provenance ?? null),
+      tier: staleGap ? null : (row.tier ?? null),
+      source_authority: staleGap ? null : (row.source_authority ?? null),
       fill_type: fillType
     })
 
