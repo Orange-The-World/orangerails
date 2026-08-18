@@ -155,12 +155,18 @@ def q(sql, timeout=30):
 
 
 def fetch_btc_usd_window():
-    """Fetch BTC/USD anchor buckets from the last 2 hours that have no
-    cross-rate rows yet (DL-1363).
+    """Fetch BTC/USD anchor buckets from the last 2 hours (DL-1363).
 
-    Anti-join against ORBI-M rows (matched on x.product='ORBI-M'): only
-    returns bucket_ts values where no cross-rate has been written for that
-    bucket. INSERT SQL is sent via stdin, not argv, so there is no argv cap.
+    Returns all buckets in the 2hr window, newest first. The INSERT uses
+    DO NOTHING on (source_currency, target_currency, bucket_ts,
+    source_authority, granularity, product) so already-written rows for a
+    given pair are skipped atomically -- no read-before-write needed.
+
+    Anti-join on product='ORBI-M' was removed because it asked a per-bucket
+    question (any ORBI-M row at this bucket?) rather than a per-pair question
+    (ORBI-M row for this specific target_currency?). Pairs with 100% coverage
+    (CAD, EUR) were excluding every bucket for all other pairs.
+
     PGOPTIONS (set in _pg_env) carries max_parallel_workers_per_gather=0
     for the whole session; no per-call SET flag is needed.
 
@@ -171,11 +177,6 @@ def fetch_btc_usd_window():
         "WHERE a.source_currency='BTC' AND a.target_currency='USD' "
         "AND a.source_authority='ORBI' AND a.provenance='forward-fill' "
         "AND a.granularity='1m' AND a.bucket_ts > NOW() - INTERVAL '2 hours' "
-        "AND NOT EXISTS ("
-        "  SELECT 1 FROM exchange_rates x "
-        "  WHERE x.source_currency='BTC' AND x.product='ORBI-M' "
-        "  AND x.bucket_ts = a.bucket_ts AND x.granularity='1m'"
-        ") "
         "ORDER BY a.bucket_ts DESC"
     )
     try:
@@ -303,7 +304,8 @@ def main():
         sys.exit(1)
     log(
         f"wrote {len(rows)} Tier 3 cross-rate rows "
-        f"({len(btc_usd_buckets)} missing anchor bucket(s) x {len(TIER3_CROSSES)} pairs)"
+        f"({len(btc_usd_buckets)} anchor bucket(s) in 2hr window x {len(TIER3_CROSSES)} pairs; "
+        f"DO NOTHING skips already-written per-pair rows)"
     )
 
 
