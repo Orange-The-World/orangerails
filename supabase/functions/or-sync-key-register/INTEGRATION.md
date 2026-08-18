@@ -7,14 +7,14 @@ This document is for **integrator backends** that need to register a user's Owne
 
 ## What this endpoint does
 
-When a user opts in to background sync, their browser derives an X25519 keypair from their vault
-password. The browser keeps the private half (OSK) and posts the public half (OPK) to the
-integrator's backend. The integrator backend forwards it here.
+When a user opts in to background sync, the integrator client derives an X25519 keypair from the
+integrator master key held behind the vault (not from the vault password). The client keeps the
+private half (OSK) and posts the public half (OPK) to the integrator's backend. The integrator
+backend forwards it here.
 
 Once the OPK is registered on the subaccount row, `or-quiltt-sync` (and any future background
 writer) can seal new transaction data under the user's key before writing it to the database.
-Orange Rails never sees the private key: a user who loses their vault password loses the ability
-to unseal OPK-sealed rows.
+Orange Rails never sees the private key: the private half never leaves the integrator client.
 
 **Any webhook inbox rows that arrived while the subaccount had no OPK are re-admitted to the sync
 queue the moment this call succeeds** (see Deferred-row unblock below).
@@ -117,7 +117,7 @@ If the subaccount already has an OPK and you send a **different** `opk_public`, 
   "opk_public": "NEW_BASE64_PUBLIC_KEY==",
   "opk_alg": "libsodium-crypto_box_seal-v1",
   "confirm_rotation": true,
-  "rotation_reason": "user reset vault password"
+  "rotation_reason": "periodic key rotation"
 }
 ```
 
