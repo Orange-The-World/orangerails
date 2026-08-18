@@ -11,6 +11,7 @@
 // Updated: Security, 2026-07-23 -- key lookup uses maybeSingle so a bad or revoked key returns 401, not 500
 // Updated: Sr Dev A, 2026-08-14 -- DL-1043: validate FORWARD_FILL_MAX_DAYS; reject NaN/non-positive, fall back to 2d, log on misconfig
 // Updated: Sr Dev A, 2026-08-18 -- DL-0505: return 404 unsupported_pair when pair has no coverage; stale forward-fill continues to return fill_type:gap
+// Updated: Sr Dev A, 2026-08-18 -- DL-0505 Auditor fix: existence probe distinguishes unsupported_pair from before_coverage_start; per-item errors in batch preserve prior results and metering
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
@@ -98,6 +99,11 @@ const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 //   404 unsupported_pair -- the requested asset/fiat pair has no rate coverage
 //     on the given product; this pair is not ingested and will never forward-fill.
 //     Distinguish from fill_type:gap (pair IS covered, data temporarily missing).
+//   404 before_coverage_start -- pair IS ingested but the requested time predates
+//     its first available bucket; request a later timestamp.
+//   Batch (POST) requests embed both codes as per-item errors in the 200 envelope
+//     so earlier resolved results are not discarded and successful items are metered.
+//   Single-item GET/POST surfaces them as HTTP 404 for backward compatibility.
 //   500 -- outer try/catch (below) returns structured JSON
 //     { error: 'server_error', message, correlation_id }; callers treat as
 //     transient and may retry.
@@ -249,15 +255,42 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return Response.json({ error: 'server_error', message: 'Database error fetching exchange rate', correlation_id: correlationId }, { status: 500 })
     }
 
-    // No rows at all: this pair is not covered on this product. Distinguish from
-    // fill_type:gap (pair IS ingested, data temporarily absent). Callers should
-    // not retry a 404; fix the asset/fiat/product combination.
+    // No rows at or before the requested time -- two distinct cases:
+    //   unsupported_pair: pair is not ingested at all; callers must fix asset/fiat/product.
+    //   before_coverage_start: pair IS ingested but requested time predates its first
+    //     bucket; callers should request a later timestamp.
+    // For batch requests, push a per-item error and continue so previously resolved items
+    // are not discarded and all successful items reach the usage-log insert below.
+    // Single-item requests are surfaced as HTTP 404 after the loop (see below).
     if (!row) {
-      return errResponse(
-        404,
-        'unsupported_pair',
-        `No rate coverage for ${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on product ${product}`,
-      )
+      const { data: coverageRow } = await supabase
+        .from('exchange_rates')
+        .select('bucket_ts')
+        .eq('source_currency', item.asset.toUpperCase())
+        .eq('target_currency', item.fiat.toUpperCase())
+        .eq('granularity', granularity)
+        .eq('product', product)
+        .eq('source_authority', 'ORBI')
+        .eq('status', 'CONFIRMED')
+        .is('superseded_by_id', null)
+        .order('bucket_ts', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+
+      const errorCode = coverageRow ? 'before_coverage_start' : 'unsupported_pair'
+      const errorMessage = coverageRow
+        ? `${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on ${product} has no data before ${bucketTs}; coverage starts at ${coverageRow.bucket_ts}`
+        : `No rate coverage for ${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on product ${product}`
+
+      results.push({
+        asset: item.asset.toUpperCase(),
+        fiat: item.fiat.toUpperCase(),
+        product,
+        requested_at: item.at,
+        error: errorCode,
+        message: errorMessage,
+      })
+      continue
     }
 
     const resolvedTs = new Date(row.bucket_ts).toISOString()
@@ -294,9 +327,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   }
 
   // Await so metering actually writes; failure is non-fatal and must not block the response.
-  const { error: logErr } = await supabase.from('orbi_usage_log').insert(usageLogs)
-  if (logErr) console.error('usage-log insert failed:', logErr.message)
+  // Guard against empty array: Supabase returns an error on insert([]).
+  if (usageLogs.length > 0) {
+    const { error: logErr } = await supabase.from('orbi_usage_log').insert(usageLogs)
+    if (logErr) console.error('usage-log insert failed:', logErr.message)
+  }
 
+  // Single-item requests: surface per-item errors as HTTP 404 for backward compatibility.
+  if (items.length === 1 && results[0]?.error) {
+    return errResponse(404, results[0].error as string, results[0].message as string)
+  }
   return Response.json(items.length === 1 ? results[0] : { results, count: results.length })
   } catch (err) {
     console.error(`v1-rate unhandled error [${correlationId}]:`, err)
