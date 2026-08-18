@@ -1260,30 +1260,7 @@ export async function liveFetchTip(
   return j.height;
 }
 
-/**
- * Fetch a BIP158 filter for the given block height, plus the sidecar JSON
- * that names which block hash that filter is bound to.
- *
- * Retries a transient failure up to FILTER_FETCH_ATTEMPTS times with jittered
- * backoff. A first scan of a year-old wallet issues tens of thousands of these
- * requests through 32 concurrent workers; the worker pool is joined with
- * Promise.all, so a single unretried rejection aborts the whole scan and, with
- * the cursor written only after that join, discards every filter already read.
- * Observed on production 2026-08-18: 28,625 filters read, then one burst of
- * network-layer rejections, and the customer saw "Sync failed Failed to fetch".
- * A network rejection is not a status code, so the careful status handling
- * below never saw it.
- *
- * Throws on 404 from either resource. Every height up to tip should have a
- * filter; a 404 is a fetch failure (transient CDN outage, rate limit, or a
- * race on a freshly produced block), NOT a signal that the height has no
- * transactions. Returning null for a 404 let callers silently skip the
- * height, dropping all transactions in it with zero signal.
- *
- * Callers that need a null-safe interface (e.g. mock fetchFilter in tests)
- * may still use the FetchFilter type with a null return; this function
- * itself never returns null.
- */
+/** How many times a single filter read is attempted before it is given up on. */
 export const FILTER_FETCH_ATTEMPTS = 3;
 
 /**
@@ -1336,6 +1313,32 @@ async function fetchFilterPair(height: number, baseUrl: string): Promise<FilterR
   };
 }
 
+/**
+ * Fetch a BIP158 filter for the given block height, plus the sidecar JSON
+ * that names which block hash that filter is bound to.
+ *
+ * Retries a transient failure up to FILTER_FETCH_ATTEMPTS times with jittered
+ * backoff. A first scan of a year-old wallet issues tens of thousands of these
+ * requests through 32 concurrent workers; the worker pool is joined with
+ * Promise.all, so a single unretried rejection aborts the whole scan and, with
+ * the cursor written only after that join, discards every filter already read.
+ * Observed on production 2026-08-18: 28,625 filters read, then one burst of
+ * network-layer rejections, and the customer saw "Sync failed Failed to fetch".
+ * A network rejection is not a status code, so the careful status handling in
+ * fetchFilterPair never saw it.
+ *
+ * A 404 from either resource is treated as DURABLE: it fails on the first
+ * attempt, is never retried, and reaches the caller immediately. Every height
+ * up to tip should have a filter, so a 404 means the read failed, and it must
+ * never be read as "this height has no transactions". Returning null for a 404
+ * let callers silently skip the height, dropping all its transactions with
+ * zero signal. The same first-attempt-and-out rule applies to every other
+ * durable status; only network rejections and RETRYABLE_FILTER_STATUS retry.
+ *
+ * Callers that need a null-safe interface (e.g. mock fetchFilter in tests)
+ * may still use the FetchFilter type with a null return; this function
+ * itself never returns null.
+ */
 export async function liveFetchFilter(
   height: number,
   baseUrl: string = DEFAULT_FILTER_BASE,
