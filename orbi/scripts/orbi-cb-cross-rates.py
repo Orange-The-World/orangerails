@@ -13,6 +13,7 @@ so the synthetic does NOT collide with the forward-fill direct VW-median
 row (which lives under source_authority='ORBI'). This lets consumers
 choose direct vs synthetic for pairs that have both (CAD, CHF, ...).
 """
+import fcntl
 import os
 import subprocess
 import sys
@@ -24,6 +25,7 @@ ENV_FILE = os.environ.get("ORBI_ENV_FILE")
 if not ENV_FILE:
     sys.exit("ORBI_ENV_FILE is not set. The service unit must supply it.")
 LOG = os.environ.get("ORBI_CROSS_RATES_LOG", "/var/log/orbi/cb-cross-rates.log")
+LOCK_FILE = "/var/run/orbi/cb-cross-rates.lock"
 
 # (authority, source_ccy, target_ccy) tuples we compute crosses for.
 # The emitted BTC/X row's source_authority = this same authority.
@@ -172,6 +174,20 @@ def fetch_usd_x(authority, target):
 
 
 def main():
+    # DL-0784 P2: advisory lock -- prevent concurrent instances from racing on
+    # uq_rates_pair_bucket_authority. Second invocation exits cleanly; the
+    # first run covers the same bucket_ts.
+    lock_path = Path(LOCK_FILE)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        _lock_fh = open(lock_path, "w")  # noqa: SIM115 -- held for process lifetime
+        fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        log("advisory lock held by another instance; exiting (same bucket will be written)")
+        sys.exit(0)
+    except OSError as e:
+        log(f"WARNING: could not acquire advisory lock ({e}); proceeding without lock")
+
     btc_usd_ts, btc_usd = fetch_btc_usd()
     if btc_usd is None:
         log("no BTC/USD anchor, aborting")
