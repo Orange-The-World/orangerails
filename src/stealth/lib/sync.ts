@@ -1260,36 +1260,47 @@ export async function liveFetchTip(
   return j.height;
 }
 
+/** How many times a single filter read is attempted before it is given up on. */
+export const FILTER_FETCH_ATTEMPTS = 3;
+
 /**
- * Fetch a BIP158 filter for the given block height, plus the sidecar JSON
- * that names which block hash that filter is bound to.
- *
- * Throws on 404 from either resource. Every height up to tip should have a
- * filter; a 404 is a fetch failure (transient CDN outage, rate limit, or a
- * race on a freshly produced block), NOT a signal that the height has no
- * transactions. Returning null for a 404 let callers silently skip the
- * height, dropping all transactions in it with zero signal.
- *
- * Callers that need a null-safe interface (e.g. mock fetchFilter in tests)
- * may still use the FetchFilter type with a null return; this function
- * itself never returns null.
+ * Backoff before attempt N+1, in ms. One entry shorter than
+ * FILTER_FETCH_ATTEMPTS because the last attempt is never followed by a wait.
+ * Jittered at use, because 32 workers hitting the same blip would otherwise
+ * retry in lockstep and re-create the burst that knocked them over.
  */
-export async function liveFetchFilter(
-  height: number,
-  baseUrl: string = DEFAULT_FILTER_BASE,
-): Promise<FilterRecord> {
+const FILTER_RETRY_BACKOFF_MS = [250, 1000];
+
+/**
+ * Statuses where trying again is reasonable: the origin is overloaded, rate
+ * limiting, or briefly unavailable. Everything else (401, 403, 410, ...) is a
+ * durable answer and retrying only delays a failure the caller must see.
+ * 404 is handled separately and loudly , see fetchFilterPair.
+ */
+const RETRYABLE_FILTER_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/** An error the caller must surface immediately; retrying cannot change it. */
+class DurableFilterError extends Error {}
+
+/** One attempt at the .gcs.gz + .json pair. Throws; never returns null. */
+async function fetchFilterPair(height: number, baseUrl: string): Promise<FilterRecord> {
   const [gzResp, jsonResp] = await Promise.all([
     fetch(`${baseUrl}/${height}.gcs.gz`),
     fetch(`${baseUrl}/${height}.json`),
   ]);
   if (gzResp.status === 404 || jsonResp.status === 404) {
-    throw new Error(
+    throw new DurableFilterError(
       `liveFetchFilter: 404 at height ${height} -- filter should exist for all heights up to tip; ` +
       `this is a fetch failure, not an empty result. Do not silently skip this height.`,
     );
   }
-  if (!gzResp.ok) throw new Error(`fetchFilter ${height} gz failed: ${gzResp.status}`);
-  if (!jsonResp.ok) throw new Error(`fetchFilter ${height} json failed: ${jsonResp.status}`);
+  for (const [label, resp] of [['gz', gzResp], ['json', jsonResp]] as const) {
+    if (resp.ok) continue;
+    const message = `fetchFilter ${height} ${label} failed: ${resp.status}`;
+    throw RETRYABLE_FILTER_STATUS.has(resp.status)
+      ? new Error(message)
+      : new DurableFilterError(message);
+  }
 
   const sidecar = (await jsonResp.json()) as FilterSidecar;
   const gzBuf = new Uint8Array(await gzResp.arrayBuffer());
@@ -1300,6 +1311,54 @@ export async function liveFetchFilter(
     blockHashHex: sidecar.block_hash,
     filter,
   };
+}
+
+/**
+ * Fetch a BIP158 filter for the given block height, plus the sidecar JSON
+ * that names which block hash that filter is bound to.
+ *
+ * Retries a transient failure up to FILTER_FETCH_ATTEMPTS times with jittered
+ * backoff. A first scan of a year-old wallet issues tens of thousands of these
+ * requests through 32 concurrent workers; the worker pool is joined with
+ * Promise.all, so a single unretried rejection aborts the whole scan and, with
+ * the cursor written only after that join, discards every filter already read.
+ * Observed on production 2026-08-18: 28,625 filters read, then one burst of
+ * network-layer rejections, and the customer saw "Sync failed Failed to fetch".
+ * A network rejection is not a status code, so the careful status handling in
+ * fetchFilterPair never saw it.
+ *
+ * A 404 from either resource is treated as DURABLE: it fails on the first
+ * attempt, is never retried, and reaches the caller immediately. Every height
+ * up to tip should have a filter, so a 404 means the read failed, and it must
+ * never be read as "this height has no transactions". Returning null for a 404
+ * let callers silently skip the height, dropping all its transactions with
+ * zero signal. The same first-attempt-and-out rule applies to every other
+ * durable status; only network rejections and RETRYABLE_FILTER_STATUS retry.
+ *
+ * Callers that need a null-safe interface (e.g. mock fetchFilter in tests)
+ * may still use the FetchFilter type with a null return; this function
+ * itself never returns null.
+ */
+export async function liveFetchFilter(
+  height: number,
+  baseUrl: string = DEFAULT_FILTER_BASE,
+): Promise<FilterRecord> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < FILTER_FETCH_ATTEMPTS; attempt++) {
+    try {
+      return await fetchFilterPair(height, baseUrl);
+    } catch (err) {
+      if (err instanceof DurableFilterError) throw err;
+      lastError = err;
+      const backoff = FILTER_RETRY_BACKOFF_MS[attempt];
+      if (backoff === undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, backoff * (0.5 + Math.random())));
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(
+    `fetchFilter ${height} failed after ${FILTER_FETCH_ATTEMPTS} attempts: ${detail}`,
+  );
 }
 
 /**
