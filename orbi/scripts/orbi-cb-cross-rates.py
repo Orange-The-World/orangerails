@@ -158,9 +158,9 @@ def fetch_btc_usd_window():
     """Fetch BTC/USD anchor buckets from the last 2 hours that have no
     cross-rate rows yet (DL-1363).
 
-    Anti-join against ORBI-M rows: only returns bucket_ts values where no
-    cross-rate has been written. In steady state this is 1-2 buckets
-    (~30 rows), bounding the INSERT argv inside Linux's 128 KiB cap.
+    Anti-join against ORBI-M rows (matched on x.product='ORBI-M'): only
+    returns bucket_ts values where no cross-rate has been written for that
+    bucket. INSERT SQL is sent via stdin, not argv, so there is no argv cap.
     PGOPTIONS (set in _pg_env) carries max_parallel_workers_per_gather=0
     for the whole session; no per-call SET flag is needed.
 
@@ -173,7 +173,7 @@ def fetch_btc_usd_window():
         "AND a.granularity='1m' AND a.bucket_ts > NOW() - INTERVAL '2 hours' "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM exchange_rates x "
-        "  WHERE x.source_currency='BTC' AND x.source_authority='ORBI-M' "
+        "  WHERE x.source_currency='BTC' AND x.product='ORBI-M' "
         "  AND x.bucket_ts = a.bucket_ts AND x.granularity='1m'"
         ") "
         "ORDER BY a.bucket_ts DESC"
@@ -293,8 +293,8 @@ def main():
         " DO NOTHING;"
     )
     try:
-        r = subprocess.run(["psql", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql],
-                           capture_output=True, text=True, timeout=120, env=PG)
+        r = subprocess.run(["psql", "-q", "-v", "ON_ERROR_STOP=1", "-f", "-"],
+                           input=sql, capture_output=True, text=True, timeout=120, env=PG)
     except (OSError, subprocess.TimeoutExpired) as e:
         log(f"INSERT error: {e}")
         sys.exit(1)
