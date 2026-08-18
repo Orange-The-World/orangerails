@@ -22,6 +22,7 @@ import { gzipSync } from 'node:zlib';
 
 import { sealEnvelope, unsealEnvelope } from './seal';
 import {
+  FILTER_FETCH_ATTEMPTS,
   liveFetchBlock,
   liveFetchFilter,
   liveFetchTip,
@@ -1042,6 +1043,90 @@ describe('live fetchers', () => {
     await expect(liveFetchFilter(2, 'https://stealth.example')).rejects.toThrow(
       'liveFetchFilter: 404 at height 2',
     );
+  });
+
+  // DL-1171. A first scan of a year-old wallet issues tens of thousands of
+  // filter reads through 32 concurrent workers joined with Promise.all. One
+  // unretried rejection aborted the whole scan and, because the cursor is only
+  // written after that join, threw away everything already read. Measured on
+  // production 2026-08-18: 28,625 filters read, then a burst of network-layer
+  // rejections, then "Sync failed Failed to fetch" with no progress kept.
+  it('liveFetchFilter retries a network-layer rejection and succeeds on a later attempt', async () => {
+    const filterPayload = new Uint8Array([0x01, 0x02, 0x03]);
+    const gz = gzipSync(filterPayload);
+    const sidecar = {
+      block_hash: '000000000000000000015c92fa872e387085585ac046e0935fdf9eed872f9297',
+      block_height: 924_821,
+      time: 1_777_986_476,
+      filter_size: filterPayload.length,
+    };
+
+    // Reject the whole first pair the way the browser does: a TypeError, not a
+    // response. That is precisely what the status checks could never see.
+    let pairsServed = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('.gcs.gz')) pairsServed += 1;
+      if (pairsServed <= 1) throw new TypeError('Failed to fetch');
+      if (url.endsWith('.gcs.gz')) {
+        return new Response(new Uint8Array(gz) as BodyInit, { status: 200 });
+      }
+      return jsonResponse(sidecar);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const rec = await liveFetchFilter(924_821, 'https://stealth.example');
+    expect(rec.height).toBe(924_821);
+    expect(Array.from(rec.filter)).toEqual(Array.from(filterPayload));
+    // Two pairs: the rejected one and the one that worked.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('liveFetchFilter gives up after FILTER_FETCH_ATTEMPTS and says so', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(liveFetchFilter(924_822, 'https://stealth.example')).rejects.toThrow(
+      `fetchFilter 924822 failed after ${FILTER_FETCH_ATTEMPTS} attempts`,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(FILTER_FETCH_ATTEMPTS * 2);
+  });
+
+  it('liveFetchFilter does not retry a 404, which stays a loud one-shot failure', async () => {
+    // Retrying a 404 would turn a signal the orchestrator must see into a
+    // three-times-slower version of the same failure.
+    const fetchMock = vi.fn(async (url: string) =>
+      url.endsWith('.gcs.gz') ? new Response('', { status: 404 }) : jsonResponse({}),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(liveFetchFilter(3, 'https://stealth.example')).rejects.toThrow(
+      'liveFetchFilter: 404 at height 3',
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('liveFetchFilter retries a 503 but not a 403', async () => {
+    const flaky = vi.fn(async (url: string) => {
+      if (url.endsWith('.gcs.gz')) return new Response('', { status: 503 });
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', flaky);
+    await expect(liveFetchFilter(4, 'https://stealth.example')).rejects.toThrow(
+      `fetchFilter 4 failed after ${FILTER_FETCH_ATTEMPTS} attempts`,
+    );
+    expect(flaky).toHaveBeenCalledTimes(FILTER_FETCH_ATTEMPTS * 2);
+
+    const forbidden = vi.fn(async (url: string) => {
+      if (url.endsWith('.gcs.gz')) return new Response('', { status: 403 });
+      return jsonResponse({});
+    });
+    vi.stubGlobal('fetch', forbidden);
+    await expect(liveFetchFilter(5, 'https://stealth.example')).rejects.toThrow(
+      'fetchFilter 5 gz failed: 403',
+    );
+    expect(forbidden).toHaveBeenCalledTimes(2);
   });
 
   it('liveFetchBlock reads the X-Block-Height header', async () => {
