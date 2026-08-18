@@ -27,6 +27,26 @@ jobs:
       - name: Install Playwright browsers
         run: bunx playwright install --with-deps chromium
 
+      # DL-0439: wait for the bundle this push produces before asserting on it.
+      #
+      # Measured on the 710 promotion (2026-08-18): this job's last assertion
+      # logged 06:24:09.7Z and the Cloudflare deploy finished 06:24:34.7Z, so
+      # the smoke tested the bundle the push was replacing and failed exactly
+      # the tests an old bundle fails. A dispatch re-run on the identical
+      # commit passed. Without this wait that race repeats on every promotion,
+      # and a real regression is indistinguishable from the false one.
+      #
+      # Only on prod: a dev push deploys a different Pages project, and a
+      # manual dispatch usually targets a commit that is already live.
+      - name: Wait for the Cloudflare Pages deploy
+        if: github.ref_name == 'prod'
+        uses: ./.github/actions/wait-for-pages-deploy
+        with:
+          project: orangerails-prod
+          commit_sha: ${{ github.sha }}
+          account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
       - name: Run Sparrow smoke
         run: bunx playwright test tests/e2e/sparrow.spec.ts --forbid-only
 
