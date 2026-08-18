@@ -119,6 +119,9 @@ def _pg_env():
         "PGUSER": urllib.parse.unquote(p.username or ""),
         "PGPASSWORD": urllib.parse.unquote(p.password or ""),
         "PGDATABASE": (p.path or "/").lstrip("/"),
+        # Covers every psql session this script opens: derive_needs_orbi_row
+        # DISTINCT scan, anchor SELECT, and INSERT. No per-call flag needed.
+        "PGOPTIONS": "-c max_parallel_workers_per_gather=0",
     }
 
 
@@ -139,8 +142,12 @@ def log(msg):
 
 
 def q(sql, timeout=30):
-    r = subprocess.run(["psql", "-At", "-F", "|", "-c", sql],
-                       capture_output=True, text=True, timeout=timeout, env=PG)
+    try:
+        r = subprocess.run(["psql", "-At", "-F", "|", "-c", sql],
+                           capture_output=True, text=True, timeout=timeout, env=PG)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"psql error: {e}")
+        return None
     if r.returncode != 0:
         log(f"psql err: {r.stderr.strip()[:200]}")
         return None
@@ -148,32 +155,37 @@ def q(sql, timeout=30):
 
 
 def fetch_btc_usd_window():
-    """Fetch all BTC/USD anchor buckets from the last 2 hours (DL-1363).
+    """Fetch BTC/USD anchor buckets from the last 2 hours that have no
+    cross-rate rows yet (DL-1363).
+
+    Anti-join against ORBI-M rows: only returns bucket_ts values where no
+    cross-rate has been written. In steady state this is 1-2 buckets
+    (~30 rows), bounding the INSERT argv inside Linux's 128 KiB cap.
+    PGOPTIONS (set in _pg_env) carries max_parallel_workers_per_gather=0
+    for the whole session; no per-call SET flag is needed.
 
     Returns a list of (bucket_ts_str, rate) pairs, newest first.
-
-    Two -c flags share the same psql session: the SET disables parallel query
-    workers before the anchor SELECT runs, avoiding the 64MB shared memory
-    resize abort (DL-1363 Fix 1).
-
-    The 2-hour lookback (no LIMIT) repairs holes caused by late-arriving
-    anchors: a bucket whose BTC/USD row was computed after the cross-rate
-    script ran for that minute will be backfilled on the next invocation.
-    ON CONFLICT DO UPDATE in the INSERT makes this idempotent (DL-1363 Fix 2).
     """
     anchor_sql = (
-        "SELECT bucket_ts::text, rate::text FROM exchange_rates "
-        "WHERE source_currency='BTC' AND target_currency='USD' "
-        "AND source_authority='ORBI' AND provenance='forward-fill' "
-        "AND granularity='1m' AND bucket_ts > NOW() - INTERVAL '2 hours' "
-        "ORDER BY bucket_ts DESC"
+        "SELECT a.bucket_ts::text, a.rate::text FROM exchange_rates a "
+        "WHERE a.source_currency='BTC' AND a.target_currency='USD' "
+        "AND a.source_authority='ORBI' AND a.provenance='forward-fill' "
+        "AND a.granularity='1m' AND a.bucket_ts > NOW() - INTERVAL '2 hours' "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM exchange_rates x "
+        "  WHERE x.source_currency='BTC' AND x.source_authority='ORBI-M' "
+        "  AND x.bucket_ts = a.bucket_ts AND x.granularity='1m'"
+        ") "
+        "ORDER BY a.bucket_ts DESC"
     )
-    r = subprocess.run(
-        ["psql", "-At", "-F", "|",
-         "-c", "SET max_parallel_workers_per_gather = 0",
-         "-c", anchor_sql],
-        capture_output=True, text=True, timeout=30, env=PG,
-    )
+    try:
+        r = subprocess.run(
+            ["psql", "-At", "-F", "|", "-c", anchor_sql],
+            capture_output=True, text=True, timeout=30, env=PG,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"psql error (fetch_btc_usd_window): {e}")
+        return []
     if r.returncode != 0:
         log(f"psql err (fetch_btc_usd_window): {r.stderr.strip()[:200]}")
         return []
@@ -278,17 +290,20 @@ def main():
         " provenance, source_authority) VALUES\n" +
         ",\n".join(rows) +
         " ON CONFLICT (source_currency, target_currency, bucket_ts, source_authority, granularity, product) "
-        " DO UPDATE SET rate = EXCLUDED.rate, composite_via = EXCLUDED.composite_via, "
-        " computed_at = EXCLUDED.computed_at;"
+        " DO NOTHING;"
     )
-    r = subprocess.run(["psql", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql],
-                       capture_output=True, text=True, timeout=30, env=PG)
+    try:
+        r = subprocess.run(["psql", "-q", "-v", "ON_ERROR_STOP=1", "-c", sql],
+                           capture_output=True, text=True, timeout=120, env=PG)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"INSERT error: {e}")
+        sys.exit(1)
     if r.returncode != 0:
         log(f"INSERT failed: {r.stderr.strip()[:300]}")
         sys.exit(1)
     log(
         f"wrote {len(rows)} Tier 3 cross-rate rows "
-        f"({len(btc_usd_buckets)} anchor bucket(s) x {len(TIER3_CROSSES)} pairs)"
+        f"({len(btc_usd_buckets)} missing anchor bucket(s) x {len(TIER3_CROSSES)} pairs)"
     )
 
 
