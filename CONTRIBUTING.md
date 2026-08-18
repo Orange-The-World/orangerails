@@ -147,7 +147,7 @@ git commit -s -m "feat: add Strike adapter"
 
 The `-s` flag appends `Signed-off-by: Your Name <your.email@example.com>`. By signing off, you certify the DCO , you have the right to submit the contribution under Apache 2.0.
 
-This is not a legal document but a lightweight guarantee that every commit's provenance is marked with provenance.
+This is not a legal document but a lightweight guarantee that every commit's provenance is traceable.
 
 ---
 
