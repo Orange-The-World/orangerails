@@ -27,6 +27,7 @@ import { Route as ConnectBitcoinRouteImport } from './routes/connect/bitcoin'
 import { Route as ConnectSparrowRouteImport } from './routes/connect/sparrow'
 import { Route as ConnectQuilttRouteImport } from './routes/connect/quiltt'
 import { Route as AdminCustomerIdRouteImport } from './routes/admin/$customerId'
+import { Route as ProvidersRouteImport } from './routes/providers'
 
 const UnlockRoute = UnlockRouteImport.update({
   id: '/unlock',
@@ -118,9 +119,15 @@ const AdminCustomerIdRoute = AdminCustomerIdRouteImport.update({
   path: '/$customerId',
   getParentRoute: () => AdminRoute,
 } as any)
+const ProvidersRoute = ProvidersRouteImport.update({
+  id: '/providers',
+  path: '/providers',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/providers': typeof ProvidersRoute
   '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
@@ -141,6 +148,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/providers': typeof ProvidersRoute
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
   '/demo': typeof DemoRoute
@@ -161,6 +169,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/providers': typeof ProvidersRoute
   '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRoute
   '/connect': typeof ConnectRouteWithChildren
@@ -200,6 +209,7 @@ export interface FileRouteTypes {
     | '/connect/stealth'
     | '/docs/xpub-export'
     | '/admin/'
+    | '/providers'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -219,6 +229,7 @@ export interface FileRouteTypes {
     | '/connect/stealth'
     | '/docs/xpub-export'
     | '/admin'
+    | '/providers'
   id:
     | '__root__'
     | '/'
@@ -239,6 +250,7 @@ export interface FileRouteTypes {
     | '/connect/stealth'
     | '/docs/xpub-export'
     | '/admin/'
+    | '/providers'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -253,6 +265,7 @@ export interface RootRouteChildren {
   RecoverRoute: typeof RecoverRoute
   SignupRoute: typeof SignupRoute
   UnlockRoute: typeof UnlockRoute
+  ProvidersRoute: typeof ProvidersRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -383,6 +396,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminCustomerIdRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/providers': {
+      id: '/providers'
+      path: '/providers'
+      fullPath: '/providers'
+      preLoaderRoute: typeof ProvidersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -437,6 +457,7 @@ const rootRouteChildren: RootRouteChildren = {
   RecoverRoute: RecoverRoute,
   SignupRoute: SignupRoute,
   UnlockRoute: UnlockRoute,
+  ProvidersRoute: ProvidersRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

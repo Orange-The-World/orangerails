@@ -17,13 +17,24 @@
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
+import {
+  authenticateRequestOrWidgetToken,
+  enforceWidgetAppUser,
+  isAuthError,
+  getCallerPlatformId,
+} from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 interface EnvelopeFetchRequestBody {
   connection_id?: string;
   app_user_id?: string;
   app_slug?: string;
+  /**
+   * Widget-mode credential. Present when the caller is browser code inside a
+   * host app's connect session and holds neither a platform API key nor an
+   * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
+   */
+  widget_token?: string;
 }
 
 interface EnvelopeFetchResponseBody {
@@ -44,12 +55,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
 
   try {
-    const ctx = await authenticateRequest(req);
-    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
-
+    // The body is read BEFORE auth because a widget-mode caller presents its
+    // credential in the body rather than in a header. Header-based callers are
+    // resolved exactly as before; see authenticateRequestOrWidgetToken.
     const raw = await readBoundedText(req);
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
-    const body = JSON.parse(raw || '{}') as EnvelopeFetchRequestBody;
+
+    // Parsing now happens before authentication, so malformed JSON from an
+    // unauthenticated caller must answer 400 rather than fall through to the
+    // catch below and answer 500.
+    let body: EnvelopeFetchRequestBody;
+    try {
+      body = JSON.parse(raw || '{}') as EnvelopeFetchRequestBody;
+    } catch {
+      return jsonResponse({ error: 'Request body is not valid JSON' }, 400, cors);
+    }
+
+    const ctx = await authenticateRequestOrWidgetToken(req, body.widget_token);
+    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
     if (!body.connection_id || !UUID_RE.test(body.connection_id)) {
       return jsonResponse({ error: 'connection_id (uuid) required' }, 400, cors);
@@ -66,6 +89,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         { error: 'app_user_id must match the authenticated user' },
         403, cors,
       );
+    }
+
+    // Widget mode gets the same lock for the same reason: the token pins one
+    // app_user_id, so a body naming a different one is an attempt to reach
+    // into another user's records.
+    const widgetUserErr = enforceWidgetAppUser(ctx, body.app_user_id);
+    if (widgetUserErr) {
+      return jsonResponse({ error: widgetUserErr.message }, widgetUserErr.status, cors);
     }
 
     // Audit 2026-05-16 High #2: every stealth_connections read/write must be

@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { fetchPendingBatch, handleEvent, markDeferred, reDriveReadyDeferrals } from './index.ts';
+import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals } from './index.ts';
 
 // ── fetchPendingBatch: batch query filter ─────────────────────────────
 //
@@ -580,7 +580,7 @@ function makeQuilttSyncMock(opts: {
       return Promise.resolve(
         new Response(
           JSON.stringify({
-            data: { connection: { accounts: { nodes: uniqueIds.map((id) => ({ id })) } } },
+            data: { connection: { accounts: uniqueIds.map((id) => ({ id })) } },
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         ),
@@ -736,4 +736,166 @@ Deno.test('markDeferred: updates opk_deferred_at field on the correct row', asyn
     false,
     'markDeferred must not touch processed_at',
   );
+});
+
+// ── handleEventSinkDelivery: partial-index 23505 tolerance (DL-0853) ─
+//
+// Root cause of the Aug 2026 incident: connections.upsert({onConflict:
+// 'subaccount_id,quiltt_connection_id'}) always fails against the partial unique
+// index because PostgREST cannot express a partial-index predicate in the ON
+// CONFLICT clause. The drain marked events as failed and retired them after
+// MAX_ATTEMPTS, destroying customer bank data.
+//
+// The fix uses plain .insert() and treats error code 23505 (unique_violation) as
+// success -- the row already exists from or-quiltt-link-complete, which is the
+// normal path. These tests guard that path.
+//
+// Why a mock could not have caught the original bug: mock clients return success
+// for .upsert() regardless, so a green test suite gave false confidence. The new
+// tests assert the 23505-as-success path explicitly, so a future refactor that
+// drops the `insertErr.code !== '23505'` check turns green into red.
+
+Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as success (partial-index tolerance)', async () => {
+  let connectionsCallCount = 0;
+
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(table: string) {
+      if (table === 'connections') {
+        connectionsCallCount++;
+        if (connectionsCallCount === 1) {
+          // First call: insert -- simulate the partial-index 23505 conflict that
+          // killed events in production. PostgREST cannot express the partial predicate
+          // in ON CONFLICT; the fix must silently treat this as "row already exists".
+          return {
+            insert(_row: unknown) {
+              return Promise.resolve({
+                data: null,
+                error: {
+                  code:    '23505',
+                  message: 'duplicate key value violates unique constraint "connections_subaccount_id_quiltt_connection_id_idx"',
+                },
+              });
+            },
+          };
+        }
+        // Second call: select to resolve the connection row id after the conflict.
+        // deno-lint-ignore no-explicit-any
+        const chain: any = {
+          select(_c: string) { return chain; },
+          eq(_c: string, _v: unknown) { return chain; },
+          maybeSingle() {
+            return Promise.resolve({ data: { id: 'conn-or-1' }, error: null });
+          },
+        };
+        return chain;
+      }
+      if (table === 'platforms') {
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          select(_c: string) { return ch; },
+          eq(_c: string, _v: unknown) { return ch; },
+          maybeSingle() {
+            // No webhook_url: skip the webhook enqueue branch.
+            return Promise.resolve({ data: { webhook_url: null }, error: null });
+          },
+        };
+        return ch;
+      }
+      // deno-lint-ignore no-explicit-any
+      return { select() { return this as any; }, eq() { return this as any; } };
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-sink-23505',
+    event_type:    'connection.synced.successful.initial',
+    payload:       { record: { id: 'quiltt-conn-1' } },
+    platform_id:   'plat-sink',
+    subaccount_id: 'sub-sink',
+    attempts:      0,
+  };
+
+  const result = await handleEventSinkDelivery(mockClient, ev, 'quiltt-conn-1', 'plat-sink', 'sub-sink');
+  assertEquals(
+    result,
+    'processed',
+    '23505 from a partial unique index must be treated as success -- row already exists',
+  );
+});
+
+Deno.test('handleEventSinkDelivery: non-23505 insert error surfaces as error string', async () => {
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(table: string) {
+      if (table === 'connections') {
+        return {
+          insert(_row: unknown) {
+            return Promise.resolve({
+              data: null,
+              // Generic integrity error -- NOT a unique-violation. Must not be swallowed.
+              error: { code: '23000', message: 'integrity constraint violation' },
+            });
+          },
+        };
+      }
+      // deno-lint-ignore no-explicit-any
+      return { select() { return this as any; }, eq() { return this as any; } };
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-sink-dberr',
+    event_type:    'connection.synced.successful.initial',
+    payload:       { record: { id: 'quiltt-conn-2' } },
+    platform_id:   'plat-sink',
+    subaccount_id: 'sub-sink',
+    attempts:      0,
+  };
+
+  const result = await handleEventSinkDelivery(mockClient, ev, 'quiltt-conn-2', 'plat-sink', 'sub-sink');
+  assertEquals(
+    typeof result === 'string' && result.includes('sink connection insert failed'),
+    true,
+    'a non-23505 insert error must surface as an error string, not be silently swallowed',
+  );
+});
+
+// ── DL-0747 accounts query shape regression guard ─────────────────────────────
+//
+// Quiltt's Connection.accounts field returns [Account!] directly (a flat array).
+// The correct query is `accounts { id }` and the unwrap is `accounts ?? []`.
+// If the code reverts to `accounts { nodes { id } }` + `accounts?.nodes ?? []`,
+// filterAccountIds will be [] (reading .nodes on a plain array gives undefined),
+// the function returns 'connection has no accounts at Quiltt', and no transactions
+// sync. This test fails in that case because inserted.length would be 0, not 2.
+
+Deno.test('DL-0747 accounts shape: flat [Account] array (no nodes wrapper) -- ids extracted and transactions sync', async () => {
+  // swRows = [] triggers the GetAccounts pre-fetch path.
+  // The mock (updated above) returns accounts as a flat array -- correct Quiltt shape.
+  // If code reads .nodes on a flat array, filterAccountIds is [], handleEvent
+  // returns an error string, and inserted stays empty.
+  const { client, inserted, cleanup } = makeQuilttSyncMock({
+    swRows: [],
+    txNodes: [
+      { id: 'tx-dl0747-a', account: { id: 'acct-flat-1' } },
+      { id: 'tx-dl0747-b', account: { id: 'acct-flat-2' } },
+    ],
+  });
+  const ev = {
+    event_id: 'evt-dl0747-shape',
+    event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-dl0747' } },
+    platform_id: 'plat-1',
+    subaccount_id: 'sub-1',
+    attempts: 0,
+  };
+  // deno-lint-ignore no-explicit-any
+  await handleEvent(client as any, ev, 'plat-1', 'sub-1', 'api-key');
+  assertEquals(
+    inserted.length,
+    2,
+    'DL-0747: both transactions must sync; if 0, the code is reading .nodes on a plain array (regression)',
+  );
+  cleanup();
 });

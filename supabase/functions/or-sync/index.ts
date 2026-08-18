@@ -18,7 +18,7 @@
  *      ciphertext in encrypted_transactions. Caller fetches via
  *      or-transactions-list and decrypts in-browser.
  *      Response: { synced: number, connections: [{ connection_id, synced?, next_cursor, partial?, denied_sources?, error? }] }
- *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all non-success (error or skip).
  *
  *   2. Protocol-driven sink mode (V2 today, V3 future):
  *        { subaccount_id?, connection_ids?, credentials_key, format }
@@ -28,10 +28,18 @@
  *      Response: {
  *        synced: number,
  *        connections: [{ connection_id, synced?, next_cursor, partial?, denied_sources?, error? }],
- *      HTTP: 200 all succeeded, 207 mixed, 422 all failed.
+ *      HTTP: 200 all succeeded, 207 mixed, 422 all non-success (error or skip).
  *        rows: { <table-name>: [...rows] },
  *        metadata: { format, requires_encryption: string[] }
  *      }
+ *
+ * connection_ids miss behaviour (both modes, DL-1033 + DL-1105):
+ *   Total miss (zero ids resolve): 404 if unknown, 400 if stealth (DL-1033).
+ *   Partial miss (some ids resolve, some do not): the entire request fails with
+ *   the same non-2xx shape. When unresolved ids are a mix of stealth and unknown,
+ *   400 wins (stealth is the caller-fixable condition). Body lists both sets
+ *   separately: 400 { error, stealth_ids, unknown_ids }. All-unknown: 404 { error, unresolved_ids }.
+ *   Callers must not assume a 200 covers all requested ids -- silent-drop is gone.
  *
  * Mode is selected by presence of `format`. See OrangeRails-Protocol.html §8
  * for the protocol contract; see _shared/sinks/dispatch.ts for the sink
@@ -102,14 +110,16 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
 /**
  * Determine the HTTP status for a batch sync response.
  *   200 -- every connection succeeded (or the batch was empty).
- *   207 -- some connections succeeded, some failed.
- *   422 -- every connection in the batch failed.
+ *   207 -- some connections succeeded; at least one failed or was skipped.
+ *   422 -- every connection in the batch failed or was skipped (e.g. no_quiltt_profile_map).
  *
  * Exported so the pure logic can be unit-tested without a Deno.serve mock.
  */
-export function batchHttpStatus(results: Array<{ synced?: number; error?: string }>): number {
+export function batchHttpStatus(results: Array<{ synced?: number; error?: string; skip_reason?: string }>): number {
   if (results.length === 0) return 200;
-  const errCount = results.filter(r => r.error != null).length;
+  // Count both hard errors and soft skips (e.g. no_quiltt_profile_map) as
+  // non-success so the HTTP status is honest. A skip is not a clean sync.
+  const errCount = results.filter(r => r.error != null || r.skip_reason != null).length;
   if (errCount === 0) return 200;
   if (errCount === results.length) return 422;
   return 207;
@@ -312,9 +322,68 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const { data: connections, error: connErr } = await connQuery;
     if (connErr) throw connErr;
     if (!connections?.length) {
-      // Empty-result early-exit must still match the response shape the
-      // caller's mode expects. Sink-mode consumers (V2) parse `rows` +
-      // `metadata` strictly, so skipping those fields blows up the client.
+      // When the caller requested specific IDs and none resolved to a regular
+      // connection, this is a miss, not an empty batch. Fall through to the
+      // stealth store with the same ownership scope or-connection-delete uses:
+      // (id, platform_id, app_user_id). A foreign-subaccount stealth id and a
+      // genuinely unknown id both resolve to 404; a stealth id that belongs to
+      // this subaccount gets a 400 explaining the right endpoint to use.
+      if (connection_ids?.length) {
+        const { data: subRow, error: subErr } = await ctx.serviceClient
+          .from('subaccounts')
+          .select('platform_id, external_user_id')
+          .eq('id', subaccountId)
+          .maybeSingle();
+
+        if (!subErr && subRow) {
+          const { count: stealthCount, error: stealthErr } = await ctx.serviceClient
+            .from('stealth_connections')
+            .select('id', { count: 'exact', head: true })
+            .in('id', connection_ids)
+            .eq('platform_id', subRow.platform_id)
+            .eq('app_user_id', subRow.external_user_id);
+
+          if (!stealthErr && (stealthCount ?? 0) > 0) {
+            return jsonResponse(
+              { error: 'Stealth connections cannot be synced via this endpoint' },
+              400,
+              cors,
+            );
+          }
+        }
+        // The main query excludes status='disconnected'. A disconnected id resolves
+        // to nothing in that query but is not "not found". Return 422 so callers
+        // can distinguish it from a genuinely unknown id (consistent with the
+        // partial-miss disconnected branch, DL-1105).
+        const { data: disconnectedRows } = await ctx.serviceClient
+          .from('connections')
+          .select('id')
+          .in('id', connection_ids)
+          .eq('subaccount_id', subaccountId)
+          .eq('status', 'disconnected');
+
+        if (disconnectedRows?.length) {
+          const disconnectedIds = disconnectedRows.map((r) => r.id);
+          const disconnectedSet = new Set(disconnectedIds);
+          const unknownIds = connection_ids.filter((id) => !disconnectedSet.has(id));
+          return jsonResponse(
+            {
+              error: 'Connection is disconnected and cannot be synced',
+              disconnected_ids: disconnectedIds,
+              unknown_ids: unknownIds,
+            },
+            422,
+            cors,
+          );
+        }
+        // Not found in connections, stealth, or disconnected for this subaccount.
+        return jsonResponse({ error: 'Connection not found in this subaccount' }, 404, cors);
+      }
+
+      // Empty-result early-exit (no connection_ids filter) must still match the
+      // response shape the caller's mode expects. Sink-mode consumers (V2)
+      // parse `rows` + `metadata` strictly, so skipping those fields blows up
+      // the client.
       if (sinkMode) {
         return jsonResponse(
           {
@@ -328,6 +397,87 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         );
       }
       return jsonResponse({ synced: 0, connections: [] }, 200, cors);
+    }
+
+    // Partial-miss guard (DL-1105): derive unresolved ids via set difference
+    // over the deduplicated request list. Count comparison is wrong: repeated
+    // ids in the caller's array (e.g. ["a","a"]) trigger count < length even
+    // when every unique id resolved, producing a spurious 404 with
+    // unresolved_ids: []. The main query also excludes status='disconnected';
+    // a disconnected id is real and must not be conflated with "not found".
+    if (connection_ids?.length) {
+      const resolvedSet = new Set(connections!.map((c) => c.id));
+      const unresolvedIds = [...new Set(connection_ids)].filter(
+        (id) => !resolvedSet.has(id),
+      );
+
+      if (unresolvedIds.length > 0) {
+        const { data: subRow, error: subErr } = await ctx.serviceClient
+          .from('subaccounts')
+          .select('platform_id, external_user_id')
+          .eq('id', subaccountId)
+          .maybeSingle();
+
+        if (!subErr && subRow) {
+          const { data: stealthRows, error: stealthErr } = await ctx.serviceClient
+            .from('stealth_connections')
+            .select('id')
+            .in('id', unresolvedIds)
+            .eq('platform_id', subRow.platform_id)
+            .eq('app_user_id', subRow.external_user_id);
+
+          if (!stealthErr && stealthRows && stealthRows.length > 0) {
+            const stealthIds = stealthRows.map((r) => r.id);
+            const stealthSet = new Set(stealthIds);
+            const unknownIds = unresolvedIds.filter((id) => !stealthSet.has(id));
+            return jsonResponse(
+              {
+                error: 'Stealth connections cannot be synced via this endpoint',
+                stealth_ids: stealthIds,
+                unknown_ids: unknownIds,
+              },
+              400,
+              cors,
+            );
+          }
+        }
+
+        // The main query excludes status='disconnected'. A disconnected id
+        // resolves to nothing in that query but is not "not found"; return 422
+        // so callers can differentiate it from a genuinely unknown id.
+        const { data: disconnectedRows } = await ctx.serviceClient
+          .from('connections')
+          .select('id')
+          .in('id', unresolvedIds)
+          .eq('subaccount_id', subaccountId)
+          .eq('status', 'disconnected');
+
+        if (disconnectedRows?.length) {
+          const disconnectedIds = disconnectedRows.map((r) => r.id);
+          const disconnectedSet = new Set(disconnectedIds);
+          const unknownIds = unresolvedIds.filter(
+            (id) => !disconnectedSet.has(id),
+          );
+          return jsonResponse(
+            {
+              error: 'Connection is disconnected and cannot be synced',
+              disconnected_ids: disconnectedIds,
+              unknown_ids: unknownIds,
+            },
+            422,
+            cors,
+          );
+        }
+
+        return jsonResponse(
+          {
+            error: 'Connection not found in this subaccount',
+            unresolved_ids: unresolvedIds,
+          },
+          404,
+          cors,
+        );
+      }
     }
 
     const results: Array<{
@@ -428,7 +578,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 body: JSON.stringify({
                   query: `query GetAccounts($connId: ID!) {
                     connection(id: $connId) {
-                      accounts { nodes { id } }
+                      accounts { id }
                     }
                   }`,
                   variables: { connId: quilttConnIdSink },
@@ -444,7 +594,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 throw new Error(`Quiltt accounts fetch errors: ${msgs}`);
               }
               const filterAccountIdsSink: string[] = (
-                (acctJsonSink?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+                (acctJsonSink?.data?.connection?.accounts ?? []) as Array<{ id: string }>
               ).map((a) => a.id);
 
               if (filterAccountIdsSink.length === 0) {
@@ -710,7 +860,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               body: JSON.stringify({
                 query: `query GetAccounts($connId: ID!) {
                   connection(id: $connId) {
-                    accounts { nodes { id } }
+                    accounts { id }
                   }
                 }`,
                 variables: { connId: quilttConnId },
@@ -726,7 +876,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               throw new Error(`Quiltt accounts fetch errors: ${msgs}`);
             }
             const filterAccountIdsMain: string[] = (
-              (acctJsonMain?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+              (acctJsonMain?.data?.connection?.accounts ?? []) as Array<{ id: string }>
             ).map((a) => a.id);
 
             if (filterAccountIdsMain.length === 0) {

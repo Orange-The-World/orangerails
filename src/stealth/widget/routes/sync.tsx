@@ -56,6 +56,7 @@ import { ProgressModal } from "../components/ProgressModal";
 import { useStealthInit } from "../StealthInitContext";
 import { proxyFetch } from "../lib/proxyFetch";
 import { resolveFunctionUrl } from "../lib/resolveFunctionUrl";
+import { waitForDeliveryAck, DeliveryAckMissingError } from "../lib/deliveryAck";
 
 const STEALTH_FILTER_BASE =
   (import.meta.env.VITE_OR_STEALTH_FILTER_BASE_URL as string | undefined) ??
@@ -149,10 +150,15 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         // 1. Fetch sealed envelope. Routes through parent postMessage proxy
         //    when proxy_base_url is set in INIT (V2 pattern, keeps platform
         //    key off the browser); falls back to direct fetch otherwise.
+        // Widget-token auth: carried in the body so a host app whose users
+        // have no OrangeRails account can still authenticate. Harmless on the
+        // proxy path, where the platform key attached server-side outranks it,
+        // and absent for every caller that does not send one.
         const envFetchBody = {
           connection_id: init.connection_id,
           app_user_id: init.app_user_id,
           app_slug: init.app_slug,
+          widget_token: init.widget_token,
         };
         let envOk = false;
         let envStatus = 0;
@@ -246,6 +252,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           const uploadBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
+            widget_token: init.widget_token,
             sealed_transactions: result.sealedTransactions,
             last_block_scanned: result.lastBlockScanned,
           };
@@ -286,7 +293,59 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           }
         }
 
-        // 4. Persist the sync cursor, independent of transaction upload.
+        // 4. Delivery acknowledgement gate (DL-0807).
+        //    When require_delivery_ack is set (only honoured with
+        //    skip_transaction_upload: true), the widget posts SYNC_COMPLETE
+        //    with pending_delivery_ack: true BEFORE advancing the cursor.
+        //    The consuming app must then post OR_STEALTH_DELIVERY_ACK to
+        //    confirm its own save. Only after that ack does the widget write
+        //    the cursor. If no ack arrives within 30 s the widget fires
+        //    DELIVERY_ACK_MISSING (retryable: true) and leaves the cursor
+        //    unchanged so the next sync re-scans safely from the stored value.
+        //
+        //    When require_delivery_ack is not set (the default), the cursor
+        //    is written first and then SYNC_COMPLETE fires, preserving the
+        //    existing behaviour for all current integrators.
+        const useDeliveryAck =
+          !!init.require_delivery_ack && !!init.skip_transaction_upload;
+
+        if (useDeliveryAck) {
+          // 4a. Post SYNC_COMPLETE with pending_delivery_ack before the cursor
+          //     write. The popup stays open until the ack or timeout arrives.
+          if (parent) {
+            const msg: StealthSyncCompleteMessage = {
+              type: "OR_STEALTH_SYNC_COMPLETE",
+              connection_id: init.connection_id,
+              sealed_transactions: result.sealedTransactions,
+              last_block_scanned: result.lastBlockScanned,
+              tx_count: result.txCount,
+              bytes_downloaded: result.bytesDownloaded,
+              duration_seconds: (Date.now() - startedAt) / 1000,
+              address_window_exhausted: result.windowExhausted || undefined,
+              pending_delivery_ack: true,
+            };
+            try {
+              parent.postMessage(msg, init.return_callback_origin);
+            } catch (e) {
+              console.error("[stealth/sync] failed to post complete (pending ack):", e);
+            }
+          }
+          // 4b. Wait for OR_STEALTH_DELIVERY_ACK. Throws DeliveryAckMissingError
+          //     on timeout, which surfaces as DELIVERY_ACK_MISSING via the outer
+          //     catch. The cursor is never written when this throws.
+          //     Guard: a cancellation between 4a and 4b must abort the run, not
+          //     fall through to the cursor write at step 5. Every other cancelled
+          //     check in this effect returns immediately on true; this one too.
+          if (cancelled) return;
+          await waitForDeliveryAck(
+            window,
+            init.return_callback_origin,
+            init.connection_id!,
+            30_000,
+          );
+        }
+
+        // 5. Persist the sync cursor, independent of transaction upload.
         //    Consumer apps that set skip_transaction_upload (and any sync
         //    that found zero new transactions) never reach
         //    or-stealth-transactions-store, so without this call their
@@ -298,12 +357,18 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    returns the previous cursor unchanged when fromHeight > tip
         //    (short-circuit path). Persisting that value would falsely mark
         //    the wallet as synced to a height it never scanned.
+        //
+        //    When useDeliveryAck is true, we only reach this block after the
+        //    consuming app confirmed its save (step 4b). A timeout in step 4b
+        //    throws before we ever get here, so the cursor stays at its stored
+        //    value and the next sync re-scans from there.
         let cursorFailed = false;
         if ((!useMock || isForceCursor()) && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
           try {
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
+            widget_token: init.widget_token,
             last_block_scanned: result.lastBlockScanned,
           };
           let cursorWritten = false;
@@ -410,8 +475,10 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           }
         }
 
-        // 5. SYNC_COMPLETE.
-        if (parent) {
+        // 6. SYNC_COMPLETE.
+        //    When useDeliveryAck is true, SYNC_COMPLETE already fired at step 4a
+        //    (with pending_delivery_ack: true). Skip here to avoid a duplicate.
+        if (!useDeliveryAck && parent) {
           const msg: StealthSyncCompleteMessage = {
             type: "OR_STEALTH_SYNC_COMPLETE",
             connection_id: init.connection_id,
@@ -436,7 +503,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
         setError(msg);
-        if (e instanceof WindowExhaustedError) {
+        if (e instanceof DeliveryAckMissingError) {
+          // The consuming app did not post OR_STEALTH_DELIVERY_ACK within 30 s.
+          // The cursor was not advanced; retrying the sync is safe.
+          postWidgetError("DELIVERY_ACK_MISSING", msg, true);
+        } else if (e instanceof WindowExhaustedError) {
           // Address window exhausted: wallet history beyond the scanned window
           // may be missing. Not retryable as is; the embedder must prompt a
           // re-sync with a wider gap_limit. Its own code so this is

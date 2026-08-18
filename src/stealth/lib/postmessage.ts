@@ -145,6 +145,21 @@ export interface StealthInitWidgetMessage {
    * never a key that can unseal anything.
    */
   access_token?: string;
+  /**
+   * Auth mode C (widget token). The short-lived session id the host app's
+   * backend minted via or-link-mint-token before opening the widget. Sent in
+   * the POST BODY, not as a header.
+   *
+   * For a host app whose users have no OrangeRails account there is no
+   * Supabase JWT to put in mode B, and mode A needs a backend proxy the app
+   * may not have. This is the credential that path already holds, and the
+   * same one or-discover-wallets and or-link-complete already accept.
+   *
+   * Ignored when `proxy_base_url` is set: the proxy attaches the platform key
+   * server-side, which outranks it. Like `access_token`, this is an access
+   * credential for OR's API and can unseal nothing.
+   */
+  widget_token?: string;
   /** Optional: when true, the widget skips uploading sealed transactions
    *  to OR's `or-stealth-transactions-store` endpoint. Used by consumer
    *  apps that hold their own source-of-truth copy and do not need OR's
@@ -165,6 +180,20 @@ export interface StealthInitWidgetMessage {
    * a changed default cannot reach into a sealed envelope.
    */
   gap_limit?: number;
+  /**
+   * Delivery acknowledgement gate (DL-0807). Only honoured when
+   * skip_transaction_upload is also true.
+   *
+   * When set, the widget posts SYNC_COMPLETE with pending_delivery_ack: true
+   * BEFORE advancing the sync cursor. The consuming app must then post
+   * OR_STEALTH_DELIVERY_ACK to confirm it saved the sealed transactions. Only
+   * after that ack does the widget write the cursor via
+   * or-stealth-envelope-update. If the ack does not arrive within 30 seconds,
+   * the widget fires OR_STEALTH_ERROR with code DELIVERY_ACK_MISSING
+   * (retryable: true) and leaves the cursor unchanged so the next sync
+   * re-scans safely.
+   */
+  require_delivery_ack?: boolean;
 }
 
 /**
@@ -349,6 +378,14 @@ export interface StealthSyncCompleteWidgetMessage {
    * itself is intact.
    */
   cursor_update_failed?: true;
+  /**
+   * Present when require_delivery_ack was set on the INIT message. Signals
+   * that the cursor has NOT yet been advanced. The consuming app must post
+   * OR_STEALTH_DELIVERY_ACK to the widget to confirm its own save, after
+   * which the widget writes the cursor. Keeping the popup open while this
+   * field is present is the recommended pattern.
+   */
+  pending_delivery_ack?: true;
 }
 
 /**
@@ -426,6 +463,7 @@ export type StealthErrorCode =
   | 'ORIGIN_NOT_ALLOWED'
   | 'PROTOCOL_VERSION_MISMATCH'
   | 'WINDOW_EXHAUSTED'
+  | 'DELIVERY_ACK_MISSING'
   | 'INTERNAL';
 
 export interface StealthErrorMessage {
@@ -439,9 +477,20 @@ export interface StealthErrorMessage {
 // Discriminated unions for type-safe handlers
 // ─────────────────────────────────────────────────────────────────────
 
+/**
+ * App -> Widget: confirms the consuming app has saved the sealed transactions.
+ * Only sent when require_delivery_ack was set on the INIT message.
+ * The widget advances the sync cursor upon receiving this message.
+ */
+export interface StealthDeliveryAckMessage {
+  type: 'OR_STEALTH_DELIVERY_ACK';
+  connection_id: string;
+}
+
 export type StealthMessageFromApp =
   | StealthInitMessage
-  | StealthProxyResponseMessage;
+  | StealthProxyResponseMessage
+  | StealthDeliveryAckMessage;
 
 export type StealthMessageFromWidget =
   | StealthReadyMessage

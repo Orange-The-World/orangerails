@@ -460,7 +460,11 @@ export async function handleEvent(
     // not fall through to all-sync. The event will retry on the next tick.
     return `source_wallets lookup failed: ${swErr.message}`;
   }
-  // selectedAccountIds === null means no rows present: sync everything (all-sync fallback)
+  // selectedAccountIds === null means no rows present: sync everything (all-sync fallback).
+  // When rows exist, only accounts with is_synced=true are included.
+  // Retention policy (DL-0740 / issue #647): accounts with is_synced=false are skipped for
+  // future data pulls but their existing encrypted_transactions rows are NOT deleted. Data
+  // is preserved so the user can re-enable an account without losing history.
   const selectedAccountIds: Set<string> | null =
     swRows && swRows.length > 0
       ? new Set(
@@ -481,6 +485,7 @@ export async function handleEvent(
       // All accounts deselected by the user. No data to pull. Mark the event processed
       // so it does not retry: the selection is the user's intent and will not change
       // until they update source_wallets. reconcileConnectionSuccess already ran above.
+      // Existing encrypted_transactions rows are retained (retention policy, DL-0740).
       console.log(
         `[or-quiltt-sync] event ${ev.event_id}: all accounts deselected, skipping data pull`,
       );
@@ -497,7 +502,7 @@ export async function handleEvent(
       body: JSON.stringify({
         query: `query GetAccounts($connId: ID!) {
           connection(id: $connId) {
-            accounts { nodes { id } }
+            accounts { id }
           }
         }`,
         variables: { connId: connectionId },
@@ -516,7 +521,7 @@ export async function handleEvent(
       return `Quiltt accounts fetch errors: ${redactProviderError(msgs, 400)}`;
     }
     filterAccountIds = (
-      (acctJson?.data?.connection?.accounts?.nodes ?? []) as Array<{ id: string }>
+      (acctJson?.data?.connection?.accounts ?? []) as Array<{ id: string }>
     ).map((a) => a.id);
     if (filterAccountIds.length === 0) {
       // Connection has no accounts yet -- possibly still provisioning.
@@ -756,7 +761,7 @@ export async function handleEvent(
  *
  * Returns 'processed' so the inbox event is consumed and not retried.
  */
-async function handleEventSinkDelivery(
+export async function handleEventSinkDelivery(
   client: SupabaseClient,
   ev: PendingEvent,
   quilttConnectionId: string,

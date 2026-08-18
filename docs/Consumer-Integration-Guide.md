@@ -183,6 +183,14 @@ Wordlist source must match between server and browser; OR uses the same 256 word
 > model instead, see [Stealth-Sync.md, Consumer integration: the exact
 > steps](Stealth-Sync.md#consumer-integration-the-exact-steps). Most apps
 > (`bitbooks-v2` included) integrate both.
+>
+> **Widening the address window.** Stealth Sync scans a fixed set of
+> addresses per chain and ignores any transaction paid to an address
+> beyond that ceiling, so a default connection can silently miss history
+> for a busy wallet. You control the ceiling with the optional integer
+> `gap_limit` field (1 to 1000) on `OR_STEALTH_INIT`. See
+> [Stealth-Sync.md, the `gap_limit` field](Stealth-Sync.md#step-3-send-or_stealth_init)
+> for the exact contract, valid range, and the existing-connection caveat.
 
 The Link widget is OR's hosted credential collection page. Plaid-hybrid co-branding: your app's name appears prominently, "Powered by OrangeRails" smaller. Provider-specific form fields (Blink: API key; xpub: extended public key + gap limit; BTCPay: server URL + API key; etc.) come from the [provider catalog](#provider-catalog-dynamic-discovery).
 

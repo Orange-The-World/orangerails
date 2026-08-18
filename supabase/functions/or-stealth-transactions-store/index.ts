@@ -37,7 +37,12 @@
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
+import {
+  authenticateRequestOrWidgetToken,
+  enforceWidgetAppUser,
+  isAuthError,
+  getCallerPlatformId,
+} from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 interface SealedTransactionInput {
@@ -56,6 +61,12 @@ interface TransactionsStoreRequestBody {
   app_user_id?: string;
   sealed_transactions?: SealedTransactionInput[];
   last_block_scanned?: number;
+  /**
+   * Widget-mode credential. Present when the caller is browser code inside a
+   * host app's connect session and holds neither a platform API key nor an
+   * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
+   */
+  widget_token?: string;
 }
 
 interface TransactionsStoreResponseBody {
@@ -126,12 +137,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
 
   try {
-    const ctx = await authenticateRequest(req);
-    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
-
+    // The body is read BEFORE auth because a widget-mode caller presents its
+    // credential in the body rather than in a header. Header-based callers are
+    // resolved exactly as before; see authenticateRequestOrWidgetToken.
     const raw = await readBoundedText(req);
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
-    const body = JSON.parse(raw || '{}') as TransactionsStoreRequestBody;
+
+    // Parsing now happens before authentication, so malformed JSON from an
+    // unauthenticated caller must answer 400 rather than fall through to the
+    // catch below and answer 500.
+    let body: TransactionsStoreRequestBody;
+    try {
+      body = JSON.parse(raw || '{}') as TransactionsStoreRequestBody;
+    } catch {
+      return jsonResponse({ error: 'Request body is not valid JSON' }, 400, cors);
+    }
+
+    const ctx = await authenticateRequestOrWidgetToken(req, body.widget_token);
+    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
     // ── Validate ──────────────────────────────────────────────────────
     if (!body.connection_id || !UUID_RE.test(body.connection_id)) {
@@ -187,6 +210,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       );
     }
 
+    // Widget mode gets the same lock for the same reason: the token pins one
+    // app_user_id, so a body naming a different one is an attempt to reach
+    // into another user's records.
+    const widgetUserErr = enforceWidgetAppUser(ctx, body.app_user_id);
+    if (widgetUserErr) {
+      return jsonResponse({ error: widgetUserErr.message }, widgetUserErr.status, cors);
+    }
+
     // Audit 2026-05-16 High #2: every stealth_connections read/write must be
     // bound to the calling platform. Resolve once here.
     const platformIdOrErr = await getCallerPlatformId(ctx);
@@ -215,6 +246,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     if ((ownerRow.app_user_id as string) !== body.app_user_id) {
       return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
+    }
+
+    // Stamp last_sync_attempt_at on entry so every sync attempt is recorded,
+    // including runs that find zero new transactions (where last_sync_at would
+    // still advance but the attempt column would otherwise stay NULL forever).
+    // Non-fatal: a failure here must not block the actual sync work.
+    const { error: attemptErr } = await ctx.serviceClient
+      .from('stealth_connections')
+      .update({ last_sync_attempt_at: new Date().toISOString() })
+      .eq('platform_id', callerPlatformId)
+      .eq('id', body.connection_id);
+    if (attemptErr) {
+      console.error('[or-stealth-transactions-store] last_sync_attempt_at stamp failed:', attemptErr);
     }
 
     const total = body.sealed_transactions.length;

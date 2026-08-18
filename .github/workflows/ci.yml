@@ -15,6 +15,7 @@ jobs:
   lint-and-build:
     name: Lint + build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -77,6 +78,7 @@ jobs:
   deno-typecheck:
     name: Typecheck edge functions (Deno)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Why this job exists: until 2026-07-26 CI never looked at supabase/functions
     # at all. `bun run lint` carries continue-on-error (see the note on it above)
     # and `bun run build` only builds the Vite frontend, so every one of the 37
@@ -218,6 +220,7 @@ jobs:
   deno-test:
     name: Test edge functions (Deno)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
@@ -320,6 +323,7 @@ jobs:
   vitest:
     name: Unit tests (vitest)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Why this job exists: src/**/*.test.ts carries discriminating tests for the
     # stealth/sync orchestrator: birthday height rejection and the stored-cursor
     # short-circuit requirement. Without this job those tests sit in the tree
@@ -349,6 +353,7 @@ jobs:
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Runs against the already-deployed dev site. Two separate things deploy
     # that site, and neither of them is this workflow:
     #   frontend      -> Cloudflare Pages, from its own git integration, on
@@ -438,7 +443,11 @@ jobs:
         # --forbid-only: fail if any test.only() was left in a committed spec.
         # Same failure shape as the skip problem: .only() causes all other
         # tests to skip and the job exits 0. --forbid-only makes that loud too.
-        run: bunx playwright test --forbid-only
+        #
+        # sparrow-host-routing.spec.ts targets live prod hosts and has a
+        # module-level throw when its env vars are absent. Exclude it here so
+        # dev-PR runs do not fail; it runs in the playwright-prod-smoke job.
+        run: bunx playwright test --forbid-only --grep-invert 'Sparrow host-routing smoke'
 
       - name: Upload Playwright report
         if: always()
@@ -457,9 +466,52 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  playwright-prod-smoke:
+    name: Playwright prod smoke -- Sparrow host routing (DL-0439)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: lint-and-build
+    # Only meaningful on pushes to dev/prod where the live hosts are the target.
+    # PR preview URLs are not the production hosts, so this job runs on push
+    # events only. The spec's module-level guard throws when the vars are unset,
+    # so a misconfigured run fails loudly rather than silently skipping.
+    if: github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run Sparrow host-routing smoke
+        env:
+          # Public production URLs -- not secrets, hardcoded intentionally.
+          # The spec throws at module level if either is empty, so a typo or
+          # accidental blank here fails the job rather than silently skipping.
+          SMOKE_PROD_CONNECT_URL: https://connect.orangerails.com/sparrow
+          SMOKE_PROD_MAIN_URL: https://orangerails.com/connect/sparrow
+        run: bunx playwright test tests/e2e/sparrow-host-routing.spec.ts --forbid-only
+
+      - name: Upload prod-smoke report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-prod-smoke-report
+          path: playwright-report/
+          retention-days: 14
+
   playwright-stealth-cursor:
     name: Playwright stealth cursor-write proof (DL-0649)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: lint-and-build
     # Explicit, because the reporting step below is the ONLY way the assertion
     # output leaves this runner. Without this block the job inherits the
