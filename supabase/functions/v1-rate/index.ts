@@ -263,7 +263,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // are not discarded and all successful items reach the usage-log insert below.
     // Single-item requests are surfaced as HTTP 404 after the loop (see below).
     if (!row) {
-      const { data: coverageRow } = await supabase
+      const { data: coverageRow, error: coverageErr } = await supabase
         .from('exchange_rates')
         .select('bucket_ts')
         .eq('source_currency', item.asset.toUpperCase())
@@ -276,6 +276,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         .order('bucket_ts', { ascending: true })
         .limit(1)
         .maybeSingle()
+
+      if (coverageErr) {
+        console.error(`coverage-probe DB error [${correlationId}]:`, coverageErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity }))
+        void reportError(coverageErr, 'v1-rate', req)
+        return Response.json({ error: 'server_error', message: 'Database error fetching rate coverage', correlation_id: correlationId }, { status: 500 })
+      }
 
       const errorCode = coverageRow ? 'before_coverage_start' : 'unsupported_pair'
       const errorMessage = coverageRow
