@@ -735,16 +735,20 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(fetchFilterCalls).toEqual([800_001]);
   });
 
-  it('rejects when fetchFilter throws a fetch-failure error rather than silently skipping the height', async () => {
-    // RED -> GREEN guard for DL-0489.
+  it('returns filterFetchError when fetchFilter throws rather than rejecting or silently skipping the height', async () => {
+    // RED -> GREEN guard for DL-0489, updated for DL-1175.
     //
-    // Before the fix: liveFetchFilter returned null on 404, the orchestrator
+    // Before DL-0489: liveFetchFilter returned null on 404, the orchestrator
     // stored the null in filterCache and moved on -- all transactions at that
     // height were silently dropped with zero signal to the caller.
     //
-    // After the fix: liveFetchFilter throws, the error propagates through the
-    // worker's Promise.all, and runSync rejects so the caller cannot silently
-    // succeed with a wrong result.
+    // After DL-0489: liveFetchFilter throws, the error propagated through
+    // the worker's Promise.all, and runSync rejected.
+    //
+    // After DL-1175: the scan worker catches the fetch error, aborts the scan
+    // window, and returns a resolved result with filterFetchError set. The
+    // caller receives a non-zero signal and can persist the resume cursor
+    // without losing it to an unhandled rejection.
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
       kind: 'xpub_stealth',
@@ -761,19 +765,24 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       'this is a fetch failure, not an empty result. Do not silently skip this height.',
     );
 
-    await expect(
-      runSync({
-        envelope,
-        orStealthKey,
-        birthdayHeight: 900_000,
-        lastBlockScanned: 900_000,
-        fetchTip: async () => 900_001,
-        // Simulate liveFetchFilter throwing on 404 for the only height in range.
-        fetchFilter: async (_h) => { throw fetchFilterError; },
-        fetchBlock: async () => { throw new Error('should not be reached'); },
-        matcher: { matchAny: () => true },
-      }),
-    ).rejects.toThrow('liveFetchFilter: 404 at height 900001');
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 900_000,
+      lastBlockScanned: 900_000,
+      fetchTip: async () => 900_001,
+      // Simulate liveFetchFilter throwing on 404 for the only height in range.
+      fetchFilter: async (_h) => { throw fetchFilterError; },
+      fetchBlock: async () => { throw new Error('should not be reached'); },
+      matcher: { matchAny: () => true },
+    });
+
+    // The scan aborts gracefully: no transactions, cursor unchanged, error surfaced.
+    expect(result.filterFetchError).toBeDefined();
+    expect(result.filterFetchError!.failedHeight).toBe(900_001);
+    expect(result.filterFetchError!.cause.message).toContain('liveFetchFilter: 404 at height 900001');
+    expect(result.txCount).toBe(0);
+    expect(result.lastBlockScanned).toBe(900_000);
   });
 
   it('throws when extension passes are exhausted and window is still near its edge', async () => {
