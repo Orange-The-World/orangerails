@@ -780,7 +780,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     // The scan aborts gracefully: no transactions, cursor unchanged, error surfaced.
     expect(result.filterFetchError).toBeDefined();
     expect(result.filterFetchError!.failedHeight).toBe(900_001);
-    expect(result.filterFetchError!.cause.message).toContain('liveFetchFilter: 404 at height 900001');
+    expect(result.filterFetchError!.cause).toContain('liveFetchFilter: 404 at height 900001');
     expect(result.txCount).toBe(0);
     expect(result.lastBlockScanned).toBe(900_000);
   });
