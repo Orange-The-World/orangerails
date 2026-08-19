@@ -1631,5 +1631,65 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
       // Cursor stops at FAIL_HEIGHT - 1, not at the tip.
       expect(result.lastBlockScanned).toBe(FAIL_HEIGHT - 1);
     });
+
+    it('skip_transaction_upload path: sealedTransactions populated alongside filterFetchError', async () => {
+      // Regression guard for DL-1175. The widget skips the upload step when
+      // skip_transaction_upload is set and relies on OR_STEALTH_SYNC_COMPLETE
+      // to deliver found transactions to the embedder. When a filter fetch
+      // fails permanently, the widget posts SYNC_COMPLETE with the partial
+      // result BEFORE surfacing the error. That path depends on runSync
+      // returning non-empty sealedTransactions alongside filterFetchError
+      // for hits below the failure height. Verify it does.
+      const orStealthKey = randomKeyB64();
+      const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+      const fixtureTs = Math.floor(new Date('2024-09-01T00:00:00Z').getTime() / 1000);
+      const blockBuild = buildFixtureBlock({
+        payToScript: targetScript,
+        amountSats: 7_500n,
+        timestamp: fixtureTs,
+      });
+      const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+      const blockHashHex = bytesToHex(blockHash);
+
+      const payload: WalletEnvelopePayload = {
+        kind: 'xpub_stealth',
+        xpub: BIP84_XPUB,
+        label: 'skip-upload-filter-fail',
+        wallet_birthday: '2024-01-01',
+        gap_limit: 5,
+        script_type: 'p2wpkh',
+      };
+      const envelope = await sealEnvelope(payload, orStealthKey);
+
+      const HIT_HEIGHT = 900_001;
+      const FAIL_HEIGHT = 900_003;
+      const fakeFilter = new Uint8Array([0xcd]);
+
+      const result = await runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 900_000,
+        lastBlockScanned: 900_000,
+        fetchTip: async () => 900_005,
+        fetchFilter: async (h) => {
+          if (h >= FAIL_HEIGHT) throw new Error('gone-permanent');
+          return {
+            height: h,
+            blockHashHex: h === HIT_HEIGHT ? blockHashHex : bytesToHex(new Uint8Array(32)),
+            filter: fakeFilter,
+          };
+        },
+        fetchBlock: async () => ({ height: HIT_HEIGHT, blockHashHex, raw: blockBuild.raw }),
+        matcher: { matchAny: (filter, _hash, _scripts) => bytesToHex(filter) === bytesToHex(fakeFilter) },
+      });
+
+      // Both must be present: the library must return non-empty sealedTransactions
+      // alongside the error so the widget can fire SYNC_COMPLETE before throwing.
+      expect(result.filterFetchError).toBeDefined();
+      expect(result.sealedTransactions.length).toBeGreaterThan(0);
+      expect(result.txCount).toBeGreaterThan(0);
+      // Cursor must stop at the last successfully scanned height.
+      expect(result.lastBlockScanned).toBe(FAIL_HEIGHT - 1);
+    });
   });
 });
