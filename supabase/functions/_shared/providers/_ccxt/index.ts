@@ -276,11 +276,17 @@ function buildDiscover(slug: string, exchangeId: string) {
         throw out;
       }
     } else {
-      // Exchange does not advertise fetchBalance; skip live validation here.
-      // The first sync will surface bad credentials through the sync error path.
-      // This should be rare: fetchBalance is supported by virtually all CCXT
-      // exchanges that require authentication.
-      console.warn(`[ccxt:${exchangeId}] fetchBalance not advertised; skipping discovery credential check`);
+      // Exchange does not advertise fetchBalance. Reject at discovery so callers
+      // get a distinct error code (UPSTREAM_UNSUPPORTED) rather than accepting a
+      // wallet that will fail every subsequent sync. This should be rare:
+      // fetchBalance is supported by virtually all CCXT exchanges that require
+      // authentication. A thrown error at discovery surfaces a meaningful
+      // rejection immediately instead of deferring failure to the first sync.
+      const unsupported = new Error(
+        `[ccxt:${exchangeId}] discover: exchange does not advertise fetchBalance: UPSTREAM_UNSUPPORTED`,
+      );
+      (unsupported as any).upstreamCode = 'UPSTREAM_UNSUPPORTED';
+      throw unsupported;
     }
 
     return [
