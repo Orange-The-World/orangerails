@@ -115,5 +115,5 @@ CREATE POLICY orc_member_select ON public.org_recovery_challenges
     )
   );
 
-CREATE INDEX ON public.org_recovery_challenges(vault_id, issued_at);
-CREATE INDEX ON public.org_recovery_challenges(issued_at) WHERE consumed_at IS NULL;
+CREATE INDEX IF NOT EXISTS org_recovery_challenges_vault_id_issued_at_idx ON public.org_recovery_challenges(vault_id, issued_at);
+CREATE INDEX IF NOT EXISTS org_recovery_challenges_issued_at_idx ON public.org_recovery_challenges(issued_at) WHERE consumed_at IS NULL;
