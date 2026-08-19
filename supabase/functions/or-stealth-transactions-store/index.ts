@@ -19,8 +19,9 @@
  *   inserted rows only, not the scan tip. This preserves the DL-0419 guard:
  *   never jump past uncommitted items in the scan range.
  *   When zero rows are inserted (empty scan or all-duplicate batch): advances to
- *   body.last_block_scanned so the same empty range is not rescanned forever
- *   (DL-1188). Safe: no uncommitted items exist in the range to lose.
+ *   max(block_height) of the submitted batch (batchTip), not body.last_block_scanned.
+ *   Bounded to submitted data, not client-dictated. (DL-1188). Safe: no uncommitted
+ *   items exist in the range to lose.
  *
  * POST body:
  *   connection_id:        string (uuid)
@@ -123,9 +124,9 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
  * this batch.
  *
  * When zero rows were inserted (empty scan or all-duplicate batch): advance to
- * scanTip (body.last_block_scanned). The range was fully scanned with no new
- * outputs; staying at the old cursor causes infinite rescan (DL-1188). Safe:
- * no uncommitted items exist in the range.
+ * batchTip (max(block_height) of the submitted batch, NOT body.last_block_scanned).
+ * The range was fully scanned with no new outputs; staying at the old cursor
+ * causes infinite rescan (DL-1188). Safe: no uncommitted items exist in the range.
  *
  * Forward-only guard applies in both paths: candidate must strictly exceed
  * storedCursor, or the cursor stays unchanged.
