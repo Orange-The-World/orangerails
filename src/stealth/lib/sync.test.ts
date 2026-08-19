@@ -1528,4 +1528,99 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
       }
     });
   });
+
+  describe('filter fetch abort and resume (DL-1175)', () => {
+    it('returns filterFetchError and advances cursor to last good height when fetchFilter throws', async () => {
+      const orStealthKey = randomKeyB64();
+      const payload: WalletEnvelopePayload = {
+        kind: 'xpub_stealth',
+        xpub: BIP84_XPUB,
+        label: 'filter-fetch-abort',
+        wallet_birthday: '2024-01-01',
+        gap_limit: 5,
+        script_type: 'p2wpkh',
+      };
+      const envelope = await sealEnvelope(payload, orStealthKey);
+
+      const storedCursor = 800_000;
+      const tip = 800_005;
+      const failHeight = 800_003; // heights 800001 and 800002 succeed; 800003 fails
+      const zeroHashHex = bytesToHex(new Uint8Array(32));
+      const fakeFilter = new Uint8Array([0xde, 0xad]);
+      const networkError = new Error('network-failure-DL-1175');
+
+      const result = await runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 800_000,
+        lastBlockScanned: storedCursor,
+        fetchTip: async () => tip,
+        fetchFilter: async (h) => {
+          if (h < failHeight) return { height: h, blockHashHex: zeroHashHex, filter: fakeFilter };
+          throw networkError;
+        },
+        fetchBlock: async () => { throw new Error('no block fetch expected'); },
+        matcher: { matchAny: () => false },
+      });
+
+      // runSync must NOT throw; the failure is surfaced via the return value.
+      expect(result.filterFetchError).toBeDefined();
+      expect(result.filterFetchError!.failedHeight).toBe(failHeight);
+      expect(result.filterFetchError!.cause).toBe(networkError.message);
+
+      // Cursor advances to the last CONTIGUOUS height successfully fetched,
+      // not the stored cursor and not the tip. Heights 800001-800002 were
+      // fetched; 800003+ were not. lastBlockScanned must be 800002.
+      expect(result.lastBlockScanned).toBe(failHeight - 1);
+      expect(result.txCount).toBe(0);
+    });
+
+    it('includes hits from heights below the failure point in the returned result', async () => {
+      const orStealthKey = randomKeyB64();
+      const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+      const fixtureTs = Math.floor(new Date('2024-08-01T00:00:00Z').getTime() / 1000);
+      const blockBuild = buildFixtureBlock({
+        payToScript: targetScript,
+        amountSats: 5_000n,
+        timestamp: fixtureTs,
+      });
+      const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+      const blockHashHex = bytesToHex(blockHash);
+
+      const payload: WalletEnvelopePayload = {
+        kind: 'xpub_stealth',
+        xpub: BIP84_XPUB,
+        label: 'filter-abort-hits',
+        wallet_birthday: '2024-01-01',
+        gap_limit: 5,
+        script_type: 'p2wpkh',
+      };
+      const envelope = await sealEnvelope(payload, orStealthKey);
+
+      const HIT_HEIGHT = 800_001;
+      const FAIL_HEIGHT = 800_003;
+      const fakeFilter = new Uint8Array([0xab]);
+
+      const result = await runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 800_000,
+        lastBlockScanned: 800_000,
+        fetchTip: async () => 800_005,
+        fetchFilter: async (h) => {
+          if (h >= FAIL_HEIGHT) throw new Error('transient-gone');
+          return { height: h, blockHashHex: h === HIT_HEIGHT ? blockHashHex : bytesToHex(new Uint8Array(32)), filter: fakeFilter };
+        },
+        fetchBlock: async () => ({ height: HIT_HEIGHT, blockHashHex, raw: blockBuild.raw }),
+        matcher: { matchAny: (filter, _hash, _scripts) => bytesToHex(filter) === bytesToHex(fakeFilter) },
+      });
+
+      // The tx at HIT_HEIGHT (below the failure) must be in the result.
+      expect(result.txCount).toBeGreaterThan(0);
+      expect(result.filterFetchError).toBeDefined();
+      expect(result.filterFetchError!.failedHeight).toBe(FAIL_HEIGHT);
+      // Cursor stops at FAIL_HEIGHT - 1, not at the tip.
+      expect(result.lastBlockScanned).toBe(FAIL_HEIGHT - 1);
+    });
+  });
 });
