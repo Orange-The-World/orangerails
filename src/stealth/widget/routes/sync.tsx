@@ -475,6 +475,18 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           }
         }
 
+        // If the filter fetch failed permanently after retries, surface the
+        // error NOW -- after the cursor was persisted -- so the embedder sees
+        // a retryable failure and the next sync resumes from lastBlockScanned
+        // rather than restarting from the wallet birthday.
+        if (result.filterFetchError) {
+          throw new Error(
+            `Sync stopped at block ${result.filterFetchError.failedHeight}: ` +
+            `${result.filterFetchError.cause}. ` +
+            `Progress to block ${result.lastBlockScanned} was saved. Retry to continue.`,
+          );
+        }
+
         // 6. SYNC_COMPLETE.
         //    When useDeliveryAck is true, SYNC_COMPLETE already fired at step 4a
         //    (with pending_delivery_ack: true). Skip here to avoid a duplicate.
