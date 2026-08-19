@@ -107,6 +107,37 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
   return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// ─── Human-readable redacted detail for UPSTREAM_OTHER (DL-1292) ──────────
+// Amends audit 2026-05-16 finding #1. An unclassified upstream failure
+// (UPSTREAM_OTHER) leaves an operator with only a code and a hash, which is
+// not enough to explain the failure to an integrator. This produces a
+// redacted, human-readable first line of the upstream error for the EDGE LOG
+// ONLY.
+//
+// The hard rule: never emit a shape the fingerprint hash path
+// (errorFingerprint) would have scrubbed. So it removes the SAME UUIDs and
+// base64/token blobs that path removes, PLUS provider ids (foo_ab12cd) and
+// 6+ digit runs. Every redaction runs on the FULL first line and the 300-char
+// limit is applied LAST, so truncation can only ever cut text that is already
+// safe. Nothing here reaches the HTTP response body or encrypted_last_error.
+export function redactedUpstreamDetail(raw: string): string {
+  const firstLine = raw.split('\n')[0] ?? raw;
+  return firstLine
+    .replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]')
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
+    .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
+    .replace(/\b\d{6,}\b/g, '[redacted]')
+    .slice(0, 300);
+}
+
+// The ` detail=...` suffix appended to the edge log line: present ONLY on the
+// UPSTREAM_OTHER path, empty on every other code. JSON.stringify keeps it a
+// single grep-safe token. Split out so the UPSTREAM_OTHER-only gating is
+// unit-testable without stubbing console.
+export function upstreamDetailSuffix(code: string, raw: string): string {
+  return code === 'UPSTREAM_OTHER' ? ` detail=${JSON.stringify(redactedUpstreamDetail(raw))}` : '';
+}
+
 /**
  * Determine the HTTP status for a batch sync response.
  *   200 -- every connection succeeded (or the batch was empty).
@@ -1421,7 +1452,7 @@ export async function handleConnectionError(
   const code = classifyUpstreamError(raw, errorClass);
   const correlationId = randomCorrelationId();
   const fp = await errorFingerprint(raw, errorClass);
-  console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
+  console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}${upstreamDetailSuffix(code, raw)}`);
 
   // Persist the taxonomy code on the connection row. In legacy
   // (non-sink) mode we still want it encrypted at rest so the column
