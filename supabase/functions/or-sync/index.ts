@@ -1452,7 +1452,7 @@ export async function handleConnectionError(
   const code = classifyUpstreamError(raw, errorClass);
   const correlationId = randomCorrelationId();
   const fp = await errorFingerprint(raw, errorClass);
-  console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
+  console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}${upstreamDetailSuffix(code, raw)}`);
 
   // Persist the taxonomy code on the connection row. In legacy
   // (non-sink) mode we still want it encrypted at rest so the column
