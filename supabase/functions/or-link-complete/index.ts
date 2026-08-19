@@ -71,9 +71,11 @@
  *                                 and OR normalizes reconnects using the server-side
  *                                 receiverId as the real account key).
  *   submitted_external_wallet_id  the id the caller sent in THIS request. Equal
- *                                 to external_wallet_id on a first connect, different
- *                                 on a reconnect. Correlate our response back to your
- *                                 request on this; never dedup or anchor on this field.
+ *                                 to external_wallet_id on a first connect; on a
+ *                                 reconnect it may differ, and always differs for
+ *                                 adapters that mint a fresh id per discovery.
+ *                                 Correlate our response back to your request on
+ *                                 this; never dedup or anchor on this field.
  *
  * Response 404 if platform_slug unknown; 400 on missing fields.
  */
@@ -581,9 +583,9 @@ Deno.serve(
 
         // The pure-reconnect path: every picked wallet is one we already hold,
         // so EVERY row here comes back under its stored id while the caller only
-        // knows the id it just minted. This is the path where the two ids always
-        // disagree, and echoing the submitted one is what makes the response
-        // correlatable at all.
+        // knows the id it just minted. This is the path where the two ids may
+        // disagree; for adapters that mint a fresh id per discovery they always
+        // do. Echoing the submitted one is what makes the response correlatable.
         const reconnected = knownWallets.map((w) => ({
           id: rowFor(w).id,
           external_wallet_id: rowFor(w).externalWalletId,
@@ -661,9 +663,10 @@ Deno.serve(
       //                                 and what the integrating app dedups on.
       //   submitted_external_wallet_id  the id the CALLER sent us in this request.
       //
-      // On a first connect they are equal. On a reconnect they are not, because
-      // the adapter mints a fresh opaque id on every discovery and we hand back
-      // the stored one. The caller therefore cannot match our response to the
+      // On a first connect they are equal. On a reconnect they may differ;
+      // for adapters that mint a fresh id per discovery, they always differ
+      // (the adapter mints a new opaque id on every discovery and we hand back
+      // the stored one). The caller therefore cannot match our response to the
       // request it just made using external_wallet_id alone, and the widget has
       // to: it holds this wallet's currency and label keyed by the id it sent,
       // and it cannot read them back out of encrypted_metadata. Echoing the
