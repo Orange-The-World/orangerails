@@ -36,10 +36,29 @@ jobs:
 
           # Append literal patterns from the repo secret (base64-encoded, one ERE pattern per line).
           # The secret keeps identifiers that cannot appear in the public file itself.
-          SECRET_PATTERNS=""
-          if [ -n "$DENY_EXTRA" ]; then
-            SECRET_PATTERNS=$(printf '%s' "$DENY_EXTRA" | base64 -d | grep -vE '^\s*(#|$)') || true
+          # The COMMIT_MSG_DENY_PATTERNS secret is mandatory: it carries literal
+          # internal identifiers that cannot appear in the public denylist file.
+          # Abort loudly when it is absent so the gap is never silent.
+          if [ -z "$DENY_EXTRA" ]; then
+            echo "ERROR: COMMIT_MSG_DENY_PATTERNS secret is absent or empty." >&2
+            echo "Set it under repo Settings > Secrets and variables > Actions." >&2
+            echo "The gate cannot enforce literal identifier patterns without it." >&2
+            exit 1
           fi
+
+          # Decode the secret. A decode failure means the secret is malformed -- abort.
+          SECRET_RAW=$(printf '%s' "$DENY_EXTRA" | base64 -d) || {
+            echo "ERROR: base64 decode of COMMIT_MSG_DENY_PATTERNS failed -- secret may be malformed." >&2
+            exit 1
+          }
+          SECRET_PATTERNS=$(printf '%s' "$SECRET_RAW" | grep -vE '^\s*(#|$)') || true
+          SECRET_COUNT=$(printf '%s\n' "$SECRET_PATTERNS" | grep -c .) || true
+          if [ "$SECRET_COUNT" -eq 0 ]; then
+            echo "ERROR: COMMIT_MSG_DENY_PATTERNS decoded to zero usable patterns." >&2
+            echo "Ensure the secret contains at least one non-comment ERE pattern." >&2
+            exit 1
+          fi
+          echo "Loaded $SECRET_COUNT secret pattern(s)."
 
           # Combine file patterns and secret patterns, drop blank lines.
           PATTERNS=$(printf '%s\n%s\n' "$FILE_PATTERNS" "$SECRET_PATTERNS" | grep -vE '^\s*$') || true
@@ -76,3 +95,43 @@ jobs:
 
           COUNT=$(git log --oneline "$BASE".."$HEAD" | wc -l | tr -d ' ')
           echo "PASS: scanned $COUNT commit message(s), no prohibited values found."
+
+  self-test:
+    name: Self-test -- scanner rejects a known prohibited shape
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert scanner catches a planted prohibited value
+        run: |
+          DENY_FILE=".github/commit-msg-denylist.txt"
+          FILE_PATTERNS=$(grep -vE '^\s*(#|$)' "$DENY_FILE") || true
+
+          if [ -z "$FILE_PATTERNS" ]; then
+            echo "ERROR: no patterns in denylist file -- cannot self-test." >&2
+            exit 1
+          fi
+
+          # Plant a commit message that MUST match the public shape patterns.
+          # 100.1.2.3 matches the Tailscale CGNAT shape (100\.[0-9]+\.[0-9]+\.[0-9]+).
+          TEST_MSG="fix: hardcoded address 100.1.2.3 in legacy config"
+
+          HITS=""
+          GREP_RC=0
+          HITS=$(printf '%s' "$TEST_MSG" | grep -inEf <(printf '%s\n' "$FILE_PATTERNS")) || GREP_RC=$?
+
+          if [ "$GREP_RC" -eq 2 ]; then
+            echo "ERROR: grep failed during self-test (bad pattern or I/O)." >&2
+            exit 1
+          fi
+
+          if [ -z "$HITS" ]; then
+            echo "SELF-TEST FAILED: planted prohibited value was NOT caught by the scanner." >&2
+            echo "The deny-list shape patterns must match '100.1.2.3'." >&2
+            echo "Patterns loaded:" >&2
+            printf '%s\n' "$FILE_PATTERNS" >&2
+            exit 1
+          fi
+
+          echo "SELF-TEST PASSED: scanner correctly caught planted value:"
+          printf '%s\n' "$HITS"
