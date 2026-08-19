@@ -134,9 +134,9 @@ export function deriveResponseCursor(
   storedCursor: number | null,
   inserted: number,
   maxBlockInserted: number,
-  scanTip: number,
+  batchTip: number,
 ): number | null {
-  const candidate = inserted > 0 ? maxBlockInserted : scanTip;
+  const candidate = inserted > 0 ? maxBlockInserted : batchTip;
   const prev = storedCursor ?? -1;
   return candidate > prev ? candidate : storedCursor;
 }
@@ -338,12 +338,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     // Forward-only cursor guard (DL-0419 trackMax-inside-guard, DL-1188 zero-match).
     // When rows were inserted: advance to max(block_height) of inserted rows.
-    // When zero rows were inserted: advance to scan tip so the same empty range
-    // is not rescanned forever. Hold back only on a real scan error (those
-    // already returned 500 above). Always update last_sync_at.
+    // When zero rows were inserted from a non-empty batch (all-duplicate): advance to
+    // max(block_height) of the submitted batch. This is server-validated and cannot
+    // be spoofed via the client-supplied body.last_block_scanned field.
+    // When the batch is empty (total === 0): batchTip = -1, no advance. Always update last_sync_at.
     const storedCursor = (ownerRow.last_block_scanned as number | null) ?? -1;
-    const scanTip = body.last_block_scanned as number;
-    const cursorCandidate = inserted > 0 ? maxBlockInserted : scanTip;
+    const batchTip = total > 0
+      ? Math.max(...(body.sealed_transactions as SealedTransactionInput[]).map(r => r.block_height as number))
+      : -1;
+    const cursorCandidate = inserted > 0 ? maxBlockInserted : batchTip;
     const cursorPatch: Record<string, unknown> = { last_sync_at: new Date().toISOString() };
     if (cursorCandidate > storedCursor) {
       cursorPatch.last_block_scanned = cursorCandidate;
@@ -367,7 +370,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       ownerRow.last_block_scanned as number | null,
       inserted,
       maxBlockInserted,
-      scanTip,
+      batchTip,
     );
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,
