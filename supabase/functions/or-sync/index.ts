@@ -1173,6 +1173,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 discovery_source: 'server',
               });
             }
+            console.log(
+              `[or-sync] DL-1398: conn ${conn.id as string}: discovered ${healDiscovered.length} wallet(s), to_heal ${toHeal.length}`,
+            );
             if (toHeal.length > 0) {
               const { error: healErr } = await ctx.serviceClient
                 .from('source_wallets')
@@ -1200,11 +1203,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                     );
                   }
                 }
+                console.log(
+                  `[or-sync] DL-1398: conn ${conn.id as string}: healed ${toHeal.length} of ${healDiscovered.length} discovered`,
+                );
               }
             }
           } catch (healErr) {
             console.warn(
-              `[or-sync] DL-1398: wallet heal failed for conn ${conn.id as string}:`,
+              `[or-sync] DL-1398: wallet heal failed for conn ${conn.id as string}`,
               healErr instanceof Error ? healErr.message : String(healErr),
             );
           }
