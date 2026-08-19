@@ -56,15 +56,24 @@
  *     source_wallet_id?: string
  *   }
  *
- * The two ids on a returned wallet are NOT interchangeable:
- *   external_wallet_id            the STORED id, stable across reconnects. Dedup
- *                                 on this one.
+ * The ids on a returned wallet -- they are NOT interchangeable:
+ *   id (source_wallets.id)        OR's primary key. THE recommended consumer anchor:
+ *                                 stable across reconnects, the field OR's own dedup
+ *                                 logic uses. Use this as your cross-system foreign key.
+ *   external_wallet_id            the STORED id OR assigned at first connect, returned
+ *                                 consistently on reconnects. For most providers this
+ *                                 matches the provider's own ID; for Strike
+ *                                 (post-2026-07-17) it is an opaque UUID OR assigned,
+ *                                 not a Strike-issued identifier. Do NOT describe this
+ *                                 as "the upstream provider's stable ID" -- for Strike
+ *                                 it is OR's stored id, which happens to be stable from
+ *                                 OR's side (the adapter mints a fresh UUID per discovery
+ *                                 and OR normalizes reconnects using the server-side
+ *                                 receiverId as the real account key).
  *   submitted_external_wallet_id  the id the caller sent in THIS request. Equal
- *                                 to the above on a first connect, different on a
- *                                 reconnect, because the adapter mints a fresh
- *                                 opaque id per discovery and we return the
- *                                 stored one. Correlate our response back to your
- *                                 request on this one, never on external_wallet_id.
+ *                                 to external_wallet_id on a first connect, different
+ *                                 on a reconnect. Correlate our response back to your
+ *                                 request on this; never dedup or anchor on this field.
  *
  * Response 404 if platform_slug unknown; 400 on missing fields.
  */
