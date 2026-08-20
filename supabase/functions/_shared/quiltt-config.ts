@@ -86,7 +86,7 @@ export async function resolveQuilttConfigForPlatform(
   const apiKey = data.quiltt_api_key ?? envApiKey;
   const connectorIdLink = data.quiltt_connector_id_link ?? envConnectorIdLink;
   const connectorIdReconnect =
-    data.quiltt_connector_id_reconnect ?? envConnectorIdReconnect ?? connectorIdLink;
+    data.quiltt_connector_id_reconnect || envConnectorIdReconnect || connectorIdLink;
   const catalogProfileId = data.quiltt_catalog_profile_id ?? envCatalogProfileId;
 
   return {
