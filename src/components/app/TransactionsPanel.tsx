@@ -92,9 +92,15 @@ function rowKey(tx: DecryptedTxRow): string {
 
 /**
  * Resolve a transaction's wallet display info: { currency, label } or null
- * for legacy rows. Walks all connections looking for a source_wallet whose
- * id matches tx.source_wallet_id. O(c*w) total connections × wallets, but
- * that's tiny in practice (< 50).
+ * for legacy rows. Matches on source_wallets.id (internal UUID, written by
+ * or-sync after DL-1440) with a backward-compat fallback to external_wallet_id
+ * for rows created before that fix was deployed and the DBA backfill runs.
+ *
+ * DL-1440: a bare external_wallet_id is NOT a safe join key. Blink wallet ids
+ * and ccxt exchange slugs ('coinbase', 'kraken') repeat across different
+ * customers' connections. The connection_id guard below is MANDATORY; do not
+ * remove it. source_wallets.id is the only globally-unique anchor per CTO
+ * ruling 2026-08-19. O(c*w) total connections x wallets, tiny in practice.
  */
 function findWalletInfo(
   tx: DecryptedTxRow,
@@ -102,8 +108,17 @@ function findWalletInfo(
 ): { currency: string; label?: string | null } | null {
   if (!tx.source_wallet_id) return null;
   for (const c of connections) {
+    // DL-1440: this guard is MANDATORY. external_wallet_id repeats across
+    // customers; without connection scoping, a Blink/ccxt id would match the
+    // wrong customer's wallet. Never remove this check.
     if (c.id !== tx.connection_id) continue;
-    const w = c.source_wallets?.find((sw) => sw.external_wallet_id === tx.source_wallet_id);
+    const w = c.source_wallets?.find(
+      (sw) =>
+        // Primary: internal UUID (new rows written by or-sync post DL-1440)
+        sw.id === tx.source_wallet_id ||
+        // Fallback: provider's external id (rows before the DBA backfill runs)
+        sw.external_wallet_id === tx.source_wallet_id,
+    );
     if (w) return { currency: w.currency, label: w.label };
   }
   return null;

@@ -402,3 +402,136 @@ Deno.test('total-miss guard: all-disconnected ids return 422 not 404', () => {
     'disconnected 422 check must appear before the total-miss 404 fallback',
   );
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DL-1440: external_wallet_id collision across customers
+//
+// DBA confirmed 2026-08-19: 5 external_wallet_id values repeat across different
+// customers' connections in prod (33 affected source_wallets rows). Providers
+// including Blink and ccxt emit non-globally-unique wallet identifiers. Storing
+// a bare provider id in encrypted_transactions.source_wallet_id means any lookup
+// by that column alone resolves ambiguously.
+//
+// The fix (in or-sync): build a map of external_wallet_id -> source_wallets.id
+// (internal UUID) and rewrite each transaction's source_wallet_id to the UUID
+// before persisting. These tests pin that behaviour.
+// ──────────────────────────────────────────────────────────────────────────────
+
+Deno.test('DL-1440: remap resolves colliding external ids to distinct internal UUIDs', () => {
+  // Two customers both connect to Blink. Blink returns the same wallet id for
+  // each of their BTC wallets (e.g. a slug or short opaque id that is not
+  // globally unique across Blink accounts -- DBA confirmed this scenario).
+  const BLINK_BTC_WALLET_ID = 'blink-btc-wallet-x';
+
+  // Customer A's connection row
+  const connA_id = '00000000-0000-0000-0000-000000000001';
+  const connA_internalId = '00000000-0000-0000-1111-000000000001'; // source_wallets.id for A
+
+  // Customer B's connection row (same external id, different connection)
+  const connB_id = '00000000-0000-0000-0000-000000000002';
+  const connB_internalId = '00000000-0000-0000-1111-000000000002'; // source_wallets.id for B
+
+  // Simulate externalToInternalId map for customer A's sync run
+  const externalToInternalId = new Map<string, string>([
+    [BLINK_BTC_WALLET_ID, connA_internalId],
+  ]);
+
+  // A transaction comes back from the Blink adapter tagged with the provider id
+  const rawTx = {
+    id: 'tx-001',
+    source_wallet_id: BLINK_BTC_WALLET_ID,
+  };
+
+  // Apply the DL-1440 remap (mirrors the logic in or-sync/index.ts)
+  const remapped = {
+    ...rawTx,
+    source_wallet_id: rawTx.source_wallet_id != null
+      ? (externalToInternalId.get(rawTx.source_wallet_id) ?? null)
+      : null,
+  };
+
+  // The persisted source_wallet_id must be the INTERNAL UUID for A, not the
+  // bare provider id. If it were the provider id, a lookup by that id alone
+  // could match customer B's wallet row (connB_internalId) too.
+  assertEquals(
+    remapped.source_wallet_id,
+    connA_internalId,
+    'source_wallet_id must be the internal UUID, not the provider-issued external id',
+  );
+  assert(
+    remapped.source_wallet_id !== BLINK_BTC_WALLET_ID,
+    'source_wallet_id must not be the raw provider wallet id after remap',
+  );
+  assert(
+    remapped.source_wallet_id !== connB_internalId,
+    'remap must not produce customer B uuid when running in customer A context',
+  );
+
+  // Customer B's sync run builds a different map (different connection) and
+  // gets its own distinct internal UUID. Same external id -> different UUID.
+  const externalToInternalIdB = new Map<string, string>([
+    [BLINK_BTC_WALLET_ID, connB_internalId],
+  ]);
+  const remappedB = {
+    ...rawTx,
+    source_wallet_id: rawTx.source_wallet_id != null
+      ? (externalToInternalIdB.get(rawTx.source_wallet_id) ?? null)
+      : null,
+  };
+  assertEquals(remappedB.source_wallet_id, connB_internalId);
+  assert(remappedB.source_wallet_id !== connA_internalId, 'B uuid must differ from A uuid');
+  assert(
+    remapped.source_wallet_id !== remappedB.source_wallet_id,
+    'same provider wallet id must resolve to distinct internal UUIDs per connection',
+  );
+});
+
+Deno.test('DL-1440: remap sets source_wallet_id null when no map entry (syncAccountWide path)', () => {
+  // When a provider emits source_wallet_id but there are no source_wallets rows
+  // (syncAccountWide fallback, no wallet selection configured), the map is empty
+  // and the id should become null rather than leaking the provider id.
+  const externalToInternalId = new Map<string, string>();
+  const rawTx = { id: 'tx-002', source_wallet_id: 'coinbase' };
+  const remapped = {
+    ...rawTx,
+    source_wallet_id: rawTx.source_wallet_id != null
+      ? (externalToInternalId.get(rawTx.source_wallet_id) ?? null)
+      : null,
+  };
+  assertEquals(remapped.source_wallet_id, null, 'unmapped provider id must become null');
+});
+
+Deno.test('DL-1440: remap preserves null source_wallet_id unchanged', () => {
+  const externalToInternalId = new Map<string, string>([['x', 'y']]);
+  const rawTx = { id: 'tx-003', source_wallet_id: null as string | null };
+  const remapped = {
+    ...rawTx,
+    source_wallet_id: rawTx.source_wallet_id != null
+      ? (externalToInternalId.get(rawTx.source_wallet_id) ?? null)
+      : null,
+  };
+  assertEquals(remapped.source_wallet_id, null, 'null input must stay null after remap');
+});
+
+Deno.test('DL-1440: or-sync source code must select id from source_wallets (DL-1440 guard)', () => {
+  // Pin that or-sync fetches source_wallets.id (needed to build externalToInternalId).
+  // If this reverts to selecting only external_wallet_id, the remap map would
+  // have no internal UUIDs to emit and would always produce null.
+  const src = readSelf('./index.ts');
+  assert(
+    src.includes("'id, external_wallet_id, is_synced, wallet_fingerprint'"),
+    'source_wallets select must include id field (DL-1440 composite anchor)',
+  );
+});
+
+Deno.test('DL-1440: or-sync source code must contain externalToInternalId remap (DL-1440 guard)', () => {
+  const src = readSelf('./index.ts');
+  assert(
+    src.includes('externalToInternalId'),
+    'or-sync must build externalToInternalId map (DL-1440 fix)',
+  );
+  assert(
+    src.includes('externalToInternalId.get(tx.source_wallet_id)'),
+    'or-sync must remap tx.source_wallet_id via externalToInternalId (DL-1440 fix)',
+  );
+});
