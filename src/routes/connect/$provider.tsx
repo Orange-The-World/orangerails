@@ -4,7 +4,7 @@
  * The widget's canonical URL for generic providers is:
  *   /connect?provider={slug}&platform=...&app_user_id=...&...
  *
- * BitBooks V2 and other consumer apps navigate to path-based URLs
+ * Consumer apps may navigate to path-based URLs
  *   /connect/blink, /connect/strike, ...
  * which previously fell through to a 404 / error page.
  *
