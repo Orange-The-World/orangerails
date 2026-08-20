@@ -36,6 +36,28 @@ import {
   redactProviderId,
 } from './resolve.ts';
 
+// ─── correlation ID / error classification ───────────────────────────
+
+/**
+ * Opaque short ID for cross-referencing a client error to ops investigation.
+ * Matches the 8-byte hex shape written by or-sync (CORRELATION_RE in strike-error-copy.ts).
+ */
+function randomCorrelationId(): string {
+  const buf = new Uint8Array(8);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Map a Quiltt errored event type to an UPSTREAM_ taxonomy code recognised
+ * by upstreamMarkerToCopy in app.tsx. Unrecoverable events need reconnection
+ * (auth class); all other subtypes are transient (unavailable class).
+ */
+function quilttErrorCode(eventType: string): string {
+  if (eventType.includes('.unrecoverable')) return 'UPSTREAM_AUTH_FAILED';
+  return 'UPSTREAM_UNAVAILABLE';
+}
+
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 const BATCH_SIZE = 20;        // events drained per invocation
 const TX_PAGE_SIZE = 100;
@@ -891,9 +913,16 @@ async function reconcileConnectionError(
     conn = legacy.data as { id: string };
   }
 
+  // DL-1445: persist a recognised UPSTREAM_ marker so the UI can surface a
+  // message. Stored as plaintext CODE:correlationId (same shape as or-sync
+  // sink mode / encrypt-failure fallback) so upstreamMarkerToCopy in app.tsx
+  // classifies it before any decrypt attempt.
+  const errorCode = quilttErrorCode(ev.event_type);
+  const correlationId = randomCorrelationId();
+  const errorMarker = `${errorCode}:${correlationId}`;
   const { error } = await client
     .from('connections')
-    .update({ status: 'error', updated_at: new Date().toISOString() })
+    .update({ status: 'error', encrypted_last_error: errorMarker, updated_at: new Date().toISOString() })
     .eq('id', conn.id);
   if (error) return `connection status update failed: ${error.message}`;
 
