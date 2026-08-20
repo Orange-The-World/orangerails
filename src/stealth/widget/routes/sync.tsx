@@ -103,7 +103,8 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
     detail: "Your password never left this browser.",
   });
   const [done, setDone] = useState<{ txCount: number; bytes: number; windowExhausted: boolean } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; retryable: boolean } | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
   const [isFirstSync, setIsFirstSync] = useState<boolean | null>(null);
 
   function postWidgetError(code: StealthErrorCode, message: string, retryable: boolean) {
@@ -502,18 +503,20 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
       } catch (e) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
-        setError(msg);
         if (e instanceof DeliveryAckMissingError) {
           // The consuming app did not post OR_STEALTH_DELIVERY_ACK within 30 s.
           // The cursor was not advanced; retrying the sync is safe.
+          setError({ message: msg, retryable: true });
           postWidgetError("DELIVERY_ACK_MISSING", msg, true);
         } else if (e instanceof WindowExhaustedError) {
           // Address window exhausted: wallet history beyond the scanned window
           // may be missing. Not retryable as is; the embedder must prompt a
           // re-sync with a wider gap_limit. Its own code so this is
           // distinguishable from an unexpected INTERNAL failure. DL-0584.
+          setError({ message: msg, retryable: false });
           postWidgetError("WINDOW_EXHAUSTED", msg, false);
         } else {
+          setError({ message: msg, retryable: true });
           postWidgetError("INTERNAL", msg, true);
         }
       }
@@ -522,23 +525,39 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
     return () => {
       cancelled = true;
     };
-    // We deliberately run once on mount.
+    // retryKey increments when the user clicks "Try again"; the effect
+    // re-runs as a fresh sync attempt. All other deps are stable on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [retryKey]);
 
   if (error) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background p-6">
         <div className="w-full max-w-md rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center">
           <h1 className="text-lg font-semibold text-destructive">Sync failed</h1>
-          <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-          <button
-            type="button"
-            onClick={() => window.close()}
-            className="mt-4 inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90"
-          >
-            Close this window
-          </button>
+          <p className="mt-2 text-sm text-muted-foreground">{error.message}</p>
+          <div className="mt-4 flex justify-center gap-2">
+            {error.retryable && (
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setDone(null);
+                  setRetryKey((k) => k + 1);
+                }}
+                className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90"
+              >
+                Try again
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => window.close()}
+              className="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground hover:bg-muted"
+            >
+              Close this window
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -559,8 +578,8 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
               <p className="font-semibold">Your history may be incomplete.</p>
               <p className="mt-1">
                 Transactions were found near the edge of the address window. Some older
-                transactions may not have been found. Re-connect this wallet with a
-                wider address window to recover the full history.
+                transactions may not have been found. To recover the full history,
+                re-add this wallet from the app with a wider gap limit.
               </p>
             </div>
           )}
