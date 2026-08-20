@@ -905,11 +905,26 @@ export async function reconcileConnectionError(
   // client would try to decrypt and fail on. Every Quiltt connection on
   // production today is on a sink platform, so this gate is a no-op now and
   // correct if that ever changes.
-  const { data: platRow } = await client
+  const { data: platRow, error: platErr } = await client
     .from('platforms')
     .select('sink_format')
     .eq('id', ev.platform_id)
     .maybeSingle();
+  // Review follow-up on PR 808. A failed read leaves platRow undefined, which
+  // makes sinkMode false, which silently reproduces the exact NULL-cause state
+  // this function was changed to prevent. The cause_recorded flag below makes
+  // that observable, but the read error itself was being discarded, so nobody
+  // could tell a transient platforms failure apart from a genuine non-sink
+  // platform. Log them differently. Deliberately NOT returning an error: a
+  // platforms read failure must not stop the status reconcile, which is the
+  // more important half and does not depend on this lookup.
+  if (platErr) {
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: platforms lookup failed for ` +
+        `platform ${ev.platform_id}, treating as non-sink so no cause will be ` +
+        `recorded: ${platErr.message}`,
+    );
+  }
   const sinkMode = typeof platRow?.sink_format === 'string' && platRow.sink_format.length > 0;
 
   const connPatch: Record<string, unknown> = {
