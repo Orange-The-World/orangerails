@@ -440,7 +440,14 @@ export async function handleEvent(
       .limit(1)
       .maybeSingle();
     if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
-    if (!legacy.data) return 'or-connection row not yet created';
+    // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
+    // connections row (timing race on first connect or reconnect). Defer instead
+    // of bumping the attempt counter: the OPK gate above (lines 323-330) already
+    // confirmed opk_public is set, so reDriveReadyDeferrals re-admits this event
+    // on the next drain tick once the connections row exists. Returning a non-null
+    // string here would call bumpAttempts on every tick and retire the event after
+    // 25 attempts, permanently losing a sync that was never broken.
+    if (!legacy.data) return 'deferred';
     conn = legacy.data as { id: string };
   }
 
