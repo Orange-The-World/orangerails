@@ -1004,3 +1004,53 @@ Deno.test('DL-1409: a successful Quiltt sync clears pending as well as error', a
     "'error' must stay promotable: this is the existing reconnect-recovery behaviour and must not regress",
   );
 });
+
+Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending', async () => {
+  // The fallback resolves "oldest quiltt row for this subaccount with a NULL
+  // quiltt_connection_id", which is not necessarily the connection this event
+  // is about. Promoting pending there could activate the wrong connection, and
+  // cancelPendingConnection refuses to delete an active row, so it cannot be
+  // undone. This test pins the fallback to 'error' only.
+  let statusFilter: string[] | undefined;
+  let lookupCalls = 0;
+
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() {
+          lookupCalls++;
+          // First lookup is the exact quiltt_connection_id match: miss.
+          // Second is the legacy NULL-id fallback: hit.
+          return Promise.resolve(
+            lookupCalls === 1
+              ? { data: null, error: null }
+              : { data: { id: 'conn-legacy' }, error: null },
+          );
+        },
+        update(_patch: Record<string, unknown>) { return chain; },
+        in(_col: string, vals: string[]) {
+          statusFilter = vals;
+          return Promise.resolve({ error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-unknown', 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(lookupCalls, 2, 'the exact match must miss and the legacy fallback must run');
+  assertEquals(
+    statusFilter,
+    ['error'],
+    "the legacy fallback must stay error-only: it may be resolving a different connection than the one that succeeded, and promoting pending there is not reversible by the consumer",
+  );
+});
