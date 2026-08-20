@@ -249,6 +249,14 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         // re-enter the queue.
         await markDeferred(client, ev.event_id);
         skipped++;
+      } else if (handled === 'deferred-conn-race') {
+        // connections row missing (race with or-link-complete, DL-1414-C).
+        // Defer so the event sits out one tick, AND bump attempts so the
+        // loop is bounded: after MAX_ATTEMPTS ticks without the connections
+        // row appearing the event retires rather than cycling indefinitely.
+        await markDeferred(client, ev.event_id);
+        await bumpAttempts(client, ev, 'or-connection row not yet created (DL-1414-C)');
+        skipped++;
       } else {
         await bumpAttempts(client, ev, handled);
         failed++;
@@ -441,13 +449,15 @@ export async function handleEvent(
       .maybeSingle();
     if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
     // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
-    // connections row (timing race on first connect or reconnect). Defer instead
-    // of bumping the attempt counter: the OPK gate above (lines 323-330) already
-    // confirmed opk_public is set, so reDriveReadyDeferrals re-admits this event
-    // on the next drain tick once the connections row exists. Returning a non-null
-    // string here would call bumpAttempts on every tick and retire the event after
-    // 25 attempts, permanently losing a sync that was never broken.
-    if (!legacy.data) return 'deferred';
+    // connections row (timing race on first connect or reconnect). Return
+    // 'deferred-conn-race' so the drain loop defers the row (markDeferred)
+    // AND increments its attempt counter (bumpAttempts). opk_public is already
+    // set here (we passed the gate above), so reDriveReadyDeferrals would
+    // re-admit the event on the very next tick with a plain 'deferred' return,
+    // creating an unbounded loop if the connections row never appears. With
+    // 'deferred-conn-race' the loop is bounded: after MAX_ATTEMPTS ticks the
+    // event retires normally rather than cycling forever.
+    if (!legacy.data) return 'deferred-conn-race';
     conn = legacy.data as { id: string };
   }
 
