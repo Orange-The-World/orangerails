@@ -62,6 +62,8 @@ import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
+import { computeWalletFingerprint } from '../_shared/account-fingerprint.ts';
+import { toByteaHex } from '../_shared/bytea.ts';
 import { readSyncCompleteness } from './_connection-result.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
@@ -1161,6 +1163,89 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               .map((w: { wallet_fingerprint: string; external_wallet_id: string }) =>
                 [w.wallet_fingerprint, w.external_wallet_id] as [string, string]),
           );
+
+          // DL-1398: Heal missing currency wallets on every Strike sync.
+          // Connections created before 2026-07-20 may hold only one source_wallet
+          // row (the second currency wallet was not yet created at link time).
+          // Call discoverWallets() with the already-decrypted credentials to get
+          // all active currencies and their receiverId (account_key). For each
+          // currency that has no fingerprint row in source_wallets, insert a
+          // server-discovered wallet (discovery_source='server', no
+          // encrypted_metadata -- ZKA-safe per migration 20260722140000).
+          // Idempotent: upsert on wallet_fingerprint unique index.
+          // Non-fatal: a failure here is logged and the sync continues.
+          try {
+            const healDiscovered = await adapter.discoverWallets(credentials);
+            const toHeal: Array<{
+              connection_id: string;
+              external_wallet_id: string;
+              is_synced: boolean;
+              wallet_fingerprint: string;
+              wallet_fingerprint_key_version: number;
+              discovery_source: string;
+            }> = [];
+            for (const w of healDiscovered) {
+              const accountKey = (w as { account_key?: string }).account_key;
+              if (!accountKey || !w.currency) continue;
+              const mac = await computeWalletFingerprint(
+                subaccountId as string,
+                'strike',
+                accountKey,
+                w.currency,
+              );
+              const fpHex = toByteaHex(mac);
+              if (walletsByFingerprintHex.has(fpHex)) continue;
+              toHeal.push({
+                connection_id: conn.id as string,
+                external_wallet_id: crypto.randomUUID(),
+                is_synced: true,
+                wallet_fingerprint: fpHex,
+                wallet_fingerprint_key_version: 1,
+                discovery_source: 'server',
+              });
+            }
+            console.log(
+              `[or-sync] DL-1398: conn ${conn.id as string}: discovered ${healDiscovered.length} wallet(s), to_heal ${toHeal.length}`,
+            );
+            if (toHeal.length > 0) {
+              const { error: healErr } = await ctx.serviceClient
+                .from('source_wallets')
+                .upsert(toHeal, { onConflict: 'wallet_fingerprint', ignoreDuplicates: true });
+              if (healErr) {
+                console.warn(
+                  `[or-sync] DL-1398: wallet heal upsert failed for conn ${conn.id as string}:`,
+                  healErr.message,
+                );
+              } else {
+                // Refresh walletsByFingerprintHex so the drain path below can
+                // attribute transactions to the newly inserted wallets in this
+                // same sync run.
+                const { data: healed } = await ctx.serviceClient
+                  .from('source_wallets')
+                  .select('external_wallet_id, wallet_fingerprint')
+                  .eq('connection_id', conn.id)
+                  .eq('is_synced', true)
+                  .not('wallet_fingerprint', 'is', null);
+                for (const row of healed ?? []) {
+                  if (row.wallet_fingerprint) {
+                    walletsByFingerprintHex.set(
+                      row.wallet_fingerprint as string,
+                      row.external_wallet_id as string,
+                    );
+                  }
+                }
+                console.log(
+                  `[or-sync] DL-1398: conn ${conn.id as string}: healed ${toHeal.length} of ${healDiscovered.length} discovered`,
+                );
+              }
+            }
+          } catch (healErr) {
+            console.warn(
+              `[or-sync] DL-1398: wallet heal failed for conn ${conn.id as string}`,
+              healErr instanceof Error ? healErr.message : String(healErr),
+            );
+          }
+
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
             connection: {
