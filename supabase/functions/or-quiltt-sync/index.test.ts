@@ -105,6 +105,8 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
 
 Deno.test('handleEvent: dispatches errored event, reconciles connection to error, returns processed', async () => {
   let updateCalled = false;
+  // deno-lint-ignore no-explicit-any
+  let capturedPatch: Record<string, any> | null = null;
 
   const mockClient = {
     from(table: string) {
@@ -115,8 +117,12 @@ Deno.test('handleEvent: dispatches errored event, reconciles connection to error
         is()     { return chain; },
         order()  { return chain; },
         limit()  { return chain; },
-        update(_patch: unknown) {
-          if (table === 'connections') updateCalled = true;
+        // deno-lint-ignore no-explicit-any
+        update(patch: any) {
+          if (table === 'connections') {
+            updateCalled = true;
+            capturedPatch = patch;
+          }
           return chain;
         },
         single() {
@@ -152,6 +158,16 @@ Deno.test('handleEvent: dispatches errored event, reconciles connection to error
   const result = await handleEvent(mockClient as any, ev, 'plat-1', 'sub-1', 'api-key');
   assertEquals(result, 'processed', 'errored event must return processed after status flip');
   assertEquals(updateCalled, true, 'must call update on connections table to flip status to error');
+  // DL-1445: the update must carry encrypted_last_error so the UI can surface a message.
+  // The value must be UPSTREAM_CODE:correlationId (16 hex chars) -- the plaintext marker
+  // format that upstreamMarkerToCopy classifies before any decrypt attempt.
+  const lastErr = (capturedPatch as Record<string, unknown> | null)?.encrypted_last_error as string | undefined;
+  assertEquals(typeof lastErr, 'string', 'encrypted_last_error must be a string in the update patch (not null/undefined)');
+  assertEquals(
+    /^UPSTREAM_[A-Z_]+:[0-9a-f]{16}$/.test(lastErr ?? ''),
+    true,
+    `encrypted_last_error must match UPSTREAM_CODE:16hexchars, got: ${lastErr}`,
+  );
 });
 
 // ── reDriveReadyDeferrals ─────────────────────────────────────────────
