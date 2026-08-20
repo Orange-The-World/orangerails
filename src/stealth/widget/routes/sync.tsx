@@ -243,6 +243,40 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         });
         if (cancelled) return;
 
+        // 2b. Refresh the widget token before upload (DL-1478).
+        //     The xpub scan takes 10-15 min; the initial token TTL is 300 s,
+        //     so init.widget_token is always expired by the time the upload
+        //     runs. Re-mint goes through the proxy so the auth uses the
+        //     integrator's live platform API key, NOT the expiring token
+        //     (Security constraint on option a, 2026-08-20).
+        //     On failure the original token is kept; the upload will 401 as
+        //     before, surfacing the error rather than silently discarding.
+        let currentWidgetToken = init.widget_token;
+        if (init.proxy_base_url && parent && init.widget_token) {
+          try {
+            const refreshed = await proxyFetch({
+              parent,
+              parentOrigin: init.return_callback_origin,
+              fn: "or-link-mint-token",
+              body: { app_user_id: init.app_user_id },
+            });
+            if (
+              refreshed.ok &&
+              refreshed.parsed !== null &&
+              typeof (refreshed.parsed as { widget_token?: unknown }).widget_token === "string"
+            ) {
+              currentWidgetToken = (refreshed.parsed as { widget_token: string }).widget_token;
+            } else {
+              console.warn(
+                "[stealth/sync] token refresh returned unexpected shape; proceeding with original token:",
+                refreshed.bodyText,
+              );
+            }
+          } catch (e) {
+            console.warn("[stealth/sync] token refresh failed; proceeding with original token:", e);
+          }
+        }
+
         // 3. Upload sealed transactions to OR , UNLESS the consumer app
         //    has set skip_transaction_upload (V2 does this; V2's own DB
         //    is the source of truth and OR-side encrypted backup is
@@ -253,7 +287,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           const uploadBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
-            widget_token: init.widget_token,
+            widget_token: currentWidgetToken,
             sealed_transactions: result.sealedTransactions,
             last_block_scanned: result.lastBlockScanned,
           };
@@ -369,7 +403,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
-            widget_token: init.widget_token,
+            widget_token: currentWidgetToken,
             last_block_scanned: result.lastBlockScanned,
           };
           let cursorWritten = false;
