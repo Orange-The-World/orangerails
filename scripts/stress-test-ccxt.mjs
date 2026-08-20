@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MANIFEST_PATH = join(__dirname, '..', 'supabase', 'functions', '_shared', 'providers', '_ccxt-manifest.ts');
+const MANIFEST_PATH = join(__dirname, '..', 'supabase', 'functions', '_shared', 'providers', '_ccxt', 'manifest.ts');
 const STATUS_PATH = join(__dirname, '..', 'docs', 'ccxt-status.md');
 
 const tsSource = readFileSync(MANIFEST_PATH, 'utf8');

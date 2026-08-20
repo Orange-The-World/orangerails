@@ -62,6 +62,8 @@ import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
+import { computeWalletFingerprint } from '../_shared/account-fingerprint.ts';
+import { toByteaHex } from '../_shared/bytea.ts';
 import { readSyncCompleteness } from './_connection-result.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
@@ -105,6 +107,37 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
   const bytes = new TextEncoder().encode(`${errorClass}|${redacted}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ─── Human-readable redacted detail for UPSTREAM_OTHER (DL-1292) ──────────
+// Amends audit 2026-05-16 finding #1. An unclassified upstream failure
+// (UPSTREAM_OTHER) leaves an operator with only a code and a hash, which is
+// not enough to explain the failure to an integrator. This produces a
+// redacted, human-readable first line of the upstream error for the EDGE LOG
+// ONLY.
+//
+// The hard rule: never emit a shape the fingerprint hash path
+// (errorFingerprint) would have scrubbed. So it removes the SAME UUIDs and
+// base64/token blobs that path removes, PLUS provider ids (foo_ab12cd) and
+// 6+ digit runs. Every redaction runs on the FULL first line and the 300-char
+// limit is applied LAST, so truncation can only ever cut text that is already
+// safe. Nothing here reaches the HTTP response body or encrypted_last_error.
+export function redactedUpstreamDetail(raw: string): string {
+  const firstLine = raw.split('\n')[0] ?? raw;
+  return firstLine
+    .replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]')
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
+    .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
+    .replace(/\b\d{6,}\b/g, '[redacted]')
+    .slice(0, 300);
+}
+
+// The ` detail=...` suffix appended to the edge log line: present ONLY on the
+// UPSTREAM_OTHER path, empty on every other code. JSON.stringify keeps it a
+// single grep-safe token. Split out so the UPSTREAM_OTHER-only gating is
+// unit-testable without stubbing console.
+export function upstreamDetailSuffix(code: string, raw: string): string {
+  return code === 'UPSTREAM_OTHER' ? ` detail=${JSON.stringify(redactedUpstreamDetail(raw))}` : '';
 }
 
 /**
@@ -1130,6 +1163,89 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               .map((w: { wallet_fingerprint: string; external_wallet_id: string }) =>
                 [w.wallet_fingerprint, w.external_wallet_id] as [string, string]),
           );
+
+          // DL-1398: Heal missing currency wallets on every Strike sync.
+          // Connections created before 2026-07-20 may hold only one source_wallet
+          // row (the second currency wallet was not yet created at link time).
+          // Call discoverWallets() with the already-decrypted credentials to get
+          // all active currencies and their receiverId (account_key). For each
+          // currency that has no fingerprint row in source_wallets, insert a
+          // server-discovered wallet (discovery_source='server', no
+          // encrypted_metadata -- ZKA-safe per migration 20260722140000).
+          // Idempotent: upsert on wallet_fingerprint unique index.
+          // Non-fatal: a failure here is logged and the sync continues.
+          try {
+            const healDiscovered = await adapter.discoverWallets(credentials);
+            const toHeal: Array<{
+              connection_id: string;
+              external_wallet_id: string;
+              is_synced: boolean;
+              wallet_fingerprint: string;
+              wallet_fingerprint_key_version: number;
+              discovery_source: string;
+            }> = [];
+            for (const w of healDiscovered) {
+              const accountKey = (w as { account_key?: string }).account_key;
+              if (!accountKey || !w.currency) continue;
+              const mac = await computeWalletFingerprint(
+                subaccountId as string,
+                'strike',
+                accountKey,
+                w.currency,
+              );
+              const fpHex = toByteaHex(mac);
+              if (walletsByFingerprintHex.has(fpHex)) continue;
+              toHeal.push({
+                connection_id: conn.id as string,
+                external_wallet_id: crypto.randomUUID(),
+                is_synced: true,
+                wallet_fingerprint: fpHex,
+                wallet_fingerprint_key_version: 1,
+                discovery_source: 'server',
+              });
+            }
+            console.log(
+              `[or-sync] DL-1398: conn ${conn.id as string}: discovered ${healDiscovered.length} wallet(s), to_heal ${toHeal.length}`,
+            );
+            if (toHeal.length > 0) {
+              const { error: healErr } = await ctx.serviceClient
+                .from('source_wallets')
+                .upsert(toHeal, { onConflict: 'wallet_fingerprint', ignoreDuplicates: true });
+              if (healErr) {
+                console.warn(
+                  `[or-sync] DL-1398: wallet heal upsert failed for conn ${conn.id as string}:`,
+                  healErr.message,
+                );
+              } else {
+                // Refresh walletsByFingerprintHex so the drain path below can
+                // attribute transactions to the newly inserted wallets in this
+                // same sync run.
+                const { data: healed } = await ctx.serviceClient
+                  .from('source_wallets')
+                  .select('external_wallet_id, wallet_fingerprint')
+                  .eq('connection_id', conn.id)
+                  .eq('is_synced', true)
+                  .not('wallet_fingerprint', 'is', null);
+                for (const row of healed ?? []) {
+                  if (row.wallet_fingerprint) {
+                    walletsByFingerprintHex.set(
+                      row.wallet_fingerprint as string,
+                      row.external_wallet_id as string,
+                    );
+                  }
+                }
+                console.log(
+                  `[or-sync] DL-1398: conn ${conn.id as string}: healed ${toHeal.length} of ${healDiscovered.length} discovered`,
+                );
+              }
+            }
+          } catch (healErr) {
+            console.warn(
+              `[or-sync] DL-1398: wallet heal failed for conn ${conn.id as string}`,
+              healErr instanceof Error ? healErr.message : String(healErr),
+            );
+          }
+
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
             connection: {
@@ -1421,7 +1537,7 @@ export async function handleConnectionError(
   const code = classifyUpstreamError(raw, errorClass);
   const correlationId = randomCorrelationId();
   const fp = await errorFingerprint(raw, errorClass);
-  console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
+  console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}${upstreamDetailSuffix(code, raw)}`);
 
   // Persist the taxonomy code on the connection row. In legacy
   // (non-sink) mode we still want it encrypted at rest so the column
