@@ -7,10 +7,21 @@ const ALLOWED_METHODS = "GET, POST, OPTIONS";
 const MAX_BODY_BYTES = 1_000_000; // 1 MB
 
 // Static CORS allow-list. Covers only Orange Rails-owned origins and local
-// development hosts. Customer- and integrator-specific origins are validated
-// at runtime via the `platforms.cors_origin` DB lookup (see the
-// 20260424120000 migration). Add entries here only for public Orange Rails
+// development hosts. Add entries here only for public Orange Rails
 // properties.
+//
+// THERE IS NO RUNTIME PER-PLATFORM CORS LOOKUP. This set is the only thing
+// that decides CORS. `platforms.cors_origin` is written by the platform
+// registration migrations and by or_create_platform, and is read by nothing:
+// not by any edge function, not by any database function. Setting it on a
+// platform row has no effect at all. The 20260424120000 migration that added
+// the column says so itself: the allow-list "lives in _shared/http.ts
+// (static) for v1" and the column exists so that a FUTURE migration can move
+// the decision into the database. That migration has not been written.
+//
+// So if a browser on a customer or integrator origin ever needs to call an
+// authenticated endpoint, the fix is to add that origin to this set,
+// deliberately. Setting cors_origin instead will look right and do nothing.
 //
 // Add entries by exact origin match (no trailing slash, no wildcards).
 const ALLOWED_ORIGINS: ReadonlySet<string> = new Set<string>([
