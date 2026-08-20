@@ -12,6 +12,7 @@
 // Updated: Sr Dev A, 2026-08-14 -- DL-1043: validate FORWARD_FILL_MAX_DAYS; reject NaN/non-positive, fall back to 2d, log on misconfig
 // Updated: Sr Dev A, 2026-08-18 -- DL-0505: return 404 unsupported_pair when pair has no coverage; stale forward-fill continues to return fill_type:gap
 // Updated: Sr Dev A, 2026-08-18 -- DL-0505 Auditor fix: existence probe distinguishes unsupported_pair from before_coverage_start; per-item errors in batch preserve prior results and metering
+// Updated: Sr Dev B, 2026-08-20 -- DL-1361: surface rate_type and data_source_authority for CB-sourced composites (official_reference vs market)
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
@@ -39,6 +40,26 @@ const VALID_PRODUCTS: Record<string, { granularity: string }> = {
   'ORBI-M': { granularity: '1m' },
   'ORBI-D': { granularity: '1d' },
   'ORBI-D-authority': { granularity: '1d' },
+}
+
+// Official central-bank authorities whose rates reflect published pegs, not traded
+// market prices. Composites derived from these are labeled rate_type:'official_reference'
+// so callers know the number may differ from local market rates.
+const OFFICIAL_CB_AUTHORITIES = new Set([
+  'CBN', 'NBU', 'CBR', 'NBK', 'BAM', 'BANK_OF_ALGERIA',
+  'SBV', 'BB', 'CBE', 'BOG', 'BOC', 'FED',
+])
+
+// Extract the data-source authority from a composite_via string.
+// Format written by orbi-cb-cross-rates.py: 'BTC-USD * USD-{TARGET}-{AUTHORITY}'.
+// Returns null for non-composite rows (composite_via is null or does not match).
+function extractCompositeAuthority(compositeVia: string | null | undefined): string | null {
+  if (!compositeVia) return null
+  const afterStar = compositeVia.split('* ')[1]
+  if (!afterStar) return null
+  const segments = afterStar.split('-')
+  // Minimum: 'USD-XXX-AUTH' = 3 segments
+  return segments.length >= 3 ? segments[segments.length - 1] : null
 }
 
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
@@ -234,7 +255,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // PostgREST select syntax has no AS; a bare cast keeps the field name `rate`.
     const { data: row, error: rateErr } = await supabase
       .from('exchange_rates')
-      .select('bucket_ts, rate::text, provenance, tier, source_authority')
+      .select('bucket_ts, rate::text, provenance, tier, source_authority, composite_via')
       .eq('source_currency', item.asset.toUpperCase())
       .eq('target_currency', item.fiat.toUpperCase())
       .eq('granularity', granularity)
@@ -306,6 +327,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const gapMs = new Date(bucketTs).getTime() - new Date(row.bucket_ts).getTime()
     const staleGap = gapMs > FORWARD_FILL_MAX_MS
     const fillType = staleGap ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
+    const compositeAuth = staleGap ? null : extractCompositeAuthority(row.composite_via)
+    const rateType = staleGap ? null : (compositeAuth && OFFICIAL_CB_AUTHORITIES.has(compositeAuth) ? 'official_reference' : 'market')
 
     results.push({
       asset: item.asset.toUpperCase(),
@@ -317,6 +340,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       provenance: staleGap ? null : (row.provenance ?? null),
       tier: staleGap ? null : (row.tier ?? null),
       source_authority: staleGap ? null : (row.source_authority ?? null),
+      data_source_authority: compositeAuth,
+      rate_type: rateType,
       fill_type: fillType
     })
 
