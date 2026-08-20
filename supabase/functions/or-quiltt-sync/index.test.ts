@@ -105,6 +105,8 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
 
 Deno.test('handleEvent: dispatches errored event, reconciles connection to error, returns processed', async () => {
   let updateCalled = false;
+  // deno-lint-ignore no-explicit-any
+  let capturedPatch: Record<string, any> | null = null;
 
   const mockClient = {
     from(table: string) {
@@ -115,8 +117,12 @@ Deno.test('handleEvent: dispatches errored event, reconciles connection to error
         is()     { return chain; },
         order()  { return chain; },
         limit()  { return chain; },
-        update(_patch: unknown) {
-          if (table === 'connections') updateCalled = true;
+        // deno-lint-ignore no-explicit-any
+        update(patch: any) {
+          if (table === 'connections') {
+            updateCalled = true;
+            capturedPatch = patch;
+          }
           return chain;
         },
         single() {
@@ -152,6 +158,79 @@ Deno.test('handleEvent: dispatches errored event, reconciles connection to error
   const result = await handleEvent(mockClient as any, ev, 'plat-1', 'sub-1', 'api-key');
   assertEquals(result, 'processed', 'errored event must return processed after status flip');
   assertEquals(updateCalled, true, 'must call update on connections table to flip status to error');
+  // DL-1445: the update must carry encrypted_last_error so the UI can surface a message.
+  // The value must be UPSTREAM_CODE:correlationId (16 hex chars) -- the plaintext marker
+  // format that upstreamMarkerToCopy classifies before any decrypt attempt.
+  const lastErr = (capturedPatch as Record<string, unknown> | null)?.encrypted_last_error as string | undefined;
+  assertEquals(typeof lastErr, 'string', 'encrypted_last_error must be a string in the update patch (not null/undefined)');
+  assertEquals(
+    /^UPSTREAM_[A-Z_]+:[0-9a-f]{16}$/.test(lastErr ?? ''),
+    true,
+    `encrypted_last_error must match UPSTREAM_CODE:16hexchars, got: ${lastErr}`,
+  );
+});
+
+// ── reconcileConnectionSuccess: clears encrypted_last_error on recovery ─
+//
+// Regression guard: when a connection.synced.successful event fires,
+// encrypted_last_error must be cleared alongside the status flip.
+// Without this clear the UI shows a stale error message after recovery.
+// reconcileConnectionSuccess runs before the OPK gate, so the connections
+// update fires even when handleEvent returns 'deferred' (no opk_public).
+
+Deno.test('reconcileConnectionSuccess: clears encrypted_last_error when flipping error to active', async () => {
+  // deno-lint-ignore no-explicit-any
+  let capturedPatch: Record<string, any> | null = null;
+
+  const mockClient = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select() { return chain; },
+        eq()     { return chain; },
+        is()     { return chain; },
+        in()     { return chain; },
+        order()  { return chain; },
+        limit()  { return chain; },
+        update(patch: Record<string, unknown>) {
+          if (table === 'connections') capturedPatch = patch;
+          return chain;
+        },
+        single() {
+          if (table === 'subaccounts') {
+            return Promise.resolve({ data: { id: 'sub-1', opk_public: null, opk_alg: null }, error: null });
+          }
+          return Promise.resolve({ data: null, error: { message: 'unexpected table' } });
+        },
+        maybeSingle() {
+          if (table === 'connections') {
+            return Promise.resolve({ data: { id: 'conn-or-1' }, error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-ok-1',
+    event_type:    'connection.synced.successful.initial',
+    payload:       { record: { id: 'quiltt-conn-1' } },
+    platform_id:   'plat-1',
+    subaccount_id: 'sub-1',
+    attempts:      0,
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await handleEvent(mockClient as any, ev, 'plat-1', 'sub-1', 'api-key');
+
+  assertEquals(capturedPatch !== null, true, 'update on connections must be called by reconcileConnectionSuccess');
+  assertEquals(
+    (capturedPatch as Record<string, unknown>)['encrypted_last_error'],
+    null,
+    'encrypted_last_error must be null in the recovery patch -- stale error marker survives without this',
+  );
 });
 
 // ── reDriveReadyDeferrals ─────────────────────────────────────────────

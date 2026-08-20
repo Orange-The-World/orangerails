@@ -496,6 +496,11 @@ function AppHome() {
                 decrypted_last_error = "(could not decrypt error , check browser console)";
               }
             }
+          } else if (c.status === 'error') {
+            // DL-1445: encrypted_last_error is null but the connection is in error state.
+            // Legacy rows (before the Quiltt error marker was persisted) land here.
+            // Show a stable generic message so the panel is never blank.
+            decrypted_last_error = "Sync failed. No error detail was recorded for this connection.";
           }
           // Decrypt source-wallet metadata (currency + optional label).
           const rawWallets = walletsByConn.get(c.id) ?? [];
