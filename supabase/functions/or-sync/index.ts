@@ -1234,7 +1234,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 // same sync run.
                 const { data: healed } = await ctx.serviceClient
                   .from('source_wallets')
-                  .select('external_wallet_id, wallet_fingerprint')
+                  .select('id, external_wallet_id, wallet_fingerprint')
                   .eq('connection_id', conn.id)
                   .eq('is_synced', true)
                   .not('wallet_fingerprint', 'is', null);
@@ -1244,6 +1244,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                       row.wallet_fingerprint as string,
                       row.external_wallet_id as string,
                     );
+                  }
+                  if (row.id && row.external_wallet_id) {
+                    externalToInternalId.set(row.external_wallet_id as string, row.id as string);
                   }
                 }
                 console.log(
@@ -1293,21 +1296,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           completeness = readSyncCompleteness(out);
         }
 
-        // DL-1440: rewrite provider-issued source_wallet_id values to the
-        // internal source_wallets.id UUID before persisting. A provider id
-        // (Blink wallet id, ccxt exchange slug) is not a safe join key -- it
-        // can repeat across different customers. source_wallets.id is globally
-        // unique. Transactions whose id has no map entry (syncAccountWide path
-        // with no source_wallet rows, or Strike-healed wallets not yet in the
-        // initial snapshot) are set to null; attribution heals on the next sync
-        // after the DBA backfill migration runs.
-        newTxs = newTxs.map((tx) => ({
-          ...tx,
-          source_wallet_id: tx.source_wallet_id != null
-            ? (externalToInternalId.get(tx.source_wallet_id) ?? null)
-            : null,
-        }));
-
         if (sinkMode) {
           // Protocol-driven path: run the sink adapter per transaction,
           // collect outputs for response merging. NO encrypted_transactions
@@ -1326,8 +1314,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           }
         } else if (newTxs.length > 0) {
           // Legacy encrypted-payload path (V3 today).
+          // DL-1440: remap provider-issued source_wallet_id to the internal
+          // source_wallets.id UUID only for the persisted payload. Sink
+          // consumers receive provider-facing ids (their contract unchanged).
+          // On a map miss, keep the external id so the DBA backfill can still
+          // key off it; attribution heals on next sync after migration runs.
+          const txsToStore = newTxs.map((tx) => ({
+            ...tx,
+            source_wallet_id: tx.source_wallet_id != null
+              ? (externalToInternalId.get(tx.source_wallet_id) ?? tx.source_wallet_id)
+              : null,
+          }));
           const rows = await Promise.all(
-            newTxs.map(async tx => ({
+            txsToStore.map(async tx => ({
               connection_id: conn.id,
               external_id: tx.id,
               encrypted_payload: await encryptAes(JSON.stringify(tx), txnsKey!),
