@@ -80,7 +80,7 @@ function toInvoice(raw: AlbyRawInvoice): LNInvoice {
 /**
  * Assert the Alby response body matches the expected {invoices:[...]} shape.
  *
- * Codex flagged (PR #105) that the live Alby API may return a top-level array
+ * The live Alby API may return a top-level array
  * instead of {invoices:[...]} and that timestamps may be ISO-8601 strings
  * instead of unix numbers. We hold no live Alby key to confirm the shape, so
  * we fail loud rather than silently returning empty results or producing
