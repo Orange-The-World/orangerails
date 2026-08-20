@@ -36,7 +36,7 @@ curl -X POST \
 
 * `exact`: a rate exists at this exact UTC minute (or day for ORBI-D products).
 * `forward_fill`: no rate at this minute; the prior available minute was used. `resolved_at` shows which minute.
-* `gap`: no rate can be served for this timestamp. `rate`, `provenance`, `tier`, and `source_authority` are null; `resolved_at` equals `requested_at`. **Do not treat null as zero.** Two conditions produce a gap:
+* `gap`: no rate can be served for this timestamp. `rate`, `provenance`, `tier`, and `source_authority` are null. **Do not treat null as zero.** Use `fill_type` to detect a gap: do not compare `resolved_at` to `requested_at`, because `resolved_at` is truncated to the product bucket (minute for ORBI-M, day for ORBI-D) and may differ from `requested_at` even when no rate can be served. Two conditions produce a gap:
   1. No data exists before this timestamp for this pair.
   2. The nearest prior row exists but is older than 2 days relative to the requested timestamp (the staleness cap, tunable via the `FORWARD_FILL_MAX_DAYS` environment variable). A row that stale is suppressed rather than served as a confident answer -- before this cap was added, a 5.5-year data hole in BTC/MXN caused every historical lookup to silently return a rate ~65% too low.
 
