@@ -43,6 +43,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
+import { withErrorCopy } from './error-copy.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import {
   buildListResponse,
@@ -193,8 +194,35 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       }
     }
 
+    // DL-1490: resolve the stored error code into customer-facing copy, using
+    // the same catalog or-sync uses so the two surfaces cannot drift.
+    //
+    // Sink mode only. On a non-sink platform encrypted_last_error is
+    // ciphertext and is not ours to interpret here. The platform is read from
+    // the subaccount row that was already fetched above, so this costs one
+    // extra lookup and only when that read succeeded. If it did not, we simply
+    // do not decorate: the response keeps exactly the shape it has today.
+    let sinkMode = false;
+    if (subaccountRow) {
+      const { data: platRow, error: platErr } = await ctx.serviceClient
+        .from('platforms')
+        .select('sink_format')
+        .eq('id', subaccountRow.platform_id)
+        .maybeSingle();
+      if (platErr) {
+        // Loud but non-fatal, for the same reason the stealth read is: a
+        // failure to enrich must never blank out a user's connections.
+        console.error('[or-connection-list] platforms lookup failed, returning without error copy:', platErr);
+      }
+      sinkMode = typeof platRow?.sink_format === 'string' && platRow.sink_format.length > 0;
+    }
+
+    const decorated = enriched.map(
+      c => withErrorCopy(c as unknown as Record<string, unknown>, sinkMode),
+    ) as unknown as UnifiedConnection[];
+
     return jsonResponse(
-      buildListResponse(mergeConnections(enriched, stealthConnections), stealthUnavailable),
+      buildListResponse(mergeConnections(decorated, stealthConnections), stealthUnavailable),
       200,
       cors,
     );
