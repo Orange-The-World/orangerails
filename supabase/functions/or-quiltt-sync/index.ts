@@ -782,7 +782,17 @@ export async function handleEventSinkDelivery(
       quiltt_connection_id:    quilttConnectionId,
       encrypted_credentials:   'quiltt-managed',
       credentials_key_version: 1,
-      status:                  'pending',
+      // DL-1409: was 'pending'. Nothing in this worker could ever clear it.
+      // 'pending' belongs to the atomic connect flow, where a consumer calls
+      // or-connection-confirm (pending -> active) or or-connection-cancel
+      // (row deleted). A sink row has no consumer handshake and no wallet
+      // write to protect, so it never got either call and sat pending forever.
+      // or-quiltt-link-complete already inserts 'active' directly on its own
+      // no-accounts branch, so this matches the existing contract rather than
+      // inventing one. This insert is insert-only (23505 is treated as
+      // success below), so it can never overwrite the status of a row that
+      // or-quiltt-link-complete created.
+      status:                  'active',
     });
   // 23505 = unique_violation: connection row already exists, which is fine.
   if (insertErr && insertErr.code !== '23505') {
@@ -911,7 +921,7 @@ async function reconcileConnectionError(
  * Only transitions error -> active; leaves partial/pending/active rows untouched.
  * Callers that confirmed a full data pull should also clear partial -> active post-pull.
  */
-async function reconcileConnectionSuccess(
+export async function reconcileConnectionSuccess(
   client: SupabaseClient,
   connectionId: string,
   subaccountId: string,
@@ -945,7 +955,15 @@ async function reconcileConnectionSuccess(
     .from('connections')
     .update({ status: 'active', updated_at: new Date().toISOString() })
     .eq('id', orConnId)
-    .in('status', ['error']);
+    // DL-1409: 'pending' added so rows stranded by the old sink insert heal
+    // themselves on the next successful Quiltt sync, instead of needing a
+    // manual UPDATE on production. Quiltt reporting a successful sync is
+    // positive evidence the connection works, which is exactly what 'active'
+    // asserts. Safe against the atomic connect flow: or-quiltt-link-complete
+    // promotes on its own success path and deletes the row on failure, so the
+    // worst case here is that a row it was about to promote is promoted a
+    // moment earlier by a signal that means the same thing.
+    .in('status', ['error', 'pending']);
   if (statusErr) return `connection status update failed: ${statusErr.message}`;
   console.log(
     `[or-quiltt-sync] connection ${orConnId} reconciled to active`,
