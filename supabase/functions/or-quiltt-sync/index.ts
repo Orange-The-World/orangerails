@@ -972,7 +972,7 @@ async function reconcileConnectionSuccess(
   if (!orConnId) return null;
   const { error: statusErr } = await client
     .from('connections')
-    .update({ status: 'active', updated_at: new Date().toISOString() })
+    .update({ status: 'active', encrypted_last_error: null, updated_at: new Date().toISOString() })
     .eq('id', orConnId)
     .in('status', ['error']);
   if (statusErr) return `connection status update failed: ${statusErr.message}`;
