@@ -50,16 +50,32 @@ const OFFICIAL_CB_AUTHORITIES = new Set([
   'SBV', 'BB', 'CBE', 'BOG', 'BOC', 'FED',
 ])
 
+// Matches a trailing ISO-date suffix written by orbi-cb-cross-rates.py for dated
+// composites, e.g. '-2026-06-19' in 'BTC-USD * USD-CNY-ECB-2026-06-19'.
+const ISO_DATE_SUFFIX_RE = /-\d{4}-\d{2}-\d{2}$/
+
 // Extract the data-source authority from a composite_via string.
-// Format written by orbi-cb-cross-rates.py: 'BTC-USD * USD-{TARGET}-{AUTHORITY}'.
+// Formats written by orbi-cb-cross-rates.py:
+//   Standard: 'BTC-USD * USD-{TARGET}-{AUTHORITY}'
+//   Dated:    'BTC-USD * USD-{TARGET}-{AUTHORITY}-YYYY-MM-DD'
+//   Peg:      'BTC-USD * USD-{TARGET}-PEG'
+// 'PEG' is a construction method (pegged rate), not a data-source institution,
+// so it returns null. Dated forms strip the date suffix before extracting the
+// authority, so 'ECB-2026-06-19' correctly yields 'ECB', not '19'.
 // Returns null for non-composite rows (composite_via is null or does not match).
-function extractCompositeAuthority(compositeVia: string | null | undefined): string | null {
+export function extractCompositeAuthority(compositeVia: string | null | undefined): string | null {
   if (!compositeVia) return null
   const afterStar = compositeVia.split('* ')[1]
   if (!afterStar) return null
-  const segments = afterStar.split('-')
+  // Strip trailing ISO-date suffix (e.g. -2026-06-19) before splitting
+  const stripped = afterStar.replace(ISO_DATE_SUFFIX_RE, '')
+  const segments = stripped.split('-')
   // Minimum: 'USD-XXX-AUTH' = 3 segments
-  return segments.length >= 3 ? segments[segments.length - 1] : null
+  if (segments.length < 3) return null
+  const authority = segments[segments.length - 1]
+  // 'PEG' marks a construction method (pegged rate), not a data-source institution
+  if (authority === 'PEG') return null
+  return authority
 }
 
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
