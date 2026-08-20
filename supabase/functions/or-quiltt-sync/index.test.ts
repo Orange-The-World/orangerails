@@ -1001,6 +1001,55 @@ Deno.test('DL-1445: on a non-sink platform the column is left alone, never writt
   );
 });
 
+Deno.test('DL-1445 follow-up: a platforms read failure must not stop the status reconcile', async () => {
+  // Raised in review on PR 808. If the sink lookup fails we cannot know whether
+  // the column is safe to write, so we skip the cause. What must NOT happen is
+  // losing the status write too: that is the more important half and does not
+  // depend on the lookup at all.
+  let captured: Record<string, unknown> | undefined;
+
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      if (table === 'platforms') {
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          select(_c: string) { return ch; },
+          eq(_c: string, _v: unknown) { return ch; },
+          maybeSingle() {
+            return Promise.resolve({ data: null, error: { message: 'connection timeout' } });
+          },
+        };
+        return ch;
+      }
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() { return Promise.resolve({ data: { id: 'conn-or-1' }, error: null }); },
+        update(patch: Record<string, unknown>) {
+          captured = patch;
+          return { eq(_c: string, _v: unknown) { return Promise.resolve({ error: null }); } };
+        },
+      };
+      return chain;
+    },
+  };
+
+  const err = await reconcileConnectionError(client, erroredEvent, 'sub-1');
+
+  assertEquals(err, null, 'a platforms read failure must not fail the reconcile');
+  assertEquals(captured?.status, 'error', 'the status write is the half that must always happen');
+  assertEquals(
+    'encrypted_last_error' in (captured ?? {}),
+    false,
+    'if we cannot confirm the platform is sink mode we must not write the column',
+  );
+});
+
 // ── DL-1409: the sink path must not create a status it cannot clear ────
 //
 // Six production connections sat in 'pending' from 2026-08-12 with
