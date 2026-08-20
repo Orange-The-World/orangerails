@@ -194,6 +194,15 @@ export interface SyncResult {
    * address_window_exhausted. See issue #352 and docs/Stealth-Sync.md.
    */
   windowExhausted: boolean;
+  /**
+   * Set when a fetchFilter call fails permanently after all retries inside
+   * the concurrent worker pool. The scan stopped before failedHeight;
+   * lastBlockScanned is the last contiguous height fully processed. Persist
+   * lastBlockScanned as the cursor so the next sync resumes there instead of
+   * restarting from the wallet birthday. Transactions found before the
+   * failure are still in sealedTransactions and normalized.
+   */
+  filterFetchError?: { failedHeight: number; cause: string };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -701,12 +710,29 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
 
   let nextHeight = fromHeight;
+  // Shared abort state: when one worker exhausts its retries, it sets these
+  // so other workers stop claiming new heights rather than piling up behind
+  // a broken range. fetchFailure is read after Promise.all resolves.
+  let fetchAborted = false;
+  let fetchFailure: { height: number; cause: unknown } | undefined;
   async function worker(): Promise<void> {
     while (true) {
+      if (fetchAborted) return;
       const h = nextHeight;
       if (h > tip) return;
       nextHeight = h + 1;
-      const f = await opts.fetchFilter(h);
+      let f: FilterRecord | null;
+      try {
+        f = await opts.fetchFilter(h);
+      } catch (err) {
+        // opts.fetchFilter (liveFetchFilter in production) already retries
+        // transient errors; this catch sees only permanent failures after all
+        // attempts are exhausted. Signal the other workers to stop and record
+        // the failure so the cursor can be advanced to the last good height.
+        if (!fetchFailure) fetchFailure = { height: h, cause: err };
+        fetchAborted = true;
+        return; // do not throw; let Promise.all resolve so we compute the cursor
+      }
       processedCount += 1;
       filterCache.set(h, f);  // cache result (including null) for extension passes (req 4)
       if (f !== null) {
@@ -725,22 +751,39 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     Array.from({ length: FETCH_CONCURRENCY }, () => worker()),
   );
   emitFetchProgress(true);
-  emit(opts, progress('fetching_filters', 100));
-  emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
+  // Only emit 100 % when the scan completed normally; on abort the 100 %
+  // would misrepresent partial coverage to the progress listener.
+  if (!fetchAborted) {
+    emit(opts, progress('fetching_filters', 100));
+  }
 
   // Heights near tip often return null because the filter producer lags the
   // block source. Returning tip unconditionally as the cursor would mark those
   // heights as scanned and skip them permanently on the next sync, missing any
   // transactions they contain. Walk forward from fromHeight and stop at the
-  // first null to find the highest height we can safely advance the cursor to.
-  // This mirrors the reasoning at the early-return path above (req 2 of
-  // issue #335): the chain tip is never an accurate cursor when heights were
-  // skipped because their filters were not yet produced.
+  // first height absent from the cache (fetch never ran -- aborted) or null
+  // (filter not yet produced). This is the highest height we can safely
+  // advance the cursor to. This mirrors the reasoning at the early-return
+  // path above (req 2 of issue #335): the chain tip is never an accurate
+  // cursor when heights were skipped.
   let lastContiguousScanned = fromHeight - 1;
   for (let h = fromHeight; h <= tip; h++) {
-    if (filterCache.get(h) === null) break;
+    if (!filterCache.has(h) || filterCache.get(h) === null) break;
     lastContiguousScanned = h;
   }
+
+  // When the fetch was aborted, concurrent workers may have raced ahead of
+  // the failure point and pushed hits for heights above lastContiguousScanned
+  // into the array. Those heights are beyond the coverage gap and must not be
+  // processed -- doing so would let the cursor skip over unscanned heights and
+  // permanently drop any transactions there on future syncs. Trim in-place so
+  // all code below sees only the safe, contiguous range.
+  if (fetchAborted && hits.length > 0) {
+    const safe = hits.filter((hit) => hit.height <= lastContiguousScanned);
+    hits.splice(0, hits.length, ...safe);
+  }
+
+  emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
 
   // The concurrent filter fetch above pushes hits in COMPLETION order,
   // not chain order. The UTXO tracker below is order-sensitive: a spend
@@ -1018,7 +1061,14 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         if (filterCache.has(h)) {
           f = filterCache.get(h)!;
         } else {
-          f = await opts.fetchFilter(h);
+          try {
+            f = await opts.fetchFilter(h);
+          } catch {
+            // A cache-miss fetch in the extension pass failed. The height was
+            // null or missing in the initial scan; failing again is acceptable.
+            // Skip it rather than killing the extension pass.
+            continue;
+          }
           filterCache.set(h, f);
           if (f !== null) bytesDownloaded += f.filter.length;
         }
@@ -1186,6 +1236,16 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     sealedTransactions,
     normalized,
     windowExhausted,
+    ...(fetchFailure !== undefined
+      ? {
+          filterFetchError: {
+            failedHeight: fetchFailure.height,
+            cause: fetchFailure.cause instanceof Error
+              ? fetchFailure.cause.message
+              : String(fetchFailure.cause),
+          },
+        }
+      : {}),
   };
 }
 
