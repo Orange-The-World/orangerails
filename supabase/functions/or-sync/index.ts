@@ -1072,7 +1072,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // until the user opts in by re-running discovery from the UI.
         const { data: sourceWallets, error: swErr } = await ctx.serviceClient
           .from('source_wallets')
-          .select('external_wallet_id, is_synced, wallet_fingerprint')
+          .select('id, external_wallet_id, is_synced, wallet_fingerprint')
           .eq('connection_id', conn.id)
           .eq('is_synced', true)
           // Deterministic order so walletIds[0] is stable across syncs. Both
@@ -1085,6 +1085,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .order('external_wallet_id', { ascending: true });
 
         if (swErr) throw swErr;
+
+        // DL-1440: map each stored external_wallet_id to its source_wallets.id
+        // (internal UUID). Provider-issued ids -- Blink wallet UUIDs, ccxt
+        // exchange slugs ('coinbase', 'kraken'), xpub ids -- are NOT globally
+        // unique. The same id appears across different customers' connections
+        // (5 collisions confirmed in prod by DBA 2026-08-19). source_wallets.id
+        // is the only safe anchor for encrypted_transactions.source_wallet_id.
+        const externalToInternalId = new Map<string, string>(
+          (sourceWallets ?? []).map(
+            (w: { external_wallet_id: string; id: string }) => [w.external_wallet_id, w.id],
+          ),
+        );
 
         let newTxs: NormalizedTransaction[];
         let next_cursor: string | null;
@@ -1280,6 +1292,21 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           next_cursor = out.next_cursor;
           completeness = readSyncCompleteness(out);
         }
+
+        // DL-1440: rewrite provider-issued source_wallet_id values to the
+        // internal source_wallets.id UUID before persisting. A provider id
+        // (Blink wallet id, ccxt exchange slug) is not a safe join key -- it
+        // can repeat across different customers. source_wallets.id is globally
+        // unique. Transactions whose id has no map entry (syncAccountWide path
+        // with no source_wallet rows, or Strike-healed wallets not yet in the
+        // initial snapshot) are set to null; attribution heals on the next sync
+        // after the DBA backfill migration runs.
+        newTxs = newTxs.map((tx) => ({
+          ...tx,
+          source_wallet_id: tx.source_wallet_id != null
+            ? (externalToInternalId.get(tx.source_wallet_id) ?? null)
+            : null,
+        }));
 
         if (sinkMode) {
           // Protocol-driven path: run the sink adapter per transaction,
