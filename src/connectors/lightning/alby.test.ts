@@ -136,7 +136,7 @@ describe('AlbyConfirmsClient.fetchSettled - pagination safety cap', () => {
 
 describe('AlbyConfirmsClient.fetchSettled - API shape guards', () => {
   it('throws if the Alby response is a top-level array', async () => {
-    // Codex flag (PR #105): live Alby may return a top-level array instead
+    // Guard: live Alby may return a top-level array instead
     // of {invoices:[...]}. Without this guard, body.invoices is undefined,
     // the ?? [] fallback returns empty, and all invoices are silently lost.
     const fetchMock = vi.fn().mockResolvedValue(
