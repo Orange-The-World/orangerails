@@ -8,6 +8,9 @@ OnFailure=orbi-probe-failed@%n.service
 
 [Service]
 Type=oneshot
+# Hard ceiling: if psql hangs despite --connect-timeout=10, the unit kills it.
+# 120s gives the 10s connect timeout + generous query + alarm delivery headroom.
+TimeoutStartSec=120
 EnvironmentFile=/etc/orbi/orbi-staleness-probe.env
 ExecStart=/usr/local/bin/orbi-staleness-probe.sh
 StandardOutput=journal
