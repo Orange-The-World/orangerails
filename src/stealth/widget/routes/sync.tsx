@@ -476,6 +476,44 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           }
         }
 
+        // If the filter fetch failed permanently after retries, surface the
+        // error NOW -- after the cursor was persisted -- so the embedder sees
+        // a retryable failure and the next sync resumes from lastBlockScanned
+        // rather than restarting from the wallet birthday.
+        if (result.filterFetchError) {
+          // Deliver partial results before throwing. When useDeliveryAck is
+          // false (the default, including every skip_transaction_upload
+          // integrator that omits require_delivery_ack), OR_STEALTH_SYNC_COMPLETE
+          // has not fired yet: step 6 below is bypassed by this throw, so
+          // transactions found below the failure height would be silently lost.
+          // Post here so the embedder receives them. When useDeliveryAck is
+          // true, SYNC_COMPLETE already fired at step 4a -- skip to avoid a
+          // duplicate.
+          if (!useDeliveryAck && parent) {
+            const partialMsg: StealthSyncCompleteMessage = {
+              type: "OR_STEALTH_SYNC_COMPLETE",
+              connection_id: init.connection_id,
+              sealed_transactions: result.sealedTransactions,
+              last_block_scanned: result.lastBlockScanned,
+              tx_count: result.txCount,
+              bytes_downloaded: result.bytesDownloaded,
+              duration_seconds: (Date.now() - startedAt) / 1000,
+              address_window_exhausted: result.windowExhausted || undefined,
+              cursor_update_failed: cursorFailed ? true : undefined,
+            };
+            try {
+              parent.postMessage(partialMsg, init.return_callback_origin);
+            } catch (e) {
+              console.error("[stealth/sync] failed to post partial complete before filterFetchError:", e);
+            }
+          }
+          throw new Error(
+            `Sync stopped at block ${result.filterFetchError.failedHeight}: ` +
+            `${result.filterFetchError.cause}. ` +
+            `Progress to block ${result.lastBlockScanned} was saved. Retry to continue.`,
+          );
+        }
+
         // 6. SYNC_COMPLETE.
         //    When useDeliveryAck is true, SYNC_COMPLETE already fired at step 4a
         //    (with pending_delivery_ack: true). Skip here to avoid a duplicate.
