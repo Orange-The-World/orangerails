@@ -481,7 +481,7 @@ Deno.test('DL-1440: remap resolves colliding external ids to distinct internal U
   assertEquals(remappedB.source_wallet_id, connB_internalId);
   assert(remappedB.source_wallet_id !== connA_internalId, 'B uuid must differ from A uuid');
   assert(
-    remappedA.source_wallet_id !== remappedB.source_wallet_id,
+    remapped.source_wallet_id !== remappedB.source_wallet_id,
     'same provider wallet id must resolve to distinct internal UUIDs per connection',
   );
 });
