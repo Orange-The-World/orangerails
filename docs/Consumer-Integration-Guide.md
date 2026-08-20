@@ -431,6 +431,23 @@ When opening the Link widget, pass the same value you used as `external_user_id`
 
 Symptom: `Sync failed at Bitcoin Connections: synced 0 / 0 wallets`, no errors logged. → [Connect a wallet](#connecting-a-wallet-through-the-link-widget).
 
+### Your proxy handler must ignore the `app_user_id` in the message
+
+The widget re-mints its own token part way through a long scan, because the
+initial `widget_token` lives 300 seconds and an xpub scan runs 10 to 15 minutes.
+That re-mint arrives at your proxy handler as a message from browser code, and
+it carries an `app_user_id`.
+
+**Take `app_user_id` from your own authenticated session and ignore the value in
+the message.** The token `or-link-mint-token` returns is a bearer credential
+scoped to whatever `app_user_id` your handler forwards, so trusting the
+browser-supplied value would let one signed-in user mint a working token for
+another.
+
+Your handler must also route `or-link-mint-token` in its allowlist. If it does
+not, the refresh call times out after 15 seconds and the upload proceeds with
+the expired token, which fails the way it did before this change.
+
 ### `cred_key` REQUIRED, `txn_key` OPTIONAL
 
 The widget at connect.orangerails.com/connect (commit 615614b or later) accepts cred_key alone. Older widgets required both and silently fell back to a built-in test password when one was missing, locking the credential with the wrong key. Sync later failed with "decryption failed" with no trail back to the cause.

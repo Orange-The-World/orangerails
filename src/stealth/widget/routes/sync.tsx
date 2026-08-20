@@ -259,6 +259,13 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
               parentOrigin: init.return_callback_origin,
               fn: "or-link-mint-token",
               body: { app_user_id: init.app_user_id },
+              // Fail fast. proxyFetch defaults to 120s, and an integrator whose
+              // proxy allowlist does not yet route or-link-mint-token never
+              // replies at all. Without this the widget stalls for two minutes
+              // after a 15 minute scan and then uploads with the expired token
+              // anyway, so the user waits longer to see the same 401. Matches
+              // the cursor write below, which fails fast for the same reason.
+              timeoutMs: 15000,
             });
             if (
               refreshed.ok &&
