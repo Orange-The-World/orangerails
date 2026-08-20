@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reconcileConnectionSuccess, reDriveReadyDeferrals } from './index.ts';
+import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── fetchPendingBatch: batch query filter ─────────────────────────────
 //
@@ -898,6 +898,107 @@ Deno.test('DL-0747 accounts shape: flat [Account] array (no nodes wrapper) -- id
     'DL-0747: both transactions must sync; if 0, the code is reading .nodes on a plain array (regression)',
   );
   cleanup();
+});
+
+// ── DL-1445: a connection must never sit in 'error' with no recorded cause ──
+//
+// Two production connections were in exactly that state: status 'error',
+// encrypted_last_error NULL. The cause was in scope the whole time as the
+// event subtype, which the log line printed and then discarded.
+
+Deno.test('DL-1445: errored subtypes map to the catalog, unknown subtypes still get a code', () => {
+  assertEquals(
+    upstreamCodeForErroredEvent('connection.synced.errored.repairable'),
+    'UPSTREAM_AUTH_FAILED',
+    'ERROR_REPAIRABLE can only be cleared by the user re-authenticating, which is what UPSTREAM_AUTH_FAILED tells them',
+  );
+  assertEquals(
+    upstreamCodeForErroredEvent('connection.synced.errored.provider'),
+    'UPSTREAM_UNAVAILABLE',
+    'a provider-side failure is not the customer\'s to fix',
+  );
+  assertEquals(
+    upstreamCodeForErroredEvent('connection.synced.errored.somethingNewQuilttAdds'),
+    'UPSTREAM_OTHER',
+    "Quiltt's errored taxonomy is not bounded: an unknown subtype must still record a cause rather than record nothing",
+  );
+});
+
+function errorReconcileClient(sinkFormat: string | null) {
+  const captured: { patch?: Record<string, unknown> } = {};
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      if (table === 'platforms') {
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          select(_c: string) { return ch; },
+          eq(_c: string, _v: unknown) { return ch; },
+          maybeSingle() { return Promise.resolve({ data: { sink_format: sinkFormat }, error: null }); },
+        };
+        return ch;
+      }
+      // connections
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() { return Promise.resolve({ data: { id: 'conn-or-1' }, error: null }); },
+        update(patch: Record<string, unknown>) {
+          captured.patch = patch;
+          return { eq(_c: string, _v: unknown) { return Promise.resolve({ error: null }); } };
+        },
+      };
+      return chain;
+    },
+  };
+  return { client, captured };
+}
+
+const erroredEvent = {
+  event_id:      'evt-dl1445',
+  event_type:    'connection.synced.errored.repairable',
+  payload:       { record: { id: 'quiltt-conn-1' } },
+  platform_id:   'plat-sink',
+  subaccount_id: 'sub-1',
+  attempts:      0,
+};
+
+Deno.test('DL-1445: on a sink platform the cause is written alongside the error status', async () => {
+  const { client, captured } = errorReconcileClient('bitbooks-v2');
+
+  const err = await reconcileConnectionError(client, erroredEvent, 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(captured.patch?.status, 'error', 'status must still be set to error');
+  const stored = captured.patch?.encrypted_last_error as string | undefined;
+  assertEquals(
+    typeof stored === 'string' && stored.startsWith('UPSTREAM_AUTH_FAILED:'),
+    true,
+    'a connection must never enter error status with no cause recorded (DL-1445)',
+  );
+  assertEquals(
+    (stored ?? '').split(':')[1]?.length,
+    16,
+    'the correlation id must be present so the failure can be cross-referenced in the edge logs',
+  );
+});
+
+Deno.test('DL-1445: on a non-sink platform the column is left alone, never written in the clear', async () => {
+  const { client, captured } = errorReconcileClient(null);
+
+  const err = await reconcileConnectionError(client, erroredEvent, 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(captured.patch?.status, 'error', 'status must still be set to error');
+  assertEquals(
+    'encrypted_last_error' in (captured.patch ?? {}),
+    false,
+    'this worker holds no transaction key, so on a non-sink platform it must not write a plaintext value a legacy client would try to decrypt',
+  );
 });
 
 // ── DL-1409: the sink path must not create a status it cannot clear ────
