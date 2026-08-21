@@ -407,11 +407,16 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         let cursorFailed = false;
         if ((!useMock || isForceCursor()) && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
           try {
+          // from_height is the inclusive start of the range just scanned:
+          // the previous cursor (null on the first sync, in which case the
+          // wallet birthday is the starting point). The edge function uses
+          // both values to call record_stealth_scan_range() (DL-1478).
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
             widget_token: currentWidgetToken,
             last_block_scanned: result.lastBlockScanned,
+            from_height: envJson.last_block_scanned ?? birthdayHeight,
           };
           let cursorWritten = false;
           if (init.proxy_base_url && parent) {
