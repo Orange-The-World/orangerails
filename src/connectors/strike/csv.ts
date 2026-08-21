@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import {
   STAGED_IMPORT_CONTRACT_VERSION,
   type StagedImportPayload,
+  type StagedTrade,
   type V3StagedRow,
 } from "../contract";
 import type { StrikeCsvRow, StrikeTxType } from "./types";
@@ -357,6 +358,90 @@ export function magnitude(amount: string): string {
   return amount.replace(/^-/, "").trim();
 }
 
+/** Does this row move fiat and bitcoin at once? Purchases and Sales do. */
+export function isTwoLeggedTrade(r: StrikeCsvRow): boolean {
+  return Boolean(r.btcAmount && r.fiatAmount);
+}
+
+/**
+ * Stable identity for one Strike transaction.
+ *
+ * NOT the Reference on its own. A real export reuses one Reference across the
+ * lifecycle of a target order: the row that opened it and the row that
+ * cancelled it carry the same Reference, opposite amounts and different
+ * dates. Keying on Reference alone would collapse those two into one and
+ * leave the customer holding a sale that never happened.
+ *
+ * Date is normalized first so the key survives any difference in how the
+ * annual and monthly exports format the timestamp. The residual risk is two
+ * transactions sharing a Reference, a day, a type AND an exact amount, which
+ * would be one transaction exported twice, which is what we want collapsed.
+ */
+export function strikeDedupKey(r: StrikeCsvRow): string {
+  return [
+    r.reference ?? "",
+    normalizeStrikeDate(r.date),
+    r.direction,
+    r.amount.trim(),
+    r.fiatAmount?.trim() ?? "",
+  ].join("|");
+}
+
+/**
+ * Collapse rows that are the same transaction seen twice.
+ *
+ * Customers are told to export one annual file per year plus a monthly
+ * statement for the current year, so overlap is the expected case, not the
+ * exceptional one. First occurrence wins; order is otherwise preserved.
+ */
+export function dedupeStrikeRows(rows: StrikeCsvRow[]): {
+  rows: StrikeCsvRow[];
+  removed: number;
+} {
+  const seen = new Set<string>();
+  const out: StrikeCsvRow[] = [];
+  for (const r of rows) {
+    const key = strikeDedupKey(r);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return { rows: out, removed: rows.length - out.length };
+}
+
+/**
+ * Stage two-legged trades as raw facts rather than as journal-entry rows.
+ *
+ * Same reasoning as `lightning` in the contract: the connector cannot build a
+ * balanced entry for a trade on its own, so it hands V3 everything it can see
+ * (both legs, the price, the cost basis, both fees) and V3 supplies the
+ * counter-account. Emitting one leg as a journal row would look like it
+ * worked and quietly halve the transaction.
+ */
+export function strikeRowsToTrades(rows: StrikeCsvRow[]): StagedTrade[] {
+  const out: StagedTrade[] = [];
+  for (const r of rows) {
+    if (!isTwoLeggedTrade(r)) continue;
+    out.push({
+      date: normalizeStrikeDate(r.date),
+      kind: r.direction,
+      btcAmount: r.btcAmount ?? "",
+      fiatAmount: r.fiatAmount ?? "",
+      fiatCurrency: r.fiatCurrency ?? "",
+      dedupKey: strikeDedupKey(r),
+      ...(r.btcPrice ? { btcPrice: r.btcPrice } : {}),
+      ...(r.costBasis ? { costBasis: r.costBasis } : {}),
+      ...(r.btcFee ? { btcFee: r.btcFee } : {}),
+      ...(r.fiatFee ? { fiatFee: r.fiatFee } : {}),
+      ...(r.reference ? { reference: r.reference } : {}),
+      ...(r.txHash ? { txHash: r.txHash } : {}),
+      ...(r.description ? { memo: r.description } : {}),
+      ...(r.note ? { note: r.note } : {}),
+    });
+  }
+  return out;
+}
+
 /**
  * Convert typed Strike rows into V3 journal-entry-shaped staged rows.
  *
@@ -403,16 +488,10 @@ export function strikeRowsToJournalStagedRows(rows: StrikeCsvRow[]): {
     if (date === r.date && r.date && !/^\d{4}-\d{2}-\d{2}/.test(r.date)) {
       warnings.push(`Row ${i + 2}: could not normalize date "${r.date}" , left as-is.`);
     }
-    // Purchase and Sale rows carry a fiat leg AND a bitcoin leg on one line.
-    // A staged row has a single debit/credit pair, so posting one of the two
-    // legs would silently misstate the entry. Hold them back and say so.
-    if (r.btcAmount && r.fiatAmount) {
-      warnings.push(
-        `Row ${i + 2}: ${r.direction} has both a bitcoin leg and a ${r.fiatCurrency ?? "fiat"} leg, ` +
-          `which needs two-sided staging. Held back rather than posted as one side.`,
-      );
-      continue;
-    }
+    // Trades move fiat and bitcoin at once and cannot be expressed as one
+    // debit/credit pair. They leave through `strikeRowsToTrades` instead, so
+    // they are skipped here rather than posted as half an entry.
+    if (isTwoLeggedTrade(r)) continue;
     const amount = magnitude(r.amount);
     const raw = r.amount.trim();
     const isSigned = raw.startsWith("-") || raw.startsWith("+");
@@ -458,12 +537,23 @@ export function buildStrikeCsvStagedPayload(input: BuildStrikeCsvPayloadInput): 
   warnings: string[];
   rows: StrikeCsvRow[];
 } {
-  const { rows, warnings: parseWarn } = parseStrikeCsv(input.csvText);
+  const { rows: parsed, warnings: parseWarn } = parseStrikeCsv(input.csvText);
+  const { rows, removed } = dedupeStrikeRows(parsed);
   const { staged, warnings: rowWarn } = strikeRowsToJournalStagedRows(rows);
+  const trades = strikeRowsToTrades(rows);
   const warnings = [...parseWarn, ...rowWarn];
-
-  const refs = new Set<string>();
-  for (const s of staged) refs.add(s["je_ref_#"] || "");
+  if (removed > 0) {
+    warnings.push(
+      `${removed} duplicate row(s) collapsed. Overlapping exports are expected: ` +
+        `customers are told to upload a yearly file plus monthly statements.`,
+    );
+  }
+  if (trades.length > 0) {
+    warnings.push(
+      `${trades.length} trade(s) moved both bitcoin and fiat and are staged for ` +
+        `two-sided mapping rather than posted as a single debit or credit.`,
+    );
+  }
 
   const payload: StagedImportPayload = {
     contractVersion: STAGED_IMPORT_CONTRACT_VERSION,
@@ -485,13 +575,17 @@ export function buildStrikeCsvStagedPayload(input: BuildStrikeCsvPayloadInput): 
     summary: {
       accounts: 0,
       contacts: 0,
-      journalEntries: refs.size,
+      // One staged row is one single-line entry, so entries and lines match.
+      // This used to count DISTINCT je_ref_# values, which understated the
+      // total whenever Strike reused a Reference across an order lifecycle.
+      journalEntries: staged.length,
       journalLines: staged.length,
       warnings,
       errors: [],
     },
     staged: {
       ...(staged.length ? { journalEntries: staged } : {}),
+      ...(trades.length ? { trades } : {}),
     },
   };
   return { payload, warnings, rows };

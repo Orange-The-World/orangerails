@@ -8,6 +8,9 @@ import {
   magnitude,
   normalizeStrikeDate,
   parseStrikeCsv,
+  strikeDedupKey,
+  dedupeStrikeRows,
+  strikeRowsToTrades,
   strikeRowsToJournalStagedRows,
 } from "./csv";
 
@@ -181,11 +184,78 @@ describe("strikeRowsToJournalStagedRows on real-shape rows", () => {
     expect(wdr?.debit).toBe("");
   });
 
-  it("holds back two-legged rows rather than posting one side of them", () => {
+  it("keeps two-legged trades out of the journal rows entirely", () => {
     const rows = parseStrikeCsv(REAL_SHAPE).rows;
-    const { staged, warnings } = strikeRowsToJournalStagedRows(rows);
+    const { staged } = strikeRowsToJournalStagedRows(rows);
     expect(staged.some((s) => s["je_ref_#"] === "ref-buy")).toBe(false);
-    expect(warnings.some((w) => w.includes("two-sided staging"))).toBe(true);
+  });
+});
+
+describe("strikeDedupKey", () => {
+  it("does NOT collapse an order that was opened and later cancelled", () => {
+    const [opened, cancelled] = parseStrikeCsv(REAL_SHAPE).rows.filter(
+      (r) => r.reference === "ref-dup",
+    );
+    expect(opened.reference).toBe(cancelled.reference);
+    expect(strikeDedupKey(opened)).not.toBe(strikeDedupKey(cancelled));
+  });
+
+  it("collapses the same transaction seen in two overlapping exports", () => {
+    const rows = parseStrikeCsv(REAL_SHAPE).rows;
+    const { rows: deduped, removed } = dedupeStrikeRows([...rows, ...rows]);
+    expect(removed).toBe(rows.length);
+    expect(deduped).toHaveLength(rows.length);
+  });
+
+  it("leaves a single clean export untouched", () => {
+    const rows = parseStrikeCsv(REAL_SHAPE).rows;
+    expect(dedupeStrikeRows(rows).removed).toBe(0);
+  });
+});
+
+describe("strikeRowsToTrades", () => {
+  it("stages both legs, the price and the cost basis of a purchase", () => {
+    const trades = strikeRowsToTrades(parseStrikeCsv(REAL_SHAPE).rows);
+    const buy = trades.find((t) => t.kind === "Purchase");
+    expect(buy).toMatchObject({
+      date: "2025-08-25",
+      btcAmount: "0.00102333",
+      fiatAmount: "-99.02",
+      fiatCurrency: "EUR",
+      btcPrice: "95531.26",
+      costBasis: "99.02",
+      fiatFee: "1.26",
+    });
+  });
+
+  it("ignores single-legged rows, which belong in journal entries", () => {
+    const trades = strikeRowsToTrades(parseStrikeCsv(REAL_SHAPE).rows);
+    expect(trades.every((t) => t.btcAmount && t.fiatAmount)).toBe(true);
+    expect(trades.some((t) => t.kind === "Receive")).toBe(false);
+  });
+});
+
+describe("buildStrikeCsvStagedPayload on a real-shape export", () => {
+  it("counts entries by row, not by distinct Reference", () => {
+    const { payload } = buildStrikeCsvStagedPayload({ csvText: REAL_SHAPE });
+    const staged = payload.staged.journalEntries ?? [];
+    expect(payload.summary.journalEntries).toBe(staged.length);
+    expect(payload.summary.journalLines).toBe(staged.length);
+  });
+
+  it("carries trades alongside journal entries", () => {
+    const { payload } = buildStrikeCsvStagedPayload({ csvText: REAL_SHAPE });
+    expect(payload.staged.trades?.length).toBe(1);
+    expect(payload.staged.journalEntries?.length).toBe(5);
+  });
+
+  it("reports collapsed duplicates instead of hiding them", () => {
+    const doubled = REAL_SHAPE + "\n" + REAL_SHAPE.split("\n").slice(1).join("\n");
+    const { payload } = buildStrikeCsvStagedPayload({ csvText: doubled });
+    expect(payload.summary.warnings.some((w) => w.includes("duplicate row(s) collapsed"))).toBe(
+      true,
+    );
+    expect(payload.staged.journalEntries?.length).toBe(5);
   });
 });
 
