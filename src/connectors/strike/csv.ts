@@ -10,7 +10,9 @@
  * Strike-specific quirks handled here:
  *   - Semicolon delimiter (CSV-with-semicolons is European-Excel style).
  *   - Date: "Sep 24 2024 13:21:51" (3-letter month, no zero pad on day).
- *   - Direction: "Receive" / "Send" carries the sign , strip negative.
+ *   - Transaction Type is a label, not a sign. A real export signs its
+ *     amounts, so the sign decides debit vs credit and the type is only a
+ *     fallback for files that carry unsigned magnitudes.
  *   - No Account column. Emit empty account_code / account_name; mapping
  *     wizard handles the fallback.
  *   - "Destination" is an LN invoice or BTC address. Emit as memo, NOT as
@@ -146,8 +148,9 @@ const LEGACY_ALIASES = {
  * A real Strike export names the currency inside the column rather than in a
  * column of its own: "Amount EUR", "Fee EUR", "Cost Basis (EUR)". The code
  * varies per account, so it has to be read off the header instead of matched
- * against a fixed list. "currency" is excluded because "Amount (Currency)" is
- * the legacy placeholder header, not a real currency code.
+ * against a fixed list. The 2-to-4 letter bound is what keeps the legacy
+ * placeholder header "Amount (Currency)" out: it is not a currency code, and
+ * it is handled by the legacy alias table instead.
  */
 const AMOUNT_RE = /^amount\s*\(?([a-z]{2,4})\)?$/;
 const FEE_RE = /^fee\s*\(?([a-z]{2,4})\)?$/;
@@ -208,7 +211,7 @@ function buildHeaderIndex(headerRow: string[]): {
     if (amount) {
       const code = amount[1];
       if (code === "btc") index.btcAmount = i;
-      else if (code !== "currency") {
+      else {
         index.fiatAmount = i;
         index.fiatCurrency = code.toUpperCase();
       }
@@ -218,7 +221,7 @@ function buildHeaderIndex(headerRow: string[]): {
     if (fee) {
       const code = fee[1];
       if (code === "btc") index.btcFee = i;
-      else if (code !== "currency") index.fiatFee = i;
+      else index.fiatFee = i;
       continue;
     }
     const basis = COST_BASIS_RE.exec(h);
@@ -359,18 +362,41 @@ export function magnitude(amount: string): string {
  *
  * Each Strike transaction becomes ONE staged row with the account-side fields
  * blank. The mapping wizard / V3's default-account fallback fills them in.
- * Debit vs Credit is decided by Direction:
- *   Receive (inflow)  → Debit  (cash in)
- *   Send    (outflow) → Credit (cash out)
+ * Debit vs Credit is decided by the sign of the amount, not by the type
+ * label: a Sale moves bitcoin out and a Withdrawal moves fiat out, and
+ * neither of them is called "Send".
  * This is a placeholder convention; the mapping wizard will pair each row
  * with a counter-account so the entry balances.
+ *
+ * Which side a row lands on:
+ *
+ *   1. An explicit sign on the amount wins. A real export signs its outflows,
+ *      and the sign is the only field that distinguishes a target order being
+ *      opened from the same order being cancelled: same type, same reference,
+ *      opposite amounts.
+ *   2. If no row in the file carries a sign, the file states magnitudes only
+ *      and the Transaction Type decides instead. That is the shape the legacy
+ *      alias table describes.
+ *   3. Where the sign and the type disagree, the sign wins and the row is
+ *      named in a warning, so a guessed direction is never silent.
  */
+/** Which way a Transaction Type moves the PRIMARY leg, when no sign is given. */
+function typeImpliesInflow(t: StrikeTxType): boolean {
+  // Purchase brings bitcoin in, Sale sends it out; the primary leg is bitcoin
+  // whenever the row has one, so those two read opposite to their fiat side.
+  return t === "Receive" || t === "Deposit" || t === "Purchase";
+}
+
 export function strikeRowsToJournalStagedRows(rows: StrikeCsvRow[]): {
   staged: V3StagedRow[];
   warnings: string[];
 } {
   const warnings: string[] = [];
   const out: V3StagedRow[] = [];
+  // Decided once per file, not per row. If anything in this export is signed,
+  // the export signs its outflows, so an unsigned amount means positive. Only
+  // a file with no signs anywhere is stating bare magnitudes.
+  const fileIsSigned = rows.some((r) => r.amount.trim().startsWith("-"));
   for (let i = 0; i < rows.length; i += 1) {
     const r = rows[i];
     const date = normalizeStrikeDate(r.date);
@@ -388,9 +414,17 @@ export function strikeRowsToJournalStagedRows(rows: StrikeCsvRow[]): {
       continue;
     }
     const amount = magnitude(r.amount);
-    // The sign is authoritative. The type label alone is not: a Sale moves
-    // bitcoin out, a Withdrawal moves fiat out, and neither is "Send".
-    const isInflow = !r.amount.trim().startsWith("-");
+    const raw = r.amount.trim();
+    const isSigned = raw.startsWith("-") || raw.startsWith("+");
+    const impliedByType = typeImpliesInflow(r.direction);
+    // See the docblock: sign first, type only when the whole file is unsigned.
+    const isInflow = isSigned || fileIsSigned ? !raw.startsWith("-") : impliedByType;
+    if (isInflow !== impliedByType) {
+      warnings.push(
+        `Row ${i + 2}: ${r.direction} of ${raw} posts as ${isInflow ? "a debit" : "a credit"}, ` +
+          `which is the opposite of what the type alone implies. The sign was followed.`,
+      );
+    }
     out.push({
       je_date: date,
       "je_ref_#": r.reference ?? "",

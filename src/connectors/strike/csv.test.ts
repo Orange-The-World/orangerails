@@ -134,6 +134,44 @@ describe("parseStrikeCsv against a genuine Strike export shape", () => {
   });
 });
 
+describe("which side a row posts to", () => {
+  // A file that states magnitudes only and puts the direction in the type
+  // column. Nothing here carries a sign, so the type has to decide.
+  const UNSIGNED = "Date,Direction,Currency,Amount (Currency),Description,Destination\n" +
+    "Oct 1 2024 10:00:00,Receive,BTC,0.00010000,in,lnbc1\n" +
+    "Oct 2 2024 10:00:00,Send,BTC,0.00020000,out,lnbc2";
+
+  it("falls back to the type when no amount in the file is signed", () => {
+    const { staged, warnings } = strikeRowsToJournalStagedRows(parseStrikeCsv(UNSIGNED).rows);
+    expect(staged[0].debit).toBe("0.00010000");
+    expect(staged[0].credit).toBe("");
+    // The unsigned outflow is the case that matters: magnitude alone would
+    // have posted it as a debit.
+    expect(staged[1].credit).toBe("0.00020000");
+    expect(staged[1].debit).toBe("");
+    expect(warnings).toEqual([]);
+  });
+
+  it("lets the sign win in a signed file, and never guesses silently", () => {
+    const rows = parseStrikeCsv(REAL_SHAPE).rows;
+    const { staged, warnings } = strikeRowsToJournalStagedRows(rows);
+    // The cancelled half of the target order is a positive, unsigned amount in
+    // a file that signs its outflows. Its type says Sale, which alone would
+    // post it as a credit and undo the cancellation.
+    const cancelled = staged.find((r) => r.line_description === "Cancelled target order");
+    expect(cancelled?.debit).toBe("0.00421625");
+    expect(cancelled?.credit).toBe("");
+    expect(warnings.some((w) => w.includes("opposite of what the type alone implies"))).toBe(true);
+  });
+
+  it("posts an unsigned inflow in a signed file without complaint", () => {
+    const rows = parseStrikeCsv(REAL_SHAPE).rows;
+    const { staged } = strikeRowsToJournalStagedRows(rows);
+    const recv = staged.find((r) => r["je_ref_#"] === "ref-recv");
+    expect(recv?.debit).toBe("0.00071111");
+  });
+});
+
 describe("strikeRowsToJournalStagedRows on real-shape rows", () => {
   it("posts by the sign of the amount, not by the type label", () => {
     const rows = parseStrikeCsv(REAL_SHAPE).rows;
