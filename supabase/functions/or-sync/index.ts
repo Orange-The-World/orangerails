@@ -1101,6 +1101,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         let newTxs: NormalizedTransaction[];
         let next_cursor: string | null;
         let completeness: { status: 'active' | 'partial'; denied_sources?: string[] } = { status: 'active' };
+        // DL-1505 item 2: drainStrikeQueue returns a subscription-error marker
+        // instead of writing it to the DB directly. We write it here in the
+        // single post-pass connection update so the success-path null-clear
+        // cannot overwrite it. Null for all non-Strike providers and for any
+        // Strike connection that registered successfully this pass.
+        let drainSubscriptionError: string | null = null;
 
         if (conn.provider_type === 'strike') {
           // Strike uses BOTH paths now (V3 ADR 2026-05-25):
@@ -1279,6 +1285,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // strikeWalletIds (not sourceWallets) because it is exactly the array
           // the poll was given, so "poll attributed by walletIds[0]" and the
           // guard here read off the same value.
+          drainSubscriptionError = drain.subscriptionError ?? null;
           newTxs = mergeStrikeTransactions(poll.transactions, drain.transactions, strikeWalletIds);
           // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.
@@ -1361,7 +1368,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         const connUpdate: Record<string, unknown> = {
           last_sync_at: new Date().toISOString(),
           status: completeness.status,
-          encrypted_last_error: null,
+          // DL-1505 item 2: write the subscription error (or null on clean pass)
+          // in one place so no secondary update can overwrite it.
+          encrypted_last_error: drainSubscriptionError,
         };
         if (newTxs.length > 0 && next_cursor != null) {
           connUpdate.last_sync_cursor = next_cursor;
