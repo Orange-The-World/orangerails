@@ -1,7 +1,7 @@
 /**
- * or-quiltt-drain-alert -- three-signal health check for or_quiltt_sync_drain
+ * or-quiltt-drain-alert -- four-signal health check for or_quiltt_sync_drain
  *
- * Signals (DL-0640):
+ * Signals (DL-0640, signal D added by DL-1540):
  *   A. Failure rate: >10% of or_quiltt_sync_drain runs failed in last 30 min.
  *      Reads cron.job_run_details via drain_cron_job_stats() SECURITY DEFINER RPC.
  *      Fires only when at least one run occurred (total_count > 0), so a quiet
@@ -11,6 +11,22 @@
  *   C. Queue stall: any quiltt_webhook_inbox row that is unprocessed (processed_at
  *      IS NULL), not retired (retirement_reason IS NULL), and older than 2 hours.
  *      Direct table query; no cron schema bridge needed.
+ *   D. Retired events: any quiltt_webhook_inbox row retired (retirement_reason
+ *      IS NOT NULL) in the last 24 hours. A retirement is a webhook this system
+ *      received, failed to handle MAX_ATTEMPTS times, and then DESTROYED. The
+ *      customer's bank told us something and we threw it away.
+ *
+ *      This signal exists because signals A to C were all green for ten weeks
+ *      while 246 events were destroyed. None of them can see a retirement:
+ *      A and B watch whether the drain JOB runs, which it does, successfully;
+ *      and C cannot fire because bumpAttempts stamps processed_at at the same
+ *      moment it stamps retirement_reason, so a destroyed event is
+ *      indistinguishable from a delivered one by every column C looks at.
+ *      Signal C also excludes retired rows explicitly. Retirement was invisible
+ *      by construction, not by accident.
+ *
+ *      Threshold is deliberately > 0 rather than a rate. Losing a customer's
+ *      bank data is not a thing that has an acceptable background level.
  *
  * Auth: X-Internal-Worker-Token header, constant-time compared to OR_INTERNAL_WORKER_TOKEN.
  * Query errors surface as alert_firing = true (absence of evidence is not green).
@@ -35,6 +51,7 @@ const FAILURE_WINDOW_MINUTES      = 30;
 const SUCCESS_WINDOW_MINUTES      = 60;
 const FAILURE_RATE_THRESHOLD      = 0.10; // 10%
 const STALL_HOURS                 = 2;
+const RETIREMENT_WINDOW_HOURS     = 24;
 const SUPPRESSION_COOLDOWN_MINUTES = 60;
 
 interface DrainCronStats {
@@ -67,6 +84,11 @@ interface HealthReport {
       stalled_rows: number | null;
       stall_hours:  number;
       firing:       boolean;
+    };
+    retired_events: {
+      retired_rows:  number | null;
+      window_hours:  number;
+      firing:        boolean;
     };
   };
 }
@@ -190,10 +212,34 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   const stalled:    number | null = stalledCount ?? null;
   const stallFiring               = stalled !== null && stalled > 0;
 
+  // Signal D: events retired in the last RETIREMENT_WINDOW_HOURS.
+  //
+  // processed_at is the retirement timestamp for a retired row: bumpAttempts
+  // writes processed_at and retirement_reason in the same UPDATE when attempts
+  // reach MAX_ATTEMPTS. There is no separate retired_at column, so this is the
+  // honest key to window on rather than received_at, which would measure when
+  // the webhook arrived instead of when we gave up on it.
+  const retirementCutoff = new Date(
+    Date.now() - RETIREMENT_WINDOW_HOURS * 60 * 60 * 1000,
+  ).toISOString();
+  const { count: retiredCount, error: retiredErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select('*', { count: 'exact', head: true })
+    .not('retirement_reason', 'is', null)
+    .gte('processed_at', retirementCutoff);
+
+  if (retiredErr) {
+    console.error('[or-quiltt-drain-alert] signal D (retired events) query failed:', retiredErr.message);
+  }
+
+  const retired:      number | null = retiredCount ?? null;
+  const retiredFiring               = retired !== null && retired > 0;
+
   // Surface query errors: a probe that cannot run must not exit green.
   const queryErrors: string[] = [];
   if (statsErr) queryErrors.push(`signals A+B (cron stats): ${statsErr.message}`);
   if (stallErr) queryErrors.push(`signal C (queue stall): ${stallErr.message}`);
+  if (retiredErr) queryErrors.push(`signal D (retired events): ${retiredErr.message}`);
   const queryError = queryErrors.length > 0 ? queryErrors.join('; ') : undefined;
 
   if (failureRateFiring) {
@@ -216,8 +262,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     );
   }
 
+  if (retiredFiring) {
+    console.error(
+      `[or-quiltt-drain-alert] ALERT signal D (retired events): ` +
+      `${retired} webhook event(s) DESTROYED in past ${RETIREMENT_WINDOW_HOURS}h`,
+    );
+  }
+
   const alertFiring = failureRateFiring || zeroCompletionsFiring || stallFiring ||
-    queryError !== undefined;
+    retiredFiring || queryError !== undefined;
 
   // zulip_post_sent: null when not firing, true/false when firing based on outcome.
   let zulipPostSent: boolean | null = null;
@@ -263,6 +316,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           `${STALL_HOURS}h`,
         );
       }
+      if (retiredFiring) {
+        parts.push(
+          `:x: **Signal D (retired events):** ${retired} webhook event(s) DESTROYED in the last ` +
+          `${RETIREMENT_WINDOW_HOURS}h. Each one is a bank sync notification we received and threw ` +
+          `away. Query quiltt_webhook_inbox for retirement_reason to see why.`,
+        );
+      }
       if (queryError) {
         parts.push(`:warning: **Query error (probe could not run):** ${queryError}`);
       }
@@ -306,6 +366,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         stalled_rows: stalled,
         stall_hours:  STALL_HOURS,
         firing:       stallFiring,
+      },
+      retired_events: {
+        retired_rows: retired,
+        window_hours: RETIREMENT_WINDOW_HOURS,
+        firing:       retiredFiring,
       },
     },
   };
