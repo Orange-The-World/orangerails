@@ -146,8 +146,18 @@ export interface RunSyncOptions {
   orStealthKey: string;
   /** Block height the previous sync left off at. -1 or undefined means
    *  start from the wallet birthday height (which the caller resolves and
-   *  passes as `birthdayHeight`). */
+   *  passes as `birthdayHeight`).
+   *
+   *  Superseded by `resumeFromHeight` where that is supplied. Kept because a
+   *  single cursor cannot express a gap, and because the widget bundle and the
+   *  edge function deploy independently: either can be live first, so this
+   *  orchestrator must still work when only the old field arrives. */
   lastBlockScanned?: number | null;
+  /** Block height to resume at, already reduced from the connection's recorded
+   *  coverage by `resumeHeightFromRanges`. Undefined or null means the caller
+   *  had no coverage map to reduce, in which case the legacy cursor above is
+   *  used and behaviour is unchanged from before ranges existed. */
+  resumeFromHeight?: number | null;
   /** Block height corresponding to wallet_birthday. The caller resolves
    *  the date → height mapping; this orchestrator stays date-blind. */
   birthdayHeight: number;
@@ -614,9 +624,15 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     );
   }
 
+  // Resume point. `resumeFromHeight` is already anchored at the birthday by
+  // resumeHeightFromRanges, so it is used as-is rather than incremented: the
+  // coverage rule deliberately re-reads the boundary block instead of risking
+  // an off-by-one gap. The legacy cursor is one BEHIND the next unread block,
+  // hence the +1 on that arm only. Math.max still guards both, so neither path
+  // can start before the wallet birthday.
   const fromHeight = Math.max(
     opts.birthdayHeight,
-    (opts.lastBlockScanned ?? -1) + 1,
+    opts.resumeFromHeight ?? (opts.lastBlockScanned ?? -1) + 1,
   );
   if (fromHeight > tip) {
     // Already current. Short-circuit with empty result.
