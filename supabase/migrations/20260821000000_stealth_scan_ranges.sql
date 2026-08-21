@@ -76,7 +76,7 @@ CREATE POLICY "Owners can read their stealth scan ranges"
       SELECT 1
       FROM public.stealth_connections sc
       WHERE sc.id          = stealth_scan_ranges.connection_id
-        AND sc.app_user_id = (current_setting('request.jwt.claims', true)::jsonb ->> 'sub')
+        AND sc.app_user_id = auth.uid()::text
     )
   );
 
@@ -117,14 +117,21 @@ DECLARE
   v_merged_from  INT;
   v_merged_to    INT;
 BEGIN
+  -- Serialize per connection: two concurrent callers for the same connection_id
+  -- could each read before the other writes, leaving overlapping rows or a PK
+  -- collision. Advisory lock released automatically at transaction end.
+  -- Namespace 1478 = DL-1478; hashtext maps the UUID to int4.
+  PERFORM pg_advisory_xact_lock(1478, hashtext(p_connection_id::text));
+
   -- Collect the span of all existing ranges that overlap or touch [p_from, p_to].
   -- Adjacency: a range [a, b] with b = p_from - 1 or a = p_to + 1 merges too.
+  -- Cast to bigint before +1/-1 to avoid overflow at INT max/min.
   SELECT MIN(from_height), MAX(to_height)
     INTO v_overlap_from, v_overlap_to
     FROM public.stealth_scan_ranges
    WHERE connection_id = p_connection_id
-     AND from_height  <= p_to_height   + 1
-     AND to_height    >= p_from_height - 1;
+     AND from_height  <= (p_to_height::bigint   + 1)
+     AND to_height    >= (p_from_height::bigint  - 1);
 
   IF v_overlap_from IS NULL THEN
     -- No overlapping or adjacent ranges exist: plain insert.
