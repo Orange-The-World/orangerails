@@ -25,6 +25,7 @@
 import { useEffect, useState } from "react";
 
 import { parseDescriptor, type ParsedDescriptor } from "@/stealth/lib/derive";
+import { resumeHeightFromCoverage, type ScanRange } from "@/stealth/lib/ranges";
 import {
   runSync,
   WindowExhaustedError,
@@ -203,6 +204,10 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           sealed_envelope: SealedEnvelope;
           last_block_scanned: number | null;
           wallet_birthday_plaintext: string | null;
+          // Optional: absent when the deployed edge function predates the
+          // coverage-map read. The widget and the edge function ship
+          // separately, so either can be the older half.
+          scan_ranges?: ScanRange[] | null;
         };
         setIsFirstSync(envJson.last_block_scanned === null);
 
@@ -219,6 +224,23 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           ? approximateHeightFromDate(envelopePayload.wallet_birthday)
           : await liveResolveBirthdayHeight(envelopePayload.wallet_birthday, BLOCK_SOURCE_BASE);
 
+        // Resume point, from the recorded coverage rather than from a single
+        // cursor. A cursor cannot say "everything above 900000 is read but the
+        // birthday at 800000 was never reached", so a wallet whose first scan
+        // started late could never fill in the blocks before it.
+        //
+        // undefined here means the coverage cannot answer: the field is absent
+        // because the edge function is the older half of a split deploy, or it
+        // is null because the coverage read failed, or it is empty because this
+        // connection last synced before the coverage table held rows. All three
+        // keep the legacy cursor, which is what shipped before this existed.
+        // Only a connection that actually has recorded ranges is resumed from
+        // them, and a pre-coverage connection therefore keeps whatever gap it
+        // already had rather than rescanning its whole history on first sync.
+        // Healing those is a backfill decision about existing data, deliberately
+        // not something this path does to every wallet at once.
+        const resumeFromHeight = resumeHeightFromCoverage(envJson.scan_ranges, birthdayHeight);
+
         let descriptor: ParsedDescriptor | undefined;
         if (envelopePayload.kind === "descriptor_stealth") {
           descriptor = parseDescriptor(envelopePayload.descriptor);
@@ -229,6 +251,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           envelope: envJson.sealed_envelope,
           orStealthKey: init.or_stealth_key_b64,
           lastBlockScanned: envJson.last_block_scanned,
+          resumeFromHeight,
           birthdayHeight,
           descriptor,
           fetchTip: useMock ? mockFetchTip : liveFetchTip,
@@ -405,18 +428,33 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    throws before we ever get here, so the cursor stays at its stored
         //    value and the next sync re-scans from there.
         let cursorFailed = false;
-        if ((!useMock || isForceCursor()) && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
+        // The scan actually began here, so this is the only honest lower bound
+        // for the interval we are about to record. Reading from the coverage
+        // map and then recording a different start would write a range we did
+        // not scan.
+        const scannedFrom = Math.max(
+          birthdayHeight,
+          resumeFromHeight ?? (envJson.last_block_scanned ?? -1) + 1,
+        );
+        // Two ways this sync produced new coverage: it reached higher than the
+        // stored cursor, or it started lower than the stored cursor and so
+        // filled in ground below it. The second arm is new. Without it, a
+        // gap-filling scan that stops before overtaking the old cursor throws
+        // away everything it just read and the gap never closes.
+        const reachedHigher = result.lastBlockScanned > (envJson.last_block_scanned ?? -1);
+        const filledBelow = scannedFrom <= (envJson.last_block_scanned ?? -1)
+          && result.lastBlockScanned >= scannedFrom;
+        if ((!useMock || isForceCursor()) && (reachedHigher || filledBelow)) {
           try {
-          // from_height is the inclusive start of the range just scanned:
-          // the previous cursor (null on the first sync, in which case the
-          // wallet birthday is the starting point). The edge function uses
-          // both values to call record_stealth_scan_range() (DL-1478).
+          // from_height is the inclusive start of the range just scanned. The
+          // edge function uses both values to call record_stealth_scan_range()
+          // (DL-1478).
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
             widget_token: currentWidgetToken,
             last_block_scanned: result.lastBlockScanned,
-            from_height: envJson.last_block_scanned ?? birthdayHeight,
+            from_height: scannedFrom,
           };
           let cursorWritten = false;
           if (init.proxy_base_url && parent) {
