@@ -13,6 +13,7 @@
 // Updated: Sr Dev A, 2026-08-18 -- DL-0505: return 404 unsupported_pair when pair has no coverage; stale forward-fill continues to return fill_type:gap
 // Updated: Sr Dev A, 2026-08-18 -- DL-0505 Auditor fix: existence probe distinguishes unsupported_pair from before_coverage_start; per-item errors in batch preserve prior results and metering
 // Updated: Sr Dev B, 2026-08-20 -- DL-1361: surface rate_type and data_source_authority for CB-sourced composites (official_reference vs market)
+// Updated: Sr Dev B, 2026-08-21 -- DL-1361 round 2: drop OFFICIAL_CB_AUTHORITIES whitelist; any non-null composite authority is official_reference
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
@@ -41,14 +42,6 @@ const VALID_PRODUCTS: Record<string, { granularity: string }> = {
   'ORBI-D': { granularity: '1d' },
   'ORBI-D-authority': { granularity: '1d' },
 }
-
-// Official central-bank authorities whose rates reflect published pegs, not traded
-// market prices. Composites derived from these are labeled rate_type:'official_reference'
-// so callers know the number may differ from local market rates.
-const OFFICIAL_CB_AUTHORITIES = new Set([
-  'CBN', 'NBU', 'CBR', 'NBK', 'BAM', 'BANK_OF_ALGERIA',
-  'SBV', 'BB', 'CBE', 'BOG', 'BOC', 'FED',
-])
 
 // Matches a trailing ISO-date suffix written by orbi-cb-cross-rates.py for dated
 // composites, e.g. '-2026-06-19' in 'BTC-USD * USD-CNY-ECB-2026-06-19'.
@@ -344,7 +337,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const staleGap = gapMs > FORWARD_FILL_MAX_MS
     const fillType = staleGap ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
     const compositeAuth = staleGap ? null : extractCompositeAuthority(row.composite_via)
-    const rateType = staleGap ? null : (compositeAuth && OFFICIAL_CB_AUTHORITIES.has(compositeAuth) ? 'official_reference' : 'market')
+    const rateType = staleGap ? null : (compositeAuth !== null ? 'official_reference' : 'market')
 
     results.push({
       asset: item.asset.toUpperCase(),
