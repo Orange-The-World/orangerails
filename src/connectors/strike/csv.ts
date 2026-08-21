@@ -358,6 +358,33 @@ export function magnitude(amount: string): string {
   return amount.replace(/^-/, "").trim();
 }
 
+/**
+ * Compare decimals by value, not by how they were typed.
+ *
+ * The dedup key rests entirely on this. A customer is told to upload a yearly
+ * export and monthly statements for the current year, so the same transaction
+ * arrives twice by design. If one file writes "0.00100000" and the other
+ * writes "0.001", an unnormalized key sees two transactions and the customer
+ * gets a double.
+ *
+ * I have seen exactly one real export, an annual one, and never a monthly
+ * statement, so I cannot claim the two formats are byte identical. This
+ * normalizes rather than assuming they are.
+ */
+export function normalizeDecimal(raw: string): string {
+  const t = raw.trim().replace(/^\+/, "");
+  if (!t) return "";
+  if (!/^-?\d*\.?\d+$/.test(t)) return t;
+  const neg = t.startsWith("-");
+  const body = neg ? t.slice(1) : t;
+  const [intPart = "0", fracPart = ""] = body.split(".");
+  const int = intPart.replace(/^0+(?=\d)/, "");
+  const frac = fracPart.replace(/0+$/, "");
+  const n = frac ? `${int}.${frac}` : int;
+  // Do not let "-0" and "0" key differently.
+  return n === "0" ? "0" : (neg ? "-" : "") + n;
+}
+
 /** Does this row move fiat and bitcoin at once? Purchases and Sales do. */
 export function isTwoLeggedTrade(r: StrikeCsvRow): boolean {
   return Boolean(r.btcAmount && r.fiatAmount);
@@ -382,8 +409,8 @@ export function strikeDedupKey(r: StrikeCsvRow): string {
     r.reference ?? "",
     normalizeStrikeDate(r.date),
     r.direction,
-    r.amount.trim(),
-    r.fiatAmount?.trim() ?? "",
+    normalizeDecimal(r.amount),
+    normalizeDecimal(r.fiatAmount ?? ""),
   ].join("|");
 }
 
@@ -530,6 +557,19 @@ export type BuildStrikeCsvPayloadInput = {
   fileName?: string;
   fileBytes?: Uint8Array;
   orgHint?: { name?: string; currency?: string };
+  /**
+   * Emit `staged.trades`. OFF by default, deliberately.
+   *
+   * `assertStagedImportPayload` ignores keys it does not recognise, so a
+   * consumer that predates `staged.trades` discards every trade and still
+   * reports success. Silent loss of the price and the cost basis is worse
+   * than not shipping the field, so the producer does not send it until the
+   * caller confirms the consumer understands it.
+   *
+   * Either way the trades are never dropped quietly: with the switch off they
+   * are counted in the warnings, and they are never posted as half an entry.
+   */
+  emitTrades?: boolean;
 };
 
 export function buildStrikeCsvStagedPayload(input: BuildStrikeCsvPayloadInput): {
@@ -548,10 +588,15 @@ export function buildStrikeCsvStagedPayload(input: BuildStrikeCsvPayloadInput): 
         `customers are told to upload a yearly file plus monthly statements.`,
     );
   }
+  const emitTrades = input.emitTrades === true;
   if (trades.length > 0) {
     warnings.push(
-      `${trades.length} trade(s) moved both bitcoin and fiat and are staged for ` +
-        `two-sided mapping rather than posted as a single debit or credit.`,
+      emitTrades
+        ? `${trades.length} trade(s) moved both bitcoin and fiat and are staged for ` +
+            `two-sided mapping rather than posted as a single debit or credit.`
+        : `${trades.length} trade(s) moved both bitcoin and fiat and were NOT imported. ` +
+            `Their price and cost basis are not in this payload. Two-sided staging is ` +
+            `off until the importer confirms it reads staged.trades.`,
     );
   }
 
@@ -585,7 +630,7 @@ export function buildStrikeCsvStagedPayload(input: BuildStrikeCsvPayloadInput): 
     },
     staged: {
       ...(staged.length ? { journalEntries: staged } : {}),
-      ...(trades.length ? { trades } : {}),
+      ...(emitTrades && trades.length ? { trades } : {}),
     },
   };
   return { payload, warnings, rows };

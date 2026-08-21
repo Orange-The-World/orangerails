@@ -9,6 +9,7 @@ import {
   normalizeStrikeDate,
   parseStrikeCsv,
   strikeDedupKey,
+  normalizeDecimal,
   dedupeStrikeRows,
   strikeRowsToTrades,
   strikeRowsToJournalStagedRows,
@@ -213,6 +214,45 @@ describe("strikeDedupKey", () => {
   });
 });
 
+describe("normalizeDecimal, which the dedup key rests on", () => {
+  it("treats the same value written two ways as one", () => {
+    expect(normalizeDecimal("0.00100000")).toBe(normalizeDecimal("0.001"));
+    expect(normalizeDecimal("+12.50")).toBe(normalizeDecimal("12.5"));
+    expect(normalizeDecimal("007.10")).toBe(normalizeDecimal("7.1"));
+    expect(normalizeDecimal("-0")).toBe(normalizeDecimal("0"));
+  });
+
+  it("keeps genuinely different values apart", () => {
+    expect(normalizeDecimal("0.001")).not.toBe(normalizeDecimal("-0.001"));
+    expect(normalizeDecimal("0.0011")).not.toBe(normalizeDecimal("0.001"));
+  });
+
+  it("leaves anything that is not a plain decimal alone", () => {
+    expect(normalizeDecimal("1,234.5")).toBe("1,234.5");
+  });
+});
+
+describe("dedup across differently formatted exports", () => {
+  // The same transaction as a yearly export might write it, and as a monthly
+  // statement might: padded amount, and a zero-padded day.
+  const YEARLY =
+    "Reference,Date & Time (UTC),Transaction Type,Amount EUR,Fee EUR,Amount BTC,Fee BTC," +
+    "BTC Price,Cost Basis (EUR),Destination,Description,Transaction Hash,Note\n" +
+    "ref-x,Nov 5 2024 14:48:37,Receive,,,0.001,,,,lnbc1,tip,hash-1,";
+  const MONTHLY =
+    "Reference,Date & Time (UTC),Transaction Type,Amount EUR,Fee EUR,Amount BTC,Fee BTC," +
+    "BTC Price,Cost Basis (EUR),Destination,Description,Transaction Hash,Note\n" +
+    "ref-x,Nov 05 2024 14:48:37,Receive,,,0.00100000,,,,lnbc1,tip,hash-1,";
+
+  it("collapses one transaction written two different ways", () => {
+    const rows = [...parseStrikeCsv(YEARLY).rows, ...parseStrikeCsv(MONTHLY).rows];
+    expect(rows).toHaveLength(2);
+    const { rows: deduped, removed } = dedupeStrikeRows(rows);
+    expect(removed).toBe(1);
+    expect(deduped).toHaveLength(1);
+  });
+});
+
 describe("strikeRowsToTrades", () => {
   it("stages both legs, the price and the cost basis of a purchase", () => {
     const trades = strikeRowsToTrades(parseStrikeCsv(REAL_SHAPE).rows);
@@ -243,8 +283,19 @@ describe("buildStrikeCsvStagedPayload on a real-shape export", () => {
     expect(payload.summary.journalLines).toBe(staged.length);
   });
 
-  it("carries trades alongside journal entries", () => {
+  it("does NOT emit trades unless the caller asks, and says so loudly", () => {
     const { payload } = buildStrikeCsvStagedPayload({ csvText: REAL_SHAPE });
+    expect(payload.staged.trades).toBeUndefined();
+    expect(
+      payload.summary.warnings.some((w) => w.includes("were NOT imported")),
+    ).toBe(true);
+  });
+
+  it("carries trades alongside journal entries when switched on", () => {
+    const { payload } = buildStrikeCsvStagedPayload({
+      csvText: REAL_SHAPE,
+      emitTrades: true,
+    });
     expect(payload.staged.trades?.length).toBe(1);
     expect(payload.staged.journalEntries?.length).toBe(5);
   });
