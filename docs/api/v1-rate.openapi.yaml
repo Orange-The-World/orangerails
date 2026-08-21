@@ -152,8 +152,15 @@ components:
           enum: [exact, forward_fill, gap]
           description: >
             exact: a rate existed at this exact UTC minute (or day for ORBI-D products).
-            forward_fill: nearest prior bucket used; resolved_at shows which.
-            gap: no data for this pair before this timestamp; rate is null.
+            forward_fill: nearest prior bucket was used; resolved_at shows which.
+              Only returned when that row is within FORWARD_FILL_MAX_DAYS (default 2 days)
+              of the requested timestamp.
+            gap: no rate can be served; rate is null. Use fill_type to detect a gap:
+              resolved_at is truncated to the product bucket (minute for ORBI-M, day for
+              ORBI-D) and must not be compared to requested_at for this purpose.
+              Returned in two cases: (1) no prior data exists for this pair before the
+              requested timestamp, or (2) the nearest prior row is older than the staleness
+              cap (default 2 days). A stale number is worse than an honest null.
 
     BatchResult:
       type: object
