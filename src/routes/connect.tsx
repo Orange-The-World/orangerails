@@ -1726,44 +1726,42 @@ function EnterCredentialsStep({
   const vaultPasswordFilled = !showVaultPassword || (vaultPassword ?? "").length > 0;
   return (
     <form onSubmit={onContinue} className="mt-4 space-y-4">
-      <div className="flex items-center gap-1.5">
-        <h2 className="text-sm font-semibold">Connect your {providerLabel} account</h2>
-        {providerSlug === "strike" && (
-          <TooltipProvider delayDuration={150}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="About Strike's API"
-                  className="text-muted-foreground hover:text-foreground"
-                >
-                  <Info className="h-3.5 w-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="right" className="max-w-xs text-xs leading-snug">
-                <p className="font-medium">A note on Strike's API</p>
-                <p className="mt-1">
-                  Strike's public API does not expose a full transaction history endpoint. It does
-                  not list Lightning Address tips, and there is no replay window for activity that
-                  landed before you connected. This is a well known Strike limitation. Every
-                  accounting tool we know of (Koinly, CoinLedger, CoinTracker) hits the same wall.
-                </p>
-                <p className="mt-2">
-                  <span className="font-medium">Going forward:</span> everything syncs. Once
-                  connected, Strike sends a real time webhook for every invoice, receive, deposit,
-                  payout, payment, and exchange. Fully automatic, no polling.
-                </p>
-                <p className="mt-2">
-                  <span className="font-medium">The past:</span> the only way to recover historical
-                  activity is the CSV export from Strike's dashboard. CSV upload from this screen is
-                  shipping next. Rows match on Strike's Reference column so anything that also
-                  arrives via webhook never double counts.
-                </p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )}
-      </div>
+      <h2 className="text-sm font-semibold">Connect your {providerLabel} account</h2>
+
+      {providerSlug === "strike" && (
+        <div className="rounded-lg border border-border bg-muted/40 p-3">
+          <div className="flex items-start gap-2">
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+            <div className="space-y-2 text-sm leading-snug">
+              <p className="font-semibold">Strike does not share your past transactions</p>
+              <p className="text-muted-foreground">
+                This is a limit on Strike's side, not ours. Strike's API has no way to hand over
+                activity from before you connected, so no tool can pull your history
+                automatically. Koinly, CoinTracker and CoinLedger all hit the same wall.
+              </p>
+              <p className="text-muted-foreground">
+                <span className="font-medium text-foreground">From now on, automatic.</span> The
+                moment you connect, Strike tells us about every receive, send, deposit, payout and
+                exchange as it happens. Nothing for you to do.
+              </p>
+              <p className="text-muted-foreground">
+                <span className="font-medium text-foreground">Your past, one file.</span> Export a
+                CSV from your Strike dashboard and keep it. Bringing it into this same account is
+                being built right now. Rows are matched on Strike's Reference column, so anything
+                that also arrives automatically is never counted twice.
+              </p>
+              <a
+                href="/docs/strike-csv"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-block font-medium underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+              >
+                How to export your Strike CSV
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div>
         <label htmlFor="connection-label" className="block text-sm font-medium">
