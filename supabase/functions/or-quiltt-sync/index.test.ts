@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reconcileConnectionError, reDriveReadyDeferrals, upstreamCodeForErroredEvent } from './index.ts';
+import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── fetchPendingBatch: batch query filter ─────────────────────────────
 //
@@ -1047,5 +1047,160 @@ Deno.test('DL-1445 follow-up: a platforms read failure must not stop the status 
     'encrypted_last_error' in (captured ?? {}),
     false,
     'if we cannot confirm the platform is sink mode we must not write the column',
+  );
+});
+
+// ── DL-1409: the sink path must not create a status it cannot clear ────
+//
+// Six production connections sat in 'pending' from 2026-08-12 with
+// last_sync_at NULL while their webhook inbox was fully drained. The sink
+// insert hardcoded 'pending', and this worker only ever promoted 'partial'
+// and 'error'. Nothing here could clear it, so the row was stranded: the
+// data moved and the status did not.
+//
+// These two tests are the regression guard. The first fails if the insert
+// goes back to 'pending'; the second fails if 'pending' is dropped from the
+// success reconciler.
+
+Deno.test('DL-1409: sink delivery inserts an ACTIVE connection, never pending', async () => {
+  let insertedStatus: string | undefined;
+
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(table: string) {
+      if (table === 'connections') {
+        return {
+          insert(row: Record<string, unknown>) {
+            insertedStatus = row.status as string;
+            return Promise.resolve({ data: null, error: null });
+          },
+          select(_c: string) {
+            // deno-lint-ignore no-explicit-any
+            const chain: any = {
+              eq(_col: string, _v: unknown) { return chain; },
+              maybeSingle() { return Promise.resolve({ data: { id: 'conn-or-1' }, error: null }); },
+            };
+            return chain;
+          },
+        };
+      }
+      if (table === 'platforms') {
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          select(_c: string) { return ch; },
+          eq(_c: string, _v: unknown) { return ch; },
+          maybeSingle() { return Promise.resolve({ data: { webhook_url: null }, error: null }); },
+        };
+        return ch;
+      }
+      // deno-lint-ignore no-explicit-any
+      return { select() { return this as any; }, eq() { return this as any; } };
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-dl1409',
+    event_type:    'connection.synced.successful.initial',
+    payload:       { record: { id: 'quiltt-conn-dl1409' } },
+    platform_id:   'plat-sink',
+    subaccount_id: 'sub-sink',
+    attempts:      0,
+  };
+
+  await handleEventSinkDelivery(mockClient, ev, 'quiltt-conn-dl1409', 'plat-sink', 'sub-sink');
+
+  assertEquals(
+    insertedStatus,
+    'active',
+    "sink-created connections must be inserted 'active': this worker has no rule that clears 'pending', so inserting it strands the row forever (DL-1409)",
+  );
+});
+
+Deno.test('DL-1409: a successful Quiltt sync clears pending as well as error', async () => {
+  let statusFilter: string[] | undefined;
+
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() { return Promise.resolve({ data: { id: 'conn-or-1' }, error: null }); },
+        update(_patch: Record<string, unknown>) { return chain; },
+        in(_col: string, vals: string[]) {
+          statusFilter = vals;
+          return Promise.resolve({ error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-1', 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(
+    statusFilter?.includes('pending'),
+    true,
+    "'pending' must be promotable here so rows stranded by the old sink insert heal themselves without a manual production UPDATE (DL-1409)",
+  );
+  assertEquals(
+    statusFilter?.includes('error'),
+    true,
+    "'error' must stay promotable: this is the existing reconnect-recovery behaviour and must not regress",
+  );
+});
+
+Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending', async () => {
+  // The fallback resolves "oldest quiltt row for this subaccount with a NULL
+  // quiltt_connection_id", which is not necessarily the connection this event
+  // is about. Promoting pending there could activate the wrong connection, and
+  // cancelPendingConnection refuses to delete an active row, so it cannot be
+  // undone. This test pins the fallback to 'error' only.
+  let statusFilter: string[] | undefined;
+  let lookupCalls = 0;
+
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() {
+          lookupCalls++;
+          // First lookup is the exact quiltt_connection_id match: miss.
+          // Second is the legacy NULL-id fallback: hit.
+          return Promise.resolve(
+            lookupCalls === 1
+              ? { data: null, error: null }
+              : { data: { id: 'conn-legacy' }, error: null },
+          );
+        },
+        update(_patch: Record<string, unknown>) { return chain; },
+        in(_col: string, vals: string[]) {
+          statusFilter = vals;
+          return Promise.resolve({ error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-unknown', 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(lookupCalls, 2, 'the exact match must miss and the legacy fallback must run');
+  assertEquals(
+    statusFilter,
+    ['error'],
+    "the legacy fallback must stay error-only: it may be resolving a different connection than the one that succeeded, and promoting pending there is not reversible by the consumer",
   );
 });

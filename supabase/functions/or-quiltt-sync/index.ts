@@ -782,7 +782,17 @@ export async function handleEventSinkDelivery(
       quiltt_connection_id:    quilttConnectionId,
       encrypted_credentials:   'quiltt-managed',
       credentials_key_version: 1,
-      status:                  'pending',
+      // DL-1409: was 'pending'. Nothing in this worker could ever clear it.
+      // 'pending' belongs to the atomic connect flow, where a consumer calls
+      // or-connection-confirm (pending -> active) or or-connection-cancel
+      // (row deleted). A sink row has no consumer handshake and no wallet
+      // write to protect, so it never got either call and sat pending forever.
+      // or-quiltt-link-complete already inserts 'active' directly on its own
+      // no-accounts branch, so this matches the existing contract rather than
+      // inventing one. This insert is insert-only (23505 is treated as
+      // success below), so it can never overwrite the status of a row that
+      // or-quiltt-link-complete created.
+      status:                  'active',
     });
   // 23505 = unique_violation: connection row already exists, which is fine.
   if (insertErr && insertErr.code !== '23505') {
@@ -995,10 +1005,11 @@ function randomCorrelationId(): string {
  * When Quiltt reports a successful connection sync, flip any error row back to active.
  * Uses the same lookup pattern as reconcileConnectionError: exact quiltt_connection_id
  * match first, legacy NULL-id fallback for pre-migration rows.
- * Only transitions error -> active; leaves partial/pending/active rows untouched.
+ * Transitions error -> active always, and pending -> active ONLY on the exact
+ * quiltt_connection_id match path. Leaves partial and active rows untouched.
  * Callers that confirmed a full data pull should also clear partial -> active post-pull.
  */
-async function reconcileConnectionSuccess(
+export async function reconcileConnectionSuccess(
   client: SupabaseClient,
   connectionId: string,
   subaccountId: string,
@@ -1012,8 +1023,13 @@ async function reconcileConnectionSuccess(
     .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
   if (exactErr) return `connection lookup failed: ${exactErr.message}`;
+  // Whether we resolved the row Quiltt is actually talking about, or fell back
+  // to "the oldest legacy row for this subaccount". The distinction decides
+  // which statuses may be promoted below.
+  let matchedExactly = false;
   if (exact) {
     orConnId = exact.id;
+    matchedExactly = true;
   } else {
     const { data: legacy, error: legacyErr } = await client
       .from('connections')
@@ -1032,7 +1048,22 @@ async function reconcileConnectionSuccess(
     .from('connections')
     .update({ status: 'active', updated_at: new Date().toISOString() })
     .eq('id', orConnId)
-    .in('status', ['error']);
+    // DL-1409: 'pending' is promotable here so rows stranded by the old sink
+    // insert heal themselves on the next successful Quiltt sync, instead of
+    // needing a manual UPDATE on production. Quiltt reporting a successful
+    // sync is positive evidence the connection works, which is exactly what
+    // 'active' asserts.
+    //
+    // But ONLY on the exact quiltt_connection_id match. The legacy fallback
+    // above resolves "the oldest quiltt row for this subaccount with a NULL
+    // id", which is not necessarily the connection this event is about.
+    // Promoting a pending row on that path could activate a different
+    // connection than the one that succeeded, and the promotion is not
+    // reversible by the consumer: cancelPendingConnection in
+    // _shared/connection-state.ts returns 'already_active' and refuses to
+    // delete once the row is active. So the legacy path stays 'error' only,
+    // which is exactly the behaviour it had before this change.
+    .in('status', matchedExactly ? ['error', 'pending'] : ['error']);
   if (statusErr) return `connection status update failed: ${statusErr.message}`;
   console.log(
     `[or-quiltt-sync] connection ${orConnId} reconciled to active`,
