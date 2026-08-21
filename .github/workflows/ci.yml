@@ -6,6 +6,7 @@ on:
     branches: [dev, prod]
   push:
     branches: [dev, prod]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,6 +16,7 @@ jobs:
   lint-and-build:
     name: Lint + build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -77,6 +79,7 @@ jobs:
   deno-typecheck:
     name: Typecheck edge functions (Deno)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Why this job exists: until 2026-07-26 CI never looked at supabase/functions
     # at all. `bun run lint` carries continue-on-error (see the note on it above)
     # and `bun run build` only builds the Vite frontend, so every one of the 37
@@ -218,6 +221,7 @@ jobs:
   deno-test:
     name: Test edge functions (Deno)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
@@ -320,6 +324,7 @@ jobs:
   vitest:
     name: Unit tests (vitest)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Why this job exists: src/**/*.test.ts carries discriminating tests for the
     # stealth/sync orchestrator: birthday height rejection and the stored-cursor
     # short-circuit requirement. Without this job those tests sit in the tree
@@ -349,6 +354,7 @@ jobs:
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Runs against the already-deployed dev site. Two separate things deploy
     # that site, and neither of them is this workflow:
     #   frontend      -> Cloudflare Pages, from its own git integration, on
@@ -438,7 +444,13 @@ jobs:
         # --forbid-only: fail if any test.only() was left in a committed spec.
         # Same failure shape as the skip problem: .only() causes all other
         # tests to skip and the job exits 0. --forbid-only makes that loud too.
-        run: bunx playwright test --forbid-only
+        #
+        # sparrow-host-routing.spec.ts targets live prod hosts. Exclude it
+        # here so dev-PR runs do not fail; it runs in the playwright-prod-smoke
+        # job. Its env-var guard is a beforeAll, so deselecting the suite skips
+        # it cleanly. A module-level throw would instead crash THIS job at
+        # collection, because Playwright imports every spec to enumerate tests.
+        run: bunx playwright test --forbid-only --grep-invert 'Sparrow host-routing smoke'
 
       - name: Upload Playwright report
         if: always()
@@ -457,9 +469,78 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  playwright-prod-smoke:
+    name: Playwright prod smoke -- Sparrow host routing (DL-0439)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: lint-and-build
+    # Only meaningful where the live hosts are the target. PR preview URLs are
+    # not the production hosts, so this never runs on pull_request.
+    #
+    # workflow_dispatch is included so a change to the prod smoke can be PROVEN
+    # before it merges. Without it this job is unrunnable on a branch, which
+    # means a PR that edits this spec can only ever show it as skipped, and
+    # "15 checks green" says nothing about the file the PR changed.
+    #
+    # The spec's beforeAll guard throws when the vars are unset, so a
+    # misconfigured run here fails loudly rather than silently skipping.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium
+
+      # DL-0439: wait for the bundle this push produces before asserting on it.
+      #
+      # Measured on the 710 promotion (2026-08-18): this job's last assertion
+      # logged 06:24:09.7Z and the Cloudflare deploy finished 06:24:34.7Z, so
+      # the smoke tested the bundle the push was replacing and failed exactly
+      # the tests an old bundle fails. A dispatch re-run on the identical
+      # commit passed. Without this wait that race repeats on every promotion,
+      # and a real regression is indistinguishable from the false one.
+      #
+      # Only on prod: a dev push deploys a different Pages project, and a
+      # manual dispatch usually targets a commit that is already live.
+      - name: Wait for the Cloudflare Pages deploy
+        if: github.ref_name == 'prod'
+        uses: ./.github/actions/wait-for-pages-deploy
+        with:
+          project: orangerails-prod
+          commit_sha: ${{ github.sha }}
+          account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Run Sparrow host-routing smoke
+        env:
+          # Public production URLs -- not secrets, hardcoded intentionally.
+          # The spec's beforeAll throws if either is empty, so a typo or an
+          # accidental blank here fails the job rather than silently skipping.
+          SMOKE_PROD_CONNECT_URL: https://connect.orangerails.com/sparrow
+          SMOKE_PROD_MAIN_URL: https://orangerails.com/connect/sparrow
+        run: bunx playwright test tests/e2e/sparrow-host-routing.spec.ts --forbid-only
+
+      - name: Upload prod-smoke report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-prod-smoke-report
+          path: playwright-report/
+          retention-days: 14
+
   playwright-stealth-cursor:
     name: Playwright stealth cursor-write proof (DL-0649)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: lint-and-build
     # Explicit, because the reporting step below is the ONLY way the assertion
     # output leaves this runner. Without this block the job inherits the

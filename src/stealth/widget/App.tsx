@@ -242,10 +242,10 @@ export function App() {
         // a key, so admitting this INIT would dispatch a keyless session into
         // key-holding crypto. Refuse here, explicitly, before route dispatch.
         if (!APP_MODE_IMPLEMENTED_MODES.has(data.mode)) {
-          setError(`seal_mode='app' is not implemented for mode '${data.mode}'`);
+          setError(`seal_mode='app' is not yet supported. This feature is not available in the current widget version.`);
           postError(event.source as Window | null, event.origin, {
             code: "INTERNAL",
-            message: `seal_mode='app' is not implemented for mode '${data.mode}'. The widget refuses to run a key-holding route with no key.`,
+            message: `App mode (seal_mode='app') is not yet supported. No keyless route exists in the current widget release. Use seal_mode='widget' with a key, or wait for app-mode support to be announced.`,
             retryable: false,
           });
           return;

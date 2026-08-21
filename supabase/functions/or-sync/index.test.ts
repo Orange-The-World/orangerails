@@ -299,3 +299,239 @@ Deno.test('handleConnectionError: classifies error, stamps status=error, returns
 
   // 4. No re-throw: reaching this line proves handleConnectionError returned normally.
 });
+
+// ── Partial-miss guard: DL-1105 ──────────────────────────────────────────────
+//
+// When some but not all requested connection_ids resolve, the whole request
+// must fail (non-2xx) rather than silently dropping the unresolved ids.
+// Source-inspection tests verify the guard logic survives future edits to the
+// handler, following the same pattern used for the quiltt accountIds guard above.
+
+Deno.test('partial-miss guard (all-resolve path): boundary condition is correct', () => {
+  // The guard uses Set-difference to compute unresolved ids: deduplicates the
+  // requested list (avoiding false miss on duplicate ids), then filters out
+  // resolved ids. Fires only when the result is non-empty. Both the dedup step
+  // and the guard condition must survive future edits.
+  const src = readSelf('./index.ts');
+  assertEquals(
+    src.includes('[...new Set(connection_ids)].filter'),
+    true,
+    'guard must deduplicate via Set to avoid false miss on duplicate ids',
+  );
+  assertEquals(
+    src.includes('unresolvedIds.length > 0'),
+    true,
+    'guard must fire only when unresolved ids exist after set-difference',
+  );
+});
+
+Deno.test('partial-miss guard (partial-resolve path): stealth_ids+unknown_ids in 400, unresolved_ids in 404', () => {
+  const src = readSelf('./index.ts');
+  assert(
+    src.includes('stealth_ids: stealthIds'),
+    'stealth-400 body must include stealth_ids field',
+  );
+  assert(
+    src.includes('unknown_ids: unknownIds'),
+    'stealth-400 body must include unknown_ids field',
+  );
+  assert(
+    src.includes('unresolved_ids: unresolvedIds'),
+    'unknown-404 body must include unresolved_ids field',
+  );
+});
+
+Deno.test('partial-miss guard (partial-resolve path): stealth 400 and unknown 404 follow the guard', () => {
+  const src = readSelf('./index.ts');
+  const guardIdx = src.indexOf('unresolvedIds.length > 0');
+  assert(guardIdx !== -1, 'partial-miss guard must be present in index.ts');
+  const afterGuard = src.slice(guardIdx);
+  assert(
+    afterGuard.includes('Stealth connections cannot be synced via this endpoint'),
+    '400 stealth branch must appear after the partial-miss guard',
+  );
+  assert(
+    afterGuard.includes('Connection not found in this subaccount'),
+    '404 unknown branch must appear after the partial-miss guard',
+  );
+});
+
+Deno.test('partial-miss guard: mixed stealth+unknown -> 400 wins, both id sets listed separately', () => {
+  // When unresolved ids include both stealth and genuinely unknown, 400 must win
+  // (stealth is the caller-fixable condition). Both sets are listed in separate
+  // fields so the caller can act on each independently.
+  const src = readSelf('./index.ts');
+  const guardIdx = src.indexOf('unresolvedIds.length > 0');
+  assert(guardIdx !== -1, 'partial-miss guard must be present');
+  const afterGuard = src.slice(guardIdx);
+  // 400 branch fires when ANY stealth id is present (covers the mixed case).
+  assert(
+    afterGuard.includes('stealthRows.length > 0'),
+    'stealth branch must fire on any stealthRows presence, covering the mixed case',
+  );
+  // unknownIds computed as set-difference so genuinely unknown ids are not lost.
+  assert(
+    afterGuard.includes('unresolvedIds.filter((id) => !stealthSet.has(id))'),
+    'unknown_ids must be the diff of unresolvedIds minus the stealth set',
+  );
+  // Both fields present in the 400 body.
+  assert(
+    afterGuard.includes('stealth_ids: stealthIds'),
+    '400 body must carry stealth_ids',
+  );
+  assert(
+    afterGuard.includes('unknown_ids: unknownIds'),
+    '400 body must carry unknown_ids (empty when all unresolved are stealth)',
+  );
+});
+
+Deno.test('total-miss guard: all-disconnected ids return 422 not 404', () => {
+  // When every requested id resolves to a disconnected connection (excluded by
+  // the main query's neq status=disconnected), returning 404 misleads callers:
+  // the id exists, it is just disconnected. 422 matches the partial-miss path.
+  // Verify the disconnected check appears before the first total-miss 404 in source.
+  const src = readSelf('./index.ts');
+  // indexOf returns the FIRST occurrence -- that is the total-miss branch, which
+  // appears before the partial-miss branch in the file.
+  const totalMiss404Idx = src.indexOf("'Connection not found in this subaccount'");
+  assert(totalMiss404Idx !== -1, 'total-miss 404 message must be present');
+  const disconnectedCheckIdx = src.indexOf("'Connection is disconnected and cannot be synced'");
+  assert(disconnectedCheckIdx !== -1, 'disconnected 422 message must be present');
+  assert(
+    disconnectedCheckIdx < totalMiss404Idx,
+    'disconnected 422 check must appear before the total-miss 404 fallback',
+  );
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DL-1440: external_wallet_id collision across customers
+//
+// DBA confirmed 2026-08-19: 5 external_wallet_id values repeat across different
+// customers' connections in prod (33 affected source_wallets rows). Providers
+// including Blink and ccxt emit non-globally-unique wallet identifiers. Storing
+// a bare provider id in encrypted_transactions.source_wallet_id means any lookup
+// by that column alone resolves ambiguously.
+//
+// The fix (in or-sync): build a map of external_wallet_id -> source_wallets.id
+// (internal UUID) and rewrite each transaction's source_wallet_id to the UUID
+// before persisting. These tests pin that behaviour.
+// ──────────────────────────────────────────────────────────────────────────────
+
+Deno.test('DL-1440: remap resolves colliding external ids to distinct internal UUIDs', () => {
+  // Two customers both connect to Blink. Blink returns the same wallet id for
+  // each of their BTC wallets (e.g. a slug or short opaque id that is not
+  // globally unique across Blink accounts -- DBA confirmed this scenario).
+  const BLINK_BTC_WALLET_ID = 'blink-btc-wallet-x';
+
+  // Customer A's connection row
+  const connA_id = '00000000-0000-0000-0000-000000000001';
+  const connA_internalId = '00000000-0000-0000-1111-000000000001'; // source_wallets.id for A
+
+  // Customer B's connection row (same external id, different connection)
+  const connB_id = '00000000-0000-0000-0000-000000000002';
+  const connB_internalId = '00000000-0000-0000-1111-000000000002'; // source_wallets.id for B
+
+  // Simulate externalToInternalId map for customer A's sync run
+  const externalToInternalId = new Map<string, string>([
+    [BLINK_BTC_WALLET_ID, connA_internalId],
+  ]);
+
+  // A transaction comes back from the Blink adapter tagged with the provider id
+  const rawTx = {
+    id: 'tx-001',
+    source_wallet_id: BLINK_BTC_WALLET_ID,
+  };
+
+  // Apply the DL-1440 remap (mirrors the logic in or-sync/index.ts)
+  const remapped = {
+    ...rawTx,
+    source_wallet_id: rawTx.source_wallet_id != null
+      ? (externalToInternalId.get(rawTx.source_wallet_id) ?? null)
+      : null,
+  };
+
+  // The persisted source_wallet_id must be the INTERNAL UUID for A, not the
+  // bare provider id. If it were the provider id, a lookup by that id alone
+  // could match customer B's wallet row (connB_internalId) too.
+  assertEquals(
+    remapped.source_wallet_id,
+    connA_internalId,
+    'source_wallet_id must be the internal UUID, not the provider-issued external id',
+  );
+  assert(
+    remapped.source_wallet_id !== BLINK_BTC_WALLET_ID,
+    'source_wallet_id must not be the raw provider wallet id after remap',
+  );
+  assert(
+    remapped.source_wallet_id !== connB_internalId,
+    'remap must not produce customer B uuid when running in customer A context',
+  );
+
+  // Customer B's sync run builds a different map (different connection) and
+  // gets its own distinct internal UUID. Same external id -> different UUID.
+  const externalToInternalIdB = new Map<string, string>([
+    [BLINK_BTC_WALLET_ID, connB_internalId],
+  ]);
+  const remappedB = {
+    ...rawTx,
+    source_wallet_id: rawTx.source_wallet_id != null
+      ? (externalToInternalIdB.get(rawTx.source_wallet_id) ?? null)
+      : null,
+  };
+  assertEquals(remappedB.source_wallet_id, connB_internalId);
+  assert(remappedB.source_wallet_id !== connA_internalId, 'B uuid must differ from A uuid');
+  assert(
+    remapped.source_wallet_id !== remappedB.source_wallet_id,
+    'same provider wallet id must resolve to distinct internal UUIDs per connection',
+  );
+});
+
+Deno.test('DL-1440: remap sets source_wallet_id null when no map entry (syncAccountWide path)', () => {
+  // When a provider emits source_wallet_id but there are no source_wallets rows
+  // (syncAccountWide fallback, no wallet selection configured), the map is empty
+  // and the id should become null rather than leaking the provider id.
+  const externalToInternalId = new Map<string, string>();
+  const rawTx = { id: 'tx-002', source_wallet_id: 'coinbase' };
+  const remapped = {
+    ...rawTx,
+    source_wallet_id: rawTx.source_wallet_id != null
+      ? (externalToInternalId.get(rawTx.source_wallet_id) ?? null)
+      : null,
+  };
+  assertEquals(remapped.source_wallet_id, null, 'unmapped provider id must become null');
+});
+
+Deno.test('DL-1440: remap preserves null source_wallet_id unchanged', () => {
+  const externalToInternalId = new Map<string, string>([['x', 'y']]);
+  const rawTx = { id: 'tx-003', source_wallet_id: null as string | null };
+  const remapped = {
+    ...rawTx,
+    source_wallet_id: rawTx.source_wallet_id != null
+      ? (externalToInternalId.get(rawTx.source_wallet_id) ?? null)
+      : null,
+  };
+  assertEquals(remapped.source_wallet_id, null, 'null input must stay null after remap');
+});
+
+Deno.test('DL-1440: or-sync source code must select id from source_wallets (DL-1440 guard)', () => {
+  // Pin that or-sync fetches source_wallets.id (needed to build externalToInternalId).
+  // If this reverts to selecting only external_wallet_id, the remap map would
+  // have no internal UUIDs to emit and would always produce null.
+  const src = readSelf('./index.ts');
+  assert(
+    src.includes("'id, external_wallet_id, is_synced, wallet_fingerprint'"),
+    'source_wallets select must include id field (DL-1440 composite anchor)',
+  );
+});
+
+Deno.test('DL-1440: or-sync source code must contain externalToInternalId remap (DL-1440 guard)', () => {
+  const src = readSelf('./index.ts');
+  assert(
+    src.includes('externalToInternalId'),
+    'or-sync must build externalToInternalId map (DL-1440 fix)',
+  );
+  assert(
+    src.includes('externalToInternalId.get(tx.source_wallet_id)'),
+    'or-sync must remap tx.source_wallet_id via externalToInternalId (DL-1440 fix)',
+  );
+});

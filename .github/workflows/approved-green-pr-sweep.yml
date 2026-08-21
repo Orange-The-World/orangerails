@@ -12,6 +12,7 @@ jobs:
       pull-requests: read
       checks: read
       statuses: read
+      issues: write
     steps:
       - name: Find approved and green PRs
         env:
@@ -19,12 +20,14 @@ jobs:
           ZULIP_SITE: ${{ secrets.ZULIP_SITE }}
           ZULIP_BOT_EMAIL: ${{ secrets.ZULIP_BOT_EMAIL }}
           ZULIP_API_KEY: ${{ secrets.ZULIP_API_KEY }}
+          ISSUE_TITLE: 'Approved and green PRs waiting to merge (DL-0544)'
         run: |
           set -euo pipefail
 
+          chat_ready=1
           if [ -z "${ZULIP_SITE:-}" ] || [ -z "${ZULIP_BOT_EMAIL:-}" ] || [ -z "${ZULIP_API_KEY:-}" ]; then
-            echo "::error::Chat credentials are not configured, so this sweep cannot report anything. Set ZULIP_SITE, ZULIP_BOT_EMAIL and ZULIP_API_KEY."
-            exit 1
+            chat_ready=0
+            echo "::warning::Chat credentials are not configured. This run will report to a GitHub issue instead."
           fi
 
           now=$(date +%s)
@@ -69,9 +72,46 @@ jobs:
             body="Scanned ${total} open PRs. None are approved and green right now.${partial}"
           fi
 
-          curl -s --fail -X POST "${ZULIP_SITE}/api/v1/messages" \
-            -u "${ZULIP_BOT_EMAIL}:${ZULIP_API_KEY}" \
-            --data-urlencode "type=stream" \
-            --data-urlencode "to=Releases" \
-            --data-urlencode "topic=Approved and green PRs waiting to merge (DL-0544)" \
-            --data-urlencode "content=${body}"
+          delivered=0
+          if [ "$chat_ready" = "1" ]; then
+            if curl -s --fail -X POST "${ZULIP_SITE}/api/v1/messages" \
+              -u "${ZULIP_BOT_EMAIL}:${ZULIP_API_KEY}" \
+              --data-urlencode "type=stream" \
+              --data-urlencode "to=Releases" \
+              --data-urlencode "topic=Approved and green PRs waiting to merge (DL-0544)" \
+              --data-urlencode "content=${body}"; then
+              delivered=1
+              echo "Reported ${count} PR(s) to chat."
+            else
+              echo "::warning::Chat post failed. This run will report to a GitHub issue instead."
+            fi
+          fi
+
+          if [ "$delivered" = "1" ]; then
+            exit 0
+          fi
+
+          if [ "$count" -eq 0 ]; then
+            echo "::warning::Could not deliver to chat, and no PR is approved and green. Scanned ${total}. No issue opened."
+            exit 0
+          fi
+
+          issue_body=$(printf '%s\n\n%s\n\n%s' \
+            "This sweep could not deliver its report to chat, so it is reporting here instead." \
+            "Approved and green pull requests waiting to merge (${count} of ${total} open):${partial}" \
+            "${report}")
+
+          existing=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --limit 100 \
+            --json number,title \
+            | jq -r --arg t "$ISSUE_TITLE" 'map(select(.title == $t)) | .[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$issue_body"
+            echo "Reported ${count} PR(s) on existing issue #${existing}."
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$issue_body"
+            echo "Reported ${count} PR(s) on a new issue."
+          fi

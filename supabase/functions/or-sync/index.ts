@@ -33,6 +33,14 @@
  *        metadata: { format, requires_encryption: string[] }
  *      }
  *
+ * connection_ids miss behaviour (both modes, DL-1033 + DL-1105):
+ *   Total miss (zero ids resolve): 404 if unknown, 400 if stealth (DL-1033).
+ *   Partial miss (some ids resolve, some do not): the entire request fails with
+ *   the same non-2xx shape. When unresolved ids are a mix of stealth and unknown,
+ *   400 wins (stealth is the caller-fixable condition). Body lists both sets
+ *   separately: 400 { error, stealth_ids, unknown_ids }. All-unknown: 404 { error, unresolved_ids }.
+ *   Callers must not assume a 200 covers all requested ids -- silent-drop is gone.
+ *
  * Mode is selected by presence of `format`. See OrangeRails-Protocol.html §8
  * for the protocol contract; see _shared/sinks/dispatch.ts for the sink
  * registry; see _shared/providers/dispatch.ts for the source adapter registry.
@@ -54,6 +62,8 @@ import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
+import { computeWalletFingerprint } from '../_shared/account-fingerprint.ts';
+import { toByteaHex } from '../_shared/bytea.ts';
 import { readSyncCompleteness } from './_connection-result.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
@@ -97,6 +107,37 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
   const bytes = new TextEncoder().encode(`${errorClass}|${redacted}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ─── Human-readable redacted detail for UPSTREAM_OTHER (DL-1292) ──────────
+// Amends audit 2026-05-16 finding #1. An unclassified upstream failure
+// (UPSTREAM_OTHER) leaves an operator with only a code and a hash, which is
+// not enough to explain the failure to an integrator. This produces a
+// redacted, human-readable first line of the upstream error for the EDGE LOG
+// ONLY.
+//
+// The hard rule: never emit a shape the fingerprint hash path
+// (errorFingerprint) would have scrubbed. So it removes the SAME UUIDs and
+// base64/token blobs that path removes, PLUS provider ids (foo_ab12cd) and
+// 6+ digit runs. Every redaction runs on the FULL first line and the 300-char
+// limit is applied LAST, so truncation can only ever cut text that is already
+// safe. Nothing here reaches the HTTP response body or encrypted_last_error.
+export function redactedUpstreamDetail(raw: string): string {
+  const firstLine = raw.split('\n')[0] ?? raw;
+  return firstLine
+    .replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]')
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
+    .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
+    .replace(/\b\d{6,}\b/g, '[redacted]')
+    .slice(0, 300);
+}
+
+// The ` detail=...` suffix appended to the edge log line: present ONLY on the
+// UPSTREAM_OTHER path, empty on every other code. JSON.stringify keeps it a
+// single grep-safe token. Split out so the UPSTREAM_OTHER-only gating is
+// unit-testable without stubbing console.
+export function upstreamDetailSuffix(code: string, raw: string): string {
+  return code === 'UPSTREAM_OTHER' ? ` detail=${JSON.stringify(redactedUpstreamDetail(raw))}` : '';
 }
 
 /**
@@ -314,9 +355,68 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const { data: connections, error: connErr } = await connQuery;
     if (connErr) throw connErr;
     if (!connections?.length) {
-      // Empty-result early-exit must still match the response shape the
-      // caller's mode expects. Sink-mode consumers (V2) parse `rows` +
-      // `metadata` strictly, so skipping those fields blows up the client.
+      // When the caller requested specific IDs and none resolved to a regular
+      // connection, this is a miss, not an empty batch. Fall through to the
+      // stealth store with the same ownership scope or-connection-delete uses:
+      // (id, platform_id, app_user_id). A foreign-subaccount stealth id and a
+      // genuinely unknown id both resolve to 404; a stealth id that belongs to
+      // this subaccount gets a 400 explaining the right endpoint to use.
+      if (connection_ids?.length) {
+        const { data: subRow, error: subErr } = await ctx.serviceClient
+          .from('subaccounts')
+          .select('platform_id, external_user_id')
+          .eq('id', subaccountId)
+          .maybeSingle();
+
+        if (!subErr && subRow) {
+          const { count: stealthCount, error: stealthErr } = await ctx.serviceClient
+            .from('stealth_connections')
+            .select('id', { count: 'exact', head: true })
+            .in('id', connection_ids)
+            .eq('platform_id', subRow.platform_id)
+            .eq('app_user_id', subRow.external_user_id);
+
+          if (!stealthErr && (stealthCount ?? 0) > 0) {
+            return jsonResponse(
+              { error: 'Stealth connections cannot be synced via this endpoint' },
+              400,
+              cors,
+            );
+          }
+        }
+        // The main query excludes status='disconnected'. A disconnected id resolves
+        // to nothing in that query but is not "not found". Return 422 so callers
+        // can distinguish it from a genuinely unknown id (consistent with the
+        // partial-miss disconnected branch, DL-1105).
+        const { data: disconnectedRows } = await ctx.serviceClient
+          .from('connections')
+          .select('id')
+          .in('id', connection_ids)
+          .eq('subaccount_id', subaccountId)
+          .eq('status', 'disconnected');
+
+        if (disconnectedRows?.length) {
+          const disconnectedIds = disconnectedRows.map((r) => r.id);
+          const disconnectedSet = new Set(disconnectedIds);
+          const unknownIds = connection_ids.filter((id) => !disconnectedSet.has(id));
+          return jsonResponse(
+            {
+              error: 'Connection is disconnected and cannot be synced',
+              disconnected_ids: disconnectedIds,
+              unknown_ids: unknownIds,
+            },
+            422,
+            cors,
+          );
+        }
+        // Not found in connections, stealth, or disconnected for this subaccount.
+        return jsonResponse({ error: 'Connection not found in this subaccount' }, 404, cors);
+      }
+
+      // Empty-result early-exit (no connection_ids filter) must still match the
+      // response shape the caller's mode expects. Sink-mode consumers (V2)
+      // parse `rows` + `metadata` strictly, so skipping those fields blows up
+      // the client.
       if (sinkMode) {
         return jsonResponse(
           {
@@ -330,6 +430,87 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         );
       }
       return jsonResponse({ synced: 0, connections: [] }, 200, cors);
+    }
+
+    // Partial-miss guard (DL-1105): derive unresolved ids via set difference
+    // over the deduplicated request list. Count comparison is wrong: repeated
+    // ids in the caller's array (e.g. ["a","a"]) trigger count < length even
+    // when every unique id resolved, producing a spurious 404 with
+    // unresolved_ids: []. The main query also excludes status='disconnected';
+    // a disconnected id is real and must not be conflated with "not found".
+    if (connection_ids?.length) {
+      const resolvedSet = new Set(connections!.map((c) => c.id));
+      const unresolvedIds = [...new Set(connection_ids)].filter(
+        (id) => !resolvedSet.has(id),
+      );
+
+      if (unresolvedIds.length > 0) {
+        const { data: subRow, error: subErr } = await ctx.serviceClient
+          .from('subaccounts')
+          .select('platform_id, external_user_id')
+          .eq('id', subaccountId)
+          .maybeSingle();
+
+        if (!subErr && subRow) {
+          const { data: stealthRows, error: stealthErr } = await ctx.serviceClient
+            .from('stealth_connections')
+            .select('id')
+            .in('id', unresolvedIds)
+            .eq('platform_id', subRow.platform_id)
+            .eq('app_user_id', subRow.external_user_id);
+
+          if (!stealthErr && stealthRows && stealthRows.length > 0) {
+            const stealthIds = stealthRows.map((r) => r.id);
+            const stealthSet = new Set(stealthIds);
+            const unknownIds = unresolvedIds.filter((id) => !stealthSet.has(id));
+            return jsonResponse(
+              {
+                error: 'Stealth connections cannot be synced via this endpoint',
+                stealth_ids: stealthIds,
+                unknown_ids: unknownIds,
+              },
+              400,
+              cors,
+            );
+          }
+        }
+
+        // The main query excludes status='disconnected'. A disconnected id
+        // resolves to nothing in that query but is not "not found"; return 422
+        // so callers can differentiate it from a genuinely unknown id.
+        const { data: disconnectedRows } = await ctx.serviceClient
+          .from('connections')
+          .select('id')
+          .in('id', unresolvedIds)
+          .eq('subaccount_id', subaccountId)
+          .eq('status', 'disconnected');
+
+        if (disconnectedRows?.length) {
+          const disconnectedIds = disconnectedRows.map((r) => r.id);
+          const disconnectedSet = new Set(disconnectedIds);
+          const unknownIds = unresolvedIds.filter(
+            (id) => !disconnectedSet.has(id),
+          );
+          return jsonResponse(
+            {
+              error: 'Connection is disconnected and cannot be synced',
+              disconnected_ids: disconnectedIds,
+              unknown_ids: unknownIds,
+            },
+            422,
+            cors,
+          );
+        }
+
+        return jsonResponse(
+          {
+            error: 'Connection not found in this subaccount',
+            unresolved_ids: unresolvedIds,
+          },
+          404,
+          cors,
+        );
+      }
     }
 
     const results: Array<{
@@ -891,7 +1072,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // until the user opts in by re-running discovery from the UI.
         const { data: sourceWallets, error: swErr } = await ctx.serviceClient
           .from('source_wallets')
-          .select('external_wallet_id, is_synced, wallet_fingerprint')
+          .select('id, external_wallet_id, is_synced, wallet_fingerprint')
           .eq('connection_id', conn.id)
           .eq('is_synced', true)
           // Deterministic order so walletIds[0] is stable across syncs. Both
@@ -904,6 +1085,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           .order('external_wallet_id', { ascending: true });
 
         if (swErr) throw swErr;
+
+        // DL-1440: map each stored external_wallet_id to its source_wallets.id
+        // (internal UUID). Provider-issued ids -- Blink wallet UUIDs, ccxt
+        // exchange slugs ('coinbase', 'kraken'), xpub ids -- are NOT globally
+        // unique. The same id appears across different customers' connections
+        // (5 collisions confirmed in prod by DBA 2026-08-19). source_wallets.id
+        // is the only safe anchor for encrypted_transactions.source_wallet_id.
+        const externalToInternalId = new Map<string, string>(
+          (sourceWallets ?? []).map(
+            (w: { external_wallet_id: string; id: string }) => [w.external_wallet_id, w.id],
+          ),
+        );
 
         let newTxs: NormalizedTransaction[];
         let next_cursor: string | null;
@@ -982,6 +1175,92 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               .map((w: { wallet_fingerprint: string; external_wallet_id: string }) =>
                 [w.wallet_fingerprint, w.external_wallet_id] as [string, string]),
           );
+
+          // DL-1398: Heal missing currency wallets on every Strike sync.
+          // Connections created before 2026-07-20 may hold only one source_wallet
+          // row (the second currency wallet was not yet created at link time).
+          // Call discoverWallets() with the already-decrypted credentials to get
+          // all active currencies and their receiverId (account_key). For each
+          // currency that has no fingerprint row in source_wallets, insert a
+          // server-discovered wallet (discovery_source='server', no
+          // encrypted_metadata -- ZKA-safe per migration 20260722140000).
+          // Idempotent: upsert on wallet_fingerprint unique index.
+          // Non-fatal: a failure here is logged and the sync continues.
+          try {
+            const healDiscovered = await adapter.discoverWallets(credentials);
+            const toHeal: Array<{
+              connection_id: string;
+              external_wallet_id: string;
+              is_synced: boolean;
+              wallet_fingerprint: string;
+              wallet_fingerprint_key_version: number;
+              discovery_source: string;
+            }> = [];
+            for (const w of healDiscovered) {
+              const accountKey = (w as { account_key?: string }).account_key;
+              if (!accountKey || !w.currency) continue;
+              const mac = await computeWalletFingerprint(
+                subaccountId as string,
+                'strike',
+                accountKey,
+                w.currency,
+              );
+              const fpHex = toByteaHex(mac);
+              if (walletsByFingerprintHex.has(fpHex)) continue;
+              toHeal.push({
+                connection_id: conn.id as string,
+                external_wallet_id: crypto.randomUUID(),
+                is_synced: true,
+                wallet_fingerprint: fpHex,
+                wallet_fingerprint_key_version: 1,
+                discovery_source: 'server',
+              });
+            }
+            console.log(
+              `[or-sync] DL-1398: conn ${conn.id as string}: discovered ${healDiscovered.length} wallet(s), to_heal ${toHeal.length}`,
+            );
+            if (toHeal.length > 0) {
+              const { error: healErr } = await ctx.serviceClient
+                .from('source_wallets')
+                .upsert(toHeal, { onConflict: 'wallet_fingerprint', ignoreDuplicates: true });
+              if (healErr) {
+                console.warn(
+                  `[or-sync] DL-1398: wallet heal upsert failed for conn ${conn.id as string}:`,
+                  healErr.message,
+                );
+              } else {
+                // Refresh walletsByFingerprintHex so the drain path below can
+                // attribute transactions to the newly inserted wallets in this
+                // same sync run.
+                const { data: healed } = await ctx.serviceClient
+                  .from('source_wallets')
+                  .select('id, external_wallet_id, wallet_fingerprint')
+                  .eq('connection_id', conn.id)
+                  .eq('is_synced', true)
+                  .not('wallet_fingerprint', 'is', null);
+                for (const row of healed ?? []) {
+                  if (row.wallet_fingerprint) {
+                    walletsByFingerprintHex.set(
+                      row.wallet_fingerprint as string,
+                      row.external_wallet_id as string,
+                    );
+                  }
+                  if (row.id && row.external_wallet_id) {
+                    externalToInternalId.set(row.external_wallet_id as string, row.id as string);
+                  }
+                }
+                console.log(
+                  `[or-sync] DL-1398: conn ${conn.id as string}: healed ${toHeal.length} of ${healDiscovered.length} discovered`,
+                );
+              }
+            }
+          } catch (healErr) {
+            console.warn(
+              `[or-sync] DL-1398: wallet heal failed for conn ${conn.id as string}`,
+              healErr instanceof Error ? healErr.message : String(healErr),
+            );
+          }
+
           const drain = await drainStrikeQueue({
             serviceClient: ctx.serviceClient,
             connection: {
@@ -1035,8 +1314,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           }
         } else if (newTxs.length > 0) {
           // Legacy encrypted-payload path (V3 today).
+          // DL-1440: remap provider-issued source_wallet_id to the internal
+          // source_wallets.id UUID only for the persisted payload. Sink
+          // consumers receive provider-facing ids (their contract unchanged).
+          // On a map miss, keep the external id so the DBA backfill can still
+          // key off it; attribution heals on next sync after migration runs.
+          const txsToStore = newTxs.map((tx) => ({
+            ...tx,
+            source_wallet_id: tx.source_wallet_id != null
+              ? (externalToInternalId.get(tx.source_wallet_id) ?? tx.source_wallet_id)
+              : null,
+          }));
           const rows = await Promise.all(
-            newTxs.map(async tx => ({
+            txsToStore.map(async tx => ({
               connection_id: conn.id,
               external_id: tx.id,
               encrypted_payload: await encryptAes(JSON.stringify(tx), txnsKey!),
@@ -1273,7 +1563,7 @@ export async function handleConnectionError(
   const code = classifyUpstreamError(raw, errorClass);
   const correlationId = randomCorrelationId();
   const fp = await errorFingerprint(raw, errorClass);
-  console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}`);
+  console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}${upstreamDetailSuffix(code, raw)}`);
 
   // Persist the taxonomy code on the connection row. In legacy
   // (non-sink) mode we still want it encrypted at rest so the column

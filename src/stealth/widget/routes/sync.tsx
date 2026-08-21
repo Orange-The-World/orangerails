@@ -103,7 +103,8 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
     detail: "Your password never left this browser.",
   });
   const [done, setDone] = useState<{ txCount: number; bytes: number; windowExhausted: boolean } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; retryable: boolean } | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
   const [isFirstSync, setIsFirstSync] = useState<boolean | null>(null);
 
   function postWidgetError(code: StealthErrorCode, message: string, retryable: boolean) {
@@ -242,6 +243,47 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         });
         if (cancelled) return;
 
+        // 2b. Refresh the widget token before upload (DL-1478).
+        //     The xpub scan takes 10-15 min; the initial token TTL is 300 s,
+        //     so init.widget_token is always expired by the time the upload
+        //     runs. Re-mint goes through the proxy so the auth uses the
+        //     integrator's live platform API key, NOT the expiring token
+        //     (Security constraint on option a, 2026-08-20).
+        //     On failure the original token is kept; the upload will 401 as
+        //     before, surfacing the error rather than silently discarding.
+        let currentWidgetToken = init.widget_token;
+        if (init.proxy_base_url && parent && init.widget_token) {
+          try {
+            const refreshed = await proxyFetch({
+              parent,
+              parentOrigin: init.return_callback_origin,
+              fn: "or-link-mint-token",
+              body: { app_user_id: init.app_user_id },
+              // Fail fast. proxyFetch defaults to 120s, and an integrator whose
+              // proxy allowlist does not yet route or-link-mint-token never
+              // replies at all. Without this the widget stalls for two minutes
+              // after a 15 minute scan and then uploads with the expired token
+              // anyway, so the user waits longer to see the same 401. Matches
+              // the cursor write below, which fails fast for the same reason.
+              timeoutMs: 15000,
+            });
+            if (
+              refreshed.ok &&
+              refreshed.parsed !== null &&
+              typeof (refreshed.parsed as { widget_token?: unknown }).widget_token === "string"
+            ) {
+              currentWidgetToken = (refreshed.parsed as { widget_token: string }).widget_token;
+            } else {
+              console.warn(
+                "[stealth/sync] token refresh returned unexpected shape; proceeding with original token:",
+                refreshed.bodyText,
+              );
+            }
+          } catch (e) {
+            console.warn("[stealth/sync] token refresh failed; proceeding with original token:", e);
+          }
+        }
+
         // 3. Upload sealed transactions to OR , UNLESS the consumer app
         //    has set skip_transaction_upload (V2 does this; V2's own DB
         //    is the source of truth and OR-side encrypted backup is
@@ -252,7 +294,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           const uploadBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
-            widget_token: init.widget_token,
+            widget_token: currentWidgetToken,
             sealed_transactions: result.sealedTransactions,
             last_block_scanned: result.lastBlockScanned,
           };
@@ -365,11 +407,16 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         let cursorFailed = false;
         if ((!useMock || isForceCursor()) && result.lastBlockScanned > (envJson.last_block_scanned ?? -1)) {
           try {
+          // from_height is the inclusive start of the range just scanned:
+          // the previous cursor (null on the first sync, in which case the
+          // wallet birthday is the starting point). The edge function uses
+          // both values to call record_stealth_scan_range() (DL-1478).
           const cursorBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
-            widget_token: init.widget_token,
+            widget_token: currentWidgetToken,
             last_block_scanned: result.lastBlockScanned,
+            from_height: envJson.last_block_scanned ?? birthdayHeight,
           };
           let cursorWritten = false;
           if (init.proxy_base_url && parent) {
@@ -475,6 +522,44 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           }
         }
 
+        // If the filter fetch failed permanently after retries, surface the
+        // error NOW -- after the cursor was persisted -- so the embedder sees
+        // a retryable failure and the next sync resumes from lastBlockScanned
+        // rather than restarting from the wallet birthday.
+        if (result.filterFetchError) {
+          // Deliver partial results before throwing. When useDeliveryAck is
+          // false (the default, including every skip_transaction_upload
+          // integrator that omits require_delivery_ack), OR_STEALTH_SYNC_COMPLETE
+          // has not fired yet: step 6 below is bypassed by this throw, so
+          // transactions found below the failure height would be silently lost.
+          // Post here so the embedder receives them. When useDeliveryAck is
+          // true, SYNC_COMPLETE already fired at step 4a -- skip to avoid a
+          // duplicate.
+          if (!useDeliveryAck && parent) {
+            const partialMsg: StealthSyncCompleteMessage = {
+              type: "OR_STEALTH_SYNC_COMPLETE",
+              connection_id: init.connection_id,
+              sealed_transactions: result.sealedTransactions,
+              last_block_scanned: result.lastBlockScanned,
+              tx_count: result.txCount,
+              bytes_downloaded: result.bytesDownloaded,
+              duration_seconds: (Date.now() - startedAt) / 1000,
+              address_window_exhausted: result.windowExhausted || undefined,
+              cursor_update_failed: cursorFailed ? true : undefined,
+            };
+            try {
+              parent.postMessage(partialMsg, init.return_callback_origin);
+            } catch (e) {
+              console.error("[stealth/sync] failed to post partial complete before filterFetchError:", e);
+            }
+          }
+          throw new Error(
+            `Sync stopped at block ${result.filterFetchError.failedHeight}: ` +
+            `${result.filterFetchError.cause}. ` +
+            `Progress to block ${result.lastBlockScanned} was saved. Retry to continue.`,
+          );
+        }
+
         // 6. SYNC_COMPLETE.
         //    When useDeliveryAck is true, SYNC_COMPLETE already fired at step 4a
         //    (with pending_delivery_ack: true). Skip here to avoid a duplicate.
@@ -502,18 +587,20 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
       } catch (e) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
-        setError(msg);
         if (e instanceof DeliveryAckMissingError) {
           // The consuming app did not post OR_STEALTH_DELIVERY_ACK within 30 s.
           // The cursor was not advanced; retrying the sync is safe.
+          setError({ message: msg, retryable: true });
           postWidgetError("DELIVERY_ACK_MISSING", msg, true);
         } else if (e instanceof WindowExhaustedError) {
           // Address window exhausted: wallet history beyond the scanned window
           // may be missing. Not retryable as is; the embedder must prompt a
           // re-sync with a wider gap_limit. Its own code so this is
           // distinguishable from an unexpected INTERNAL failure. DL-0584.
+          setError({ message: msg, retryable: false });
           postWidgetError("WINDOW_EXHAUSTED", msg, false);
         } else {
+          setError({ message: msg, retryable: true });
           postWidgetError("INTERNAL", msg, true);
         }
       }
@@ -522,23 +609,39 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
     return () => {
       cancelled = true;
     };
-    // We deliberately run once on mount.
+    // retryKey increments when the user clicks "Try again"; the effect
+    // re-runs as a fresh sync attempt. All other deps are stable on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [retryKey]);
 
   if (error) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background p-6">
         <div className="w-full max-w-md rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center">
           <h1 className="text-lg font-semibold text-destructive">Sync failed</h1>
-          <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-          <button
-            type="button"
-            onClick={() => window.close()}
-            className="mt-4 inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90"
-          >
-            Close this window
-          </button>
+          <p className="mt-2 text-sm text-muted-foreground">{error.message}</p>
+          <div className="mt-4 flex justify-center gap-2">
+            {error.retryable && (
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setDone(null);
+                  setRetryKey((k) => k + 1);
+                }}
+                className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90"
+              >
+                Try again
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => window.close()}
+              className="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-xs font-medium text-foreground hover:bg-muted"
+            >
+              Close this window
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -559,8 +662,8 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
               <p className="font-semibold">Your history may be incomplete.</p>
               <p className="mt-1">
                 Transactions were found near the edge of the address window. Some older
-                transactions may not have been found. Re-connect this wallet with a
-                wider address window to recover the full history.
+                transactions may not have been found. To recover the full history,
+                re-add this wallet from the app with a wider gap limit.
               </p>
             </div>
           )}

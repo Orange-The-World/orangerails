@@ -460,7 +460,11 @@ export async function handleEvent(
     // not fall through to all-sync. The event will retry on the next tick.
     return `source_wallets lookup failed: ${swErr.message}`;
   }
-  // selectedAccountIds === null means no rows present: sync everything (all-sync fallback)
+  // selectedAccountIds === null means no rows present: sync everything (all-sync fallback).
+  // When rows exist, only accounts with is_synced=true are included.
+  // Retention policy (DL-0740 / issue #647): accounts with is_synced=false are skipped for
+  // future data pulls but their existing encrypted_transactions rows are NOT deleted. Data
+  // is preserved so the user can re-enable an account without losing history.
   const selectedAccountIds: Set<string> | null =
     swRows && swRows.length > 0
       ? new Set(
@@ -481,6 +485,7 @@ export async function handleEvent(
       // All accounts deselected by the user. No data to pull. Mark the event processed
       // so it does not retry: the selection is the user's intent and will not change
       // until they update source_wallets. reconcileConnectionSuccess already ran above.
+      // Existing encrypted_transactions rows are retained (retention policy, DL-0740).
       console.log(
         `[or-quiltt-sync] event ${ev.event_id}: all accounts deselected, skipping data pull`,
       );
@@ -777,7 +782,17 @@ export async function handleEventSinkDelivery(
       quiltt_connection_id:    quilttConnectionId,
       encrypted_credentials:   'quiltt-managed',
       credentials_key_version: 1,
-      status:                  'pending',
+      // DL-1409: was 'pending'. Nothing in this worker could ever clear it.
+      // 'pending' belongs to the atomic connect flow, where a consumer calls
+      // or-connection-confirm (pending -> active) or or-connection-cancel
+      // (row deleted). A sink row has no consumer handshake and no wallet
+      // write to protect, so it never got either call and sat pending forever.
+      // or-quiltt-link-complete already inserts 'active' directly on its own
+      // no-accounts branch, so this matches the existing contract rather than
+      // inventing one. This insert is insert-only (23505 is treated as
+      // success below), so it can never overwrite the status of a row that
+      // or-quiltt-link-complete created.
+      status:                  'active',
     });
   // 23505 = unique_violation: connection row already exists, which is fine.
   if (insertErr && insertErr.code !== '23505') {
@@ -840,7 +855,7 @@ export async function handleEventSinkDelivery(
  * connections table reflects Quiltt's own view of the connection health.
  * No transaction data is pulled. No DDL required (DL-0441).
  */
-async function reconcileConnectionError(
+export async function reconcileConnectionError(
   client: SupabaseClient,
   ev: PendingEvent,
   subaccountId: string,
@@ -886,27 +901,115 @@ async function reconcileConnectionError(
     conn = legacy.data as { id: string };
   }
 
+  // DL-1445: record WHY, not just THAT. This block used to write status alone,
+  // so a Quiltt connection could sit in 'error' with encrypted_last_error NULL
+  // and no operator or support path could ever say what went wrong. Two
+  // production connections were in exactly that state. The cause was in scope
+  // the whole time: it is the event subtype, which the log line below already
+  // printed and then threw away.
+  //
+  // Sink-mode only, deliberately. Per the V2 contract the column is PLAINTEXT
+  // on sink platforms, which is why this can be written here at all. This
+  // worker holds no transaction key and cannot encrypt, so on a non-sink
+  // platform we leave the column alone rather than write a value a legacy
+  // client would try to decrypt and fail on. Every Quiltt connection on
+  // production today is on a sink platform, so this gate is a no-op now and
+  // correct if that ever changes.
+  const { data: platRow, error: platErr } = await client
+    .from('platforms')
+    .select('sink_format')
+    .eq('id', ev.platform_id)
+    .maybeSingle();
+  // Review follow-up on PR 808. A failed read leaves platRow undefined, which
+  // makes sinkMode false, which silently reproduces the exact NULL-cause state
+  // this function was changed to prevent. The cause_recorded flag below makes
+  // that observable, but the read error itself was being discarded, so nobody
+  // could tell a transient platforms failure apart from a genuine non-sink
+  // platform. Log them differently. Deliberately NOT returning an error: a
+  // platforms read failure must not stop the status reconcile, which is the
+  // more important half and does not depend on this lookup.
+  if (platErr) {
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: platforms lookup failed for ` +
+        `platform ${ev.platform_id}, treating as non-sink so no cause will be ` +
+        `recorded: ${platErr.message}`,
+    );
+  }
+  const sinkMode = typeof platRow?.sink_format === 'string' && platRow.sink_format.length > 0;
+
+  const connPatch: Record<string, unknown> = {
+    status:     'error',
+    updated_at: new Date().toISOString(),
+  };
+  const code = upstreamCodeForErroredEvent(ev.event_type);
+  const correlationId = randomCorrelationId();
+  if (sinkMode) {
+    // Same shape or-sync writes: CODE:correlationId. Never the raw upstream text.
+    connPatch.encrypted_last_error = `${code}:${correlationId}`;
+  }
+
   const { error } = await client
     .from('connections')
-    .update({ status: 'error', updated_at: new Date().toISOString() })
+    .update(connPatch)
     .eq('id', conn.id);
   if (error) return `connection status update failed: ${error.message}`;
 
   console.log(
     `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} ` +
-      `reconciled to error (event_type: ${ev.event_type})`,
+      `reconciled to error (event_type: ${ev.event_type}, code: ${code}, ` +
+      `correlation_id: ${correlationId}, cause_recorded: ${sinkMode})`,
   );
   return null;
+}
+
+/**
+ * Map a Quiltt errored event subtype onto the shared error catalog.
+ *
+ * Derived from event_type and NOT from payload.record.status: on production
+ * 2 of 209 repairable events arrived with a truncated payload and no status
+ * field at all, while the subtype is always present. Measured, not assumed.
+ *
+ * ERROR_REPAIRABLE is documented in our own Knowledge base, verified against
+ * Quiltt's reconnect docs: it "can only be repaired by the user re
+ * authenticating with the institution". That is precisely what
+ * UPSTREAM_AUTH_FAILED tells the customer, including its "Reconnect this
+ * account" action.
+ *
+ * ERROR_PROVIDER is mapped to UPSTREAM_UNAVAILABLE, which tells the customer
+ * the service behind the account is unreachable and to try again shortly.
+ * That reading comes from the subtype name and from it being the residual
+ * class after repairable; I did not find it spelled out in a doc the way
+ * ERROR_REPAIRABLE is.
+ *
+ * Anything else under the errored prefix falls to UPSTREAM_OTHER. Quiltt's
+ * errored taxonomy is explicitly not guaranteed to be bounded (see handleEvent),
+ * so an unknown subtype must still record a cause rather than record nothing.
+ */
+export function upstreamCodeForErroredEvent(eventType: string): string {
+  if (eventType === 'connection.synced.errored.repairable') return 'UPSTREAM_AUTH_FAILED';
+  if (eventType === 'connection.synced.errored.provider')   return 'UPSTREAM_UNAVAILABLE';
+  return 'UPSTREAM_OTHER';
+}
+
+/**
+ * Opaque short id so a customer-visible failure can be cross-referenced against
+ * the edge logs. Same construction as or-sync's, and not security sensitive.
+ */
+function randomCorrelationId(): string {
+  const buf = new Uint8Array(8);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /**
  * When Quiltt reports a successful connection sync, flip any error row back to active.
  * Uses the same lookup pattern as reconcileConnectionError: exact quiltt_connection_id
  * match first, legacy NULL-id fallback for pre-migration rows.
- * Only transitions error -> active; leaves partial/pending/active rows untouched.
+ * Transitions error -> active always, and pending -> active ONLY on the exact
+ * quiltt_connection_id match path. Leaves partial and active rows untouched.
  * Callers that confirmed a full data pull should also clear partial -> active post-pull.
  */
-async function reconcileConnectionSuccess(
+export async function reconcileConnectionSuccess(
   client: SupabaseClient,
   connectionId: string,
   subaccountId: string,
@@ -920,8 +1023,13 @@ async function reconcileConnectionSuccess(
     .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
   if (exactErr) return `connection lookup failed: ${exactErr.message}`;
+  // Whether we resolved the row Quiltt is actually talking about, or fell back
+  // to "the oldest legacy row for this subaccount". The distinction decides
+  // which statuses may be promoted below.
+  let matchedExactly = false;
   if (exact) {
     orConnId = exact.id;
+    matchedExactly = true;
   } else {
     const { data: legacy, error: legacyErr } = await client
       .from('connections')
@@ -940,7 +1048,22 @@ async function reconcileConnectionSuccess(
     .from('connections')
     .update({ status: 'active', updated_at: new Date().toISOString() })
     .eq('id', orConnId)
-    .in('status', ['error']);
+    // DL-1409: 'pending' is promotable here so rows stranded by the old sink
+    // insert heal themselves on the next successful Quiltt sync, instead of
+    // needing a manual UPDATE on production. Quiltt reporting a successful
+    // sync is positive evidence the connection works, which is exactly what
+    // 'active' asserts.
+    //
+    // But ONLY on the exact quiltt_connection_id match. The legacy fallback
+    // above resolves "the oldest quiltt row for this subaccount with a NULL
+    // id", which is not necessarily the connection this event is about.
+    // Promoting a pending row on that path could activate a different
+    // connection than the one that succeeded, and the promotion is not
+    // reversible by the consumer: cancelPendingConnection in
+    // _shared/connection-state.ts returns 'already_active' and refuses to
+    // delete once the row is active. So the legacy path stays 'error' only,
+    // which is exactly the behaviour it had before this change.
+    .in('status', matchedExactly ? ['error', 'pending'] : ['error']);
   if (statusErr) return `connection status update failed: ${statusErr.message}`;
   console.log(
     `[or-quiltt-sync] connection ${orConnId} reconciled to active`,

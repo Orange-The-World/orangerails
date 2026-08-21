@@ -39,6 +39,14 @@ interface EnvelopeUpdateRequestBody {
   app_user_id?: string;
   last_block_scanned?: number;
   /**
+   * Inclusive start of the block range just scanned. When present alongside
+   * last_block_scanned (the to_height), the handler calls
+   * record_stealth_scan_range() to persist the interval. Optional: callers
+   * that omit it skip range recording and fall back to the cursor only.
+   * DL-1478.
+   */
+  from_height?: number;
+  /**
    * Widget-mode credential. Present when the caller is browser code inside a
    * host app's connect session and holds neither a platform API key nor an
    * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
@@ -152,6 +160,26 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: cursorResult.error }, cursorResult.status, cors);
     }
     const effectiveCursor = cursorResult.effectiveCursor;
+
+    // Record the scan range when the caller supplies from_height (DL-1478).
+    // Failure is logged but does not fail the request: the cursor write above
+    // is the safe fallback while range recording is rolled out.
+    if (
+      body.from_height !== undefined &&
+      typeof body.from_height === 'number' &&
+      Number.isInteger(body.from_height) &&
+      body.from_height >= 0 &&
+      body.from_height <= body.last_block_scanned
+    ) {
+      const { error: rpcErr } = await ctx.serviceClient.rpc('record_stealth_scan_range', {
+        p_connection_id: body.connection_id,
+        p_from_height:   body.from_height,
+        p_to_height:     body.last_block_scanned,
+      });
+      if (rpcErr) {
+        console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', rpcErr);
+      }
+    }
 
     const resp: EnvelopeUpdateResponseBody = {
       connection_id: body.connection_id,
