@@ -23,6 +23,9 @@
 https://docs.orangerails.com/* https://orangerails.com/docs/:splat 302
 https://docs.orangerails.dev/* https://orangerails.dev/docs/:splat 302
 
+# www to bare-domain redirect (301 permanent -- canonical host is orangerails.com)
+https://www.orangerails.com/* https://orangerails.com/:splat 301
+
 # SPA deep-link fallback. MUST be the last rule so the specific rules
 # above match first. Cloudflare Pages serves any real static asset
 # (JS/CSS/images, index.html) before consulting _redirects, so this
