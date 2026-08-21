@@ -55,10 +55,6 @@ interface EnvelopeFetchResponseBody {
   last_sync_at: string | null;
   status: 'active' | 'error' | 'archived';
   /**
-   * Recorded scan coverage for this connection, inclusive at both ends,
-   * ordered by from_height. Empty when the connection has never been scanned.
-   */
-  /**
    * Recorded block coverage for this connection, ascending by from_height.
    * An empty array means "no coverage recorded". Null means the coverage read
    * FAILED and the coverage is unknown; the caller must keep using its cursor
