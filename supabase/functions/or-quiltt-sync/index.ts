@@ -846,6 +846,24 @@ export async function handleEventSinkDelivery(
           provider:      'quiltt',
           subaccount_id: subaccountId,
           connection_id: connRow.id,
+          // The OPK path above emits sync.completed with synced_count.
+          // This path emits the same event name, so it must emit the same
+          // shape: consumers validate the payload before acting on it, and
+          // a shape they do not recognise is one they are entitled to drop.
+          //
+          // Omitting it does not fail loudly. A consumer that rejects an
+          // unrecognised payload is expected to answer 2xx rather than make
+          // us retry an event we will never send differently, and
+          // or-webhook-dispatch marks any 2xx as delivered. So a missing
+          // field reads as a successful delivery on our side while the
+          // consumer recorded nothing, which is harder to notice than a
+          // straightforward failure would have been.
+          //
+          // Zero is the honest value here, not a placeholder. Sink delivery
+          // means we pulled no rows ourselves: the whole point of the
+          // webhook is to tell the consumer to come and call or-sync. The
+          // OPK path reports a real row count because it did pull rows.
+          synced_count:  0,
           ts:            new Date().toISOString(),
         },
       });
