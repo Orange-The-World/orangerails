@@ -94,19 +94,24 @@ Deno.test('dated form: USD-MXN-BANXICO-2026-01-01 -> BANXICO', () => {
   assertEquals(extractCompositeAuthority('BTC-USD * USD-MXN-BANXICO-2026-01-01'), 'BANXICO')
 })
 
-// --- OFFICIAL_CB_AUTHORITIES membership (integration check) ---
-// Verifies that a correctly parsed authority determines rate_type correctly.
-// Not imported directly here; validated by checking known set members.
+// --- rate_type mapping: non-null authority -> 'official_reference', null -> 'market' ---
+// Whitelist dropped (DL-1361 round 2): any non-null result from extractCompositeAuthority
+// maps to 'official_reference'. PEG rows return null and stay 'market'.
 
-Deno.test('CBN is a recognized official authority', () => {
-  // extractCompositeAuthority returning 'CBN' means rate_type becomes
-  // 'official_reference' when fed through the OFFICIAL_CB_AUTHORITIES check
-  // in the handler. This test pins the parser output the handler will see.
-  assertEquals(extractCompositeAuthority('BTC-USD * USD-NGN-CBN'), 'CBN')
+Deno.test('ECB (outside old hardcoded whitelist): non-null authority -> official_reference', () => {
+  const auth = extractCompositeAuthority('BTC-USD * USD-CNY-ECB-2026-06-19')
+  assertEquals(auth, 'ECB')
+  assertEquals(auth !== null ? 'official_reference' : 'market', 'official_reference')
 })
 
-Deno.test('PEG is not a recognized official authority (parser returns null before check)', () => {
-  // Parser returns null, so rate_type stays 'market' without even reaching
-  // OFFICIAL_CB_AUTHORITIES.has(...).
-  assertEquals(extractCompositeAuthority('BTC-USD * USD-HKD-PEG'), null)
+Deno.test('CBN: non-null authority -> official_reference', () => {
+  const auth = extractCompositeAuthority('BTC-USD * USD-NGN-CBN')
+  assertEquals(auth, 'CBN')
+  assertEquals(auth !== null ? 'official_reference' : 'market', 'official_reference')
+})
+
+Deno.test('PEG: null authority -> market, not official_reference', () => {
+  const auth = extractCompositeAuthority('BTC-USD * USD-HKD-PEG')
+  assertEquals(auth, null)
+  assertEquals(auth !== null ? 'official_reference' : 'market', 'market')
 })
