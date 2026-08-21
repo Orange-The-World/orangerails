@@ -15,14 +15,15 @@
 #   ORBI_TEAM_POST_BIN       absolute path to the team-post binary
 #
 # Optional environment:
-#   ORBI_NUDGE_BIN           absolute path to the nudge binary; if unset or
-#                            not executable, the alert is still delivered but
-#                            the agent is not immediately flushed
+#   ORBI_NUDGE_BIN           absolute path to the nudge binary; must be set
+#                            and executable or the alarm exits non-zero (exit 5)
 #
 # Exit codes:
-#   0  -- alarm delivered (team-post returned "OK id=...", nudge attempted)
+#   0  -- alarm delivered (team-post returned "OK id=...", mention confirmed, nudge sent)
 #   3  -- required environment variable(s) unset or team-post binary missing
-#   4  -- team-post ran but did not return "OK id=..." (alarm NOT delivered)
+#   4  -- team-post ran but did not return "OK id=..." (alarm NOT delivered), or
+#         team-post warned "no @mention resolved" (alarm delivered but wakes nobody)
+#   5  -- alarm delivered but nudge is unset, not executable, or exited non-zero
 #
 # WHY team-post instead of a direct Zulip bot call:
 #   The bot is subject to a per-window message budget. When that budget is
@@ -55,7 +56,7 @@ UNIT="${UNIT:-unknown.service}"
 HOST="$(sanitize "$(hostname -s 2>/dev/null || echo unknown-host)")"
 HOST="${HOST:-unknown-host}"
 
-BODY="ALARM: ${UNIT} entered the failed state on ${HOST}. Diagnose: journalctl -u ${UNIT} -n 50 --no-pager"
+BODY="ALARM: @**ORBI** -- ${UNIT} entered the failed state on ${HOST}. Diagnose: journalctl -u ${UNIT} -n 50 --no-pager"
 
 echo "[${HANDLER}] ${BODY}" >&2
 
@@ -86,19 +87,24 @@ if ! printf '%s' "${RESULT}" | grep -q 'OK id='; then
   exit 4
 fi
 
+if printf '%s' "${RESULT}" | grep -q 'no @mention resolved'; then
+  echo "[${HANDLER}] team-post warned no @mention resolved; alarm NOT confirmed to wake anyone for ${UNIT}" >&2
+  exit 4
+fi
+
 echo "[${HANDLER}] alarm delivered for ${UNIT}: ${RESULT}"
 
 # --- nudge the agent to flush immediately ---
 
 NUDGE_BIN="${ORBI_NUDGE_BIN:-}"
-if [[ -n "${NUDGE_BIN}" && -x "${NUDGE_BIN}" ]]; then
-  if "${NUDGE_BIN}" "${ORBI_ALERT_NUDGE_AGENT}" "${ORBI_ALERT_ORG}" >&2; then
-    echo "[${HANDLER}] nudge sent to ${ORBI_ALERT_NUDGE_AGENT} in ${ORBI_ALERT_ORG}" >&2
-  else
-    echo "[${HANDLER}] nudge exited non-zero; alert was delivered but flush may be delayed" >&2
-  fi
-else
-  echo "[${HANDLER}] ORBI_NUDGE_BIN unset or not executable; alert was delivered but flush not triggered" >&2
+if [[ -z "${NUDGE_BIN}" || ! -x "${NUDGE_BIN}" ]]; then
+  echo "[${HANDLER}] ORBI_NUDGE_BIN unset or not executable; alarm delivered but flush NOT triggered for ${UNIT}" >&2
+  exit 5
 fi
+if ! "${NUDGE_BIN}" "${ORBI_ALERT_NUDGE_AGENT}" "${ORBI_ALERT_ORG}" >&2; then
+  echo "[${HANDLER}] nudge exited non-zero; alarm delivered but flush NOT confirmed for ${UNIT}" >&2
+  exit 5
+fi
+echo "[${HANDLER}] nudge sent to ${ORBI_ALERT_NUDGE_AGENT} in ${ORBI_ALERT_ORG}" >&2
 
 exit 0
