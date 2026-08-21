@@ -89,6 +89,7 @@ const secondary = [
   { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933754-openapi-spec-v0-draft" },
   { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933752-security-and-threat-model" },
   { icon: FileText, title: "How to export your xpub", body: "Find your extended public key in Sparrow, Specter, BlueWallet, Electrum, Wasabi.", href: "/docs/xpub-export" },
+  { icon: FileText, title: "How to export your Strike CSV", body: "Recover the Strike history the API cannot return, straight from Strike's dashboard.", href: "/docs/strike-csv" },
   { icon: Users, title: "Contributing", body: "Repo conventions, branch model, RFCs.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933753-contributing" },
 ];
 
