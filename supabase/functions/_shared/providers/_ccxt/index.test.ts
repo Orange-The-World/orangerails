@@ -129,3 +129,47 @@ Deno.test('serverDiscover prefers data.body over data.error in the !res.ok branc
     'serverDiscover must keep data.error as a fallback for backward compatibility',
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DL-1440: external_wallet_id must be opaque, not the provider slug.
+//
+// buildDiscover used to emit `external_wallet_id: slug`, so every customer of a
+// given exchange shared one identifier: all four Bitstamp wallets in production
+// carry the literal string "bitstamp". The DiscoveredWallet contract in
+// ../types.ts requires an opaque value with zero derivable relationship to the
+// key material, which a constant exchange name is not.
+//
+// Same source-as-text approach as the joints above, and for the same reason:
+// running buildDiscover means loading ccxt, which is not viable here. The
+// assertion is narrow on purpose. It pins the one line that regressed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Deno.test('buildDiscover emits an opaque external_wallet_id, never the slug', () => {
+  const src = readSource('./index.ts');
+
+  assertEquals(
+    /external_wallet_id:\s*slug\b/.test(src),
+    false,
+    'external_wallet_id must not be the provider slug: it repeats across every customer of the exchange',
+  );
+
+  assertEquals(
+    /external_wallet_id:\s*crypto\.randomUUID\(\)/.test(src),
+    true,
+    'external_wallet_id must be a fresh opaque UUID, per the DiscoveredWallet contract',
+  );
+});
+
+// account_key is what reconnect dedup actually keys on, so the opaque id above
+// is only safe while this line survives. If account_key ever stops being
+// emitted, changing external_wallet_id to a random value would turn every
+// reconnect into a duplicate wallet row. Pinned here so the two move together.
+Deno.test('buildDiscover still emits account_key for reconnect dedup', () => {
+  const src = readSource('./index.ts');
+
+  assertEquals(
+    /account_key:\s*accountKey/.test(src),
+    true,
+    'buildDiscover must keep emitting account_key: or-link-complete fingerprints on it',
+  );
+});

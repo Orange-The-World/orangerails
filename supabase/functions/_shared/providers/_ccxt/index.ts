@@ -292,7 +292,18 @@ function buildDiscover(slug: string, exchangeId: string) {
 
     return [
       {
-        external_wallet_id: slug,
+        // Opaque per discovery, per the DiscoveredWallet contract in ../types.ts:
+        // this value MUST have zero derivable relationship to the key material.
+        // It was previously `slug`, so every customer of a given exchange shared
+        // one id: all four Bitstamp wallets in production carry the literal
+        // string "bitstamp". An identifier meant to name one wallet was naming a
+        // whole exchange, which defeats any per-wallet routing built on it.
+        //
+        // Reconnect dedup does NOT depend on this value. or-discover-wallets
+        // records account_key server side keyed by this id, and or-link-complete
+        // fingerprints on that account_key. account_key is always present here:
+        // the branch above either sets it or throws UPSTREAM_UNSUPPORTED.
+        external_wallet_id: crypto.randomUUID(),
         ...(accountKey !== undefined ? { account_key: accountKey } : {}),
         currency: 'USD', // exchange wallets are multi-currency; this is the display default
         label: `${slug} account`,
