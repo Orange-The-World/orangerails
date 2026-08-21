@@ -24,7 +24,7 @@ import {
   type StagedImportPayload,
   type V3StagedRow,
 } from "../contract";
-import type { StrikeCsvRow } from "./types";
+import type { StrikeCsvRow, StrikeTxType } from "./types";
 
 const CONNECTOR_VERSION = "0.1.0";
 
@@ -126,45 +126,140 @@ export function normalizeStrikeDate(raw: string): string {
   return `${m[3]}-${mon}-${day}`;
 }
 
-function normalizeHeader(h: string): string {
-  return h.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-const HEADER_ALIASES: Record<keyof StrikeCsvRow, string[]> = {
+/**
+ * Legacy header names, kept so files exported by our own CLI and the older
+ * fixtures keep parsing. A genuine Strike export matches none of these, which
+ * is why real files used to be rejected outright.
+ */
+const LEGACY_ALIASES = {
   date: ["date", "transaction date", "time"],
   direction: ["direction", "type"],
   currency: ["currency"],
   amount: ["amount (currency)", "amount", "amount (btc)"],
-  description: ["description", "note", "memo"],
+  description: ["description", "memo"],
   destination: ["destination", "address", "to"],
   fee: ["fee", "network fee"],
   reference: ["reference", "ref", "id"],
+} as const;
+
+/**
+ * A real Strike export names the currency inside the column rather than in a
+ * column of its own: "Amount EUR", "Fee EUR", "Cost Basis (EUR)". The code
+ * varies per account, so it has to be read off the header instead of matched
+ * against a fixed list. "currency" is excluded because "Amount (Currency)" is
+ * the legacy placeholder header, not a real currency code.
+ */
+const AMOUNT_RE = /^amount\s*\(?([a-z]{2,4})\)?$/;
+const FEE_RE = /^fee\s*\(?([a-z]{2,4})\)?$/;
+const COST_BASIS_RE = /^cost basis\s*\(?([a-z]{2,4})\)?$/;
+
+type HeaderIndex = {
+  date?: number;
+  direction?: number;
+  description?: number;
+  destination?: number;
+  reference?: number;
+  btcAmount?: number;
+  btcFee?: number;
+  fiatAmount?: number;
+  fiatFee?: number;
+  fiatCurrency?: string;
+  btcPrice?: number;
+  costBasis?: number;
+  txHash?: number;
+  note?: number;
+  legacyCurrency?: number;
+  legacyAmount?: number;
+  legacyFee?: number;
 };
 
+function normalizeHeader(h: string): string {
+  return h.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function firstIndexOf(norm: string[], candidates: readonly string[]): number | undefined {
+  for (const c of candidates) {
+    const i = norm.indexOf(c);
+    if (i >= 0) return i;
+  }
+  return undefined;
+}
+
 function buildHeaderIndex(headerRow: string[]): {
-  index: Partial<Record<keyof StrikeCsvRow, number>>;
+  index: HeaderIndex;
   missing: string[];
 } {
   const norm = headerRow.map(normalizeHeader);
-  const index: Partial<Record<keyof StrikeCsvRow, number>> = {};
-  const missing: string[] = [];
-  for (const key of Object.keys(HEADER_ALIASES) as Array<keyof StrikeCsvRow>) {
-    const candidates = HEADER_ALIASES[key];
-    let found = -1;
-    for (const c of candidates) {
-      const i = norm.indexOf(c);
-      if (i >= 0) {
-        found = i;
-        break;
+  const index: HeaderIndex = {};
+
+  index.date = firstIndexOf(norm, ["date & time (utc)", "date and time (utc)", ...LEGACY_ALIASES.date]);
+  index.direction = firstIndexOf(norm, ["transaction type", ...LEGACY_ALIASES.direction]);
+  index.description = firstIndexOf(norm, LEGACY_ALIASES.description);
+  index.destination = firstIndexOf(norm, LEGACY_ALIASES.destination);
+  index.reference = firstIndexOf(norm, LEGACY_ALIASES.reference);
+  index.btcPrice = firstIndexOf(norm, ["btc price"]);
+  index.txHash = firstIndexOf(norm, ["transaction hash"]);
+  index.note = firstIndexOf(norm, ["note"]);
+  index.legacyCurrency = firstIndexOf(norm, LEGACY_ALIASES.currency);
+
+  for (let i = 0; i < norm.length; i += 1) {
+    const h = norm[i];
+    const amount = AMOUNT_RE.exec(h);
+    if (amount) {
+      const code = amount[1];
+      if (code === "btc") index.btcAmount = i;
+      else if (code !== "currency") {
+        index.fiatAmount = i;
+        index.fiatCurrency = code.toUpperCase();
       }
+      continue;
     }
-    if (found >= 0) {
-      index[key] = found;
-    } else if (key !== "fee" && key !== "reference") {
-      missing.push(key);
+    const fee = FEE_RE.exec(h);
+    if (fee) {
+      const code = fee[1];
+      if (code === "btc") index.btcFee = i;
+      else if (code !== "currency") index.fiatFee = i;
+      continue;
     }
+    const basis = COST_BASIS_RE.exec(h);
+    if (basis) index.costBasis = i;
+  }
+
+  // Legacy files carry a single unqualified Amount / Fee plus a Currency column.
+  if (index.btcAmount === undefined && index.fiatAmount === undefined) {
+    index.legacyAmount = firstIndexOf(norm, LEGACY_ALIASES.amount);
+  }
+  if (index.btcFee === undefined && index.fiatFee === undefined) {
+    index.legacyFee = firstIndexOf(norm, LEGACY_ALIASES.fee);
+  }
+  // Only fall back to Note-as-description when there is no Description column.
+  if (index.description === undefined) index.description = firstIndexOf(norm, ["note"]);
+
+  const missing: string[] = [];
+  if (index.date === undefined) missing.push("date");
+  if (index.direction === undefined) missing.push("transaction type");
+  if (
+    index.btcAmount === undefined &&
+    index.fiatAmount === undefined &&
+    index.legacyAmount === undefined
+  ) {
+    missing.push("amount");
   }
   return { index, missing };
+}
+
+const TX_TYPES: readonly StrikeTxType[] = [
+  "Receive",
+  "Send",
+  "Deposit",
+  "Withdrawal",
+  "Purchase",
+  "Sale",
+];
+
+function toTxType(raw: string): StrikeTxType | null {
+  const t = raw.trim().toLowerCase();
+  return TX_TYPES.find((v) => v.toLowerCase() === t) ?? null;
 }
 
 export type ParseStrikeCsvResult = {
@@ -195,26 +290,57 @@ export function parseStrikeCsv(input: string | Buffer): ParseStrikeCsvResult {
   for (let r = 1; r < grid.length; r += 1) {
     const cells = grid[r];
     if (cells.every((c) => c.trim() === "")) continue;
-    const get = (k: keyof StrikeCsvRow): string => {
-      const i = index[k];
-      return i === undefined ? "" : (cells[i] ?? "").trim();
-    };
-    const dirRaw = get("direction");
-    const direction =
-      dirRaw === "Receive" || dirRaw === "Send" ? (dirRaw as "Receive" | "Send") : null;
+    const at = (i: number | undefined): string =>
+      i === undefined ? "" : (cells[i] ?? "").trim();
+
+    const typeRaw = at(index.direction);
+    const direction = toTxType(typeRaw);
     if (!direction) {
-      warnings.push(`Row ${r + 1}: unknown Direction "${dirRaw}" , skipped.`);
+      warnings.push(`Row ${r + 1}: unknown Transaction Type "${typeRaw}", skipped.`);
       continue;
     }
+
+    const btcAmount = at(index.btcAmount);
+    const fiatAmount = at(index.fiatAmount);
+    const legacyAmount = at(index.legacyAmount);
+    const btcFee = at(index.btcFee);
+    const fiatFee = at(index.fiatFee);
+    const legacyFee = at(index.legacyFee);
+
+    // Bitcoin is the primary leg when present, so `amount` and `currency`
+    // keep meaning what they meant to callers written before fiat legs
+    // existed. Legacy files have one unqualified amount and a Currency column.
+    const primaryAmount = btcAmount || fiatAmount || legacyAmount;
+    const primaryFee = btcAmount ? btcFee : fiatAmount ? fiatFee : legacyFee;
+    const primaryCurrency = btcAmount
+      ? "BTC"
+      : fiatAmount
+        ? (index.fiatCurrency ?? "")
+        : at(index.legacyCurrency);
+
+    if (!primaryAmount) {
+      warnings.push(`Row ${r + 1}: no amount in any currency column, skipped.`);
+      continue;
+    }
+
     rows.push({
-      date: get("date"),
+      date: at(index.date),
       direction,
-      currency: get("currency"),
-      amount: get("amount"),
-      description: get("description"),
-      destination: get("destination"),
-      fee: get("fee"),
-      reference: get("reference"),
+      currency: primaryCurrency,
+      amount: primaryAmount,
+      description: at(index.description),
+      destination: at(index.destination),
+      ...(primaryFee ? { fee: primaryFee } : {}),
+      ...(at(index.reference) ? { reference: at(index.reference) } : {}),
+      ...(btcAmount ? { btcAmount } : {}),
+      ...(btcFee ? { btcFee } : {}),
+      ...(fiatAmount ? { fiatAmount } : {}),
+      ...(fiatFee ? { fiatFee } : {}),
+      ...(index.fiatCurrency ? { fiatCurrency: index.fiatCurrency } : {}),
+      ...(at(index.btcPrice) ? { btcPrice: at(index.btcPrice) } : {}),
+      ...(at(index.costBasis) ? { costBasis: at(index.costBasis) } : {}),
+      ...(at(index.txHash) ? { txHash: at(index.txHash) } : {}),
+      ...(at(index.note) ? { note: at(index.note) } : {}),
     });
   }
   return { rows, warnings, delimiter };
@@ -251,8 +377,20 @@ export function strikeRowsToJournalStagedRows(rows: StrikeCsvRow[]): {
     if (date === r.date && r.date && !/^\d{4}-\d{2}-\d{2}/.test(r.date)) {
       warnings.push(`Row ${i + 2}: could not normalize date "${r.date}" , left as-is.`);
     }
+    // Purchase and Sale rows carry a fiat leg AND a bitcoin leg on one line.
+    // A staged row has a single debit/credit pair, so posting one of the two
+    // legs would silently misstate the entry. Hold them back and say so.
+    if (r.btcAmount && r.fiatAmount) {
+      warnings.push(
+        `Row ${i + 2}: ${r.direction} has both a bitcoin leg and a ${r.fiatCurrency ?? "fiat"} leg, ` +
+          `which needs two-sided staging. Held back rather than posted as one side.`,
+      );
+      continue;
+    }
     const amount = magnitude(r.amount);
-    const isInflow = r.direction === "Receive";
+    // The sign is authoritative. The type label alone is not: a Sale moves
+    // bitcoin out, a Withdrawal moves fiat out, and neither is "Send".
+    const isInflow = !r.amount.trim().startsWith("-");
     out.push({
       je_date: date,
       "je_ref_#": r.reference ?? "",
