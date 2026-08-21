@@ -384,6 +384,12 @@ export async function fetchAllSince(
   exchange: any,
   exchangeId: string,
   since: number | undefined,
+  // The wallet these transactions belong to, as stored in
+  // source_wallets.external_wallet_id. Threaded through to the normalizers so
+  // every row is stamped with the wallet rather than the exchange. Required
+  // rather than defaulted: a default would silently reintroduce the exchange
+  // id on any caller that forgot to pass it, which is the bug this fixes.
+  sourceWalletId: string,
 ): Promise<CcxtSourceSweep> {
   const out: NormalizedTransaction[] = [];
   const denied: string[] = [];
@@ -427,7 +433,7 @@ export async function fetchAllSince(
       // build symbols when no-arg trades aren't supported.
       const trades = await exchange.fetchMyTrades(undefined, since, 500);
       for (const t of trades ?? []) {
-        out.push(normalizeTrade(t, exchangeId));
+        out.push(normalizeTrade(t, exchangeId, sourceWalletId));
       }
     });
   }
@@ -437,7 +443,7 @@ export async function fetchAllSince(
     await sweep('deposits', 'fetchDeposits', async () => {
       const deposits = await exchange.fetchDeposits(undefined, since, 500);
       for (const d of deposits ?? []) {
-        out.push(normalizeTransfer(d, 'deposit', 'in', exchangeId));
+        out.push(normalizeTransfer(d, 'deposit', 'in', exchangeId, sourceWalletId));
       }
     });
   }
@@ -447,7 +453,7 @@ export async function fetchAllSince(
     await sweep('withdrawals', 'fetchWithdrawals', async () => {
       const withdrawals = await exchange.fetchWithdrawals(undefined, since, 500);
       for (const w of withdrawals ?? []) {
-        out.push(normalizeTransfer(w, 'withdrawal', 'out', exchangeId));
+        out.push(normalizeTransfer(w, 'withdrawal', 'out', exchangeId, sourceWalletId));
       }
     });
   }
@@ -472,7 +478,7 @@ export async function fetchAllSince(
  * SUSPENSE default rule route it for human review. v1.1 will emit two
  * legs (one per asset) when V2 has trade-routing rules in its yaml.
  */
-function normalizeTrade(trade: any, exchangeId: string): NormalizedTransaction {
+function normalizeTrade(trade: any, exchangeId: string, sourceWalletId: string): NormalizedTransaction {
   const symbol = trade.symbol ?? '';
   const [base, quote] = symbol.split('/');
   const side = trade.side === 'sell' ? 'sell' : 'buy';
@@ -490,7 +496,7 @@ function normalizeTrade(trade: any, exchangeId: string): NormalizedTransaction {
     counterparty: null,
     status: 'CLOSED',
     timestamp: trade.datetime ?? new Date(trade.timestamp ?? Date.now()).toISOString(),
-    source_wallet_id: exchangeId,
+    source_wallet_id: sourceWalletId,
   };
 }
 
@@ -503,6 +509,7 @@ function normalizeTransfer(
   type: 'deposit' | 'withdrawal',
   direction: 'in' | 'out',
   exchangeId: string,
+  sourceWalletId: string,
 ): NormalizedTransaction {
   const currency = String(tx.currency ?? 'BTC').toUpperCase();
   const amount = Number(tx.amount ?? 0);
@@ -519,7 +526,7 @@ function normalizeTransfer(
     status:
       tx.status === 'ok' ? 'COMPLETE' : tx.status === 'pending' ? 'PENDING' : (tx.status ?? 'PENDING').toUpperCase(),
     timestamp: tx.datetime ?? new Date(tx.timestamp ?? Date.now()).toISOString(),
-    source_wallet_id: exchangeId,
+    source_wallet_id: sourceWalletId,
   } as const;
 
   if (isBtc) {
@@ -543,7 +550,13 @@ export function makeCcxtAdapter(config: CcxtAdapterConfig): ProviderAdapter {
     const exchange = await instantiateExchange(exchangeId, credentials);
     const since = cursor ? Number(cursor) : undefined;
 
-    const { transactions, denied } = await fetchAllSince(exchange, exchangeId, since);
+    // Unambiguous here: the adapter declares multiWallet: false and discovery
+    // returns exactly one wallet, so walletIds[0] IS the wallet rather than a
+    // guess at one. syncAccountWide passes [slug], which keeps the historical
+    // value for connections that predate wallet selection.
+    const sourceWalletId = walletIds[0];
+
+    const { transactions, denied } = await fetchAllSince(exchange, exchangeId, since, sourceWalletId);
 
     // Cursor = highest timestamp (unix ms) seen across the batch.
     //
