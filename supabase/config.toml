@@ -47,6 +47,9 @@ verify_jwt = false
 [functions.or-source-wallets-set]
 verify_jwt = false
 
+[functions.or-source-wallet-lookup]
+verify_jwt = false
+
 [functions.or-stealth-connection-create]
 verify_jwt = false
 
