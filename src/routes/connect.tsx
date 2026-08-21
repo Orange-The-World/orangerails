@@ -1747,8 +1747,8 @@ function EnterCredentialsStep({
               <p className="text-muted-foreground">
                 <span className="font-medium text-foreground">Your past, one file.</span> Export a
                 CSV from your Strike dashboard and keep it. Bringing it into this same account is
-                being built right now. Rows are matched on Strike's Reference column, so anything
-                that also arrives automatically is never counted twice.
+                being built right now, and anything that also arrives automatically is matched up
+                rather than counted twice.
               </p>
               <a
                 href="/docs/strike-csv"
