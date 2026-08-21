@@ -97,3 +97,43 @@ export function resumeHeightFromRanges(
   }
   return resume;
 }
+
+/**
+ * Decide whether the coverage map should drive the resume point at all, and
+ * if so what that point is. Returns `undefined` to mean "coverage cannot
+ * answer this, use the legacy cursor".
+ *
+ * This exists because three very different situations all arrive at the
+ * caller as "no ranges", and one of them must not be treated like the others:
+ *
+ *   absent  the edge function is the older half of a split deploy and does
+ *           not send the field yet
+ *   null    the edge function tried to read the coverage and the read FAILED,
+ *           so what was scanned is unknown
+ *   empty   the read succeeded and this connection genuinely has no recorded
+ *           coverage, which is every connection that last synced before the
+ *           coverage table held rows
+ *
+ * All three fall back to the cursor, which is exactly the behaviour that
+ * shipped before this module existed, so none of them can make a sync worse.
+ * The distinction that matters is that none of them may be read as "coverage
+ * says nothing was scanned", because that answer restarts the scan at the
+ * wallet birthday. For a failed read that would be a rescan triggered by an
+ * outage, and for a pre-coverage connection it would be a rescan of the
+ * entire wallet history on the first sync after this ships.
+ *
+ * The cost of this choice, stated plainly: a connection that has a cursor and
+ * no recorded ranges keeps whatever gap it already had. Healing those is a
+ * one-time backfill decision about existing data, not something a code path
+ * should do silently to every wallet at once.
+ *
+ * Once a single range exists the coverage map wins, which is the case the
+ * whole change is for.
+ */
+export function resumeHeightFromCoverage(
+  ranges: readonly ScanRange[] | null | undefined,
+  birthdayHeight: number,
+): number | undefined {
+  if (!ranges || ranges.length === 0) return undefined;
+  return resumeHeightFromRanges(ranges, birthdayHeight);
+}

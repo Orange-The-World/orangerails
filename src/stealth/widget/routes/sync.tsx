@@ -25,7 +25,7 @@
 import { useEffect, useState } from "react";
 
 import { parseDescriptor, type ParsedDescriptor } from "@/stealth/lib/derive";
-import { resumeHeightFromRanges, type ScanRange } from "@/stealth/lib/ranges";
+import { resumeHeightFromCoverage, type ScanRange } from "@/stealth/lib/ranges";
 import {
   runSync,
   WindowExhaustedError,
@@ -207,7 +207,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           // Optional: absent when the deployed edge function predates the
           // coverage-map read. The widget and the edge function ship
           // separately, so either can be the older half.
-          scan_ranges?: ScanRange[];
+          scan_ranges?: ScanRange[] | null;
         };
         setIsFirstSync(envJson.last_block_scanned === null);
 
@@ -227,13 +227,19 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         // Resume point, from the recorded coverage rather than from a single
         // cursor. A cursor cannot say "everything above 900000 is read but the
         // birthday at 800000 was never reached", so a wallet whose first scan
-        // started late could never fill in the blocks before it. When the edge
-        // function is the older half and sends no ranges, this resolves to the
-        // birthday and sync.ts falls back to the cursor, which is the exact
-        // behaviour that shipped before.
-        const resumeFromHeight = envJson.scan_ranges
-          ? resumeHeightFromRanges(envJson.scan_ranges, birthdayHeight)
-          : undefined;
+        // started late could never fill in the blocks before it.
+        //
+        // undefined here means the coverage cannot answer: the field is absent
+        // because the edge function is the older half of a split deploy, or it
+        // is null because the coverage read failed, or it is empty because this
+        // connection last synced before the coverage table held rows. All three
+        // keep the legacy cursor, which is what shipped before this existed.
+        // Only a connection that actually has recorded ranges is resumed from
+        // them, and a pre-coverage connection therefore keeps whatever gap it
+        // already had rather than rescanning its whole history on first sync.
+        // Healing those is a backfill decision about existing data, deliberately
+        // not something this path does to every wallet at once.
+        const resumeFromHeight = resumeHeightFromCoverage(envJson.scan_ranges, birthdayHeight);
 
         let descriptor: ParsedDescriptor | undefined;
         if (envelopePayload.kind === "descriptor_stealth") {

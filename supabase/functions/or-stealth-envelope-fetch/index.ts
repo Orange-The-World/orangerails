@@ -58,7 +58,13 @@ interface EnvelopeFetchResponseBody {
    * Recorded scan coverage for this connection, inclusive at both ends,
    * ordered by from_height. Empty when the connection has never been scanned.
    */
-  scan_ranges: Array<{ from_height: number; to_height: number }>;
+  /**
+   * Recorded block coverage for this connection, ascending by from_height.
+   * An empty array means "no coverage recorded". Null means the coverage read
+   * FAILED and the coverage is unknown; the caller must keep using its cursor
+   * rather than treat unknown as empty.
+   */
+  scan_ranges: Array<{ from_height: number; to_height: number }> | null;
 }
 
 /**
@@ -156,7 +162,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // the widget falls back to the legacy last_block_scanned cursor, which is
     // exactly the behaviour that shipped before this field existed. Losing the
     // improvement is acceptable; losing the ability to sync is not.
-    let scanRanges: Array<{ from_height: number; to_height: number }> = [];
+    //
+    // On failure this stays null rather than becoming an empty array, and the
+    // difference is load-bearing. An empty array is a truthful statement that
+    // this connection has no recorded coverage, and the widget answers it by
+    // resuming at the wallet birthday. Null means the coverage is UNKNOWN, and
+    // the only safe answer to unknown is the cursor the widget already had. If
+    // these two collapsed into one value, a transient read error would silently
+    // restart the scan at the birthday.
+    let scanRanges: Array<{ from_height: number; to_height: number }> | null = [];
     const { data: rangeRows, error: rangeErr } = await ctx.serviceClient
       .from('stealth_scan_ranges')
       .select('from_height, to_height')
@@ -165,6 +179,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .limit(MAX_SCAN_RANGES);
     if (rangeErr) {
       console.error('[or-stealth-envelope-fetch] scan range read failed:', rangeErr);
+      scanRanges = null;
     } else if (rangeRows) {
       scanRanges = rangeRows.map((r) => ({
         from_height: r.from_height as number,

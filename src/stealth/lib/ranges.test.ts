@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { resumeHeightFromRanges, type ScanRange } from "./ranges";
+import { resumeHeightFromCoverage, resumeHeightFromRanges, type ScanRange } from "./ranges";
 
 const BIRTHDAY = 800_000;
 
@@ -90,5 +90,47 @@ describe("resumeHeightFromRanges", () => {
 
   it("rejects a non-finite birthday instead of scanning from NaN", () => {
     expect(() => resumeHeightFromRanges([], Number.NaN)).toThrow(/finite/);
+  });
+});
+
+/**
+ * The three ways coverage can say nothing, and why they must not be the same
+ * as saying "nothing was scanned".
+ *
+ * A failed coverage read used to arrive here as an empty array, which is a
+ * confident claim that this connection has scanned no blocks at all. Acting on
+ * it restarts the scan at the wallet birthday, so a transient database error
+ * on the read path would have turned into a full wallet rescan for a wallet
+ * that was already fully scanned.
+ */
+describe("resumeHeightFromCoverage", () => {
+  const BIRTHDAY = 800_000;
+
+  it("defers to the cursor when the field is absent (older edge function)", () => {
+    expect(resumeHeightFromCoverage(undefined, BIRTHDAY)).toBeUndefined();
+  });
+
+  it("defers to the cursor when the coverage read failed", () => {
+    expect(resumeHeightFromCoverage(null, BIRTHDAY)).toBeUndefined();
+  });
+
+  it("defers to the cursor for a connection with no recorded coverage", () => {
+    expect(resumeHeightFromCoverage([], BIRTHDAY)).toBeUndefined();
+  });
+
+  it("uses the coverage as soon as a single range exists", () => {
+    const ranges: ScanRange[] = [{ from_height: BIRTHDAY, to_height: 850_000 }];
+    expect(resumeHeightFromCoverage(ranges, BIRTHDAY)).toBe(850_000);
+  });
+
+  it("still returns the birthday when the ranges are all ahead of it", () => {
+    const ranges: ScanRange[] = [{ from_height: 900_000, to_height: 910_000 }];
+    expect(resumeHeightFromCoverage(ranges, BIRTHDAY)).toBe(BIRTHDAY);
+  });
+
+  it("does not confuse a real coverage answer with the defer signal", () => {
+    const ranges: ScanRange[] = [{ from_height: 0, to_height: 0 }];
+    expect(resumeHeightFromCoverage(ranges, 0)).toBe(0);
+    expect(resumeHeightFromCoverage(ranges, 0)).not.toBeUndefined();
   });
 });
