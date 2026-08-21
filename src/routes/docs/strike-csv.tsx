@@ -75,7 +75,10 @@ const steps: ExportStep[] = [
 ];
 
 const columns: Array<{ name: string; note: string }> = [
-  { name: "Reference", note: "A unique id. This is what we match on so nothing is ever counted twice." },
+  {
+    name: "Reference",
+    note: "Strike's id for the transaction. It is not always unique: an order that is placed and later cancelled reuses the same one, so we match on more than this.",
+  },
   { name: "Date & Time (UTC)", note: "Strike's own date format, for example Nov 23 2023 15:12:48." },
   { name: "Transaction Type", note: "Deposit, Withdrawal, Receive, Send, Purchase or Sale." },
   { name: "Amount USD, Fee USD", note: "Signed. Negative when money left your account." },
