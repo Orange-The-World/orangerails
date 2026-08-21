@@ -627,6 +627,27 @@ Deno.serve(
       }
       const connectionId = createdConn.id as string;
 
+      // DL-1414-C: re-drive any or-quiltt-sync events that deferred because this
+      // connections row did not exist yet. Now that it does, clearing opk_deferred_at
+      // lets them re-enter the pending queue on the next drain tick without waiting
+      // for reDriveReadyDeferrals to sweep them (which it would do anyway, since the
+      // subaccount has OPK set). Non-fatal: a failure here only delays re-drive by
+      // at most one drain interval.
+      {
+        const { error: reDriveErr } = await serviceClient
+          .from('quiltt_webhook_inbox')
+          .update({ opk_deferred_at: null })
+          .eq('subaccount_id', subaccountId)
+          .is('processed_at', null)
+          .not('opk_deferred_at', 'is', null);
+        if (reDriveErr) {
+          console.warn(
+            '[or-link-complete] failed to re-drive deferred quiltt_webhook_inbox events:',
+            reDriveErr.message,
+          );
+        }
+      }
+
       // 6. Insert the new wallets, in two batches.
       //
       // Fingerprinted and un-fingerprinted wallets go in separate statements so
