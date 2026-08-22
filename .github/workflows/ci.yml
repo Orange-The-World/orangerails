@@ -197,7 +197,33 @@ jobs:
               grep -oE 'TS[0-9]+ \[ERROR\]' "$RUNNER_TEMP/deno-check.log" | sort | uniq -c | sort -rn || true
               echo '```'
             fi
+            if [ "$ERRORS" -gt "$DENO_CHECK_BASELINE" ]; then
+              echo
+              echo "Full deno check output (errors above baseline -- new errors introduced by this change):"
+              echo '```'
+              cat "$RUNNER_TEMP/deno-check.log"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # Emit per-error workflow annotations (file:line) when above baseline.
+          # Annotations surface in the PR diff view and the Annotations tab
+          # without requiring shell or log access -- readable from gh_checks.
+          # Deno error format:
+          #   error[TSxxxx]: <message>
+          #       --> supabase/functions/<file>:<line>:<col>
+          # We capture message and location, emit one ::error per diagnostic.
+          if [ "$ERRORS" -gt "$DENO_CHECK_BASELINE" ]; then
+            current_msg=""
+            while IFS= read -r ln; do
+              if [[ "$ln" =~ ^error\[TS[0-9]+\]:\ (.+)$ ]]; then
+                current_msg="${BASH_REMATCH[1]}"
+              elif [[ -n "$current_msg" && "$ln" =~ ^[[:space:]]*--\>[[:space:]]([^:]+):([0-9]+):[0-9]+ ]]; then
+                echo "::error file=${BASH_REMATCH[1]},line=${BASH_REMATCH[2]}::${current_msg}"
+                current_msg=""
+              fi
+            done < "$RUNNER_TEMP/deno-check.log"
+          fi
 
           echo "deno check: ${ERRORS} error(s); ratchet baseline ${DENO_CHECK_BASELINE}"
 
@@ -280,7 +306,7 @@ jobs:
           #
           # When you add or remove a test file, change the number for that
           # branch in the same PR, and say why in the message if it goes down.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '16' }}
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '22' }}
         run: |
           set -euo pipefail
 

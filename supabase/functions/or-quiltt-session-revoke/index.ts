@@ -44,6 +44,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { checkTokenState, extractJwtUserId } from './validate.ts';
+import type { PendingWidgetSession } from './validate.ts';
 
 const QUILTT_REVOKE_URL = "https://auth.quiltt.io/v1/users/session";
 
@@ -99,15 +101,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         cors,
       );
     }
-    if (session.data.used_at) {
-      return jsonResponse({ error: "Invalid widget token", code: "widget_token_used" }, 401, cors);
-    }
-    if (new Date(session.data.expires_at as string) < new Date()) {
-      return jsonResponse(
-        { error: "Invalid widget token", code: "widget_token_expired" },
-        401,
-        cors,
-      );
+    const tokenCheck = checkTokenState(session.data as PendingWidgetSession, Date.now());
+    if (!tokenCheck.ok) {
+      return jsonResponse({ error: tokenCheck.error, code: tokenCheck.code }, tokenCheck.status, cors);
     }
 
     // Binding check: verify the session_token belongs to this widget_token's
@@ -116,17 +112,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // Decode the JWT payload (no signature verification; we only need the
     // userId field. Quiltt's DELETE call below does the real signature
     // check). Standard 3-part JWT: header.payload.signature.
-    let jwtUserId: string | null = null;
-    try {
-      const parts = body.session_token.split(".");
-      if (parts.length === 3) {
-        const padded = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-        const json = JSON.parse(atob(padded + "===".slice((padded.length + 3) % 4)));
-        if (typeof json.userId === "string") jwtUserId = json.userId;
-      }
-    } catch {
-      // Malformed JWT, fall through to bind check failure.
-    }
+    const jwtUserId = extractJwtUserId(body.session_token);
     if (!jwtUserId) {
       return jsonResponse(
         { error: "Session token not bound", code: "session_token_unparseable" },

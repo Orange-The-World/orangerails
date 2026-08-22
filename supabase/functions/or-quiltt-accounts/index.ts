@@ -88,6 +88,7 @@ import { resolveQuilttConfigForPlatform } from '../_shared/quiltt-config.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import { buildAccountsResponse, mergeAccountSets } from './transform.ts';
 import type { QuilttAccount } from './transform.ts';
+import { validateBody, validatePlatformAuth, resolveQueryMode } from './validate.ts';
 
 const QUILTT_GRAPHQL = 'https://api.quiltt.io/v1/graphql';
 
@@ -125,23 +126,21 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if ('status' in auth) {
       return jsonResponse({ error: auth.message }, auth.status, cors);
     }
-    if (auth.mode !== 'platform') {
-      return jsonResponse({ error: 'platform API key required' }, 403, cors);
-    }
+    const authCheck = validatePlatformAuth(auth.mode);
+    if (!authCheck.ok) return jsonResponse({ error: authCheck.error }, authCheck.status, cors);
 
     const raw = await readBoundedText(req);
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
     const body = JSON.parse(raw || '{}') as AccountsBody;
 
-    if (!body.app_user_id || typeof body.app_user_id !== 'string' || body.app_user_id.length > 256) {
-      return jsonResponse({ error: 'app_user_id required (string, <=256 chars)' }, 400, cors);
-    }
+    const bodyCheck = validateBody(body);
+    if (!bodyCheck.ok) return jsonResponse({ error: bodyCheck.error }, bodyCheck.status, cors);
     // quiltt_connection_id is OPTIONAL. When omitted (empty string), we
     // enumerate ALL connections under the profile. This is the fallback
     // path V2 uses when the popup's postMessage didn't survive a
     // cross-origin redirect (Finicity/MX PROD flows sever window.opener).
-    const connectionId =
-      typeof body.quiltt_connection_id === 'string' ? body.quiltt_connection_id.trim() : '';
+    const queryMode = resolveQueryMode(body);
+    const connectionId = queryMode === 'single_connection' ? body.quiltt_connection_id!.trim() : '';
 
     // Per-platform Quiltt API key resolution (env fallback during transition).
     let quilttCfg;

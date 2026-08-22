@@ -41,6 +41,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { resolveQuilttConfigForPlatform } from "../_shared/quiltt-config.ts";
 import { wrapSentryHandler } from "../_shared/sentry.ts";
+import { validateBody, checkTokenState } from "./validate.ts";
+import type { PendingWidgetSession } from "./validate.ts";
 
 const QUILTT_AUTH_URL = "https://auth.quiltt.io/v1/users/sessions";
 
@@ -64,9 +66,8 @@ Deno.serve(
       if (raw === null) return jsonResponse({ error: "Request body too large" }, 413, cors);
       const body = JSON.parse(raw || "{}") as { widget_token?: string };
 
-      if (!body.widget_token || typeof body.widget_token !== "string") {
-        return jsonResponse({ error: "widget_token required" }, 400, cors);
-      }
+      const bodyCheck = validateBody(body);
+      if (!bodyCheck.ok) return jsonResponse({ error: bodyCheck.error }, bodyCheck.status, cors);
 
       const service = createClient(
         Deno.env.get("SUPABASE_URL")!,
@@ -82,12 +83,8 @@ Deno.serve(
       if (session.error || !session.data) {
         return jsonResponse({ error: "Invalid widget token" }, 401, cors);
       }
-      if (session.data.used_at) {
-        return jsonResponse({ error: "Invalid widget token" }, 401, cors);
-      }
-      if (new Date(session.data.expires_at as string) < new Date()) {
-        return jsonResponse({ error: "Invalid widget token" }, 401, cors);
-      }
+      const tokenCheck = checkTokenState(session.data as PendingWidgetSession, Date.now());
+      if (!tokenCheck.ok) return jsonResponse({ error: tokenCheck.error }, tokenCheck.status, cors);
 
       // 2. Resolve platform slug from platform_id.
       const platform = await service
