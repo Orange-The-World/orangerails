@@ -1,0 +1,97 @@
+name: Wait for the Cloudflare Pages deploy
+description: >
+  Block until the Pages production deployment for a given commit is live, so a
+  smoke test cannot assert against the bundle the push was replacing.
+
+inputs:
+  project:
+    description: Pages project name, e.g. orangerails-prod.
+    required: true
+  commit_sha:
+    description: Commit the deployment must correspond to. Normally github.sha.
+    required: true
+  account_id:
+    description: Cloudflare account id. Empty disables the wait.
+    required: true
+  api_token:
+    description: Cloudflare API token with Pages read. Empty disables the wait.
+    required: true
+  timeout_seconds:
+    description: >
+      Give up waiting after this long and continue anyway. Observed deploys take
+      about 2m30s end to end, most of it queue, so this is a wide margin.
+    required: false
+    default: "420"
+  poll_seconds:
+    required: false
+    default: "10"
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for the Pages production deploy
+      shell: bash
+      env:
+        CF_ACCOUNT: ${{ inputs.account_id }}
+        CF_TOKEN: ${{ inputs.api_token }}
+        PROJECT: ${{ inputs.project }}
+        SHA: ${{ inputs.commit_sha }}
+        TIMEOUT_S: ${{ inputs.timeout_seconds }}
+        POLL_S: ${{ inputs.poll_seconds }}
+      run: |
+        # Deliberately no `set -e`. This step is best effort by design: it
+        # exists to remove a false failure, so it must never become a new
+        # source of one. Every abnormal path warns and returns 0, leaving the
+        # smoke itself as the only thing that can fail the job.
+        set -uo pipefail
+
+        if [ -z "${CF_TOKEN}" ] || [ -z "${CF_ACCOUNT}" ]; then
+          echo "::warning::Cloudflare credentials are not available to this run, so the deploy wait is skipped. A red smoke below may be a race with the build rather than a defect."
+          exit 0
+        fi
+
+        API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/pages/projects/${PROJECT}/deployments?per_page=25"
+        DEADLINE=$(( $(date +%s) + TIMEOUT_S ))
+        LAST="unknown"
+
+        while : ; do
+          # -sS keeps curl quiet but still prints transport errors. Note that
+          # curl has no --fail here on purpose: a non-2xx body is parsed below
+          # so the reason can be reported, rather than collapsing to exit 22.
+          BODY=$(curl -sS --max-time 20 -H "Authorization: Bearer ${CF_TOKEN}" "${API}" 2>/dev/null)
+
+          if [ -z "${BODY}" ] || [ "$(printf '%s' "${BODY}" | jq -r '.success // false')" != "true" ]; then
+            echo "::warning::Could not read the Pages deployments API, so the deploy wait is skipped. A red smoke below may be a race with the build rather than a defect."
+            exit 0
+          fi
+
+          # Only production deployments count. A branch push to this project
+          # produces environment=preview, which never serves the live host.
+          LAST=$(printf '%s' "${BODY}" | jq -r --arg sha "${SHA}" '
+            [ .result[]
+              | select(.environment == "production")
+              | select(.deployment_trigger.metadata.commit_hash == $sha)
+            ][0]
+            | if . == null then "absent"
+              else "\(.latest_stage.name):\(.latest_stage.status)"
+              end')
+
+          case "${LAST}" in
+            deploy:success)
+              echo "Pages production deploy for ${SHA} is live. Safe to assert against it."
+              exit 0
+              ;;
+            *:failure)
+              echo "::warning::The Pages deploy for ${SHA} reported ${LAST}. Continuing so the smoke can report what the host actually serves."
+              exit 0
+              ;;
+          esac
+
+          if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+            echo "::warning::Timed out after ${TIMEOUT_S}s waiting for the Pages production deploy of ${SHA}; last observed state was '${LAST}'. Continuing anyway. READ THIS FIRST if the smoke below is red: it may be asserting against the previous bundle."
+            exit 0
+          fi
+
+          echo "waiting for ${PROJECT} @ ${SHA}: ${LAST}"
+          sleep "${POLL_S}"
+        done

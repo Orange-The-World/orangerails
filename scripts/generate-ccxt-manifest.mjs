@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MANIFEST_PATH = join(__dirname, '..', 'supabase', 'functions', '_shared', 'providers', '_ccxt-manifest.ts');
+const MANIFEST_PATH = join(__dirname, '..', 'supabase', 'functions', '_shared', 'providers', '_ccxt', 'manifest.ts');
 const STATUS_PATH = join(__dirname, '..', 'docs', 'ccxt-status.md');
 
 // Hand-curated popularity hints for the headline exchanges. Anything not
@@ -79,6 +79,7 @@ for (const id of ccxt.exchanges) {
       trades: !!inst.has?.fetchMyTrades,
       deposits: !!inst.has?.fetchDeposits,
       withdrawals: !!inst.has?.fetchWithdrawals,
+      fetchBalance: !!inst.has?.fetchBalance,
       popularity: POPULARITY[id] ?? 35,
       tags,
     });
@@ -93,7 +94,7 @@ const today = new Date().toISOString().slice(0, 10);
 
 const ts = [];
 ts.push('/**');
-ts.push(' * GENERATED FILE — do not edit by hand.');
+ts.push(' * GENERATED FILE, do not edit by hand.');
 ts.push(' * Source: scripts/generate-ccxt-manifest.mjs introspecting ccxt@' + ccxt.version);
 ts.push(' * Regenerated: ' + today);
 ts.push(' * Total exchanges: ' + rows.length);
@@ -107,7 +108,7 @@ ts.push('  description?: string;');
 ts.push('  tags: string[];');
 ts.push('  popularity: number;');
 ts.push("  credentialShape: 'apiKey+secret' | 'apiKey+password+secret' | 'apiKey+secret+uid';");
-ts.push('  capabilities: { trades: boolean; deposits: boolean; withdrawals: boolean };');
+ts.push('  capabilities: { trades: boolean; deposits: boolean; withdrawals: boolean; fetchBalance: boolean };');
 ts.push('}');
 ts.push('');
 ts.push('export const CCXT_MANIFEST: ReadonlyArray<CcxtExchangeManifestEntry> = [');
@@ -121,7 +122,7 @@ for (const r of rows) {
   ts.push('    tags: ' + JSON.stringify(r.tags) + ',');
   ts.push('    popularity: ' + r.popularity + ',');
   ts.push('    credentialShape: ' + JSON.stringify(r.creds) + ',');
-  ts.push('    capabilities: { trades: ' + r.trades + ', deposits: ' + r.deposits + ', withdrawals: ' + r.withdrawals + ' },');
+  ts.push('    capabilities: { trades: ' + r.trades + ', deposits: ' + r.deposits + ', withdrawals: ' + r.withdrawals + ', fetchBalance: ' + r.fetchBalance + ' },');
   ts.push('  },');
 }
 ts.push('];');
@@ -143,22 +144,23 @@ md.push('Regenerate with: `node scripts/generate-ccxt-manifest.mjs`');
 md.push('');
 md.push('## What the matrix means');
 md.push('');
-md.push('Three CCXT capabilities matter to OR sync:');
+md.push('Four CCXT capabilities matter to OR sync:');
 md.push('');
 md.push('* **trades** — `fetchMyTrades` available, OR can pull buy/sell history');
 md.push('* **deposits** — `fetchDeposits` available, OR can pull funding events');
 md.push('* **withdrawals** — `fetchWithdrawals` available, OR can pull payouts');
+md.push('* **fetchBalance** — `fetchBalance` available, OR uses this to validate credentials on connect');
 md.push('');
 md.push("If `trades` is false for an exchange, sync surfaces zero transactions until CCXT adds it upstream. That's a CCXT limitation, not OR.");
 md.push('');
 md.push('## Matrix');
 md.push('');
-md.push('| Exchange | Slug | Countries | Trades | Deposits | Withdrawals | Cred shape |');
-md.push('|----------|------|-----------|--------|----------|-------------|------------|');
+md.push('| Exchange | Slug | Countries | Trades | Deposits | Withdrawals | fetchBalance | Cred shape |');
+md.push('|----------|------|-----------|--------|----------|-------------|--------------|------------|');
 for (const r of rows) {
   md.push('| ' + r.name + ' | `' + r.id + '` | ' + (r.countries.join(', ') || '—') + ' | ' +
     (r.trades ? '✅' : '❌') + ' | ' + (r.deposits ? '✅' : '❌') + ' | ' +
-    (r.withdrawals ? '✅' : '❌') + ' | ' + r.creds + ' |');
+    (r.withdrawals ? '✅' : '❌') + ' | ' + (r.fetchBalance ? '✅' : '❌') + ' | ' + r.creds + ' |');
 }
 md.push('');
 if (skipped.length > 0) {
@@ -177,5 +179,6 @@ const caps = rows.reduce((a, r) => ({
   trades: a.trades + (r.trades ? 1 : 0),
   deposits: a.deposits + (r.deposits ? 1 : 0),
   withdrawals: a.withdrawals + (r.withdrawals ? 1 : 0),
-}), { trades: 0, deposits: 0, withdrawals: 0 });
+  fetchBalance: a.fetchBalance + (r.fetchBalance ? 1 : 0),
+}), { trades: 0, deposits: 0, withdrawals: 0, fetchBalance: 0 });
 console.error('Capabilities across ' + rows.length + ' exchanges:', caps);

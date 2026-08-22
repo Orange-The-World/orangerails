@@ -121,7 +121,7 @@ export async function drainStrikeQueue(args: {
    * receiverId || currency).
    */
   subaccountId: string;
-}): Promise<SyncResult> {
+}): Promise<SyncResult & { subscriptionError?: string }> {
   const creds = parseStrikeCredentials(args.credentials);
   const conn = args.connection;
 
@@ -146,11 +146,15 @@ export async function drainStrikeQueue(args: {
       console.log(`[strike-queue] registered subscription ${sub.id} for connection ${conn.id}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // Persist an actionable marker on EVERY subscription-failure branch, not
-      // just the scope case. The old code console.error'd non-scope failures
-      // into the void, leaving the connection with no readable cause and
+      // Map the failure to an actionable marker on EVERY subscription-failure
+      // branch, not just the scope case. The old code console.error'd non-scope
+      // failures into the void, leaving the connection with no readable cause and
       // forcing a server-log dig on the next failure. strikeSubscriptionErrorMarker
       // maps the error to a distinct plaintext marker the consumer maps to a CTA.
+      // The marker is RETURNED to the caller (or-sync), not written here directly:
+      // a DB write here was immediately overwritten by the post-pass success-path
+      // encrypted_last_error: null clear (DL-1505 item 2). The caller owns the
+      // single connection-row write.
       const marker = strikeSubscriptionErrorMarker(message);
       if (marker === 'STRIKE_SCOPE_MISSING_partner.webhooks.manage') {
         console.error(
@@ -164,11 +168,7 @@ export async function drainStrikeQueue(args: {
           `[strike-queue] subscription registration failed for ${conn.id} -> ${marker}: ${message.slice(0, 200)}`,
         );
       }
-      await args.serviceClient
-        .from('connections')
-        .update({ encrypted_last_error: marker })
-        .eq('id', conn.id);
-      return { transactions: [], next_cursor: conn.last_sync_cursor };
+      return { transactions: [], next_cursor: conn.last_sync_cursor, subscriptionError: marker };
     }
   }
 

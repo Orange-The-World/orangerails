@@ -74,6 +74,47 @@ interface LinkCompleteBody {
   accounts?: SourceWalletInput[];
 }
 
+// ---------------------------------------------------------------------------
+// Exported helpers (tested in index.test.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Promote a just-inserted connection from 'pending' to 'active'.
+ * Called after source_wallets upsert succeeds (DL-0740).
+ * The status guard prevents accidental double-activate races.
+ */
+export async function activateConnection(
+  service: SupabaseClient,
+  connectionId: string,
+): Promise<string | null> {
+  const { error } = await service
+    .from('connections')
+    .update({ status: 'active' })
+    .eq('id', connectionId)
+    .eq('status', 'pending');
+  if (error) return `activateConnection failed: ${error.message}`;
+  return null;
+}
+
+/**
+ * Delete a just-inserted pending connection whose wallet write failed.
+ * Lets the client retry with a fresh widget token without leaving a zombie
+ * active row with zero selection rows (DL-0740).
+ * The status guard prevents deleting a row that was already promoted.
+ */
+export async function rollbackPendingConnection(
+  service: SupabaseClient,
+  connectionId: string,
+): Promise<string | null> {
+  const { error } = await service
+    .from('connections')
+    .delete()
+    .eq('id', connectionId)
+    .eq('status', 'pending');
+  if (error) return `rollbackPendingConnection failed: ${error.message}`;
+  return null;
+}
+
 function makeServiceClient(): SupabaseClient {
   return createClient(
     Deno.env.get('SUPABASE_URL') ?? '',
@@ -189,6 +230,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // creating a duplicate. The partial unique index keeps subsequent
     // relinks idempotent.
     let connectionId: string;
+    let wasInserted = false;
     const existingByQid = quilttConnectionId
       ? await service
           .from('connections')
@@ -240,7 +282,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             encrypted_label:         body.encrypted_label ?? null,
             encrypted_credentials:   QUILTT_CREDENTIALS_SENTINEL,
             credentials_key_version: 1,
-            status:                  'active',
+            // Insert as 'pending' when accounts are present so a wallet-write
+            // failure cannot leave an active connection with zero selection rows.
+            // The row is promoted to 'active' after source_wallets upsert succeeds,
+            // or deleted on failure so the client can retry with a fresh token
+            // (DL-0740).
+            status:                  body.accounts && body.accounts.length > 0 ? 'pending' : 'active',
           })
           .select('id')
           .single();
@@ -249,6 +296,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           return jsonResponse({ error: 'Failed to create connection' }, 500, cors);
         }
         connectionId = insertConn.data.id as string;
+        wasInserted = true;
       }
     }
 
@@ -269,7 +317,27 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         .upsert(walletRows, { onConflict: 'connection_id,external_wallet_id' });
       if (walletErr) {
         console.error('[or-quiltt-link-complete] source_wallets upsert failed:', walletErr.message);
+        if (wasInserted) {
+          // Remove the pending connection so the client can retry with a fresh
+          // widget token. If rollback itself fails the pending row lingers until
+          // cleanup_pending_connections cron runs (~10 min). Still return 500 so
+          // the client never treats a failed wallet write as a successful link.
+          const rbErr = await rollbackPendingConnection(service, connectionId);
+          if (rbErr) {
+            console.error('[or-quiltt-link-complete] rollback failed, pending row may linger (cron will clean up):', rbErr);
+          }
+        }
         return jsonResponse({ error: 'Failed to persist account selection' }, 500, cors);
+      }
+      if (wasInserted) {
+        // Fail closed: if activate fails the connection stays pending and cron
+        // deletes it in ~10 minutes. Return 500 so the client retries with a
+        // fresh widget token rather than treating this as a successful link.
+        const actErr = await activateConnection(service, connectionId);
+        if (actErr) {
+          console.error('[or-quiltt-link-complete] activate failed, connection stays pending:', actErr);
+          return jsonResponse({ error: 'Failed to activate connection' }, 500, cors);
+        }
       }
     }
 

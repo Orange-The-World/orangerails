@@ -13,16 +13,74 @@
  *
  * Response:
  *   { connections: [{
- *       id, provider_type, encrypted_label, encrypted_credentials,
- *       status, last_sync_at, last_sync_cursor, encrypted_last_error,
- *       credentials_key_version, created_at,
- *       source_wallets: [{ id, external_wallet_id, is_synced, encrypted_metadata }]
- *     }] }
+ *       id, provider_type, is_stealth, encrypted_label, encrypted_credentials,
+ *       status, last_sync_at, last_sync_cursor, last_block_scanned,
+ *       encrypted_last_error, credentials_key_version, created_at,
+ *       source_wallets: [{ id, external_wallet_id, is_synced, encrypted_metadata }],
+ *
+ *       // DL-1490, present ONLY on a failed connection on a sink-mode
+ *       // platform. Absent entirely otherwise: absent means "no readable
+ *       // cause", never "no failure". Read `status` for whether it failed.
+ *       error, correlation_id, message, detail, action, help_url
+ *     }],
+ *     stealth_unavailable: boolean }
+ *
+ * The six DL-1490 fields, in detail, because this is the contract other teams
+ * build against:
+ *
+ *   `error`           the machine-readable code, e.g. UPSTREAM_AUTH_FAILED.
+ *                     THIS IS PER CONNECTION. It is not the top-level `error`
+ *                     key, which only ever appears on an endpoint failure and
+ *                     never alongside `connections`. Do not conflate them.
+ *   `correlation_id`  opaque id for cross-referencing our edge logs. Show it
+ *                     to support, not to a customer as an explanation.
+ *   `message`         one-line customer-facing title.
+ *   `detail`          customer-facing body.
+ *   `action`          suggested next step, or null when there is nothing the
+ *                     customer can do. Null is meaningful: render no button.
+ *   `help_url`        EMPTY STRING for every code today, because the help
+ *                     articles are not published. Do NOT render a link from
+ *                     it until it is non-empty; guard on length, not presence.
+ *
+ * These are resolved from the same _shared/error-catalog.ts that or-sync uses,
+ * so the two surfaces cannot drift. They are additive: every field that was
+ * here before is still here, `encrypted_last_error` included, so a consumer
+ * reading only the raw column keeps working untouched.
+ *
+ * Sync progress is two fields, never one coerced into the other:
+ * `last_sync_cursor` (text, regular rows) and `last_block_scanned` (integer,
+ * stealth rows), each null on the row kind that does not carry it.
+ *
+ * `stealth_unavailable` is true when the stealth store could not be read, so
+ * the list may be short. It is about the READ, not the result: a user with no
+ * stealth connections gets false. Always present, never omitted on success,
+ * because a key that only appears on failure is a key clients forget to
+ * check.
+ *
+ * The contract, stated as an outcome: this returns every connection the user
+ * completed, in one shape, regardless of provider family. Stealth Sync
+ * connections live in a separate store and are unioned in here. Branch on
+ * `is_stealth`, which is a boolean on every row, never on a provider list.
+ * See ./stealth-union.ts for the field-by-field reasoning and for what is
+ * deliberately never surfaced.
+ *
+ * Newest-first across both families, so a stealth connection made minutes
+ * ago does not render below a bank connection from July.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
+import { withErrorCopy } from './error-copy.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import {
+  buildListResponse,
+  isUnmappedStealthStatus,
+  mergeConnections,
+  STEALTH_UNAVAILABLE_ALARM,
+  stealthRowToConnection,
+  tagRegularConnection,
+} from './stealth-union.ts';
+import type { StealthConnectionRow, UnifiedConnection } from './stealth-union.ts';
 
 interface SourceWalletRow {
   id: string;
@@ -95,10 +153,106 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         is_synced: w.is_synced,
         encrypted_metadata: w.encrypted_metadata,
       }));
-      return { ...c, source_wallets: walletsForConn };
-    });
+      return tagRegularConnection({ ...c, source_wallets: walletsForConn });
+    }) as unknown as UnifiedConnection[];
 
-    return jsonResponse({ connections: enriched }, 200, cors);
+    // Union in the stealth store. See ./stealth-union.ts for why the two
+    // stores are disjoint and what this deliberately does not surface.
+    //
+    // The join needs no migration and no new column. `connections` is scoped
+    // by subaccount_id; `stealth_connections` by (platform_id, app_user_id)
+    // and has no subaccount_id. The subaccount row already carries both
+    // halves: ow-or-proxy provisions with external_user_id = the host app's
+    // user id, and the connect widget is handed that same id as app_user_id.
+    //
+    // Reading the pair off the subaccount row rather than off `ctx` covers
+    // platform and direct mode with one code path, and keeps the lookup
+    // anchored to the subaccount the caller was already authorized for.
+    const { data: subaccountRow, error: subErr } = await ctx.serviceClient
+      .from('subaccounts')
+      .select('platform_id, external_user_id')
+      .eq('id', subaccountId)
+      .maybeSingle();
+
+    let stealthConnections: UnifiedConnection[] = [];
+    // Tracks whether the stealth store could be READ, not whether it returned
+    // rows. A user with no stealth connections is a successful read of an
+    // empty set and must not raise this.
+    let stealthUnavailable = false;
+
+    if (subErr || !subaccountRow) {
+      // Non-fatal, and loud. resolveSubaccount already proved this row
+      // exists, so reaching here means the second read failed rather than
+      // the caller being unauthorized.
+      stealthUnavailable = true;
+      console.error(
+        `[or-connection-list] ${STEALTH_UNAVAILABLE_ALARM} subaccount reread failed:`,
+        subErr,
+      );
+    } else {
+      const { data: stealthRows, error: stealthErr } = await ctx.serviceClient
+        .from('stealth_connections')
+        .select('id, connection_kind, status, last_sync_at, last_block_scanned, created_at')
+        .eq('platform_id', subaccountRow.platform_id)
+        .eq('app_user_id', subaccountRow.external_user_id)
+        .order('created_at', { ascending: false });
+
+      if (stealthErr) {
+        // Non-fatal on purpose: a stealth read failure must not blank out a
+        // user's working bank connections. It is logged at error level, with
+        // the alarm token, and reported to the client on the response,
+        // because the visible symptom, a missing connection, is exactly the
+        // bug this union exists to fix and must not pass unnoticed.
+        stealthUnavailable = true;
+        console.error(
+          `[or-connection-list] ${STEALTH_UNAVAILABLE_ALARM} stealth_connections query failed:`,
+          stealthErr,
+        );
+      } else {
+        const rows = (stealthRows ?? []) as StealthConnectionRow[];
+        for (const r of rows) {
+          if (isUnmappedStealthStatus(r.status)) {
+            console.error(
+              `[or-connection-list] unmapped stealth status "${r.status}" on connection ${r.id}, reported as error`,
+            );
+          }
+        }
+        stealthConnections = rows.map(stealthRowToConnection);
+      }
+    }
+
+    // DL-1490: resolve the stored error code into customer-facing copy, using
+    // the same catalog or-sync uses so the two surfaces cannot drift.
+    //
+    // Sink mode only. On a non-sink platform encrypted_last_error is
+    // ciphertext and is not ours to interpret here. The platform is read from
+    // the subaccount row that was already fetched above, so this costs one
+    // extra lookup and only when that read succeeded. If it did not, we simply
+    // do not decorate: the response keeps exactly the shape it has today.
+    let sinkMode = false;
+    if (subaccountRow) {
+      const { data: platRow, error: platErr } = await ctx.serviceClient
+        .from('platforms')
+        .select('sink_format')
+        .eq('id', subaccountRow.platform_id)
+        .maybeSingle();
+      if (platErr) {
+        // Loud but non-fatal, for the same reason the stealth read is: a
+        // failure to enrich must never blank out a user's connections.
+        console.error('[or-connection-list] platforms lookup failed, returning without error copy:', platErr);
+      }
+      sinkMode = typeof platRow?.sink_format === 'string' && platRow.sink_format.length > 0;
+    }
+
+    const decorated = enriched.map(
+      c => withErrorCopy(c as unknown as Record<string, unknown>, sinkMode),
+    ) as unknown as UnifiedConnection[];
+
+    return jsonResponse(
+      buildListResponse(mergeConnections(decorated, stealthConnections), stealthUnavailable),
+      200,
+      cors,
+    );
   } catch (err) {
     console.error('[or-connection-list] fatal:', err);
     return jsonResponse({ error: 'Internal error' }, 500, cors);

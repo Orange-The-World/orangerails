@@ -77,6 +77,12 @@ export const ERROR_CATALOG: Record<string, ErrorCatalogEntry> = {
     action: "Reconnect this account",
     help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
   },
+  UPSTREAM_UNSUPPORTED: {
+    title: "This exchange is not fully supported",
+    body: "We could not connect this account because this exchange does not support the connection method we require. Try a different exchange, or contact support for help.",
+    action: null,
+    help_url: "",  // TODO: re-enable once articles published to docs.orangerails.com
+  },
   UPSTREAM_OTHER: {
     title: "Something went wrong",
     body: "We hit an unexpected error syncing this account. Try again in a few minutes. If it keeps happening, contact support and share the reference code below.",

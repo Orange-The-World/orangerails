@@ -47,6 +47,9 @@ verify_jwt = false
 [functions.or-source-wallets-set]
 verify_jwt = false
 
+[functions.or-source-wallet-lookup]
+verify_jwt = false
+
 [functions.or-stealth-connection-create]
 verify_jwt = false
 
@@ -60,6 +63,9 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.or-stealth-envelope-update]
+verify_jwt = false
+
+[functions.or-stealth-transactions-list]
 verify_jwt = false
 
 [functions.or-stealth-transactions-store]
@@ -127,4 +133,10 @@ verify_jwt = false
 # v1-rate authenticates against orbi_api_keys, not the platform key table.
 # Gateway must pass through so the function's own auth block can run.
 [functions.v1-rate]
+verify_jwt = false
+
+# --- Internal worker token auth (X-Internal-Worker-Token header) ------
+# or-quiltt-drain-alert is invoked by pg_cron via net.http_post and
+# validates X-Internal-Worker-Token itself. Gateway must pass through.
+[functions.or-quiltt-drain-alert]
 verify_jwt = false

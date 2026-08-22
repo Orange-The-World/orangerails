@@ -102,8 +102,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (!conn) return jsonResponse({ error: 'Connection not found' }, 404, cors);
 
     // Upsert each wallet. ON CONFLICT (connection_id, external_wallet_id)
-    // means a re-call with the same wallet replaces is_synced + ciphertext ,
+    // means a re-call with the same wallet replaces is_synced + ciphertext,
     // perfect for "user reopened picker, toggled USD off" flows.
+    //
+    // Retention policy (DL-0740 / issue #647): deselecting an account
+    // (is_synced: false) does NOT delete its source_wallets row, and does
+    // NOT purge any encrypted_transactions rows. Historical data is kept
+    // intact. or-quiltt-sync reads is_synced and skips future data pulls
+    // for deselected accounts; the user can re-enable an account without
+    // losing history. Never add a delete or purge here without a separate
+    // founder ruling: wiping encrypted_transactions is irreversible under ZKA.
     const rows = body.source_wallets.map(w => ({
       connection_id: body.connection_id!,
       external_wallet_id: w.external_wallet_id,

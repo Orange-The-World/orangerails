@@ -183,6 +183,14 @@ Wordlist source must match between server and browser; OR uses the same 256 word
 > model instead, see [Stealth-Sync.md, Consumer integration: the exact
 > steps](Stealth-Sync.md#consumer-integration-the-exact-steps). Most apps
 > (`bitbooks-v2` included) integrate both.
+>
+> **Widening the address window.** Stealth Sync scans a fixed set of
+> addresses per chain and ignores any transaction paid to an address
+> beyond that ceiling, so a default connection can silently miss history
+> for a busy wallet. You control the ceiling with the optional integer
+> `gap_limit` field (1 to 1000) on `OR_STEALTH_INIT`. See
+> [Stealth-Sync.md, the `gap_limit` field](Stealth-Sync.md#step-3-send-or_stealth_init)
+> for the exact contract, valid range, and the existing-connection caveat.
 
 The Link widget is OR's hosted credential collection page. Plaid-hybrid co-branding: your app's name appears prominently, "Powered by OrangeRails" smaller. Provider-specific form fields (Blink: API key; xpub: extended public key + gap limit; BTCPay: server URL + API key; etc.) come from the [provider catalog](#provider-catalog-dynamic-discovery).
 
@@ -422,6 +430,23 @@ Every error V2's integration hit. Each one is something you can step on too. Eac
 When opening the Link widget, pass the same value you used as `external_user_id` at `or-provision` time. Do NOT pass the `subaccount_id` you got back. The widget calls `or-link-complete` which looks up subaccounts by `external_user_id`; passing the wrong value mints a brand new orphan subaccount. Sync later returns zero connections because they are on a different subaccount than the one your code queries.
 
 Symptom: `Sync failed at Bitcoin Connections: synced 0 / 0 wallets`, no errors logged. → [Connect a wallet](#connecting-a-wallet-through-the-link-widget).
+
+### Your proxy handler must ignore the `app_user_id` in the message
+
+The widget re-mints its own token part way through a long scan, because the
+initial `widget_token` lives 300 seconds and an xpub scan runs 10 to 15 minutes.
+That re-mint arrives at your proxy handler as a message from browser code, and
+it carries an `app_user_id`.
+
+**Take `app_user_id` from your own authenticated session and ignore the value in
+the message.** The token `or-link-mint-token` returns is a bearer credential
+scoped to whatever `app_user_id` your handler forwards, so trusting the
+browser-supplied value would let one signed-in user mint a working token for
+another.
+
+Your handler must also route `or-link-mint-token` in its allowlist. If it does
+not, the refresh call times out after 15 seconds and the upload proceeds with
+the expired token, which fails the way it did before this change.
 
 ### `cred_key` REQUIRED, `txn_key` OPTIONAL
 

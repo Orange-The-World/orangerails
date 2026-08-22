@@ -1,8 +1,14 @@
-import { createFileRoute, Link, Outlet, useNavigate } from '@tanstack/react-router';
-import { useEffect } from 'react';
+import { createFileRoute, Link, Outlet, redirect } from '@tanstack/react-router';
+import { supabase } from '@/integrations/supabase/client';
 import { useRole } from '@/hooks/useRole';
 
 export const Route = createFileRoute('/admin')({
+  beforeLoad: async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      throw redirect({ to: '/login' });
+    }
+  },
   component: AdminLayout,
 });
 
@@ -12,13 +18,6 @@ function AdminLayout() {
   // auth.jwt() ->> 'app_metadata' -> 'role' == 'staff'. This
   // client-side check is defense-in-depth, not the primary lock.
   const role = useRole();
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    if (!role.loading && role.role === 'anonymous') {
-      navigate({ to: '/login' });
-    }
-  }, [role.loading, role.role, navigate]);
 
   if (role.loading) {
     return (
