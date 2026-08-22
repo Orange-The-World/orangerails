@@ -54,7 +54,7 @@
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
-import { validateBody, ENCRYPTED_LABEL_MAX } from './validate.ts';
+import { validateBody } from './validate.ts';
 
 const QUILTT_CREDENTIALS_SENTINEL = 'quiltt-managed';
 
