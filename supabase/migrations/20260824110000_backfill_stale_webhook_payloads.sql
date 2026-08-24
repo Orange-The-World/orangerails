@@ -48,10 +48,22 @@
 -- nothing. Scoped: only succeeded_at IS NULL, so delivered history is never
 -- rewritten. Reversible, see foot.
 --
--- Down / undo:
+-- Down / undo. This migration adds `type`/`data` ONLY to rows that lacked a
+-- `type` at apply time. Rows already in canonical shape (emitted by #846) are
+-- never touched here and MUST NOT be stripped on reversal. Because both kinds
+-- carry type+data afterwards, a blanket
+--   UPDATE ... SET payload = payload - 'type' - 'data'
+--     WHERE succeeded_at IS NULL AND event_type = 'sync.completed';
+-- is too wide: it would corrupt the #846 rows this migration never modified.
+-- To reverse, key the strip to exactly the ids reported before apply:
+--   -- capture BEFORE running this migration:
+--   SELECT id FROM public.webhook_delivery
+--    WHERE succeeded_at IS NULL AND event_type = 'sync.completed'
+--      AND NOT (payload ? 'type');
+--   -- then reverse only those ids:
 --   UPDATE public.webhook_delivery
 --      SET payload = payload - 'type' - 'data'
---    WHERE succeeded_at IS NULL AND event_type = 'sync.completed';
+--    WHERE id = ANY(:captured_ids);
 -- ============================================================
 
 DO $$
