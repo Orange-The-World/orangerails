@@ -25,8 +25,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import {
-  ageHours,
-  isStalled,
+  classify,
   type QueueDefinition,
   QUEUES,
   watchedQueues,
@@ -40,7 +39,13 @@ interface QueueReport {
   oldest_undrained_at: string | null;
   age_hours: number | null;
   threshold_hours: number | null;
-  firing: boolean;
+  /**
+   * Three states, never a boolean. 'unknown' means the probe learned nothing
+   * and must never be rendered as healthy (ruled on #378, 2026-08-01).
+   */
+  state: 'ok' | 'stalled' | 'unknown';
+  /** Present for 'unknown'. Says what we could not find out, and why. */
+  why?: string;
   error?: string;
 }
 
@@ -71,8 +76,17 @@ function jsonResponse(body: unknown, status: number): Response {
  * Oldest still-queued row for one queue.
  *
  * "Still queued" means the drain column is NULL and every terminal column is
- * NULL. Ordering ascending and taking one row lets the index do the work
- * rather than counting the whole table.
+ * NULL. Ordering ascending and taking one row means we read one row rather
+ * than counting the whole table.
+ *
+ * ON INDEXES, because an earlier version of this comment claimed one covered
+ * this and that was FALSE. `idx_webhook_delivery_pending` is partial on
+ * `(succeeded_at IS NULL AND attempts < 5)`. This query deliberately omits the
+ * attempts clause, because a row that exhausted its retries is exactly the row
+ * we must still see, so Postgres cannot use that index: a partial index is only
+ * usable when the query predicate implies the index predicate. The migration in
+ * this change adds an index matching THIS predicate. Check both together if you
+ * ever change the filter here.
  */
 async function oldestUndrained(
   // deno-lint-ignore no-explicit-any
@@ -157,55 +171,75 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   for (const q of watchedQueues()) {
     const { at, error } = await oldestUndrained(client, q);
     const threshold = q.coverage.kind === 'watched' ? q.coverage.stallHours : null;
-    const age = ageHours(at, now);
+    const verdict = classify(q, at, now, error ?? null);
 
-    // A failed query fires. Absence of evidence is not green.
-    const firing = error !== undefined || isStalled(q, at, now);
-
-    if (error) {
-      console.error(`[or-queue-health] ${q.table}: query failed: ${error}`);
-    } else if (firing) {
+    if (verdict.state === 'unknown') {
+      // Loud, because this is the state a monitor must never hide. A probe that
+      // cannot see is not a probe that found nothing.
+      console.error(`[or-queue-health] UNKNOWN ${q.table}: ${verdict.why}`);
+    } else if (verdict.state === 'stalled') {
       console.error(
         `[or-queue-health] ALERT ${q.table}: oldest undrained row is ` +
-        `${(age ?? 0).toFixed(1)}h old, threshold ${threshold}h`,
+        `${verdict.ageHours.toFixed(1)}h old, threshold ${threshold}h`,
       );
     }
 
+    const age = verdict.state === 'unknown' ? null : verdict.ageHours;
     queues.push({
       table: q.table,
       oldest_undrained_at: at,
       age_hours: age === null ? null : Number(age.toFixed(2)),
       threshold_hours: threshold,
-      firing,
+      state: verdict.state,
+      ...(verdict.state === 'unknown' ? { why: verdict.why } : {}),
       ...(error ? { error } : {}),
     });
   }
 
-  const alertFiring = queues.some((q) => q.firing);
+  // Anything that is not a clean 'ok' is worth telling someone about.
+  const firingQueues = queues.filter((q) => q.state !== 'ok');
+  const alertFiring = firingQueues.length > 0;
   let zulipPostSent: boolean | null = null;
 
   if (alertFiring) {
-    const { data: stateRow } = await client
+    // PER-QUEUE cooldown, not one global row. Ruled on 2026-08-10 reviewing
+    // PR 648: a single suppression row means the first queue to stall silences
+    // every other queue for the whole cooldown, so a second, unrelated outage
+    // starting inside that hour is never announced at all.
+    const tables = firingQueues.map((q) => q.table);
+    const { data: stateRows, error: stateError } = await client
       .from('queue_health_alert_state')
-      .select('last_notified_at')
-      .eq('id', 1)
-      .maybeSingle();
+      .select('queue, last_notified_at')
+      .in('queue', tables);
 
-    const lastNotifiedAt: string | null = stateRow?.last_notified_at ?? null;
-    const withinCooldown = lastNotifiedAt !== null &&
-      now.getTime() - new Date(lastNotifiedAt).getTime() <
-        SUPPRESSION_COOLDOWN_MINUTES * 60 * 1000;
+    if (stateError) {
+      // Fail towards posting. A missing cooldown read must not silence an
+      // alert; a duplicate chat post is much cheaper than a missed outage.
+      console.error(
+        `[or-queue-health] cooldown read failed, posting anyway: ${stateError.message}`,
+      );
+    }
 
-    if (withinCooldown) {
+    const lastByQueue = new Map<string, string | null>(
+      (stateRows ?? []).map((r) => [r.queue as string, r.last_notified_at as string | null]),
+    );
+    const cooldownMs = SUPPRESSION_COOLDOWN_MINUTES * 60 * 1000;
+    const dueQueues = firingQueues.filter((q) => {
+      const last = lastByQueue.get(q.table) ?? null;
+      if (last === null) return true;
+      return now.getTime() - new Date(last).getTime() >= cooldownMs;
+    });
+
+    if (dueQueues.length === 0) {
       console.log(
-        `[or-queue-health] firing but suppressed (last post: ${lastNotifiedAt}, ` +
-        `cooldown: ${SUPPRESSION_COOLDOWN_MINUTES} min)`,
+        `[or-queue-health] ${firingQueues.length} queue(s) firing, all inside ` +
+        `the ${SUPPRESSION_COOLDOWN_MINUTES} min per-queue cooldown`,
       );
       zulipPostSent = false;
     } else {
-      const lines = queues.filter((q) => q.firing).map((q) =>
-        q.error
-          ? `:warning: **${q.table}**: probe could not run: ${q.error}`
+      const lines = dueQueues.map((q) =>
+        q.state === 'unknown'
+          ? `:warning: **${q.table}**: probe could not check this queue: ${q.why ?? q.error}`
           : `:x: **${q.table}**: oldest undrained row is **${q.age_hours}h** old ` +
             `(threshold ${q.threshold_hours}h, queued at ${q.oldest_undrained_at})`
       );
@@ -220,16 +254,29 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         'checking whether it succeeded: an absent `cron.job` entry is how ' +
         'DL-1562 went unnoticed for ten weeks.',
         '',
+        'A `could not check` line is NOT a clean bill of health. It means this ' +
+        'probe learned nothing about that queue on this run.',
+        '',
         `Coverage map and known blind spots: \`supabase/functions/or-queue-health/queues.ts\`. ` +
-        `Reposts suppressed for ${SUPPRESSION_COOLDOWN_MINUTES} min.`,
+        `Reposts suppressed per queue for ${SUPPRESSION_COOLDOWN_MINUTES} min.`,
       ].join('\n');
 
       zulipPostSent = await postToZulip(message);
       if (zulipPostSent) {
-        await client
+        // Stamp only the queues actually named in this post. Stamping a queue
+        // we suppressed would extend its silence without ever announcing it.
+        const stampedAt = now.toISOString();
+        const { error: upsertError } = await client
           .from('queue_health_alert_state')
-          .update({ last_notified_at: now.toISOString() })
-          .eq('id', 1);
+          .upsert(
+            dueQueues.map((q) => ({ queue: q.table, last_notified_at: stampedAt })),
+            { onConflict: 'queue' },
+          );
+        if (upsertError) {
+          console.error(
+            `[or-queue-health] posted but could not stamp cooldown: ${upsertError.message}`,
+          );
+        }
       }
     }
   }

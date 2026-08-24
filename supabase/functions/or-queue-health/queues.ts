@@ -46,6 +46,21 @@ export type QueueCoverage =
     owner: string;
     /** Why duplicating it here would be worse than deferring. */
     why: string;
+  }
+  | {
+    /**
+     * There is no scheduled drain, so age is a meaningless signal: rows sit
+     * until something external happens, and that is CORRECT behaviour rather
+     * than a stall. Alerting on age here would fire forever for every inactive
+     * user and train everyone to ignore this channel.
+     *
+     * This is not the same as 'delegated'. Delegated means somebody else is
+     * watching. This means NOBODY is watching, and we are saying so out loud
+     * rather than pretending an age threshold covers it.
+     */
+    kind: 'unmonitorable';
+    /** What would actually have to be built to cover this queue. */
+    needs: string;
   };
 
 export interface QueueDefinition {
@@ -91,8 +106,22 @@ export const QUEUES: QueueDefinition[] = [
     enqueuedAt: 'received_at',
     drainedAt: 'processed_at',
     alsoTerminal: [],
-    coverage: { kind: 'watched', stallHours: 2 },
+    // VERIFIED 2026-08-24: drainStrikeQueue() is called from exactly one place,
+    // or-sync/index.ts, which is the user-initiated sync endpoint. No cron job
+    // invokes it, and none can: the drain decrypts with the user's unlock key,
+    // which only exists inside a request that user authenticated. So a row here
+    // waits for its owner to next open the app, and a week-old row is normal for
+    // anyone on holiday. An earlier draft of this file gave this queue a 2 hour
+    // threshold, which would have alerted continuously for every inactive user.
+    coverage: {
+      kind: 'unmonitorable',
+      needs:
+        'A drain that does not need the user unlock key, or an arrival-rate ' +
+        'signal that compares inserts against Strike deliveries. Age cannot ' +
+        'work here while the only drain is user-initiated.',
+    },
     blindSpots: [
+      'Not watched at all, deliberately. See coverage.needs.',
       'This table held zero rows at the time of writing and every inbound ' +
       'Strike delivery was being rejected 401 before insert (DL-1505). An age ' +
       'probe cannot see that: an empty queue and a queue nothing can write to ' +
@@ -136,13 +165,53 @@ export function ageHours(oldestEnqueuedAt: string | null, now: Date): number | n
   return (now.getTime() - then) / (60 * 60 * 1000);
 }
 
-/** True when this queue has an undrained row older than its threshold. */
-export function isStalled(
+/**
+ * The verdict for one queue.
+ *
+ * THREE states, not two, and that is the whole point. Ruled on #378,
+ * 2026-08-01: "I could not check must never report as OK". A boolean forces a
+ * failed lookup to collapse into `false`, which reads as healthy, which is
+ * exactly how a monitor becomes a thing that reassures you while blind.
+ */
+export type QueueVerdict =
+  /** Queried successfully, oldest undrained row is within threshold. */
+  | { state: 'ok'; ageHours: number | null }
+  /** Queried successfully, oldest undrained row is past threshold. */
+  | { state: 'stalled'; ageHours: number }
+  /** Not queried, or the query failed. NEVER treat this as healthy. */
+  | { state: 'unknown'; why: string };
+
+/**
+ * Turn a lookup result into a verdict.
+ *
+ * `lookupError` is separate from a null age on purpose. A null age means "no
+ * undrained rows", which is the healthiest possible answer. An error means we
+ * learned nothing, and those two must never share a return value.
+ */
+export function classify(
   queue: QueueDefinition,
   oldestEnqueuedAt: string | null,
   now: Date,
-): boolean {
-  if (queue.coverage.kind !== 'watched') return false;
+  lookupError?: string | null,
+): QueueVerdict {
+  if (lookupError) {
+    return { state: 'unknown', why: `lookup failed: ${lookupError}` };
+  }
+  if (queue.coverage.kind === 'delegated') {
+    return { state: 'unknown', why: `delegated to ${queue.coverage.owner}` };
+  }
+  if (queue.coverage.kind === 'unmonitorable') {
+    return { state: 'unknown', why: `unmonitorable: ${queue.coverage.needs}` };
+  }
   const age = ageHours(oldestEnqueuedAt, now);
-  return age !== null && age > queue.coverage.stallHours;
+  if (oldestEnqueuedAt !== null && age === null) {
+    // A row exists but its timestamp did not parse. That is a real unknown,
+    // not an empty queue, and silently treating it as empty would hide a
+    // wedged row behind a clean bill of health.
+    return { state: 'unknown', why: `unparseable ${queue.enqueuedAt}` };
+  }
+  if (age !== null && age > queue.coverage.stallHours) {
+    return { state: 'stalled', ageHours: age };
+  }
+  return { state: 'ok', ageHours: age };
 }
