@@ -104,6 +104,26 @@ Deno.test('non-POST is refused', () => {
   );
 });
 
+Deno.test('the function is declared in the public-auth manifest', () => {
+  // scripts/check-public-auth.mjs is a bidirectional CI gate: verify_jwt = false
+  // without a manifest entry is how an unauthenticated endpoint ships, and a
+  // manifest entry without verify_jwt = false is how a receiver gets rejected at
+  // the gateway before its own auth runs. It caught this PR: I set the config
+  // flag and forgot the declaration, and CI went red on exactly that.
+  //
+  // internal-worker-token is the same mode or-quiltt-drain-alert uses, and it is
+  // the honest description: a service-internal caller proving it is us, never
+  // exposed to integrators.
+  const manifest = JSON.parse(
+    Deno.readTextFileSync(new URL('../public-auth.json', import.meta.url)),
+  );
+  assertEquals(
+    manifest.functions['or-webhook-dispatch'],
+    'internal-worker-token',
+    'or-webhook-dispatch must declare its auth mode in public-auth.json',
+  );
+});
+
 Deno.test('config.toml and the guard ship together', () => {
   // The dangerous state is verify_jwt = false with no guard. This asserts the
   // config entry exists, which is what makes the guard load-bearing; the tests
