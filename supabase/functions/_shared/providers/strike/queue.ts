@@ -188,6 +188,11 @@ export async function drainStrikeQueue(args: {
 
   const transactions: NormalizedTransaction[] = [];
   const processedIds: string[] = [];
+  // First per-event error encountered this drain pass. Written to
+  // encrypted_last_error by the or-sync caller so the consumer sees a
+  // CTA rather than a silently stale connection. Only the first error is
+  // captured; subsequent events continue (idempotent on retry).
+  let firstDrainEventError: string | null = null;
 
   for (const ev of events) {
     try {
@@ -245,9 +250,16 @@ export async function drainStrikeQueue(args: {
       if (norm) transactions.push(norm);
       processedIds.push(ev.id);
     } catch (err) {
-      // GET-by-id failed (404, network, CF flake). Leave processed_at NULL
-      // so the next sync retries. Log and continue with the next event.
+      // GET-by-id failed (404, auth, network, CF flake). Leave processed_at
+      // NULL so the next sync retries. Log and continue with next event.
+      // Capture the first error as a marker so or-sync can write it to
+      // encrypted_last_error; without this the connection looked healthy
+      // while the drain silently discarded every event (DL-1505 Group B).
+      const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[strike-queue] event ${ev.id} (${ev.event_type} ${ev.entity_id}) failed:`, err);
+      if (!firstDrainEventError) {
+        firstDrainEventError = `STRIKE_DRAIN_EVENT_FAILED:${ev.event_type}:${errMsg.slice(0, 120)}`;
+      }
     }
   }
 
@@ -267,6 +279,9 @@ export async function drainStrikeQueue(args: {
   return {
     transactions,
     next_cursor: conn.last_sync_cursor, // cursor unused in the webhook model
+    // Surface the first drain-level event error to the caller so it can
+    // write it to encrypted_last_error. Null when all events processed OK.
+    ...(firstDrainEventError ? { subscriptionError: firstDrainEventError } : {}),
   };
 }
 
