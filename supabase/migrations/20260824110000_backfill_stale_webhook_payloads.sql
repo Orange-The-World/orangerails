@@ -45,8 +45,12 @@
 -- the published type does not carry it. It remains flat, same as #846.
 --
 -- Idempotent: filtered on rows that lack `type`, so a second run matches
--- nothing. Scoped: only succeeded_at IS NULL, so delivered history is never
--- rewritten. Reversible, see foot.
+-- nothing. Scoped twice over: `succeeded_at IS NULL` so delivered history is
+-- never rewritten, and `attempts < 5` so rows the pre-cutoff mark in
+-- 20260824105000 has retired are left exactly as that migration left them.
+-- `attempts < 5` is the contract, not the sentinel string in `last_error`:
+-- the integer is what the dispatcher itself predicates on, the string is for
+-- humans reading the table. Reversible, see foot.
 --
 -- Down / undo. This migration adds `type`/`data` ONLY to rows that lacked a
 -- `type` at apply time. Rows already in canonical shape (emitted by #846) are
@@ -58,7 +62,8 @@
 -- To reverse, key the strip to exactly the ids reported before apply:
 --   -- capture BEFORE running this migration:
 --   SELECT id FROM public.webhook_delivery
---    WHERE succeeded_at IS NULL AND event_type = 'sync.completed'
+--    WHERE succeeded_at IS NULL AND attempts < 5
+--      AND event_type = 'sync.completed'
 --      AND NOT (payload ? 'type');
 --   -- then reverse only those ids:
 --   UPDATE public.webhook_delivery
@@ -74,6 +79,7 @@ BEGIN
   SELECT count(*) INTO before_count
   FROM public.webhook_delivery
   WHERE succeeded_at IS NULL
+    AND attempts < 5
     AND event_type = 'sync.completed'
     AND NOT (payload ? 'type');
 
@@ -92,6 +98,7 @@ BEGIN
                       )
                     )
    WHERE succeeded_at IS NULL
+     AND attempts < 5
      AND event_type = 'sync.completed'
      AND NOT (payload ? 'type');
 
@@ -100,6 +107,7 @@ BEGIN
   SELECT count(*) INTO after_count
   FROM public.webhook_delivery
   WHERE succeeded_at IS NULL
+    AND attempts < 5
     AND event_type = 'sync.completed'
     AND NOT (payload ? 'type');
 
@@ -113,6 +121,7 @@ BEGIN
   SELECT count(*) INTO after_count
   FROM public.webhook_delivery
   WHERE succeeded_at IS NULL
+    AND attempts < 5
     AND event_type = 'sync.completed'
     AND (payload -> 'data' ->> 'subaccount_id' IS NULL
       OR payload -> 'data' ->> 'connection_id' IS NULL);
