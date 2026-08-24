@@ -20,6 +20,10 @@ name: Prod gate selftest (no-op)
 # cancelled by the checker as designed.
 
 on:
+  # TEMPORARY (reverted before merge): lets the gate be exercised from this branch
+  # before the workflow exists on the default branch. See PR #849.
+  push:
+    branches: [chore/prod-gate-selftest]
   workflow_dispatch:
     inputs:
       reason:
