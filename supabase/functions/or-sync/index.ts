@@ -52,6 +52,7 @@ import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
 import {
   getSinkAdapter,
   listSinkFormats,
@@ -810,14 +811,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                   platform_id:   webhookPlatformId,
                   subaccount_id: subaccountId,
                   event_type:    'sync.completed',
-                  payload: {
-                    event:         'sync.completed',
-                    provider:      'quiltt',
-                    subaccount_id: subaccountId,
-                    connection_id: conn.id,
-                    synced_count:  quilttSinkSynced,
-                    ts:            new Date().toISOString(),
-                  },
+                  payload: buildSyncCompletedPayload({
+                    subaccountId,
+                    connectionId: conn.id,
+                    syncedCount:  quilttSinkSynced,
+                    provider:     'quiltt',
+                  }),
                 });
               } catch (whErr) {
                 console.error(`[or-sync] webhook enqueue failed for quiltt sink conn ${conn.id}:`, whErr);
@@ -1015,14 +1014,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 platform_id:   webhookPlatformId,
                 subaccount_id: subaccountId,
                 event_type:    'sync.completed',
-                payload: {
-                  event:         'sync.completed',
-                  provider:      'quiltt',
-                  subaccount_id: subaccountId,
-                  connection_id: conn.id,
-                  synced_count:  synced,
-                  ts:            new Date().toISOString(),
-                },
+                payload: buildSyncCompletedPayload({
+                  subaccountId,
+                  connectionId: conn.id,
+                  syncedCount:  synced,
+                  provider:     'quiltt',
+                }),
               });
             } catch (whErr) {
               console.error(`[or-sync] webhook enqueue failed for quiltt conn ${conn.id}:`, whErr);
@@ -1397,38 +1394,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // webhook_url configured (most direct-mode users today).
         if (webhookEnabled && webhookPlatformId) {
           try {
-            // Dual-shape payload -- emitted in parallel during the SDK
-            // transition window (May 2026 → ~end Q3 2026).
-            //
-            // - Top-level `event` + flat fields preserves the legacy
-            //   wire format that hand-rolled receivers (V2 pre-SDK, OW
-            //   pre-SDK) read. Removing it would break them mid-flight.
-            // - Top-level `type` + nested `data` matches the shape
-            //   `@orangerails/webhooks` (and the broader industry
-            //   convention: Stripe, Linear, Shopify) expect.
-            //
-            // Once every known consumer is on the SDK, drop the flat
-            // fields and keep only { type, data }. Tracked in OR's
-            // webhook architecture doc on maintainer-only.
-            const ts = new Date().toISOString();
-            const data = {
-              subaccount_id: subaccountId,
-              connection_id: conn.id,
-              synced_count: newTxs.length,
-              ts,
-            };
             await ctx.serviceClient.from('webhook_delivery').insert({
               platform_id: webhookPlatformId,
               subaccount_id: subaccountId,
               event_type: 'sync.completed',
-              payload: {
-                // legacy flat shape
-                event: 'sync.completed',
-                ...data,
-                // canonical shape consumed by @orangerails/webhooks
-                type: 'sync.completed',
-                data,
-              },
+              payload: buildSyncCompletedPayload({
+                subaccountId,
+                connectionId: conn.id,
+                syncedCount: newTxs.length,
+              }),
             });
           } catch (whErr) {
             // Best-effort: log and move on. The sync itself already succeeded.
