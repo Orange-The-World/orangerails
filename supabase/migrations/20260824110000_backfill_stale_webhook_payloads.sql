@@ -118,6 +118,15 @@ BEGIN
   -- Guard against a backfill that produced a `data` object with NULL members,
   -- which would parse but carry nothing. A flat field we cannot read is a row
   -- we must look at by hand, not one to quietly ship.
+  --
+  -- This check is DELIBERATELY wider than the rows this migration touched: it
+  -- covers every live sync.completed row, including ones that already carried
+  -- the canonical shape. If a row emitted elsewhere has an incomplete `data`,
+  -- the queue is about to be drained for the first time and that is worth
+  -- stopping the apply for, not worth stepping around because this particular
+  -- migration did not create it. It checks the two identifiers only; a NULL
+  -- `synced_count` or `ts` is not covered, because those are recoverable
+  -- downstream whereas an unidentifiable event is not.
   SELECT count(*) INTO after_count
   FROM public.webhook_delivery
   WHERE succeeded_at IS NULL
