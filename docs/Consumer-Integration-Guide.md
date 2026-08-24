@@ -404,9 +404,16 @@ Note what is different: it carries a `provider` field, and it has **no `type` an
 
 > **Read this before you pick a parser.** `@orangerails/webhooks` `constructEvent()` requires a top-level `type` and throws `SignatureVerificationError: Unsupported webhook event type: undefined` when it is missing. Bank events do not carry `type`. **So the SDK currently rejects every bank notification.** If you consume bank events, either parse the flat shape yourself or wait for the emitters to be aligned. This is tracked as a defect on our side, not a contract you should design around.
 
-**`synced_count` is `0` on the event-driven sink path and that is correct, not a bug.** Sink delivery means OR pulled nothing; the whole point of the notification is to ask you to come and call `or-sync`. It is a real count on paths where OR did the pulling. Do not read `0` as "nothing happened" and skip your pull.
+**A `synced_count` of `0` is a real value, not a bug, and it does not mean "nothing happened".** Two different paths can produce it:
 
-**When a notification is sent.** The generic provider path enqueues on every successful sync, including one that found nothing. The Quiltt pull paths enqueue only when `synced_count > 0`. The Quiltt event-driven sink path enqueues with `0` because the count is not knowable there. Do not infer "there is new data" from the arrival of a notification alone; call `or-sync` and let its cursor decide.
+* the event-driven sink path, where OR pulled nothing by design and the notification exists purely to ask you to come and call `or-sync`;
+* the generic provider path, which notifies after every successful sync, including one that found no new rows.
+
+On paths where OR did the pulling it is the real row count. In the live queue at time of writing it ranges from `0` to `190`. **Do not read `0` as "skip the pull".**
+
+**When a notification is sent.** The generic provider path enqueues on every successful sync, whether or not it found anything. The Quiltt pull paths enqueue only when they pulled at least one row, so they never send `0`. The Quiltt event-driven sink path always sends `0`, because the count is not knowable there. Do not infer "there is new data" from the arrival of a notification alone; call `or-sync` and let its cursor decide.
+
+**Ignore top-level keys you do not recognise; do not reject on them.** OR is mid-migration between two payload shapes and adds fields ahead of removing them. A strict validator that rejects unknown keys will drop events, and because you are told to answer `2xx` on anything you do not handle, that rejection is invisible on both sides.
 
 ### Signature
 
@@ -414,11 +421,20 @@ Two headers are sent on every request. Verify either one; `X-OR-Signature-V2` is
 
 ```
 X-OR-Signature:    hex(HMAC-SHA-256(secret, raw_body))
-X-OR-Signature-V2: t=<unix_seconds>,v1=<hex>
+X-OR-Signature-V2: t=<unix_seconds>,v1=hex(HMAC-SHA-256(secret, "<t>.<raw_body>"))
 X-OR-Event-Id:     <uuid>
 ```
 
-Compute the HMAC over the **raw request body bytes**. Do not parse and re-serialize first: even a whitespace difference changes the digest and the check will fail. Compare in constant time.
+**The two headers do not sign the same material, and this is the easiest thing on the page to get wrong.**
+
+| Header | Signed material |
+|---|---|
+| `X-OR-Signature` (v1) | the raw request body bytes, alone |
+| `X-OR-Signature-V2` (v2) | the `t` value from the same header, then a literal `.`, then the raw body |
+
+So for v2 you build the string `1756040400.{"event":"sync.completed",...}` and HMAC that. Signing the body alone produces a digest that never matches the preferred header, and the timestamp prefix is the whole point: it is what stops a captured request being replayed later.
+
+Do not parse and re-serialize the body first: even a whitespace difference changes the digest and the check will fail. Compare in constant time.
 
 `packages/webhooks/src/verify.ts` in this repo is the reference implementation and is kept byte-for-byte in step with the sender.
 
