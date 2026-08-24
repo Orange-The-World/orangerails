@@ -15,10 +15,11 @@ A reference implementation is maintained by the BitBooks team; see their integra
 5. [Vault setup (Path B, client-sealed)](#vault-setup-path-b-client-sealed)
 6. [Connecting a wallet through the Link widget](#connecting-a-wallet-through-the-link-widget)
 7. [Syncing transactions: protocol-driven sink mode](#syncing-transactions-protocol-driven-sink-mode)
-8. [App Profile (sink configuration)](#app-profile-sink-configuration)
-9. [Provider catalog (dynamic discovery)](#provider-catalog-dynamic-discovery)
-10. [Wire-format gotchas (read before integrating)](#wire-format-gotchas-read-before-integrating)
-11. [Adding a provider (for OR maintainers)](#adding-a-provider-for-or-maintainers)
+8. [Sync notifications: the `sync.completed` webhook](#sync-notifications-the-synccompleted-webhook)
+9. [App Profile (sink configuration)](#app-profile-sink-configuration)
+10. [Provider catalog (dynamic discovery)](#provider-catalog-dynamic-discovery)
+11. [Wire-format gotchas (read before integrating)](#wire-format-gotchas-read-before-integrating)
+12. [Adding a provider (for OR maintainers)](#adding-a-provider-for-or-maintainers)
 
 
 ## Quickstart
@@ -338,6 +339,80 @@ If the subaccount has zero non-disconnected connections, `or-sync` returns:
 ```
 
 The shape is the same regardless. Your client should treat this as a soft "nothing to sync" rather than an error.
+
+
+## Sync notifications: the `sync.completed` webhook
+
+Sink mode is pull-based: you call `or-sync` and get rows back. This webhook is the **push half**. It does not carry transaction data. It tells you there is something new so you know when to pull, instead of polling on a timer.
+
+Registering for it is optional. If you do not register, everything still works and your data is simply as fresh as your last pull.
+
+### Registering
+
+Give your OR maintainer contact a receiver URL and a shared secret. Both are stored on your `platforms` row. **OR sends nothing until both are set**: a URL without a secret is treated as unregistered, deliberately, so a half-finished registration never sends unsigned traffic.
+
+### The payload
+
+`POST`, `Content-Type: application/json`:
+
+```json
+{
+  "event": "sync.completed",
+  "provider": "quiltt",
+  "subaccount_id": "...",
+  "connection_id": "...",
+  "synced_count": 0,
+  "ts": "2026-08-24T12:00:00.000Z"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `event` | string | Always `sync.completed` today. Treat other values as unknown, see below. |
+| `provider` | string | The upstream provider that reported the sync. |
+| `subaccount_id` | string | Your subaccount. Resolve your own tenant from this. |
+| `connection_id` | string | OR's connection id. |
+| `synced_count` | number | Rows OR pulled itself. **Sink mode: always `0`.** See below. |
+| `ts` | string | ISO 8601 timestamp. |
+
+**`synced_count` is `0` on the sink path and that is correct, not a bug.** Sink delivery means OR pulled nothing; the whole point of the notification is to ask you to come and call `or-sync`. It is a real count only on the legacy encrypted-payload path, where OR did the pulling. Do not read `0` as "nothing happened" and skip your pull. It is always a number, never absent.
+
+### Signature
+
+Two headers are sent on every request. Verify either one; `X-OR-Signature-V2` is preferred.
+
+```
+X-OR-Signature:    hex(HMAC-SHA-256(secret, raw_body))
+X-OR-Signature-V2: t=<unix_seconds>,v1=<hex>
+X-OR-Event-Id:     <uuid>
+```
+
+Compute the HMAC over the **raw request body bytes**. Do not parse and re-serialize first: even a whitespace difference changes the digest and the check will fail. Compare in constant time.
+
+`packages/webhooks/src/verify.ts` in this repo is the reference implementation and is kept byte-for-byte in step with the sender.
+
+### Responding, and the one thing that will bite you
+
+**OR treats any 2xx as delivered and will not retry.** This is the single most important sentence in this section.
+
+The intuitive design on your side is to answer `200 {"status":"ignored"}` for a payload you do not recognise, so that OR stops retrying an event type you will never handle. That is reasonable, and it is also a silent-failure generator: if your validator rejects a payload you *did* want, OR records a successful delivery, you record nothing, and no error appears on either side. Both dashboards agree it worked.
+
+So:
+
+| You want | Answer |
+|---|---|
+| Accepted and stored | `200` |
+| Valid, but no tenant matches this `subaccount_id` yet | `202`. Permanent mapping gap, do not burn retry budget. |
+| Bad or missing signature | `401` |
+| Body too large | `413` |
+| **You could not store it and want OR to try again** | **`5xx`. Not 2xx.** |
+| Unknown `event` value | `200`, and log it loudly enough that someone notices |
+
+Retries are exponential with a cap of 5 attempts. `X-OR-Event-Id` is stable across retries: use it to dedupe.
+
+### Ordering and delivery guarantees
+
+At-least-once, not exactly-once, and not ordered. Treat the notification as a hint that something changed, then let `or-sync` and its cursor be the source of truth. Never reconstruct state from the sequence of webhooks.
 
 
 ## App Profile (sink configuration)
