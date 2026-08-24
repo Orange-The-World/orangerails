@@ -25,6 +25,7 @@
     "or-platform-display": "none",
     "or-providers": "none",
     "or-provision": "platform-api-key",
+    "or-queue-health": "internal-worker-token",
     "or-quiltt-accounts": "platform-api-key",
     "or-quiltt-disconnect": "platform-api-key",
     "or-quiltt-drain-alert": "internal-worker-token",
