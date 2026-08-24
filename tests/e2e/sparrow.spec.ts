@@ -215,31 +215,34 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
   // state. This case is the regression guard that the fix dropped that condition:
   // red at the dev tip, green on this branch.
   test("iframe direct-load of /connect/stealth shows the guidance card after the grace window", async ({ page }) => {
-    await page.goto("/connect/sparrow");
-
-    // Inject a same-origin iframe pointing at the widget. Inside it,
-    // window.parent !== window (framed) while window.opener is null, which is
-    // exactly the shape the old opener/parent gate rejected.
-    await page.evaluate(() => {
-      const frame = document.createElement("iframe");
-      frame.id = "stealth-frame";
-      frame.src = "/connect/stealth";
-      frame.style.width = "480px";
-      frame.style.height = "640px";
-      document.body.appendChild(frame);
+    // Stub window.parent before navigation to simulate the framed shape
+    // (window.parent !== window, window.opener === null) without an actual
+    // iframe. X-Frame-Options: DENY (PR #851) blocks same-origin iframes,
+    // including this test fixture, but the header is correct and must not be
+    // weakened -- production loads the widget as a popup, never an iframe.
+    // The #451 guarantee is exercised equally by the stub: the widget reads
+    // window.parent !== window, not the DOM context it runs in. addInitScript
+    // fires before any page script so the widget sees the stub value on its
+    // first property access.
+    await page.addInitScript(() => {
+      const sentinel = {} as Window;
+      Object.defineProperty(window, "parent", {
+        get: () => sentinel,
+        configurable: true,
+      });
     });
 
-    const widget = page.frameLocator("#stealth-frame");
+    await page.goto("/connect/stealth");
 
     // Never post OR_STEALTH_INIT. Wait just past the grace window so awaitingInit
     // flips to false with no init set.
     await page.waitForTimeout(1600); // just past the 1500ms DIRECT_LOAD_GRACE_MS window
 
     await expect(
-      widget.getByRole("heading", { name: /stealth sync widget/i, level: 1 }),
+      page.getByRole("heading", { name: /stealth sync widget/i, level: 1 }),
     ).toBeVisible({ timeout: 15_000 });
     await expect(
-      widget.getByText(/OR_STEALTH_INIT postMessage to this window/i),
+      page.getByText(/OR_STEALTH_INIT postMessage to this window/i),
     ).toBeVisible({ timeout: 15_000 });
     await capture(page, "05-stealth-iframe-load-guidance-card");
   });
