@@ -20,7 +20,13 @@ import {
   assert,
   assertEquals,
 } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { ageHours, classify, QUEUES, watchedQueues } from './queues.ts';
+import {
+  ageHours,
+  classify,
+  QUEUES,
+  unmonitoredQueues,
+  watchedQueues,
+} from './queues.ts';
 
 /** Timestamp columns that mean "this row joined a queue". */
 const ENQUEUED_COLUMNS = ['created_at', 'received_at'];
@@ -86,16 +92,25 @@ export function queueTablesInSql(sources: string[]): string[] {
     }
 
     // ALTER TABLE ... ADD COLUMN, which the old scanner could not see at all.
-    const alters = sql.matchAll(
-      new RegExp(
-        `ALTER TABLE\\s+(?:IF EXISTS\\s+)?(?:public\\.)?(\\w+)\\s+ADD COLUMN\\s+` +
-          `(?:IF NOT EXISTS\\s+)?(\\w+)\\s+${TIMESTAMP_TYPE}`,
-        'gi',
-      ),
+    //
+    // Matched as WHOLE STATEMENTS, then every ADD COLUMN clause inside each one.
+    // A per-clause regex anchored on `ALTER TABLE` only ever sees the first
+    // column, and the comma-separated form is the house style here: over ten
+    // migrations use it, including the one that created webhook_delivery
+    // (`ADD COLUMN webhook_url TEXT, ADD COLUMN webhook_secret TEXT`). A queue
+    // written that way would have sailed through the coverage gate.
+    const alterStatements = sql.matchAll(
+      /ALTER TABLE\s+(?:IF EXISTS\s+)?(?:public\.)?(\w+)([^;]*);/gi,
     );
-    for (const m of alters) {
-      const [, table, column] = m;
-      if (interesting.includes(column.toLowerCase())) note(table, column);
+    for (const stmt of alterStatements) {
+      const [, table, body] = stmt;
+      const addClauses = body.matchAll(
+        new RegExp(`ADD COLUMN\\s+(?:IF NOT EXISTS\\s+)?(\\w+)\\s+${TIMESTAMP_TYPE}`, 'gi'),
+      );
+      for (const c of addClauses) {
+        const column = c[1];
+        if (interesting.includes(column.toLowerCase())) note(table, column);
+      }
     }
   }
 
@@ -281,6 +296,25 @@ Deno.test('a queue with no scheduled drain is unmonitorable, not watched', () =>
   );
 });
 
+Deno.test('an unwatched queue is still named in the report', () => {
+  // The failure this pins: if the report only lists queues the probe queried,
+  // then a run where every watched queue is healthy looks identical to a run
+  // where nothing is uncovered. strike_webhook_events would vanish from a green
+  // report despite being the one queue we know nobody is watching.
+  const unmonitored = unmonitoredQueues();
+  assertEquals(
+    unmonitored.map((q) => q.table),
+    ['strike_webhook_events'],
+    'the uncovered queue must be reportable independently of any alert',
+  );
+  for (const q of unmonitored) {
+    assert(
+      q.coverage.kind === 'unmonitorable' && q.coverage.needs.length > 0,
+      `${q.table} is uncovered but does not say what would cover it`,
+    );
+  }
+});
+
 Deno.test('the scanner sees a queue assembled across two migrations', () => {
   // A fixture, not the real migrations. Deleting the ALTER TABLE handling makes
   // this go red; asserting on real tables did not, because they are all
@@ -305,6 +339,27 @@ Deno.test('the scanner sees a queue assembled across two migrations', () => {
     queueTablesInSql([createOnly, drainAddedLater]),
     ['late_bound_queue'],
     'a drain column added by a later migration must still be detected',
+  );
+});
+
+Deno.test('the scanner sees every ADD COLUMN clause in one ALTER TABLE', () => {
+  // The comma-separated form is the house style here: over ten migrations use
+  // it, including the one that created webhook_delivery. A regex anchored on
+  // `ALTER TABLE` before each clause reads only the first column, so a queue
+  // written this way would pass the coverage gate with no QUEUES entry, which
+  // is the precise hole this whole test file exists to close.
+  const bothInOneStatement = `
+    CREATE TABLE public.combined_queue (
+      id UUID PRIMARY KEY
+    );
+    ALTER TABLE public.combined_queue
+      ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+  `;
+  assertEquals(
+    queueTablesInSql([bothInOneStatement]),
+    ['combined_queue'],
+    'the second ADD COLUMN clause must be seen, not just the first',
   );
 });
 

@@ -155,6 +155,19 @@ export function watchedQueues(): QueueDefinition[] {
 }
 
 /**
+ * The queues NOBODY watches.
+ *
+ * Exported so the health report can carry them on every run, including a run
+ * where everything checked came back healthy. A report that lists only what it
+ * checked reads exactly like a report where nothing is uncovered, and the whole
+ * argument of this probe is that the dangerous queue is the one nobody was
+ * thinking about.
+ */
+export function unmonitoredQueues(): QueueDefinition[] {
+  return QUEUES.filter((q) => q.coverage.kind === 'unmonitorable');
+}
+
+/**
  * Hours between `enqueuedAt` and now, for the oldest still-queued row.
  * Pure, so the threshold logic is testable without a database.
  */

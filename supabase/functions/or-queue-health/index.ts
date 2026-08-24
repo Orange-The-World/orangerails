@@ -28,6 +28,7 @@ import {
   classify,
   type QueueDefinition,
   QUEUES,
+  unmonitoredQueues,
   watchedQueues,
 } from './queues.ts';
 
@@ -56,6 +57,17 @@ interface HealthReport {
   zulip_post_sent: boolean | null;
   queues: QueueReport[];
   delegated: { table: string; owner: string }[];
+  /**
+   * Queues nobody watches, and what it would take to watch them.
+   *
+   * In the report ON PURPOSE, and never omitted just because the watched
+   * queues are healthy. A report that lists only what it checked is
+   * indistinguishable from a report where everything is covered, and this
+   * probe's entire argument is that the dangerous queue is the one nobody
+   * was thinking about. A green run must still say out loud what it is
+   * not looking at.
+   */
+  unmonitored: { table: string; needs: string }[];
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
@@ -291,6 +303,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .map((q) => ({
         table: q.table,
         owner: q.coverage.kind === 'delegated' ? q.coverage.owner : '',
+      })),
+    unmonitored: unmonitoredQueues()
+      .map((q) => ({
+        table: q.table,
+        needs: q.coverage.kind === 'unmonitorable' ? q.coverage.needs : '',
       })),
   };
 
