@@ -105,6 +105,14 @@ verify_jwt = false
 [functions.or-quiltt-sync]
 verify_jwt = false
 
+# Cron-invoked, same as or-quiltt-sync above. pg_cron reaches the function over
+# HTTP with no user JWT to present, so the platform gate has to come off and the
+# X-Internal-Worker-Token guard inside the function replaces it. Removing this
+# entry without also removing that guard just makes the function unreachable;
+# removing the guard without this entry leaves it open. They ship together.
+[functions.or-webhook-dispatch]
+verify_jwt = false
+
 [functions.or-quiltt-disconnect]
 verify_jwt = false
 
