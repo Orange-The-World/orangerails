@@ -18,11 +18,22 @@
 -- in the older shape it throws, because there is no type to dispatch on. A
 -- receiver on our published SDK therefore cannot read the older rows at all.
 --
--- ORDERING REQUIREMENT. This must be applied before the dispatcher cron is
--- enabled in an environment. Delivery is one-way: once a queued row has been
--- POSTed and accepted it is no longer pending, so a row sent in a shape the
--- receiver cannot use is not recoverable by retrying later. Fix the shape
--- first, then start draining.
+-- ORDERING REQUIREMENT, and why this file carries an earlier timestamp than
+-- the change it follows. Delivery is one-way: once a queued row has been POSTed
+-- and accepted it is no longer pending, so a row sent in a shape the receiver
+-- cannot use is not recoverable by retrying later. The shape has to be right
+-- before anything drains the queue, not after.
+--
+-- #844 added 20260824120000_schedule_or_webhook_dispatch.sql, which gives this
+-- queue its first scheduled drain. The apply runner walks
+-- supabase/migrations/*.sql in filename order, one statement round trip per
+-- file, so on any environment where both are pending, whichever sorts first
+-- runs first. This file is deliberately versioned 20260824110000, ahead of that
+-- one, so the payloads are correct before the schedule exists rather than a few
+-- round trips after it. That is out of chronological order on purpose. It is
+-- already applied on dev, where this migration is a no-op, and the runner
+-- applies by set membership rather than by ordering, so arriving late there
+-- changes nothing.
 --
 -- WHAT IT DOES. For undrained sync.completed rows missing `type`, adds the
 -- canonical half built from the row's OWN flat fields. Nothing is invented and
