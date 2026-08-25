@@ -67,6 +67,7 @@ ALTER TABLE public.stealth_utxos ENABLE ROW LEVEL SECURITY;
 -- not permitted. All writes go through upsert_stealth_utxos (SECURITY
 -- DEFINER, EXECUTE granted to service_role only).
 -- service_role bypasses RLS entirely and needs no policy here.
+DROP POLICY IF EXISTS "owner read via connection" ON public.stealth_utxos;
 CREATE POLICY "owner read via connection" ON public.stealth_utxos
   FOR SELECT
   USING (
