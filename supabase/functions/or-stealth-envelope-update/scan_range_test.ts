@@ -23,18 +23,19 @@ import { buildScanRangeArgs, recordScanRange } from './scan_range.ts';
 
 const CONN_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
-/** The signed-in caller making the request. */
-const CALLER = 'user-attacker';
+/** The identity of the signed-in caller making the request. */
+const CALLER = 'user-making-the-request';
 
 /**
- * The owner of CONN_ID as stored in stealth_connections. The pre-fix handler
- * read this value and passed it to the RPC, which is exactly what made the
- * database guard compare the owner against itself.
+ * The owner of CONN_ID as stored in stealth_connections, i.e. the value the
+ * database resolves for itself and compares against. The pre-fix handler read
+ * this value and passed it back in, which is what left the comparison unable
+ * to distinguish anything.
  */
-const CONNECTION_OWNER = 'user-victim';
+const CONNECTION_OWNER = 'user-owning-the-connection';
 
 Deno.test(
-  'cross-tenant: payload carries the CALLER id, not the connection owner (the guard must be able to reject)',
+  'payload carries the CALLER id, not the connection owner, so the database check can reject',
   () => {
     const args = buildScanRangeArgs({
       connection_id: CONN_ID,
@@ -47,8 +48,8 @@ Deno.test(
     if (args === null) return;
 
     // The assertion that fails against the pre-fix handler. It passed
-    // CONNECTION_OWNER here, which the database then compared against
-    // CONNECTION_OWNER: always equal, never a rejection.
+    // CONNECTION_OWNER here, and the database compares the value it is given
+    // against that same owner: always equal, so no input could be rejected.
     assertNotEquals(
       args.p_app_user_id,
       CONNECTION_OWNER,
