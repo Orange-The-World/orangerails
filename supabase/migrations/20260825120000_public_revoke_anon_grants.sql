@@ -5,8 +5,7 @@
 --
 -- WHAT
 -- 1. ALTER DEFAULT PRIVILEGES: stop new functions in public from inheriting anon EXECUTE.
--- 2. REVOKE EXECUTE on all existing public functions from anon, then restore the three
---    trigger functions that are harmless (trigger machinery ignores EXECUTE at fire time).
+-- 2. REVOKE EXECUTE on all existing public functions from anon.
 -- SCOPE: anon only. authenticated and service_role are untouched throughout.
 --
 -- WHY
@@ -16,10 +15,10 @@
 -- Every CREATE FUNCTION in public by postgres still hands anon EXECUTE at birth.
 -- data_keys anon privileges (REVOKE ALL) are handled in file 4 (20260723170000) per CTO ruling.
 --
--- THREE FUNCTIONS EXCLUDED FROM NET REVOKE (restored after blanket revoke):
--- All three are prosecdef=false trigger functions named by Auditor in msg 39520.
--- Trigger machinery does not consult EXECUTE at fire time; the grant on them is
--- functionally inert. Net result is equivalent to them holding nothing.
+-- NOTE ON TRIGGER FUNCTIONS: Three prosecdef=false trigger functions previously held
+-- a direct anon EXECUTE grant. The Auditor confirmed trigger machinery does not consult
+-- EXECUTE at fire time, so the grant was functionally inert. The blanket REVOKE removes
+-- it cleanly; no re-grant is needed (triggers fire via the trigger mechanism regardless).
 --     public.enforce_customer_vault_pubkey_write_once()
 --     public.enforce_vault_meta_no_direct_delete()
 --     public.enforce_vault_pubkey_write_once()
@@ -45,13 +44,9 @@ ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
   REVOKE EXECUTE ON FUNCTIONS FROM anon;
 
 -- 2. Remove the standing anon EXECUTE grant from all existing public functions.
---    Then restore the three trigger functions by name; the Auditor confirmed they are
---    prosecdef=false and the trigger machinery does not consult EXECUTE at fire time.
---    Inside this transaction the revoke and re-grant are atomic.
+--    Trigger functions are included in the blanket revoke; trigger machinery does not
+--    consult EXECUTE at fire time, so removing the grant has no effect on their behavior.
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM anon;
-GRANT EXECUTE ON FUNCTION public.enforce_customer_vault_pubkey_write_once() TO anon;
-GRANT EXECUTE ON FUNCTION public.enforce_vault_meta_no_direct_delete() TO anon;
-GRANT EXECUTE ON FUNCTION public.enforce_vault_pubkey_write_once() TO anon;
 
 -- 3. Prove it or abort. Both directions in the same transaction.
 DO $$
@@ -68,7 +63,7 @@ BEGIN
     RAISE EXCEPTION 'FAIL: anon still appears in public functions default ACL after revoke';
   END IF;
 
-  -- (b) Blanket revoke landed: anon holds no direct EXECUTE grant on any non-trigger public function.
+  -- (b) Blanket revoke landed: anon holds no direct EXECUTE grant on any public function.
   --     Uses proacl directly, not has_function_privilege, which also returns true for PUBLIC (=X/postgres)
   --     grants that our REVOKE FROM anon does not touch.
   --     When proacl IS NULL, unnest returns no rows and EXISTS returns false, which is correct:
@@ -79,11 +74,6 @@ BEGIN
       FROM pg_proc p
       JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
-       AND p.proname NOT IN (
-           'enforce_customer_vault_pubkey_write_once',
-           'enforce_vault_meta_no_direct_delete',
-           'enforce_vault_pubkey_write_once'
-       )
        AND EXISTS (
          SELECT 1
            FROM unnest(p.proacl) AS ace
