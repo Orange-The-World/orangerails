@@ -68,7 +68,12 @@ BEGIN
     RAISE EXCEPTION 'FAIL: anon still appears in public functions default ACL after revoke';
   END IF;
 
-  -- (b) Blanket revoke landed: anon holds no EXECUTE on any non-trigger public function.
+  -- (b) Blanket revoke landed: anon holds no direct EXECUTE grant on any non-trigger public function.
+  --     Uses proacl directly, not has_function_privilege, which also returns true for PUBLIC (=X/postgres)
+  --     grants that our REVOKE FROM anon does not touch.
+  --     When proacl IS NULL, unnest returns no rows and EXISTS returns false, which is correct:
+  --     NULL proacl means the function inherits the default ACL, and assertion (a) already confirmed
+  --     the default ACL carries no anon entry.
   IF EXISTS (
     SELECT 1
       FROM pg_proc p
@@ -79,9 +84,13 @@ BEGIN
            'enforce_vault_meta_no_direct_delete',
            'enforce_vault_pubkey_write_once'
        )
-       AND has_function_privilege('anon', p.oid, 'EXECUTE')
+       AND EXISTS (
+         SELECT 1
+           FROM unnest(p.proacl) AS ace
+          WHERE ace::text LIKE 'anon=%'
+       )
   ) THEN
-    RAISE EXCEPTION 'FAIL: anon still holds EXECUTE on a public function after blanket revoke';
+    RAISE EXCEPTION 'FAIL: anon still holds a direct EXECUTE grant on a public function after blanket revoke';
   END IF;
 END $$;
 
