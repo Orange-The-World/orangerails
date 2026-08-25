@@ -23,7 +23,8 @@
 CREATE OR REPLACE FUNCTION public.record_stealth_scan_range(
   p_connection_id UUID,
   p_from_height   INT,
-  p_to_height     INT
+  p_to_height     INT,
+  p_app_user_id   TEXT
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -36,7 +37,6 @@ DECLARE
   v_merged_from   INT;
   v_merged_to     INT;
   v_owner         TEXT;
-  v_caller_uid    TEXT;
 BEGIN
   -- ── 0. Authorization guard ────────────────────────────────────────────────
   --
@@ -53,13 +53,12 @@ BEGIN
       USING ERRCODE = 'P0001';
   END IF;
 
-  -- When a JWT subject is present, enforce that the caller owns this connection.
-  -- auth.uid() returns NULL in the service_role path (no JWT), so the service
-  -- path is unaffected: the IS NOT NULL guard skips the ownership check.
-  v_caller_uid := auth.uid()::text;
-  IF v_caller_uid IS NOT NULL AND v_caller_uid <> v_owner THEN
+  -- Unconditional ownership check. p_app_user_id must exactly match the owner
+  -- from the stealth_connections row. IS DISTINCT FROM treats NULL as a
+  -- mismatch: a NULL or wrong caller id always raises. No role escape.
+  IF p_app_user_id IS DISTINCT FROM v_owner THEN
     RAISE EXCEPTION 'record_stealth_scan_range: caller % does not own connection %',
-      v_caller_uid, p_connection_id
+      p_app_user_id, p_connection_id
       USING ERRCODE = 'P0001';
   END IF;
 
@@ -105,13 +104,13 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.record_stealth_scan_range(uuid, int, int) IS
-  'Merge-on-insert writer for stealth_scan_ranges. When a JWT subject is '
-  'present (auth.uid() IS NOT NULL), rejects unless the caller owns the '
-  'target connection (ownership derived from stealth_connections row -- no '
-  'caller-supplied owner parameter). Service-role path (no JWT) proceeds on '
-  'the authoritative row owner. DL-1478, DL-1597.';
+COMMENT ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text) IS
+  'Merge-on-insert writer for stealth_scan_ranges. Ownership enforced '
+  'unconditionally: p_app_user_id must match the owner from the '
+  'stealth_connections row (IS DISTINCT FROM, so NULL always raises). '
+  'No role escape. Edge function is the only caller and passes the '
+  'row-verified authenticated user id. DL-1478, DL-1597.';
 
 -- Grants unchanged from PR #842: service_role only.
-REVOKE ALL ON FUNCTION public.record_stealth_scan_range(uuid, int, int) FROM PUBLIC;
-GRANT  EXECUTE ON FUNCTION public.record_stealth_scan_range(uuid, int, int) TO service_role;
+REVOKE ALL ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text) FROM PUBLIC;
+GRANT  EXECUTE ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text) TO service_role;
