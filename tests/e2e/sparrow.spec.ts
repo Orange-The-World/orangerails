@@ -217,7 +217,7 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
   test("iframe direct-load of /connect/stealth shows the guidance card after the grace window", async ({ page }) => {
     // Stub window.parent before navigation to simulate the framed shape
     // (window.parent !== window, window.opener === null) without an actual
-    // iframe. X-Frame-Options: DENY (PR #851) blocks same-origin iframes,
+    // iframe. The X-Frame-Options: DENY response header blocks same-origin iframes,
     // including this test fixture, but the header is correct and must not be
     // weakened -- production loads the widget as a popup, never an iframe.
     // The #451 guarantee is exercised equally by the stub: the widget reads
