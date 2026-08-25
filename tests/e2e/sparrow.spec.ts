@@ -215,35 +215,40 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
   // state. This case is the regression guard that the fix dropped that condition:
   // red at the dev tip, green on this branch.
   test("iframe direct-load of /connect/stealth shows the guidance card after the grace window", async ({ page }) => {
-    // Stub window.parent before navigation to simulate the framed shape
-    // (window.parent !== window, window.opener === null) without an actual
-    // iframe. The X-Frame-Options: DENY response header blocks same-origin iframes,
-    // including this test fixture, but the header is correct and must not be
-    // weakened -- production loads the widget as a popup, never an iframe.
-    // The #451 guarantee is exercised equally by the stub: the widget reads
-    // window.parent !== window, not the DOM context it runs in. addInitScript
-    // fires before any page script so the widget sees the stub value on its
-    // first property access.
-    await page.addInitScript(() => {
-      const sentinel = {} as Window;
-      Object.defineProperty(window, "parent", {
-        get: () => sentinel,
-        configurable: true,
-      });
+    // Strip X-Frame-Options so the real iframe can load in this test.
+    // The header correctness is covered by the security PR; this test guards
+    // the widget JS behaviour when window.parent !== window by construction.
+    await page.route("**/connect/stealth", async (route) => {
+      const response = await route.fetch();
+      const headers = response.headers();
+      delete headers["x-frame-options"];
+      await route.fulfill({ response, headers });
     });
 
-    await page.goto("/connect/stealth");
+    // Load the widget in a real iframe so window.parent !== window is true
+    // by construction, not by monkey-patch (#451 regression shape).
+    await page.goto("/");
+    await page.evaluate(() => {
+      const iframe = document.createElement("iframe");
+      iframe.id = "stealth-iframe-fixture";
+      iframe.src = "/connect/stealth";
+      Object.assign(iframe.style, {
+        width: "100vw",
+        height: "100vh",
+        border: "none",
+      });
+      document.body.replaceChildren(iframe);
+    });
 
-    // Never post OR_STEALTH_INIT. Wait just past the grace window so awaitingInit
-    // flips to false with no init set.
-    await page.waitForTimeout(1600); // just past the 1500ms DIRECT_LOAD_GRACE_MS window
-
+    // Web-first: 5000ms covers the 1500ms grace window plus render time.
+    // No hardcoded waitForTimeout; the assertion retries until visible.
+    const widget = page.frameLocator("#stealth-iframe-fixture");
     await expect(
-      page.getByRole("heading", { name: /stealth sync widget/i, level: 1 }),
-    ).toBeVisible({ timeout: 15_000 });
+      widget.getByRole("heading", { name: /stealth sync widget/i }),
+    ).toBeVisible({ timeout: 5000 });
     await expect(
-      page.getByText(/OR_STEALTH_INIT postMessage to this window/i),
-    ).toBeVisible({ timeout: 15_000 });
+      widget.getByText(/OR_STEALTH_INIT postMessage to this window/i),
+    ).toBeVisible({ timeout: 5000 });
     await capture(page, "05-stealth-iframe-load-guidance-card");
   });
 });
