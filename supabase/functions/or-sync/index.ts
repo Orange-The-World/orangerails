@@ -1402,6 +1402,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 subaccountId,
                 connectionId: conn.id,
                 syncedCount: newTxs.length,
+                provider: conn.provider_type as string,
               }),
             });
           } catch (whErr) {
