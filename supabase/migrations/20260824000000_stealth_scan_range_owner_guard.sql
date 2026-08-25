@@ -115,8 +115,11 @@ COMMENT ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text) IS
   'Merge-on-insert writer for stealth_scan_ranges. Ownership enforced '
   'unconditionally: p_app_user_id must match the owner from the '
   'stealth_connections row (IS DISTINCT FROM, so NULL always raises). '
-  'No role escape. Edge function is the only caller and passes the '
-  'row-verified authenticated user id. DL-1478, DL-1597.';
+  'No role escape. The edge function is the only caller and passes the '
+  'CALLER identity from the request, token-pinned before the call, never '
+  'the owner it read from this connection row: passing that would compare '
+  'the owner against itself and the check could never fail. '
+  'DL-1478, DL-1597.';
 
 -- Grants unchanged from PR #842: service_role only.
 REVOKE ALL ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text) FROM PUBLIC;
