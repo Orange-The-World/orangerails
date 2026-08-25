@@ -175,7 +175,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         p_connection_id: body.connection_id,
         p_from_height:   body.from_height,
         p_to_height:     body.last_block_scanned,
-        p_app_user_id:   row.app_user_id as string,
+        // The caller identity, not the row owner: handing the function the
+        // value we just read would make its ownership check compare the owner
+        // against itself and never fail. body.app_user_id is token-pinned
+        // above (direct: equals ctx.userId, widget: enforceWidgetAppUser,
+        // platform: scoped by platform_id on the row read).
+        p_app_user_id:   body.app_user_id,
       });
       if (rpcErr) {
         console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', rpcErr);
