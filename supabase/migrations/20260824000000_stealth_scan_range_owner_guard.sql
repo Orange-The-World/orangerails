@@ -11,9 +11,11 @@
 --
 --   1. Always join stealth_connections on p_connection_id; read app_user_id
 --      from that row (authoritative). Reject if not found or null.
---   2. JWT present (auth.uid() IS NOT NULL): reject unless caller matches owner.
---   3. Service path (auth.uid() IS NULL): proceed. No caller-supplied owner.
---   4. Connection not found or no owner: reject, never write.
+--   2. Compare p_app_user_id against that owner UNCONDITIONALLY, with
+--      IS DISTINCT FROM, so a NULL or mismatched caller id always raises.
+--      There is no service path exemption: the edge function is the only
+--      caller and it passes the token-pinned caller identity.
+--   3. Connection not found or no owner: reject, never write.
 --
 -- 4-arg signature (adds p_app_user_id TEXT): drops old 3-arg overload.
 -- Grants: EXECUTE to service_role only (unchanged from PR #842).
