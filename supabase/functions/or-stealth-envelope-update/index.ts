@@ -175,6 +175,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         p_connection_id: body.connection_id,
         p_from_height:   body.from_height,
         p_to_height:     body.last_block_scanned,
+        p_app_user_id:   row.app_user_id as string,
       });
       if (rpcErr) {
         console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', rpcErr);
