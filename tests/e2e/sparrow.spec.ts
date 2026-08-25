@@ -215,13 +215,16 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
   // state. This case is the regression guard that the fix dropped that condition:
   // red at the dev tip, green on this branch.
   test("iframe direct-load of /connect/stealth shows the guidance card after the grace window", async ({ page }) => {
-    // Strip X-Frame-Options so the real iframe can load in this test.
-    // The header correctness is covered by the security PR; this test guards
-    // the widget JS behaviour when window.parent !== window by construction.
+    // Strip framing-denial headers so the real iframe can load in this test.
+    // Both X-Frame-Options and the CSP frame-ancestors directive must be absent
+    // or the browser refuses to render the iframe regardless of which branch
+    // this test runs against. Header correctness is covered by the security PR;
+    // this test guards the widget JS behaviour when window.parent !== window.
     await page.route("**/connect/stealth", async (route) => {
       const response = await route.fetch();
       const headers = response.headers();
       delete headers["x-frame-options"];
+      delete headers["content-security-policy"];
       await route.fulfill({ response, headers });
     });
 
