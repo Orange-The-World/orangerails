@@ -6,9 +6,8 @@
  * before a customer connects can only be recovered from Strike's own CSV
  * export. The export menu is not obvious, hence this page.
  *
- * Deliberately does NOT tell the reader to upload the file in-app: that
- * control does not exist yet. Add the upload step here in the same PR
- * that ships it, not before.
+ * Does not include an in-app upload step. CSV upload is not on the roadmap
+ * this cycle. Add the step here if and when the feature ships.
  */
 
 import { createFileRoute, Link } from "@tanstack/react-router";
@@ -68,9 +67,9 @@ const steps: ExportStep[] = [
   },
   {
     title: "Save the files somewhere you can find them",
-    body: "Keep every file you generate. You will need them in one place when you bring them across.",
+    body: "Keep every file you generate.",
     detail:
-      "Bringing these files into your OrangeRails account is being built right now. This page gets the upload step the moment it ships.",
+      "Your exported CSVs are a complete record of your Strike activity. They work directly with most tax and accounting tools.",
   },
 ];
 
