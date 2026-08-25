@@ -14,7 +14,7 @@
 -- row (grantor=postgres, schema=public, objtype=f) was left open:
 --     anon=X | authenticated=X | service_role=X
 -- Every CREATE FUNCTION in public by postgres still hands anon EXECUTE at birth.
--- data_keys anon SELECT is handled in file 4 (20260723170000) per CTO ruling.
+-- data_keys anon privileges (REVOKE ALL) are handled in file 4 (20260723170000) per CTO ruling.
 --
 -- THREE FUNCTIONS EXCLUDED FROM NET REVOKE (restored after blanket revoke):
 -- All three are prosecdef=false trigger functions named by Auditor in msg 39520.
@@ -68,11 +68,21 @@ BEGIN
     RAISE EXCEPTION 'FAIL: anon still appears in public functions default ACL after revoke';
   END IF;
 
-  -- (b) Nothing broke for authenticated: spot-check has_function_privilege on one
-  --     function that RLS policies depend on (rotate_data_key is SECURITY DEFINER;
-  --     authenticated must still be able to call it).
-  --     NOTE: if rotate_data_key does not exist yet in this env, remove this check.
-  --     The anon-only revokes above cannot affect authenticated grants.
+  -- (b) Blanket revoke landed: anon holds no EXECUTE on any non-trigger public function.
+  IF EXISTS (
+    SELECT 1
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public'
+       AND p.proname NOT IN (
+           'enforce_customer_vault_pubkey_write_once',
+           'enforce_vault_meta_no_direct_delete',
+           'enforce_vault_pubkey_write_once'
+       )
+       AND has_function_privilege('anon', p.oid, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'FAIL: anon still holds EXECUTE on a public function after blanket revoke';
+  END IF;
 END $$;
 
 COMMIT;
