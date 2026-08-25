@@ -47,6 +47,7 @@
     "or-sync": "platform-api-key",
     "or-sync-key-register": "platform-api-key",
     "or-transactions-list": "platform-api-key",
+    "or-webhook-dispatch": "internal-worker-token",
     "v1-rate": "orbi-api-key"
   }
 }
