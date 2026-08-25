@@ -242,7 +242,18 @@ scan() {
   local count
   count=$(printf '%s\n' "$filtered" | wc -l)
   printf "  \033[31m✗\033[0m  %s (%d findings)\n" "$name" "$count"
-  printf '%s\n' "$filtered" | sed 's/^/      /' | head -20
+  # In CI the output goes to a PUBLIC Actions log, so never echo matched
+  # CONTENT there: a reserved-term or infra-shape hit would publish the exact
+  # internal string this scan exists to keep out of the public tree. Emit
+  # file:line only (the category is already named on the line above), which is
+  # enough to locate and clean up. Locally, emit the full matched line so a
+  # developer can see exactly what matched. The canary self-test sets
+  # SCAN_NO_REDACT to force full output so it can still assert the token fired.
+  if [[ -z "${SCAN_NO_REDACT:-}" && ( -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ) ]]; then
+    printf '%s\n' "$filtered" | sed -E 's/^([^:]+:[0-9]+):.*/\1/' | sed 's/^/      /' | head -20
+  else
+    printf '%s\n' "$filtered" | sed 's/^/      /' | head -20
+  fi
   if [[ "$count" -gt 20 ]]; then
     printf "      ... %d more\n" "$((count - 20))"
   fi
@@ -272,7 +283,12 @@ self_test() {
   # without ever matching the canary. Matching the token is what proves the
   # term scan actually fired.
   local out
+  # Force full (unredacted) output so the assertion below can see the canary
+  # token itself; in CI real scans redact content, but the self-test must
+  # prove the match mechanism fired by matching the token, not just file:line.
+  SCAN_NO_REDACT=1
   out=$(scan "canary self-test" "$canary" "i" "" 2>&1)
+  unset SCAN_NO_REDACT
   rm -f "$cf"
   EXIT_CODE=$saved
   if ! printf '%s' "$out" | grep -q "$canary"; then
