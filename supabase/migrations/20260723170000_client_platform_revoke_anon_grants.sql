@@ -69,7 +69,7 @@ BEGIN;
 
 -- 1. Future tables in this schema must not inherit anon SELECT. This is the
 --    actual point of the migration.
-ALTER DEFAULT PRIVILEGES IN SCHEMA client_platform
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA client_platform
   REVOKE SELECT ON TABLES FROM anon;
 
 -- 2. Drop the standing blanket grant on the tables that already exist.
@@ -90,7 +90,14 @@ GRANT SELECT ON client_platform.api_plans TO anon;
 REVOKE EXECUTE ON FUNCTION client_platform.is_member_of(uuid) FROM anon, PUBLIC;
 REVOKE EXECUTE ON FUNCTION client_platform.has_role(uuid, text) FROM anon, PUBLIC;
 
--- 5. Prove it, in this transaction, or abort.
+-- 5. Remove anon SELECT on public.data_keys.
+--    data_keys carries an anon SELECT grant inherited from the public-schema default
+--    table ACL. RLS is enabled and the only policy scopes to authenticated, so anon
+--    cannot reach any row today. This removes the grant so that cannot change silently.
+--    Placed here (file 4) per CTO ruling; file 5 does not duplicate it.
+REVOKE SELECT ON public.data_keys FROM anon;
+
+-- 6. Prove it, in this transaction, or abort.
 --    (a) covers all 7 tables step 2 must close, each named. The schema holds 8
 --    tables and every one of them carries an anon SELECT entry; api_plans is
 --    deliberately re-granted at step 3, so 7 must end with none. Named, not
