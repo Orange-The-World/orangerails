@@ -15,10 +15,15 @@
 --   3. Service path (auth.uid() IS NULL): proceed. No caller-supplied owner.
 --   4. Connection not found or no owner: reject, never write.
 --
--- Function signature is unchanged. No new parameters.
--- Grants are unchanged: EXECUTE to service_role only.
+-- 4-arg signature (adds p_app_user_id TEXT): drops old 3-arg overload.
+-- Grants: EXECUTE to service_role only (unchanged from PR #842).
 --
 -- Refs: DL-1597, residual of DL-1569
+
+-- Drop the unguarded 3-arg overload so it cannot be called directly.
+-- The guarded 4-arg replacement below is the only callable path after
+-- this migration runs. DL-1597.
+DROP FUNCTION IF EXISTS public.record_stealth_scan_range(uuid, int, int);
 
 CREATE OR REPLACE FUNCTION public.record_stealth_scan_range(
   p_connection_id UUID,
