@@ -70,6 +70,24 @@ export function strikeSubscriptionErrorMarker(message: string): string {
   return 'STRIKE_SUBSCRIPTION_FAILED';
 }
 
+/**
+ * Classify a drain-event fetch failure into a fixed closed-vocabulary reason
+ * code. Raw error text MUST NOT enter the marker: encrypted_last_error is a
+ * plaintext field consumed downstream, and provider error strings can carry
+ * entity ids or URLs. The raw message is already logged by the caller.
+ *
+ * Strike API errors arrive as `Strike <status> GET /<path>: <detail>`, so
+ * the status code drives the class.
+ */
+export function classifyDrainEventError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/\b404\b|not.?found/i.test(msg)) return 'NOT_FOUND';
+  if (/\b(401|403)\b|unauthori|forbidden/i.test(msg)) return 'AUTH_ERROR';
+  if (/\b429\b|rate.?limit/i.test(msg)) return 'RATE_LIMITED';
+  if (/network|fetch|ECONNRESET|timeout/i.test(msg)) return 'NETWORK_ERROR';
+  return 'PROVIDER_ERROR';
+}
+
 export interface DrainConnection {
   id: string;
   strike_subscription_id: string | null;
@@ -255,10 +273,9 @@ export async function drainStrikeQueue(args: {
       // Capture the first error as a marker so or-sync can write it to
       // encrypted_last_error; without this the connection looked healthy
       // while the drain silently discarded every event (DL-1505 Group B).
-      const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[strike-queue] event ${ev.id} (${ev.event_type} ${ev.entity_id}) failed:`, err);
       if (!firstDrainEventError) {
-        firstDrainEventError = `STRIKE_DRAIN_EVENT_FAILED:${ev.event_type}:${errMsg.slice(0, 120)}`;
+        firstDrainEventError = `STRIKE_DRAIN_EVENT_FAILED:${ev.event_type}:${classifyDrainEventError(err)}`;
       }
     }
   }
