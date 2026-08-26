@@ -1,0 +1,160 @@
+name: Merge low-risk approved PRs
+
+# THE LAST STEP OF "HOW WE SHIP" USED TO BE A CHAT MESSAGE.
+#
+# The old workflow (approved-green-pr-sweep.yml) held `pull-requests: read`. It
+# could only REPORT -- it found approved, green PRs and posted them to Zulip for a
+# person to merge by hand. PR #852 sat approved and green and unmerged because the
+# lifecycle's final move was "ask a human". This replaces the report with the action.
+#
+# FOUNDER RULING 2026-08-26, verbatim:
+#   "for merges, we can reduce the number of approvals if we focus on the high
+#    sensitive risky ones for me to review and ask questions for all the other ones
+#    low risk and all green are good to merge"
+#
+# So the gate is RISK-TIERED, not approval-tiered:
+#   low risk  + approved + green -> merged automatically, silently
+#   high risk                    -> never merged here; collected onto one GitHub
+#                                   issue with the specific questions to answer
+#
+# WHERE THE RULES LIVE. In delivery-db, table `ship_rules` -- not in this file and
+# not in a markdown doc. `.github/ship-rules.json` is GENERATED from that table by
+# `ship-rules-export`. GitHub's runners cannot reach delivery-db (it is on loopback
+# on ruche), so the export is how the rule crosses the network boundary. If the
+# file is missing this workflow FAILS rather than merging under no rule at all.
+
+on:
+  pull_request_review:
+    types: [submitted]
+  check_suite:
+    types: [completed]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: merge-sweep-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Merge low-risk approved PRs, escalate the sensitive ones
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE: dev
+          ISSUE_TITLE: 'Sensitive PRs waiting on Miguel (DL-0544)'
+        run: |
+          set -euo pipefail
+
+          RULES=.github/ship-rules.json
+          if [ ! -f "$RULES" ]; then
+            echo "::error::$RULES is missing. It is generated from the ship_rules table in"
+            echo "::error::delivery-db by 'ship-rules-export'. Refusing to merge with no rule."
+            exit 1
+          fi
+          jq -e '.rules | length > 0' "$RULES" >/dev/null || {
+            echo "::error::$RULES contains no rules. Refusing to merge with no rule."; exit 1; }
+
+          # Read the PR list into a FILE first. `gh` inside a `while read` loop
+          # consumes the loop's stdin and the loop silently stops after one
+          # iteration -- observed 2026-08-26, where a 56-PR backlog scanned as 1.
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --base "$BASE" \
+            --json number,title,url,isDraft,reviewDecision,mergeStateStatus,reviews,commits \
+            --limit 200 > /tmp/prs.json
+          echo "Scanned $(jq 'length' /tmp/prs.json) open PRs against ${BASE}."
+
+          merged=0; escalated=""; stale=0
+
+          for number in $(jq -r '.[].number' /tmp/prs.json); do
+            pr=$(jq -c --argjson n "$number" '.[] | select(.number==$n)' /tmp/prs.json)
+            title=$(jq -r '.title' <<<"$pr")
+            url=$(jq   -r '.url'   <<<"$pr")
+
+            [ "$(jq -r '.isDraft'          <<<"$pr")" = "false"    ] || continue
+            [ "$(jq -r '.reviewDecision'   <<<"$pr")" = "APPROVED" ] || continue
+            [ "$(jq -r '.mergeStateStatus' <<<"$pr")" = "CLEAN"    ] || continue
+
+            # AN APPROVAL THAT PREDATES THE CODE IS NOT AN APPROVAL OF THAT CODE.
+            # The protect-live-branch ruleset has dismiss_stale_reviews_on_push=false,
+            # so GitHub keeps showing APPROVED after new commits land. Check it here.
+            approved_at=$(jq -r '[.reviews[]|select(.state=="APPROVED")|.submittedAt]|max' <<<"$pr")
+            commit_at=$(jq  -r '[.commits[].committedDate]|max' <<<"$pr")
+            if [ "$approved_at" = "null" ] || [ "$commit_at" = "null" ]; then continue; fi
+            if [ "$(date -d "$approved_at" +%s)" -lt "$(date -d "$commit_at" +%s)" ]; then
+              echo "PR #${number}: approved ${approved_at} predates commit ${commit_at} - STALE, not merging."
+              stale=$((stale+1)); continue
+            fi
+
+            files=$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" --json files \
+                      -q '.files[].path' </dev/null)
+
+            # Classify EACH FILE. A file matched by any low rule is exempt from every
+            # high rule -- otherwise a docs-only PR goes high because the word
+            # "wallet" appears in a path. The PR is high only if a file is still high.
+            reasons=""
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              if grep -qEi -f <(jq -r '.rules[]|select(.risk=="low")|.pattern' "$RULES") <<<"$f"; then
+                continue
+              fi
+              hits=$(jq -r '.rules[]|select(.risk=="high")|.pattern' "$RULES" \
+                     | while IFS= read -r p; do
+                         if printf '%s' "$f" | grep -qEi -- "$p"; then printf '%s\n' "$p"; fi
+                       done)
+              hit=${hits%%$'\n'*}
+              if [ -n "$hit" ]; then
+                why=$(jq -r --arg p "$hit" 'first(.rules[]|select(.pattern==$p)|.why)' "$RULES")
+                ask=$(jq -r --arg p "$hit" 'first(.rules[]|select(.pattern==$p)|.ask)' "$RULES")
+                reasons="${reasons}    - \`${f}\` — ${why}"$'\n'
+                [ "$ask" != "null" ] && [ -n "$ask" ] && reasons="${reasons}      **Question:** ${ask}"$'\n'
+              fi
+            done <<<"$files"
+
+            if [ -n "$reasons" ]; then
+              echo "PR #${number}: SENSITIVE - not merging, escalating."
+              escalated="${escalated}- PR #${number}: [${title}](${url})"$'\n'"${reasons}"
+              continue
+            fi
+
+            echo "PR #${number}: low risk, approved, green - merging."
+            if gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --squash --delete-branch; then
+              merged=$((merged+1))
+            else
+              echo "::warning::PR #${number} passed every check but the merge call failed."
+              escalated="${escalated}- PR #${number}: [${title}](${url})"$'\n'"    - merge call FAILED despite passing every check; needs a look."$'\n'
+            fi
+          done
+
+          echo "Merged ${merged}. Escalated $(printf '%s' "$escalated" | grep -c '^- PR' || true). Stale approvals skipped: ${stale}."
+
+          # A clean run is SILENT. Only things needing a human get written down, and
+          # they go to a GitHub issue -- which is in the fleet search index -- not to
+          # chat, so agent-to-agent traffic stays out of Zulip.
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+                       --json number,title \
+                     | jq -r --arg t "$ISSUE_TITLE" 'map(select(.title==$t))|.[0].number // empty')
+
+          if [ -z "$escalated" ]; then
+            [ -n "$existing" ] && gh issue close "$existing" --repo "$GITHUB_REPOSITORY" \
+              --comment "Nothing sensitive is waiting. Merged ${merged} low-risk PR(s) this run." || true
+            exit 0
+          fi
+
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            "These pull requests are approved and green, but they touch something sensitive, so they are NOT merged automatically. Each one says what it touches and what to ask." \
+            "${escalated}" \
+            "_Risk rules come from the \`ship_rules\` table in delivery-db, exported to \`.github/ship-rules.json\`. To change what counts as sensitive, change the table._")
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$body"
+          fi
