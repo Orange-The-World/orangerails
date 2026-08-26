@@ -497,7 +497,7 @@ jobs:
         #   MIGRATION_APPLY_ALLOWED_ACTORS_PROD   (prod project)
         # Either one absent or empty fails closed on that path only.
         env:
-          TARGET_ENV: ${{ needs.deploy.outputs.environment_name }}
+          TARGET_ENV: ${{ needs.target.outputs.environment_name }}
           ALLOWED_DEV: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_DEV }}
           ALLOWED_PROD: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD }}
           ACTOR: ${{ github.actor }}
@@ -547,7 +547,7 @@ jobs:
         # manual recovery via the CLI later stays clean.
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_REF: ${{ needs.deploy.outputs.supabase_ref }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
         run: |
           set -euo pipefail
           MIG_DIR="supabase/migrations"
