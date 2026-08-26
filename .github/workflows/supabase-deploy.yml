@@ -271,21 +271,20 @@ jobs:
 
   check-pending-migrations:
     needs: [target, apply-migrations]
-    # Runs after EVERY deploy attempt so schema drift is its OWN visible
-    # check-run. The deploy job stays green when edge functions ship; this job
-    # goes red when migrations are pending, making drift impossible to miss
-    # without blocking the deploy gate. This job is NOT in branch-protection
-    # required checks, so it never prevents a merge on its own.
+    # Runs BEFORE the deploy job, not after it. deploy declares
+    # needs: [target, check-pending-migrations], so when this job exits 1 the
+    # deploy is SKIPPED and code cannot ship ahead of its schema. That is the
+    # inverse of the old arrangement, where this job ran after deploy and was
+    # deliberately non-blocking. It is still NOT in branch-protection required
+    # checks, so it never prevents a merge on its own; what it prevents is the
+    # deploy that would otherwise follow that merge.
     #
-    # `if: always()` with no result condition is deliberate. This job used to be
-    # skipped when deploy failed, and a skipped check-run renders NEUTRAL, not
-    # red -- so a run that learned nothing about the schema looked exactly like a
-    # run that found it clean. Reporting UNKNOWN out loud costs one extra red on
-    # an already-failing run; staying silent costs a migration nobody notices.
-    # always(), because apply-migrations is SKIPPED on every prod push and a skipped
-    # dependency would otherwise cancel this job -- which would hand prod a green run
-    # that never looked at the schema. A skipped check-run renders NEUTRAL, not red,
-    # so silence here reads exactly like clean.
+    # `if: always()` with no result condition is deliberate: apply-migrations is
+    # SKIPPED on every prod push, and a skipped dependency would otherwise cancel
+    # this job. A skipped check-run renders NEUTRAL, not red, so a run that never
+    # looked at the schema would read exactly like a run that found it clean.
+    # Reporting UNKNOWN out loud costs one extra red; staying silent costs a
+    # migration nobody notices.
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -441,12 +440,7 @@ jobs:
 
   apply-migrations:
     needs: [target]
-    # Only ever runs on an explicit workflow_dispatch with apply_migrations checked
-    # AND the deploy job must have succeeded. A push CANNOT reach this job: `inputs`
-    # is null on a push event, so the condition is false. Deploying code and changing
-    # a schema are different acts with different blast radii; merging a PR must never
-    # silently rewrite a database.
-    # A PUSH TO DEV NOW REACHES THIS JOB. That is the whole change: dev applies its
+    # A PUSH TO DEV REACHES THIS JOB. That is the whole change: dev applies its
     # own migrations at merge time, so the dev backlog is always 0 or 1 and prod
     # promotion is a batch that has already run once on a real database.
     #
