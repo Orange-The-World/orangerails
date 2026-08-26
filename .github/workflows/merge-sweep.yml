@@ -71,6 +71,23 @@ jobs:
             --limit 200 > /tmp/prs.json
           echo "Scanned $(jq 'length' /tmp/prs.json) open PRs against ${BASE}."
 
+          # ASK THE REPO WHICH MERGE METHOD IT ALLOWS. Do not hardcode one.
+          # Found the hard way 2026-08-26: merging PR #852 by hand returned
+          # "GraphQL: Squash merges are not allowed on this repository" -- orangerails
+          # has allow_squash_merge=false. This workflow shipped with --squash hardcoded,
+          # so it would have failed EVERY merge in the repo it was written for, and the
+          # failure would have looked like a flaky merge rather than a wrong flag.
+          methods=$(gh api "repos/$GITHUB_REPOSITORY" \
+            -q '[(if .allow_squash_merge then "--squash" else empty end),
+                 (if .allow_merge_commit then "--merge"  else empty end),
+                 (if .allow_rebase_merge then "--rebase" else empty end)] | .[]')
+          METHOD=$(printf '%s\n' "$methods" | head -n1)
+          if [ -z "$METHOD" ]; then
+            echo "::error::This repository allows no merge method at all. Nothing to do."
+            exit 1
+          fi
+          echo "Merge method for ${GITHUB_REPOSITORY}: ${METHOD}"
+
           merged=0; escalated=""; stale=0
 
           for number in $(jq -r '.[].number' /tmp/prs.json); do
@@ -124,8 +141,8 @@ jobs:
               continue
             fi
 
-            echo "PR #${number}: low risk, approved, green - merging."
-            if gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --squash --delete-branch; then
+            echo "PR #${number}: low risk, approved, green - merging via ${METHOD}."
+            if gh pr merge "$number" --repo "$GITHUB_REPOSITORY" "$METHOD" --delete-branch; then
               merged=$((merged+1))
             else
               echo "::warning::PR #${number} passed every check but the merge call failed."
