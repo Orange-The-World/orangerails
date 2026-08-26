@@ -26,7 +26,69 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # DL-1640 / DL-1470 / DL-1655, 2026-08-26. Founder: "why the drift why not done
+  # as they are built?"
+  #
+  # WHAT WAS WRONG. Nothing was broken -- the workflow did exactly what it was
+  # written to do, and what it was written to do produced 37 unapplied migrations
+  # on production, 10 of them security revocations, the oldest from 2026-07-13.
+  #
+  #   deploy                    (no needs)     shipped edge functions
+  #   check-pending-migrations  needs: deploy  reported drift AFTER the code shipped
+  #   apply-migrations          needs: deploy  required workflow_dispatch + a ticked box
+  #
+  # `inputs` is null on a push, so apply-migrations could NEVER run on a merge.
+  # Every automatic deploy shipped 100% of the code and 0% of the schema, and the
+  # drift report ran afterwards and blocked nothing. The design assumed a human
+  # would see the red check and hand-dispatch the apply. Over six weeks nobody did,
+  # and the reason is structural rather than lazy: migrations apply IN ORDER, so
+  # the cost of applying one migration is the risk of applying the whole backlog.
+  # The longer it drifts the scarier the apply, so it drifts further. The DL-1597
+  # cross-tenant scan-range guard is live in code right now with its migration
+  # unapplied -- believing you are protected when you are not is the worst state
+  # this can produce, and it was the normal operating state.
+  #
+  # THE RULE NOW: a migration and the code that needs it land together, or neither
+  # lands.
+  #
+  #   target                    resolves the project (no secrets, no side effects)
+  #   apply-migrations          needs: target   AUTOMATIC on a push to dev
+  #   check-pending-migrations  needs: target   gates the deploy, does not follow it
+  #   deploy                    needs: gate     cannot ship ahead of its schema
+  #
+  # dev applies on merge, so its backlog can never exceed one and a bad migration
+  # breaks dev in front of the person who wrote it. prod keeps the two-party
+  # dispatch untouched -- it protects real money -- but prod DEPLOY now blocks
+  # while prod has pending migrations, which is what makes the drift impossible
+  # to carry silently.
+  # ---------------------------------------------------------------------------
+  target:
+    runs-on: ubuntu-latest
+    outputs:
+      supabase_ref: ${{ steps.t.outputs.supabase_ref }}
+      environment_name: ${{ steps.t.outputs.environment_name }}
+    steps:
+      - name: Resolve Supabase target for this branch
+        id: t
+        run: |
+          # Same mapping the deploy job uses. Lifted into its own job so the
+          # migration jobs can resolve the project WITHOUT depending on deploy
+          # having already run -- that dependency is what forced the schema
+          # check to happen after the code had shipped.
+          if [ "${{ github.ref_name }}" = "prod" ]; then
+            echo "supabase_ref=lcdicqalreskibdfxkzb" >> "$GITHUB_OUTPUT"
+            echo "environment_name=supabase-prod" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_name }}" = "dev" ]; then
+            echo "supabase_ref=fzwmnzmtqidumdqjdddz" >> "$GITHUB_OUTPUT"
+            echo "environment_name=supabase-dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Supabase deploys only run from 'prod' or 'dev' branches; got '${{ github.ref_name }}'"
+            exit 1
+          fi
+
   deploy:
+    needs: [target, check-pending-migrations]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -208,7 +270,7 @@ jobs:
 
 
   check-pending-migrations:
-    needs: [deploy]
+    needs: [target, apply-migrations]
     # Runs after EVERY deploy attempt so schema drift is its OWN visible
     # check-run. The deploy job stays green when edge functions ship; this job
     # goes red when migrations are pending, making drift impossible to miss
@@ -220,6 +282,10 @@ jobs:
     # red -- so a run that learned nothing about the schema looked exactly like a
     # run that found it clean. Reporting UNKNOWN out loud costs one extra red on
     # an already-failing run; staying silent costs a migration nobody notices.
+    # always(), because apply-migrations is SKIPPED on every prod push and a skipped
+    # dependency would otherwise cancel this job -- which would hand prod a green run
+    # that never looked at the schema. A skipped check-run renders NEUTRAL, not red,
+    # so silence here reads exactly like clean.
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -233,8 +299,8 @@ jobs:
       - name: Check pending DB migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_REF: ${{ needs.deploy.outputs.supabase_ref }}
-          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+          APPLY_RESULT: ${{ needs['apply-migrations'].result }}
         run: |
           set -uo pipefail
 
@@ -255,11 +321,15 @@ jobs:
             exit 1
           }
 
-          if [ "${DEPLOY_RESULT}" != "success" ]; then
-            unknown "The deploy job ended '${DEPLOY_RESULT}', so no target project was resolved and no schema was read."
+          # apply-migrations is 'skipped' on every prod push (by design) and on a
+          # dispatch without the box ticked. Both are fine -- this job then simply
+          # reports what is pending and blocks the deploy. A 'failure' is different:
+          # the apply ran and did not finish, so the schema is in an unknown state.
+          if [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "cancelled" ]; then
+            unknown "apply-migrations ended '${APPLY_RESULT}'. Some migrations may have applied and some not; the schema state is not known from here."
           fi
           if [ -z "${SUPABASE_REF}" ]; then
-            unknown "The deploy job produced no supabase_ref output."
+            unknown "The target job produced no supabase_ref output."
           fi
 
           MIG_DIR="supabase/migrations"
@@ -350,7 +420,9 @@ jobs:
             {
               echo "## :warning: ${PENDING} unapplied migration(s) on \`${SUPABASE_REF}\`"
               echo ""
-              echo ":white_check_mark: Edge functions deployed successfully. Only the schema is out of sync."
+              echo ":no_entry: **The deploy is blocked.** Edge functions have NOT shipped."
+              echo ""
+              echo "Code is not allowed to ship ahead of its schema (DL-1640). Apply these first."
               echo ""
               printf '%b' "${PENDING_NAMES}"
               echo ""
@@ -361,20 +433,30 @@ jobs:
               echo "| dev | DBA applies and verifies |"
               echo "| prod | two-party: founder + CTO |"
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- schema out of sync. Apply via workflow_dispatch with apply_migrations=true."
+            echo "::error::${PENDING} migration(s) not applied on ${SUPABASE_REF} -- DEPLOY BLOCKED. On prod, apply via workflow_dispatch with apply_migrations=true (two-party). On dev this means the automatic apply did not run or did not finish."
             exit 1
           else
             echo "Schema in sync on ${SUPABASE_REF}." >> "$GITHUB_STEP_SUMMARY"
           fi
 
   apply-migrations:
-    needs: [deploy]
+    needs: [target]
     # Only ever runs on an explicit workflow_dispatch with apply_migrations checked
     # AND the deploy job must have succeeded. A push CANNOT reach this job: `inputs`
     # is null on a push event, so the condition is false. Deploying code and changing
     # a schema are different acts with different blast radii; merging a PR must never
     # silently rewrite a database.
-    if: ${{ needs.deploy.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.apply_migrations }}
+    # A PUSH TO DEV NOW REACHES THIS JOB. That is the whole change: dev applies its
+    # own migrations at merge time, so the dev backlog is always 0 or 1 and prod
+    # promotion is a batch that has already run once on a real database.
+    #
+    # prod is UNCHANGED and still cannot be reached by a push: it needs an explicit
+    # workflow_dispatch with the box ticked, the GitHub Environment reviewers, and
+    # the actor allowlist below. Deploying code and rewriting a production schema
+    # stay different acts with different blast radii.
+    if: >-
+      ${{ (github.event_name == 'push' && github.ref_name == 'dev')
+          || (github.event_name == 'workflow_dispatch' && inputs.apply_migrations) }}
     runs-on: ubuntu-latest
     # environment: binds this job to a GitHub Environment whose required-reviewer list
     # is set in repo Settings -> Environments. prod dispatches bind to supabase-prod
@@ -383,7 +465,7 @@ jobs:
     # the right project is always protected. Add reviewers to supabase-prod in repo
     # Settings -> Environments once this PR merges -- the job will pause for approval
     # before any steps run.
-    environment: ${{ needs.deploy.outputs.environment_name }}
+    environment: ${{ needs.target.outputs.environment_name }}
     permissions:
       contents: read
     steps:
@@ -393,6 +475,13 @@ jobs:
           fetch-depth: 0
 
       - name: Actor allowlist gate (per target, no inheritance)
+        # SKIPPED on the automatic dev push, deliberately. On a dispatch the actor is
+        # a person and the allowlist is the control. On a push to dev the actor is
+        # whoever merged, and the control is the reviewed PR that reached dev at all --
+        # requiring a second per-person allowlist there would reintroduce exactly the
+        # human bottleneck that produced the 37-migration backlog. This never loosens
+        # prod: prod cannot be reached by a push, so prod always takes the branch below.
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         # Fallback gate. The primary gate is meant to be the required-reviewer list on
         # the GitHub Environment this job binds to; until reviewers are configured on
         # supabase-prod, this step is the only thing standing in front of the prod
@@ -408,7 +497,7 @@ jobs:
         #   MIGRATION_APPLY_ALLOWED_ACTORS_PROD   (prod project)
         # Either one absent or empty fails closed on that path only.
         env:
-          TARGET_ENV: ${{ needs.deploy.outputs.environment_name }}
+          TARGET_ENV: ${{ needs.target.outputs.environment_name }}
           ALLOWED_DEV: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_DEV }}
           ALLOWED_PROD: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD }}
           ACTOR: ${{ github.actor }}
@@ -458,7 +547,7 @@ jobs:
         # manual recovery via the CLI later stays clean.
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_REF: ${{ needs.deploy.outputs.supabase_ref }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
         run: |
           set -euo pipefail
           MIG_DIR="supabase/migrations"
