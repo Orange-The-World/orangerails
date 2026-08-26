@@ -33,6 +33,7 @@ import {
 } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import { advanceCursor, isAdvanceCursorError } from './cursor.ts';
+import { recordScanRange } from './scan_range.ts';
 
 interface EnvelopeUpdateRequestBody {
   connection_id?: string;
@@ -162,24 +163,21 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const effectiveCursor = cursorResult.effectiveCursor;
 
     // Record the scan range when the caller supplies from_height (DL-1478).
-    // Failure is logged but does not fail the request: the cursor write above
-    // is the safe fallback while range recording is rolled out.
-    if (
-      body.from_height !== undefined &&
-      typeof body.from_height === 'number' &&
-      Number.isInteger(body.from_height) &&
-      body.from_height >= 0 &&
-      body.from_height <= body.last_block_scanned
-    ) {
-      const { error: rpcErr } = await ctx.serviceClient.rpc('record_stealth_scan_range', {
-        p_connection_id: body.connection_id,
-        p_from_height:   body.from_height,
-        p_to_height:     body.last_block_scanned,
-      });
-      if (rpcErr) {
-        console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', rpcErr);
-      }
-    }
+    //
+    // The row read above is deliberately NOT passed here. record_stealth_scan_range
+    // resolves the owner from stealth_connections itself and rejects unless the
+    // id it is given matches: hand it the value we just read from that same row
+    // and it compares the owner against itself, so the check can never fail.
+    // recordScanRange only ever sees the request body, which carries the caller
+    // identity, token-pinned above (direct: equals ctx.userId, widget:
+    // enforceWidgetAppUser, platform: scoped by platform_id on the row read).
+    // DL-1597.
+    await recordScanRange(ctx.serviceClient, {
+      connection_id:      body.connection_id,
+      app_user_id:        body.app_user_id,
+      last_block_scanned: body.last_block_scanned,
+      from_height:        body.from_height,
+    });
 
     const resp: EnvelopeUpdateResponseBody = {
       connection_id: body.connection_id,
