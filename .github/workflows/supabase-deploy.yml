@@ -44,8 +44,8 @@ jobs:
   # would see the red check and hand-dispatch the apply. Over six weeks nobody did,
   # and the reason is structural rather than lazy: migrations apply IN ORDER, so
   # the cost of applying one migration is the risk of applying the whole backlog.
-  # The longer it drifts the scarier the apply, so it drifts further. PR #852's
-  # cross-tenant security guard is live in code right now with its migration
+  # The longer it drifts the scarier the apply, so it drifts further. The DL-1597
+  # cross-tenant scan-range guard is live in code right now with its migration
   # unapplied -- believing you are protected when you are not is the worst state
   # this can produce, and it was the normal operating state.
   #
