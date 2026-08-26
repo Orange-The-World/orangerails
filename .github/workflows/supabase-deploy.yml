@@ -54,7 +54,7 @@ jobs:
   #
   #   target                    resolves the project (no secrets, no side effects)
   #   apply-migrations          needs: target   AUTOMATIC on a push to dev
-  #   check-pending-migrations  needs: target   gates the deploy, does not follow it
+  #   check-pending-migrations  needs: target, apply-migrations   gates the deploy
   #   deploy                    needs: gate     cannot ship ahead of its schema
   #
   # dev applies on merge, so its backlog can never exceed one and a bad migration
@@ -271,10 +271,12 @@ jobs:
 
   check-pending-migrations:
     needs: [target, apply-migrations]
-    # Runs after EVERY deploy attempt so schema drift is its OWN visible
-    # check-run. The deploy job stays green when edge functions ship; this job
-    # goes red when migrations are pending, making drift impossible to miss
-    # without blocking the deploy gate. This job is NOT in branch-protection
+    # Runs BEFORE deploy, not after. deploy declares needs:
+    # [target, check-pending-migrations], so when this job exits 1 the deploy is
+    # SKIPPED and no edge function ships. That is the DL-1640 rule in one line:
+    # code is not allowed to ship ahead of its schema. It also needs
+    # apply-migrations, so on a dev push it reads the schema only after the
+    # automatic apply has had its turn. This job is NOT in branch-protection
     # required checks, so it never prevents a merge on its own.
     #
     # `if: always()` with no result condition is deliberate. This job used to be
@@ -441,11 +443,6 @@ jobs:
 
   apply-migrations:
     needs: [target]
-    # Only ever runs on an explicit workflow_dispatch with apply_migrations checked
-    # AND the deploy job must have succeeded. A push CANNOT reach this job: `inputs`
-    # is null on a push event, so the condition is false. Deploying code and changing
-    # a schema are different acts with different blast radii; merging a PR must never
-    # silently rewrite a database.
     # A PUSH TO DEV NOW REACHES THIS JOB. That is the whole change: dev applies its
     # own migrations at merge time, so the dev backlog is always 0 or 1 and prod
     # promotion is a batch that has already run once on a real database.
