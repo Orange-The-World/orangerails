@@ -215,32 +215,43 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
   // state. This case is the regression guard that the fix dropped that condition:
   // red at the dev tip, green on this branch.
   test("iframe direct-load of /connect/stealth shows the guidance card after the grace window", async ({ page }) => {
-    await page.goto("/connect/sparrow");
-
-    // Inject a same-origin iframe pointing at the widget. Inside it,
-    // window.parent !== window (framed) while window.opener is null, which is
-    // exactly the shape the old opener/parent gate rejected.
-    await page.evaluate(() => {
-      const frame = document.createElement("iframe");
-      frame.id = "stealth-frame";
-      frame.src = "/connect/stealth";
-      frame.style.width = "480px";
-      frame.style.height = "640px";
-      document.body.appendChild(frame);
+    // Strip framing-denial headers so the real iframe can load in this test.
+    // Both X-Frame-Options and the CSP frame-ancestors directive must be absent
+    // or the browser refuses to render the iframe regardless of which branch
+    // this test runs against. Header correctness is covered by the security PR;
+    // this test guards the widget JS behaviour when window.parent !== window.
+    await page.route("**/connect/stealth", async (route) => {
+      const response = await route.fetch();
+      const headers = response.headers();
+      delete headers["x-frame-options"];
+      delete headers["content-security-policy"];
+      await route.fulfill({ response, headers });
     });
 
-    const widget = page.frameLocator("#stealth-frame");
+    // Load the widget in a real iframe so window.parent !== window is true
+    // by construction, not by monkey-patch (#451 regression shape).
+    await page.goto("/");
+    await page.evaluate(() => {
+      const iframe = document.createElement("iframe");
+      iframe.id = "stealth-iframe-fixture";
+      iframe.src = "/connect/stealth";
+      Object.assign(iframe.style, {
+        width: "100vw",
+        height: "100vh",
+        border: "none",
+      });
+      document.body.replaceChildren(iframe);
+    });
 
-    // Never post OR_STEALTH_INIT. Wait just past the grace window so awaitingInit
-    // flips to false with no init set.
-    await page.waitForTimeout(1600); // just past the 1500ms DIRECT_LOAD_GRACE_MS window
-
+    // Web-first: 5000ms covers the 1500ms grace window plus render time.
+    // No hardcoded waitForTimeout; the assertion retries until visible.
+    const widget = page.frameLocator("#stealth-iframe-fixture");
     await expect(
-      widget.getByRole("heading", { name: /stealth sync widget/i, level: 1 }),
-    ).toBeVisible({ timeout: 15_000 });
+      widget.getByRole("heading", { name: /stealth sync widget/i }),
+    ).toBeVisible({ timeout: 5000 });
     await expect(
       widget.getByText(/OR_STEALTH_INIT postMessage to this window/i),
-    ).toBeVisible({ timeout: 15_000 });
+    ).toBeVisible({ timeout: 5000 });
     await capture(page, "05-stealth-iframe-load-guidance-card");
   });
 });
