@@ -262,8 +262,9 @@ jobs:
           # branch this job is running against, and it is PER BRANCH because
           # the two branches genuinely differ.
           #
-          # MEASURED 2026-08-03 with this job's own find pattern:
-          #   dev  16 files
+          # MEASURED 2026-08-03 with this job's own find pattern, dev raised to
+          # 18 on 2026-08-27 for the new or-sync/_probe.test.ts (DEV-0126):
+          #   dev  18 files
           #   prod  9 files
           #
           # The value shipped when this guard landed was 3, which was the count
