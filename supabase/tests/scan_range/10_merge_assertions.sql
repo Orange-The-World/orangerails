@@ -116,8 +116,12 @@ SELECT public.t_assert_ranges('9b neighbouring single heights close it up',
 -- guard that has only ever been observed permitting is not a guard anyone has
 -- tested, so each of the three refusal paths is exercised and then the table
 -- is checked to prove nothing was written on the way out.
+-- 10a targets a connection that HAS an owner, so this lands on the
+-- owner-mismatch raise. 10b targets the connection with a NULL owner, which
+-- is a different branch. Pointing both at the same connection would have
+-- tested one branch twice and the mismatch branch not at all.
 SELECT public.t_assert_refused('10a a caller who does not own the connection is refused',
-       '00000000-0000-0000-0000-0000000000a9'::uuid, 100, 200, 'user-a');
+       '00000000-0000-0000-0000-0000000000a1'::uuid, 100, 200, 'not-the-owner');
 
 SELECT public.t_assert_refused('10b a connection with no owner is refused',
        '00000000-0000-0000-0000-0000000000a9'::uuid, 100, 200, NULL);
