@@ -2107,4 +2107,97 @@ describe('runSync , spend arithmetic and change tracking', () => {
     expect(result.windowExhausted).toBe(true);
     expect(result.sealedTransactions).toHaveLength(2);
   });
+
+  it('detects a spend that is only found in a rolling window extension pass on the change chain', async () => {
+    // Same shape as the chain-0 extension test above, moved to chain 1
+    // (the change branch). GAP_LIMIT is 5 here (see the outer describe),
+    // so the initial window per chain is [0, 10) and the near-edge
+    // threshold is index 5. Setup:
+    //   block 1 pays CHANGE index 5, which is inside the initial window
+    //     and at the near-edge threshold, so chain1Near fires and
+    //     chainWindowEnd[1] extends.
+    //   block 2 spends that outpoint and pays 39,000 to CHANGE index 12,
+    //     which no initial-window scan can match on chain 1. The stub
+    //     matcher models that honestly: it matches a block only when the
+    //     script that block pays is among the scripts it was handed.
+    // So the spending transaction is only seen once the chain-1 arm of
+    // the extension loop (sync.ts:1035-1037) has actually derived index
+    // 12 on chain 1 and re-scanned for it.
+    const orStealthKey = randomKeyB64();
+    const envelope = await sealedEnvelopeFor('spend-in-extension-chain1', orStealthKey);
+    const ts = Math.floor(new Date('2024-06-25T00:00:00Z').getTime() / 1000);
+
+    const nearEdgeChange = deriveScriptPubkeyBytes(BIP84_XPUB, 1, 5, 'p2wpkh');
+    const beyondWindowChange = deriveScriptPubkeyBytes(BIP84_XPUB, 1, 12, 'p2wpkh');
+
+    const fund = buildFixtureBlock({
+      timestamp: ts,
+      txs: [{ outputs: [{ script: nearEdgeChange, amountSats: 100_000n }] }],
+    });
+    const fundTxid = await fixtureTxid(fund.txs[0]);
+
+    const spend = buildFixtureBlock({
+      timestamp: ts + 600,
+      txs: [
+        {
+          inputs: [{ prevTxidHex: fundTxid, voutIdx: 0 }],
+          outputs: [
+            { script: STRANGER, amountSats: 60_000n },
+            { script: beyondWindowChange, amountSats: 39_000n },
+          ],
+        },
+      ],
+    });
+    const spendTxid = await fixtureTxid(spend.txs[0]);
+
+    const fundHash = await blockHashOf(fund.raw);
+    const spendHash = await blockHashOf(spend.raw);
+
+    const scriptPresent = (scripts: readonly Uint8Array[], target: Uint8Array): boolean =>
+      scripts.some((s) => s.length === target.length && s.every((b, i) => b === target[i]));
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 840_000,
+      lastBlockScanned: 840_000,
+      fetchTip: async () => 840_002,
+      fetchFilter: async (h) => {
+        if (h === 840_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xf1]) };
+        if (h === 840_002) return { height: h, blockHashHex: spendHash, filter: new Uint8Array([0xf2]) };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === fundHash) return { height: 0, blockHashHex: fundHash, raw: fund.raw };
+        if (hashHex === spendHash) return { height: 0, blockHashHex: spendHash, raw: spend.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      // GCS semantics without WASM: a filter matches only when the script
+      // its block actually pays is in the list handed to the matcher.
+      matcher: {
+        matchAny: (filter, _hash, scripts) => {
+          if (filter[0] === 0xf1) return scriptPresent(scripts, nearEdgeChange);
+          if (filter[0] === 0xf2) return scriptPresent(scripts, beyondWindowChange);
+          return false;
+        },
+      },
+    });
+
+    expect(result.normalized).toHaveLength(2);
+
+    const received = result.normalized.find((t) => t.txid === fundTxid);
+    expect(received).toBeDefined();
+    expect(received!.direction).toBe('in');
+    expect(received!.amount_sats).toBe(100_000);
+
+    const sent = result.normalized.find((t) => t.txid === spendTxid);
+    expect(sent).toBeDefined();
+    expect(sent!.direction).toBe('out');
+    expect(sent!.amount_sats).toBe(61_000);
+    expect(sent!.address).toBe(STRANGER_ADDRESS);
+    expect(sent!.block_height).toBe(840_002);
+
+    expect(result.windowExhausted).toBe(true);
+    expect(result.sealedTransactions).toHaveLength(2);
+  });
 });
