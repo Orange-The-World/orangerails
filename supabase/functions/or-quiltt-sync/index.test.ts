@@ -497,8 +497,12 @@ function makeQuilttSyncMock(opts: {
   swError?: string;
   txNodes: Array<{ id: string; account: { id: string } | null }>;
   opkPublic?: string;
-}): { client: any; inserted: string[]; cleanup: () => void } {
+}): { client: any; inserted: string[]; connUpdates: Array<Record<string, unknown>>; cleanup: () => void } {
   const inserted: string[] = [];
+  // DL-1778: patches applied to the connections table, in call order, so a
+  // test can assert whether (and with what) last_sync_at was stamped without
+  // caring about the status/partial reconcile calls that also touch this table.
+  const connUpdates: Array<Record<string, unknown>> = [];
   const client = {
     from(table: string) {
       // deno-lint-ignore no-explicit-any
@@ -513,7 +517,10 @@ function makeQuilttSyncMock(opts: {
         not(_c: string, _op: string, _v: unknown) { return chain; },
         order(_c: string, _o: unknown) { return chain; },
         limit(_n: number) { return chain; },
-        update(_patch: unknown, _opts?: unknown) { return chain; },
+        update(patch: unknown, _opts?: unknown) {
+          if (table === 'connections') connUpdates.push(patch as Record<string, unknown>);
+          return chain;
+        },
         single() {
           if (table === 'subaccounts') {
             return Promise.resolve({
@@ -610,7 +617,7 @@ function makeQuilttSyncMock(opts: {
     );
   };
   const cleanup = () => { (globalThis as any).fetch = origFetch; };
-  return { client, inserted, cleanup };
+  return { client, inserted, connUpdates, cleanup };
 }
 
 Deno.test('DL-0442 account filter: subset selected -- only matching accounts sync', async () => {
