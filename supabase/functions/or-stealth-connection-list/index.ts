@@ -15,8 +15,22 @@
  * Response:
  *   { connections: Array<{
  *       connection_id, app_slug, connection_kind, last_sync_at,
- *       last_block_scanned, status, created_at
+ *       last_block_scanned, status, created_at,
+ *       sync_freshness, hours_since_sync, stale_after_hours
  *     }> }
+ *
+ * DL-1737, the last three. `sync_freshness` is `never`, `fresh` or `stale`.
+ * `hours_since_sync` is the age of `last_sync_at` in hours, or null when there
+ * is no usable stamp. `stale_after_hours` is the threshold this response was
+ * computed against, returned so no client hardcodes it and so it can be tuned
+ * without a client release.
+ *
+ * `status` is deliberately unchanged and gains no new value: consumers switch
+ * on it, so this is strictly additive.
+ *
+ * The rule and the number come from ../_shared/sync-freshness.ts, the same
+ * module or-connection-list uses, so the two read surfaces cannot drift into
+ * disagreeing about whether one connection is stale.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
