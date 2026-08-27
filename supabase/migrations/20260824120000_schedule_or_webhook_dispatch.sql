@@ -21,6 +21,23 @@
 -- next pulled. Data was stale rather than absent. That is why this is worth
 -- fixing properly and is not an emergency.
 --
+-- NOTE ON ORDERING, added 2026-08-27, DL-1596. This file was applied on dev
+-- BEFORE 20260824105000_mark_pre_cutoff_webhook_backlog_dead.sql, which numbers
+-- below it and whose whole purpose is to retire the pre-cutoff backlog before
+-- this schedule can drain it. This one merged first, in #844 and #846; that one
+-- merged about forty minutes later in #850 with the lower number and did not
+-- apply in that run. For that window the drain was live and the retirement was
+-- not. webhook_delivery on dev held 0 rows, so nothing was delivered wrongly:
+-- that is luck, not a control.
+--
+-- The lesson is general and it is not about these two files. Filename order
+-- orders the files inside ONE apply run. It cannot reorder across runs, so on
+-- any partly applied database, which is every environment we own, a file that
+-- merges late while numbering early runs after the migrations it was written to
+-- precede. The control is the out-of-order gate in
+-- .github/workflows/supabase-deploy.yml, which refuses the apply and names the
+-- offending file and the highest version already applied.
+--
 -- Mirrors invoke_or_quiltt_sync (20260804140000_or_quiltt_sync_fail_loudly.sql)
 -- deliberately, including the loud-failure behaviour: a missing Vault secret
 -- RAISES rather than returning NULL, so a broken config shows up as a failed
