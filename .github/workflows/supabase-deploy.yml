@@ -14,6 +14,11 @@ on:
         required: false
         default: false
         type: boolean
+      allow_out_of_order:
+        description: 'Apply even if a pending migration numbers BELOW the highest version already applied on this target (DL-1596). Off by default. Pushes can never turn this on.'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: pages-${{ github.ref }}
