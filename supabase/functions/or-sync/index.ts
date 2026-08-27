@@ -65,7 +65,7 @@ import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
 import { computeWalletFingerprint } from '../_shared/account-fingerprint.ts';
 import { toByteaHex } from '../_shared/bytea.ts';
-import { readSyncCompleteness } from './_connection-result.ts';
+import { readSyncCompleteness, buildProbeBody } from './_connection-result.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //
@@ -204,6 +204,12 @@ async function encryptAes(plaintext: string, key: CryptoKey): Promise<string> {
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
+  // Anonymous, unauthenticated probe (DEV-0126): proves the deployed bundle,
+  // not just the source, carries the connection-result wiring. No DB access,
+  // no auth, no customer data, no secrets. Safe to call repeatedly.
+  if (req.method === 'GET') {
+    return jsonResponse(buildProbeBody(Deno.env.get('OR_BUILD_SHA') ?? null), 200, cors);
+  }
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
 
   try {
