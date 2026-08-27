@@ -586,7 +586,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   const derived: DerivedAddr[] = [];
 
   if (payload.kind === 'xpub_stealth') {
-    for (const chain of [0, 1] as const) {
+    for (const chain of [0] as const) {
       for (let i = 0; i < chainWindowEnd[chain]; i++) {
         const script = deriveScriptPubkeyBytes(payload.xpub, chain, i, payload.script_type);
         const address = deriveAddress(payload.xpub, chain, i, payload.script_type);
@@ -929,7 +929,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         //   receivedAmount , total value of new outputs paying us back (change)
         // The difference is "what we paid out" (and includes the network fee).
         // Pure self-transfer (consolidation) → amount = fee only.
-        const netOut = receivedAmount - spentInputs;
+        const netOut = spentInputs - receivedAmount;
         // Best-effort recipient address: first output that does NOT pay
         // us. Empty if every output pays us (pure consolidation).
         let recipientAddress = '';
