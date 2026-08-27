@@ -929,7 +929,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         //   receivedAmount , total value of new outputs paying us back (change)
         // The difference is "what we paid out" (and includes the network fee).
         // Pure self-transfer (consolidation) → amount = fee only.
-        const netOut = spentInputs - receivedAmount;
+        const netOut = receivedAmount - spentInputs;
         // Best-effort recipient address: first output that does NOT pay
         // us. Empty if every output pays us (pure consolidation).
         let recipientAddress = '';
