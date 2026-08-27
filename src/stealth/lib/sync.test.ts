@@ -450,6 +450,51 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(result.txCount).toBe(0);
   });
 
+  it('advances lastBlockScanned to tip when the scan finds zero matching transactions but has full filter coverage (DL-1188)', async () => {
+    // A wallet can have complete filter coverage across the whole range and
+    // still match nothing (no activity in this window). The cursor must
+    // still advance to tip: it tracks what was SCANNED, not what MATCHED.
+    // The test above (DL-0516) proves the walk stops at a coverage gap; this
+    // proves it does NOT stop early when there is no gap and nothing
+    // matched. sync.tsx step 5 persists this exact value as the server-side
+    // cursor regardless of match count, so a wrong answer here is the shape
+    // DL-1188 reported: a quiet wallet re-scanning the same range forever.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'quiet-wallet-full-coverage',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const seenHeights: number[] = [];
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 900_000,
+      lastBlockScanned: 900_000,
+      fetchTip: async () => 900_005,
+      fetchFilter: async (h) => {
+        seenHeights.push(h);
+        // Every height in range returns a real filter record. No null
+        // anywhere, so there is no coverage gap for the walk to stop at.
+        return { height: h, blockHashHex: '00'.repeat(32), filter: new Uint8Array([0x01]) };
+      },
+      fetchBlock: async () => { throw new Error('should not be called: matcher never matches'); },
+      matcher: { matchAny: () => false },
+    });
+
+    expect(seenHeights.slice().sort((a, b) => a - b)).toEqual([900_001, 900_002, 900_003, 900_004, 900_005]);
+    expect(result.txCount).toBe(0);
+    expect(result.sealedTransactions).toEqual([]);
+    // The whole point: full coverage + zero matches still reaches tip.
+    expect(result.lastBlockScanned).toBe(900_005);
+  });
+
   // Condition 4 of issue #335: birthdayHeight outside [0, tip] must REJECT,
   // never clamp. Clamping would silently claim a scan range the user never
   // requested and is not recoverable; rejection is.
