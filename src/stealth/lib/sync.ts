@@ -586,7 +586,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   const derived: DerivedAddr[] = [];
 
   if (payload.kind === 'xpub_stealth') {
-    for (const chain of [0] as const) {
+    for (const chain of [0, 1] as const) {
       for (let i = 0; i < chainWindowEnd[chain]; i++) {
         const script = deriveScriptPubkeyBytes(payload.xpub, chain, i, payload.script_type);
         const address = deriveAddress(payload.xpub, chain, i, payload.script_type);
