@@ -37,6 +37,7 @@
 
 /** Event names OR emits. Keep in step with EventType in packages/webhooks. */
 export const SYNC_COMPLETED = 'sync.completed' as const;
+export const CONNECTION_DATA_AVAILABLE = 'connection.data_available' as const;
 
 export interface SyncCompletedInput {
   subaccountId: string;
