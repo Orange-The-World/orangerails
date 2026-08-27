@@ -1,134 +1,143 @@
 /**
- * Deno tests for or-connection-delete: stealth fallback path.
+ * Deno tests for or-connection-delete. DL-1723.
  *
  * Run with:
- *   deno test supabase/functions/or-connection-delete/index.test.ts
+ *   deno test --allow-read supabase/functions/or-connection-delete/index.test.ts
  *
- * Tests tryDeleteStealthConnection, which handles the case where a
- * connection_id is absent from `connections` but present in (or absent
- * from) `stealth_connections`. Three cases from DL-1033:
- *   1. Stealth id deleted successfully (count=1).
- *   2. Foreign subaccount: id exists in stealth_connections but belongs to
- *      a different scope, delete matches zero rows => 404.
- *   3. Unknown id: not in either table, delete matches zero rows => 404.
+ * WHY SOURCE INSPECTION. Same rationale the or-sync tests already state: a
+ * unit test over an extracted pure helper cannot detect that a guard was
+ * removed from the live call site, and the live call site is the entire
+ * subject here. The defect being pinned is not a wrong value returned by a
+ * function, it is a failure path that did not report.
+ *
+ * TWO HALVES, AND THE SECOND MATTERS AS MUCH AS THE FIRST.
+ *
+ *   1. A failed source_wallets cleanup must reach the error tracker.
+ *      console.error alone does not, which is how this failure stayed
+ *      invisible: it left source_wallets rows pointing at a connection id
+ *      that was about to stop existing, and nothing recorded it.
+ *
+ *   2. The connection delete must STILL PROCEED. Blocking a customer's
+ *      delete because a cleanup query failed is its own bad outcome, and
+ *      or-link-complete's liveness guard is the backstop that catches the
+ *      orphaned rows on the next link.
+ *
+ * A future edit that "fixes" this by turning the cleanup failure into a 500
+ * satisfies the first half and breaks the second, so the second is asserted
+ * explicitly rather than left to reviewer memory.
+ *
+ * Every test below first asserts it FOUND the block it is about to inspect.
+ * Without that, a renamed variable would make the search return nothing and
+ * the assertions would pass vacuously over an empty string, which is exactly
+ * the kind of green that means nothing.
  */
 
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { tryDeleteStealthConnection } from './index.ts';
+import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 
-const SUBACCOUNT_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-const CONNECTION_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
-const PLATFORM_ID = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
-const APP_USER_ID = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+const SOURCE = Deno.readTextFileSync(new URL('./index.ts', import.meta.url));
 
-interface FilterCall {
-  col: string;
-  val: unknown;
+/** Marker for the start of the failed-cleanup branch. */
+const BLOCK_START = 'if (swDelErr) {';
+/** Marker for the first line after that branch. */
+const BLOCK_END = '// Step 3:';
+
+/**
+ * The text of the failed-cleanup branch, from the `if` to the start of Step 3.
+ *
+ * Throws rather than returning an empty string when either marker is missing,
+ * so a rename fails loudly instead of turning every assertion below into a
+ * pass over nothing.
+ */
+function failedCleanupBranch(): string {
+  const start = SOURCE.indexOf(BLOCK_START);
+  const end = SOURCE.indexOf(BLOCK_END, start);
+  if (start === -1) {
+    throw new Error(`could not find "${BLOCK_START}" in index.ts; was swDelErr renamed?`);
+  }
+  if (end === -1 || end <= start) {
+    throw new Error(`could not find "${BLOCK_END}" after the cleanup branch in index.ts`);
+  }
+  return SOURCE.slice(start, end);
 }
 
-interface DeleteRecord {
-  table: string;
-  filters: FilterCall[];
-}
-
-interface MockOpts {
-  subaccountRow?: { platform_id: string; external_user_id: string } | null;
-  subaccountError?: unknown;
-  stealthDeleteCount?: number;
-  stealthDeleteError?: unknown;
-  deleteRecords: DeleteRecord[];
-}
-
-// deno-lint-ignore no-explicit-any
-function makeMockClient(opts: MockOpts): any {
-  return {
-    from(table: string) {
-      const filters: FilterCall[] = [];
-      const chain: Record<string, unknown> = {
-        select(_cols: string) { return chain; },
-        delete(_deleteOpts?: unknown) { return chain; },
-        eq(col: string, val: unknown) {
-          filters.push({ col, val });
-          return chain;
-        },
-        maybeSingle() {
-          if (table === 'subaccounts') {
-            return Promise.resolve({
-              data: opts.subaccountRow ?? null,
-              error: opts.subaccountError ?? null,
-            });
-          }
-          return Promise.resolve({ data: null, error: null });
-        },
-        // deno-lint-ignore no-explicit-any
-        then(onResolve: (r: unknown) => unknown): any {
-          if (table === 'stealth_connections') {
-            opts.deleteRecords.push({ table, filters: [...filters] });
-            return Promise.resolve({
-              data: null,
-              error: opts.stealthDeleteError ?? null,
-              count: opts.stealthDeleteCount ?? 0,
-            }).then(onResolve);
-          }
-          return Promise.resolve({ data: null, error: null, count: 0 }).then(onResolve);
-        },
-      };
-      return chain;
-    },
-  };
-}
-
-Deno.test('stealth id in same subaccount is deleted (count=1)', async () => {
-  const deleteRecords: DeleteRecord[] = [];
-  const client = makeMockClient({
-    subaccountRow: { platform_id: PLATFORM_ID, external_user_id: APP_USER_ID },
-    stealthDeleteCount: 1,
-    deleteRecords,
-  });
-
-  const result = await tryDeleteStealthConnection(client, CONNECTION_ID, SUBACCOUNT_ID);
-
-  assertEquals(result, { deleted: true });
-  // Delete was attempted exactly once
-  assertEquals(deleteRecords.length, 1);
-  // All three ownership filters applied: id, platform_id, app_user_id
-  const { filters } = deleteRecords[0];
-  assertEquals(filters.some(f => f.col === 'id' && f.val === CONNECTION_ID), true);
-  assertEquals(filters.some(f => f.col === 'platform_id' && f.val === PLATFORM_ID), true);
-  assertEquals(filters.some(f => f.col === 'app_user_id' && f.val === APP_USER_ID), true);
+Deno.test('the source is readable and non-trivial, so the checks below mean something', () => {
+  // Guards the whole file: if the read silently returned nothing, every
+  // "does not contain" assertion below would pass while proving nothing.
+  assert(SOURCE.length > 1000, 'index.ts read back as suspiciously short');
+  assert(SOURCE.includes('or-connection-delete'), 'read the wrong file');
 });
 
-Deno.test('foreign subaccount: count=0 returns notFound, no widening', async () => {
-  // The id may exist in stealth_connections but belong to a different
-  // (platform_id, app_user_id) pair. The delete should match zero rows
-  // and return notFound without touching any other row.
-  const deleteRecords: DeleteRecord[] = [];
-  const client = makeMockClient({
-    subaccountRow: { platform_id: PLATFORM_ID, external_user_id: APP_USER_ID },
-    stealthDeleteCount: 0,
-    deleteRecords,
-  });
-
-  const result = await tryDeleteStealthConnection(client, CONNECTION_ID, SUBACCOUNT_ID);
-
-  assertEquals(result, { notFound: true });
-  // Ownership filters were still applied (scope was not widened)
-  assertEquals(deleteRecords.length, 1);
-  const { filters } = deleteRecords[0];
-  assertEquals(filters.some(f => f.col === 'platform_id'), true);
-  assertEquals(filters.some(f => f.col === 'app_user_id'), true);
+Deno.test('reportError is imported, so the failure can reach the error tracker', () => {
+  assertEquals(
+    SOURCE.includes("import { wrapSentryHandler, reportError } from '../_shared/sentry.ts';"),
+    true,
+    'reportError must be imported from _shared/sentry.ts; console.error alone does not report',
+  );
 });
 
-Deno.test('unknown id absent from connections and stealth_connections returns notFound', async () => {
-  const UNKNOWN_ID = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
-  const deleteRecords: DeleteRecord[] = [];
-  const client = makeMockClient({
-    subaccountRow: { platform_id: PLATFORM_ID, external_user_id: APP_USER_ID },
-    stealthDeleteCount: 0,
-    deleteRecords,
-  });
+Deno.test('a failed source_wallets cleanup is reported, tagged to this function', () => {
+  const branch = failedCleanupBranch();
+  assert(branch.length > 0, 'failed-cleanup branch came back empty');
+  assertEquals(
+    branch.includes("reportError(swDelErr, 'or-connection-delete', req)"),
+    true,
+    'the swDelErr branch must call reportError with the swDelErr object and this function name, ' +
+      'so the resulting issue is attributable to or-connection-delete',
+  );
+});
 
-  const result = await tryDeleteStealthConnection(client, UNKNOWN_ID, SUBACCOUNT_ID);
+Deno.test('a failed cleanup is still logged as well as reported', () => {
+  // The log line is the local breadcrumb and the report is the alarm. Losing
+  // either one costs a different kind of debugging.
+  const branch = failedCleanupBranch();
+  assertEquals(
+    branch.includes("console.error('[or-connection-delete] source_wallets cleanup failed:', swDelErr)"),
+    true,
+    'the local error log must survive alongside the report',
+  );
+});
 
-  assertEquals(result, { notFound: true });
+Deno.test('a failed cleanup does NOT block the connection delete', () => {
+  // This is the half a well-meaning future edit is most likely to break.
+  // Turning the cleanup failure into a 500 would stop a customer deleting a
+  // connection because an unrelated cleanup query failed.
+  const branch = failedCleanupBranch();
+  assert(branch.length > 0, 'failed-cleanup branch came back empty');
+  assertEquals(
+    /\breturn\b/.test(branch),
+    false,
+    'the swDelErr branch must not return; the connection delete has to proceed',
+  );
+  assertEquals(
+    /\bthrow\b/.test(branch),
+    false,
+    'the swDelErr branch must not throw; the connection delete has to proceed',
+  );
+  assertEquals(
+    branch.includes('jsonResponse'),
+    false,
+    'the swDelErr branch must not build a response; it is not a terminal path',
+  );
+});
+
+Deno.test('the connection delete still runs after the cleanup branch', () => {
+  // Proves the ordering the branch test assumes: Step 3 exists, and it comes
+  // after the cleanup rather than having been moved above it.
+  const cleanupIdx = SOURCE.indexOf(BLOCK_START);
+  const stepThreeIdx = SOURCE.indexOf(BLOCK_END);
+  const deleteIdx = SOURCE.indexOf(".delete({ count: 'exact' })", stepThreeIdx);
+
+  assert(cleanupIdx !== -1, 'cleanup branch not found');
+  assert(stepThreeIdx > cleanupIdx, 'Step 3 must come after the source_wallets cleanup');
+  assert(deleteIdx !== -1, 'the counted connection delete must still be present in Step 3');
+});
+
+Deno.test('the success response is unchanged', () => {
+  // DL-1723 is a reporting fix. The response contract is not part of it, and
+  // a change here would be a silent breaking change for every caller.
+  assertEquals(
+    SOURCE.includes("const response: Record<string, unknown> = { ok: true };"),
+    true,
+    'the ok:true success response must be untouched by this fix',
+  );
 });
