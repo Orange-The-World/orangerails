@@ -101,24 +101,97 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/** One input of a fixture transaction: a genuine previous outpoint. */
+interface FixtureTxInput {
+  /** Previous txid in RPC display order, which is what parseTx reports. */
+  prevTxidHex: string;
+  voutIdx: number;
+}
+
+/** One output of a fixture transaction. */
+interface FixtureTxOutput {
+  script: Uint8Array;
+  amountSats: bigint;
+}
+
+interface FixtureTx {
+  /**
+   * Omit for the all-zero outpoint the single-output fixtures have always
+   * used. parseTx drops that input as coinbase-like, which is correct and
+   * is exactly why a spend test has to supply real outpoints here.
+   */
+  inputs?: FixtureTxInput[];
+  outputs: FixtureTxOutput[];
+}
+
 /**
- * Build a minimal valid block containing a single non-segwit transaction
- * with one input and one output that pays to the given scriptPubKey for
- * the given amount in sats.
+ * Serialize one legacy (non-witness) transaction.
  *
  * Layout:
- *   [80-byte header][varint(txCount=1)][tx]
- * Tx layout (legacy, no witness):
- *   [version=2 LE 4][vin count=1 varint][outpoint 36 + scriptSig 0 + seq 0xffffffff][
- *    vout count=1 varint][value 8 LE][scriptPubKey varint+bytes][locktime 4]
+ *   [version=2 LE 4][vin count varint]
+ *   [per input: outpoint 36 + scriptSig 0 + seq 0xffffffff]
+ *   [vout count varint][per output: value 8 LE + scriptPubKey varint+bytes]
+ *   [locktime 4]
+ *
+ * Because there is no witness, this serialization IS the pre-image the
+ * orchestrator hashes for the txid, so fixtureTxid below can hash it
+ * directly and get the same value parseTx will report.
+ */
+function serializeFixtureTx(tx: FixtureTx): Uint8Array {
+  const inputs: FixtureTxInput[] = tx.inputs ?? [
+    { prevTxidHex: '00'.repeat(32), voutIdx: 0xffffffff },
+  ];
+
+  const parts: Uint8Array[] = [
+    u32LE(2),                 // version
+    varInt(inputs.length),    // vin count
+  ];
+  for (const inp of inputs) {
+    // On the wire the previous txid is internal little-endian; parseTx
+    // reverses it back to display order. Write it reversed here so the
+    // caller can pass the txid string the orchestrator hands back.
+    parts.push(reverseBytes(hexToBytes(inp.prevTxidHex)));
+    parts.push(u32LE(inp.voutIdx));
+    parts.push(varInt(0));            // empty scriptSig
+    parts.push(u32LE(0xffffffff));    // sequence
+  }
+
+  parts.push(varInt(tx.outputs.length));
+  for (const out of tx.outputs) {
+    parts.push(u64LE(out.amountSats));
+    parts.push(varInt(out.script.length));
+    parts.push(out.script);
+  }
+  parts.push(u32LE(0));               // locktime
+
+  return concat(...parts);
+}
+
+/**
+ * Build a minimal valid block.
+ *
+ * Two call shapes:
+ *   { payToScript, amountSats, timestamp }  one transaction, one
+ *     coinbase-like input, one output. The original shape; every existing
+ *     call site produces byte-identical blocks.
+ *   { txs, timestamp }                      any number of transactions,
+ *     each with real previous outpoints and any number of outputs. This is
+ *     what makes a spend expressible.
+ *
+ * Layout:
+ *   [80-byte header][varint(txCount)][tx...]
  *
  * Header timestamp is bytes 68..72.
+ *
+ * Returns the serialized bytes of each transaction alongside the block so
+ * the caller can derive txids for use as inputs in a later block.
  */
 function buildFixtureBlock(opts: {
-  payToScript: Uint8Array;
-  amountSats: bigint;
+  payToScript?: Uint8Array;
+  amountSats?: bigint;
   timestamp: number;
-}): { raw: Uint8Array; blockHashHex: string } {
+  txs?: FixtureTx[];
+}): { raw: Uint8Array; blockHashHex: string; txs: Uint8Array[] } {
   // Header: version + prev hash + merkle + ts + bits + nonce. We do not
   // bother making the merkle root match (the orchestrator does not verify);
   // for txid we hash the legacy serialization independently.
@@ -129,21 +202,23 @@ function buildFixtureBlock(opts: {
   header.set(u32LE(0x1d00ffff), 72);   // bits
   header.set(u32LE(0), 76);            // nonce
 
-  const tx = concat(
-    u32LE(2),                                          // version
-    varInt(1),                                         // vin count
-    new Uint8Array(32),                                // prev txid (zero)
-    u32LE(0xffffffff),                                 // prev vout (coinbase-like, fine for fixture)
-    varInt(0),                                         // empty scriptSig
-    u32LE(0xffffffff),                                 // sequence
-    varInt(1),                                         // vout count
-    u64LE(opts.amountSats),                            // value
-    varInt(opts.payToScript.length),
-    opts.payToScript,
-    u32LE(0),                                          // locktime
-  );
+  let txList: FixtureTx[];
+  if (opts.txs !== undefined) {
+    txList = opts.txs;
+  } else {
+    if (opts.payToScript === undefined || opts.amountSats === undefined) {
+      // Loud rather than quietly building an empty block: a fixture that
+      // silently contains nothing would make an assertion pass for the
+      // wrong reason.
+      throw new Error(
+        'buildFixtureBlock: pass either txs, or payToScript together with amountSats',
+      );
+    }
+    txList = [{ outputs: [{ script: opts.payToScript, amountSats: opts.amountSats }] }];
+  }
 
-  const raw = concat(header, varInt(1), tx);
+  const serialized = txList.map(serializeFixtureTx);
+  const raw = concat(header, varInt(serialized.length), ...serialized);
 
   // We do NOT compute the real block hash from the header double-sha256
   // here; the orchestrator's parseBlockHeader does that itself. We need
@@ -151,7 +226,16 @@ function buildFixtureBlock(opts: {
   // it inline using SubtleCrypto.
   // Vitest's node env has globalThis.crypto.subtle.digest with SHA-256.
   // But for synchronous fixture creation we use a tiny inline routine.
-  return { raw, blockHashHex: '' /* filled in by caller using async sha */ };
+  return { raw, blockHashHex: '' /* filled in by caller using async sha */, txs: serialized };
+}
+
+/**
+ * The txid the orchestrator will report for a fixture transaction. These
+ * fixtures carry no witness, so the whole serialization is the legacy
+ * serialization parseTx hashes.
+ */
+async function fixtureTxid(txBytes: Uint8Array): Promise<string> {
+  return bytesToHex(reverseBytes(await dsha256Async(txBytes)));
 }
 
 async function dsha256Async(b: Uint8Array): Promise<Uint8Array> {
