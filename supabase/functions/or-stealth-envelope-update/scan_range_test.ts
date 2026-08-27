@@ -37,14 +37,6 @@ function clientRejectingWith(error: unknown) {
   };
 }
 
-/** A request that always reaches the RPC (from_height present and in range). */
-const RECORDING_REQUEST = {
-  connection_id: CONN_ID,
-  app_user_id: CALLER,
-  last_block_scanned: 900_100,
-  from_height: 900_000,
-};
-
 const CONN_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
 /** The identity of the signed-in caller making the request. */
@@ -57,6 +49,20 @@ const CALLER = 'user-making-the-request';
  * to distinguish anything.
  */
 const CONNECTION_OWNER = 'user-owning-the-connection';
+
+/**
+ * A request that always reaches the RPC (from_height present and in range).
+ *
+ * Declared AFTER CONN_ID and CALLER on purpose: module-level const initialisers
+ * run top to bottom, so reading them from above would throw a ReferenceError at
+ * load time and kill every test in this file.
+ */
+const RECORDING_REQUEST = {
+  connection_id: CONN_ID,
+  app_user_id: CALLER,
+  last_block_scanned: 900_100,
+  from_height: 900_000,
+};
 
 Deno.test(
   'payload carries the CALLER id, not the connection owner, so the database check can reject',
