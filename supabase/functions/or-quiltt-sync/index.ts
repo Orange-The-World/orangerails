@@ -27,7 +27,10 @@
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
-import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
+import {
+  buildSyncCompletedPayload,
+  buildConnectionDataAvailablePayload,
+} from '../_shared/webhook-events.ts';
 import {
   chooseProfileId,
   chooseRouting,
