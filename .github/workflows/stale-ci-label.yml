@@ -35,6 +35,10 @@ jobs:
   label-stale-ci:
     name: Evaluate STALE CI label
     runs-on: ubuntu-latest
+    # Do not re-run on our own completion. Every run of this job is itself a
+    # check_run that completes, which would otherwise re-fire this same
+    # workflow and add another record on every pass (see commit message).
+    if: github.event.check_run.name != 'Evaluate STALE CI label'
     steps:
       - name: Find open PR targeting dev for this commit
         id: find-pr
