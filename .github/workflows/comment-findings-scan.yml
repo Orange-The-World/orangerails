@@ -32,6 +32,13 @@ jobs:
   scan:
     name: Scan comment body
     runs-on: ubuntu-latest
+    # Skip comments posted by bots (our own CI automation). They are templated
+    # status text, not human-typed content, so they carry none of the risk this
+    # scan exists to catch, and on a long-lived promotion PR they are the
+    # dominant source of repeat triggers: every automated status comment adds
+    # another check-run record to the PR head, crowding out the required
+    # contexts (DL-1602 / DEV-0108). Human-authored comments still scan.
+    if: github.event.sender.type != 'Bot'
     # Deny all permissions for this job. A comment-triggered workflow that holds
     # write permissions is the classic pwn-request foot-gun. The scan job reads
     # only the event payload passed through env -- it needs no repo contents and
