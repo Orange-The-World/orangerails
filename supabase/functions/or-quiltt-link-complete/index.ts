@@ -44,6 +44,12 @@
  * Response 404 — unknown platform OR no quiltt_profile_map row (call
  *                or-quiltt-session first)
  *
+ * DL-1115: on success this also stamps completed_connection_id on the
+ * pending_widget_sessions row the widget_token claimed, so or-quiltt-
+ * link-status can answer "did it land" for an opener that never received
+ * this call's postMessage (popup closed mid-completion). Best-effort,
+ * logged on failure, never turns a real link into a 500.
+ *
  * Schema note: connections.encrypted_credentials is NOT NULL, so we
  * store the sentinel literal 'quiltt-managed'. The bank credentials
  * never exist server-side under any key — Quiltt holds them. The
