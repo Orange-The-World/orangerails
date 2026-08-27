@@ -31,7 +31,7 @@ import {
   type BlockRecord,
   type WalletEnvelopePayload,
 } from './sync';
-import { deriveScriptPubkeyBytes } from './derive';
+import { deriveAddress, deriveScriptPubkeyBytes } from './derive';
 import type { StealthStage } from './postmessage';
 
 // BIP84 official test vector (https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki).
