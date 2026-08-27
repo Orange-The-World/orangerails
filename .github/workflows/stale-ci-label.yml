@@ -1,21 +1,36 @@
 name: STALE CI label
 
-# Fires on every completed check_run. We use this to compare the set of
-# check names on the PR head against the trunk (dev) baseline. A PR whose
-# head SHA is missing any non-skipped trunk check name is labeled STALE CI
-# so the review queue and reviewers can see it at a glance.
+# We use this to compare the set of check names on the PR head against the
+# trunk (dev) baseline. A PR whose head SHA is missing any non-skipped trunk
+# check name is labeled STALE CI so the review queue and reviewers can see
+# it at a glance.
 #
-# Why check_run and not pull_request:
-#   pull_request fires when the PR is created or updated, before checks have
-#   run. We need the checks to have (or not have) fired before we can compare.
-#   check_run fires each time one check completes, which is exactly the moment
-#   we can re-evaluate the set.
-#
-# False-positive guard: if any check on the PR head is still in-progress or
-# queued, we skip the evaluation. Only a fully-settled head can be scored.
+# Trigger, and why it changed (DEV-0108, 2026-08-27):
+#   This used to fire on every completed check_run, repo-wide -- one
+#   workflow run, and one more "Evaluate STALE CI label" check-run on the
+#   PR head, for EVERY individual check that finished (each of ci.yml's ~5
+#   jobs separately, plus every re-run). On a long-lived promotion PR that
+#   pushed check-run counts on the head past the 100-row page the merge
+#   tool reads, crowding the five REQUIRED contexts off page one (DL-1602).
+#   Switched to workflow_run on the CI workflow: one trigger per CI run
+#   completing, not per job inside it. deno-typecheck/deno-test/vitest/
+#   playwright are jobs of that one workflow, so this still re-evaluates
+#   once they have all settled.
+#   Accepted tradeoff: a check-run from outside ci.yml finishing last (for
+#   example a Cloudflare Pages deploy) no longer re-triggers this label by
+#   itself. That is acceptable because this labeler is explicitly advisory
+#   (see the concurrency comment below) and never blocks merge on its own;
+#   the next CI run or push re-evaluates it. Rejected: keeping check_run as
+#   a second trigger filtered to non-Actions apps only reduces PASS to SKIP
+#   on the same number of runs (a job-level `if:` still creates a check-run
+#   entry, it does not prevent one), so it would not have cut the count at
+#   all -- verified against this same repo's "Open issue on scan failure"
+#   job, which shows SKIP on nearly every invocation and still counts
+#   toward the same page-one crowding this ticket exists to fix.
 
 on:
-  check_run:
+  workflow_run:
+    workflows: ["CI"]
     types: [completed]
 
 # This labeler is advisory. It must never leave an unsuccessful check-run
@@ -23,10 +38,11 @@ on:
 # merge tooling. So: queue runs instead of cancelling them (a cancelled run
 # is an unsuccessful conclusion), and let the compare step fail soft.
 concurrency:
-  group: stale-ci-${{ github.event.check_run.head_sha }}
+  group: stale-ci-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 permissions:
+  actions: read
   checks: read
   contents: read
   pull-requests: write
@@ -42,7 +58,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          HEAD_SHA="${{ github.event.check_run.head_sha }}"
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
           PR_NUMBER=$(gh api \
             "repos/${{ github.repository }}/commits/${HEAD_SHA}/pulls" \
             -H "Accept: application/vnd.github+json" \
