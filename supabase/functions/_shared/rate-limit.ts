@@ -8,8 +8,9 @@
  *     set to "true" to actually reject. Otherwise the throttle just records
  *     the violation in console.error so we can baseline usage before
  *     enforcing.
- *   - **Atomic UPSERT** — one round trip per request; no read-then-write
- *     race window.
+ *   - **Atomic increment in the database** (increment_platform_rate_limit):
+ *     one round trip per request, no read-then-write race window. This file
+ *     must not write the bucket row itself; doing so resets the window.
  *
  * Caller pattern (or-link-complete is the first integration):
  *
