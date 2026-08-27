@@ -16,6 +16,14 @@ inputs:
   api_token:
     description: Cloudflare API token with Pages read. Empty disables the wait.
     required: true
+  environment:
+    description: >
+      Which Pages deployment environment to match: production or preview.
+      A branch push to a Pages project with git integration produces a
+      preview deployment, which never satisfies environment == production,
+      so the caller must say which one it means.
+    required: false
+    default: "production"
   timeout_seconds:
     description: >
       Give up waiting after this long and continue anyway. Observed deploys take
@@ -36,6 +44,7 @@ runs:
         CF_TOKEN: ${{ inputs.api_token }}
         PROJECT: ${{ inputs.project }}
         SHA: ${{ inputs.commit_sha }}
+        DEPLOY_ENV: ${{ inputs.environment }}
         TIMEOUT_S: ${{ inputs.timeout_seconds }}
         POLL_S: ${{ inputs.poll_seconds }}
       run: |
@@ -65,11 +74,12 @@ runs:
             exit 0
           fi
 
-          # Only production deployments count. A branch push to this project
-          # produces environment=preview, which never serves the live host.
-          LAST=$(printf '%s' "${BODY}" | jq -r --arg sha "${SHA}" '
+          # Match the caller's requested environment. Production callers
+          # (the DL-0439 prod smoke) never see a preview deployment satisfy
+          # this; preview callers (a PR branch build) never see production.
+          LAST=$(printf '%s' "${BODY}" | jq -r --arg sha "${SHA}" --arg env "${DEPLOY_ENV}" '
             [ .result[]
-              | select(.environment == "production")
+              | select(.environment == $env)
               | select(.deployment_trigger.metadata.commit_hash == $sha)
             ][0]
             | if . == null then "absent"
