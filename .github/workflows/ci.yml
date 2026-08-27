@@ -434,6 +434,23 @@ jobs:
             echo "PLAYWRIGHT_BASE_URL=https://dev.orangerails.com" >> "$GITHUB_ENV"
           fi
 
+      # DEV-0056: on a real feature-branch PR, PLAYWRIGHT_BASE_URL above is a
+      # Cloudflare Pages branch preview. Wait for that exact commit's preview
+      # to finish deploying before Playwright asserts against it, mirroring
+      # the DL-0439 wait already proven on the prod push path. Skipped on a
+      # push, and on a PR whose head is dev/prod, because those use the
+      # static dev.orangerails.com host, which is not this project's preview
+      # deployment and is covered by no wait here.
+      - name: Wait for the Cloudflare Pages branch preview
+        if: github.event_name == 'pull_request' && github.head_ref != 'dev' && github.head_ref != 'prod'
+        uses: ./.github/actions/wait-for-pages-deploy
+        with:
+          project: orangerails-dev
+          environment: preview
+          commit_sha: ${{ github.event.pull_request.head.sha }}
+          account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
       - name: Run Playwright
         env:
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
