@@ -321,6 +321,161 @@ jobs:
           echo "Found ${FILE_COUNT} test file(s) (baseline: ${DENO_TEST_FILE_BASELINE})"
           deno test --no-check --allow-all supabase/functions/
 
+  scan-range-sql:
+    name: SQL tests (record_stealth_scan_range merge)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Why this job exists (decision on DL-1855, built as DL-1856):
+    # record_stealth_scan_range is the ONLY writer of stealth_scan_ranges. Its
+    # merge arithmetic decides which block ranges a customer is told they
+    # already hold, and its ownership guard is the cross-tenant write control.
+    # Until this job, nothing in CI executed a line of it. deno-test runs
+    # TypeScript, vitest runs the frontend, and the anon-grant checks read the
+    # migration TEXT without ever running it.
+    #
+    # This runs against a throwaway Postgres service container inside the
+    # runner. It needs no credentials, reaches no network, and cannot touch dev
+    # or prod Supabase.
+    #
+    # The migrations are applied VERBATIM from supabase/migrations. That is the
+    # point: a schema hand-copied into the test directory drifts from what
+    # ships, and then the suite passes against SQL nobody deployed. The price
+    # is the shim in supabase/tests/scan_range/00_bootstrap.sql, whose header
+    # states exactly what this harness does and does not prove. It does NOT
+    # prove row level security and it says so.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          # No password appears anywhere in this file. The container listens
+          # only inside the runner and is destroyed with it, so trust auth is
+          # both correct here and avoids committing a credential-shaped string
+          # to a public repo.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: scanrange
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d scanrange"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGDATABASE: scanrange
+      # Number of assertions the suite is expected to report. Checked, not
+      # assumed: a suite that silently stops halfway through must not hand back
+      # the same green as a full run. Change this in the same PR that adds or
+      # removes an assertion.
+      SCAN_RANGE_ASSERTION_BASELINE: '19'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Prove psql is present and the database is reachable
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            echo "::notice::psql is not on this runner image; installing postgresql-client"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          psql --version
+          # A connection failure here must look like a connection failure, not
+          # like an empty test run twenty lines further down.
+          psql -v ON_ERROR_STOP=1 -tAc 'select current_database(), version()'
+
+      - name: Bootstrap the Supabase surface the migrations reach for
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/scan_range/00_bootstrap.sql
+
+      - name: Load the scan-range migrations from supabase/migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Discovered, not hardcoded, so a later migration that alters the
+          # function is picked up without anyone remembering to edit this list.
+          # Filename order is chronological because the names are timestamped.
+          mapfile -t MIGRATIONS < <(grep -lE 'stealth_scan_ranges|record_stealth_scan_range' supabase/migrations/*.sql | sort)
+
+          if [ "${#MIGRATIONS[@]}" -eq 0 ]; then
+            echo "::error::No file under supabase/migrations mentions stealth_scan_ranges or record_stealth_scan_range. This job would then be testing nothing. Fix the path rather than let it report green."
+            exit 1
+          fi
+
+          printf '%s\n' "${MIGRATIONS[@]}" | sed 's/^/  loading: /'
+
+          APPLIED=0
+          for f in "${MIGRATIONS[@]}"; do
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+            APPLIED=$((APPLIED + 1))
+          done
+
+          echo "Applied ${APPLIED} of ${#MIGRATIONS[@]} migration file(s)"
+          if [ "$APPLIED" -ne "${#MIGRATIONS[@]}" ]; then
+            echo "::error::Applied ${APPLIED} of ${#MIGRATIONS[@]}. The loop finished without applying everything it collected."
+            exit 1
+          fi
+
+      - name: Load the assertion helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/scan_range/05_assert_helpers.sql
+
+      # Deliberately BEFORE the real assertions, and it fails the job if it
+      # PASSES. Every way of wiring this suite up wrong (ON_ERROR_STOP unset,
+      # wrong file, wrong database, a helper raising NOTICE where it meant
+      # EXCEPTION) produces exactly the same green tick as a passing run.
+      # Proving the harness can go red is what makes the green mean anything.
+      - name: Self-test the harness (this file MUST fail)
+        shell: bash
+        run: |
+          set -uo pipefail
+          if psql -v ON_ERROR_STOP=1 -f supabase/tests/scan_range/99_selftest_must_fail.sql; then
+            echo "::error::The harness self-test PASSED. It asserts something known to be false, so a pass means the assertions cannot fail and every result below is worthless."
+            exit 1
+          fi
+          echo "Self-test failed as required: the assertion helpers can go red."
+
+      - name: Merge and refusal assertions
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/scan_range/10_merge_assertions.sql \
+            2>&1 | tee "$RUNNER_TEMP/scan-range-assertions.log"
+          RC=${PIPESTATUS[0]}
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::record_stealth_scan_range assertions failed. The failing assertion is named in the log above."
+            exit "$RC"
+          fi
+
+          OK=$(grep -c 'ok  ' "$RUNNER_TEMP/scan-range-assertions.log" || true)
+          echo "Assertions reported OK: ${OK} (baseline: ${SCAN_RANGE_ASSERTION_BASELINE})"
+
+          # A zero exit with fewer assertions than expected is the silent
+          # success this repo keeps finding: the file ran, nothing raised, and
+          # half the cases never executed. Exit code alone cannot see that.
+          if [ "$OK" -lt "$SCAN_RANGE_ASSERTION_BASELINE" ]; then
+            echo "::error::Only ${OK} assertion(s) reported OK, expected at least ${SCAN_RANGE_ASSERTION_BASELINE}. The suite exited clean without running everything it should have."
+            exit 1
+          fi
+
+          {
+            echo "## record_stealth_scan_range SQL suite"
+            echo
+            echo "**${OK} assertion(s) passed** (baseline: ${SCAN_RANGE_ASSERTION_BASELINE})"
+            echo
+            echo "Harness self-test was run first and correctly failed, so these results come from a suite proven able to go red."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   vitest:
     name: Unit tests (vitest)
     runs-on: ubuntu-latest
