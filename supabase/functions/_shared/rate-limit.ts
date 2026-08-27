@@ -71,8 +71,7 @@ export async function checkPlatformRateLimit(
     // Do NOT write the row from here first. An upsert carrying count: 1 is an
     // UPDATE on conflict, so it reset the window counter on every request:
     // the count could never climb past 2 and no limit above 1 could ever be
-    // reached — the SELECT in the next call gives us the
-    // accurate post-increment count.
+    // reached, in log-only mode or in enforce mode.
     const { data: incremented, error: incErr } = await supabase.rpc(
       'increment_platform_rate_limit',
       {
