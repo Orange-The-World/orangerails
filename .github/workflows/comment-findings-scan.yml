@@ -9,6 +9,17 @@ name: Comment findings-boundary scan
 # published content is a maintainer decision, not an automated one. It never
 # echoes the matched text, because printing the match into the public run log
 # would republish the reference it is flagging. A failed run here is the signal.
+#
+# One job, not two (DEV-0108, 2026-08-27). This used to be a `scan` job plus
+# a separate `notify-on-failure` job that only ran `if: failure()`. A
+# job-level `if:` does not stop GitHub creating a check-run for that job --
+# it just marks it skipped -- so on a comment-heavy PR the failure-notify job
+# added a second "skipped" check-run entry for every single comment, on top
+# of the scan itself, with no coverage lost by removing it. It is now a step
+# inside the one job, gated the same way (`if: failure()`), so a comment
+# event costs one check-run instead of two. This does not reduce SCAN
+# coverage: the same two steps run on the same events with the same logic,
+# only the job boundary moved.
 
 on:
   issue_comment:
@@ -22,6 +33,7 @@ on:
 # itself to permissions: {} (no scope at all). Only the notify-on-failure job
 # needs issues: write, and only when the scan job fails.
 permissions:
+  contents: read
   issues: write
 
 concurrency:
@@ -32,11 +44,12 @@ jobs:
   scan:
     name: Scan comment body
     runs-on: ubuntu-latest
-    # Deny all permissions for this job. A comment-triggered workflow that holds
-    # write permissions is the classic pwn-request foot-gun. The scan job reads
-    # only the event payload passed through env -- it needs no repo contents and
-    # no write scope.
-    permissions: {}
+    # issues: write is only used by the failure-notify step below, and only
+    # when the scan step above it fails. The scan step itself still reads
+    # only the event payload passed through env -- it needs no repo contents
+    # and no write scope of its own.
+    permissions:
+      issues: write
     steps:
       - name: Canary self-test (prove patterns match before trusting results)
         # Routes known-matching and known-safe literals through the exact grep
@@ -139,21 +152,20 @@ jobs:
             exit 1
           fi
 
-  # issue_comment-triggered runs do NOT appear in a PR's check list. A failure
-  # is therefore invisible to reviewers unless actively watched in the Actions
-  # tab. This job opens a GitHub issue on failure so maintainers are notified
-  # without requiring any external secret -- only GITHUB_TOKEN (issues: write).
-  #
-  # Note: the scheduled-workflow-failure monitor (PR #660) covers scheduled and
-  # dispatched workflows via workflow_run. It does NOT cover event-triggered runs
-  # like this one, so this job is the alarm path for this workflow specifically.
-  notify-on-failure:
-    name: Open issue on scan failure
-    runs-on: ubuntu-latest
-    needs: scan
-    if: failure()
-    steps:
-      - name: Open maintainer-alert issue
+      # issue_comment-triggered runs do NOT appear in a PR's check list. A
+      # failure is therefore invisible to reviewers unless actively watched
+      # in the Actions tab. This step opens a GitHub issue on failure so
+      # maintainers are notified without requiring any external secret --
+      # only GITHUB_TOKEN (issues: write). Was a separate `notify-on-failure`
+      # job; folded into this one so a comment event costs one check-run
+      # instead of two (see the header note).
+      #
+      # Note: the scheduled-workflow-failure monitor (PR #660) covers scheduled
+      # and dispatched workflows via workflow_run. It does NOT cover
+      # event-triggered runs like this one, so this step is the alarm path
+      # for this workflow specifically.
+      - name: Open issue on scan failure
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
