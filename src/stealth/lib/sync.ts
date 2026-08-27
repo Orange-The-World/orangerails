@@ -1032,9 +1032,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // Derive addresses for the chain(s) that need extension. Collect them
     // separately so the extension scan can target only the new scripts.
     const passNewDerived: DerivedAddr[] = [];
-    for (const chain of [0] as const) {
+    for (const chain of [0, 1] as const) {
       if (chain === 0 && !chain0Near) continue;
-      if ((chain as number) === 1 && !chain1Near) continue;
+      if (chain === 1 && !chain1Near) continue;
 
       const prevEnd = chainWindowEnd[chain];
       const newEnd  = prevEnd + gapLimit;
