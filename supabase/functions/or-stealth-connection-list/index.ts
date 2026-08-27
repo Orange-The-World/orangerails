@@ -30,7 +30,7 @@ interface ListRequestBody {
   app_slug?: string;
 }
 
-interface ListedConnection {
+interface ListedConnection extends SyncFreshnessFields {
   connection_id: string;
   app_slug: string;
   connection_kind: 'xpub_stealth' | 'descriptor_stealth';
@@ -42,6 +42,34 @@ interface ListedConnection {
 
 interface ListResponseBody {
   connections: ListedConnection[];
+}
+
+/**
+ * Project one `stealth_connections` row into the response shape.
+ *
+ * Exported and pure so a test can exercise the real mapping instead of a
+ * reimplementation of it. A test that rebuilds the projection agrees with its
+ * own copy of any bug and proves nothing about what the endpoint returns.
+ *
+ * `status` is passed through verbatim. Nothing here reads it and the freshness
+ * fields never influence it: consumers switch on `status`, so DL-1737 is
+ * strictly additive.
+ */
+export function toListedConnection(
+  row: Record<string, unknown>,
+  now: Date,
+): ListedConnection {
+  const lastSyncAt = (row.last_sync_at as string | null) ?? null;
+  return {
+    connection_id: row.id as string,
+    app_slug: row.app_slug as string,
+    connection_kind: row.connection_kind as 'xpub_stealth' | 'descriptor_stealth',
+    last_sync_at: lastSyncAt,
+    last_block_scanned: (row.last_block_scanned as number | null) ?? null,
+    status: row.status as 'active' | 'error' | 'archived',
+    created_at: row.created_at as string,
+    ...computeSyncFreshness(lastSyncAt, now),
+  };
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -95,15 +123,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Failed to list stealth connections' }, 500, cors);
     }
 
-    const connections: ListedConnection[] = (rows ?? []).map((r) => ({
-      connection_id: r.id as string,
-      app_slug: r.app_slug as string,
-      connection_kind: r.connection_kind as 'xpub_stealth' | 'descriptor_stealth',
-      last_sync_at: (r.last_sync_at as string | null) ?? null,
-      last_block_scanned: (r.last_block_scanned as number | null) ?? null,
-      status: r.status as 'active' | 'error' | 'archived',
-      created_at: r.created_at as string,
-    }));
+    // DL-1737: the clock is read ONCE for the whole response. Read per row,
+    // two connections stamped at the same moment could land on opposite sides
+    // of the staleness threshold inside the same payload.
+    const now = new Date();
+    const connections: ListedConnection[] = (rows ?? []).map((r) =>
+      toListedConnection(r as Record<string, unknown>, now),
+    );
 
     const resp: ListResponseBody = { connections };
     return jsonResponse(resp, 200, cors);
