@@ -775,8 +775,8 @@ export async function handleEvent(
  *      or-quiltt-link-complete normally creates this row from the browser,
  *      but that callback is optional and may not have fired yet (DL-0853
  *      root cause: REQUIRED server record behind an OPTIONAL browser callback).
- *   2. Enqueues a sync.completed webhook so the integrator knows to call
- *      or-sync for the data.
+ *   2. Enqueues a connection.data_available webhook so the integrator
+ *      knows to call or-sync for the data itself (DEV-0060).
  *
  * Returns 'processed' so the inbox event is consumed and not retried.
  */
