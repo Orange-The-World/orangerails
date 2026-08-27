@@ -39,7 +39,7 @@ The customer's xpub never leaves the browser. The Orange Rails server holds a se
 ┌────────────────────────────┐
 │  connect.orangerails.com   │  ← The widget host
 │  Static HTML/JS/WASM       │     Where the math runs
-│  Loaded in popup           │     CSP locked, logged
+│  Loaded in popup           │     Framing denied, see public/_headers
 └────────────┬───────────────┘
              │
    ┌─────────┴─────────────────┐
