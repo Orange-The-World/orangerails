@@ -582,7 +582,16 @@ jobs:
             rm -f "$SQL_PAYLOAD"
 
             if [[ ! "$CODE" =~ ^2 ]]; then
-              echo "  x FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
+              # The response body is deliberately NOT printed, for the same reason
+              # the read-only step above does not print it: this repository is
+              # public and so are its Actions logs. On a failed apply the body is
+              # the database's answer to a statement run against a real project,
+              # production included, and can carry the failing statement, row
+              # values quoted in a constraint violation, or an auth error. The
+              # status and the file name are what a person needs in order to know
+              # what to go and look at; read the body by running the statement
+              # against the project directly, off the public log.
+              echo "::error::${BASENAME} FAILED to apply on ${SUPABASE_REF} (HTTP $CODE). Response body withheld: Actions logs on this repository are public. Run the statement against the project directly to read the database error."
               rm -f /tmp/mig.resp
               exit 1
             fi
@@ -600,7 +609,11 @@ jobs:
             rm -f "$REC"
 
             if [[ ! "$REC_CODE" =~ ^2 ]]; then
-              echo "  x FAILED to record migration in ledger (HTTP $REC_CODE): $(head -c 400 /tmp/mig.resp)"
+              # Body withheld for the reason given above. The extra sentence here
+              # is load bearing: the SQL already succeeded and only the ledger row
+              # failed, so this migration has run and is not recorded as having
+              # run. Re-running this workflow would apply it a second time.
+              echo "::error::${BASENAME} applied but FAILED to record in supabase_migrations.schema_migrations on ${SUPABASE_REF} (HTTP $REC_CODE). The statement HAS run; insert the ledger row by hand before re-running this workflow, or it applies again. Response body withheld: Actions logs on this repository are public."
               rm -f /tmp/mig.resp
               exit 1
             fi
