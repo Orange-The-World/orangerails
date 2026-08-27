@@ -42,6 +42,26 @@ const BLOCK_START = 'if (swDelErr) {';
 const BLOCK_END = '// Step 3:';
 
 /**
+ * Remove `//` line comments and block comments.
+ *
+ * WHY THIS EXISTS, and it is worth reading before deleting it. The control
+ * flow assertions below search for `return` and `throw`. The branch they scan
+ * carries a comment explaining what goes wrong when an orphan survives, and
+ * that prose contains the words "and return success with nothing written". A
+ * raw text search therefore matched English and failed on correct code.
+ *
+ * Scanning comments for control flow is wrong in both directions: it fails on
+ * a correct branch that merely describes a return, and it would pass a broken
+ * one whose real return sat inside a commented-out line. Strip first, then
+ * assert on what actually executes.
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ');
+}
+
+/**
  * The text of the failed-cleanup branch, from the `if` to the start of Step 3.
  *
  * Throws rather than returning an empty string when either marker is missing,
@@ -97,24 +117,45 @@ Deno.test('a failed cleanup is still logged as well as reported', () => {
   );
 });
 
+Deno.test('the comment stripper actually strips, so the next test is not vacuous', () => {
+  // A stripper that quietly returned its input unchanged would reintroduce
+  // the prose-matching bug this exists to prevent, and a stripper that ate
+  // everything would make the control-flow assertions pass over nothing.
+  const sample = 'const a = 1; // return this is prose\n/* throw also prose */ const b = 2;';
+  const stripped = stripComments(sample);
+  assertEquals(/\breturn\b/.test(stripped), false, 'line comments must be removed');
+  assertEquals(/\bthrow\b/.test(stripped), false, 'block comments must be removed');
+  assert(stripped.includes('const a = 1;'), 'code before a comment must survive');
+  assert(stripped.includes('const b = 2;'), 'code after a comment must survive');
+});
+
 Deno.test('a failed cleanup does NOT block the connection delete', () => {
   // This is the half a well-meaning future edit is most likely to break.
   // Turning the cleanup failure into a 500 would stop a customer deleting a
   // connection because an unrelated cleanup query failed.
   const branch = failedCleanupBranch();
   assert(branch.length > 0, 'failed-cleanup branch came back empty');
+
+  const code = stripComments(branch);
+  // The branch is mostly explanatory comment, so prove something executable
+  // survived the strip before asserting on what is missing from it.
+  assert(
+    code.includes('reportError'),
+    'stripping comments removed the executable code too; the assertions below would be vacuous',
+  );
+
   assertEquals(
-    /\breturn\b/.test(branch),
+    /\breturn\b/.test(code),
     false,
     'the swDelErr branch must not return; the connection delete has to proceed',
   );
   assertEquals(
-    /\bthrow\b/.test(branch),
+    /\bthrow\b/.test(code),
     false,
     'the swDelErr branch must not throw; the connection delete has to proceed',
   );
   assertEquals(
-    branch.includes('jsonResponse'),
+    code.includes('jsonResponse'),
     false,
     'the swDelErr branch must not build a response; it is not a terminal path',
   );
