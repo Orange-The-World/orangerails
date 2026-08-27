@@ -842,16 +842,13 @@ export async function handleEventSinkDelivery(
       await client.from('webhook_delivery').insert({
         platform_id:   platformId,
         subaccount_id: subaccountId,
-        event_type:    'sync.completed',
-        // Zero is the honest value here, not a placeholder. Sink delivery
-        // means we pulled no rows ourselves: the whole point of the webhook
-        // is to tell the consumer to come and call or-sync. The OPK path
-        // reports a real row count because it did pull rows.
-        payload: buildSyncCompletedPayload({
+        event_type:    'connection.data_available',
+        // Sink delivery never pulls or stores a row itself: the whole point
+        // is to tell the consumer new data exists so it can call or-sync in
+        // the user's own session. No synced_count, because nothing synced.
+        payload: buildConnectionDataAvailablePayload({
           subaccountId,
           connectionId: connRow.id,
-          syncedCount:  0,
-          provider:     'quiltt',
         }),
       });
     }
