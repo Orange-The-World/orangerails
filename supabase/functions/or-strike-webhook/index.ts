@@ -75,7 +75,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     const { data: conn, error: lookupErr } = await client
       .from('connections')
-      .select('id, strike_webhook_secret, provider_type')
+      .select('id, strike_webhook_secret, provider_type, subaccount_id')
       .eq('id', connId)
       .maybeSingle();
 
