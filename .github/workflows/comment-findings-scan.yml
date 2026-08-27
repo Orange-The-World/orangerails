@@ -29,9 +29,9 @@ on:
   pull_request_review:
     types: [submitted, edited]
 
-# Minimum privilege required across all jobs. The scan job further restricts
-# itself to permissions: {} (no scope at all). Only the notify-on-failure job
-# needs issues: write, and only when the scan job fails.
+# Minimum privilege required. issues: write is only exercised by the
+# failure-notify step at the bottom of the scan job, gated on `if: failure()`,
+# so it is only ever spent when the scan step fails.
 permissions:
   contents: read
   issues: write
