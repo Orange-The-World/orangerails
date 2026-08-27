@@ -600,7 +600,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     const desc = opts.descriptor;
     for (const chain of [0, 1] as const) {
       for (let i = 0; i < chainWindowEnd[chain]; i++) {
-        const script = deriveMultisigScriptPubkeyBytes(desc, chain, i + 1);
+        const script = deriveMultisigScriptPubkeyBytes(desc, chain, i);
         const address = deriveMultisigAddress(desc, chain, i);
         derived.push({ chain, index: i, script, address });
       }
