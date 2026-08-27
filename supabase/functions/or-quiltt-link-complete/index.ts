@@ -394,6 +394,22 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       }
     }
 
+    // DL-1115: record the outcome so or-quiltt-link-status can answer "did
+    // it land" for an opener that never received the postMessage (popup
+    // closed mid-completion). Best-effort and after every other write:
+    // a failure here must not turn an otherwise-successful link into a 500
+    // for the popup that is waiting on this exact response.
+    const statusWrite = await service
+      .from('pending_widget_sessions')
+      .update({ completed_connection_id: connectionId })
+      .eq('id', body.widget_token);
+    if (statusWrite.error) {
+      console.error(
+        '[or-quiltt-link-complete] completed_connection_id write-back failed:',
+        statusWrite.error.message,
+      );
+    }
+
     return jsonResponse({ subaccount_id: subaccountId, connection_id: connectionId }, 200, cors);
   } catch (e) {
     console.error('[or-quiltt-link-complete] fatal:', e instanceof Error ? e.message : String(e));
