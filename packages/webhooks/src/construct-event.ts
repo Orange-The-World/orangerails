@@ -206,7 +206,8 @@ function parseEvent(rawBody: string, eventId: string): Event {
   const type = body["type"];
   const data = body["data"];
 
-  if (type !== "sync.completed") {
+  const KNOWN_TYPES = ["sync.completed", "connection.data_available"] as const;
+  if (!KNOWN_TYPES.includes(type as (typeof KNOWN_TYPES)[number])) {
     throw new SignatureVerificationError(
       `Unsupported webhook event type: ${String(type)}.`,
     );
@@ -221,7 +222,7 @@ function parseEvent(rawBody: string, eventId: string): Event {
   // field embedded in the JSON body , the header is what dedupe keys on.
   return {
     id: eventId,
-    type: "sync.completed",
-    data: data as Event["data"],
-  };
+    type,
+    data,
+  } as Event;
 }
