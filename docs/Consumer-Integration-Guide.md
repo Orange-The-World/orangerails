@@ -353,13 +353,12 @@ Give your OR maintainer contact a receiver URL and a shared secret. Both are sto
 
 ### The payload
 
-**There are two shapes on the wire today, and which one you get depends on the source.** This is a known inconsistency, not a design; see the warning at the end of this section.
-
-**Canonical shape**, emitted by the generic provider path (Bitcoin sources: Strike, Blink, xpub, CCXT exchanges). This is what `@orangerails/webhooks` parses:
+**One shape, built in one place.** All 5 emit sites (the generic provider path and every bank/Quiltt path) call the same builder, `buildSyncCompletedPayload` in `supabase/functions/_shared/webhook-events.ts`, and pass it values rather than structure. That used to not be true: four of five sites built the payload as an inline literal and had drifted apart, and the SDK throws on any payload missing `type`. That defect is fixed; every emitter now sends the same fields.
 
 ```json
 {
   "event": "sync.completed",
+  "provider": "quiltt",
   "subaccount_id": "...",
   "connection_id": "...",
   "synced_count": 12,
@@ -374,35 +373,18 @@ Give your OR maintainer contact a receiver URL and a shared secret. Both are sto
 }
 ```
 
-The flat fields and the nested `data` carry the same values. Both are sent during the SDK transition window so that hand-rolled receivers written before the SDK keep working.
-
-**Legacy-only shape**, emitted by every bank (Quiltt) path:
-
-```json
-{
-  "event": "sync.completed",
-  "provider": "quiltt",
-  "subaccount_id": "...",
-  "connection_id": "...",
-  "synced_count": 0,
-  "ts": "2026-08-24T12:00:00.000Z"
-}
-```
-
-Note what is different: it carries a `provider` field, and it has **no `type` and no `data`**.
+The flat fields and the nested `data` carry the same values. Both are sent deliberately and will keep being sent until every known consumer is on the SDK (webhook architecture decision of 2026-05-23): `data` is what `@orangerails/webhooks` `constructEvent()` reads, the flat fields are what receivers written before the SDK read.
 
 | Field | Type | Notes |
 |---|---|---|
-| `event` | string | Always `sync.completed`. Present on both shapes. |
-| `type` | string | Canonical discriminator. **Bitcoin sources only.** Absent on bank events. |
-| `data` | object | Nested duplicate of the flat fields. **Bitcoin sources only.** |
-| `provider` | string | **Bank events only.** Not sent by the generic provider path. |
+| `event` | string | Always `sync.completed`. |
+| `type` | string | Same value as `event`. Read by the SDK's `constructEvent()`. |
+| `data` | object | Nested duplicate of the flat fields. Matches the SDK's `SyncCompletedEvent['data']` type exactly, so do not expect extra fields in here even if the flat payload has them. |
+| `provider` | string | Present when the emitting path knows the upstream provider (bank/Quiltt paths today). Flat-only, never copied into `data`, because `data`'s shape is contractual. |
 | `subaccount_id` | string | Your subaccount. Resolve your own tenant from this. |
 | `connection_id` | string | OR's connection id. |
 | `synced_count` | number | Rows OR pulled itself. See below. Always a number, never absent. |
 | `ts` | string | ISO 8601 timestamp. |
-
-> **Read this before you pick a parser.** `@orangerails/webhooks` `constructEvent()` requires a top-level `type` and throws `SignatureVerificationError: Unsupported webhook event type: undefined` when it is missing. Bank events do not carry `type`. **So the SDK currently rejects every bank notification.** If you consume bank events, either parse the flat shape yourself or wait for the emitters to be aligned. This is tracked as a defect on our side, not a contract you should design around.
 
 **A `synced_count` of `0` is a real value, not a bug, and it does not mean "nothing happened".** Two different paths can produce it:
 
@@ -413,7 +395,7 @@ On paths where OR did the pulling it is the real row count. In the live queue at
 
 **When a notification is sent.** The generic provider path enqueues on every successful sync, whether or not it found anything. The Quiltt pull paths enqueue only when they pulled at least one row, so they never send `0`. The Quiltt event-driven sink path always sends `0`, because the count is not knowable there. Do not infer "there is new data" from the arrival of a notification alone; call `or-sync` and let its cursor decide.
 
-**Ignore top-level keys you do not recognise; do not reject on them.** OR is mid-migration between two payload shapes and adds fields ahead of removing them. A strict validator that rejects unknown keys will drop events, and because you are told to answer `2xx` on anything you do not handle, that rejection is invisible on both sides.
+**Ignore top-level keys you do not recognise; do not reject on them.** Fields ship ahead of any future removal. A strict validator that rejects unknown keys will drop events, and because you are told to answer `2xx` on anything you do not handle, that rejection is invisible on both sides.
 
 ### Signature
 
