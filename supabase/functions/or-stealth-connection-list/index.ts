@@ -22,6 +22,8 @@
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { computeSyncFreshness } from '../_shared/sync-freshness.ts';
+import type { SyncFreshnessFields } from '../_shared/sync-freshness.ts';
 
 interface ListRequestBody {
   app_user_id?: string;
