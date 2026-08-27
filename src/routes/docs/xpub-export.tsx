@@ -272,12 +272,12 @@ function XpubExportPage() {
               <p className="mt-1 text-sm text-muted-foreground">
                 Open a ticket at{" "}
                 <a
-                  href="https://docs.orangerails.com/support"
+                  href="https://github.com/Orange-The-World/orangerails/issues/new?labels=support"
                   target="_blank"
                   rel="noreferrer"
                   className="underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
                 >
-                  docs.orangerails.com/support
+                  GitHub Issues
                 </a>{" "}
                 with the wallet you're trying to export from and we'll add it
                 here.
