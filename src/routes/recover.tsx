@@ -141,7 +141,13 @@ function RecoverPage() {
       // if any row migration above threw -- the user is never left with
       // invalidated wrappers and un-migrated rows simultaneously.
       // vault_verifier_ciphertext MUST be updated: it is derived from the MEK.
-      const { error: updateErr } = await (supabase as any)
+      // This write has to be PROVEN to have landed, not assumed. Every row above
+      // is now under the new MEK and the only copies of that MEK are the wrappers
+      // in this statement. An update that matches zero rows comes back without an
+      // error, so the row count is the only signal that it actually happened.
+      // The compare-and-swap on recovery_ciphertext (read at the top of this
+      // submit) makes a concurrent rotation fail loudly rather than be overwritten.
+      const { data: updatedRows, error: updateErr } = await (supabase as any)
         .from("user_vault_meta")
         .update({
           enc_mek_ciphertext: newEncMekCiphertext,
@@ -149,8 +155,15 @@ function RecoverPage() {
           vault_verifier_ciphertext: newVerifierCiphertext,
           vault_key_version: CURRENT_VAULT_KEY_VERSION,
         })
-        .eq("user_id", session.user.id);
+        .eq("user_id", session.user.id)
+        .eq("recovery_ciphertext", meta.recovery_ciphertext)
+        .select("user_id");
       if (updateErr) throw updateErr;
+      if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
+        throw new Error(
+          "Vault recovery did not save. Your data has been re-encrypted but the new keys were not stored. Do not close or reload this page, and contact support with this message.",
+        );
+      }
 
       // Zero old key material.
       // clearMigrationKeys is intentionally NOT called in the catch branch below
