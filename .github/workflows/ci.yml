@@ -280,7 +280,8 @@ jobs:
           #
           # When you add or remove a test file, change the number for that
           # branch in the same PR, and say why in the message if it goes down.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '17' }}
+          #   dev  18 files as of DEV-0136 (scan_range.test.ts added)
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '18' }}
         run: |
           set -euo pipefail
 
