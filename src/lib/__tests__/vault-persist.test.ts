@@ -294,7 +294,7 @@ describe("vault password change: the re-wrapped meta write", () => {
    */
   function rewrapArgs(
     client: VaultPersistClient,
-    verifyPersisted: RewrapVaultArgs["verifyPersisted"] = async () => {},
+    verifyPersisted: RewrapVaultArgs["verifyPersisted"] = async () => undefined,
   ): RewrapVaultArgs {
     return {
       supabase: client,
@@ -335,7 +335,7 @@ describe("vault password change: the re-wrapped meta write", () => {
     await expect(persistRewrappedVaultMeta(rewrapArgs(client))).resolves.toBeUndefined();
   });
 
-  it("asks for the stored envelopes back, not just a row count, and keeps the compare-and-swap", async () => {
+  it("asks for the stored envelopes back, not just a row count", async () => {
     const { client, calls } = makeFakeClient();
 
     await persistRewrappedVaultMeta(rewrapArgs(client));
@@ -393,22 +393,28 @@ describe("vault password change: the re-wrapped meta write", () => {
       },
     });
 
-    const failure = await persistRewrappedVaultMeta(
-      rewrapArgs(client, async () => {
-        throw new Error("The stored recovery code envelope could not be re-opened.");
-      }),
-    ).catch((e: unknown) => e as Error);
+    let failure: Error | null = null;
+    try {
+      await persistRewrappedVaultMeta(
+        rewrapArgs(client, async () => {
+          throw new Error("The stored recovery code envelope could not be re-opened.");
+        }),
+      );
+    } catch (e) {
+      failure = e as Error;
+    }
 
+    expect(failure).not.toBeNull();
     // The user-facing sentence, which tells them not to close the page.
-    expect(failure.message).toContain(PASSWORD_CHANGE_NOT_PROVEN_MESSAGE);
+    expect(failure?.message).toContain(PASSWORD_CHANGE_NOT_PROVEN_MESSAGE);
     // And the diagnostic, so support can tell WHICH envelope failed.
-    expect(failure.message).toContain("could not be re-opened");
+    expect(failure?.message).toContain("could not be re-opened");
   });
 
   it("throws when the row comes back without the envelope columns", async () => {
     // We asked for two columns and got a row without them. That is not proof
     // of anything, so it must not be treated as success.
-    const verify = vi.fn(async () => {});
+    const verify = vi.fn(async () => undefined);
     const { client } = makeFakeClient({
       metaUpdate: { data: [{ user_id: "user-1" }], error: null },
     });
@@ -422,7 +428,7 @@ describe("vault password change: the re-wrapped meta write", () => {
   it("does not call the verifier at all when the write matched no row", async () => {
     // Nothing was written, so there is nothing to prove and the user gets the
     // conflict message, not the much scarier do-not-close-the-page one.
-    const verify = vi.fn(async () => {});
+    const verify = vi.fn(async () => undefined);
     const { client } = makeFakeClient({ metaUpdate: { data: [], error: null } });
 
     await expect(persistRewrappedVaultMeta(rewrapArgs(client, verify))).rejects.toThrow(
