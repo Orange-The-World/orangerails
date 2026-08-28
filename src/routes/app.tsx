@@ -851,13 +851,28 @@ function AppHome() {
       // one action that can clear it, or the owner is stuck: revoking again
       // finds no key row and refuses every time.
       if (e instanceof CoAdminRevocationIncompleteError) {
+        // Close the revoke dialog in the SAME state update that opens the
+        // list-only one. ConfirmDialog closes itself from a .finally that runs
+        // after this function resolves, which is a later React commit, so
+        // leaving the close to that would render one commit with two modal
+        // dialogs mounted at once.
+        setPendingRevokeAdmin(null);
         setPendingListOnlyRemoval({ row: a, keyRemoved: e.keyRemoved });
       }
     }
   }
 
-  /** Clears the list entry and nothing else. This does not remove access. */
-  async function confirmClearCoAdminListEntry(a: CoAdminRow) {
+  /**
+   * Clears the list entry and nothing else. This does not remove access.
+   *
+   * WHY IT LOGS. The list row is the only record of who may still hold a
+   * stored key, so removing it has to leave a record somewhere else, or the
+   * owner ends up with no list row, no key row they can read, and nothing at
+   * all to say this happened. keyRemoved is carried into that record because
+   * it is the difference between "the stored key was known to be gone" and
+   * "nobody established whether it is still there".
+   */
+  async function confirmClearCoAdminListEntry(a: CoAdminRow, keyRemoved: boolean) {
     if (!userId) {
       setErr("Missing user , try reloading.");
       return;
@@ -867,6 +882,11 @@ function AppHome() {
         adminUserId: a.admin_user_id,
         ownerUserId: userId,
         supabase: supabase as unknown as CoAdminSupabaseLike,
+      });
+      // Not coadmin_revoked: this removed a record, not an access grant.
+      void logSecurityEvent(supabase, userId, "coadmin_list_entry_cleared", {
+        admin_user_id: a.admin_user_id,
+        key_removed: keyRemoved,
       });
       setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
       setErr("");
@@ -1325,7 +1345,10 @@ function AppHome() {
         destructive
         onConfirm={async () => {
           if (pendingListOnlyRemoval) {
-            await confirmClearCoAdminListEntry(pendingListOnlyRemoval.row);
+            await confirmClearCoAdminListEntry(
+              pendingListOnlyRemoval.row,
+              pendingListOnlyRemoval.keyRemoved,
+            );
           }
         }}
       />
