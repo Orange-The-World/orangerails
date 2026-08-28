@@ -33,9 +33,11 @@ type QueryResult = { data: unknown[] | null; error: unknown };
 
 interface RecordedCall {
   table: string;
-  op: "select" | "delete";
+  op: "select" | "delete" | "rpc";
   columns?: string;
   filters: Array<{ column: string; value: unknown }>;
+  /** the arguments an rpc was called with; unused for select and delete */
+  args?: Record<string, unknown>;
 }
 
 interface Chain {
@@ -54,6 +56,12 @@ interface FakeOptions {
   selectResult?: Record<string, QueryResult>;
   /** what a delete on each table returns */
   deleteResult?: Record<string, QueryResult>;
+  /** what get_coadmin_emails returns, keyed the way the real RPC returns it */
+  emails?: Array<{ user_id: string; email: string }>;
+  /** an error from get_coadmin_emails instead of rows */
+  emailError?: unknown;
+  /** make get_coadmin_emails throw rather than return an error */
+  emailThrows?: boolean;
 }
 
 /**
@@ -104,6 +112,14 @@ function makeFakeClient(options: FakeOptions = {}) {
   }
 
   const client = {
+    rpc(fn: string, args: Record<string, unknown>) {
+      calls.push({ table: fn, op: "rpc", filters: [], args });
+      if (options.emailThrows) throw new Error("rpc exploded");
+      return Promise.resolve({
+        data: options.emails ?? [],
+        error: options.emailError ?? null,
+      });
+    },
     from(table: string) {
       return {
         select(columns: string) {
@@ -178,7 +194,12 @@ describe("a recovery invalidates every co-admin grant", () => {
     // Half two: the owner is told, in words, with the number in them. The two
     // is the number the DELETE gave back, and the fixture makes a select on
     // that table return nothing, so it cannot have come from a read.
-    expect(result).toEqual({ status: "invalidated", grantsInvalidated: 2 });
+    expect(result).toEqual({
+      status: "invalidated",
+      grantsInvalidated: 2,
+      people: [],
+      peopleAreComplete: false,
+    });
     const message = coAdminInvalidationMessage(result);
     expect(message).toContain("2 people");
     expect(message).toContain("Emergency access was reset");
@@ -306,6 +327,95 @@ describe("a recovery invalidates every co-admin grant", () => {
     if (result.status === "failed") {
       expect(result.reason).toContain("wrapped keys were removed");
     }
+  });
+
+  it("tells the owner WHO lost emergency access, not only how many", async () => {
+    const { client } = makeFakeClient({
+      ...TWO_GRANTS,
+      emails: [
+        { user_id: "admin-1", email: "ada@example.com" },
+        { user_id: "admin-2", email: "grace@example.com" },
+      ],
+    });
+
+    const result = await invalidate(client);
+
+    // The owner is being asked to re-grant emergency access to a list this
+    // very function just deleted. Without the names the instruction cannot be
+    // followed: workspace_admins was the only record of who they were.
+    expect(result).toEqual({
+      status: "invalidated",
+      grantsInvalidated: 2,
+      people: ["ada@example.com", "grace@example.com"],
+      peopleAreComplete: true,
+    });
+    const message = coAdminInvalidationMessage(result);
+    expect(message).toContain("ada@example.com");
+    expect(message).toContain("grace@example.com");
+    expect(message).not.toContain("including");
+  });
+
+  it("asks who they are BEFORE deleting the admin list, because afterwards it cannot", async () => {
+    const { client, calls } = makeFakeClient({
+      ...TWO_GRANTS,
+      emails: [{ user_id: "admin-1", email: "ada@example.com" }],
+    });
+
+    await invalidate(client);
+
+    // get_coadmin_emails only returns a row while a workspace_admins row still
+    // links the caller to that user. Move this lookup after the delete and it
+    // returns nothing, every time, and the message quietly degrades to a bare
+    // count with no error anywhere to explain it.
+    const lookupAt = calls.findIndex((c) => c.op === "rpc" && c.table === "get_coadmin_emails");
+    const adminDeleteAt = calls.findIndex(
+      (c) => c.table === "workspace_admins" && c.op === "delete",
+    );
+    expect(lookupAt).toBeGreaterThanOrEqual(0);
+    expect(adminDeleteAt).toBeGreaterThanOrEqual(0);
+    expect(lookupAt).toBeLessThan(adminDeleteAt);
+    expect(calls[lookupAt].args).toEqual({ user_ids: ["admin-1", "admin-2"] });
+  });
+
+  it("says 'including' when it could only name some of them", async () => {
+    const { client } = makeFakeClient({
+      ...TWO_GRANTS,
+      emails: [{ user_id: "admin-1", email: "ada@example.com" }],
+    });
+
+    const result = await invalidate(client);
+
+    // Two people lost access and we can name one. Presenting that one as the
+    // whole list would send the owner to re-grant the wrong set.
+    if (result.status !== "invalidated") throw new Error("expected invalidated");
+    expect(result.peopleAreComplete).toBe(false);
+    const message = coAdminInvalidationMessage(result);
+    expect(message).toContain("2 people");
+    expect(message).toContain("including ada@example.com");
+  });
+
+  it("still deletes the dead key material when the name lookup fails", async () => {
+    const { client, calls } = makeFakeClient({ ...TWO_GRANTS, emailError: { message: "denied" } });
+
+    const result = await invalidate(client);
+
+    // Putting a name to an id is worth having. It is not worth leaving a dead
+    // grant in place for, so the lookup is best effort and nothing else
+    // changes when it fails.
+    expect(result.status).toBe("invalidated");
+    if (result.status === "invalidated") expect(result.people).toEqual([]);
+    expect(calls.some((c) => c.table === "wrapped_data_keys" && c.op === "delete")).toBe(true);
+    expect(coAdminInvalidationMessage(result)).toContain("2 people no longer have it.");
+  });
+
+  it("does not throw when the name lookup throws", async () => {
+    const { client } = makeFakeClient({ ...TWO_GRANTS, emailThrows: true });
+
+    // The contract for this whole module is that it reports rather than
+    // raises: by the time it runs the recovery has already succeeded.
+    const result = await invalidate(client);
+
+    expect(result.status).toBe("invalidated");
   });
 
   it("does not delete on a read it could not perform", async () => {

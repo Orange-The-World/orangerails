@@ -51,6 +51,15 @@
  * what the deletes give back, never from a select on wrapped_data_keys. An
  * earlier version of this file gated the whole cleanup on that select, which
  * made it do nothing at all while looking like it had found nothing to do.
+ *
+ * A THIRD PERMISSION FACT, and it fixes an order. Owners are told WHO lost
+ * emergency access, not just how many, because they are being asked to grant
+ * it again to a list this function deletes. The only way to put a name to a
+ * recipient id is public.get_coadmin_emails, and that function authorises the
+ * caller BY the workspace_admins row linking them. Deleting the list therefore
+ * destroys the permission to resolve it. The lookup runs before the deletes for
+ * that reason and cannot be moved below them: it would return nothing, with no
+ * error, and the message would silently fall back to a bare count.
  */
 
 /**
@@ -58,8 +67,18 @@
  * vault-persist.ts: the generated types do not cover these tables, and naming
  * the hatch in one place is what lets a test pass a fake client in.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type CoAdminRecoveryClient = { from: (table: string) => any };
+export type CoAdminRecoveryClient = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  from: (table: string) => any;
+  /**
+   * Needed for get_coadmin_emails, which is the only way to put a name to a
+   * recipient id. It is REQUIRED rather than optional on purpose: the real
+   * client always has it, and an optional member would let a fixture quietly
+   * skip the resolution and a test then pass over a message that names nobody.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  rpc: (fn: string, args: Record<string, unknown>) => any;
+};
 
 export interface InvalidateCoAdminGrantsArgs {
   supabase: CoAdminRecoveryClient;
@@ -79,13 +98,60 @@ export type CoAdminInvalidation =
    */
   | { status: "none" }
   /** Grants existed and are gone. */
-  | { status: "invalidated"; grantsInvalidated: number }
+  | {
+      status: "invalidated";
+      grantsInvalidated: number;
+      /**
+       * Who lost emergency access, in a form a person recognises, resolved
+       * before the delete because afterwards it cannot be resolved at all.
+       * Empty when nothing could be resolved, which is not an error.
+       */
+      people: string[];
+      /**
+       * True only when `people` accounts for EVERY listed admin. A partial
+       * list shown as a complete one would tell the owner to re-grant to the
+       * wrong set, so the message says "including" instead when this is false.
+       */
+      peopleAreComplete: boolean;
+    }
   /**
    * The cleanup did not complete. The recovery itself DID succeed, so this is
    * reported to the owner as an action to take, not as a failure of the
    * recovery.
    */
   | { status: "failed"; reason: string };
+
+/**
+ * Put names to the ids of the people about to lose emergency access.
+ *
+ * MUST RUN BEFORE THE DELETE. public.get_coadmin_emails only returns a row
+ * while a workspace_admins row still links the caller to that user, see
+ * supabase/migrations/20260421020000_coadmin_email_lookup.sql. Once the admin
+ * list is deleted the same call returns nothing, so this is the only moment
+ * the names exist to be read.
+ *
+ * Best effort, and never throws: this whole module's contract is that a
+ * cleanup problem is reported, not raised, and a message that names nobody is
+ * a worse message rather than a failed recovery.
+ */
+async function resolveAdminEmails(
+  supabase: CoAdminRecoveryClient,
+  adminUserIds: string[],
+): Promise<string[]> {
+  if (adminUserIds.length === 0) return [];
+  try {
+    const { data, error } = await supabase.rpc("get_coadmin_emails", {
+      user_ids: adminUserIds,
+    });
+    if (error) return [];
+    const emails = ((data ?? []) as Array<{ email?: unknown }>)
+      .map((row) => row?.email)
+      .filter((email): email is string => typeof email === "string" && email.length > 0);
+    return Array.from(new Set(emails));
+  } catch {
+    return [];
+  }
+}
 
 function errorText(error: unknown): string {
   if (typeof error === "string") return error;
@@ -136,8 +202,18 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     };
   }
 
+  const adminIds = (admins ?? [])
+    .map((row) => (row as { admin_user_id?: unknown } | null)?.admin_user_id)
+    .filter((id): id is string => typeof id === "string");
+
   const listedAdmins = (admins ?? []).length;
   if (listedAdmins === 0) return { status: "none" };
+
+  // Resolve who they are while it is still possible. The delete below destroys
+  // the rows that authorise this lookup, so doing it afterwards would return
+  // nothing and look like a resolution failure rather than a mistimed call.
+  const people = await resolveAdminEmails(supabase, adminIds);
+  const peopleAreComplete = people.length > 0 && people.length === listedAdmins;
 
   // Delete under the owner scoped delete policy, and ask for the removed rows
   // back so the count is what the database actually did rather than what a
@@ -195,7 +271,7 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     };
   }
 
-  return { status: "invalidated", grantsInvalidated: grantsRemoved };
+  return { status: "invalidated", grantsInvalidated: grantsRemoved, people, peopleAreComplete };
 }
 
 /**
@@ -212,7 +288,18 @@ export function coAdminInvalidationMessage(result: CoAdminInvalidation): string 
   if (result.status === "invalidated") {
     const people =
       result.grantsInvalidated === 1 ? "1 person" : `${result.grantsInvalidated} people`;
-    return `Emergency access was reset. Recovering your vault created new keys, and the old emergency access could not be carried across, so ${people} no longer have it. Grant it again from Settings if you still want them to have it.`;
+    // Naming them is the difference between an instruction the owner can
+    // follow and one they cannot: the list they are being asked to rebuild is
+    // the list this cleanup just deleted. "including" when the resolution was
+    // partial, because a short list read as a complete one is worse than a
+    // count.
+    const who =
+      result.people.length === 0
+        ? ""
+        : result.peopleAreComplete
+          ? `: ${result.people.join(", ")}`
+          : `, including ${result.people.join(", ")}`;
+    return `Emergency access was reset. Recovering your vault created new keys, and the old emergency access could not be carried across, so ${people} no longer have it${who}. Grant it again from Settings if you still want them to have it.`;
   }
 
   return `Emergency access may still be listed but no longer works, and we could not clean it up automatically (${result.reason}). Go to Settings, remove every emergency contact, and add them again.`;
