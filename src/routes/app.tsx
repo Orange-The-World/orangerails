@@ -244,13 +244,19 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
+      // Collects every failed read below so the effect can surface ONE
+      // user-visible toast at the end, rather than console.warn only
+      // (DEV-0405: a failed read was previously invisible to the user).
+      const readFailures: string[] = [];
       const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
         .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
       if (classifyRead(meta, metaErr) === "error") {
-        console.warn(`Failed to load vault meta: ${formatError(metaErr)}`);
+        const msg = `Failed to load vault meta: ${formatError(metaErr)}`;
+        console.warn(msg);
+        readFailures.push(msg);
       }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
@@ -295,7 +301,9 @@ function AppHome() {
         .select("id, admin_user_id, added_at")
         .eq("owner_user_id", session.user.id);
       if (classifyRead(admins, adminsErr) === "error") {
-        console.warn(`Failed to load co-admin list: ${formatError(adminsErr)}`);
+        const msg = `Failed to load co-admin list: ${formatError(adminsErr)}`;
+        console.warn(msg);
+        readFailures.push(msg);
       }
       const adminRows = (admins ?? []) as CoAdminRow[];
 
@@ -305,7 +313,9 @@ function AppHome() {
         .select("owner_user_id")
         .eq("admin_user_id", session.user.id);
       if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
-        console.warn(`Failed to load workspaces you administer: ${formatError(myAdminOfErr)}`);
+        const msg = `Failed to load workspaces you administer: ${formatError(myAdminOfErr)}`;
+        console.warn(msg);
+        readFailures.push(msg);
       }
 
       const workspaces: WorkspaceOption[] = [];
@@ -318,9 +328,9 @@ function AppHome() {
             .eq("user_id", ownerId)
             .single();
           if (classifyRead(ownerMeta, ownerMetaErr) === "error") {
-            console.warn(
-              `Failed to load vault meta for workspace owner ${ownerId}, skipping this workspace: ${formatError(ownerMetaErr)}`,
-            );
+            const msg = `Failed to load vault meta for workspace owner ${ownerId}, skipping this workspace: ${formatError(ownerMetaErr)}`;
+            console.warn(msg);
+            readFailures.push(msg);
           }
           if (!ownerMeta) continue;
           const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
@@ -336,9 +346,9 @@ function AppHome() {
             .eq("data_key_id", ownerKeyId)
             .maybeSingle();
           if (classifyRead(wdk, wdkErr) === "error") {
-            console.warn(
-              `Failed to load wrapped key for workspace owner ${ownerId}, skipping this workspace: ${formatError(wdkErr)}`,
-            );
+            const msg = `Failed to load wrapped key for workspace owner ${ownerId}, skipping this workspace: ${formatError(wdkErr)}`;
+            console.warn(msg);
+            readFailures.push(msg);
           }
           if (!wdk) continue;
           workspaces.push({
@@ -372,6 +382,17 @@ function AppHome() {
       setAdminWorkspaces(
         workspaces.map((w) => ({ ...w, ownerEmail: emailMap.get(w.ownerUserId) ?? w.ownerUserId })),
       );
+      // DEV-0405: at least one read in this effect genuinely failed (not a
+      // legitimate empty result, see classifyRead). One aggregated toast,
+      // deliberately generic, so the person is not shown a raw Postgres
+      // error and is not toast-bombed if several reads failed at once.
+      if (readFailures.length > 0) {
+        toast.error(
+          readFailures.length === 1
+            ? "Some of your co-admin data could not be loaded. It may be missing below; try refreshing."
+            : `${readFailures.length} co-admin data reads failed. Some workspaces or admins may be missing below; try refreshing.`,
+        );
+      }
     })();
   }, [isUnlocked, navigate]);
 
