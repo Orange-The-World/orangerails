@@ -615,7 +615,7 @@ jobs:
   schema-invariants:
     needs: [target, apply-migrations]
     # DEV-0395, out of DEV-0384 item 2. A migration can only police the schema
-    # at its own apply time. This job policses nothing of its own: it re-reads
+    # at its own apply time. This job polices nothing of its own: it re-reads
     # three design rules off the LIVE schema after the migrations in this commit
     # have applied, so a LATER migration that quietly breaks one is caught on
     # the merge that carries it rather than at some future audit.
@@ -744,5 +744,6 @@ jobs:
             exit 1
           fi
 
-          SKIPPED=$(echo "$RESPONSE" | jq -r '[.[] | select(.status == "SKIP")] | length')
+          SKIPPED=$(echo "$RESPONSE" | jq -r '[.[] | select(.status == "SKIP")] | length' 2>/dev/null || echo "")
+          SKIPPED="${SKIPPED:-0}"
           echo "wrapped_data_keys design invariants on ${SUPABASE_REF}: $((4 - SKIPPED)) asserted, ${SKIPPED} not applicable on this project."
