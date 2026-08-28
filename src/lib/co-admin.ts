@@ -45,6 +45,7 @@ import { base64ToBytes } from "./key-wrapping";
 import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } from "./pqc";
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
 import { signMemberGrant, verifyMemberGrant } from "./member-grant";
+import { formatError } from "./format-error";
 
 // ------------------------------------------------------------------
 // Encoding helpers
