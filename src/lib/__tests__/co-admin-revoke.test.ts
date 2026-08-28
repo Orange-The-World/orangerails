@@ -309,10 +309,10 @@ describe("revoking a co-admin proves both deletes", () => {
   it("says the stored key was removed when the list delete errors", async () => {
     const { client } = makeFakeClient({
       removed: { wrapped_data_keys: [{ recipient_user_id: "admin-1" }] },
-      // A string, not an object: the code interpolates the error into a
-      // template, so an object would arrive as [object Object] and the
-      // assertion below could never see it.
-      errors: { workspace_admins: "permission denied" },
+      // The actual shape a Supabase client hands back. formatError has to
+      // unwrap this or the owner sees "[object Object]" instead of the
+      // real reason.
+      errors: { workspace_admins: { message: "permission denied" } },
     });
 
     const error = await rejection(revoke(client));
@@ -351,9 +351,9 @@ describe("clearing a stale co-admin list entry", () => {
 
   it("fails when the delete errors", async () => {
     const { client } = makeFakeClient({
-      // A string for the same reason as above: an object would reach the
-      // message as [object Object] and this assertion could never see it.
-      errors: { workspace_admins: "permission denied" },
+      // A real Supabase-shaped error, not a bare string: formatError must
+      // unwrap { message } or this reason never reaches the thrown text.
+      errors: { workspace_admins: { message: "permission denied" } },
     });
 
     await expect(clearListEntry(client)).rejects.toThrow(/permission denied/);
