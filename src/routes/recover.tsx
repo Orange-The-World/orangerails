@@ -9,9 +9,9 @@ import { migrateAndPersistRotatedVault, type VaultPersistClient } from "@/lib/va
 import {
   invalidateCoAdminGrantsAfterRecovery,
   coAdminInvalidationMessage,
-  type CoAdminInvalidation,
   type CoAdminRecoveryClient,
 } from "@/lib/co-admin-recovery";
+import { runPostRecovery } from "@/lib/post-recovery";
 
 export const Route = createFileRoute("/recover")({
   component: RecoverPage,
@@ -128,37 +128,42 @@ function RecoverPage() {
         clearMigrationKeys,
       });
 
-      // The meta write is proven, so the rotation is real and every existing
-      // co-admin grant is now dead: those blobs hold HKDF subkeys of the MEK
-      // this recovery just replaced. They die silently, because the recipient's
-      // unwrap still succeeds and only the decrypts fail, so the grants are
-      // removed here and the owner is told rather than left with emergency
-      // access that looks present and does nothing.
+      // The meta write is proven, so the recovery has succeeded and the
+      // rotation is real. Two things follow from that, and their ORDER is the
+      // whole reason this is a call into a module instead of four statements.
+      //
+      // First, freshCode is now the only copy of the new recovery code in
+      // existence: the ciphertext is stored and the plaintext is never shown
+      // again after this page. So the screen goes up before anything else.
+      //
+      // Second, every existing co-admin grant is now dead. Those blobs hold
+      // HKDF subkeys of the MEK this recovery just replaced, and they die
+      // silently: the recipient's unwrap still succeeds and only the decrypts
+      // fail. So the grants are removed and the owner is told, rather than left
+      // with emergency access that looks present and does nothing.
       //
       // AFTER the meta write, never before: until it lands the stored wrappers
       // still hold the old MEK and those grants are still perfectly good.
       //
-      // This cannot fail the recovery. The recovery has already succeeded, and
-      // saying otherwise would tell the user something false about their vault.
-      // invalidateCoAdminGrantsAfterRecovery does not throw by design; the try
-      // is belt and braces so that even an unexpected throw becomes something
-      // the owner can act on instead of a recovery that reads as broken.
-      let coAdminResult: CoAdminInvalidation;
-      try {
-        coAdminResult = await invalidateCoAdminGrantsAfterRecovery({
-          supabase: supabase as unknown as CoAdminRecoveryClient,
-          ownerUserId: session.user.id,
-          workspaceKeyId: meta.workspace_key_id ?? null,
-        });
-      } catch (cleanupErr) {
-        coAdminResult = { status: "failed", reason: formatError(cleanupErr) };
-      }
-      setCoAdminNotice(coAdminInvalidationMessage(coAdminResult));
-
-      void logSecurityEvent(supabase, session.user.id, "vault_recover");
-
-      setNewRecoveryCode(freshCode);
-      setStep("new-code");
+      // None of the after-care can fail the recovery, and runPostRecovery is
+      // what guarantees that rather than a comment claiming it.
+      await runPostRecovery({
+        showNewRecoveryCode: () => {
+          setNewRecoveryCode(freshCode);
+          setStep("new-code");
+        },
+        invalidateCoAdminGrants: () =>
+          invalidateCoAdminGrantsAfterRecovery({
+            supabase: supabase as unknown as CoAdminRecoveryClient,
+            ownerUserId: session.user.id,
+            workspaceKeyId: meta.workspace_key_id ?? null,
+          }),
+        showCoAdminNotice: (result) => setCoAdminNotice(coAdminInvalidationMessage(result)),
+        logRecovery: () => {
+          void logSecurityEvent(supabase, session.user.id, "vault_recover");
+        },
+        formatError,
+      });
     } catch (err) {
       setError(formatError(err));
       setSubmitting(false);
