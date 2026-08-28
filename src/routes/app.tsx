@@ -1132,13 +1132,13 @@ function AppHome() {
                         newRecoveryCiphertext,
                         verifyPersistedEnvelopes,
                       } = await changeVaultPassword({
-                          currentPassword: changePwForm.current,
-                          newPassword: changePwForm.next,
-                          storedSaltB64: vaultSalt,
-                          storedEncMekCiphertext: vaultEncMekCiphertext,
-                          storedVerifierCiphertext: vaultVerifierCiphertext,
-                          keyVersion: vaultKeyVersion,
-                        });
+                        currentPassword: changePwForm.current,
+                        newPassword: changePwForm.next,
+                        storedSaltB64: vaultSalt,
+                        storedEncMekCiphertext: vaultEncMekCiphertext,
+                        storedVerifierCiphertext: vaultVerifierCiphertext,
+                        keyVersion: vaultKeyVersion,
+                      });
                       // Persist the new wrapping to user_vault_meta. This lives
                       // in src/lib/vault-persist.ts so a test can reach it: it
                       // throws unless the write matched a row, which is the only
