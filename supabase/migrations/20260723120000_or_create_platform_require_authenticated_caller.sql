@@ -9,9 +9,22 @@
 -- "you must be signed in". The check lives inside the function instead, where it
 -- holds no matter who ends up holding EXECUTE.
 --
--- This replaces the earlier grant revoke approach. A live read of both
--- environments showed no anon entry and no PUBLIC entry in the function ACL, so
--- the revoke was a no op in both.
+-- This is defense in depth alongside the earlier grant revoke approach in
+-- 20260721120000, not a replacement for it. The in-body guard alone admits
+-- any signed in end user, since auth.uid() IS NOT NULL is true for every
+-- account that can sign up, and this function is SECURITY DEFINER
+-- returning a freshly minted platform API key, so the guard is a backstop
+-- and the revoke is the control that actually keeps the surface closed.
+-- Both migrations must run.
+--
+-- A live read on 2026-08-28 found no anon entry and no PUBLIC entry in the
+-- function ACL on the cloud dev project, so the revoke was a no op there.
+-- It was NOT a no op on the self hosted cluster: proacl there carried an
+-- anon=X/postgres entry. A claim that holds in one environment must not be
+-- written as holding in both. See
+-- 20260828220000_or_create_platform_revoke_public_execute.sql for the
+-- explicit REVOKE that makes the ACL correct on either project regardless
+-- of environment or CREATE OR REPLACE history.
 --
 -- Why the check is not a bare "auth.uid() IS NULL" raise, which is the pattern
 -- the other helper functions use:
