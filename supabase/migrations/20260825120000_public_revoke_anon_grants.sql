@@ -33,8 +33,14 @@
 --     SELECT n.nspname, d.defaclobjtype, pg_get_userbyid(d.defaclrole), d.defaclacl
 --       FROM pg_default_acl d
 --       JOIN pg_namespace n ON n.oid = d.defaclnamespace
---      WHERE n.nspname = 'public' AND d.defaclobjtype = 'f';
+--      WHERE n.nspname = 'public' AND d.defaclobjtype = 'f'
+--        AND d.defaclrole = 'postgres'::regrole;
 -- and confirm anon is ABSENT.
+--
+-- The defaclrole filter matters. A Supabase project can carry a SECOND row for
+-- (public, 'f') whose grantor is supabase_admin. That row is platform owned,
+-- postgres cannot alter it, and this migration does not try to. Reading without
+-- the filter reports a failure that no version of this file could fix.
 
 BEGIN;
 
@@ -58,9 +64,15 @@ BEGIN
       JOIN pg_namespace n ON n.oid = d.defaclnamespace
      WHERE n.nspname = 'public'
        AND d.defaclobjtype = 'f'
+       -- Scoped to the row step 1 actually writes. ALTER DEFAULT PRIVILEGES FOR
+       -- ROLE postgres can only change the row whose defaclrole is postgres. A
+       -- platform owned supabase_admin row for the same (schema, objtype) is not
+       -- reachable from this role, so including it here asserted something this
+       -- migration does not do and can never do.
+       AND d.defaclrole = 'postgres'::regrole
        AND array_to_string(d.defaclacl, ',') LIKE '%anon=%'
   ) THEN
-    RAISE EXCEPTION 'FAIL: anon still appears in public functions default ACL after revoke';
+    RAISE EXCEPTION 'FAIL: anon still appears in the postgres default ACL for public functions after revoke';
   END IF;
 
   -- (b) Blanket revoke landed: anon holds no direct EXECUTE grant on any public function.
