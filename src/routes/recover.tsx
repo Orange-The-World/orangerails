@@ -128,6 +128,21 @@ function RecoverPage() {
         clearMigrationKeys,
       });
 
+      // SHOW THE NEW CODE FIRST. At this instant the fresh recovery code exists
+      // in exactly one place, the variable above, and it is already written to
+      // the database, so the code the user has written down no longer opens
+      // anything. Every statement between here and the screen that displays it
+      // is therefore a way to lose it: a throw lands in the catch below, the
+      // page never reaches the new-code step, and the user is left holding a
+      // dead code with no way to see the live one.
+      //
+      // Nothing after this line throws today. Ordering it this way removes the
+      // class rather than auditing each member of it, and it costs nothing: the
+      // co-admin notice is rendered by the new-code screen, so setting it a few
+      // statements later still shows it.
+      setNewRecoveryCode(freshCode);
+      setStep("new-code");
+
       // The meta write is proven, so the rotation is real and every existing
       // co-admin grant is now dead: those blobs hold HKDF subkeys of the MEK
       // this recovery just replaced. They die silently, because the recipient's
@@ -156,9 +171,6 @@ function RecoverPage() {
       setCoAdminNotice(coAdminInvalidationMessage(coAdminResult));
 
       void logSecurityEvent(supabase, session.user.id, "vault_recover");
-
-      setNewRecoveryCode(freshCode);
-      setStep("new-code");
     } catch (err) {
       setError(formatError(err));
       setSubmitting(false);
