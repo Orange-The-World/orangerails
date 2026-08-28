@@ -1126,8 +1126,12 @@ function AppHome() {
                     }
                     setChangePwLoading(true);
                     try {
-                      const { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext } =
-                        await changeVaultPassword({
+                      const {
+                        newEncMekCiphertext,
+                        newRecoveryCode,
+                        newRecoveryCiphertext,
+                        verifyPersistedEnvelopes,
+                      } = await changeVaultPassword({
                           currentPassword: changePwForm.current,
                           newPassword: changePwForm.next,
                           storedSaltB64: vaultSalt,
@@ -1142,12 +1146,18 @@ function AppHome() {
                       // opens nothing. It also carries the compare-and-swap on
                       // the prior wrapped MEK, so a concurrent change or a lost
                       // session fails loudly rather than silently.
+                      // verifyPersistedEnvelopes closes over the two new wrapping
+                      // keys, so the persist can prove the bytes that came BACK
+                      // from the write re-open, not merely that a row matched.
+                      // The keys never leave that closure and this route never
+                      // touches key material.
                       await persistRewrappedVaultMeta({
                         supabase: supabase as unknown as VaultPersistClient,
                         userId: userId as string,
                         priorEncMekCiphertext: vaultEncMekCiphertext,
                         newEncMekCiphertext,
                         newRecoveryCiphertext,
+                        verifyPersisted: verifyPersistedEnvelopes,
                       });
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
