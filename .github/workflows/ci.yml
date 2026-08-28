@@ -363,9 +363,10 @@ jobs:
     #                    every push (branch dev is the production env of the
     #                    orangerails-dev project; feature branches get previews).
     #   edge functions -> supabase-deploy.yml, on every push to dev and prod.
-    # Migrations are NOT deployed by either: they are applied by hand (the DBA
-    # on dev, two party on prod) or by an explicit dispatch of supabase-deploy
-    # with apply_migrations checked.
+    # Migrations are NOT deployed by either: on dev they are applied
+    # automatically by supabase-deploy.yml's apply-migrations job on every
+    # push to dev; on prod they still require an explicit two party dispatch
+    # of supabase-deploy with apply_migrations checked.
     #
     # A PR run therefore exercises the PR's tests against the currently-deployed
     # site; once the PR merges, the next run exercises the PR's own UI changes
