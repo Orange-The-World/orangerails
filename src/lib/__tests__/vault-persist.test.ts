@@ -19,6 +19,7 @@ import {
   migrateAndPersistRotatedVault,
   persistRewrappedVaultMeta,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
+  PQC_SECRETS_NOT_CARRIED_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
   type VaultPersistClient,
 } from "../vault-persist";
@@ -41,6 +42,15 @@ interface UpdateChain {
   ): Promise<unknown>;
   eq(column: string, value: unknown): UpdateChain;
   select(columns: string): Promise<QueryResult>;
+}
+
+interface SelectChain {
+  then(
+    onFulfilled: (value: QueryResult) => unknown,
+    onRejected?: (reason: unknown) => unknown,
+  ): Promise<unknown>;
+  eq(column: string, value: unknown): SelectChain;
+  range(from: number, to: number): Promise<QueryResult>;
 }
 
 interface FakeOptions {
@@ -94,13 +104,18 @@ function makeFakeClient(options: FakeOptions = {}) {
         select(columns: string) {
           const call: RecordedCall = { table, op: "select", columns, filters: [] };
           calls.push(call);
-          return {
+          const chain: SelectChain = {
             ...thenable(call),
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
+            },
             range(from: number, to: number) {
               call.filters.push({ column: "range", value: [from, to] });
               return Promise.resolve(resultFor(call));
             },
           };
+          return chain;
         },
         update(values: Record<string, unknown>) {
           const call: RecordedCall = { table, op: "update", values, filters: [] };
@@ -282,6 +297,116 @@ describe("vault recovery: the rotated meta write", () => {
     const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
     expect(metaUpdate?.values).not.toHaveProperty("kem_secret_wrapped");
     expect(metaUpdate?.values).toHaveProperty("sig_secret_wrapped", "sig-secret-v1");
+  });
+
+  it("refuses, having changed nothing, when the caller would drop a stored PQC secret", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        user_vault_meta: [
+          { kem_secret_wrapped: "stored-kem", sig_secret_wrapped: "stored-sig" },
+        ],
+      },
+    });
+
+    // rotateArgs defaults both new values to null, which is exactly what a
+    // caller that never selected the two columns would pass in.
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(PQC_SECRETS_NOT_CARRIED_MESSAGE);
+
+    // ZERO updates, and that is the property. A test that only checked it threw
+    // would also pass for code that re-encrypted every row and then complained,
+    // which is precisely the outcome this guard exists to prevent: by then the
+    // old wrap key is gone and the PQC secrets are unreachable forever.
+    expect(calls.filter((c) => c.op === "update")).toHaveLength(0);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("checks each PQC column on its own, so dropping only the signature secret still refuses", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        user_vault_meta: [{ kem_secret_wrapped: null, sig_secret_wrapped: "stored-sig" }],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(
+        rotateArgs(client, vi.fn(), {
+          newKemSecretWrapped: null,
+          newSigSecretWrapped: null,
+        }),
+      ),
+    ).rejects.toThrow(PQC_SECRETS_NOT_CARRIED_MESSAGE);
+
+    expect(calls.filter((c) => c.op === "update")).toHaveLength(0);
+  });
+
+  it("does not refuse a vault that has no PQC keys stored, which is the normal null case", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        user_vault_meta: [{ kem_secret_wrapped: null, sig_secret_wrapped: null }],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    ).resolves.toBeUndefined();
+
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(true);
+  });
+
+  it("proceeds when the caller did carry the stored PQC secrets across", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        user_vault_meta: [
+          { kem_secret_wrapped: "stored-kem", sig_secret_wrapped: "stored-sig" },
+        ],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(
+      rotateArgs(client, vi.fn(), {
+        newKemSecretWrapped: "kem-secret-v1",
+        newSigSecretWrapped: "sig-secret-v1",
+      }),
+    );
+
+    const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdate?.values).toHaveProperty("kem_secret_wrapped", "kem-secret-v1");
+    expect(metaUpdate?.values).toHaveProperty("sig_secret_wrapped", "sig-secret-v1");
+  });
+
+  it("reads the guard row for this user and asks for both PQC columns", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const guardRead = calls.find((c) => c.table === "user_vault_meta" && c.op === "select");
+    expect(guardRead?.columns).toBe("kem_secret_wrapped, sig_secret_wrapped");
+    expect(guardRead?.filters).toContainEqual({ column: "user_id", value: "user-1" });
+  });
+
+  it("stops, changing nothing, when the guard read itself fails", async () => {
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      selectResult: {
+        user_vault_meta: { data: null, error: { message: "guard read failed" } },
+      },
+    });
+
+    // A guard that cannot see the stored row must not shrug and continue: it
+    // cannot tell a vault with no PQC keys from one whose keys are about to be
+    // discarded, so refusing is the only honest answer.
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    ).rejects.toBeTruthy();
+
+    expect(calls.filter((c) => c.op === "update")).toHaveLength(0);
   });
 
   it("migrates every row BEFORE the meta write, never after", async () => {
