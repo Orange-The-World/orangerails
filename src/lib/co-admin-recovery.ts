@@ -51,15 +51,36 @@
  * what the deletes give back, never from a select on wrapped_data_keys. An
  * earlier version of this file gated the whole cleanup on that select, which
  * made it do nothing at all while looking like it had found nothing to do.
+ *
+ * WHY THE NAMES ARE RESOLVED BEFORE ANYTHING IS DELETED. The owner is asked to
+ * grant emergency access again, so they have to be told WHO lost it, and this
+ * function is what destroys the only record of that. Names come from the
+ * get_coadmin_emails RPC, which the co-admin list in Settings already uses.
+ * That function returns a row only while a workspace_admins row still links the
+ * caller to that user: read its body, the WHERE clause requires one. Calling it
+ * after the cleanup therefore returns an empty set with no error, which is the
+ * same shape of mistake as the select above. So the resolve happens while the
+ * list still exists, and the map it produces is used afterwards.
  */
 
 /**
  * Structural stand-in for the supabase client, same escape hatch as
  * vault-persist.ts: the generated types do not cover these tables, and naming
  * the hatch in one place is what lets a test pass a fake client in.
+ *
+ * rpc is OPTIONAL on purpose. It is used only to turn user ids into something
+ * a person recognises, and a cleanup that removes dead key material must not
+ * depend on being able to pretty-print a name.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type CoAdminRecoveryClient = { from: (table: string) => any };
+export type CoAdminRecoveryClient = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  from: (table: string) => any;
+  rpc?: (
+    fn: string,
+    args: Record<string, unknown>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ) => PromiseLike<{ data: unknown; error: unknown }>;
+};
 
 export interface InvalidateCoAdminGrantsArgs {
   supabase: CoAdminRecoveryClient;
@@ -78,19 +99,77 @@ export type CoAdminInvalidation =
    * as holding emergency access.
    */
   | { status: "none" }
-  /** Grants existed and are gone. */
-  | { status: "invalidated"; grantsInvalidated: number }
+  /**
+   * Grants existed and are gone. `people` names who lost access, in the same
+   * form the co-admin list in Settings shows them.
+   */
+  | { status: "invalidated"; grantsInvalidated: number; people: string[] }
   /**
    * The cleanup did not complete. The recovery itself DID succeed, so this is
    * reported to the owner as an action to take, not as a failure of the
-   * recovery.
+   * recovery. `people` is who is affected, and is empty when we could not find
+   * out, which is itself information: an empty list means do not trust a name.
    */
-  | { status: "failed"; reason: string };
+  | { status: "failed"; reason: string; people: string[] };
 
 function errorText(error: unknown): string {
   if (typeof error === "string") return error;
   const message = (error as { message?: unknown } | null)?.message;
   return typeof message === "string" ? message : "unknown error";
+}
+
+/**
+ * How this product names a co-admin when it has no email for them: the first
+ * eight characters of their id. This is not invented here. It is exactly what
+ * the co-admin list in Settings renders, so the two surfaces agree.
+ */
+export function shortUserId(userId: string): string {
+  return `${userId.slice(0, 8)}…`;
+}
+
+/**
+ * Best-effort user id to email. Never throws, never blocks the cleanup.
+ *
+ * MUST be called before the deletes: see the note at the top of the file about
+ * what get_coadmin_emails requires to return a row.
+ */
+async function resolveCoAdminNames(
+  supabase: CoAdminRecoveryClient,
+  userIds: string[],
+): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (userIds.length === 0 || typeof supabase.rpc !== "function") return names;
+
+  try {
+    const { data, error } = await supabase.rpc("get_coadmin_emails", {
+      user_ids: userIds,
+    });
+    if (error) return names;
+    for (const row of (data ?? []) as { user_id?: unknown; email?: unknown }[]) {
+      const id = row?.user_id;
+      const email = row?.email;
+      if (typeof id === "string" && typeof email === "string" && email.length > 0) {
+        names.set(id, email);
+      }
+    }
+  } catch {
+    // A name is a nicety. Losing it must not stop dead key material being
+    // removed, so this swallows deliberately rather than propagating.
+    return names;
+  }
+
+  return names;
+}
+
+function nameFor(userId: string, names: Map<string, string>): string {
+  return names.get(userId) ?? shortUserId(userId);
+}
+
+/** "a", "a and b", "a, b and c". */
+function joinNames(people: string[]): string {
+  if (people.length === 0) return "";
+  if (people.length === 1) return people[0];
+  return `${people.slice(0, -1).join(", ")} and ${people[people.length - 1]}`;
 }
 
 /**
@@ -112,7 +191,8 @@ function errorText(error: unknown): string {
  * matching workspace_admins row does not exist, which a grant interrupted
  * between its two inserts would leave, is not seen by the gate below and is
  * left in place. It is inert after the rotation, because the subkeys inside it
- * open nothing.
+ * open nothing. Such a row also has no name to resolve, for the same reason,
+ * so if the delete does return one it is named by its short id.
  */
 export async function invalidateCoAdminGrantsAfterRecovery(
   args: InvalidateCoAdminGrantsArgs,
@@ -133,11 +213,17 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     return {
       status: "failed",
       reason: `could not read the emergency access list: ${errorText(adminReadErr)}`,
+      people: [],
     };
   }
 
-  const listedAdmins = (admins ?? []).length;
-  if (listedAdmins === 0) return { status: "none" };
+  const listedIds = (admins ?? [])
+    .map((row) => (row as { admin_user_id?: unknown }).admin_user_id)
+    .filter((id): id is string => typeof id === "string");
+  if (listedIds.length === 0) return { status: "none" };
+
+  // Names first, while the rows that make the lookup possible still exist.
+  const names = await resolveCoAdminNames(supabase, listedIds);
 
   // Delete under the owner scoped delete policy, and ask for the removed rows
   // back so the count is what the database actually did rather than what a
@@ -151,6 +237,7 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     return {
       status: "failed",
       reason: `could not remove the stale wrapped keys: ${errorText(wdkErr)}`,
+      people: listedIds.map((id) => nameFor(id, names)),
     };
   }
 
@@ -162,14 +249,19 @@ export async function invalidateCoAdminGrantsAfterRecovery(
   // The admin list is left alone on this branch on purpose. It is the only
   // record of who has to be removed by hand, and the message below asks the
   // owner to do exactly that.
-  const grantsRemoved = (removedGrants ?? []).length;
-  if (grantsRemoved === 0) {
-    const who = listedAdmins === 1 ? "1 person is" : `${listedAdmins} people are`;
+  const removedIds = (removedGrants ?? [])
+    .map((row) => (row as { recipient_user_id?: unknown }).recipient_user_id)
+    .filter((id): id is string => typeof id === "string");
+  if (removedIds.length === 0) {
+    const who = listedIds.length === 1 ? "1 person is" : `${listedIds.length} people are`;
     return {
       status: "failed",
       reason: `${who} still listed as having emergency access and the keys behind it were not removed`,
+      people: listedIds.map((id) => nameFor(id, names)),
     };
   }
+
+  const affected = removedIds.map((id) => nameFor(id, names));
 
   const { data: removedAdmins, error: adminErr } = await supabase
     .from("workspace_admins")
@@ -183,6 +275,7 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     return {
       status: "failed",
       reason: `the stale wrapped keys were removed but the admin list was not: ${errorText(adminErr)}`,
+      people: affected,
     };
   }
 
@@ -192,10 +285,11 @@ export async function invalidateCoAdminGrantsAfterRecovery(
       status: "failed",
       reason:
         "the stale wrapped keys were removed but the admin list was not: the delete removed no rows",
+      people: affected,
     };
   }
 
-  return { status: "invalidated", grantsInvalidated: grantsRemoved };
+  return { status: "invalidated", grantsInvalidated: removedIds.length, people: affected };
 }
 
 /**
@@ -205,15 +299,26 @@ export async function invalidateCoAdminGrantsAfterRecovery(
  * This lives here rather than in the page so it can be tested. "The owner was
  * told" is half of the property this whole change exists to deliver, and a
  * string built inline in a component is a string no test ever reads.
+ *
+ * It names people wherever it can. The owner is being asked to grant emergency
+ * access again to a list this code has just deleted, and a bare count leaves
+ * them guessing at who. The count wording is kept as the fallback for the one
+ * case where no name survived, because "2 people" is still better than nothing.
  */
 export function coAdminInvalidationMessage(result: CoAdminInvalidation): string | null {
   if (result.status === "none") return null;
 
   if (result.status === "invalidated") {
+    if (result.people.length > 0) {
+      const verb = result.people.length === 1 ? "no longer has" : "no longer have";
+      return `Emergency access was reset. Recovering your vault created new keys, and the old emergency access could not be carried across, so ${joinNames(result.people)} ${verb} it. Grant it again from Settings if you still want them to have it.`;
+    }
     const people =
       result.grantsInvalidated === 1 ? "1 person" : `${result.grantsInvalidated} people`;
     return `Emergency access was reset. Recovering your vault created new keys, and the old emergency access could not be carried across, so ${people} no longer have it. Grant it again from Settings if you still want them to have it.`;
   }
 
-  return `Emergency access may still be listed but no longer works, and we could not clean it up automatically (${result.reason}). Go to Settings, remove every emergency contact, and add them again.`;
+  const affected =
+    result.people.length > 0 ? ` This affects ${joinNames(result.people)}.` : "";
+  return `Emergency access may still be listed but no longer works, and we could not clean it up automatically (${result.reason}).${affected} Go to Settings, remove every emergency contact, and add them again.`;
 }
