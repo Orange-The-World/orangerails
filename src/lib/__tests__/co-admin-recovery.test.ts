@@ -148,7 +148,7 @@ function makeFakeClient(options: FakeOptions = {}) {
     };
   }
 
-  return { client: client as CoAdminRecoveryClient, calls };
+  return { client: client as unknown as CoAdminRecoveryClient, calls };
 }
 
 /** Two people hold emergency access, and the owner cannot read the key rows. */
