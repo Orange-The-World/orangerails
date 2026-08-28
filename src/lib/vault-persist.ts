@@ -39,6 +39,16 @@ export const RECOVERY_META_NOT_SAVED_MESSAGE =
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
+/**
+ * Shown when the caller would have dropped a stored PQC secret.
+ *
+ * This one is raised before any row is touched, so it can honestly promise the
+ * vault is untouched. That is worth saying in the message: every other failure
+ * on this path leaves the user wondering what state their data is in.
+ */
+export const PQC_SECRETS_NOT_CARRIED_MESSAGE =
+  "Vault recovery was stopped before anything changed. This vault stores post-quantum keys and the recovery did not carry them across, so it was refused rather than allowed to discard them. Nothing has been re-encrypted and your vault is exactly as it was. Contact support with this message.";
+
 /** Transactions are re-encrypted in pages of this size. */
 const TRANSACTION_PAGE_SIZE = 500;
 
@@ -94,6 +104,38 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     migrateTransactionCiphertext,
     clearMigrationKeys,
   } = args;
+
+  // REFUSE BEFORE ANYTHING IRREVERSIBLE HAPPENS.
+  // The two PQC secret columns are wrapped under an HKDF subkey of the MEK, so
+  // this rotation destroys them unless they travel in the meta write below.
+  // They only travel if the CALLER read them and passed them in, and nothing
+  // forces a caller to do that: leave them out of the select and they arrive
+  // here as null, indistinguishable from the legitimate no-PQC-keys case.
+  //
+  // So do not depend on caller discipline. Look at what is actually stored.
+  // A stored value with no replacement is always a mistake, and it has to be
+  // caught HERE, at the top: after the migration loop the old wrap key is gone
+  // and a check could only report the loss it failed to prevent.
+  //
+  // RLS scopes user_vault_meta to the caller's own row and the user id filter
+  // says so explicitly rather than relying on it.
+  const { data: storedMeta, error: storedMetaErr } = await supabase
+    .from("user_vault_meta")
+    .select("kem_secret_wrapped, sig_secret_wrapped")
+    .eq("user_id", userId);
+  if (storedMetaErr) throw storedMetaErr;
+
+  const stored = ((storedMeta ?? []) as Array<{
+    kem_secret_wrapped?: string | null;
+    sig_secret_wrapped?: string | null;
+  }>)[0];
+  // Each column is checked on its own. A vault can hold one and not the other,
+  // and dropping either one is the same permanent loss.
+  const wouldDropKem = Boolean(stored?.kem_secret_wrapped) && !newKemSecretWrapped;
+  const wouldDropSig = Boolean(stored?.sig_secret_wrapped) && !newSigSecretWrapped;
+  if (wouldDropKem || wouldDropSig) {
+    throw new Error(PQC_SECRETS_NOT_CARRIED_MESSAGE);
+  }
 
   // Re-encrypt connections first, then transactions, then meta.
   // Meta is written last so a partial failure leaves the STORED wrappers still
@@ -189,9 +231,11 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // here. One statement also means there is no window in which the wrappers
   // have rotated and the PQC secrets have not.
   //
-  // Only written when present. Passing null through into the update would
-  // overwrite a real ciphertext with null if a caller ever failed to read the
-  // columns first, which is the same silent destruction this is fixing.
+  // Only written when present, because writing null would overwrite a real
+  // ciphertext with nothing. Reaching here with a null and a stored value is
+  // now impossible: the guard at the top of this function already refused it.
+  // Both halves are needed. The guard stops the destructive case and this
+  // keeps the harmless one harmless, for the vault that has no PQC keys at all.
   const rotatedMeta: Record<string, unknown> = {
     enc_mek_ciphertext: newEncMekCiphertext,
     recovery_ciphertext: newRecoveryCiphertext,
