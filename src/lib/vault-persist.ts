@@ -49,6 +49,17 @@ export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
 export const PQC_SECRETS_NOT_CARRIED_MESSAGE =
   "Vault recovery was stopped before anything changed. This vault stores post-quantum keys and the recovery did not carry them across, so it was refused rather than allowed to discard them. Nothing has been re-encrypted and your vault is exactly as it was. Contact support with this message.";
 
+/**
+ * Shown when the guard read came back with no row at all.
+ *
+ * Separate from the message above on purpose. That one means we KNOW this
+ * recovery would discard something. This one means we do not know either way,
+ * and the honest thing to tell the user differs: this is a retry, that is a
+ * support ticket.
+ */
+export const VAULT_META_UNREADABLE_MESSAGE =
+  "Vault recovery was stopped before anything changed. Your vault settings could not be read, so there was no way to tell whether the recovery would discard your post-quantum keys, and it was refused rather than risk it. Nothing has been re-encrypted and your vault is exactly as it was. Reload the page and try again.";
+
 /** Transactions are re-encrypted in pages of this size. */
 const TRANSACTION_PAGE_SIZE = 500;
 
@@ -125,10 +136,30 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     .eq("user_id", userId);
   if (storedMetaErr) throw storedMetaErr;
 
-  const stored = ((storedMeta ?? []) as Array<{
+  const storedRows = (storedMeta ?? []) as Array<{
     kem_secret_wrapped?: string | null;
     sig_secret_wrapped?: string | null;
-  }>)[0];
+  }>;
+
+  // NO ROWS IS NOT NO SECRETS. It is no visibility. The row can exist and be
+  // unreadable from here: the session drops, or the RLS predicate stops
+  // matching mid flight. Reading that as "nothing stored, proceed" is the one
+  // way past this guard, and everything past this guard is irreversible.
+  //
+  // The refusal on a read ERROR three lines above rests on exactly this
+  // reasoning. An empty result is the same ignorance without an error attached,
+  // so it gets the same answer.
+  //
+  // This refuses nothing that could have worked. The meta write below is a
+  // compare-and-swap against this same row, so a vault with no row here cannot
+  // finish a recovery whatever we do. All that changes is where it stops:
+  // here, with the vault untouched, instead of after every ciphertext has been
+  // rewritten under a MEK that is then thrown away.
+  if (storedRows.length === 0) {
+    throw new Error(VAULT_META_UNREADABLE_MESSAGE);
+  }
+
+  const stored = storedRows[0];
   // Each column is checked on its own. A vault can hold one and not the other,
   // and dropping either one is the same permanent loss.
   const wouldDropKem = Boolean(stored?.kem_secret_wrapped) && !newKemSecretWrapped;
