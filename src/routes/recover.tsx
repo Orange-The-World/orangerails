@@ -8,10 +8,9 @@ import { logSecurityEvent } from "@/lib/audit";
 import { migrateAndPersistRotatedVault, type VaultPersistClient } from "@/lib/vault-persist";
 import {
   invalidateCoAdminGrantsAfterRecovery,
-  coAdminInvalidationMessage,
-  type CoAdminInvalidation,
   type CoAdminRecoveryClient,
 } from "@/lib/co-admin-recovery";
+import { finalizeRecovery } from "@/lib/recovery-finalize";
 
 export const Route = createFileRoute("/recover")({
   component: RecoverPage,
@@ -141,24 +140,32 @@ function RecoverPage() {
       // This cannot fail the recovery. The recovery has already succeeded, and
       // saying otherwise would tell the user something false about their vault.
       // invalidateCoAdminGrantsAfterRecovery does not throw by design; the try
-      // is belt and braces so that even an unexpected throw becomes something
-      // the owner can act on instead of a recovery that reads as broken.
-      let coAdminResult: CoAdminInvalidation;
-      try {
-        coAdminResult = await invalidateCoAdminGrantsAfterRecovery({
-          supabase: supabase as unknown as CoAdminRecoveryClient,
-          ownerUserId: session.user.id,
-          workspaceKeyId: meta.workspace_key_id ?? null,
-        });
-      } catch (cleanupErr) {
-        coAdminResult = { status: "failed", reason: formatError(cleanupErr) };
-      }
-      setCoAdminNotice(coAdminInvalidationMessage(coAdminResult));
-
-      void logSecurityEvent(supabase, session.user.id, "vault_recover");
-
-      setNewRecoveryCode(freshCode);
-      setStep("new-code");
+      // inside finalizeRecovery is belt and braces so that even an unexpected
+      // throw becomes something the owner can act on instead of a recovery that
+      // reads as broken.
+      //
+      // THE ORDER of the three steps below is a safety property and it lives in
+      // src/lib/recovery-finalize.ts, where a test asserts it. In short: the new
+      // recovery code goes on the screen FIRST, because right now it is the only
+      // copy of it anywhere and the vault it opens has already been rotated in
+      // the database. Everything that can be slow or go wrong runs after it.
+      await finalizeRecovery({
+        showNewRecoveryCode: () => {
+          setNewRecoveryCode(freshCode);
+          setStep("new-code");
+        },
+        logRecoveryEvent: () => {
+          void logSecurityEvent(supabase, session.user.id, "vault_recover");
+        },
+        invalidateCoAdminGrants: () =>
+          invalidateCoAdminGrantsAfterRecovery({
+            supabase: supabase as unknown as CoAdminRecoveryClient,
+            ownerUserId: session.user.id,
+            workspaceKeyId: meta.workspace_key_id ?? null,
+          }),
+        showCoAdminNotice: setCoAdminNotice,
+        describeError: formatError,
+      });
     } catch (err) {
       setError(formatError(err));
       setSubmitting(false);
