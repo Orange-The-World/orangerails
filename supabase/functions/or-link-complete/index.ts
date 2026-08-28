@@ -81,6 +81,10 @@ import {
   generateAccountEmittedId,
   guardAccountFingerprintKey,
 } from "../_shared/account-fingerprint.ts";
+import {
+  classifyRequireWidgetToken,
+  describeRequireWidgetTokenGap,
+} from "../_shared/widget-token-gate.ts";
 
 const MAX_WALLETS_PER_CALL = 50;
 const MAX_ENCRYPTED_METADATA_LEN = 8192;
