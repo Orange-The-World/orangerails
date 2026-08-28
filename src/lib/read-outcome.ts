@@ -24,7 +24,15 @@
 export type ReadOutcome = "row" | "empty" | "error";
 
 export function classifyRead(data: unknown, error: unknown): ReadOutcome {
-  if (error) return "error";
+  if (error) {
+    const err = error as { code?: string; details?: string | null } | null;
+    // .single() reports PGRST116 for both "0 rows" and ">1 rows"; only the
+    // confirmed zero-row case is a legitimate empty result, not a failure.
+    if (err?.code === "PGRST116" && /contain 0 rows/i.test(err.details ?? "")) {
+      return "empty";
+    }
+    return "error";
+  }
   if (data === null || data === undefined) return "empty";
   if (Array.isArray(data) && data.length === 0) return "empty";
   return "row";
