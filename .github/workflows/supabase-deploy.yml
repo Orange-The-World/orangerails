@@ -88,7 +88,7 @@ jobs:
           fi
 
   deploy:
-    needs: [target, check-pending-migrations]
+    needs: [target, check-pending-migrations, check-types-drift]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -437,6 +437,52 @@ jobs:
           else
             echo "Schema in sync on ${SUPABASE_REF}." >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  check-types-drift:
+    needs: [target, apply-migrations]
+    # Runs against the schema that is APPLIED, after apply-migrations and before
+    # deploy, for the same reason check-pending-migrations does. A migration PR
+    # legitimately carries a type file that does not match the database until
+    # its own migration runs, so comparing any earlier would report every
+    # correct migration PR as drift.
+    #
+    # `if: always()` for the reason given on the job above: apply-migrations is
+    # SKIPPED on every prod push, a skipped dependency would otherwise cancel
+    # this job, and a skipped check-run renders NEUTRAL rather than red, which
+    # reads exactly like a run that looked and found nothing wrong.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Compare the generated types against the applied schema
+        # No install step on purpose: the check has no dependencies and reads
+        # the schema through the same Management API endpoint and token the
+        # jobs above use.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+          APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+        run: |
+          set -uo pipefail
+
+          # An apply that started and did not finish leaves the schema in a
+          # state nothing here knows. Comparing against it would produce a
+          # confident answer about a database mid-migration.
+          if [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "cancelled" ]; then
+            echo "::error::apply-migrations ended '${APPLY_RESULT}', so the applied schema is not known from here. Nothing was compared, and this is not a pass."
+            exit 1
+          fi
+
+          node scripts/check-types-drift.mjs
 
   apply-migrations:
     needs: [target]
