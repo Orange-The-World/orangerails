@@ -39,8 +39,13 @@ export const RECOVERY_META_NOT_SAVED_MESSAGE =
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
-/** Transactions are re-encrypted in pages of this size. */
-const TRANSACTION_PAGE_SIZE = 500;
+/**
+ * Transactions are re-encrypted in pages of this size.
+ *
+ * Exported so the tests can size their fixtures from it rather than repeating
+ * the number. A test that hard coded 500 would keep passing if this changed.
+ */
+export const TRANSACTION_PAGE_SIZE = 500;
 
 export interface RotateVaultArgs {
   supabase: VaultPersistClient;
