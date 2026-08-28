@@ -55,13 +55,19 @@ async function cleanupStrikeSubscription(
     // the SyntaxError message, which the catch below used to log. Replacing it
     // with a fixed string means there is no fragment to leak at all, which is
     // stronger than sanitising the message afterwards.
-    let parsedCreds: unknown;
+    let decoded: unknown;
     try {
-      parsedCreds = JSON.parse(credsJson);
+      decoded = JSON.parse(credsJson);
     } catch {
       throw new Error('stored credentials are not valid JSON');
     }
-    const creds = parseStrikeCredentials(parsedCreds);
+    // JSON.parse can return a string, a number or an array. Those used to
+    // reach parseStrikeCredentials as `any`. Reject them with a fixed string
+    // rather than let the shape error be phrased by something downstream.
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
+      throw new Error('stored credentials are not a JSON object');
+    }
+    const creds = parseStrikeCredentials(decoded as Record<string, unknown>);
     await strikeDeleteSubscription(creds, conn.strike_subscription_id);
     return { ok: true };
   } catch (err) {
