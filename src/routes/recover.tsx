@@ -138,6 +138,12 @@ function RecoverPage() {
       // AFTER the meta write, never before: until it lands the stored wrappers
       // still hold the old MEK and those grants are still perfectly good.
       //
+      // Captured now, not earlier: this is the instant the rotation is proven,
+      // and it is what lets the cleanup tell a dead pre-rotation grant apart
+      // from a fresh one made from a second tab while this request was in
+      // flight. workspace_key_id alone cannot make that distinction (DEV-0367).
+      const rotationCompletedAt = new Date().toISOString();
+
       // This cannot fail the recovery. The recovery has already succeeded, and
       // saying otherwise would tell the user something false about their vault.
       // invalidateCoAdminGrantsAfterRecovery does not throw by design; the try
@@ -149,6 +155,7 @@ function RecoverPage() {
           supabase: supabase as unknown as CoAdminRecoveryClient,
           ownerUserId: session.user.id,
           workspaceKeyId: meta.workspace_key_id ?? null,
+          rotationCompletedAt,
         });
       } catch (cleanupErr) {
         coAdminResult = { status: "failed", reason: formatError(cleanupErr) };
