@@ -191,6 +191,7 @@ export async function recordScanRange(
       args.p_connection_id,
       error,
     );
+    report(scanRangeReportError(error), FN_NAME);
     return 'failed';
   }
   return 'recorded';
