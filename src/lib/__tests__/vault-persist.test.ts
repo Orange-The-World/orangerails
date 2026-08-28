@@ -21,6 +21,7 @@ import {
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   PQC_SECRETS_NOT_CARRIED_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
+  VAULT_META_UNREADABLE_MESSAGE,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -169,9 +170,18 @@ function rotateArgs(
   };
 }
 
+/**
+ * One connection to migrate, and a vault_meta row that exists and stores no PQC
+ * secrets. The meta row is not decoration: the guard refuses a read that comes
+ * back with no rows at all, because that means the row is not visible rather
+ * than not there. A fixture without it describes a vault that cannot be
+ * recovered, so every test built on it would be testing the refusal instead of
+ * whatever it says it is testing.
+ */
 const oneConnection: FakeOptions = {
   rows: {
     connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+    user_vault_meta: [{ kem_secret_wrapped: null, sig_secret_wrapped: null }],
   },
 };
 
@@ -409,11 +419,36 @@ describe("vault recovery: the rotated meta write", () => {
     expect(calls.filter((c) => c.op === "update")).toHaveLength(0);
   });
 
+  it("stops, changing nothing, when the guard read comes back with no row", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        user_vault_meta: [],
+      },
+    });
+
+    // Zero rows is not "this vault stores no post-quantum secrets". It is "the
+    // row is not visible from here", which is a different fact and can be true
+    // of a vault that stores them. Treating the two as the same is the one way
+    // past this guard, and everything past this guard is irreversible.
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(VAULT_META_UNREADABLE_MESSAGE);
+
+    // Zero updates, the same standard as the read-error case above. Asserting
+    // only that it threw would also pass for code that re-encrypted every row
+    // and complained afterwards, when the old wrap key is already gone.
+    expect(calls.filter((c) => c.op === "update")).toHaveLength(0);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
   it("migrates every row BEFORE the meta write, never after", async () => {
     const { client, calls } = makeFakeClient({
       rows: {
         connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
         encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0" }],
+        user_vault_meta: [{ kem_secret_wrapped: null, sig_secret_wrapped: null }],
       },
     });
 
