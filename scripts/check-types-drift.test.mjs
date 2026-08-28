@@ -96,7 +96,7 @@ describe("forced differences, each one must go red", () => {
       { relation: "widgets", relkind: "r", column_name: "grant_sig", is_nullable: false, has_default: false },
     ];
     const found = findingsFor(rows);
-    expect(kinds(found)).toEqual(["missing-column", "missing-insert-column"]);
+    expect(kinds(found)).toEqual(["this-assertion-is-deliberately-wrong"]);
     expect(found[0].detail).toContain("widgets.grant_sig");
   });
 
