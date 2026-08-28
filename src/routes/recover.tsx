@@ -5,10 +5,7 @@ import { useVault } from "@/context/VaultContext";
 import { MIN_PASSWORD_LENGTH, CURRENT_VAULT_KEY_VERSION } from "@/lib/vault";
 import { formatError } from "@/lib/format-error";
 import { logSecurityEvent } from "@/lib/audit";
-import {
-  migrateAndPersistRotatedVault,
-  type VaultPersistClient,
-} from "@/lib/vault-persist";
+import { migrateAndPersistRotatedVault, type VaultPersistClient } from "@/lib/vault-persist";
 
 export const Route = createFileRoute("/recover")({
   component: RecoverPage,
