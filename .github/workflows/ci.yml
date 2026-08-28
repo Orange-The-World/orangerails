@@ -2,8 +2,25 @@ name: CI
 # noop: synchronize trigger (DL-0696)
 
 on:
+  # DELIBERATELY UNFILTERED. This suite runs on EVERY pull request, whatever
+  # branch it targets.
+  #
+  # It carried `branches: [dev, prod]` until DEV-0283. That meant a PR stacked
+  # on another feature branch ran none of these jobs, got only the Cloudflare
+  # Pages previews, and reported itself GREEN with nothing tested. Measured
+  # 2026-08-28: a PR based on dev had 20 check-runs, a PR based on a feature
+  # branch had 6, and the second read as everything that ran passed. Stacking
+  # is the right way to build a change in layers, so the answer is to test the
+  # stack, not to ban it.
+  #
+  # A base filter also skipped the suite when a PR was RETARGETED onto dev
+  # after it was opened, because `edited` is not a default pull_request type.
+  # An unfiltered trigger has neither hole.
+  #
+  # Do not reintroduce a base-branch filter here unless you replace it with a
+  # required check that fails when the suite has not run. A PR that cannot show
+  # a test result must not be able to show a green tick.
   pull_request:
-    branches: [dev, prod]
   push:
     branches: [dev, prod]
   workflow_dispatch:
