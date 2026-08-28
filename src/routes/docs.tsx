@@ -4,7 +4,7 @@ import { Navbar } from "@/components/landing/Navbar";
 import { Footer } from "@/components/landing/Footer";
 import {
   ArrowRight, Rocket, Code2, Server,
-  Wrench, Lock, FileText, Shield, Users,
+  Wrench, FileText, Shield, Users,
 } from "lucide-react";
 
 export const Route = createFileRoute("/docs")({
@@ -85,7 +85,6 @@ const primary = [
 
 const secondary = [
   { icon: Wrench, title: "Adapter SDK guide", body: "Build a typed adapter in a day.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933751-adapter-sdk-guide" },
-  { icon: Lock, title: "How authentication works", body: "Three-layer model (app, source, zero-knowledge wrapper).", href: "/docs/authentication" },
   { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933754-openapi-spec-v0-draft" },
   { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933752-security-and-threat-model" },
   { icon: FileText, title: "How to export your xpub", body: "Find your extended public key in Sparrow, Specter, BlueWallet, Electrum, Wasabi.", href: "/docs/xpub-export" },
