@@ -234,6 +234,12 @@ function AppHome() {
         return;
       }
 
+      // Tracks whether any read below genuinely failed (as opposed to a
+      // legitimately absent row, which classifyRead reports as "empty").
+      // Surfaced to the user once, after the effect settles, so a failed
+      // read is never invisible to anyone but the browser console.
+      let hadReadError = false;
+
       // Resolve (or create) this user's direct-mode subaccount.
       // All connections + transactions are now keyed by subaccount_id.
       try {
@@ -251,6 +257,7 @@ function AppHome() {
         .single();
       if (classifyRead(meta, metaErr) === "error") {
         console.warn(`Failed to load vault meta: ${formatError(metaErr)}`);
+        hadReadError = true;
       }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
@@ -296,6 +303,7 @@ function AppHome() {
         .eq("owner_user_id", session.user.id);
       if (classifyRead(admins, adminsErr) === "error") {
         console.warn(`Failed to load co-admin list: ${formatError(adminsErr)}`);
+        hadReadError = true;
       }
       const adminRows = (admins ?? []) as CoAdminRow[];
 
@@ -306,6 +314,7 @@ function AppHome() {
         .eq("admin_user_id", session.user.id);
       if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
         console.warn(`Failed to load workspaces you administer: ${formatError(myAdminOfErr)}`);
+        hadReadError = true;
       }
 
       const workspaces: WorkspaceOption[] = [];
@@ -321,6 +330,7 @@ function AppHome() {
             console.warn(
               `Failed to load vault meta for workspace owner ${ownerId}, skipping this workspace: ${formatError(ownerMetaErr)}`,
             );
+            hadReadError = true;
           }
           if (!ownerMeta) continue;
           const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
@@ -339,6 +349,7 @@ function AppHome() {
             console.warn(
               `Failed to load wrapped key for workspace owner ${ownerId}, skipping this workspace: ${formatError(wdkErr)}`,
             );
+            hadReadError = true;
           }
           if (!wdk) continue;
           workspaces.push({
@@ -372,6 +383,12 @@ function AppHome() {
       setAdminWorkspaces(
         workspaces.map((w) => ({ ...w, ownerEmail: emailMap.get(w.ownerUserId) ?? w.ownerUserId })),
       );
+
+      if (hadReadError) {
+        toast.warning(
+          "Some account data could not be loaded. Reload the page to try again.",
+        );
+      }
     })();
   }, [isUnlocked, navigate]);
 
