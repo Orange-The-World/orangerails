@@ -38,6 +38,7 @@ import {
   deriveKek,
   wrapMekBytes,
   unwrapMekBytes,
+  assertMekEnvelopeReopens,
   generateRecoveryCode,
   deriveRecoveryKek,
   CURRENT_VAULT_KEY_VERSION,
@@ -290,6 +291,17 @@ interface VaultContextValue {
    *
    * Caller must persist newEncMekCiphertext + newRecoveryCiphertext to
    * user_vault_meta and show newRecoveryCode to the user exactly once.
+   *
+   * Both new envelopes are proven to re-open to the same MEK before this
+   * resolves, so a wrap that came out wrong throws here instead of being
+   * saved. On throw nothing has been persisted and the existing password and
+   * recovery code still work.
+   *
+   * verifyPersistedEnvelopes closes over the two wrapping keys and the raw
+   * MEK. Pass it the enc_mek_ciphertext and recovery_ciphertext that the
+   * UPDATE returned and it throws unless those stored bytes re-open to the
+   * same MEK. That is the difference between knowing what we sent and knowing
+   * what landed. The keys never leave the closure.
    */
   changeVaultPassword(params: {
     currentPassword: string;
@@ -302,6 +314,10 @@ interface VaultContextValue {
     newEncMekCiphertext: string;
     newRecoveryCode: string;
     newRecoveryCiphertext: string;
+    verifyPersistedEnvelopes(persisted: {
+      encMekCiphertext: string;
+      recoveryCiphertext: string;
+    }): Promise<void>;
   }>;
 }
 
@@ -580,10 +596,57 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
       const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
 
-      // 5. Keep vault unlocked with the same MEK in memory.
+      // 5. PROVE BOTH ENVELOPES RE-OPEN, before returning and therefore before
+      //    anything is persisted. Steps 3 and 4 are write-only: they produce a
+      //    string each and nothing so far has checked that either string can be
+      //    opened again. Both wrappers go out in one UPDATE and the old ones are
+      //    discarded, so a wrap that came out wrong is a permanent lockout with
+      //    no server-side copy to restore from. Fail closed: on throw nothing is
+      //    written and the user keeps the password they already have.
+      //    The keys are the ones already in scope. Nothing new is derived.
+      await assertMekEnvelopeReopens(
+        "The new password key envelope",
+        newEncMekCiphertext,
+        newKek,
+        mekRaw,
+      );
+      await assertMekEnvelopeReopens(
+        "The new recovery code envelope",
+        newRecoveryCiphertext,
+        newRecoveryKek,
+        mekRaw,
+      );
+
+      // 6. Let the caller prove what the DATABASE stored, not merely what we
+      //    sent it. The wrapping keys stay in this closure so the route that
+      //    does the write never handles key material.
+      const verifyPersistedEnvelopes = async (persisted: {
+        encMekCiphertext: string;
+        recoveryCiphertext: string;
+      }): Promise<void> => {
+        await assertMekEnvelopeReopens(
+          "The stored password key envelope",
+          persisted.encMekCiphertext,
+          newKek,
+          mekRaw,
+        );
+        await assertMekEnvelopeReopens(
+          "The stored recovery code envelope",
+          persisted.recoveryCiphertext,
+          newRecoveryKek,
+          mekRaw,
+        );
+      };
+
+      // 7. Keep vault unlocked with the same MEK in memory.
       mekRef.current = mek;
 
-      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext };
+      return {
+        newEncMekCiphertext,
+        newRecoveryCode,
+        newRecoveryCiphertext,
+        verifyPersistedEnvelopes,
+      };
     },
     [],
   );
