@@ -6,6 +6,12 @@ import { MIN_PASSWORD_LENGTH, CURRENT_VAULT_KEY_VERSION } from "@/lib/vault";
 import { formatError } from "@/lib/format-error";
 import { logSecurityEvent } from "@/lib/audit";
 import { migrateAndPersistRotatedVault, type VaultPersistClient } from "@/lib/vault-persist";
+import {
+  invalidateCoAdminGrantsAfterRecovery,
+  coAdminInvalidationMessage,
+  type CoAdminInvalidation,
+  type CoAdminRecoveryClient,
+} from "@/lib/co-admin-recovery";
 
 export const Route = createFileRoute("/recover")({
   component: RecoverPage,
@@ -24,6 +30,12 @@ function RecoverPage() {
   const [step, setStep] = useState<"form" | "new-code">("form");
   const [newRecoveryCode, setNewRecoveryCode] = useState("");
   const [newCodeCopied, setNewCodeCopied] = useState(false);
+  /**
+   * What happened to this owner's co-admin grants, in plain words, or null if
+   * they had none. Shown on the new-code screen, which is the one screen we
+   * know the user reads after a recovery.
+   */
+  const [coAdminNotice, setCoAdminNotice] = useState<string | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -60,8 +72,10 @@ function RecoverPage() {
         // the MEK. They are not data rows, so the migration never sees them: if
         // they are not carried across in the same write, the only key that opens
         // them is discarded and nothing ever regenerates them.
+        // workspace_key_id is read because every co-admin grant is keyed by it,
+        // and the rotation below makes all of them undecryptable.
         .select(
-          "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
+          "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped, workspace_key_id",
         )
         .eq("user_id", session.user.id)
         .single();
@@ -114,6 +128,40 @@ function RecoverPage() {
         clearMigrationKeys,
       });
 
+      // The meta write is proven, so the rotation is real and every existing
+      // co-admin grant is now dead: those blobs hold HKDF subkeys of the MEK
+      // this recovery just replaced. They die silently, because the recipient's
+      // unwrap still succeeds and only the decrypts fail, so the grants are
+      // removed here and the owner is told rather than left with emergency
+      // access that looks present and does nothing.
+      //
+      // AFTER the meta write, never before: until it lands the stored wrappers
+      // still hold the old MEK and those grants are still perfectly good.
+      //
+      // Captured now, not earlier: this is the instant the rotation is proven,
+      // and it is what lets the cleanup tell a dead pre-rotation grant apart
+      // from a fresh one made from a second tab while this request was in
+      // flight. workspace_key_id alone cannot make that distinction (DEV-0367).
+      const rotationCompletedAt = new Date().toISOString();
+
+      // This cannot fail the recovery. The recovery has already succeeded, and
+      // saying otherwise would tell the user something false about their vault.
+      // invalidateCoAdminGrantsAfterRecovery does not throw by design; the try
+      // is belt and braces so that even an unexpected throw becomes something
+      // the owner can act on instead of a recovery that reads as broken.
+      let coAdminResult: CoAdminInvalidation;
+      try {
+        coAdminResult = await invalidateCoAdminGrantsAfterRecovery({
+          supabase: supabase as unknown as CoAdminRecoveryClient,
+          ownerUserId: session.user.id,
+          workspaceKeyId: meta.workspace_key_id ?? null,
+          rotationCompletedAt,
+        });
+      } catch (cleanupErr) {
+        coAdminResult = { status: "failed", reason: formatError(cleanupErr) };
+      }
+      setCoAdminNotice(coAdminInvalidationMessage(coAdminResult));
+
       void logSecurityEvent(supabase, session.user.id, "vault_recover");
 
       setNewRecoveryCode(freshCode);
@@ -135,6 +183,12 @@ function RecoverPage() {
               again.
             </p>
           </div>
+
+          {coAdminNotice && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm">
+              {coAdminNotice}
+            </div>
+          )}
 
           <div className="rounded-md border-2 border-orange-500/40 bg-orange-500/5 p-4 space-y-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-orange-600">
