@@ -36,6 +36,16 @@
  * the old MEK and the existing grants are still correct, so destroying them
  * would be pure damage.
  *
+ * THE DELETE IS SCOPED TO BEFORE THE ROTATION, not just to the workspace key
+ * id. workspace_key_id is a stable row identifier, not a version counter: it
+ * does not change when the MEK rotates. If the owner grants a NEW co-admin
+ * from a second tab in the window between the rotation write landing and this
+ * cleanup running, that grant is wrapped under the fresh MEK and is valid, but
+ * it carries the same workspace_key_id as the dead pre-rotation grants. An
+ * unconditional delete on that id alone would destroy it too, silently. So the
+ * caller passes rotationCompletedAt, the instant the rotation was proven, and
+ * the delete only removes rows created at or before it. See DEV-0367.
+ *
  * IT DOES NOT THROW. By the time it runs the recovery has already succeeded.
  * Reporting a cleanup failure as a failed recovery would tell the user
  * something false about their vault. It returns what happened instead, and the
@@ -70,6 +80,15 @@ export interface InvalidateCoAdminGrantsArgs {
    * wrapped_data_keys row is keyed by this id, so without one none can exist.
    */
   workspaceKeyId: string | null;
+  /**
+   * ISO 8601 timestamp of the moment the rotated vault meta write was proven
+   * to have landed. wrapped_data_keys.created_at is compared against it: a
+   * grant created at or before this instant used the pre-rotation MEK and is
+   * dead, a grant created after it was made against the fresh MEK and is
+   * left alone. See the file header for why workspace_key_id alone cannot
+   * tell the two apart.
+   */
+  rotationCompletedAt: string;
 }
 
 export type CoAdminInvalidation =
@@ -94,8 +113,8 @@ function errorText(error: unknown): string {
 }
 
 /**
- * Delete every co-admin grant belonging to this owner, because a recovery has
- * just made all of them undecryptable.
+ * Delete every co-admin grant belonging to this owner that predates the
+ * rotation, because a recovery has just made all of them undecryptable.
  *
  * Deletes wrapped_data_keys first: that is the row carrying the now-dead key
  * material, and it is the one whose continued existence makes a dead grant
@@ -113,11 +132,18 @@ function errorText(error: unknown): string {
  * between its two inserts would leave, is not seen by the gate below and is
  * left in place. It is inert after the rotation, because the subkeys inside it
  * open nothing.
+ *
+ * A second known limit, narrower than the first and now scoped rather than
+ * accepted: a grant created in the same instant as rotationCompletedAt, down
+ * to whatever precision the client clock and the database timestamp agree on,
+ * is treated as pre-rotation and removed. Widening the race further than that
+ * would require a server-side transaction boundary this recovery flow does
+ * not have.
  */
 export async function invalidateCoAdminGrantsAfterRecovery(
   args: InvalidateCoAdminGrantsArgs,
 ): Promise<CoAdminInvalidation> {
-  const { supabase, ownerUserId, workspaceKeyId } = args;
+  const { supabase, ownerUserId, workspaceKeyId, rotationCompletedAt } = args;
 
   if (!workspaceKeyId) return { status: "none" };
 
@@ -141,11 +167,14 @@ export async function invalidateCoAdminGrantsAfterRecovery(
 
   // Delete under the owner scoped delete policy, and ask for the removed rows
   // back so the count is what the database actually did rather than what a
-  // read suggested it would do.
+  // read suggested it would do. Scoped to created_at <= rotationCompletedAt so
+  // a grant made against the fresh MEK, after the rotation landed but before
+  // this cleanup ran, is not swept up with the dead pre-rotation ones.
   const { data: removedGrants, error: wdkErr } = await supabase
     .from("wrapped_data_keys")
     .delete()
     .eq("data_key_id", workspaceKeyId)
+    .lte("created_at", rotationCompletedAt)
     .select("recipient_user_id");
   if (wdkErr) {
     return {
