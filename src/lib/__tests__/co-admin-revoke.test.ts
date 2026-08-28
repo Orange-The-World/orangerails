@@ -351,7 +351,9 @@ describe("clearing a stale co-admin list entry", () => {
 
   it("fails when the delete errors", async () => {
     const { client } = makeFakeClient({
-      errors: { workspace_admins: { message: "permission denied" } },
+      // A string for the same reason as above: an object would reach the
+      // message as [object Object] and this assertion could never see it.
+      errors: { workspace_admins: "permission denied" },
     });
 
     await expect(clearListEntry(client)).rejects.toThrow(/permission denied/);
