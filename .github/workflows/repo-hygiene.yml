@@ -1,8 +1,12 @@
 name: Repository hygiene
 
 on:
+  # DELIBERATELY UNFILTERED, see the long note in ci.yml (DEV-0283): a PR
+  # stacked on another feature branch used to run none of the real checks and
+  # still read GREEN. This scan reads the working tree, so the branch a PR
+  # targets says nothing about whether the tree is clean. Every pull request
+  # gets scanned.
   pull_request:
-    branches: [dev, prod]
   push:
     branches: [dev, prod]
 
