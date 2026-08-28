@@ -29,9 +29,12 @@
  * token back here for verification). Audit 2026-05-16 High #3.
  *
  * If the env var REQUIRE_WIDGET_TOKEN is set to "true", tokenless requests
- * are rejected. Default is "false" during the rollout window so the V2/V3/OW
- * integrating apps have time to add the mint step. Flip to "true" once they
- * all integrate.
+ * are rejected. Default is permissive during the rollout window so the
+ * V2/V3/OW integrating apps have time to add the mint step. Flip to "true"
+ * once they all integrate. As of DEV-0204, an unset or unrecognised value
+ * is no longer silent: it is reported once at cold start via console.error
+ * and GlitchTip (see the REQUIRE_WIDGET_TOKEN startup check below), even
+ * though the permissive behaviour itself is unchanged for now.
  *
  * POST body (preferred, multi-wallet):
  *   platform_slug:          string  e.g. 'bitbooks-v2'
