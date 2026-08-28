@@ -70,6 +70,18 @@ fi
 # add a connect_timeout so a blackholed connection cannot hang the oneshot
 # unit forever. (systemd's own TimeoutStartSec is the other half of that fix,
 # set on the unit file, not here.)
+#
+# The password segment of a postgres:// URI is percent-encoded (RFC 3986): a
+# literal @ in the password is written %40 so it does not end the userinfo
+# section early. libpq decodes that automatically when it parses a URI
+# itself; PGPASSWORD does not, it is read literally. Exporting the regex
+# capture verbatim would authenticate today and silently stop authenticating
+# the moment a password contains a percent-escape, so it is decoded here.
+urldecode() {
+  local encoded="$1"
+  printf '%b' "${encoded//%/\\x}"
+}
+
 SAFE_DSN="$DSN"
 if [[ "$DSN" =~ ^postgres(ql)?://([^:/@]+)(:([^@/]*))?@([^/:@]+)(:([0-9]+))?/([^?]*)(\?(.*))?$ ]]; then
   DSN_USER="${BASH_REMATCH[2]}"
@@ -79,7 +91,7 @@ if [[ "$DSN" =~ ^postgres(ql)?://([^:/@]+)(:([^@/]*))?@([^/:@]+)(:([0-9]+))?/([^
   DSN_DB="${BASH_REMATCH[8]}"
   DSN_QS="${BASH_REMATCH[10]}"
   if [[ -n "$DSN_PASS" ]]; then
-    export PGPASSWORD="$DSN_PASS"
+    export PGPASSWORD="$(urldecode "$DSN_PASS")"
   fi
   if [[ "$DSN_QS" == *connect_timeout=* ]]; then
     NEW_QS="$DSN_QS"
@@ -89,6 +101,13 @@ if [[ "$DSN" =~ ^postgres(ql)?://([^:/@]+)(:([^@/]*))?@([^/:@]+)(:([0-9]+))?/([^
     NEW_QS="connect_timeout=10"
   fi
   SAFE_DSN="postgres://${DSN_USER}@${DSN_HOST}${DSN_PORT:+:${DSN_PORT}}/${DSN_DB}?${NEW_QS}"
+else
+  # A password containing a literal (non-percent-encoded) @, an IPv6 host
+  # literal, or any other shape this regex does not anticipate falls through
+  # here. SAFE_DSN stays equal to DSN, so say so: a silent fallback looks
+  # identical to a working sanitizer in the log while leaving the credential
+  # in psql's argv exactly as before this fix existed.
+  echo "[$PROBE] WARNING: DSN does not match the expected postgres://user[:pass]@host[:port]/db[?qs] shape; passing it to psql unsanitized (the connection string, including any password, will appear in this process's argv)" >&2
 fi
 
 # ---- query ------------------------------------------------------------------
