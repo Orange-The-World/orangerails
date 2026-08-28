@@ -128,6 +128,35 @@ function makeServiceClient(): SupabaseClient {
 // account identity.
 guardAccountFingerprintKey();
 
+// Startup check for REQUIRE_WIDGET_TOKEN (audit 2026-05-16 High #3,
+// DEV-0189, DEV-0204). Computed once at cold start, not per request:
+// this is a deploy-time secret and cannot change within an isolate's
+// lifetime, the same assumption SENTRY_DSN and the other env-derived
+// constants in this codebase already make.
+//
+// DEV-0204 PR 1: reporting only, no behaviour change. "unset" and
+// "unrecognised" both keep today's permissive default (see the
+// tokenless-call branch below); what changes is that the gap no
+// longer goes unreported. DEV-0204 PR 2, held on DL-2061 and
+// DEV-0202, is the separate PR that flips the default itself.
+const requireWidgetTokenRaw = Deno.env.get("REQUIRE_WIDGET_TOKEN");
+const requireWidgetTokenState = classifyRequireWidgetToken(requireWidgetTokenRaw);
+if (requireWidgetTokenState === "unset-or-unrecognised") {
+  const gap = describeRequireWidgetTokenGap(requireWidgetTokenRaw);
+  console.error(
+    `[or-link-complete] SECURITY GATE DEFAULTING TO PERMISSIVE: ${gap}. ` +
+      `Tokenless requests to or-link-complete are being ALLOWED through. ` +
+      `Set REQUIRE_WIDGET_TOKEN explicitly to "true" or "false" on this project.`,
+  );
+  void reportError(
+    new Error(
+      `or-link-complete: REQUIRE_WIDGET_TOKEN is unset-or-unrecognised (${gap}), ` +
+        `defaulting to permissive: tokenless requests are allowed through`,
+    ),
+    "or-link-complete",
+  );
+}
+
 Deno.serve(
   wrapSentryHandler(async (req: Request) => {
     const cors = buildCorsHeaders(req);
