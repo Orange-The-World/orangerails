@@ -47,6 +47,7 @@ import {
   deriveCredentialsKey,
   deriveTransactionsKey,
   deriveBlindIndexKey,
+  derivePqcSecretWrapKey,
 } from "@/lib/key-derivation";
 import {
   encryptCredentials as encryptCredentialsFields,
@@ -59,6 +60,7 @@ import {
 } from "@/lib/crypto-fields";
 import {
   ensurePqcKeypairs as ensurePqcKeypairsImpl,
+  rewrapPqcSecretKey,
   type EnsurePqcKeypairsResult,
   type SupabaseLike as PqcSupabaseLike,
 } from "@/lib/pqc-lifecycle";
@@ -101,6 +103,18 @@ interface RecoveryResult {
    * not updated, unlock() will fail on the next page load.
    */
   newVerifierCiphertext: string;
+  /**
+   * The PQC KEM secret key re-wrapped under the rotated MEK, or null when this
+   * vault has no PQC keys yet.
+   *
+   * The caller MUST persist this in the SAME update as the MEK wrappers. It is
+   * wrapped under an HKDF subkey of the MEK, so leaving it behind orphans it
+   * permanently: the old wrap key is gone, and ensurePqcKeypairs() will never
+   * regenerate because kem_public_key is still populated.
+   */
+  newKemSecretWrapped: string | null;
+  /** The PQC signing secret key re-wrapped under the rotated MEK, or null. Same rule. */
+  newSigSecretWrapped: string | null;
 }
 
 interface VaultContextValue {
@@ -136,9 +150,19 @@ interface VaultContextValue {
    * and generates a new recovery code. The caller must persist the returned
    * fields to user_vault_meta and show the new recovery code to the user.
    *
-   * The vault salt is intentionally NOT changed , all HKDF subkeys (credentials,
-   * transactions, PQC) remain valid because they depend on MEK + salt, and
-   * neither changes.
+   * The vault salt is intentionally NOT changed, so the user does not have to
+   * re-register. That is the ONLY thing the preserved salt buys.
+   *
+   * It does NOT mean the subkeys survive. Every HKDF subkey is derived from
+   * MEK + salt and the MEK is rotated here, so all of them change: credentials,
+   * transactions, verifier and the PQC secret wrap key. An earlier version of
+   * this comment claimed the opposite and that is how the PQC secrets came to
+   * be silently destroyed on every successful recovery. Anything wrapped under
+   * an MEK-derived key must be migrated or re-wrapped on this path.
+   *
+   * Pass the stored kem_secret_wrapped and sig_secret_wrapped in so they can be
+   * re-wrapped under the rotated MEK and returned for the caller to persist.
+   * Pass null for a vault that has no PQC keys yet.
    */
   recoverWithCode(params: {
     recoveryCode: string;
@@ -146,6 +170,8 @@ interface VaultContextValue {
     saltB64: string;
     verifierCiphertext: string;
     newPassword: string;
+    kemSecretWrapped: string | null;
+    sigSecretWrapped: string | null;
   }): Promise<RecoveryResult>;
 
   /**
