@@ -10,6 +10,7 @@ import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
+import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
@@ -1134,21 +1135,20 @@ function AppHome() {
                           storedVerifierCiphertext: vaultVerifierCiphertext,
                           keyVersion: vaultKeyVersion,
                         });
-                      // Persist new wrapping to user_vault_meta.
-                      // CAS: match the prior ciphertext so a concurrent change or lost
-                      // session fails loudly instead of returning a dead recovery code.
-                      const { error: saveErr, data: saveData } = await (supabase as any)
-                        .from("user_vault_meta")
-                        .update({
-                          enc_mek_ciphertext: newEncMekCiphertext,
-                          recovery_ciphertext: newRecoveryCiphertext,
-                        })
-                        .eq("user_id", userId)
-                        .eq("enc_mek_ciphertext", vaultEncMekCiphertext)
-                        .select("user_id");
-                      if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
-                      if (!saveData || (saveData as unknown[]).length === 0)
-                        throw new Error("Vault was changed from another session. Reload the page and try again.");
+                      // Persist the new wrapping to user_vault_meta. This lives
+                      // in src/lib/vault-persist.ts so a test can reach it: it
+                      // throws unless the write matched a row, which is the only
+                      // thing standing between the user and a recovery code that
+                      // opens nothing. It also carries the compare-and-swap on
+                      // the prior wrapped MEK, so a concurrent change or a lost
+                      // session fails loudly rather than silently.
+                      await persistRewrappedVaultMeta({
+                        supabase: supabase as unknown as VaultPersistClient,
+                        userId: userId as string,
+                        priorEncMekCiphertext: vaultEncMekCiphertext,
+                        newEncMekCiphertext,
+                        newRecoveryCiphertext,
+                      });
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
                       setChangePwNewRecovery(newRecoveryCode);
