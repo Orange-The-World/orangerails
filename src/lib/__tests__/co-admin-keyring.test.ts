@@ -229,6 +229,35 @@ describe("co-admin keyring, seal and open", () => {
       }),
     ).rejects.toThrow(/grant id/i);
   });
+
+  test("an empty owner id is refused rather than silently binding to nothing", async () => {
+    const owner = ownerKeyringWithSecrets();
+    await expect(
+      sealCoAdminKeyring(projectKeyringForCoAdmin(owner), generateCoAdminKey(), {
+        ownerUserId: "",
+        grantId: GRANT_ID,
+      }),
+    ).rejects.toThrow(/owner user id/i);
+  });
+
+  test("bindings whose naive delimiter concatenation collides do not interoperate", async () => {
+    // Under a naive `${prefix}|${owner}|${grant}` join these two bindings
+    // produce the identical string "...|a|b|c": the "|" inside ownerUserId
+    // in the first binding lands in the same place as the "|" inside
+    // grantId in the second. The JSON.stringify tuple must keep them apart.
+    const owner = ownerKeyringWithSecrets();
+    const cak = generateCoAdminKey();
+    const collidingA: CoAdminBinding = { ownerUserId: "a|b", grantId: "c" };
+    const collidingB: CoAdminBinding = { ownerUserId: "a", grantId: "b|c" };
+
+    const sealed = await sealCoAdminKeyring(
+      projectKeyringForCoAdmin(owner),
+      cak,
+      collidingA,
+    );
+
+    await expect(openCoAdminKeyring(sealed, cak, collidingB)).rejects.toThrow();
+  });
 });
 
 // ------------------------------------------------------------------
