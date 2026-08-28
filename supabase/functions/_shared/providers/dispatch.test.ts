@@ -37,3 +37,25 @@ Deno.test('listProviderManifests: xpub manifest has no connectUrl (DL-1007)', ()
     'xpub manifest must not carry connectUrl (route redirects to /providers)',
   );
 });
+
+// ── DEV-0274: parse failures throw a fixed message ────────────────────────
+
+// Minimal stand-in: parseCredentials reads only `slug` on the JSON parse path,
+// and using a stub keeps this test on the helper rather than on any one
+// provider module.
+const stubAdapter = {
+  slug: 'stub',
+  credentialFields: [],
+} as unknown as ProviderAdapter;
+
+Deno.test('parseCredentials: a parse failure throws a fixed message (DEV-0274)', () => {
+  const err = assertThrows(
+    () => parseCredentials(stubAdapter, '{"apiKey": "unterminated'),
+    Error,
+  ) as Error;
+  assertEquals(
+    err.message,
+    '[stub] credentials are not valid JSON',
+    'the message must be fixed: the underlying exception text must not be composed into it',
+  );
+});
