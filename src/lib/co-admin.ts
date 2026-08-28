@@ -19,8 +19,11 @@
  *   4. Return for use in encrypt/decrypt calls.
  *
  * ## Revoke flow (owner side)
- *   1. Delete workspace_admins row (RLS ensures only the owner can do this).
- *   2. Delete the corresponding wrapped_data_keys row.
+ *   1. Delete the wrapped_data_keys row first: it is what actually grants
+ *      access, so removing it is what "revoked" has to mean.
+ *   2. Delete the workspace_admins row (RLS ensures only the owner can do
+ *      this). See the long comment above revokeCoAdmin for what a partial
+ *      failure between these two steps means and how it is reported.
  *
  * ## Why not KEY_WRAP_STRATEGIES[...].wrapForRecipient?
  *   That function enforces a 32-byte data-key size (it was designed for
@@ -228,7 +231,21 @@ interface CoAdminDeleteBuilder {
 }
 
 interface CoAdminUpdateBuilder {
-  eq(col: string, val: string): Promise<{ error: unknown }>;
+  eq(col: string, val: string): CoAdminUpdateEqBuilder;
+}
+
+interface CoAdminUpdateEqBuilder {
+  eq(col: string, val: string): CoAdminUpdateEqBuilder;
+  /**
+   * Ask an update for the rows it touched, the same reason delete asks: a
+   * filter that matches nothing and an update that succeeds both return no
+   * error, and those are different facts.
+   */
+  select(columns: string): PromiseLike<{
+    data: Record<string, unknown>[] | null;
+    error: unknown;
+  }>;
+  then(fn: (v: { error: unknown }) => void): Promise<{ error: unknown }>;
 }
 
 /** Result returned by grantCoAdmin. */
@@ -240,6 +257,109 @@ export interface GrantResult {
 export interface AdminSubkeys {
   credentialsKey: CryptoKey;
   transactionsKey: CryptoKey;
+}
+
+// ------------------------------------------------------------------
+// Stranded-envelope helpers (DEV-0416)
+//
+// A wrapped_data_keys row can be left behind with no workspace_admins row
+// pointing at it: by a grant that inserts this row and then fails before
+// inserting the workspace_admins row that follows it, or by a revoke that
+// fails partway (see the ordering fix documented above revokeCoAdmin). PR
+// #973 adds a unique constraint on (data_key_id, recipient_user_id), so a
+// plain insert into an already-stranded row now fails loudly instead of
+// silently creating a second, unreadable row , which is strictly better,
+// but it still leaves the owner stuck retrying an insert that can never
+// succeed. upsertWrappedDataKeyEnvelope is how grantCoAdmin gets unstuck:
+// replace the stranded envelope with a fresh one instead of refusing.
+// ------------------------------------------------------------------
+
+/** True for a Postgres unique_violation (23505), however the client wrapped it. */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "23505"
+  );
+}
+
+/** A short, human-readable rendering of a Supabase/Postgres error, never the raw object. */
+function describeError(error: unknown): string {
+  if (error && typeof error === "object" && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.length > 0) return message;
+  }
+  return "an unexpected database error";
+}
+
+/**
+ * Insert a wrapped_data_keys envelope for (dataKeyId, recipientUserId), and
+ * if one is already there, replace it with this freshly wrapped and freshly
+ * signed one instead of failing.
+ *
+ * It is safe to replace rather than refuse: the row this replaces cannot be
+ * anyone's live access, because grantCoAdmin only reaches this call after
+ * computing a brand new wrap and a brand new signature for the CURRENT
+ * recipient key and the CURRENT ciphertext, and the two are bound together
+ * by signMemberGrant. Reusing the old ciphertext or the old signature here
+ * would be wrong even if it were convenient: the signature binds recipient,
+ * workspace key id and ciphertext together, so a signature made for the old
+ * ciphertext would not verify against a new one anyway.
+ *
+ * @throws a plain-English message, never the raw unique-violation text, if
+ *   the insert fails for a reason other than the row already existing, or
+ *   if the replace itself cannot complete.
+ */
+export async function upsertWrappedDataKeyEnvelope(
+  supabase: CoAdminSupabaseLike,
+  params: {
+    dataKeyId: string;
+    recipientUserId: string;
+    wrappedCiphertextB64: string;
+    algorithm: string;
+    grantSig: string;
+  },
+): Promise<void> {
+  const { dataKeyId, recipientUserId, wrappedCiphertextB64, algorithm, grantSig } = params;
+
+  const { error: insertErr } = await supabase.from("wrapped_data_keys").insert({
+    data_key_id: dataKeyId,
+    recipient_user_id: recipientUserId,
+    wrapped_ciphertext: wrappedCiphertextB64,
+    algorithm,
+    grant_sig: grantSig,
+  });
+  if (!insertErr) return;
+
+  if (!isUniqueViolation(insertErr)) {
+    throw new Error(`Failed to insert wrapped_data_keys: ${describeError(insertErr)}`);
+  }
+
+  // A stranded envelope from an earlier partial grant or revoke. Replace it
+  // rather than leaving the owner stuck retrying the same failing insert.
+  const { data: replaced, error: replaceErr } = await (
+    supabase
+      .from("wrapped_data_keys")
+      .update({
+        wrapped_ciphertext: wrappedCiphertextB64,
+        algorithm,
+        grant_sig: grantSig,
+      }) as unknown as CoAdminUpdateBuilder
+  )
+    .eq("data_key_id", dataKeyId)
+    .eq("recipient_user_id", recipientUserId)
+    .select("recipient_user_id");
+  if (replaceErr) {
+    throw new Error(
+      `This person already had a stored key from an earlier attempt, and replacing it failed: ${describeError(replaceErr)}. Nothing was changed here; try again.`,
+    );
+  }
+  if ((replaced ?? []).length === 0) {
+    throw new Error(
+      "This person already had a stored key from an earlier attempt, and it disappeared before it could be replaced. Try again.",
+    );
+  }
 }
 
 // ------------------------------------------------------------------
@@ -328,15 +448,15 @@ export async function grantCoAdmin(params: {
     wrappedMekCiphertextB64: wrappedCt,
   });
 
-  // Step f , insert wrapped_data_keys row.
-  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
-    data_key_id: workspaceKeyId,
-    recipient_user_id: targetUserId,
-    wrapped_ciphertext: wrappedCt,
+  // Step f , insert wrapped_data_keys row (or replace a stranded one left
+  // behind by an earlier partial grant or revoke; see DEV-0416).
+  await upsertWrappedDataKeyEnvelope(supabase, {
+    dataKeyId: workspaceKeyId,
+    recipientUserId: targetUserId,
+    wrappedCiphertextB64: wrappedCt,
     algorithm: "hybrid-x25519-mlkem768-blob64",
-    grant_sig: grantSig,
+    grantSig,
   });
-  if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${wdkErr}`);
 
   // Step g , insert workspace_admins row.
   const { error: adminErr } = await supabase.from("workspace_admins").insert({
