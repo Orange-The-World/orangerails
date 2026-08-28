@@ -11,6 +11,15 @@
  * defect. A grant removed with nobody told is a feature that silently stopped
  * working, which is barely better. So no test here asserts only that a row was
  * deleted, and none asserts only that a string came back.
+ *
+ * WHAT THE FIXTURES MODEL, and why it is not an arbitrary choice. In the real
+ * database the owner CANNOT read wrapped_data_keys: its only select policy is
+ * recipient scoped, so an owner selecting their own grants gets zero rows and
+ * no error. They CAN delete those rows, and they can both read and delete
+ * workspace_admins. Every fixture below matches that, which is why a select on
+ * wrapped_data_keys returns nothing here and the rows arrive from the delete.
+ * A fixture that let the owner read that table would let a test pass over code
+ * that does nothing in production, which is exactly what happened before.
  */
 
 import { describe, it, expect } from "vitest";
@@ -35,10 +44,11 @@ interface Chain {
     onRejected?: (reason: unknown) => unknown,
   ): Promise<unknown>;
   eq(column: string, value: unknown): Chain;
+  select(columns: string): Chain;
 }
 
 interface FakeOptions {
-  /** rows a select on each table returns */
+  /** rows each table holds: what a select returns, and what a delete removes */
   rows?: Record<string, unknown[]>;
   /** what a select returns instead of rows */
   selectResult?: Record<string, QueryResult>;
@@ -48,7 +58,9 @@ interface FakeOptions {
 
 /**
  * A fake supabase client that records what was asked of it. It reproduces only
- * the shapes this module uses: from().select().eq() and from().delete().eq().
+ * the shapes this module uses: from().select().eq(), from().delete().eq() and
+ * from().delete().eq().select(), the last being a delete that asks for the
+ * rows it removed.
  */
 function makeFakeClient(options: FakeOptions = {}) {
   const calls: RecordedCall[] = [];
@@ -62,7 +74,13 @@ function makeFakeClient(options: FakeOptions = {}) {
         }
       );
     }
-    return options.deleteResult?.[call.table] ?? { data: [], error: null };
+    // A delete returns the rows it removed, which is the rows that were there.
+    return (
+      options.deleteResult?.[call.table] ?? {
+        data: options.rows?.[call.table] ?? [],
+        error: null,
+      }
+    );
   }
 
   function chainFor(call: RecordedCall): Chain {
@@ -75,6 +93,10 @@ function makeFakeClient(options: FakeOptions = {}) {
       },
       eq(column: string, value: unknown) {
         call.filters.push({ column, value });
+        return chain;
+      },
+      select(columns: string) {
+        call.columns = columns;
         return chain;
       },
     };
@@ -101,16 +123,26 @@ function makeFakeClient(options: FakeOptions = {}) {
   return { client: client as CoAdminRecoveryClient, calls };
 }
 
+/** Two people hold emergency access, and the owner cannot read the key rows. */
 const TWO_GRANTS: FakeOptions = {
   rows: {
-    wrapped_data_keys: [
-      { recipient_user_id: "admin-1" },
-      { recipient_user_id: "admin-2" },
-    ],
+    workspace_admins: [{ admin_user_id: "admin-1" }, { admin_user_id: "admin-2" }],
+  },
+  selectResult: {
+    wrapped_data_keys: { data: [], error: null },
+  },
+  deleteResult: {
+    wrapped_data_keys: {
+      data: [{ recipient_user_id: "admin-1" }, { recipient_user_id: "admin-2" }],
+      error: null,
+    },
   },
 };
 
-function invalidate(client: CoAdminRecoveryClient, workspaceKeyId: string | null = "workspace-key-1") {
+function invalidate(
+  client: CoAdminRecoveryClient,
+  workspaceKeyId: string | null = "workspace-key-1",
+) {
   return invalidateCoAdminGrantsAfterRecovery({
     supabase: client,
     ownerUserId: "owner-1",
@@ -133,6 +165,8 @@ describe("a recovery invalidates every co-admin grant", () => {
       column: "data_key_id",
       value: "workspace-key-1",
     });
+    // It asks for the removed rows back. Without that the count is a guess.
+    expect(wdkDelete?.columns).toBe("recipient_user_id");
 
     const adminDelete = calls.find((c) => c.table === "workspace_admins" && c.op === "delete");
     expect(adminDelete).toBeDefined();
@@ -141,16 +175,33 @@ describe("a recovery invalidates every co-admin grant", () => {
       value: "owner-1",
     });
 
-    // Half two: the owner is told, in words, with the number in them.
+    // Half two: the owner is told, in words, with the number in them. The two
+    // is the number the DELETE gave back, and the fixture makes a select on
+    // that table return nothing, so it cannot have come from a read.
     expect(result).toEqual({ status: "invalidated", grantsInvalidated: 2 });
     const message = coAdminInvalidationMessage(result);
     expect(message).toContain("2 people");
     expect(message).toContain("Emergency access was reset");
   });
 
+  it("never selects wrapped_data_keys, because the owner is not permitted to read it", async () => {
+    const { client, calls } = makeFakeClient(TWO_GRANTS);
+
+    await invalidate(client);
+
+    // The only select policy on that table is recipient scoped, so this read
+    // returns an empty set with no error when the owner runs it. Gating the
+    // cleanup on it is what made the whole feature inert.
+    expect(calls.some((c) => c.table === "wrapped_data_keys" && c.op === "select")).toBe(false);
+  });
+
   it("says one person, not one people", async () => {
     const { client } = makeFakeClient({
-      rows: { wrapped_data_keys: [{ recipient_user_id: "admin-1" }] },
+      rows: { workspace_admins: [{ admin_user_id: "admin-1" }] },
+      selectResult: { wrapped_data_keys: { data: [], error: null } },
+      deleteResult: {
+        wrapped_data_keys: { data: [{ recipient_user_id: "admin-1" }], error: null },
+      },
     });
 
     const message = coAdminInvalidationMessage(await invalidate(client));
@@ -168,14 +219,36 @@ describe("a recovery invalidates every co-admin grant", () => {
     expect(coAdminInvalidationMessage(result)).toBeNull();
   });
 
-  it("deletes nothing when a workspace key exists but carries no grants", async () => {
-    const { client, calls } = makeFakeClient({ rows: { wrapped_data_keys: [] } });
+  it("deletes nothing when a workspace key exists but nobody holds emergency access", async () => {
+    const { client, calls } = makeFakeClient({ rows: { workspace_admins: [] } });
 
     const result = await invalidate(client);
 
     expect(result).toEqual({ status: "none" });
     expect(calls.some((c) => c.op === "delete")).toBe(false);
     expect(coAdminInvalidationMessage(result)).toBeNull();
+  });
+
+  it("reports failed, and keeps the admin list, when the delete removes nothing while people are listed", async () => {
+    const { client, calls } = makeFakeClient({
+      ...TWO_GRANTS,
+      deleteResult: {
+        wrapped_data_keys: { data: [], error: null },
+      },
+    });
+
+    const result = await invalidate(client);
+
+    // No error came back, and nothing was removed. Reporting that as "none"
+    // is what a check that cannot fire looks like from the outside.
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.reason).toContain("2 people are still listed");
+    }
+    // The admin list survives on purpose: it is the only record of who the
+    // owner now has to remove by hand, and the message asks them to.
+    expect(calls.some((c) => c.table === "workspace_admins" && c.op === "delete")).toBe(false);
+    expect(coAdminInvalidationMessage(result)).toContain("Settings");
   });
 
   it("does not throw when the wrapped-key delete fails, and tells the owner what to do by hand", async () => {
@@ -198,10 +271,11 @@ describe("a recovery invalidates every co-admin grant", () => {
     expect(message).toContain("Settings");
   });
 
-  it("reports the half-done case precisely when only the admin list survives", async () => {
+  it("reports the half-done case precisely when the admin delete errors", async () => {
     const { client } = makeFakeClient({
       ...TWO_GRANTS,
       deleteResult: {
+        ...TWO_GRANTS.deleteResult,
         workspace_admins: { data: null, error: { message: "permission denied" } },
       },
     });
@@ -216,17 +290,35 @@ describe("a recovery invalidates every co-admin grant", () => {
     }
   });
 
-  it("does not delete on a read it could not perform", async () => {
-    const { client, calls } = makeFakeClient({
-      selectResult: {
-        wrapped_data_keys: { data: null, error: { message: "read failed" } },
+  it("treats an admin delete that removed no rows as a failure, not a success", async () => {
+    const { client } = makeFakeClient({
+      ...TWO_GRANTS,
+      deleteResult: {
+        ...TWO_GRANTS.deleteResult,
+        workspace_admins: { data: [], error: null },
       },
     });
 
     const result = await invalidate(client);
 
-    // A read that failed says nothing about how many grants exist, so deleting
-    // on the strength of it would be acting blind.
+    // Same standard as the wrapped-key delete: no error is not proof.
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.reason).toContain("wrapped keys were removed");
+    }
+  });
+
+  it("does not delete on a read it could not perform", async () => {
+    const { client, calls } = makeFakeClient({
+      selectResult: {
+        workspace_admins: { data: null, error: { message: "read failed" } },
+      },
+    });
+
+    const result = await invalidate(client);
+
+    // A read that failed says nothing about who holds emergency access, so
+    // deleting on the strength of it would be acting blind.
     expect(result.status).toBe("failed");
     expect(calls.some((c) => c.op === "delete")).toBe(false);
   });
