@@ -58,8 +58,17 @@
  * vault-persist.ts: the generated types do not cover these tables, and naming
  * the hatch in one place is what lets a test pass a fake client in.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type CoAdminRecoveryClient = { from: (table: string) => any };
+export type CoAdminRecoveryClient = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  from: (table: string) => any;
+  /**
+   * Optional on purpose. It is used only to turn recipient ids into something
+   * a person recognises, and a client without it degrades to the count-only
+   * message rather than failing.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  rpc?: (fn: string, params: Record<string, unknown>) => any;
+};
 
 export interface InvalidateCoAdminGrantsArgs {
   supabase: CoAdminRecoveryClient;
@@ -78,8 +87,12 @@ export type CoAdminInvalidation =
    * as holding emergency access.
    */
   | { status: "none" }
-  /** Grants existed and are gone. */
-  | { status: "invalidated"; grantsInvalidated: number }
+  /**
+   * Grants existed and are gone. `people` names them when every one of them
+   * could be resolved, and is empty otherwise: see resolveRecipientLabels for
+   * why it is all or nothing.
+   */
+  | { status: "invalidated"; grantsInvalidated: number; people: string[] }
   /**
    * The cleanup did not complete. The recovery itself DID succeed, so this is
    * reported to the owner as an action to take, not as a failure of the
@@ -91,6 +104,49 @@ function errorText(error: unknown): string {
   if (typeof error === "string") return error;
   const message = (error as { message?: unknown } | null)?.message;
   return typeof message === "string" ? message : "unknown error";
+}
+
+/**
+ * Turn recipient ids into something a person recognises.
+ *
+ * ALL OR NOTHING, and that is the interesting decision here. If only some ids
+ * resolve, this returns an empty list and the caller falls back to the count.
+ * A partial list is worse than a count: the owner reads it as the complete set
+ * of people to re-grant, and quietly does not re-grant the rest.
+ *
+ * IT NEVER THROWS AND NEVER FAILS THE CLEANUP. A client with no rpc, an error,
+ * or an unexpected throw all come back as an empty list. This is a nicety on
+ * top of a cleanup that has already done the part that matters, so it must not
+ * be able to turn a completed cleanup into a reported failure.
+ */
+async function resolveRecipientLabels(
+  supabase: CoAdminRecoveryClient,
+  recipientIds: string[],
+): Promise<string[]> {
+  if (recipientIds.length === 0 || typeof supabase.rpc !== "function") return [];
+
+  try {
+    const { data, error } = await supabase.rpc("get_coadmin_emails", {
+      user_ids: recipientIds,
+    });
+    if (error) return [];
+
+    const byId = new Map<string, string>();
+    for (const row of (data ?? []) as Array<{ user_id?: string; email?: string }>) {
+      if (row?.user_id && row?.email) byId.set(row.user_id, row.email);
+    }
+
+    const labels = recipientIds.map((id) => byId.get(id));
+    return labels.every((label): label is string => Boolean(label)) ? labels : [];
+  } catch {
+    return [];
+  }
+}
+
+/** "a", "a and b", "a, b and c". */
+function joinPeople(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
 /**
@@ -195,7 +251,15 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     };
   }
 
-  return { status: "invalidated", grantsInvalidated: grantsRemoved };
+  // Both deletes are proven, so nothing below can change what happened to the
+  // vault. Resolving names last is deliberate: no failure path above acquires a
+  // dependency on a lookup it does not need.
+  const recipientIds = (removedGrants ?? [])
+    .map((row) => (row as { recipient_user_id?: unknown }).recipient_user_id)
+    .filter((id): id is string => typeof id === "string");
+  const people = await resolveRecipientLabels(supabase, recipientIds);
+
+  return { status: "invalidated", grantsInvalidated: grantsRemoved, people };
 }
 
 /**
@@ -210,6 +274,16 @@ export function coAdminInvalidationMessage(result: CoAdminInvalidation): string 
   if (result.status === "none") return null;
 
   if (result.status === "invalidated") {
+    // Name them whenever every one of them resolved. The owner is being asked
+    // to grant emergency access again, and the list of who had it is deleted by
+    // the cleanup that produced this message, so a count alone asks them to
+    // restore something they can no longer look up.
+    if (result.people.length > 0 && result.people.length === result.grantsInvalidated) {
+      const who = joinPeople(result.people);
+      const verb = result.people.length === 1 ? "no longer has it" : "no longer have it";
+      return `Emergency access was reset. Recovering your vault created new keys, and the old emergency access could not be carried across, so ${who} ${verb}. Grant it again from Settings if you still want them to have it.`;
+    }
+
     const people =
       result.grantsInvalidated === 1 ? "1 person" : `${result.grantsInvalidated} people`;
     return `Emergency access was reset. Recovering your vault created new keys, and the old emergency access could not be carried across, so ${people} no longer have it. Grant it again from Settings if you still want them to have it.`;
