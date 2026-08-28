@@ -539,6 +539,21 @@ jobs:
         # does NOT need the DB password. We track applied versions in
         # supabase_migrations.schema_migrations the same way supabase db push would, so
         # manual recovery via the CLI later stays clean.
+        #
+        # ORDERING is the reason this loop is not replaced by the CLI, and it is the
+        # stronger of the two. The loop below applies EVERY migration file that is
+        # absent from the ledger, whether or not its version sorts below the newest
+        # version already applied. There is no newer-than-last-applied filter here,
+        # and its absence is deliberate. supabase db push refuses exactly that case
+        # unless it is given --include-all, so swapping this loop for db push would
+        # silently skip an out-of-order pending file and then run the later files
+        # that depend on it. The failure then surfaces inside an unrelated migration
+        # and looks nothing like the change that caused it.
+        #
+        # This repo has that shape right now: versions 20260815000001 and
+        # 20260817230000 are still pending while a newer version is already applied
+        # on prod, and several later migrations abort on their first statement
+        # unless those two run first. Worked example: ticket DEV-0303.
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
