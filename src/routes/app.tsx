@@ -9,6 +9,7 @@ import {
   CoAdminRevocationIncompleteError,
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
+import { CO_ADMIN_GRANT_COLUMNS, readCoAdminGrant } from "@/lib/co-admin-grant-row";
 import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
@@ -103,6 +104,9 @@ interface WorkspaceOption {
   ownerUserId: string;
   ownerEmail: string;
   workspaceKeyId: string;
+  // Envelope v2 only: the 64 byte subkey blob wrapped to this admin. A v3
+  // grant has no such blob and is not turned into a WorkspaceOption yet, so
+  // this is always a real string and never a null cast to one.
   wrappedCiphertextB64: string;
   // Grant-signature binding fields (DL-0619). loadAdminSubkeys verifies the
   // owner's ML-DSA-65 signature over (granteeUserId, workspaceKeyId, wrapped
@@ -317,16 +321,29 @@ function AppHome() {
           if (!ownerSigPubB64) continue;
           const { data: wdk } = await supabase
             .from("wrapped_data_keys")
-            .select("wrapped_ciphertext, grant_sig")
+            .select(CO_ADMIN_GRANT_COLUMNS)
             .eq("data_key_id", ownerKeyId)
             .maybeSingle();
-          if (!wdk) continue;
+          // Decide which envelope this grant is from the columns it actually
+          // carries. This used to cast wrapped_ciphertext straight to string
+          // with the row existing as its only guard, and that column is
+          // nullable from migration 20260828183000 onward, so a v3 grant would
+          // have carried a null into loadAdminSubkeys typed as a string.
+          // readCoAdminGrant returns null for anything that is not exactly one
+          // complete envelope, and skipping is the fail closed answer, the
+          // same as the unverifiable grant skipped a few lines above.
+          const grant = readCoAdminGrant(wdk);
+          if (!grant) continue;
+          // A v3 grant is recognised here but cannot be opened yet: the per
+          // grant keyring primitive that unseals one is not wired into the
+          // consume path. Decline it rather than half handle it. See DEV-0308.
+          if (grant.version !== 2) continue;
           workspaces.push({
             ownerUserId: ownerId,
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: (wdk as Record<string, unknown>).wrapped_ciphertext as string,
-            grantSigB64: ((wdk as Record<string, unknown>).grant_sig as string | null) ?? null,
+            wrappedCiphertextB64: grant.wrappedCiphertextB64,
+            grantSigB64: grant.grantSigB64,
             ownerSigPubB64,
             granteeUserId: session.user.id,
           });
