@@ -438,6 +438,128 @@ jobs:
             echo "Schema in sync on ${SUPABASE_REF}." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Check anon EXECUTE grants on public functions
+        # DEV-0238 / DL-1661 / DEV-0226. A default-privilege row (ours or a
+        # platform role's) can hand the anonymous role EXECUTE on a function
+        # the moment it is created in schema public. We hold no membership in
+        # supabase_admin, so no migration we own can prevent that row; this is
+        # the detection DEV-0226 decided on, running automatically instead of
+        # depending on someone remembering a cadence.
+        #
+        # Zero rows is PASS. Grantor-agnostic on purpose: filtering by grantor
+        # is what made 20260825120000's assertion unable to see the platform
+        # row at all.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+          ALLOWLIST: ${{ vars.ANON_EXECUTE_RPC_ALLOWLIST }}
+        run: |
+          set -uo pipefail
+
+          # Same shape as the migration check above, duplicated rather than
+          # shared because each `run:` block is its own shell process. A query
+          # that could not run must exit non-zero with a distinct message and
+          # never read as a pass -- that matters more here than on the
+          # migration check, because EMPTY is the pass condition for this one.
+          unknown () {
+            {
+              echo "## :grey_question: anon-EXECUTE check UNKNOWN on \`${SUPABASE_REF:-unresolved}\`"
+              echo ""
+              echo "$1"
+              echo ""
+              echo "This is **not** a report that a function is anon-executable, and **not**"
+              echo "a report that the surface is clean. The check could not determine the"
+              echo "state. Re-run it, or read pg_proc directly, before promoting."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::anon-EXECUTE check state UNKNOWN on ${SUPABASE_REF:-unresolved}: $1"
+            exit 1
+          }
+
+          if [ -z "${SUPABASE_REF}" ]; then
+            unknown "The target job produced no supabase_ref output."
+          fi
+
+          PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
+          trap 'rm -f "$PAYLOAD"' EXIT
+          jq -n '{query:"SELECT n.nspname, p.proname, ace::text AS ace FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, unnest(p.proacl) ace WHERE n.nspname = '\''public'\'' AND ace::text LIKE '\''anon=%'\'';"}' > "$PAYLOAD"
+
+          # --fail-with-body, not bare -sS: without it curl exits 0 on a 401,
+          # 403 or 500, the error body parses as valid JSON, row extraction
+          # yields nothing, and an auth failure reads as a clean pass.
+          RESPONSE=""
+          HTTP_OK=0
+          for attempt in 1 2 3; do
+            if RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$PAYLOAD"); then
+              HTTP_OK=1
+              break
+            fi
+            echo "anon-EXECUTE query attempt ${attempt}/3 did not return a success status"
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          # Response body not echoed on failure -- the one place a
+          # token-shaped string could reach a public build log.
+          [ "$HTTP_OK" -eq 1 ] || unknown "The Supabase Management API did not return a success status after 3 attempts. Most often an expired or rotated SUPABASE_ACCESS_TOKEN, or the project being paused."
+
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            unknown "The anon-EXECUTE query returned a success status but not a JSON array of rows."
+          fi
+
+          # Allowlist filter. Comma-separated, unqualified function names,
+          # empty by default so today "any row is a regression" holds exactly
+          # as DEV-0226 measured it.
+          IFS=',' read -ra ALLOWED_ARR <<< "${ALLOWLIST}"
+          ROWS=$(echo "$RESPONSE" | jq -r '.[] | "\(.nspname).\(.proname)\t\(.ace)"')
+
+          OFFENDING=""
+          ALLOWED_HIT=""
+          while IFS=$'\t' read -r QUALIFIED ACE; do
+            [ -z "$QUALIFIED" ] && continue
+            FUNC="${QUALIFIED#public.}"
+            IS_ALLOWED=0
+            for A in "${ALLOWED_ARR[@]}"; do
+              TRIMMED=$(echo "$A" | tr -d '[:space:]')
+              if [ -n "$TRIMMED" ] && [ "$TRIMMED" = "$FUNC" ]; then
+                IS_ALLOWED=1
+              fi
+            done
+            if [ "$IS_ALLOWED" -eq 1 ]; then
+              ALLOWED_HIT="${ALLOWED_HIT}- \`${QUALIFIED}\` (${ACE}) -- allowlisted via ANON_EXECUTE_RPC_ALLOWLIST\n"
+            else
+              OFFENDING="${OFFENDING}- \`${QUALIFIED}\` (${ACE})\n"
+            fi
+          done <<< "$ROWS"
+
+          if [ -n "$ALLOWED_HIT" ]; then
+            {
+              echo "## :warning: anon-executable function(s) allowlisted on \`${SUPABASE_REF}\`"
+              echo ""
+              printf '%b' "$ALLOWED_HIT"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "allowlisted anon-executable function(s) present, named above; not failing the check for these"
+          fi
+
+          if [ -n "$OFFENDING" ]; then
+            {
+              echo "## :no_entry: anon-executable function(s) found in \`public\` on \`${SUPABASE_REF}\`"
+              echo ""
+              echo "A default-privilege row (ours or a platform role's) handed the anonymous"
+              echo "role EXECUTE on these at creation time (DEV-0226/DEV-0238). Revoke it"
+              echo "explicitly, naming the roles, or add the function to the"
+              echo "ANON_EXECUTE_RPC_ALLOWLIST repo variable with a reason in the PR if it is"
+              echo "meant to stay public."
+              echo ""
+              printf '%b' "$OFFENDING"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::anon-executable function(s) found in schema public on ${SUPABASE_REF}. See step summary."
+            exit 1
+          fi
+
+          echo "0 anon-executable function(s) in schema public on ${SUPABASE_REF} (outside the allowlist)."
+
   apply-migrations:
     needs: [target]
     # A PUSH TO DEV REACHES THIS JOB. That is the whole change: dev applies its
