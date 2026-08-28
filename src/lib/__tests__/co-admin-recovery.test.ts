@@ -44,6 +44,7 @@ interface Chain {
     onRejected?: (reason: unknown) => unknown,
   ): Promise<unknown>;
   eq(column: string, value: unknown): Chain;
+  lte(column: string, value: unknown): Chain;
   select(columns: string): Chain;
 }
 
@@ -95,6 +96,10 @@ function makeFakeClient(options: FakeOptions = {}) {
         call.filters.push({ column, value });
         return chain;
       },
+      lte(column: string, value: unknown) {
+        call.filters.push({ column, value });
+        return chain;
+      },
       select(columns: string) {
         call.columns = columns;
         return chain;
@@ -139,14 +144,18 @@ const TWO_GRANTS: FakeOptions = {
   },
 };
 
+const ROTATION_COMPLETED_AT = "2026-08-28T12:00:00.000Z";
+
 function invalidate(
   client: CoAdminRecoveryClient,
   workspaceKeyId: string | null = "workspace-key-1",
+  rotationCompletedAt: string = ROTATION_COMPLETED_AT,
 ) {
   return invalidateCoAdminGrantsAfterRecovery({
     supabase: client,
     ownerUserId: "owner-1",
     workspaceKeyId,
+    rotationCompletedAt,
   });
 }
 
@@ -306,6 +315,46 @@ describe("a recovery invalidates every co-admin grant", () => {
     if (result.status === "failed") {
       expect(result.reason).toContain("wrapped keys were removed");
     }
+  });
+
+  it("scopes the wrapped-key delete to grants created at or before the rotation", async () => {
+    // workspace_key_id is a stable row identifier, not a version counter: it
+    // does not change when the MEK rotates. A grant made from a second tab
+    // after the rotation landed carries the same id as the dead pre-rotation
+    // grants, so the id alone cannot tell them apart. This is the filter that
+    // does: DEV-0367.
+    const { client, calls } = makeFakeClient(TWO_GRANTS);
+
+    await invalidate(client, "workspace-key-1", ROTATION_COMPLETED_AT);
+
+    const wdkDelete = calls.find((c) => c.table === "wrapped_data_keys" && c.op === "delete");
+    expect(wdkDelete?.filters).toContainEqual({
+      column: "data_key_id",
+      value: "workspace-key-1",
+    });
+    expect(wdkDelete?.filters).toContainEqual({
+      column: "created_at",
+      value: ROTATION_COMPLETED_AT,
+    });
+  });
+
+  it("does not count or report a grant the scoped delete left behind", async () => {
+    // Simulates the real Postgres-side effect of the created_at filter: a
+    // fresh grant made after the rotation is not among the rows the delete
+    // removed, even though the same two people are still listed as admins.
+    // The count and the message must both reflect the ONE grant that was
+    // actually cleaned up, not the two admins on record.
+    const { client } = makeFakeClient({
+      ...TWO_GRANTS,
+      deleteResult: {
+        wrapped_data_keys: { data: [{ recipient_user_id: "admin-1" }], error: null },
+      },
+    });
+
+    const result = await invalidate(client);
+
+    expect(result).toEqual({ status: "invalidated", grantsInvalidated: 1 });
+    expect(coAdminInvalidationMessage(result)).toContain("1 person");
   });
 
   it("does not delete on a read it could not perform", async () => {
