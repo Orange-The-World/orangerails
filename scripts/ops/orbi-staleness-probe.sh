@@ -21,13 +21,13 @@
 #                        missing, or not executable.
 #
 # Optional env:
-#   STALE_THRESHOLD_MINUTES   integer, default 10
+#   STALE_THRESHOLD_MINUTES   integer, default 90
 
 set -uo pipefail
 
 PROBE="orbi-staleness-probe"
 DSN="${ORBI_PROBE_DSN:-${DATABASE_URL:-}}"
-THRESHOLD="${STALE_THRESHOLD_MINUTES:-10}"
+THRESHOLD="${STALE_THRESHOLD_MINUTES:-90}"
 ALERT_SCRIPT="${ORBI_ALERT_SCRIPT:-}"
 
 # The alert script must be usable BEFORE anything else runs. A probe that can
@@ -63,9 +63,37 @@ if [[ -z "$DSN" ]]; then
   exit 2
 fi
 
+# ---- sanitize DSN -----------------------------------------------------------
+# psql "$DSN" puts the whole connection string, password included, into this
+# process's argv, which any user on a shared box can read with `ps`. Pull the
+# password into PGPASSWORD (an environment variable, not visible to ps) and
+# add a connect_timeout so a blackholed connection cannot hang the oneshot
+# unit forever. (systemd's own TimeoutStartSec is the other half of that fix,
+# set on the unit file, not here.)
+SAFE_DSN="$DSN"
+if [[ "$DSN" =~ ^postgres(ql)?://([^:/@]+)(:([^@/]*))?@([^/:@]+)(:([0-9]+))?/([^?]*)(\?(.*))?$ ]]; then
+  DSN_USER="${BASH_REMATCH[2]}"
+  DSN_PASS="${BASH_REMATCH[4]}"
+  DSN_HOST="${BASH_REMATCH[5]}"
+  DSN_PORT="${BASH_REMATCH[7]}"
+  DSN_DB="${BASH_REMATCH[8]}"
+  DSN_QS="${BASH_REMATCH[10]}"
+  if [[ -n "$DSN_PASS" ]]; then
+    export PGPASSWORD="$DSN_PASS"
+  fi
+  if [[ "$DSN_QS" == *connect_timeout=* ]]; then
+    NEW_QS="$DSN_QS"
+  elif [[ -n "$DSN_QS" ]]; then
+    NEW_QS="${DSN_QS}&connect_timeout=10"
+  else
+    NEW_QS="connect_timeout=10"
+  fi
+  SAFE_DSN="postgres://${DSN_USER}@${DSN_HOST}${DSN_PORT:+:${DSN_PORT}}/${DSN_DB}?${NEW_QS}"
+fi
+
 # ---- query ------------------------------------------------------------------
 
-PSQL_OUT=$(psql "$DSN" --no-password -t -A \
+PSQL_OUT=$(psql "$SAFE_DSN" --no-password -t -A \
   --command "SELECT EXTRACT(EPOCH FROM (now() - bucket_ts))::bigint \
              FROM public.exchange_rates \
              WHERE source_currency = 'BTC' \
