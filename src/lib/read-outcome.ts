@@ -23,8 +23,15 @@
  */
 export type ReadOutcome = "row" | "empty" | "error";
 
+/** PostgREST's code for ".single() matched zero rows." Not a failure. */
+const SINGLE_NO_ROWS_CODE = "PGRST116";
+
 export function classifyRead(data: unknown, error: unknown): ReadOutcome {
-  if (error) return "error";
+  if (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === SINGLE_NO_ROWS_CODE) return "empty";
+    return "error";
+  }
   if (data === null || data === undefined) return "empty";
   if (Array.isArray(data) && data.length === 0) return "empty";
   return "row";
