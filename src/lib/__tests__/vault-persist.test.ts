@@ -19,7 +19,9 @@ import {
   migrateAndPersistRotatedVault,
   persistRewrappedVaultMeta,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
+  PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
+  type RewrapVaultArgs,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -72,7 +74,21 @@ function makeFakeClient(options: FakeOptions = {}) {
       return { data: options.rows?.[call.table] ?? [], error: null };
     }
     if (call.table === "user_vault_meta") {
-      return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
+      // The default row carries the envelope columns as well as user_id,
+      // because the password-change persist now reads them back and proves
+      // they re-open. The recovery persist ignores them and only counts rows.
+      return (
+        options.metaUpdate ?? {
+          data: [
+            {
+              user_id: "user-1",
+              enc_mek_ciphertext: "enc-mek-v1",
+              recovery_ciphertext: "recovery-ciphertext-v1",
+            },
+          ],
+          error: null,
+        }
+      );
     }
     return options.otherUpdate ?? { data: [], error: null };
   }
@@ -271,13 +287,22 @@ describe("vault recovery: the rotated meta write", () => {
 });
 
 describe("vault password change: the re-wrapped meta write", () => {
-  function rewrapArgs(client: VaultPersistClient) {
+  /**
+   * verifyPersisted defaults to accepting, so the cases that are about row
+   * counts stay about row counts. The cases that are about the proof pass
+   * their own.
+   */
+  function rewrapArgs(
+    client: VaultPersistClient,
+    verifyPersisted: RewrapVaultArgs["verifyPersisted"] = async () => {},
+  ): RewrapVaultArgs {
     return {
       supabase: client,
       userId: "user-1",
       priorEncMekCiphertext: "enc-mek-v0",
       newEncMekCiphertext: "enc-mek-v1",
       newRecoveryCiphertext: "recovery-ciphertext-v1",
+      verifyPersisted,
     };
   }
 
@@ -297,21 +322,27 @@ describe("vault password change: the re-wrapped meta write", () => {
     await expect(persistRewrappedVaultMeta(rewrapArgs(client))).rejects.toThrow("boom");
   });
 
-  it("resolves when the update matches a row", async () => {
+  it("resolves when the row comes back holding envelopes that re-open", async () => {
     const { client } = makeFakeClient({
-      metaUpdate: { data: [{ user_id: "user-1" }], error: null },
+      metaUpdate: {
+        data: [
+          { enc_mek_ciphertext: "enc-mek-v1", recovery_ciphertext: "recovery-ciphertext-v1" },
+        ],
+        error: null,
+      },
     });
 
     await expect(persistRewrappedVaultMeta(rewrapArgs(client))).resolves.toBeUndefined();
   });
 
-  it("asks for the updated rows back and guards on the prior wrapped MEK", async () => {
+  it("asks for the stored envelopes back, not just a row count, and keeps the compare-and-swap", async () => {
     const { client, calls } = makeFakeClient();
 
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
-    expect(metaUpdate?.columns).toBe("user_id");
+    // user_id would only prove a row matched. These prove what the row holds.
+    expect(metaUpdate?.columns).toBe("enc_mek_ciphertext, recovery_ciphertext");
     expect(metaUpdate?.filters).toContainEqual({ column: "user_id", value: "user-1" });
     expect(metaUpdate?.filters).toContainEqual({
       column: "enc_mek_ciphertext",
@@ -325,5 +356,78 @@ describe("vault password change: the re-wrapped meta write", () => {
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     expect(calls.every((c) => c.table === "user_vault_meta")).toBe(true);
+  });
+
+  it("hands the verifier the bytes the DATABASE returned, not the bytes we sent", async () => {
+    // This is the whole reason the RETURNING changed. A row that came back
+    // holding something other than what we sent is exactly the case worth
+    // catching, so verifying what we sent would catch nothing.
+    const seen: Array<{ encMekCiphertext: string; recoveryCiphertext: string }> = [];
+    const { client } = makeFakeClient({
+      metaUpdate: {
+        data: [
+          { enc_mek_ciphertext: "enc-mek-as-stored", recovery_ciphertext: "recovery-as-stored" },
+        ],
+        error: null,
+      },
+    });
+
+    await persistRewrappedVaultMeta(
+      rewrapArgs(client, async (persisted) => {
+        seen.push(persisted);
+      }),
+    );
+
+    expect(seen).toEqual([
+      { encMekCiphertext: "enc-mek-as-stored", recoveryCiphertext: "recovery-as-stored" },
+    ]);
+  });
+
+  it("throws when the stored envelopes do not re-open, and keeps the reason", async () => {
+    const { client } = makeFakeClient({
+      metaUpdate: {
+        data: [
+          { enc_mek_ciphertext: "enc-mek-v1", recovery_ciphertext: "recovery-ciphertext-v1" },
+        ],
+        error: null,
+      },
+    });
+
+    const failure = await persistRewrappedVaultMeta(
+      rewrapArgs(client, async () => {
+        throw new Error("The stored recovery code envelope could not be re-opened.");
+      }),
+    ).catch((e: unknown) => e as Error);
+
+    // The user-facing sentence, which tells them not to close the page.
+    expect(failure.message).toContain(PASSWORD_CHANGE_NOT_PROVEN_MESSAGE);
+    // And the diagnostic, so support can tell WHICH envelope failed.
+    expect(failure.message).toContain("could not be re-opened");
+  });
+
+  it("throws when the row comes back without the envelope columns", async () => {
+    // We asked for two columns and got a row without them. That is not proof
+    // of anything, so it must not be treated as success.
+    const verify = vi.fn(async () => {});
+    const { client } = makeFakeClient({
+      metaUpdate: { data: [{ user_id: "user-1" }], error: null },
+    });
+
+    await expect(persistRewrappedVaultMeta(rewrapArgs(client, verify))).rejects.toThrow(
+      PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
+    );
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it("does not call the verifier at all when the write matched no row", async () => {
+    // Nothing was written, so there is nothing to prove and the user gets the
+    // conflict message, not the much scarier do-not-close-the-page one.
+    const verify = vi.fn(async () => {});
+    const { client } = makeFakeClient({ metaUpdate: { data: [], error: null } });
+
+    await expect(persistRewrappedVaultMeta(rewrapArgs(client, verify))).rejects.toThrow(
+      PASSWORD_CHANGE_CONFLICT_MESSAGE,
+    );
+    expect(verify).not.toHaveBeenCalled();
   });
 });
