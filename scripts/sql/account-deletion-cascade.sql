@@ -112,7 +112,7 @@ BEGIN
   END IF;
 
   -- LEG D. Delete the account BEHIND a customer, not the customer itself.
-  -- This is DEV-0334's ruling (PR #959 / DEV-0366): a BEFORE DELETE trigger
+  -- This is DEV-0334's ruling, implemented under DEV-0366: a BEFORE DELETE trigger
   -- on auth.users, trg_clear_customer_vault_meta_on_account_removal, must
   -- null customers.auth_user_id and delete that customer's vault meta row.
   -- It is a different path from LEG C above, which deletes the customer row
