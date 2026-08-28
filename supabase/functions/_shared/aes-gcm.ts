@@ -14,6 +14,8 @@
  * showed: three copies with no statement of which one is canonical. This module
  * is that statement. Add a caller here, not a fourth copy.
  *
+ * (DEV-0298: no-op edit, re-triggers the CI matrix after a base retarget.)
+ *
  * TWO PROPERTIES THIS MODULE HOLDS, AND WHY THEY ARE SEPARATE
  *
  *   extractable = false   the key BYTES can never be exported back out.
