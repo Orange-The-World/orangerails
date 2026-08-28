@@ -309,7 +309,10 @@ describe("revoking a co-admin proves both deletes", () => {
   it("says the stored key was removed when the list delete errors", async () => {
     const { client } = makeFakeClient({
       removed: { wrapped_data_keys: [{ recipient_user_id: "admin-1" }] },
-      errors: { workspace_admins: { message: "permission denied" } },
+      // A string, not an object: the code interpolates the error into a
+      // template, so an object would arrive as [object Object] and the
+      // assertion below could never see it.
+      errors: { workspace_admins: "permission denied" },
     });
 
     const error = await rejection(revoke(client));
