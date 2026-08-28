@@ -611,3 +611,141 @@ jobs:
 
           echo
           echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
+
+  # ---------------------------------------------------------------------------
+  # DEV-0212, 2026-08-28. WHY THIS JOB EXISTS.
+  #
+  # supabase-deploy.yml failed on 8 consecutive runs on dev, from 2026-08-27
+  # 00:55 UTC to 2026-08-28 00:07 UTC, about 23 hours. On every one of those runs
+  # check-pending-migrations exited 1 and the deploy job was SKIPPED, by design,
+  # so no edge function shipped to the dev project for a day across 8 merges.
+  # Nothing raised a hand: no alert, no issue, no message. It was found only
+  # because someone ran the checks on dev out of caution.
+  #
+  # The failure class is structurally invisible from a pull request:
+  # apply-migrations and check-pending-migrations run ONLY on the push to the
+  # branch, never on the PR, because the apply needs the real project. So no PR
+  # gate can predict it, and check-pending-migrations is deliberately NOT a
+  # required check, so a red branch never blocks the next merge. Seven more
+  # merges landed on top of the first failure.
+  #
+  # IT MUST BE ABLE TO GO RED ITSELF. Every gh call below is checked and every
+  # failure exits non-zero with an ::error:: annotation. There is deliberately no
+  # `|| true` anywhere in it: a notifier that swallows its own errors is exactly
+  # the silent-success shape it was written to end.
+  #
+  # KNOWN LIMIT, stated rather than hidden: this job lives inside the run it
+  # reports on, so it cannot fire if the whole run is cancelled before it starts,
+  # or if this file fails to parse. It covers job failure and a skipped deploy,
+  # which is the failure that actually happened.
+  # ---------------------------------------------------------------------------
+  notify:
+    needs: [target, apply-migrations, check-pending-migrations, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open, update or close the deploy-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          R_TARGET: ${{ needs.target.result }}
+          R_APPLY: ${{ needs['apply-migrations'].result }}
+          R_GATE: ${{ needs['check-pending-migrations'].result }}
+          R_DEPLOY: ${{ needs.deploy.result }}
+        run: |
+          set -uo pipefail
+
+          # What counts as a failure worth waking someone for:
+          #   any job failed or was cancelled -> the run did not do its work
+          #   deploy skipped                  -> nothing shipped. deploy carries no
+          #                                      `if:` of its own, so it can only be
+          #                                      skipped when target or the migration
+          #                                      gate refused it.
+          # A deploy that ran and found no changed functions is a SUCCESS and is
+          # deliberately not reported.
+          REASONS=""
+          for PAIR in "target:${R_TARGET}" "apply-migrations:${R_APPLY}" "check-pending-migrations:${R_GATE}" "deploy:${R_DEPLOY}"; do
+            JOB="${PAIR%%:*}"
+            RES="${PAIR##*:}"
+            case "$RES" in
+              failure|cancelled) REASONS="${REASONS}- \`${JOB}\` ended **${RES}**"$'\n' ;;
+            esac
+          done
+          if [ "${R_DEPLOY}" = "skipped" ]; then
+            REASONS="${REASONS}- \`deploy\` was **skipped**, so no edge function shipped to this branch's Supabase project."$'\n'
+          fi
+
+          TITLE="CI: Supabase deploy is failing on ${BRANCH}"
+
+          if ! OPEN_NUM=$(gh issue list --repo "$REPO" --state open --limit 100 \
+                --json number,title \
+                --jq "map(select(.title == \"${TITLE}\")) | .[0].number // empty"); then
+            echo "::error::could not list issues on ${REPO}; the deploy-failure notifier cannot report."
+            exit 1
+          fi
+
+          if [ -z "$REASONS" ]; then
+            echo "Every job succeeded on ${BRANCH}."
+            if [ -n "$OPEN_NUM" ]; then
+              RECOVERED="Recovered on \`${BRANCH}\` at \`${SHA}\`. Every job in this run succeeded and the deploy ran. ${RUN_URL}"
+              if ! gh issue comment "$OPEN_NUM" --repo "$REPO" --body "$RECOVERED"; then
+                echo "::error::could not comment on issue #${OPEN_NUM}."
+                exit 1
+              fi
+              if ! gh issue close "$OPEN_NUM" --repo "$REPO"; then
+                echo "::error::could not close issue #${OPEN_NUM}."
+                exit 1
+              fi
+              echo "Closed #${OPEN_NUM} on recovery." >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+
+          {
+            echo "## Deploy did NOT ship on \`${BRANCH}\`"
+            echo ""
+            printf '%s' "$REASONS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          BODY=$(printf '%s\n' \
+            "The Supabase deploy workflow did not ship on \`${BRANCH}\`." \
+            "" \
+            "Commit: \`${SHA}\`" \
+            "Run: ${RUN_URL}" \
+            "" \
+            "What went wrong:" \
+            "" \
+            "${REASONS}" \
+            "This issue is opened by the workflow itself on the first failed run and" \
+            "closed by the first run that recovers." \
+            "" \
+            "While it is open, assume edge functions on this branch's Supabase project" \
+            "are BEHIND the branch. The deploy ships only the functions changed since" \
+            "the previous push, so a later green run does not backfill the pushes that" \
+            "were skipped while this was red.")
+
+          if [ -n "$OPEN_NUM" ]; then
+            if ! gh issue comment "$OPEN_NUM" --repo "$REPO" --body "$BODY"; then
+              echo "::error::could not comment on issue #${OPEN_NUM}; the failure is NOT reported."
+              exit 1
+            fi
+            echo "Updated #${OPEN_NUM}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            if ! NEW=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY"); then
+              echo "::error::could not open an issue on ${REPO}; the failure is NOT reported."
+              exit 1
+            fi
+            echo "Opened ${NEW}." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Exit non-zero on purpose. A green notify job sitting under a red run
+          # reads as "something handled it"; it did not, the deploy still has not
+          # shipped.
+          echo "::error::deploy did not ship on ${BRANCH}; see the tracking issue."
+          exit 1
