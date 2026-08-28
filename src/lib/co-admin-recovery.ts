@@ -78,7 +78,6 @@ export type CoAdminRecoveryClient = {
   rpc?: (
     fn: string,
     args: Record<string, unknown>,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ) => PromiseLike<{ data: unknown; error: unknown }>;
 };
 
