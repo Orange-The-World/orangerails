@@ -41,6 +41,43 @@
 -- (public, 'f') whose grantor is supabase_admin. That row is platform owned,
 -- postgres cannot alter it, and this migration does not try to. Reading without
 -- the filter reports a failure that no version of this file could fix.
+--
+-- THE RESIDUAL, AND THE DECISION ON IT. Recorded here so it is not re-derived.
+--
+-- REQUIREMENT: no function in schema public may carry an EXECUTE grant to anon,
+-- whichever role granted it.
+--
+-- WHAT THIS FILE ENFORCES: the part owned by postgres. Step 1 closes the default
+-- for new functions created by postgres, step 2 removes the standing grants, and
+-- assertion (b) proves no public function holds an anon entry at apply time.
+--
+-- WHAT THIS FILE CANNOT ENFORCE: the platform default-privilege row. We hold no
+-- membership in the role that owns it (pg_has_role returns false), so a function
+-- created in public by that role would take an anon EXECUTE entry at birth and no
+-- migration in this repo can prevent it. This is a future condition, not a present
+-- one: at the time this note was written, no function in public on either project
+-- carried an anon entry from any grantor.
+--
+-- DECISION: cover the remainder by DETECTION, not by another revoke, because a
+-- revoke we cannot make stick is worse than no control at all. The detection is
+-- one query and it is deliberately grantor-agnostic, which is the whole point:
+--
+--     SELECT n.nspname, p.proname, ace::text
+--       FROM pg_proc p
+--       JOIN pg_namespace n ON n.oid = p.pronamespace,
+--            unnest(p.proacl) ace
+--      WHERE n.nspname = 'public'
+--        AND ace::text LIKE 'anon=%';
+--
+-- Expected result: zero rows. Any row is a regression and names the function.
+-- The query was proved able to FAIL before it was trusted: on the dev project a
+-- throwaway function was created in public, granted EXECUTE to anon, and the
+-- query returned it; the function was dropped and the query returned to zero.
+-- A check that has only ever returned empty has not been shown to detect anything.
+--
+-- Running it on a schedule is tracked separately. If you are reading this because
+-- that query just returned a row, the fix is a REVOKE for that specific function,
+-- not a change to this file: this file has already run and is skipped by version.
 
 BEGIN;
 
