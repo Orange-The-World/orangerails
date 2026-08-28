@@ -6,8 +6,9 @@
  *   deno test --no-check --allow-all supabase/functions/_shared/providers/dispatch.test.ts
  */
 
-import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { listProviderManifests } from './dispatch.ts';
+import { assertEquals, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import { listProviderManifests, parseCredentials } from './dispatch.ts';
+import type { ProviderAdapter } from './types.ts';
 
 // ── DL-0680: connectUrl plumbing ──────────────────────────────────────────
 
