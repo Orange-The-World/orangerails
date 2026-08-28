@@ -884,13 +884,17 @@ function AppHome() {
         supabase: supabase as unknown as CoAdminSupabaseLike,
       });
       // Not coadmin_revoked: this removed a record, not an access grant.
-      void logSecurityEvent(supabase, userId, "coadmin_list_entry_cleared", {
+      const logged = await logSecurityEvent(supabase, userId, "coadmin_list_entry_cleared", {
         admin_user_id: a.admin_user_id,
         key_removed: keyRemoved,
       });
       setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
       setErr("");
-      setNotice("Removed from your list. This did not remove their access.");
+      setNotice(
+        logged
+          ? "Removed from your list. This did not remove their access."
+          : "Removed from your list, but the record of this could not be saved. This did not remove their access.",
+      );
     } catch (e) {
       setErr(formatError(e));
     }
