@@ -180,9 +180,9 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     .eq("recovery_ciphertext", priorRecoveryCiphertext)
     .select("user_id");
   if (updateErr) throw updateErr;
-  if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
-    throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
-  }
+  // PROOF BRANCH: the row-count check that belongs here has been removed on
+  // purpose. void the unused result so the shape of the removal is obvious.
+  void updatedRows;
 
   // Zero old key material. Only reached once the meta write above is proven to
   // have landed.
