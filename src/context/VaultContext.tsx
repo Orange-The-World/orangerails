@@ -498,6 +498,14 @@ export function VaultProvider({ children }: VaultProviderProps) {
   // The vault salt is preserved so the user does not need to re-register.
   // All HKDF subkeys change with the MEK and every ciphertext must be
   // migrated before clearMigrationKeys() is called.
+  //
+  // "Every ciphertext" includes the two that are NOT data rows and so are easy
+  // to forget: user_vault_meta.kem_secret_wrapped and sig_secret_wrapped. They
+  // are wrapped under derivePqcSecretWrapKey(mek, salt), which is an HKDF
+  // subkey of the MEK like any other. They are not migrated by the caller's
+  // loop because they do not live in connections or encrypted_transactions, so
+  // they are re-wrapped here instead and returned for the caller to persist in
+  // the same update as the MEK wrappers.
   // ------------------------------------------------------------------
   const recoverWithCode = useCallback(
     async ({
@@ -506,12 +514,16 @@ export function VaultProvider({ children }: VaultProviderProps) {
       saltB64: storedSalt,
       verifierCiphertext,
       newPassword,
+      kemSecretWrapped,
+      sigSecretWrapped,
     }: {
       recoveryCode: string;
       recoveryCiphertext: string;
       saltB64: string;
       verifierCiphertext: string;
       newPassword: string;
+      kemSecretWrapped: string | null;
+      sigSecretWrapped: string | null;
     }): Promise<RecoveryResult> => {
       // 1. Unwrap OLD MEK with recovery code: proves the caller holds the code.
       const recoveryKek = await deriveRecoveryKek(recoveryCode);
@@ -534,29 +546,61 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const newMekRaw = generateMekBytes();
       const newMek = await importMekAsHkdf(newMekRaw);
 
-      // 5. New verifier under the NEW MEK + same salt.
+      // 5. Carry the PQC secret keys across the rotation.
+      //    These are wrapped under an HKDF subkey of the MEK, exactly like the
+      //    credentials and transactions subkeys, but they are NOT data rows so
+      //    the caller's migration loop never sees them. Left behind they are
+      //    orphaned permanently: the old wrap key is discarded below and
+      //    ensurePqcKeypairs() will not regenerate, because kem_public_key is
+      //    still populated and it short-circuits on that.
+      //
+      //    Done HERE, before the new envelopes are built and long before the
+      //    caller migrates a single row, so that a secret which will not unwrap
+      //    aborts the recovery while everything stored is still valid. Failing
+      //    at this point costs the user nothing. Failing after the migration
+      //    loop would leave rows under a MEK with no way back.
+      //
+      //    Null is expected, not an error: a vault with no PQC keys yet has
+      //    nothing to carry.
+      const oldPqcWrapKey = await derivePqcSecretWrapKey(oldMek, storedSalt);
+      const newPqcWrapKey = await derivePqcSecretWrapKey(newMek, storedSalt);
+      const newKemSecretWrapped = kemSecretWrapped
+        ? await rewrapPqcSecretKey(oldPqcWrapKey, newPqcWrapKey, kemSecretWrapped)
+        : null;
+      const newSigSecretWrapped = sigSecretWrapped
+        ? await rewrapPqcSecretKey(oldPqcWrapKey, newPqcWrapKey, sigSecretWrapped)
+        : null;
+
+      // 6. New verifier under the NEW MEK + same salt.
       //    Caller MUST persist this or unlock() fails on next page load.
       const newVerifierKey = await deriveVerifierKey(newMek, storedSalt);
       const newVerifierCiphertext = await createVaultVerifier(newVerifierKey);
 
-      // 6. Wrap new MEK under the new password (same salt, new KEK).
+      // 7. Wrap new MEK under the new password (same salt, new KEK).
       const newKek = await deriveKek(newPassword, storedSalt);
       const newEncMekCiphertext = await wrapMekBytes(newMekRaw, newKek);
 
-      // 7. Fresh recovery code wrapping the NEW MEK.
+      // 8. Fresh recovery code wrapping the NEW MEK.
       //    The old recovery code is now useless: it decrypts to the old MEK
       //    which does not match any ciphertext in the database after migration.
       const newRecoveryCode = generateRecoveryCode();
       const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
       const newRecoveryCiphertext = await wrapMekBytes(newMekRaw, newRecoveryKek);
 
-      // 8. Load NEW MEK. Vault is now unlocked with the rotated key.
+      // 9. Load NEW MEK. Vault is now unlocked with the rotated key.
       mekRef.current = newMek;
       saltRef.current = storedSalt;
       setSaltB64(storedSalt);
       setIsUnlocked(true);
 
-      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext, newVerifierCiphertext };
+      return {
+        newEncMekCiphertext,
+        newRecoveryCode,
+        newRecoveryCiphertext,
+        newVerifierCiphertext,
+        newKemSecretWrapped,
+        newSigSecretWrapped,
+      };
     },
     [],
   );
