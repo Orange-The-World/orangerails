@@ -20,6 +20,7 @@ import {
   persistRewrappedVaultMeta,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
+  TRANSACTION_PAGE_SIZE,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -96,9 +97,22 @@ function makeFakeClient(options: FakeOptions = {}) {
           calls.push(call);
           return {
             ...thenable(call),
+            /**
+             * The real client's .range(from, to) is an INCLUSIVE window, so the
+             * fake slices. It used to record its arguments and then ignore them,
+             * returning the same rows on every call. That made the paging loop in
+             * migrateAndPersistRotatedVault impossible to test: a fixture big
+             * enough to force a second page came back again on that page, and
+             * again forever, so the short-page break could never fire and the
+             * suite HUNG instead of failing. An error or a null-data override is
+             * passed straight through, because there is nothing to slice and the
+             * failure is the thing under test.
+             */
             range(from: number, to: number) {
               call.filters.push({ column: "range", value: [from, to] });
-              return Promise.resolve(resultFor(call));
+              const base = resultFor(call);
+              if (base.error || !base.data) return Promise.resolve(base);
+              return Promise.resolve({ data: base.data.slice(from, to + 1), error: null });
             },
           };
         },
@@ -325,5 +339,124 @@ describe("vault password change: the re-wrapped meta write", () => {
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     expect(calls.every((c) => c.table === "user_vault_meta")).toBe(true);
+  });
+});
+
+/**
+ * The transaction re-encryption loop.
+ *
+ * This is the only arithmetic in vault-persist.ts: an offset, an inclusive
+ * range window and two different break conditions. Nothing exercised it until
+ * DEV-0285. The rest of the module is well covered, including a real mutation
+ * proof, which makes it easy for the next reader to assume the whole file is
+ * covered. It was not, and the gap was invisible from the outside.
+ *
+ * What an off-by-one here would actually cost: a loop that failed to advance
+ * would re-read rows it had already migrated and re-encrypt them under the new
+ * MEK a second time, leaving them unreadable, with nothing red anywhere.
+ *
+ * These tests do not touch the loop. They pin its current behaviour so that any
+ * later change to it has something to fail against.
+ */
+describe("vault recovery: the transaction paging loop", () => {
+  function txnRows(count: number) {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `txn-${i}`,
+      encrypted_payload: `payload-${i}`,
+    }));
+  }
+
+  const txnSelects = (calls: RecordedCall[]) =>
+    calls.filter((c) => c.table === "encrypted_transactions" && c.op === "select");
+
+  const txnUpdates = (calls: RecordedCall[]) =>
+    calls.filter((c) => c.table === "encrypted_transactions" && c.op === "update");
+
+  const rangeOf = (call: RecordedCall) =>
+    call.filters.find((f) => f.column === "range")?.value;
+
+  const idOf = (call: RecordedCall) =>
+    call.filters.find((f) => f.column === "id")?.value as string;
+
+  it("terminates on a full page followed by an empty page", async () => {
+    // Exactly one page. The first read fills the page, so the loop cannot stop
+    // on the short-page break: it has to come back, get nothing, and stop on
+    // the empty break instead.
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: txnRows(TRANSACTION_PAGE_SIZE) },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(txnSelects(calls).length).toBe(2);
+    expect(txnUpdates(calls).length).toBe(TRANSACTION_PAGE_SIZE);
+  });
+
+  it("terminates on a full page followed by a short page", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: txnRows(TRANSACTION_PAGE_SIZE + 3) },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    // Two reads and no third: a short page ends the loop where it is.
+    expect(txnSelects(calls).length).toBe(2);
+    expect(txnUpdates(calls).length).toBe(TRANSACTION_PAGE_SIZE + 3);
+  });
+
+  it("asks for the second window starting at one page size, not the first again", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: txnRows(TRANSACTION_PAGE_SIZE + 3) },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(txnSelects(calls).map(rangeOf)).toEqual([
+      [0, TRANSACTION_PAGE_SIZE - 1],
+      [TRANSACTION_PAGE_SIZE, TRANSACTION_PAGE_SIZE * 2 - 1],
+    ]);
+  });
+
+  it("re-encrypts every row across both pages exactly once, each with its own payload", async () => {
+    const total = TRANSACTION_PAGE_SIZE + 3;
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: txnRows(total) },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const updates = txnUpdates(calls);
+    const timesTouched: Record<string, number> = {};
+    for (const update of updates) {
+      const id = idOf(update);
+      timesTouched[id] = (timesTouched[id] ?? 0) + 1;
+    }
+
+    // No row skipped at the page boundary, and no row migrated twice. A row
+    // migrated twice would be encrypted under the new MEK on top of itself and
+    // would never open again.
+    expect(updates.length).toBe(total);
+    expect(Object.keys(timesTouched).length).toBe(total);
+    for (const id of Object.keys(timesTouched)) expect(timesTouched[id]).toBe(1);
+
+    // And each row carries its OWN migrated payload, not a neighbour's.
+    for (const update of updates) {
+      const index = Number(idOf(update).slice("txn-".length));
+      expect(update.values).toEqual({ encrypted_payload: `payload-${index}-migrated` });
+    }
+  });
+
+  it("writes the rotated meta only after the whole paged migration", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: txnRows(TRANSACTION_PAGE_SIZE + 3) },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaIndex).toBeGreaterThan(-1);
+    calls.forEach((call, i) => {
+      if (call.table === "encrypted_transactions") expect(i).toBeLessThan(metaIndex);
+    });
   });
 });
