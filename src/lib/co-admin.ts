@@ -10,7 +10,11 @@
  *   2. Run HKDF on the raw bytes to extract credentials + transactions subkeys.
  *   3. Concatenate into a 64-byte blob.
  *   4. Wrap the blob with the admin's hybrid KEM public key (see wrapBlob64).
- *   5. Insert into wrapped_data_keys + workspace_admins.
+ *   5. Delete any stale wrapped_data_keys row left by an earlier failed grant
+ *      to the same recipient, then insert the fresh one, then insert
+ *      workspace_admins. A retry after a partial failure self-heals instead
+ *      of failing forever on the unique constraint (data_key_id,
+ *      recipient_user_id).
  *
  * ## Consume flow (admin side, post-unlock)
  *   1. Fetch wrapped_data_keys row for the owner's workspace_key_id.
@@ -328,7 +332,37 @@ export async function grantCoAdmin(params: {
     wrappedMekCiphertextB64: wrappedCt,
   });
 
-  // Step f , insert wrapped_data_keys row.
+  // Step f , clear any stale envelope for this (workspaceKeyId, targetUserId)
+  // pair before inserting the fresh one just wrapped and signed above.
+  //
+  // WHY. A previous grant attempt can have inserted this exact row and then
+  // failed on the workspace_admins insert in step g below (a network drop, a
+  // closed tab): the row survives with no workspace_admins row pointing at
+  // it. Before the unique constraint added for DL-2261 / DEV-0412, a bare
+  // retry inserted a SECOND row for the same pair, and the app's
+  // maybeSingle() read on that pair then returned no workspace at all,
+  // permanently and silently. After that constraint, a bare retry instead
+  // fails forever on a raw unique-violation, because the stranded row never
+  // goes away on its own. Deleting it first makes a retry self-heal: the
+  // insert below always carries a freshly wrapped ciphertext and a fresh
+  // ML-DSA-65 signature computed above in this same call, so nothing here
+  // ever reuses the stranded row's bytes.
+  //
+  // A delete that matches no row is a no-op with no error, so this runs
+  // safely on every grant, not only a retry.
+  const { error: staleErr } = await (
+    supabase
+      .from("wrapped_data_keys")
+      .delete()
+      .eq("data_key_id", workspaceKeyId) as unknown as CoAdminDeleteBuilder
+  ).eq("recipient_user_id", targetUserId);
+  if (staleErr) {
+    throw new Error(
+      `Failed to clear a previous grant attempt for this recipient before re-granting: ${staleErr}`,
+    );
+  }
+
+  // Step f.1 , insert wrapped_data_keys row.
   const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
     data_key_id: workspaceKeyId,
     recipient_user_id: targetUserId,
@@ -336,7 +370,18 @@ export async function grantCoAdmin(params: {
     algorithm: "hybrid-x25519-mlkem768-blob64",
     grant_sig: grantSig,
   });
-  if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${wdkErr}`);
+  if (wdkErr) {
+    // A residual race (a second grant landing between the delete above and
+    // this insert) can still hit the unique constraint. Say something an
+    // owner can act on instead of the raw constraint name.
+    const code = (wdkErr as { code?: string } | null)?.code;
+    if (code === "23505") {
+      throw new Error(
+        "Another grant to this recipient is already in progress for this workspace key. Wait a moment and try again.",
+      );
+    }
+    throw new Error(`Failed to insert wrapped_data_keys: ${wdkErr}`);
+  }
 
   // Step g , insert workspace_admins row.
   const { error: adminErr } = await supabase.from("workspace_admins").insert({
