@@ -302,7 +302,7 @@ export async function grantCoAdmin(params: {
         .from("user_vault_meta")
         .update({ workspace_key_id: workspaceKeyId }) as unknown as CoAdminUpdateBuilder
     ).eq("user_id", ownerUserId);
-    if (updateErr) throw new Error(`Failed to write workspace_key_id: ${updateErr}`);
+    if (updateErr) throw new Error(`Failed to write workspace_key_id: ${formatError(updateErr)}`);
   }
 
   // Step e , wrap the 64-byte blob for the recipient's KEM public key.
@@ -337,14 +337,14 @@ export async function grantCoAdmin(params: {
     algorithm: "hybrid-x25519-mlkem768-blob64",
     grant_sig: grantSig,
   });
-  if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${wdkErr}`);
+  if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${formatError(wdkErr)}`);
 
   // Step g , insert workspace_admins row.
   const { error: adminErr } = await supabase.from("workspace_admins").insert({
     owner_user_id: ownerUserId,
     admin_user_id: targetUserId,
   });
-  if (adminErr) throw new Error(`Failed to insert workspace_admins: ${adminErr}`);
+  if (adminErr) throw new Error(`Failed to insert workspace_admins: ${formatError(adminErr)}`);
 
   return { workspaceKeyId };
 }
@@ -494,7 +494,7 @@ export async function revokeCoAdmin(params: {
   )
     .eq("recipient_user_id", adminUserId)
     .select("recipient_user_id");
-  if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${wdkErr}`);
+  if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${formatError(wdkErr)}`);
 
   if ((removedKeys ?? []).length === 0) {
     // Nothing was removed and nothing complained, which on its own is not
@@ -511,7 +511,7 @@ export async function revokeCoAdmin(params: {
 
     if (readErr) {
       throw new CoAdminRevocationIncompleteError(
-        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${readErr})`,
+        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${formatError(readErr)})`,
         false,
       );
     }
@@ -543,7 +543,7 @@ export async function revokeCoAdmin(params: {
   if (adminErr) {
     // Say which half landed. The stored key IS gone here, and an owner told
     // only that something failed would reasonably assume the opposite.
-    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${adminErr})`, true);
+    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${formatError(adminErr)})`, true);
   }
 
   if ((removedAdmins ?? []).length === 0) {
@@ -614,7 +614,7 @@ export async function clearCoAdminListEntry(params: {
   )
     .eq("admin_user_id", adminUserId)
     .select("admin_user_id");
-  if (error) throw new Error(`Failed to remove this co-admin from your list: ${error}`);
+  if (error) throw new Error(`Failed to remove this co-admin from your list: ${formatError(error)}`);
 
   if ((removed ?? []).length === 0) {
     throw new Error(
