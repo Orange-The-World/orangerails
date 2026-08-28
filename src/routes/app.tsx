@@ -244,11 +244,18 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
-      const { data: meta } = await (supabase as any)
+      const { data: meta, error: metaError } = await (supabase as any)
         .from("user_vault_meta")
         .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
+      if (metaError) {
+        // A rejected read here must never be reported as "no meta row": that is
+        // indistinguishable on screen from a legitimate empty result. Warn loudly
+        // and skip applying state rather than silently proceeding as if unlocked
+        // vault metadata does not exist.
+        console.warn("co-admin: user_vault_meta (self) read failed:", metaError);
+      }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
