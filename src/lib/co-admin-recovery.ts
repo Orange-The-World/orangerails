@@ -40,6 +40,17 @@
  * Reporting a cleanup failure as a failed recovery would tell the user
  * something false about their vault. It returns what happened instead, and the
  * caller shows it.
+ *
+ * WHAT THE OWNER CAN AND CANNOT SEE, because it decides the shape of the code
+ * below. public.wrapped_data_keys has exactly one select policy and it is
+ * recipient scoped, recipient_user_id = auth.uid(). An owner is not a
+ * recipient of their own grants, so an owner reading that table gets zero rows
+ * and NO error. Its delete policy is owner scoped, so the owner can remove the
+ * rows they cannot read. public.workspace_admins is readable and deletable by
+ * the owner. So: the count and the gate come from workspace_admins and from
+ * what the deletes give back, never from a select on wrapped_data_keys. An
+ * earlier version of this file gated the whole cleanup on that select, which
+ * made it do nothing at all while looking like it had found nothing to do.
  */
 
 /**
@@ -62,7 +73,10 @@ export interface InvalidateCoAdminGrantsArgs {
 }
 
 export type CoAdminInvalidation =
-  /** Nothing to do. Either no workspace key or no grants against it. */
+  /**
+   * Nothing to do. Either the owner has no workspace key, or nobody is listed
+   * as holding emergency access.
+   */
   | { status: "none" }
   /** Grants existed and are gone. */
   | { status: "invalidated"; grantsInvalidated: number }
@@ -89,6 +103,16 @@ function errorText(error: unknown): string {
  * of admins who hold nothing. Both deletes are what revokeCoAdmin does, which
  * is deliberate: the end state here IS a revocation, and it should look like
  * one everywhere else in the product.
+ *
+ * Every step is proven rather than assumed. Both deletes return the rows they
+ * removed, and a delete that removed nothing is reported as a failure with the
+ * sentence that tells the owner what to do by hand.
+ *
+ * KNOWN LIMIT, stated rather than hidden: a wrapped_data_keys row whose
+ * matching workspace_admins row does not exist, which a grant interrupted
+ * between its two inserts would leave, is not seen by the gate below and is
+ * left in place. It is inert after the rotation, because the subkeys inside it
+ * open nothing.
  */
 export async function invalidateCoAdminGrantsAfterRecovery(
   args: InvalidateCoAdminGrantsArgs,
@@ -97,26 +121,32 @@ export async function invalidateCoAdminGrantsAfterRecovery(
 
   if (!workspaceKeyId) return { status: "none" };
 
-  // Count first, so the owner can be told how many people lost access rather
-  // than a vague warning. A vague warning is the thing that gets ignored.
-  const { data: grants, error: readErr } = await supabase
-    .from("wrapped_data_keys")
-    .select("recipient_user_id")
-    .eq("data_key_id", workspaceKeyId);
-  if (readErr) {
+  // Who currently holds emergency access. This read is on workspace_admins and
+  // deliberately NOT on wrapped_data_keys: see the note at the top of the file
+  // about which of the two the owner is allowed to read. A read that always
+  // returns nothing is not a gate, it is an off switch.
+  const { data: admins, error: adminReadErr } = await supabase
+    .from("workspace_admins")
+    .select("admin_user_id")
+    .eq("owner_user_id", ownerUserId);
+  if (adminReadErr) {
     return {
       status: "failed",
-      reason: `could not read the existing grants: ${errorText(readErr)}`,
+      reason: `could not read the emergency access list: ${errorText(adminReadErr)}`,
     };
   }
 
-  const grantCount = (grants ?? []).length;
-  if (grantCount === 0) return { status: "none" };
+  const listedAdmins = (admins ?? []).length;
+  if (listedAdmins === 0) return { status: "none" };
 
-  const { error: wdkErr } = await supabase
+  // Delete under the owner scoped delete policy, and ask for the removed rows
+  // back so the count is what the database actually did rather than what a
+  // read suggested it would do.
+  const { data: removedGrants, error: wdkErr } = await supabase
     .from("wrapped_data_keys")
     .delete()
-    .eq("data_key_id", workspaceKeyId);
+    .eq("data_key_id", workspaceKeyId)
+    .select("recipient_user_id");
   if (wdkErr) {
     return {
       status: "failed",
@@ -124,10 +154,28 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     };
   }
 
-  const { error: adminErr } = await supabase
+  // A delete that matched no row returns no error, so this is the only place
+  // the difference between "removed them" and "removed nothing" exists. People
+  // are listed as holding emergency access and the key material behind it is
+  // still there, so this is a failure, not nothing to do.
+  //
+  // The admin list is left alone on this branch on purpose. It is the only
+  // record of who has to be removed by hand, and the message below asks the
+  // owner to do exactly that.
+  const grantsRemoved = (removedGrants ?? []).length;
+  if (grantsRemoved === 0) {
+    const who = listedAdmins === 1 ? "1 person is" : `${listedAdmins} people are`;
+    return {
+      status: "failed",
+      reason: `${who} still listed as having emergency access and the keys behind it were not removed`,
+    };
+  }
+
+  const { data: removedAdmins, error: adminErr } = await supabase
     .from("workspace_admins")
     .delete()
-    .eq("owner_user_id", ownerUserId);
+    .eq("owner_user_id", ownerUserId)
+    .select("admin_user_id");
   if (adminErr) {
     // The dangerous half succeeded: no dead key material is left. What remains
     // is a stale admin list, which is visible and fixable by hand, so say so
@@ -138,7 +186,16 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     };
   }
 
-  return { status: "invalidated", grantsInvalidated: grantCount };
+  if ((removedAdmins ?? []).length === 0) {
+    // Same standard as the delete above: no error is not proof of a delete.
+    return {
+      status: "failed",
+      reason:
+        "the stale wrapped keys were removed but the admin list was not: the delete removed no rows",
+    };
+  }
+
+  return { status: "invalidated", grantsInvalidated: grantsRemoved };
 }
 
 /**
