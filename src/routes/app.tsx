@@ -286,27 +286,36 @@ function AppHome() {
       }
 
       // Load list of users this person has granted co-admin to.
-      const { data: admins } = await supabase
+      const { data: admins, error: adminsError } = await supabase
         .from("workspace_admins")
         .select("id, admin_user_id, added_at")
         .eq("owner_user_id", session.user.id);
+      if (adminsError) {
+        console.warn("workspace_admins (owner) read failed:", adminsError);
+      }
       const adminRows = (admins ?? []) as CoAdminRow[];
 
       // Load workspaces where this user is a co-admin.
-      const { data: myAdminOf } = await supabase
+      const { data: myAdminOf, error: myAdminOfError } = await supabase
         .from("workspace_admins")
         .select("owner_user_id")
         .eq("admin_user_id", session.user.id);
+      if (myAdminOfError) {
+        console.warn("workspace_admins (co-admin) read failed:", myAdminOfError);
+      }
 
       const workspaces: WorkspaceOption[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
         const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
         for (const ownerId of ownerIds) {
-          const { data: ownerMeta } = await supabase
+          const { data: ownerMeta, error: ownerMetaError } = await supabase
             .from("user_vault_meta")
             .select("workspace_key_id, sig_public_key")
             .eq("user_id", ownerId)
             .single();
+          if (ownerMetaError) {
+            console.warn("user_vault_meta read failed for owner", ownerId, ownerMetaError);
+          }
           if (!ownerMeta) continue;
           const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
           if (!ownerKeyId) continue;
@@ -315,11 +324,14 @@ function AppHome() {
           // verify rather than surface one the co-admin cannot safely open.
           const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
           if (!ownerSigPubB64) continue;
-          const { data: wdk } = await supabase
+          const { data: wdk, error: wdkError } = await supabase
             .from("wrapped_data_keys")
             .select("wrapped_ciphertext, grant_sig")
             .eq("data_key_id", ownerKeyId)
             .maybeSingle();
+          if (wdkError) {
+            console.warn("wrapped_data_keys read failed for data_key_id", ownerKeyId, wdkError);
+          }
           if (!wdk) continue;
           workspaces.push({
             ownerUserId: ownerId,
