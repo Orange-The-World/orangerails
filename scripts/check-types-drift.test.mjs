@@ -105,7 +105,7 @@ describe("forced differences, each one must go red", () => {
       r.column_name === "label" ? { ...r, is_nullable: false } : r,
     );
     const found = findingsFor(rows);
-    expect(kinds(found)).toEqual(["insert-too-strict", "nullability"]);
+    expect(kinds(found)).toEqual(["insert-too-loose", "nullability"]);
     expect(found.find((f) => f.kind === "nullability").detail).toContain("NOT NULL");
   });
 
