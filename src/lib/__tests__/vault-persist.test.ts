@@ -125,7 +125,19 @@ function makeFakeClient(options: FakeOptions = {}) {
   return { client: client as VaultPersistClient, calls };
 }
 
-function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) {
+/**
+ * `pqc` defaults to a vault with no PQC keys, which is the case that leaves the
+ * update carrying only the four wrapper columns. Tests that care about the
+ * carried-across secrets pass them in explicitly.
+ */
+function rotateArgs(
+  client: VaultPersistClient,
+  clearMigrationKeys: () => void,
+  pqc: { newKemSecretWrapped: string | null; newSigSecretWrapped: string | null } = {
+    newKemSecretWrapped: null,
+    newSigSecretWrapped: null,
+  },
+) {
   return {
     supabase: client,
     userId: "user-1",
@@ -134,6 +146,8 @@ function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) 
     newRecoveryCiphertext: "recovery-ciphertext-v1",
     newVerifierCiphertext: "verifier-v1",
     vaultKeyVersion: 2,
+    newKemSecretWrapped: pqc.newKemSecretWrapped,
+    newSigSecretWrapped: pqc.newSigSecretWrapped,
     migrateCredentialsCiphertext: async (c: string) => `${c}-migrated`,
     migrateTransactionCiphertext: async (c: string) => `${c}-migrated`,
     clearMigrationKeys,
@@ -223,6 +237,51 @@ describe("vault recovery: the rotated meta write", () => {
       vault_verifier_ciphertext: "verifier-v1",
       vault_key_version: 2,
     });
+  });
+
+  it("carries the re-wrapped PQC secrets in the SAME statement as the MEK wrappers", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault(
+      rotateArgs(client, vi.fn(), {
+        newKemSecretWrapped: "kem-secret-v1",
+        newSigSecretWrapped: "sig-secret-v1",
+      }),
+    );
+
+    // One statement, not two, and this is the whole property. Those two columns
+    // are wrapped under an HKDF subkey of the MEK, so the instant the wrappers
+    // rotate without them the only key that opens them stops existing. A second
+    // write would reopen that window; a write that omits them never closes it.
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates).toHaveLength(1);
+    expect(metaUpdates[0]?.values).toEqual({
+      enc_mek_ciphertext: "enc-mek-v1",
+      recovery_ciphertext: "recovery-ciphertext-v1",
+      vault_verifier_ciphertext: "verifier-v1",
+      vault_key_version: 2,
+      kem_secret_wrapped: "kem-secret-v1",
+      sig_secret_wrapped: "sig-secret-v1",
+    });
+  });
+
+  it("never writes null over a PQC column, only what it was given", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault(
+      rotateArgs(client, vi.fn(), {
+        newKemSecretWrapped: null,
+        newSigSecretWrapped: "sig-secret-v1",
+      }),
+    );
+
+    // A vault with no PQC keys yet is the normal reason for null here. Passing
+    // that null into the update would overwrite a real ciphertext with nothing
+    // if a caller ever failed to read the columns first, which is the same
+    // silent destruction this change exists to stop, arriving by another route.
+    const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdate?.values).not.toHaveProperty("kem_secret_wrapped");
+    expect(metaUpdate?.values).toHaveProperty("sig_secret_wrapped", "sig-secret-v1");
   });
 
   it("migrates every row BEFORE the meta write, never after", async () => {
