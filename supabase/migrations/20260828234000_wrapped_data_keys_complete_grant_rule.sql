@@ -57,6 +57,53 @@
 -- must have applied first. Assertion 0 says so in one line rather than letting
 -- the failure arrive as a bare undefined column.
 --
+-- HOW THE ASSERTIONS BELOW DECIDE WHAT A PRESENCE RULE MAY CONTAIN. By
+-- allowlist, not by denylist. Decided on DEV-0400, raised by the reviewer of
+-- this file. The first version of the assertion listed what a definition may
+-- NOT contain: length, substring, position, starts_with, encode, decode,
+-- similar, left, right, and the tilde the regex operators render as. A
+-- denylist over SQL text leaks, and five forms walked through that one.
+-- wrapped_cak <> '' is the sharpest, because it is exactly equivalent to
+-- length(wrapped_cak) > 0, which WAS caught: the forbidden thing and the
+-- permitted thing were the same rule written two ways. The others were strpos
+-- and split_part, md5 and any other hash, regexp_like in function form, and
+-- the ^@ starts-with operator.
+--
+-- So the test is inverted. A presence rule may contain the column names of
+-- this table and the words IS, NOT, NULL, AND, OR, plus parentheses and
+-- whitespace, and nothing else. Strip all of that from the definition and what
+-- remains must be empty. Anything that is not a pure presence test fails by
+-- default rather than by having been thought of.
+--
+-- TWO CONSEQUENCES OF THE ALLOWLIST, both deliberate. First, num_nonnulls(a,
+-- b) >= 1 is now refused even though it is genuinely contents blind, because
+-- admitting it means admitting a function call, a comparison operator and an
+-- integer literal, which is exactly the door wrapped_cak <> '' walks through.
+-- A future presence rule that truly needs that form widens this assertion in
+-- its own migration and says why. Second, a column whose name is not a plain
+-- lowercase identifier is left out of the allowlist, so a constraint
+-- referencing one fails here. Failing closed on an unusual name is the right
+-- default for a rule guarding key material.
+--
+-- WHAT THE SCOPING DELIBERATELY LEAVES OUT, stated here rather than left
+-- implicit. The property test examines only check constraints that reference
+-- coadmin_keyring_ciphertext or wrapped_cak.
+-- wrapped_data_keys_grant_sig_nonempty, CHECK (length(grant_sig) > 0), is
+-- therefore out of scope and survives. That is correct rather than an
+-- oversight: grant_sig is a signature over a grant, not opaque key material,
+-- and its length reveals nothing about a key. Measured while writing this: run
+-- through the allowlist it WOULD be refused, so the scoping is load bearing.
+--
+-- ONE ORDERING CAVEAT, recorded rather than fixed. Once this migration has
+-- applied, 20260828183000 is no longer safely re-runnable ON ITS OWN: its own
+-- assertion excludes wrapped_data_keys_carries_key_material BY NAME, so with
+-- wrapped_data_keys_carries_a_complete_grant present it would raise. In order
+-- apply is fine and a clean replay from an empty database is fine, because
+-- that file always runs first. Only an out of order or repair re-run of it
+-- alone is affected. Nothing in this file can fix that, because a DO block
+-- runs once, in timestamp order, and cannot police a migration that runs after
+-- it. The standing check on the merge path (DEV-0395) is where that belongs.
+--
 -- TO UNDO. Drop wrapped_data_keys_carries_a_complete_grant and add
 -- wrapped_data_keys_carries_key_material back with its original definition,
 -- CHECK (num_nonnulls(wrapped_ciphertext, wrapped_cak) >= 1). Nothing here
@@ -75,6 +122,15 @@
 -- 23514, an empty grant was refused with 23514, and a v2 row, a complete v3 row
 -- and a row carrying both shapes were all accepted. The table, both parent
 -- tables and the schema were re-read afterwards and were unchanged.
+--
+-- THE ALLOWLIST ITSELF WAS PROVEN THE SAME WAY, read only on the development
+-- project: the exact stripping expression used below was run over eleven
+-- candidate definitions. The rule this migration adds strips to the empty
+-- string and is accepted. All five forms that leaked through the old denylist
+-- leave a residue and are refused: <> ''::text, strpos, split_part, md5,
+-- regexp_like and ^@. length and the regex operator, which the old denylist
+-- did catch, are still refused. num_nonnulls and the grant_sig length rule are
+-- refused too, which is why both are written up above.
 
 DO $do$
 BEGIN
@@ -107,16 +163,39 @@ COMMENT ON CONSTRAINT wrapped_data_keys_carries_a_complete_grant ON public.wrapp
 -- Prove it, rather than assume the statements above did what they say. The
 -- checks below read the constraint DEFINITION, not its name, because a name
 -- proves nothing about what a constraint actually enforces. They test a
--- PROPERTY of the definition (it inspects no contents) rather than comparing it
--- to a fixed string, because pinning the exact text would make this file fail
--- on a replay after any later legitimate change to the same presence rule.
+-- PROPERTY of the definition (it contains nothing but a null presence test)
+-- rather than comparing it to a fixed string, because pinning the exact text
+-- would make this file fail on a replay after any later legitimate change to
+-- the same presence rule. The property is decided by an ALLOWLIST of what a
+-- presence rule may contain, never by a denylist of what it may not.
 DO $do$
 DECLARE
   opaque_cols text[] := ARRAY['coadmin_keyring_ciphertext', 'wrapped_cak'];
-  inspects_contents text := '(length|substring|position|starts_with|encode|decode|similar|left|right)';
+  -- Everything a pure null presence rule is allowed to contain, beyond the
+  -- column names of this table, the parentheses and the whitespace.
+  presence_words text[] := ARRAY['check', 'is', 'not', 'null', 'and', 'or'];
+  allowed text;
   thedef text;
+  residue text;
   offenders text;
+  r record;
 BEGIN
+  -- Build the allowlist from the LIVE column list, so it never has to be kept
+  -- in step with the table by hand. A column whose name is not a plain
+  -- lowercase identifier is deliberately left out, so a constraint that
+  -- references one fails this test rather than silently widening it.
+  SELECT string_agg(w, '|' ORDER BY length(w) DESC, w) INTO allowed
+  FROM (
+    SELECT attname AS w
+      FROM pg_attribute
+     WHERE attrelid = 'public.wrapped_data_keys'::regclass
+       AND attnum > 0
+       AND NOT attisdropped
+       AND attname ~ '^[a-z_][a-z0-9_]*$'
+    UNION ALL
+    SELECT unnest(presence_words)
+  ) words;
+
   -- 1. The superseded constraint is gone, so the table carries one presence
   --    rule and not two.
   IF EXISTS (
@@ -151,31 +230,52 @@ BEGIN
       'the presence rule does not read all three key material columns: %', thedef;
   END IF;
 
-  -- 4. It is a null presence rule and nothing more. This is the check that
+  -- 4. It is a null presence rule and NOTHING else. Strip the words such a rule
+  --    is allowed to contain, then the parentheses and the whitespace: what is
+  --    left must be empty. A function call, a comparison operator or a literal
+  --    all survive the stripping and fail here, which is what the allowlist
+  --    buys over the denylist it replaced. This is also the check that
   --    20260828183000 could not make, because it excluded its own constraint by
   --    NAME: a rule carrying a length or shape test on opaque ciphertext would
   --    have passed there under the right name, and fails here.
-  IF thedef ~* inspects_contents OR thedef LIKE '%~%' THEN
+  residue := regexp_replace(
+               regexp_replace(thedef, '\m(' || allowed || ')\M', ' ', 'gi'),
+               '[()[:space:]]', '', 'g');
+  IF residue <> '' THEN
     RAISE EXCEPTION
-      'the presence rule inspects the contents of an opaque column: %', thedef;
+      'the presence rule is not a pure null presence test, it also contains "%": %',
+      residue, thedef;
   END IF;
 
-  -- 5. No OTHER check constraint on this table inspects the contents of the
-  --    opaque grant columns. Same property test, applied to every constraint,
-  --    so a future one cannot hide behind a name this file happens to know.
-  SELECT string_agg(conname, ', ' ORDER BY conname) INTO offenders
-  FROM pg_constraint
-  WHERE conrelid = 'public.wrapped_data_keys'::regclass
-    AND contype = 'c'
-    AND EXISTS (
-      SELECT 1 FROM unnest(opaque_cols) AS c
-       WHERE pg_get_constraintdef(oid) LIKE '%' || c || '%'
-    )
-    AND (pg_get_constraintdef(oid) ~* inspects_contents
-      OR pg_get_constraintdef(oid) LIKE '%~%');
+  -- 5. No OTHER check constraint on this table does anything but test presence
+  --    on the opaque grant columns. Same allowlist, applied to every check
+  --    constraint that references one of them, so a future one cannot hide
+  --    behind a name this file happens to know. Scoped on purpose:
+  --    wrapped_data_keys_grant_sig_nonempty references none of these columns
+  --    and is out of scope, because grant_sig is a signature rather than opaque
+  --    key material and its length reveals nothing about a key.
+  offenders := NULL;
+  FOR r IN
+    SELECT conname, pg_get_constraintdef(oid) AS def
+      FROM pg_constraint
+     WHERE conrelid = 'public.wrapped_data_keys'::regclass
+       AND contype = 'c'
+       AND EXISTS (
+         SELECT 1 FROM unnest(opaque_cols) AS c
+          WHERE pg_get_constraintdef(oid) LIKE '%' || c || '%'
+       )
+     ORDER BY conname
+  LOOP
+    residue := regexp_replace(
+                 regexp_replace(r.def, '\m(' || allowed || ')\M', ' ', 'gi'),
+                 '[()[:space:]]', '', 'g');
+    IF residue <> '' THEN
+      offenders := concat_ws(', ', offenders, r.conname || ' (' || residue || ')');
+    END IF;
+  END LOOP;
   IF offenders IS NOT NULL THEN
     RAISE EXCEPTION
-      'a check constraint now inspects the contents of the opaque grant columns: %', offenders;
+      'a check constraint on the opaque grant columns is not a pure null presence test: %', offenders;
   END IF;
 
   -- 6. No check constraint ties row shape to the algorithm string, in either
