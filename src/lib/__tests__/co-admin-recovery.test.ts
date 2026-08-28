@@ -20,6 +20,11 @@
  * wrapped_data_keys returns nothing here and the rows arrive from the delete.
  * A fixture that let the owner read that table would let a test pass over code
  * that does nothing in production, which is exactly what happened before.
+ *
+ * The same is true of the name lookup. get_coadmin_emails returns a row only
+ * while a workspace_admins row still links the caller to that user, so the
+ * fixtures treat it as answerable before the deletes and worthless after them,
+ * and one test asserts the order rather than trusting the code to keep it.
  */
 
 import { describe, it, expect } from "vitest";
@@ -32,10 +37,12 @@ import {
 type QueryResult = { data: unknown[] | null; error: unknown };
 
 interface RecordedCall {
+  /** table name for a select or delete, rpc function name for an rpc */
   table: string;
-  op: "select" | "delete";
+  op: "select" | "delete" | "rpc";
   columns?: string;
   filters: Array<{ column: string; value: unknown }>;
+  args?: Record<string, unknown>;
 }
 
 interface Chain {
@@ -54,13 +61,21 @@ interface FakeOptions {
   selectResult?: Record<string, QueryResult>;
   /** what a delete on each table returns */
   deleteResult?: Record<string, QueryResult>;
+  /** user id to email, as get_coadmin_emails would answer it */
+  emails?: Record<string, string>;
+  /** give the client no rpc at all, the way an older caller would */
+  withoutRpc?: boolean;
+  /** make the rpc return an error instead of rows */
+  rpcError?: unknown;
+  /** make the rpc throw rather than resolve */
+  rpcThrows?: boolean;
 }
 
 /**
- * A fake supabase client that records what was asked of it. It reproduces only
- * the shapes this module uses: from().select().eq(), from().delete().eq() and
- * from().delete().eq().select(), the last being a delete that asks for the
- * rows it removed.
+ * A fake supabase client that records what was asked of it, in order. It
+ * reproduces only the shapes this module uses: from().select().eq(),
+ * from().delete().eq(), from().delete().eq().select() (a delete that asks for
+ * the rows it removed) and rpc().
  */
 function makeFakeClient(options: FakeOptions = {}) {
   const calls: RecordedCall[] = [];
@@ -103,7 +118,7 @@ function makeFakeClient(options: FakeOptions = {}) {
     return chain;
   }
 
-  const client = {
+  const client: Record<string, unknown> = {
     from(table: string) {
       return {
         select(columns: string) {
@@ -119,6 +134,19 @@ function makeFakeClient(options: FakeOptions = {}) {
       };
     },
   };
+
+  if (!options.withoutRpc) {
+    client.rpc = async (fn: string, args: Record<string, unknown>) => {
+      calls.push({ table: fn, op: "rpc", filters: [], args });
+      if (options.rpcThrows) throw new Error("network");
+      if (options.rpcError) return { data: null, error: options.rpcError };
+      const ids = (args.user_ids ?? []) as string[];
+      const rows = ids
+        .filter((id) => options.emails?.[id])
+        .map((id) => ({ user_id: id, email: options.emails?.[id] }));
+      return { data: rows, error: null };
+    };
+  }
 
   return { client: client as CoAdminRecoveryClient, calls };
 }
@@ -137,6 +165,7 @@ const TWO_GRANTS: FakeOptions = {
       error: null,
     },
   },
+  emails: { "admin-1": "ana@example.com", "admin-2": "ben@example.com" },
 };
 
 function invalidate(
@@ -151,7 +180,7 @@ function invalidate(
 }
 
 describe("a recovery invalidates every co-admin grant", () => {
-  it("removes the wrapped keys AND the admin list, and tells the owner how many lost access", async () => {
+  it("removes the wrapped keys AND the admin list, and tells the owner who lost access", async () => {
     const { client, calls } = makeFakeClient(TWO_GRANTS);
 
     const result = await invalidate(client);
@@ -175,13 +204,34 @@ describe("a recovery invalidates every co-admin grant", () => {
       value: "owner-1",
     });
 
-    // Half two: the owner is told, in words, with the number in them. The two
-    // is the number the DELETE gave back, and the fixture makes a select on
-    // that table return nothing, so it cannot have come from a read.
-    expect(result).toEqual({ status: "invalidated", grantsInvalidated: 2 });
+    // Half two: the owner is told, in words, and the words name the people. The
+    // two ids are the ones the DELETE gave back, and the fixture makes a select
+    // on that table return nothing, so they cannot have come from a read.
+    expect(result).toEqual({
+      status: "invalidated",
+      grantsInvalidated: 2,
+      people: ["ana@example.com", "ben@example.com"],
+    });
     const message = coAdminInvalidationMessage(result);
-    expect(message).toContain("2 people");
+    expect(message).toContain("ana@example.com and ben@example.com");
     expect(message).toContain("Emergency access was reset");
+  });
+
+  it("looks the names up BEFORE it deletes the rows that make the lookup possible", async () => {
+    const { client, calls } = makeFakeClient(TWO_GRANTS);
+
+    await invalidate(client);
+
+    // get_coadmin_emails answers only while a workspace_admins row still links
+    // the caller to that user. Called after the cleanup it returns an empty set
+    // with no error, so the owner would be asked to re-grant access to a list
+    // we had just made unresolvable. The order is the whole property.
+    const rpcAt = calls.findIndex((c) => c.op === "rpc" && c.table === "get_coadmin_emails");
+    const firstDeleteAt = calls.findIndex((c) => c.op === "delete");
+    expect(rpcAt).toBeGreaterThanOrEqual(0);
+    expect(firstDeleteAt).toBeGreaterThanOrEqual(0);
+    expect(rpcAt).toBeLessThan(firstDeleteAt);
+    expect(calls[rpcAt].args).toEqual({ user_ids: ["admin-1", "admin-2"] });
   });
 
   it("never selects wrapped_data_keys, because the owner is not permitted to read it", async () => {
@@ -195,18 +245,61 @@ describe("a recovery invalidates every co-admin grant", () => {
     expect(calls.some((c) => c.table === "wrapped_data_keys" && c.op === "select")).toBe(false);
   });
 
-  it("says one person, not one people", async () => {
+  it("names one person with the singular verb", async () => {
     const { client } = makeFakeClient({
       rows: { workspace_admins: [{ admin_user_id: "admin-1" }] },
       selectResult: { wrapped_data_keys: { data: [], error: null } },
       deleteResult: {
         wrapped_data_keys: { data: [{ recipient_user_id: "admin-1" }], error: null },
       },
+      emails: { "admin-1": "ana@example.com" },
     });
 
     const message = coAdminInvalidationMessage(await invalidate(client));
 
-    expect(message).toContain("1 person");
+    expect(message).toContain("ana@example.com no longer has it");
+  });
+
+  it("falls back to the short id when the client cannot resolve names at all", async () => {
+    const { client, calls } = makeFakeClient({
+      ...TWO_GRANTS,
+      rows: { workspace_admins: [{ admin_user_id: "abcdefgh-1111-2222" }] },
+      deleteResult: {
+        wrapped_data_keys: { data: [{ recipient_user_id: "abcdefgh-1111-2222" }], error: null },
+      },
+      withoutRpc: true,
+    });
+
+    const result = await invalidate(client);
+
+    // Not being able to pretty-print a name is not a reason to leave dead key
+    // material in place, and the short id is what Settings shows anyway.
+    expect(result.status).toBe("invalidated");
+    expect(calls.some((c) => c.op === "rpc")).toBe(false);
+    expect(coAdminInvalidationMessage(result)).toContain("abcdefgh…");
+  });
+
+  it("still cleans up, and still names people, when the name lookup errors", async () => {
+    const { client } = makeFakeClient({
+      ...TWO_GRANTS,
+      rpcError: { message: "permission denied" },
+    });
+
+    const result = await invalidate(client);
+
+    expect(result.status).toBe("invalidated");
+    expect(coAdminInvalidationMessage(result)).toContain("admin-1…");
+  });
+
+  it("still cleans up when the name lookup throws", async () => {
+    const { client } = makeFakeClient({ ...TWO_GRANTS, rpcThrows: true });
+
+    const result = await invalidate(client);
+
+    expect(result.status).toBe("invalidated");
+    if (result.status === "invalidated") {
+      expect(result.grantsInvalidated).toBe(2);
+    }
   });
 
   it("deletes nothing and says nothing when the owner never granted access", async () => {
@@ -226,6 +319,8 @@ describe("a recovery invalidates every co-admin grant", () => {
 
     expect(result).toEqual({ status: "none" });
     expect(calls.some((c) => c.op === "delete")).toBe(false);
+    // Nobody to name, so nothing to look up.
+    expect(calls.some((c) => c.op === "rpc")).toBe(false);
     expect(coAdminInvalidationMessage(result)).toBeNull();
   });
 
@@ -244,11 +339,15 @@ describe("a recovery invalidates every co-admin grant", () => {
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
       expect(result.reason).toContain("2 people are still listed");
+      // The owner has to remove these two by hand, so they are named.
+      expect(result.people).toEqual(["ana@example.com", "ben@example.com"]);
     }
     // The admin list survives on purpose: it is the only record of who the
     // owner now has to remove by hand, and the message asks them to.
     expect(calls.some((c) => c.table === "workspace_admins" && c.op === "delete")).toBe(false);
-    expect(coAdminInvalidationMessage(result)).toContain("Settings");
+    const message = coAdminInvalidationMessage(result);
+    expect(message).toContain("Settings");
+    expect(message).toContain("ana@example.com");
   });
 
   it("does not throw when the wrapped-key delete fails, and tells the owner what to do by hand", async () => {
@@ -287,6 +386,7 @@ describe("a recovery invalidates every co-admin grant", () => {
     // an owner who knows the dead key material is gone and one who does not.
     if (result.status === "failed") {
       expect(result.reason).toContain("wrapped keys were removed");
+      expect(result.people).toEqual(["ana@example.com", "ben@example.com"]);
     }
   });
 
@@ -321,5 +421,10 @@ describe("a recovery invalidates every co-admin grant", () => {
     // deleting on the strength of it would be acting blind.
     expect(result.status).toBe("failed");
     expect(calls.some((c) => c.op === "delete")).toBe(false);
+    // And nothing is named, because we do not know who. An empty list is the
+    // honest answer, not a guess dressed up as one.
+    if (result.status === "failed") {
+      expect(result.people).toEqual([]);
+    }
   });
 });
