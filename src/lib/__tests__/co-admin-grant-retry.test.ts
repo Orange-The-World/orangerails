@@ -5,7 +5,7 @@
  * then a workspace_admins row (step g). If the first insert lands and the
  * second one fails, the envelope row used to survive with nothing pointing
  * at it. Before the unique constraint on (data_key_id, recipient_user_id)
- * added for PR #973 / DL-2261, a bare retry inserted a SECOND envelope row
+ * added for DL-2261, a bare retry inserted a SECOND envelope row
  * for the same recipient, which broke the app's maybeSingle() read
  * permanently and silently (DEV-0412). After that constraint, a bare retry
  * instead failed forever on a raw unique-violation, because the stranded
