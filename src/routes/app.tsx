@@ -4,6 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
 import type { GrantSupabaseLike } from "@/context/VaultContext";
+import {
+  clearCoAdminListEntry,
+  CoAdminRevocationIncompleteError,
+  type CoAdminSupabaseLike,
+} from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
@@ -193,6 +198,12 @@ function AppHome() {
   // so the dialog renders branded instead of "orangerails.com says…".
   const [pendingDeleteConn, setPendingDeleteConn] = useState<Connection | null>(null);
   const [pendingRevokeAdmin, setPendingRevokeAdmin] = useState<CoAdminRow | null>(null);
+  // Set when a revocation stopped part way and left the list entry behind.
+  // keyRemoved says which half landed, which changes what the owner is told.
+  const [pendingListOnlyRemoval, setPendingListOnlyRemoval] = useState<{
+    row: CoAdminRow;
+    keyRemoved: boolean;
+  } | null>(null);
 
   // Security (change vault password) state
   const [securityOpen, setSecurityOpen] = useState(false);
@@ -835,6 +846,53 @@ function AppHome() {
       setNotice("Co-admin revoked.");
     } catch (e) {
       setErr(formatError(e));
+      // A revocation that stopped part way leaves the list entry on purpose,
+      // because it is the only record of who may still hold access. Offer the
+      // one action that can clear it, or the owner is stuck: revoking again
+      // finds no key row and refuses every time.
+      if (e instanceof CoAdminRevocationIncompleteError) {
+        // Close the revoke dialog in the SAME state update that opens the
+        // list-only one. ConfirmDialog closes itself from a .finally that runs
+        // after this function resolves, which is a later React commit, so
+        // leaving the close to that would render one commit with two modal
+        // dialogs mounted at once.
+        setPendingRevokeAdmin(null);
+        setPendingListOnlyRemoval({ row: a, keyRemoved: e.keyRemoved });
+      }
+    }
+  }
+
+  /**
+   * Clears the list entry and nothing else. This does not remove access.
+   *
+   * WHY IT LOGS. The list row is the only record of who may still hold a
+   * stored key, so removing it has to leave a record somewhere else, or the
+   * owner ends up with no list row, no key row they can read, and nothing at
+   * all to say this happened. keyRemoved is carried into that record because
+   * it is the difference between "the stored key was known to be gone" and
+   * "nobody established whether it is still there".
+   */
+  async function confirmClearCoAdminListEntry(a: CoAdminRow, keyRemoved: boolean) {
+    if (!userId) {
+      setErr("Missing user , try reloading.");
+      return;
+    }
+    try {
+      await clearCoAdminListEntry({
+        adminUserId: a.admin_user_id,
+        ownerUserId: userId,
+        supabase: supabase as unknown as CoAdminSupabaseLike,
+      });
+      // Not coadmin_revoked: this removed a record, not an access grant.
+      void logSecurityEvent(supabase, userId, "coadmin_list_entry_cleared", {
+        admin_user_id: a.admin_user_id,
+        key_removed: keyRemoved,
+      });
+      setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
+      setErr("");
+      setNotice("Removed from your list. This did not remove their access.");
+    } catch (e) {
+      setErr(formatError(e));
     }
   }
 
@@ -1269,6 +1327,29 @@ function AppHome() {
         destructive
         onConfirm={async () => {
           if (pendingRevokeAdmin) await confirmRevokeCoAdmin(pendingRevokeAdmin);
+        }}
+      />
+
+      <ConfirmDialog
+        open={pendingListOnlyRemoval !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingListOnlyRemoval(null);
+        }}
+        title="Remove from your list?"
+        description={
+          pendingListOnlyRemoval?.keyRemoved
+            ? "Their stored key was already removed, so this only tidies your list. Keys already loaded in a tab they left open keep working until that tab is closed."
+            : "This removes them from your list and nothing else. It does not remove their access, and it is not known here whether their stored key is still there. Only do this if you know the key is already gone, for example after a vault recovery."
+        }
+        confirmLabel="Remove from list"
+        destructive
+        onConfirm={async () => {
+          if (pendingListOnlyRemoval) {
+            await confirmClearCoAdminListEntry(
+              pendingListOnlyRemoval.row,
+              pendingListOnlyRemoval.keyRemoved,
+            );
+          }
         }}
       />
 
