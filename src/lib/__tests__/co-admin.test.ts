@@ -20,7 +20,7 @@
 import { describe, it, expect } from "vitest";
 import { generateHybridKemKeyPair } from "../pqc";
 import { importAesKey } from "../vault";
-import { wrapBlob64, unwrapBlob64 } from "../co-admin";
+import { wrapBlob64, unwrapBlob64, upsertWrappedDataKeyEnvelope } from "../co-admin";
 
 // ------------------------------------------------------------------
 // Helpers
@@ -159,5 +159,221 @@ describe("co-admin: revocation (store-layer)", () => {
     // NOTE: If consumeBlob had been called before revoke, the in-memory
     // CryptoKey objects would still work until the tab closes. This is the
     // documented MVP cached-subkey-in-tab limitation.
+  });
+});
+
+// ------------------------------------------------------------------
+// 6. upsertWrappedDataKeyEnvelope (DEV-0416): a re-grant after a partial
+//    grant or revoke replaces a stranded envelope instead of failing.
+// ------------------------------------------------------------------
+
+describe("co-admin: upsertWrappedDataKeyEnvelope replaces a stranded envelope", () => {
+  /**
+   * A minimal in-memory stand-in for the wrapped_data_keys table, keyed by
+   * (data_key_id, recipient_user_id) the same way the real unique
+   * constraint from PR #973 is. insert() reports a Postgres-shaped
+   * unique_violation (code 23505) the same way Supabase would, so this
+   * exercises the exact conflict path the fix is for without a live
+   * database.
+   */
+  function makeWrappedKeysStore() {
+    const rows = new Map<string, Record<string, unknown>>();
+
+    function keyOf(dataKeyId: unknown, recipientUserId: unknown): string {
+      return `${String(dataKeyId)}|${String(recipientUserId)}`;
+    }
+
+    const supabase = {
+      from(table: string) {
+        if (table !== "wrapped_data_keys") throw new Error(`unexpected table: ${table}`);
+        return {
+          insert(row: Record<string, unknown>) {
+            const key = keyOf(row.data_key_id, row.recipient_user_id);
+            if (rows.has(key)) {
+              return Promise.resolve({
+                data: null,
+                error: {
+                  code: "23505",
+                  message:
+                    'duplicate key value violates unique constraint "wrapped_data_keys_data_key_id_recipient_user_id_key"',
+                },
+              });
+            }
+            rows.set(key, { ...row });
+            return Promise.resolve({ data: [{ ...row }], error: null });
+          },
+          update(values: Record<string, unknown>) {
+            const filters: Record<string, unknown> = {};
+            const builder = {
+              eq(col: string, val: string) {
+                filters[col] = val;
+                return builder;
+              },
+              select() {
+                const key = keyOf(filters.data_key_id, filters.recipient_user_id);
+                if (!rows.has(key)) return Promise.resolve({ data: [], error: null });
+                const existing = rows.get(key) ?? {};
+                rows.set(key, { ...existing, ...values });
+                return Promise.resolve({
+                  data: [{ recipient_user_id: filters.recipient_user_id }],
+                  error: null,
+                });
+              },
+            };
+            return builder;
+          },
+        };
+      },
+    };
+
+    return {
+      supabase: supabase as unknown as Parameters<typeof upsertWrappedDataKeyEnvelope>[0],
+      rows,
+      keyOf,
+    };
+  }
+
+  it("inserts a fresh envelope when none exists yet", async () => {
+    const { supabase, rows, keyOf } = makeWrappedKeysStore();
+
+    await upsertWrappedDataKeyEnvelope(supabase, {
+      dataKeyId: "workspace-1",
+      recipientUserId: "admin-1",
+      wrappedCiphertextB64: "first-ciphertext",
+      algorithm: "hybrid-x25519-mlkem768-blob64",
+      grantSig: "first-signature",
+    });
+
+    const row = rows.get(keyOf("workspace-1", "admin-1"));
+    expect(row?.wrapped_ciphertext).toBe("first-ciphertext");
+    expect(row?.grant_sig).toBe("first-signature");
+  });
+
+  it("replaces a stranded envelope for the same recipient with the fresh ciphertext and signature, never the old ones", async () => {
+    const { supabase, rows, keyOf } = makeWrappedKeysStore();
+
+    // Simulates the envelope left behind by an earlier partial grant or
+    // revoke: the row exists with no caller left holding a reference to it.
+    await upsertWrappedDataKeyEnvelope(supabase, {
+      dataKeyId: "workspace-1",
+      recipientUserId: "admin-1",
+      wrappedCiphertextB64: "stale-ciphertext",
+      algorithm: "hybrid-x25519-mlkem768-blob64",
+      grantSig: "stale-signature",
+    });
+
+    // Re-grant to the same person: must succeed, and must not fail with the
+    // raw unique-violation the constraint from PR #973 would otherwise
+    // surface.
+    await expect(
+      upsertWrappedDataKeyEnvelope(supabase, {
+        dataKeyId: "workspace-1",
+        recipientUserId: "admin-1",
+        wrappedCiphertextB64: "fresh-ciphertext",
+        algorithm: "hybrid-x25519-mlkem768-blob64",
+        grantSig: "fresh-signature",
+      }),
+    ).resolves.toBeUndefined();
+
+    const row = rows.get(keyOf("workspace-1", "admin-1"));
+    // Exactly one row for this pair, holding the NEW envelope. The old
+    // ciphertext and signature must not survive: a signature made for the
+    // old ciphertext would not verify against the new one anyway.
+    expect(rows.size).toBe(1);
+    expect(row?.wrapped_ciphertext).toBe("fresh-ciphertext");
+    expect(row?.grant_sig).toBe("fresh-signature");
+  });
+
+  it("does not disturb a different recipient's envelope for the same workspace key", async () => {
+    const { supabase, rows, keyOf } = makeWrappedKeysStore();
+
+    await upsertWrappedDataKeyEnvelope(supabase, {
+      dataKeyId: "workspace-1",
+      recipientUserId: "admin-1",
+      wrappedCiphertextB64: "admin-1-ciphertext",
+      algorithm: "hybrid-x25519-mlkem768-blob64",
+      grantSig: "admin-1-signature",
+    });
+    await upsertWrappedDataKeyEnvelope(supabase, {
+      dataKeyId: "workspace-1",
+      recipientUserId: "admin-2",
+      wrappedCiphertextB64: "admin-2-ciphertext",
+      algorithm: "hybrid-x25519-mlkem768-blob64",
+      grantSig: "admin-2-signature",
+    });
+
+    expect(rows.size).toBe(2);
+    expect(rows.get(keyOf("workspace-1", "admin-1"))?.wrapped_ciphertext).toBe("admin-1-ciphertext");
+    expect(rows.get(keyOf("workspace-1", "admin-2"))?.wrapped_ciphertext).toBe("admin-2-ciphertext");
+  });
+
+  it("propagates a non-conflict insert error via its own message, not a stringified error object", async () => {
+    const supabase = {
+      from() {
+        return {
+          insert() {
+            return Promise.resolve({
+              data: null,
+              error: { code: "42501", message: "permission denied for table wrapped_data_keys" },
+            });
+          },
+        };
+      },
+    } as unknown as Parameters<typeof upsertWrappedDataKeyEnvelope>[0];
+
+    await expect(
+      upsertWrappedDataKeyEnvelope(supabase, {
+        dataKeyId: "workspace-1",
+        recipientUserId: "admin-1",
+        wrappedCiphertextB64: "ciphertext",
+        algorithm: "hybrid-x25519-mlkem768-blob64",
+        grantSig: "signature",
+      }),
+    ).rejects.toThrow(/permission denied for table wrapped_data_keys/);
+  });
+
+  it("surfaces a plain-English error when a stranded envelope exists but cannot be replaced", async () => {
+    const supabase = {
+      from() {
+        return {
+          insert() {
+            return Promise.resolve({
+              data: null,
+              error: {
+                code: "23505",
+                message:
+                  'duplicate key value violates unique constraint "wrapped_data_keys_data_key_id_recipient_user_id_key"',
+              },
+            });
+          },
+          update() {
+            const builder = {
+              eq() {
+                return builder;
+              },
+              select() {
+                return Promise.resolve({
+                  data: null,
+                  error: { message: "permission denied for table wrapped_data_keys" },
+                });
+              },
+            };
+            return builder;
+          },
+        };
+      },
+    } as unknown as Parameters<typeof upsertWrappedDataKeyEnvelope>[0];
+
+    // The leading sentence must be plain English, not the raw constraint
+    // name from the unique-violation the insert above hit.
+    await expect(
+      upsertWrappedDataKeyEnvelope(supabase, {
+        dataKeyId: "workspace-1",
+        recipientUserId: "admin-1",
+        wrappedCiphertextB64: "ciphertext",
+        algorithm: "hybrid-x25519-mlkem768-blob64",
+        grantSig: "signature",
+      }),
+    ).rejects.toThrow(/already had a stored key from an earlier attempt, and replacing it failed/);
   });
 });
