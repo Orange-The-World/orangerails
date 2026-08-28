@@ -26,12 +26,31 @@
 --   2 no_content_inspection
 --     No check constraint that mentions coadmin_keyring_ciphertext or
 --     wrapped_cak inspects their CONTENTS. Property test on the definition, not
---     an allow list of names, so a future constraint cannot hide behind a name
---     this file happens to know. The predicate is lifted verbatim from
---     20260828234000 rather than reinvented. The grant ciphertext columns are
+--     an allow list of constraint NAMES, so a future constraint cannot hide
+--     behind a name this file happens to know. The grant ciphertext columns are
 --     opaque, never parsed and never length pinned, because pinning a
 --     ciphertext length is what made the previous co-admin construction
 --     impossible to extend.
+--
+--     THIS IS AN ALLOW LIST OF SHAPES, NOT A DENY LIST OF FUNCTIONS, and that
+--     is deliberate. 20260828234000 detects content inspection with a list of
+--     function names plus a test for the tilde operator. That is sound inside a
+--     migration guarding a definition it wrote itself in the same file. It is
+--     not sound in a standing check, whose whole job is to catch a constraint
+--     nobody has seen yet: get_byte(coadmin_keyring_ciphertext, 0) = 1,
+--     md5(coadmin_keyring_ciphertext) <> '', and a bare comparison such as
+--     wrapped_cak <> '\x00'::bytea all read the contents of an opaque column
+--     and all pass that list. Every one of those was reproduced on the
+--     development project in an aborted transaction. Extending the list would
+--     leave the next unlisted function open, so instead: these columns may
+--     appear ONLY as IS NULL, IS NOT NULL, or an argument to num_nonnulls.
+--     Every permitted form is stripped out of the definition and anything that
+--     still names the column is reported. A function call, a comparison, a cast
+--     or an operator all survive that stripping, whether or not anyone
+--     predicted them. The cost is the other direction of error: a legitimate
+--     future rule using some other null-safe construct is refused until someone
+--     widens this list on purpose. That is the direction this check should err
+--     in.
 --
 --   3 no_algorithm_coupling
 --     No check constraint on this table references the algorithm column, in
@@ -87,10 +106,21 @@ v3 AS (SELECT count(*)::int AS n FROM information_schema.columns
 material AS (SELECT conname, def, norm FROM cons
               WHERE def LIKE '%wrapped_ciphertext%' OR def LIKE '%wrapped_cak%'
                  OR def LIKE '%coadmin_keyring_ciphertext%'),
-inspectors AS (SELECT string_agg(conname, ', ' ORDER BY conname) AS names FROM cons
-                WHERE (def LIKE '%coadmin_keyring_ciphertext%' OR def LIKE '%wrapped_cak%')
-                  AND (def ~* '(length|substring|position|starts_with|encode|decode|similar|left|right)'
-                       OR def LIKE '%~%')),
+-- Every check constraint that names an opaque grant column, with each
+-- PERMITTED mention of that column stripped out. What is left is the residual:
+-- if it still names the column, the constraint is doing something to that
+-- column other than testing whether it is null.
+opaque AS (
+  SELECT conname, def,
+         regexp_replace(
+           regexp_replace(
+             regexp_replace(norm, 'num_nonnulls [a-z0-9_, ]*', ' ', 'gi'),
+             '\m(coadmin_keyring_ciphertext|wrapped_cak)\M IS NOT NULL', ' ', 'gi'),
+           '\m(coadmin_keyring_ciphertext|wrapped_cak)\M IS NULL', ' ', 'gi') AS residual
+    FROM cons
+   WHERE norm ~* '\m(coadmin_keyring_ciphertext|wrapped_cak)\M'),
+inspectors AS (SELECT string_agg(conname, ', ' ORDER BY conname) AS names FROM opaque
+                WHERE residual ~* '\m(coadmin_keyring_ciphertext|wrapped_cak)\M'),
 algo AS (SELECT string_agg(conname, ', ' ORDER BY conname) AS names FROM cons
           WHERE def LIKE '%algorithm%')
 SELECT 1 AS ord, 'table_present' AS name,
@@ -104,8 +134,11 @@ SELECT 2, 'no_content_inspection',
             WHEN (SELECT names FROM inspectors) IS NULL THEN 'PASS' ELSE 'FAIL' END,
        CASE WHEN (SELECT rel FROM t) IS NULL THEN 'the table did not resolve, nothing was inspected'
             WHEN (SELECT names FROM inspectors) IS NULL
-            THEN 'no check constraint reads inside coadmin_keyring_ciphertext or wrapped_cak'
-            ELSE 'check constraint(s) inspecting the contents of an opaque column: ' || (SELECT names FROM inspectors) END
+            THEN (SELECT count(*) FROM opaque)::text || ' check constraint(s) name an opaque grant column, and every one names it only as a null presence test'
+            ELSE 'check constraint(s) doing something to an opaque grant column other than testing whether it is null: ' || (SELECT names FROM inspectors)
+                 || '. Permitted forms are IS NULL, IS NOT NULL and num_nonnulls, nothing else. Residual(s): '
+                 || (SELECT string_agg(conname || ' => ' || residual, ' ;; ' ORDER BY conname) FROM opaque
+                      WHERE residual ~* '\m(coadmin_keyring_ciphertext|wrapped_cak)\M') END
 UNION ALL
 SELECT 3, 'no_algorithm_coupling',
        CASE WHEN (SELECT rel FROM t) IS NULL THEN 'UNKNOWN'
