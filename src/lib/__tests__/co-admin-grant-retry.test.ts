@@ -82,7 +82,7 @@ function makeFakeClient(opts: FakeOptions = {}) {
                 r.data_key_id === row.data_key_id && r.recipient_user_id === row.recipient_user_id,
             );
             if (dup) {
-              // The real shape PostgREST returns for the PR #973 constraint.
+              // The real shape PostgREST returns for the DL-2261 unique constraint.
               return Promise.resolve({
                 data: null,
                 error: {
