@@ -18,7 +18,29 @@ describe("classifyRead", () => {
     expect(classifyRead([], null)).toBe("empty");
   });
 
-  it("classifies null data with an error as error, never empty (single(), zero rows)", () => {
+  it("classifies a confirmed zero-row single() as empty, not error (DEV-0405)", () => {
+    expect(
+      classifyRead(null, {
+        code: "PGRST116",
+        message: "JSON object requested, multiple (or no) rows returned",
+        details: "Results contain 0 rows, application/vnd.pgrst.object+json requires 1 row",
+      }),
+    ).toBe("empty");
+  });
+
+  it("classifies a confirmed multi-row single() as error, never empty", () => {
+    // >1 rows also reports PGRST116, but it is a real data integrity
+    // problem, not a legitimate empty result.
+    expect(
+      classifyRead(null, {
+        code: "PGRST116",
+        message: "JSON object requested, multiple (or no) rows returned",
+        details: "Results contain 2 rows, application/vnd.pgrst.object+json requires 1 row",
+      }),
+    ).toBe("error");
+  });
+
+  it("classifies a PGRST116 with no details as error, the safe default", () => {
     expect(
       classifyRead(null, {
         code: "PGRST116",
