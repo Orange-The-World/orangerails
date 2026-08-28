@@ -51,6 +51,15 @@
  * what the deletes give back, never from a select on wrapped_data_keys. An
  * earlier version of this file gated the whole cleanup on that select, which
  * made it do nothing at all while looking like it had found nothing to do.
+ *
+ * A THIRD PERMISSION FACT, and it fixes an order. Owners are told WHO lost
+ * emergency access, not just how many, because they are being asked to grant
+ * it again to a list this function deletes. The only way to put a name to a
+ * recipient id is public.get_coadmin_emails, and that function authorises the
+ * caller BY the workspace_admins row linking them. Deleting the list therefore
+ * destroys the permission to resolve it. The lookup runs before the deletes for
+ * that reason and cannot be moved below them: it would return nothing, with no
+ * error, and the message would silently fall back to a bare count.
  */
 
 /**
