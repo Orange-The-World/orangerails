@@ -26,11 +26,16 @@
 
 DO $dev0323$
 DECLARE
-  probe_email text := 'dev0323-cascade-probe@example.invalid';
+  probe_email  text := 'dev0323-cascade-probe@example.invalid';
+  probe_email2 text := 'dev0323-cascade-probe-d@example.invalid';
   probe_mark  text := 'dev0323-probe';
   uid     uuid := gen_random_uuid();
   cid     uuid := gen_random_uuid();
+  uid2    uuid := gen_random_uuid();
+  cid2    uuid := gen_random_uuid();
   n       int;
+  cust_n  int;
+  auth_after uuid;
   deltype "char";
 BEGIN
   -- LEG A. The two foreign keys that make the deletion reachable at all.
