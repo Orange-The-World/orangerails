@@ -34,6 +34,15 @@ interface RecordedCall {
   filters: Array<{ column: string; value: unknown }>;
 }
 
+interface UpdateChain {
+  then(
+    onFulfilled: (value: QueryResult) => unknown,
+    onRejected?: (reason: unknown) => unknown,
+  ): Promise<unknown>;
+  eq(column: string, value: unknown): UpdateChain;
+  select(columns: string): Promise<QueryResult>;
+}
+
 interface FakeOptions {
   /** rows a select on each table returns */
   rows?: Record<string, unknown[]>;
@@ -58,9 +67,9 @@ function makeFakeClient(options: FakeOptions = {}) {
 
   function resultFor(call: RecordedCall): QueryResult {
     if (call.op === "select") {
-      return (
-        options.selectResult?.[call.table] ?? { data: options.rows?.[call.table] ?? [], error: null }
-      );
+      const override = options.selectResult?.[call.table];
+      if (override) return override;
+      return { data: options.rows?.[call.table] ?? [], error: null };
     }
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
@@ -96,7 +105,7 @@ function makeFakeClient(options: FakeOptions = {}) {
         update(values: Record<string, unknown>) {
           const call: RecordedCall = { table, op: "update", values, filters: [] };
           calls.push(call);
-          const chain = {
+          const chain: UpdateChain = {
             ...thenable(call),
             eq(column: string, value: unknown) {
               call.filters.push({ column, value });
@@ -131,7 +140,11 @@ function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) 
   };
 }
 
-const oneConnection = { rows: { connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }] } };
+const oneConnection: FakeOptions = {
+  rows: {
+    connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+  },
+};
 
 describe("vault recovery: the rotated meta write", () => {
   it("throws and does NOT clear the migration keys when the update matches no row", async () => {
