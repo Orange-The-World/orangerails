@@ -276,8 +276,7 @@ Deno.serve(
       //   - wrong user     -> 401 (token issued for a different app_user_id)
       //
       // On success we atomically mark the token used so a replay fails.
-      const requireToken =
-        (Deno.env.get("REQUIRE_WIDGET_TOKEN") ?? "false").toLowerCase() === "true";
+      const requireToken = requireWidgetTokenState === "true";
       if (body.widget_token) {
         // Atomic claim: scope every guard into one UPDATE ... RETURNING row.
         // Postgres serialises concurrent updates on the same row, so exactly
