@@ -244,8 +244,14 @@ function aadBytes(binding: CoAdminBinding): Uint8Array {
   if (typeof binding.grantId !== "string" || binding.grantId.length === 0) {
     throw new Error("Co-admin keyring binding requires a grant id.");
   }
+  // JSON.stringify on an array of strings is unambiguous for any input: the
+  // encoder escapes every embedded quote and backslash, so the tuple always
+  // parses back to the exact three strings that produced it. A fixed
+  // delimiter like "prefix|owner|grant" cannot make that guarantee, because
+  // the delimiter character can appear inside either field and move the
+  // split point, letting two different bindings produce the same bytes.
   return new TextEncoder().encode(
-    `${AAD_PREFIX}|${binding.ownerUserId}|${binding.grantId}`,
+    JSON.stringify([AAD_PREFIX, binding.ownerUserId, binding.grantId]),
   );
 }
 
