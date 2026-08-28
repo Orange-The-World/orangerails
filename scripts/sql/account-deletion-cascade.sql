@@ -111,7 +111,47 @@ BEGIN
       'DEV0323_FAIL deleting the customer left % customer_vault_meta row(s) behind for a customer that no longer exists', n;
   END IF;
 
+  -- LEG D. Delete the account BEHIND a customer, not the customer itself.
+  -- This is DEV-0334's ruling (PR #959 / DEV-0366): a BEFORE DELETE trigger
+  -- on auth.users, trg_clear_customer_vault_meta_on_account_removal, must
+  -- null customers.auth_user_id and delete that customer's vault meta row.
+  -- It is a different path from LEG C above, which deletes the customer row
+  -- directly and relies on the customer_id FK cascade. Here the customer row
+  -- must survive with auth_user_id nulled: deleting it too would be a second,
+  -- unrelated bug and this leg must not confuse the two.
+  INSERT INTO auth.users (id, email) VALUES (uid2, probe_email2);
+  INSERT INTO public.customers (id, name, email, customer_type, plan, auth_user_id)
+       VALUES (cid2, 'DEV0323 probe D', probe_email2, 'individual', 'free', uid2);
+  INSERT INTO public.customer_vault_meta (customer_id, vault_salt, vault_verifier_ciphertext)
+       VALUES (cid2, probe_mark, probe_mark);
+
+  SELECT count(*) INTO n FROM public.customer_vault_meta WHERE customer_id = cid2;
+  IF n <> 1 THEN
+    RAISE EXCEPTION
+      'DEV0323_FAIL the fixture seeded % customer_vault_meta row(s) for the account removal leg where 1 was expected, so the assertion that follows would have proved nothing', n;
+  END IF;
+
+  DELETE FROM auth.users WHERE id = uid2;
+
+  SELECT count(*) INTO n FROM public.customer_vault_meta WHERE customer_id = cid2;
+  IF n <> 0 THEN
+    RAISE EXCEPTION
+      'DEV0323_FAIL deleting the account left % customer_vault_meta row(s) behind for the customer it belonged to', n;
+  END IF;
+
+  SELECT count(*) INTO cust_n FROM public.customers WHERE id = cid2;
+  IF cust_n <> 1 THEN
+    RAISE EXCEPTION
+      'DEV0323_FAIL deleting the account changed the customer row count to % (expected 1); the customer must be kept, only its auth_user_id cleared', cust_n;
+  END IF;
+
+  SELECT auth_user_id INTO auth_after FROM public.customers WHERE id = cid2;
+  IF auth_after IS NOT NULL THEN
+    RAISE EXCEPTION
+      'DEV0323_FAIL the customer row survived account removal but auth_user_id was not nulled';
+  END IF;
+
   RAISE EXCEPTION
-    'DEV0323_PASS all three legs held: both foreign keys still cascade, account removal cleared user_vault_meta, customer removal cleared customer_vault_meta. This transaction is being rolled back on purpose.';
+    'DEV0323_PASS all four legs held: both foreign keys still cascade, account removal cleared user_vault_meta, customer removal cleared customer_vault_meta, and account removal (not customer removal) cleared the customer''s vault meta while keeping the customer row with auth_user_id nulled. This transaction is being rolled back on purpose.';
 END
 $dev0323$;
