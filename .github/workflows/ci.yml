@@ -439,8 +439,8 @@ jobs:
       - name: "SCRATCH TEST (DL-2298, not for merge): force readiness gate timeout"
         # Temporary, this scratch branch only. Forces BASE_URL to a host that
         # answers but serves no JS bundle, and shortens MAX_ATTEMPTS, so the
-        # readiness gate from PR #739 (DL-1014) actually reaches its timeout
-        # branch at least once. Do not merge this step to dev.
+        # DL-1014 readiness gate actually reaches its timeout branch at
+        # least once. Do not merge this step to dev.
         run: |
           set -euo pipefail
           BASE_URL="https://example.com"
