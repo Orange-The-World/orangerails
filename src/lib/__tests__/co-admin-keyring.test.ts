@@ -80,7 +80,7 @@ async function sealedPlaintext(
     ["decrypt"],
   );
   const aad = new TextEncoder().encode(
-    `orangerails-coadmin-keyring-v1|${binding.ownerUserId}|${binding.grantId}`,
+    JSON.stringify(["orangerails-coadmin-keyring-v1", binding.ownerUserId, binding.grantId]),
   );
   const opened = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv, additionalData: aad as BufferSource },
