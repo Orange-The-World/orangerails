@@ -6,11 +6,21 @@
 -- Today the BEFORE UPDATE trigger (write-once guard) only ever fires on the
 -- UPDATE path. A raw PostgREST INSERT with a valid JWT could set
 -- workspace_key_id to any non-colliding value in the same statement that
--- creates the row, and the trigger would never see it. This is not
--- exploitable today only because the UNIQUE constraint blocks claiming a
--- value another row already holds, regardless of statement type. If that
--- constraint is ever dropped or altered, or a future migration adds another
--- insert path, the INSERT side would be left with no independent guard.
+-- creates the row, and the trigger would never see it. Neither database
+-- this migration targets has a UNIQUE constraint or write-once trigger on
+-- workspace_key_id yet; those are added by PR #958 (DEV-0364), open at the
+-- time of this migration. Once #958 lands, the UNIQUE constraint alone
+-- would still block claiming a value another row already holds, regardless
+-- of statement type, but until then and independent of it, this policy is
+-- the only guard the INSERT path has. If the constraint is ever dropped or
+-- altered, or a future migration adds another insert path, the INSERT side
+-- would again be left with no independent guard were this policy also gone.
+--
+-- This check binds the client role path only: row level security is not
+-- FORCEd on this table, so it does not constrain a role that bypasses RLS.
+-- This must remain the only INSERT policy on public.user_vault_meta:
+-- permissive policies combine with OR, so a second permissive INSERT policy
+-- would defeat this conjunct entirely.
 --
 -- No known write path is affected: the app's only insert into
 -- user_vault_meta (src/routes/signup.tsx) never sets workspace_key_id, and
