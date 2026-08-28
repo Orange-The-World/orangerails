@@ -202,6 +202,15 @@ interface CoAdminEqBuilder {
   eq(col: string, val: string): CoAdminEqBuilder;
   single(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
   maybeSingle(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
+  /**
+   * A bounded list read. revokeCoAdmin uses it to ask whether a wrapped key
+   * row is still there after a delete removed nothing, because a row count of
+   * zero does not say which of two opposite things happened.
+   */
+  limit(count: number): PromiseLike<{
+    data: Record<string, unknown>[] | null;
+    error: unknown;
+  }>;
 }
 
 interface CoAdminDeleteBuilder {
@@ -431,12 +440,25 @@ export async function loadAdminSubkeysDirect(params: {
  * grant is still validly ML-DSA signed, and loadAdminSubkeysDirect would still
  * open it.
  *
- * SO: both deletes now prove themselves, and zero removed is a failed
- * revocation rather than a successful one. It throws, deliberately and unlike
- * the recovery-time cleanup in co-admin-recovery.ts: that one runs after a
- * recovery has already succeeded and must not report a false failure, while
- * this one is a security action the owner asked for and must never report a
- * false success.
+ * SO: both deletes now prove themselves, and zero removed is never reported as
+ * a successful revocation. It throws, deliberately and unlike the recovery-time
+ * cleanup in co-admin-recovery.ts: that one runs after a recovery has already
+ * succeeded and must not report a false failure, while this one is a security
+ * action the owner asked for and must never report a false success.
+ *
+ * WHAT ZERO ROWS DOES NOT PROVE. A delete that removed nothing cannot tell
+ * "there is no such row" from "the row is there and the policy did not permit
+ * this delete", and those two mean opposite things to an owner. So the zero
+ * case asks: it reads the row back before deciding what to say. If the row is
+ * still visible the grant is definitely live and this says so. If the read
+ * comes back empty the honest answer is that it could not tell, because until
+ * the owner SELECT policy lands an owner cannot see this row in either state.
+ *
+ * NO DEAD ENDS. Every path that leaves the list entry behind hands the caller
+ * clearCoAdminListEntry as the next step. An earlier version of this change
+ * told the owner to "remove them again", which re-entered this function with
+ * the key already gone, took the zero-row branch, and answered that they still
+ * had access. That was false, and no amount of retrying could clear it.
  *
  * ORDER. The wrapped key is what actually grants access; the admin list row is
  * the record of who holds it. Stopping between the two must leave the evidence
@@ -450,7 +472,9 @@ export async function loadAdminSubkeysDirect(params: {
  * @param params.adminUserId          The admin user's ID to revoke.
  * @param params.ownerUserId          The owner's user ID (for the workspace_admins delete).
  * @param params.supabase             Authenticated Supabase client for the owner.
- * @throws if either delete errors, or if either removed no rows.
+ * @throws {CoAdminRevocationIncompleteError} when the list entry is left behind
+ *   and clearing it on its own is the next step.
+ * @throws {Error} when a delete errors, or when the grant is confirmed live.
  */
 export async function revokeCoAdmin(params: {
   ownerWorkspaceKeyId: string;
@@ -472,12 +496,36 @@ export async function revokeCoAdmin(params: {
   if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${wdkErr}`);
 
   if ((removedKeys ?? []).length === 0) {
-    // Nothing was removed and nothing complained. The grant is still there and
-    // still works, so this must not be reported as a revocation. The admin
-    // list row is deliberately left alone: it is the only record of who still
-    // holds access, and destroying it here would hide the problem.
-    throw new Error(
-      "Revocation did not take effect: the wrapped key for this co-admin was not removed, so they still have access. Nothing has been changed.",
+    // Nothing was removed and nothing complained, which on its own is not
+    // proof of anything. Ask whether the row is still there before saying what
+    // happened. The admin list row is deliberately left alone in every branch
+    // below: it is the only record of who may still hold access, and removing
+    // it here would hide the problem instead of fixing it.
+    const { data: stillPresent, error: readErr } = await supabase
+      .from("wrapped_data_keys")
+      .select("recipient_user_id")
+      .eq("data_key_id", ownerWorkspaceKeyId)
+      .eq("recipient_user_id", adminUserId)
+      .limit(1);
+
+    if (readErr) {
+      throw new CoAdminRevocationIncompleteError(
+        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${readErr})`,
+        false,
+      );
+    }
+
+    if ((stillPresent ?? []).length > 0) {
+      // The only branch entitled to state this as a fact: the row was read
+      // back and it is there.
+      throw new Error(
+        "Nothing was revoked: the stored key for this co-admin is still there, so they still have access. Your list has not been changed. Try again in a moment.",
+      );
+    }
+
+    throw new CoAdminRevocationIncompleteError(
+      "Nothing was removed by this attempt, and this cannot tell whether the stored key is already gone or whether the database refused to remove it. Your list has not been changed. If the key is already gone, for example after a vault recovery, clear the list entry on its own. That only tidies the list and does not remove access.",
+      false,
     );
   }
 
@@ -492,16 +540,84 @@ export async function revokeCoAdmin(params: {
     .eq("admin_user_id", adminUserId)
     .select("admin_user_id");
   if (adminErr) {
-    // Say which half landed. Access IS revoked, and an owner told only that
-    // something failed would reasonably assume the opposite and retry.
-    throw new Error(
-      `Access was revoked, but this co-admin is still shown in your list. Remove them again to clear it. (${adminErr})`,
-    );
+    // Say which half landed. The stored key IS gone here, and an owner told
+    // only that something failed would reasonably assume the opposite.
+    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${adminErr})`, true);
   }
 
   if ((removedAdmins ?? []).length === 0) {
+    throw new CoAdminRevocationIncompleteError(KEY_REMOVED_LIST_LEFT, true);
+  }
+}
+
+/**
+ * Said when the stored key is gone and only the list entry is left behind.
+ *
+ * It deliberately does not say "access was revoked". Subkeys already loaded in
+ * the co-admin's open browser tab keep working until that tab closes, which is
+ * the MVP limit recorded above revokeCoAdmin. After a recovery that caveat is
+ * harmless because those subkeys are dead; here they are the owner's live
+ * subkeys, so the wording has to be narrower than it was.
+ */
+const KEY_REMOVED_LIST_LEFT =
+  "The stored key was removed, so this co-admin cannot open your data in a new session, but they are still shown in your list. Clear the list entry on its own to tidy that up. Keys already loaded in a tab they left open keep working until that tab is closed.";
+
+/**
+ * Thrown when a revocation stopped part way and left the list entry behind.
+ *
+ * The caller needs this as its own type because there is a next step it can
+ * offer, clearCoAdminListEntry, and a plain Error gives it nothing to branch
+ * on. keyRemoved says which half landed, which decides how that offer should
+ * read: true means access really is gone and clearing the entry is tidying,
+ * false means it is not known and clearing the entry removes only the record.
+ */
+export class CoAdminRevocationIncompleteError extends Error {
+  readonly keyRemoved: boolean;
+
+  constructor(message: string, keyRemoved: boolean) {
+    super(message);
+    this.name = "CoAdminRevocationIncompleteError";
+    this.keyRemoved = keyRemoved;
+  }
+}
+
+/**
+ * Remove a co-admin from the owner's list, and nothing else.
+ *
+ * WHY THIS EXISTS. revokeCoAdmin will not touch the list until it has removed a
+ * key row, and that is right: the list entry is the only record of who may
+ * still hold access. But it leaves states an owner cannot get out of. The
+ * recovery cleanup removes stale wrapped keys and can leave the list row
+ * behind, and a retry or a double click lands in the same place. Without a way
+ * to clear the entry on its own, the product tells the owner to revoke again,
+ * and revoking again finds no key row and refuses, every time.
+ *
+ * THIS DOES NOT REMOVE ACCESS and must never be presented as though it does.
+ * Offer it only when the stored key is known to be gone, or when the owner is
+ * told plainly that this clears the record and nothing else.
+ *
+ * @throws if the delete errors, or if it removed no rows.
+ */
+export async function clearCoAdminListEntry(params: {
+  adminUserId: string;
+  ownerUserId: string;
+  supabase: CoAdminSupabaseLike;
+}): Promise<void> {
+  const { adminUserId, ownerUserId, supabase } = params;
+
+  const { data: removed, error } = await (
+    supabase
+      .from("workspace_admins")
+      .delete()
+      .eq("owner_user_id", ownerUserId) as unknown as CoAdminDeleteBuilder
+  )
+    .eq("admin_user_id", adminUserId)
+    .select("admin_user_id");
+  if (error) throw new Error(`Failed to remove this co-admin from your list: ${error}`);
+
+  if ((removed ?? []).length === 0) {
     throw new Error(
-      "Access was revoked, but this co-admin is still shown in your list. Remove them again to clear it.",
+      "Nothing was removed from your list, so the entry may already be gone. Reload the page to see the current list.",
     );
   }
 }
