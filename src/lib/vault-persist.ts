@@ -288,7 +288,9 @@ export async function persistRewrappedVaultMeta(args: RewrapVaultArgs): Promise<
   } catch (cause) {
     const detail = (cause as { message?: string })?.message;
     throw new Error(
-      detail ? `${PASSWORD_CHANGE_NOT_PROVEN_MESSAGE} (${detail})` : PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
+      detail
+        ? `${PASSWORD_CHANGE_NOT_PROVEN_MESSAGE} (${detail})`
+        : PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
     );
   }
 }
