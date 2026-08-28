@@ -595,9 +595,18 @@ export function VaultProvider({ children }: VaultProviderProps) {
   // and clearMigrationKeys() being called. The caller (recover.tsx) must:
   //   1. Migrate every ciphertext owned by this user.
   //   2. Persist all migrated ciphertexts to the database.
-  //   3. Call clearMigrationKeys() to zero the old key material.
-  // If any step fails, clearMigrationKeys() must NOT be called so the
-  // in-session retry can re-use the stashed old keys.
+  //   3. Persist the rotated vault meta and PROVE that write landed.
+  //   4. Call clearMigrationKeys() to zero the old key material.
+  // If any step fails, clearMigrationKeys() must NOT be called: after a
+  // partial migration these stashed subkeys are the only thing that can still
+  // read data left under the old MEK in this session.
+  //
+  // Keeping them does NOT make the migration retryable. recoverWithCode()
+  // mints a fresh random MEK on every call and nothing records which rows
+  // already moved, so a second attempt derives its old-key material from the
+  // old MEK again and cannot read the rows the first attempt already rewrote.
+  // A safe retry needs a resumable or per-row-keyed rotation, which is not
+  // implemented.
   // ------------------------------------------------------------------
   const migrateCredentialsCiphertext = useCallback(
     async (oldCiphertext: string): Promise<string> => {
