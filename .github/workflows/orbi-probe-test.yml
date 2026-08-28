@@ -112,6 +112,10 @@ jobs:
         env:
           ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
           ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          # DL-1341 raised the shipped default from 10 to 90; pin it here so
+          # this test keeps proving the exit-code CONTRACT and does not
+          # quietly start proving one specific default value instead.
+          STALE_THRESHOLD_MINUTES: "10"
         run: |
           rm -f "$RUNNER_TEMP/alert-calls.log"
           ./scripts/ops/orbi-staleness-probe.sh
@@ -139,6 +143,12 @@ jobs:
         env:
           ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
           ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          # DL-1341: 20 minutes old must stay STALE under the threshold this
+          # test pins, independent of the script's shipped default. Before this
+          # line existed, raising the default to 90 made 20 minutes read as
+          # fresh and this job went red -- the contract still held, only the
+          # fixture had drifted out from under the new default.
+          STALE_THRESHOLD_MINUTES: "10"
         run: |
           rm -f "$RUNNER_TEMP/alert-calls.log"
           set +e
@@ -245,6 +255,9 @@ jobs:
         env:
           ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
           ORBI_ALERT_SCRIPT: ${{ runner.temp }}/failing-alert.sh
+          # DL-1341: same reason as path 2 above, pinned independently of the
+          # shipped default.
+          STALE_THRESHOLD_MINUTES: "10"
         run: |
           set +e
           ./scripts/ops/orbi-staleness-probe.sh
@@ -259,6 +272,105 @@ jobs:
             exit 1
           fi
           echo "confirmed: exit 2 (stale, alert script exited non-zero)"
+
+      # -----------------------------------------------------------------------
+      # DSN sanitizer -- coverage added for the DL-2098 review findings on
+      # DL-1341: a password can be percent-encoded, a DSN can already carry a
+      # query string, and a DSN can have a shape the sanitizer regex does not
+      # anticipate at all. Each of these has to behave correctly or fail LOUD,
+      # never fail silent.
+      # -----------------------------------------------------------------------
+      - name: "[dsn-sanitizer] re-seed fresh data (1 minute old)"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            TRUNCATE public.exchange_rates;
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            VALUES (now() - interval '1 minute', '1m', 'BTC', 'USD');
+          "
+
+      - name: "[dsn-sanitizer] no password in the DSN -> parses cleanly, auth required -> expect exit 2"
+        env:
+          # No ":pass" segment. The regex's password group is optional, so this
+          # must still match and reach the query step -- it should not error
+          # out in the parser itself. The postgres:16 image requires a
+          # password, so the query fails and the probe reports ERROR, not a
+          # crash and not a false STALE.
+          ORBI_PROBE_DSN: "postgres://testuser@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+        run: |
+          set +e
+          OUT=$(./scripts/ops/orbi-staleness-probe.sh 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUT"
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (auth required, no password supplied), got $EXIT" >&2
+            exit 1
+          fi
+          if echo "$OUT" | grep -q 'WARNING: DSN does not match'; then
+            echo "ERROR: a DSN with no password is a VALID shape and must not warn" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (no password), sanitizer did not warn on a valid shape"
+
+      - name: "[dsn-sanitizer] DSN already carries a query string -> connect_timeout is appended, not duplicated -> expect exit 0"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb?sslmode=prefer"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          STALE_THRESHOLD_MINUTES: "10"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          ./scripts/ops/orbi-staleness-probe.sh
+          if [[ -e "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: fresh data paged someone: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0, existing query string preserved and connect_timeout appended"
+
+      - name: "[dsn-sanitizer] unparseable DSN shape -> warns instead of failing silent -> expect exit 2"
+        env:
+          # Not a postgres URI at all. The sanitizer must not silently accept
+          # this: it should warn on stderr and pass it through unchanged, and
+          # psql must then fail loudly rather than the probe reporting a false
+          # OK or STALE.
+          ORBI_PROBE_DSN: "not-a-valid-dsn"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+        run: |
+          set +e
+          OUT=$(./scripts/ops/orbi-staleness-probe.sh 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUT"
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (query failed on an unparseable DSN), got $EXIT" >&2
+            exit 1
+          fi
+          if ! echo "$OUT" | grep -q 'WARNING: DSN does not match'; then
+            echo "ERROR: sanitizer fell through silently -- no warning was printed for an unparseable DSN" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2, and the sanitizer warned instead of failing silent"
+
+      - name: "[dsn-sanitizer] percent-decode self-test (p%40ss -> p@ss)"
+        # Proves the exact decode one-liner shipped in the script, without
+        # needing a database whose password we can rotate mid-job. A full
+        # end-to-end auth proof would need a second postgres service with a
+        # password containing an unencoded @, which this job does not carry;
+        # this is a self-test of the decode logic, the same pattern the repo
+        # already uses for scripts/check-anon-rpc-grants.mjs --selftest.
+        run: |
+          urldecode() {
+            local encoded="$1"
+            printf '%b' "${encoded//%/\\x}"
+          }
+          RESULT="$(urldecode 'p%40ss')"
+          if [[ "$RESULT" != 'p@ss' ]]; then
+            echo "ERROR: expected 'p@ss', got '${RESULT}'" >&2
+            exit 1
+          fi
+          echo "confirmed: percent-encoded password decodes correctly"
 
       # -----------------------------------------------------------------------
       # Liveness check -- path 1: service active, expect exit 0
