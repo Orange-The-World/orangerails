@@ -15,10 +15,11 @@ A reference implementation is maintained by the BitBooks team; see their integra
 5. [Vault setup (Path B, client-sealed)](#vault-setup-path-b-client-sealed)
 6. [Connecting a wallet through the Link widget](#connecting-a-wallet-through-the-link-widget)
 7. [Syncing transactions: protocol-driven sink mode](#syncing-transactions-protocol-driven-sink-mode)
-8. [App Profile (sink configuration)](#app-profile-sink-configuration)
-9. [Provider catalog (dynamic discovery)](#provider-catalog-dynamic-discovery)
-10. [Wire-format gotchas (read before integrating)](#wire-format-gotchas-read-before-integrating)
-11. [Adding a provider (for OR maintainers)](#adding-a-provider-for-or-maintainers)
+8. [Sync notifications: the `sync.completed` webhook](#sync-notifications-the-synccompleted-webhook)
+9. [App Profile (sink configuration)](#app-profile-sink-configuration)
+10. [Provider catalog (dynamic discovery)](#provider-catalog-dynamic-discovery)
+11. [Wire-format gotchas (read before integrating)](#wire-format-gotchas-read-before-integrating)
+12. [Adding a provider (for OR maintainers)](#adding-a-provider-for-or-maintainers)
 
 
 ## Quickstart
@@ -338,6 +339,109 @@ If the subaccount has zero non-disconnected connections, `or-sync` returns:
 ```
 
 The shape is the same regardless. Your client should treat this as a soft "nothing to sync" rather than an error.
+
+
+## Sync notifications: the `sync.completed` webhook
+
+Sink mode is pull-based: you call `or-sync` and get rows back. This webhook is the **push half**. It does not carry transaction data. It tells you there is something new so you know when to pull, instead of polling on a timer.
+
+Registering for it is optional. If you do not register, everything still works and your data is simply as fresh as your last pull.
+
+### Registering
+
+Give your OR maintainer contact a receiver URL and a shared secret. Both are stored on your `platforms` row. **OR sends nothing until both are set**: a URL without a secret is treated as unregistered, deliberately, so a half-finished registration never sends unsigned traffic.
+
+### The payload
+
+**One shape, built in one place.** All 5 emit sites (the generic provider path and every bank/Quiltt path) call the same builder, `buildSyncCompletedPayload` in `supabase/functions/_shared/webhook-events.ts`, and pass it values rather than structure. That used to not be true: four of five sites built the payload as an inline literal and had drifted apart, and the SDK throws on any payload missing `type`. That defect is fixed; every emitter now sends the same fields.
+
+```json
+{
+  "event": "sync.completed",
+  "provider": "quiltt",
+  "subaccount_id": "...",
+  "connection_id": "...",
+  "synced_count": 12,
+  "ts": "2026-08-24T12:00:00.000Z",
+  "type": "sync.completed",
+  "data": {
+    "subaccount_id": "...",
+    "connection_id": "...",
+    "synced_count": 12,
+    "ts": "2026-08-24T12:00:00.000Z"
+  }
+}
+```
+
+The flat fields and the nested `data` carry the same values. Both are sent deliberately and will keep being sent until every known consumer is on the SDK (webhook architecture decision of 2026-05-23): `data` is what `@orangerails/webhooks` `constructEvent()` reads, the flat fields are what receivers written before the SDK read.
+
+| Field | Type | Notes |
+|---|---|---|
+| `event` | string | Always `sync.completed`. |
+| `type` | string | Same value as `event`. Read by the SDK's `constructEvent()`. |
+| `data` | object | Nested duplicate of the flat fields. Matches the SDK's `SyncCompletedEvent['data']` type exactly, so do not expect extra fields in here even if the flat payload has them. |
+| `provider` | string | Present when the emitting path knows the upstream provider (bank/Quiltt paths today). Flat-only, never copied into `data`, because `data`'s shape is contractual. |
+| `subaccount_id` | string | Your subaccount. Resolve your own tenant from this. |
+| `connection_id` | string | OR's connection id. |
+| `synced_count` | number | Rows OR pulled itself. See below. Always a number, never absent. |
+| `ts` | string | ISO 8601 timestamp. |
+
+**A `synced_count` of `0` is a real value, not a bug, and it does not mean "nothing happened".** Two different paths can produce it:
+
+* the event-driven sink path, where OR pulled nothing by design and the notification exists purely to ask you to come and call `or-sync`;
+* the generic provider path, which notifies after every successful sync, including one that found no new rows.
+
+On paths where OR did the pulling it is the real row count. In the live queue at time of writing it ranges from `0` to `190`. **Do not read `0` as "skip the pull".**
+
+**When a notification is sent.** The generic provider path enqueues on every successful sync, whether or not it found anything. The Quiltt pull paths enqueue only when they pulled at least one row, so they never send `0`. The Quiltt event-driven sink path always sends `0`, because the count is not knowable there. Do not infer "there is new data" from the arrival of a notification alone; call `or-sync` and let its cursor decide.
+
+**Ignore top-level keys you do not recognise; do not reject on them.** Fields ship ahead of any future removal. A strict validator that rejects unknown keys will drop events, and because you are told to answer `2xx` on anything you do not handle, that rejection is invisible on both sides.
+
+### Signature
+
+Two headers are sent on every request. Verify either one; `X-OR-Signature-V2` is preferred.
+
+```
+X-OR-Signature:    hex(HMAC-SHA-256(secret, raw_body))
+X-OR-Signature-V2: t=<unix_seconds>,v1=hex(HMAC-SHA-256(secret, "<t>.<raw_body>"))
+X-OR-Event-Id:     <uuid>
+```
+
+**The two headers do not sign the same material, and this is the easiest thing on the page to get wrong.**
+
+| Header | Signed material |
+|---|---|
+| `X-OR-Signature` (v1) | the raw request body bytes, alone |
+| `X-OR-Signature-V2` (v2) | the `t` value from the same header, then a literal `.`, then the raw body |
+
+So for v2 you build the string `1756040400.{"event":"sync.completed",...}` and HMAC that. Signing the body alone produces a digest that never matches the preferred header, and the timestamp prefix is the whole point: it is what stops a captured request being replayed later.
+
+Do not parse and re-serialize the body first: even a whitespace difference changes the digest and the check will fail. Compare in constant time.
+
+`packages/webhooks/src/verify.ts` in this repo is the reference implementation and is kept byte-for-byte in step with the sender.
+
+### Responding, and the one thing that will bite you
+
+**OR treats any 2xx as delivered and will not retry.** This is the single most important sentence in this section.
+
+The intuitive design on your side is to answer `200 {"status":"ignored"}` for a payload you do not recognise, so that OR stops retrying an event type you will never handle. That is reasonable, and it is also a silent-failure generator: if your validator rejects a payload you *did* want, OR records a successful delivery, you record nothing, and no error appears on either side. Both dashboards agree it worked.
+
+So:
+
+| You want | Answer |
+|---|---|
+| Accepted and stored | `200` |
+| Valid, but no tenant matches this `subaccount_id` yet | `202`. Permanent mapping gap, do not burn retry budget. |
+| Bad or missing signature | `401` |
+| Body too large | `413` |
+| **You could not store it and want OR to try again** | **`5xx`. Not 2xx.** |
+| Unknown `event` value | `200`, and log it loudly enough that someone notices |
+
+Retries are exponential with a cap of 5 attempts. `X-OR-Event-Id` is stable across retries: use it to dedupe.
+
+### Ordering and delivery guarantees
+
+At-least-once, not exactly-once, and not ordered. Treat the notification as a hint that something changed, then let `or-sync` and its cursor be the source of truth. Never reconstruct state from the sequence of webhooks.
 
 
 ## App Profile (sink configuration)
