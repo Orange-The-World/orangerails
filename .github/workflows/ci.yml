@@ -664,3 +664,21 @@ jobs:
           name: playwright-stealth-cursor-report
           path: playwright-report/
           retention-days: 14
+
+  ops-script-tests:
+    name: Ops script tests (stealth-filter-verify)
+    runs-on: ubuntu-latest
+    # Runs the fixture-based test suite for scripts/ops/stealth-filter-verify.sh.
+    # All three paths (Properties 1, 2, 4) are decision-path checks that need
+    # only bash, jq, curl, find, sort, and date -- no systemd, no production
+    # host, and no live network call. See the test script header for the full
+    # reasoning on why each path is fixture-reproducible.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run stealth-filter-verify test suite
+        run: |
+          chmod +x scripts/ops/stealth-filter-verify.sh
+          chmod +x scripts/ops/stealth-filter-verify_test.sh
+          bash scripts/ops/stealth-filter-verify_test.sh
