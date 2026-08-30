@@ -31,7 +31,12 @@ import {
   type BlockRecord,
   type WalletEnvelopePayload,
 } from './sync';
-import { deriveAddress, deriveScriptPubkeyBytes } from './derive';
+import {
+  deriveAddress,
+  deriveScriptPubkeyBytes,
+  deriveMultisigScriptPubkeyBytes,
+  parseDescriptor,
+} from './derive';
 import type { StealthStage } from './postmessage';
 
 // BIP84 official test vector (https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki).
@@ -2106,5 +2111,127 @@ describe('runSync , spend arithmetic and change tracking', () => {
     // the window was extended.
     expect(result.windowExhausted).toBe(true);
     expect(result.sealedTransactions).toHaveLength(2);
+  });
+});
+
+// ─── descriptor_stealth / multisig chain loop (DL-1858) ──────────────────
+//
+// Every fixture above builds an xpub_stealth wallet, so the else-arm of
+// `if (payload.kind === 'xpub_stealth')` in runSync (sync.ts:596-608) has
+// never executed here: deriveMultisigScriptPubkeyBytes and
+// deriveMultisigAddress have only ever run from derive.test.ts directly,
+// never through the orchestrator. These two tests close that gap without
+// touching sync.ts itself.
+describe('runSync , descriptor_stealth multisig payload (DL-1858)', () => {
+  // Same two BIP test-vector xpubs derive.test.ts uses as multisig
+  // cosigners (COSIGNER_A / COSIGNER_B there). The key material does not
+  // need to come from a real multisig wallet; BIP84_XPUB above doubles as
+  // COSIGNER_A here.
+  const COSIGNER_B =
+    'xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ';
+
+  it('derives through the multisig chain loop and matches a payment to it (sync.ts:601)', async () => {
+    const orStealthKey = randomKeyB64();
+    const descriptorStr = `wsh(sortedmulti(2,${BIP84_XPUB}/0/*,${COSIGNER_B}/0/*))`;
+    const desc = parseDescriptor(descriptorStr);
+    expect(desc.kind).toBe('multisig');
+
+    const payload: WalletEnvelopePayload = {
+      kind: 'descriptor_stealth',
+      descriptor: descriptorStr,
+      label: '2-of-2 multisig (wsh)',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    // The fixture block pays the multisig receive-chain leaf at
+    // (chain=0, index=0), so the orchestrator's chain loop at sync.ts:601
+    // must derive it via deriveMultisigScriptPubkeyBytes /
+    // deriveMultisigAddress, not the xpub_stealth branch above it.
+    const targetScript = deriveMultisigScriptPubkeyBytes(desc, 0, 0);
+
+    const fixtureTimestamp = Math.floor(new Date('2024-09-01T00:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({
+      payToScript: targetScript,
+      amountSats: 55_000n,
+      timestamp: fixtureTimestamp,
+    });
+    const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
+    const blockHashHex = bytesToHex(blockHash);
+
+    const stagesSeen: StealthStage[] = [];
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      descriptor: desc,
+      birthdayHeight: 900_000,
+      lastBlockScanned: 900_000,
+      fetchTip: async () => 900_001,
+      fetchFilter: async (h) => {
+        if (h === 900_001) {
+          return { height: h, blockHashHex, filter: new Uint8Array([0x9a]) };
+        }
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        expect(hashHex).toBe(blockHashHex);
+        return { height: 900_001, blockHashHex, raw: blockBuild.raw };
+      },
+      matcher: {
+        matchAny: (_filter, _hash, scripts) =>
+          scripts.some(
+            (s) => s.length === targetScript.length && s.every((b, i) => b === targetScript[i]),
+          ),
+      },
+      onProgress: (ev) => {
+        if (stagesSeen[stagesSeen.length - 1] !== ev.stage) stagesSeen.push(ev.stage);
+      },
+    });
+
+    expect(stagesSeen).toEqual([
+      'unlocking',
+      'deriving',
+      'fetching_filters',
+      'matching',
+      'fetching_blocks',
+      'building_txs',
+      'sealing',
+      'uploading',
+    ]);
+    expect(result.txCount).toBe(1);
+    expect(result.normalized).toHaveLength(1);
+    expect(result.normalized[0].amount_sats).toBe(55_000);
+    expect(result.normalized[0].direction).toBe('in');
+    expect(result.normalized[0].block_height).toBe(900_001);
+  });
+
+  it('throws when a descriptor_stealth payload arrives with no opts.descriptor (sync.ts:597-599)', async () => {
+    const orStealthKey = randomKeyB64();
+    const descriptorStr = `wsh(sortedmulti(2,${BIP84_XPUB}/0/*,${COSIGNER_B}/0/*))`;
+    const payload: WalletEnvelopePayload = {
+      kind: 'descriptor_stealth',
+      descriptor: descriptorStr,
+      label: 'missing opts.descriptor',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        // opts.descriptor deliberately omitted: this must throw before any
+        // I/O callback is reached, not fall through to the xpub_stealth path.
+        birthdayHeight: 900_000,
+        lastBlockScanned: 900_000,
+        fetchTip: async () => 900_001,
+        fetchFilter: async () => { throw new Error('must not reach filter fetch'); },
+        fetchBlock: async () => { throw new Error('must not reach block fetch'); },
+        matcher: { matchAny: () => false },
+      }),
+    ).rejects.toThrow(/requires opts\.descriptor/);
   });
 });
