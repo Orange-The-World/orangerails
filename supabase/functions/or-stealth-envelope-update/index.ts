@@ -58,6 +58,14 @@ interface EnvelopeUpdateRequestBody {
 interface EnvelopeUpdateResponseBody {
   connection_id: string;
   last_block_scanned: number;
+  /**
+   * Present only when the caller supplied from_height and the
+   * record_stealth_scan_range write was rejected by the database. Its
+   * absence means either no range was attempted or the write succeeded.
+   * The cursor advance above already happened and is not affected: this is
+   * purely an observability signal (OR-T0925), not a failure of the request.
+   */
+  scan_range_warning?: string;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
