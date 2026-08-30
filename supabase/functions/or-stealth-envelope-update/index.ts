@@ -58,6 +58,14 @@ interface EnvelopeUpdateRequestBody {
 interface EnvelopeUpdateResponseBody {
   connection_id: string;
   last_block_scanned: number;
+  /**
+   * Whether the from_height/to_height range for this call was persisted.
+   * Omitted when the caller sent no from_height (the documented opt-out,
+   * DL-1478). false means the RPC itself returned an error: the sync still
+   * succeeded (the cursor write is unaffected) but the range was not
+   * recorded. See scan_range.ts (OR-T0925).
+   */
+  scan_range_recorded?: boolean;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -172,7 +180,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // identity, token-pinned above (direct: equals ctx.userId, widget:
     // enforceWidgetAppUser, platform: scoped by platform_id on the row read).
     // DL-1597.
-    await recordScanRange(ctx.serviceClient, {
+    const scanRangeResult = await recordScanRange(ctx.serviceClient, {
       connection_id:      body.connection_id,
       app_user_id:        body.app_user_id,
       last_block_scanned: body.last_block_scanned,
@@ -183,6 +191,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       connection_id: body.connection_id,
       last_block_scanned: effectiveCursor,
     };
+    if (body.from_height !== undefined) {
+      resp.scan_range_recorded = scanRangeResult.recorded;
+    }
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-envelope-update] fatal:', err);
