@@ -20,6 +20,8 @@
     "build": "node scripts/check-legal-placeholders.mjs && vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
+    "gen:types": "supabase gen types typescript --project-id ${SUPABASE_PROJECT_REF:-fzwmnzmtqidumdqjdddz} > src/integrations/supabase/types.ts.new && mv src/integrations/supabase/types.ts.new src/integrations/supabase/types.ts",
+    "check:types-drift": "node scripts/check-types-drift.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "vitest run",
