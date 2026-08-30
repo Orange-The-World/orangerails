@@ -15,6 +15,7 @@ import { decryptString } from "@/lib/vault";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
+import { shouldApplyCoAdminRefresh } from "@/lib/co-admin-refresh-guard";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
@@ -243,11 +244,18 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
-      const { data: meta } = await (supabase as any)
+      const { data: meta, error: metaError } = await (supabase as any)
         .from("user_vault_meta")
         .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
+      if (metaError) {
+        // A rejected read here must never be reported as "no meta row": that is
+        // indistinguishable on screen from a legitimate empty result. Warn loudly
+        // and skip applying state rather than silently proceeding as if unlocked
+        // vault metadata does not exist.
+        console.warn("co-admin: user_vault_meta (self) read failed:", metaError);
+      }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
@@ -286,27 +294,45 @@ function AppHome() {
       }
 
       // Load list of users this person has granted co-admin to.
-      const { data: admins } = await supabase
+      const { data: admins, error: adminsError } = await supabase
         .from("workspace_admins")
         .select("id, admin_user_id, added_at")
         .eq("owner_user_id", session.user.id);
+      if (adminsError) {
+        console.warn("co-admin: workspace_admins (owner_user_id) read failed:", adminsError);
+      }
       const adminRows = (admins ?? []) as CoAdminRow[];
 
       // Load workspaces where this user is a co-admin.
-      const { data: myAdminOf } = await supabase
+      const { data: myAdminOf, error: myAdminOfError } = await supabase
         .from("workspace_admins")
         .select("owner_user_id")
         .eq("admin_user_id", session.user.id);
+      if (myAdminOfError) {
+        console.warn("co-admin: workspace_admins (admin_user_id) read failed:", myAdminOfError);
+      }
+
+      // A rejected read on either query above must never be reported as
+      // "co-admin of nothing": on screen that is indistinguishable from a
+      // legitimate empty result. Bail out of this refresh rather than
+      // overwrite whatever state is already there with a false empty one.
+      if (!shouldApplyCoAdminRefresh([{ error: adminsError }, { error: myAdminOfError }])) {
+        return;
+      }
 
       const workspaces: WorkspaceOption[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
         const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
         for (const ownerId of ownerIds) {
-          const { data: ownerMeta } = await supabase
+          const { data: ownerMeta, error: ownerMetaError } = await supabase
             .from("user_vault_meta")
             .select("workspace_key_id, sig_public_key")
             .eq("user_id", ownerId)
             .single();
+          if (ownerMetaError) {
+            console.warn(`co-admin: user_vault_meta read failed for owner ${ownerId}:`, ownerMetaError);
+            continue;
+          }
           if (!ownerMeta) continue;
           const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
           if (!ownerKeyId) continue;
@@ -315,11 +341,15 @@ function AppHome() {
           // verify rather than surface one the co-admin cannot safely open.
           const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
           if (!ownerSigPubB64) continue;
-          const { data: wdk } = await supabase
+          const { data: wdk, error: wdkError } = await supabase
             .from("wrapped_data_keys")
             .select("wrapped_ciphertext, grant_sig")
             .eq("data_key_id", ownerKeyId)
             .maybeSingle();
+          if (wdkError) {
+            console.warn(`co-admin: wrapped_data_keys read failed for owner ${ownerId}:`, wdkError);
+            continue;
+          }
           if (!wdk) continue;
           workspaces.push({
             ownerUserId: ownerId,
