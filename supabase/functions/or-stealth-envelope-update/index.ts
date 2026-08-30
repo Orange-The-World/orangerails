@@ -180,7 +180,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // identity, token-pinned above (direct: equals ctx.userId, widget:
     // enforceWidgetAppUser, platform: scoped by platform_id on the row read).
     // DL-1597.
-    await recordScanRange(ctx.serviceClient, {
+    const scanRangeOutcome = await recordScanRange(ctx.serviceClient, {
       connection_id:      body.connection_id,
       app_user_id:        body.app_user_id,
       last_block_scanned: body.last_block_scanned,
@@ -191,6 +191,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       connection_id: body.connection_id,
       last_block_scanned: effectiveCursor,
     };
+    if (scanRangeOutcome.attempted && !scanRangeOutcome.ok) {
+      resp.scan_range_warning = scanRangeOutcome.message;
+    }
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-envelope-update] fatal:', err);
