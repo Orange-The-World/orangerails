@@ -114,6 +114,45 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
 }
 
 /**
+ * Cursor ceiling (OR-T1120). Bounds how far the stored cursor may advance by
+ * the highest height the caller says it scanned CONTIGUOUSLY.
+ *
+ * maxBlockInserted is the height of a transaction that landed, and nothing
+ * else here checks that height against the last height actually read. A
+ * transaction can be inserted from above a coverage gap: the widget scans a
+ * range, hits a permanent filter failure or a filter that is not produced yet,
+ * and its rolling-window extension pass then walks the whole range again and
+ * can match a block above the gap. Advancing the cursor to that height marks
+ * the gap as scanned, so every later sync starts above it and the blocks
+ * inside are never read by anyone. A payment there is missing from the balance
+ * with no error and no retry path.
+ *
+ * This does not start trusting the caller, and that distinction is the whole
+ * argument for it. The value can only NARROW the advance:
+ *  - a caller reporting a HIGHER ceiling changes nothing, because
+ *    maxBlockInserted is itself derived from rows that same caller supplied;
+ *  - a caller reporting a LOWER ceiling only costs itself a re-scan, which the
+ *    (connection_id, txid_blind_index_hex) dedup makes free.
+ * So the worst a lying caller achieves is scanning some blocks twice, where
+ * the worst no ceiling at all achieves is silently losing a payment.
+ *
+ * A body with no last_block_scanned (an older widget build) gets no ceiling
+ * and behaves exactly as it did before.
+ */
+export function boundedCursorAdvance(
+  maxBlockInserted: number,
+  clientContiguousScanned: unknown,
+): number {
+  if (
+    typeof clientContiguousScanned !== 'number' ||
+    !Number.isInteger(clientContiguousScanned)
+  ) {
+    return maxBlockInserted;
+  }
+  return Math.min(maxBlockInserted, clientContiguousScanned);
+}
+
+/**
  * Response cursor derivation (DL-0419). Returns the effective stored cursor
  * AFTER this call, derived only from stored state, never from the client scan
  * tip (body.last_block_scanned). Advances to maxBlockInserted only when new
@@ -329,10 +368,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // Forward-only cursor guard (trackMax-inside-guard). Advance last_block_scanned
     // only when new rows were inserted AND their max block_height exceeds the
     // stored cursor. Always update last_sync_at so the connection shows activity.
+    //
+    // The advance is also bounded by the highest height the caller reports
+    // scanning CONTIGUOUSLY (OR-T1120), so a transaction inserted from above a
+    // coverage gap cannot mark the gap as scanned. See boundedCursorAdvance
+    // for why a ceiling the caller supplies is safe where the old, unbounded
+    // use of the same field would not have been.
+    const advanceCeiling = boundedCursorAdvance(maxBlockInserted, body.last_block_scanned);
     const storedCursor = (ownerRow.last_block_scanned as number | null) ?? -1;
     const cursorPatch: Record<string, unknown> = { last_sync_at: new Date().toISOString() };
-    if (inserted > 0 && maxBlockInserted > storedCursor) {
-      cursorPatch.last_block_scanned = maxBlockInserted;
+    if (inserted > 0 && advanceCeiling > storedCursor) {
+      cursorPatch.last_block_scanned = advanceCeiling;
     }
 
     const { error: updErr } = await ctx.serviceClient
@@ -349,10 +395,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // advanced" from "no new rows, cursor unchanged." Derived only from stored
     // state: on a fresh connection with no stored cursor and zero inserts this
     // is null, never the client-supplied scan tip (body.last_block_scanned).
+    // The bounded value, not the raw max, so what the caller is told still
+    // equals what was persisted above.
     const effectiveCursor = deriveResponseCursor(
       ownerRow.last_block_scanned as number | null,
       inserted,
-      maxBlockInserted,
+      advanceCeiling,
     );
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,
