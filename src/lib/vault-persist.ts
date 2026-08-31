@@ -161,6 +161,14 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // throws on the first of them. Recovering from a partial migration needs a
   // resumable or per-row-keyed rotation, which does not exist yet. Do not
   // describe this path as retryable.
+  //
+  // Worse than a failed retry: from the first rewritten row until this write
+  // lands, the ONLY copy of the new MEK is in this page's memory. It is not
+  // in the recovery ciphertext, not in the password wrapper, not on the
+  // server. Closing or reloading the tab anywhere in that window strands
+  // every row that already moved, permanently. The migration loop above is
+  // therefore the dangerous stretch, not this write, and the user-facing
+  // copy should say so for the whole loop.
   // vault_verifier_ciphertext MUST be updated: it is derived from the MEK.
   // This write has to be PROVEN to have landed, not assumed. Every row above is
   // now under the new MEK and the only copies of that MEK are the wrappers in
