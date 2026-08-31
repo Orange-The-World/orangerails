@@ -39,6 +39,33 @@ export const RECOVERY_META_NOT_SAVED_MESSAGE =
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
+/**
+ * Shown when the number of rows this run re-encrypted does not match the number
+ * of rows the table actually holds. It names both numbers on purpose: a run
+ * that reconciled nothing must not read the same as a run that reconciled
+ * cleanly, and support cannot act on a bare "recovery failed".
+ */
+export function rowCountMismatchMessage(table: string, migrated: number, total: number): string {
+  return (
+    `Vault recovery stopped before saving: migrated ${migrated} of ${total} ${table} rows. ` +
+    "Your stored keys were not changed by this step. " +
+    "Do not close or reload this page, and contact support with this message."
+  );
+}
+
+/**
+ * Shown when the row count could not be read at all. A missing count is a
+ * failure and not a pass: reading "I could not check" as "everything is fine"
+ * is the exact shape of the defect this reconciliation exists to catch.
+ */
+export function rowCountUnreadableMessage(table: string): string {
+  return (
+    `Vault recovery stopped before saving: could not count the ${table} rows, so there is no ` +
+    "way to tell whether every row was re-encrypted. Your stored keys were not changed by " +
+    "this step. Do not close or reload this page, and contact support with this message."
+  );
+}
+
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
 
@@ -113,6 +140,9 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // still not immune to another session INSERTing or DELETing a row while this
   // loop runs, which shifts the window. Keyset pagination on id would close
   // that too. It is deliberately out of scope here and is not a regression.
+  // Counted as each row's update lands, so it is what this run actually
+  // migrated rather than what a read said was there.
+  let connectionsMigrated = 0;
   let connOffset = 0;
   for (;;) {
     const { data: conns, error: connsErr } = await supabase
@@ -149,6 +179,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
         .update(connUpdate)
         .eq("id", conn.id);
       if (connErr) throw connErr;
+      connectionsMigrated += 1;
     }
 
     // End on a short page, not on the absence of an error. A capped or empty
@@ -163,6 +194,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // above: this loop UPDATEs the rows of each page as it goes, so an unordered
   // scan may skip a row (stranded under the old MEK, silently and permanently)
   // or return one twice (decryption throws and the rotation aborts partway).
+  let transactionsMigrated = 0;
   let offset = 0;
   for (;;) {
     const { data: txns, error: txnsErr } = await supabase
@@ -181,6 +213,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
           .update({ encrypted_payload: newPayload })
           .eq("id", txn.id);
         if (txnErr) throw txnErr;
+        transactionsMigrated += 1;
       }),
     );
 
@@ -192,6 +225,15 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // copy of the new MEK is in the page's memory. Closing or reloading the tab
   // anywhere in that window strands every row that already moved, and the
   // migration loop above is therefore the dangerous stretch, not the write.
+
+  // RECONCILE BEFORE THE POINT OF NO RETURN.
+  // Both loops above end on a short page. That is the honest signal for "this
+  // read returned everything it was asked for", and it is not a signal that the
+  // table held nothing more. Counting the rows and comparing them against what
+  // this run actually wrote turns every way of ending early, including ones not
+  // yet thought of, into a loud stop at the last moment where stopping is safe.
+  await assertEveryRowMigrated(supabase, "connections", connectionsMigrated);
+  await assertEveryRowMigrated(supabase, "encrypted_transactions", transactionsMigrated);
 
   // All ciphertexts migrated. Persist rotated vault meta now that every row is
   // under the new MEK.
@@ -240,6 +282,68 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // worth doing on its own; it is not the same as the migration being
   // retryable, and it does not make it so.
   clearMigrationKeys();
+}
+
+/**
+ * Refuse to continue unless this run re-encrypted every row the table holds.
+ *
+ * WHY A COUNT AND NOT THE LOOP'S OWN SIGNAL. Each paging loop ends on a short
+ * page, which is the only honest end condition for a read: a capped or empty
+ * read raises no error, so the row count is all there is. What it cannot tell
+ * you is whether the table held more rows than the loop ever saw. Two ways that
+ * happens, both silent:
+ *
+ *  - the project's PostgREST row cap is lowered below CONNECTION_PAGE_SIZE or
+ *    TRANSACTION_PAGE_SIZE. That cap is a project setting outside this
+ *    repository and nothing here asserts the relationship, so the first page
+ *    comes back short and the loop stops with every later row untouched;
+ *  - another session INSERTs a row while the loop runs, shifting the window.
+ *    Keyset pagination on id does not close this: a row inserted below the
+ *    cursor is missed exactly as offset paging misses it, and it is missed
+ *    while still wrapped under the OLD MEK. During a recovery that is not
+ *    exotic, because a sync in a second tab writes encrypted_transactions rows.
+ *
+ * Either way the row is left under a MEK that recoverWithCode() has already
+ * replaced and nothing stores any more, which is permanent loss for that row.
+ *
+ * WHY IT RUNS HERE. Before the user_vault_meta write is the last instant at
+ * which failing costs nothing irreversible: the stored enc_mek_ciphertext and
+ * recovery_ciphertext still wrap the old MEK, every un-migrated row still
+ * reads, the user can still unlock, and clearMigrationKeys has not run. One
+ * line later the same mismatch cannot be recovered from at all.
+ *
+ * WHY A HEAD REQUEST WITH AN EXACT COUNT. PostgREST computes that count
+ * separately from the rows it returns, so it is the true total and is not
+ * itself subject to the row cap that is one of the two failures above. An
+ * estimate would not be evidence of anything.
+ *
+ * WHY THERE IS NO user_id FILTER. Neither of these tables has a user_id column
+ * and row level security is what scopes them to the caller (VERIFIED on the dev
+ * project 2026-08-31: relrowsecurity is true on both). The paging reads carry
+ * no filter either, so adding one only here would compare two different sets.
+ *
+ * A count LOWER than migrated fails too, which is deliberate. It means a row
+ * was deleted from under the loop, and this path cannot tell that apart from a
+ * row that was skipped. Stopping before the meta write is the cheap direction
+ * to be wrong in; the other direction is unrecoverable.
+ */
+async function assertEveryRowMigrated(
+  supabase: VaultPersistClient,
+  table: string,
+  migrated: number,
+): Promise<void> {
+  const { count, error } = await supabase
+    .from(table)
+    .select("id", { count: "exact", head: true });
+  if (error) throw error;
+  // A count that could not be read is a failure. Letting it through would make
+  // "I could not check" indistinguishable from "everything matched".
+  if (typeof count !== "number" || !Number.isFinite(count)) {
+    throw new Error(rowCountUnreadableMessage(table));
+  }
+  if (count !== migrated) {
+    throw new Error(rowCountMismatchMessage(table, migrated, count));
+  }
 }
 
 export interface RewrapVaultArgs {
