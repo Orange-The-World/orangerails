@@ -44,7 +44,11 @@
  * rather than as a silent pass over every migration.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const MIGRATIONS_DIR = "supabase/migrations";
 
@@ -171,6 +175,68 @@ const CASES = [
   },
 ];
 
+/**
+ * End to end cases. These run THIS SCRIPT, as CI runs it, against a throwaway tree.
+ *
+ * The cases above prove the comparison is right. They do not prove the thing CI invokes can
+ * fail: the enumeration, the exit codes, and the two hard-failure paths all live outside
+ * verdict(), and those are precisely where a check decays into a green tick over nothing. A
+ * gate nobody has watched go red is not evidence, so this watches it, on every run, rather
+ * than once in a ticket that ages.
+ *
+ * Note what was NOT added to make this possible: an environment variable pointing the gate at
+ * a different directory. That is a bypass, and a bypass is worth more to whoever wants past
+ * the gate than the gate is worth to us. The child gets a working directory instead, which
+ * nothing in CI can set.
+ */
+const END_TO_END = [
+  {
+    name: "a real tree with a collision exits 1 and says so",
+    files: ["20260831120000_a.sql", "20260831120000_b.sql"],
+    expectStatus: 1,
+    expectOutput: "duplicate migration version",
+  },
+  {
+    name: "a real tree with unique versions exits 0",
+    files: ["20260831120000_a.sql", "20260831130000_b.sql"],
+    expectStatus: 0,
+    expectOutput: "migration version check OK",
+  },
+  {
+    name: "an empty migrations directory exits 1, it does not pass",
+    files: [],
+    expectStatus: 1,
+    expectOutput: "enumerated 0 file(s)",
+  },
+  {
+    name: "no migrations directory at all exits 1, it does not pass",
+    files: [],
+    createDir: false,
+    expectStatus: 1,
+    expectOutput: "does not exist",
+  },
+];
+
+function runInTempTree(files, createDir) {
+  const root = mkdtempSync(join(tmpdir(), "migration-version-gate-"));
+  try {
+    if (createDir) {
+      mkdirSync(join(root, MIGRATIONS_DIR), { recursive: true });
+      for (const name of files) {
+        writeFileSync(join(root, MIGRATIONS_DIR, name), "-- self-test fixture, never applied\n");
+      }
+    }
+    const run = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    if (run.error) throw run.error;
+    return { status: run.status, output: (run.stdout ?? "") + (run.stderr ?? "") };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function selftest() {
   let failed = 0;
 
@@ -194,13 +260,34 @@ function selftest() {
     }
   }
 
+  for (const testCase of END_TO_END) {
+    const { status, output } = runInTempTree(testCase.files, testCase.createDir !== false);
+    if (status !== testCase.expectStatus) {
+      failed += 1;
+      console.error(
+        "  FAIL " + testCase.name + ": expected exit " + testCase.expectStatus +
+        ", got " + status + ". Output was:\n" + output);
+      continue;
+    }
+    if (!output.includes(testCase.expectOutput)) {
+      failed += 1;
+      console.error(
+        "  FAIL " + testCase.name + ": exit code was right but the message was not. Expected to " +
+        "find \"" + testCase.expectOutput + "\". Output was:\n" + output);
+    }
+  }
+
+  const total = CASES.length + END_TO_END.length;
   if (failed) {
     console.error(
-      "migration version self-test FAILED: " + failed + " of " + CASES.length + " case(s).");
+      "migration version self-test FAILED: " + failed + " of " + total + " case(s).");
     process.exit(1);
   }
-  console.log("migration version self-test OK: " + CASES.length + " cases pass, including a " +
-    "case that must go red and a case that must not.");
+  console.log(
+    "migration version self-test OK: " + total + " cases pass (" + CASES.length +
+    " over the comparison, " + END_TO_END.length + " running this script for real in a " +
+    "throwaway tree). The gate was watched exiting 1 on a collision, on an empty migrations " +
+    "directory and on a missing one, and exiting 0 on a clean tree.");
 }
 
 /* ------------------------------------------------------------------------ main ------ */
