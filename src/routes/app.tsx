@@ -13,6 +13,11 @@ import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
+import {
+  readWrappedDataKey,
+  DUPLICATE_WRAPPED_KEY_MESSAGE,
+  type WrappedKeyClient,
+} from "@/lib/co-admin-workspace-read";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
@@ -316,18 +321,35 @@ function AppHome() {
           // verify rather than surface one the co-admin cannot safely open.
           const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
           if (!ownerSigPubB64) continue;
-          const { data: wdk } = await supabase
-            .from("wrapped_data_keys")
-            .select("wrapped_ciphertext, grant_sig")
-            .eq("data_key_id", ownerKeyId)
-            .maybeSingle();
-          if (!wdk) continue;
+          // This used to be a maybeSingle() whose error was discarded, which
+          // meant TWO wrapped key rows arrived here as NO row: the workspace
+          // vanished from this co-admin's list with nothing shown to anybody,
+          // while the owner's list still showed the grant. Nothing enforces one
+          // row per recipient per workspace key, so that state is reachable.
+          // The three cases are now separate and only the genuinely absent one
+          // is silent.
+          const wdkRead = await readWrappedDataKey(
+            supabase as unknown as WrappedKeyClient,
+            ownerKeyId,
+          );
+          if (wdkRead.status === "ambiguous") {
+            setErr(DUPLICATE_WRAPPED_KEY_MESSAGE);
+            continue;
+          }
+          if (wdkRead.status === "error") {
+            setErr(formatError(wdkRead.error));
+            continue;
+          }
+          // No grant at all is ordinary: this user is in the owner's list but
+          // has not been given a key. Skipping it quietly is correct.
+          if (wdkRead.status === "none") continue;
+          const wdk = wdkRead.row;
           workspaces.push({
             ownerUserId: ownerId,
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: (wdk as Record<string, unknown>).wrapped_ciphertext as string,
-            grantSigB64: ((wdk as Record<string, unknown>).grant_sig as string | null) ?? null,
+            wrappedCiphertextB64: wdk.wrapped_ciphertext,
+            grantSigB64: wdk.grant_sig ?? null,
             ownerSigPubB64,
             granteeUserId: session.user.id,
           });
