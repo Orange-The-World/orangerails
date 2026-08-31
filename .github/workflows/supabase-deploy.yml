@@ -616,8 +616,17 @@ jobs:
           # A success status is still not a usable answer until the shape is
           # right. Only a JSON array of rows can be trusted to mean "these are
           # the versions that are applied"; anything else is UNKNOWN, not zero.
-          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
-            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger query returned a success status but not a JSON array of rows. The applied-version set is UNKNOWN, so NOTHING was applied."
+          #
+          # `type == "array"` on its own is NOT enough. It accepts any array,
+          # including rows that carry no version key: `.[].version` over those
+          # emits `null` per row rather than a version, the numeric filter
+          # below then drops the null lines, and a well formed answer about
+          # the WRONG THING arrives downstream as an empty applied set. That
+          # is the precise confusion this abort exists to prevent, so assert
+          # the rows actually carry a version. A zero row array stays legal:
+          # zero rows is a real answer, and it is handled further down.
+          if ! echo "$RESPONSE" | jq -e 'type == "array" and (length == 0 or all(.[]; has("version")))' >/dev/null 2>&1; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger query returned a success status but not a JSON array of rows carrying a version field. The applied-version set is UNKNOWN, so NOTHING was applied."
             exit 1
           fi
 
@@ -647,8 +656,14 @@ jobs:
           #
           # So: refuse, and make the operator decide deliberately. A migration
           # that genuinely may run late opts in with a marker line in its own
-          # header, which is reviewed in the PR that introduces it and travels
-          # with the file instead of living in a repo variable somebody forgets:
+          # header, meaning the first 40 lines of the file, which is the only
+          # place this check looks. Scoped on purpose: an unscoped search also
+          # matches a commented out example, a copy of this very block pasted
+          # into a migration, or the marker sitting inside a quoted SQL string,
+          # any of which would silently opt a backwards numbered migration out
+          # of the guard. The marker is reviewed in the PR that introduces it
+          # and travels with the file instead of living in a repo variable
+          # that somebody forgets:
           #
           #     -- out-of-order-apply: <one line saying why this is safe>
           #
@@ -682,7 +697,11 @@ jobs:
               if [ "$VERSION" -ge "$MAX_APPLIED" ]; then
                 continue
               fi
-              if grep -qiE '^[[:space:]]*--[[:space:]]*out-of-order-apply:' "$FILE"; then
+              # Header only, per the note above: head -40, never the whole
+              # file. A marker written below the header is not seen, so this
+              # job ABORTS instead of applying. Loud and wrong beats quiet and
+              # wrong on a path that can replay migrations against production.
+              if head -40 "$FILE" | grep -qiE '^[[:space:]]*--[[:space:]]*out-of-order-apply:'; then
                 echo "  ! ${BASENAME} numbers below ${MAX_APPLIED} and carries an explicit out-of-order-apply marker; allowing"
                 continue
               fi
@@ -703,13 +722,14 @@ jobs:
                 echo ""
                 echo "Either renumber the file to an unused timestamp above"
                 echo "\`${MAX_APPLIED}\`, or, if running late is genuinely safe, say so in"
-                echo "the file itself so the next reader sees the decision:"
+                echo "the file HEADER, within the first 40 lines, so the next reader sees"
+                echo "the decision and so this check can see it too:"
                 echo ""
                 echo '```'
                 echo "-- out-of-order-apply: <why this is safe to run after ${MAX_APPLIED}>"
                 echo '```'
               } >> "$GITHUB_STEP_SUMMARY"
-              echo "::error::APPLY ABORTED on ${SUPABASE_REF}: migration(s)${OUT_OF_ORDER} number below the highest applied version ${MAX_APPLIED}. NOTHING was applied. Renumber above ${MAX_APPLIED}, or add an '-- out-of-order-apply:' marker line to the file."
+              echo "::error::APPLY ABORTED on ${SUPABASE_REF}: migration(s)${OUT_OF_ORDER} number below the highest applied version ${MAX_APPLIED}. NOTHING was applied. Renumber above ${MAX_APPLIED}, or add an '-- out-of-order-apply:' marker line to the file HEADER, within the first 40 lines."
               exit 1
             fi
           fi
