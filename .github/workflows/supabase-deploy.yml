@@ -627,8 +627,14 @@ jobs:
               --data-binary "@$SQL_PAYLOAD")
             rm -f "$SQL_PAYLOAD"
 
+            # The response body is deliberately NOT echoed here, for the same
+            # reason as the ledger query above: this is a public repo, so the
+            # build log is world-readable, and on an auth failure the body is
+            # the only place a token-shaped string could reach it. A failed
+            # migration's error text can also carry production table and column
+            # names. The HTTP code and the file name are what locate the failure.
             if [[ ! "$CODE" =~ ^2 ]]; then
-              echo "  x FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
+              echo "  x FAILED to apply ${BASENAME} (HTTP $CODE). Response body not printed: this build log is public."
               rm -f /tmp/mig.resp
               exit 1
             fi
@@ -645,8 +651,11 @@ jobs:
               --data-binary "@$REC")
             rm -f "$REC"
 
+            # Body deliberately not echoed, as above. This path is the one most
+            # likely to carry an auth error body: the SQL has already applied
+            # successfully, so a non-2xx here is usually the token, not the SQL.
             if [[ ! "$REC_CODE" =~ ^2 ]]; then
-              echo "  x FAILED to record migration in ledger (HTTP $REC_CODE): $(head -c 400 /tmp/mig.resp)"
+              echo "  x FAILED to record ${BASENAME} in the migration ledger (HTTP $REC_CODE). Response body not printed: this build log is public."
               rm -f /tmp/mig.resp
               exit 1
             fi
