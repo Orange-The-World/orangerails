@@ -343,26 +343,17 @@ jobs:
           # recorded the `grep -qx` below matches for BOTH and the other is
           # counted as applied forever -- no red, on any project, ever. That is
           # not a drift report failing, it is a drift report that cannot see.
-          # Caught here rather than in a lint job because this is the check
-          # whose answer the duplicate invalidates.
-          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
-          if [ -n "$DUPES" ]; then
-            {
-              echo "## :rotating_light: Duplicate migration version(s)"
-              echo ""
-              for V in $DUPES; do
-                echo "\`${V}\` is used by more than one file:"
-                echo ""
-                ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
-                echo ""
-              done
-              echo "\`supabase_migrations.schema_migrations\` stores one row per"
-              echo "version, so at most one of these can ever be tracked and the"
-              echo "rest are reported as applied whether they ran or not. Rename"
-              echo "the later file to an unused timestamp."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- this report cannot see drift in the shadowed file(s)."
-            exit 1
+          #
+          # The comparison itself no longer lives here. It lived here until
+          # OR-T1189, and this job declares needs: [..., apply-migrations], so it
+          # could only ever announce a collision that the apply had already
+          # resolved by silently skipping one of the two files. It is now
+          # check-duplicate-migrations, which apply-migrations needs, so a
+          # colliding pair stops the apply rather than describing it afterwards.
+          # What remains here is the consequence for THIS report: if that check
+          # did not pass, this comparison cannot see, and it must say so.
+          if [ "${DUPES_RESULT}" != "success" ]; then
+            unknown "check-duplicate-migrations ended '${DUPES_RESULT}'. Until every migration file has its own version, the ledger cannot distinguish a file that was applied from one that was shadowed by a namesake, so the comparison below cannot see drift. That job's summary names the colliding files."
           fi
 
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
