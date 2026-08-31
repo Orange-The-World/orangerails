@@ -51,7 +51,11 @@
  *        underscore. Not retryable: fix the value.
  *   429 { error: "rate_limited" } with a retry-after header, in seconds.
  *        Retryable after that many seconds.
- *   502 { error: "upstream_failure" }  Quiltt failed. Retryable.
+ *   502 { error: "upstream_failure", correlation_id: "..." }  Quiltt
+ *        failed. Retryable. The upstream provider's own error text is
+ *        logged server-side and deliberately NOT returned, because this
+ *        endpoint answers anonymous callers. Quote correlation_id when
+ *        reporting the failure and it can be matched to the log line.
  *   503 { error: "Quiltt not configured on OR" }  our configuration, not
  *        the caller's request. Retrying will not help until we fix it.
  */
@@ -96,11 +100,15 @@ interface CatalogInstitution {
 // does not stop, because a limiter that cannot limit is worse than none: it
 // stops people looking.
 //
-//   1. A per-isolate, per-client-IP counter over a 60 second window. It stops
-//      the naive loop from one machine. It does NOT stop a caller spread over
-//      many addresses, and because every edge isolate keeps its own counter,
-//      a caller whose requests land on different isolates gets one allowance
-//      per isolate. It is a floor, not a ceiling.
+//   1. A per-isolate, per-client-IP counter over a 60 second window, keyed on
+//      an edge-set header wherever one exists. See clientIdOrNull: it does
+//      NOT trust the caller-supplied first hop of x-forwarded-for, which is
+//      what made an earlier version of this counter bypassable from a single
+//      machine. It slows the naive loop from one machine. It does NOT stop a
+//      caller spread over many addresses, it does not stop a caller who can
+//      forge every identifying header, and because every edge isolate keeps
+//      its own counter, a caller whose requests land on different isolates
+//      gets one allowance per isolate. It is a floor, not a ceiling.
 //   2. A per-isolate memo of the mapped response, keyed by connector_id and
 //      the exact term. This is the one that protects the credential: a
 //      repeated term costs zero upstream calls for its TTL, whoever is
@@ -128,19 +136,35 @@ const CATALOG_CACHE_MAX_ENTRIES = 500;
 const catalogCache = new Map<string, { storedAt: number; institutions: CatalogInstitution[] }>();
 
 /**
- * Identify the caller for throttling. Supabase's edge gateway sets
- * x-forwarded-for and the first entry is the client. When we cannot identify
- * a caller we do NOT throttle, deliberately: bucketing every unidentified
- * request under a single key would turn a missing header into a global cap on
- * a hot path the picker calls on each keystroke. Failing open is the safer of
- * the two ways to be wrong here.
+ * Identify the caller for throttling, preferring the headers a caller cannot
+ * write.
+ *
+ * The precedence is the whole point. x-forwarded-for is caller-supplied: a
+ * proxy APPENDS to whatever the client already sent, so its FIRST entry is a
+ * value the client chose. Reading that first entry, as this function used to,
+ * made the counter bypassable from a single machine: send a different random
+ * X-Forwarded-For on every request and each one lands in a fresh bucket, so
+ * rateLimitRetryAfter returns 0 forever. cf-connecting-ip and x-real-ip are
+ * written at the edge and are not caller-forgeable, so they are tried first,
+ * and x-forwarded-for is a last resort read from its LAST entry, the one
+ * appended by the proxy nearest to us.
+ *
+ * UNKNOWN, stated rather than assumed: whether the platform gateway in front
+ * of this function overwrites a caller-supplied x-forwarded-for or appends to
+ * it. Nobody has established that. This ordering makes the answer irrelevant
+ * instead of quietly depending on it.
+ *
+ * When we cannot identify a caller at all we do NOT throttle, deliberately:
+ * bucketing every unidentified request under a single key would turn a
+ * missing header into a global cap on a hot path the picker calls on each
+ * keystroke. Failing open is the safer of the two ways to be wrong here.
  */
 function clientIdOrNull(req: Request): string | null {
+  const edgeSet = (req.headers.get('cf-connecting-ip') ?? req.headers.get('x-real-ip') ?? '').trim();
+  if (edgeSet) return edgeSet;
   const forwarded = req.headers.get('x-forwarded-for') ?? '';
-  const first = forwarded.split(',')[0].trim();
-  if (first) return first;
-  const direct = (req.headers.get('cf-connecting-ip') ?? req.headers.get('x-real-ip') ?? '').trim();
-  return direct || null;
+  const hops = forwarded.split(',').map((hop) => hop.trim()).filter((hop) => hop.length > 0);
+  return hops.length > 0 ? hops[hops.length - 1] : null;
 }
 
 /**
@@ -343,10 +367,25 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     );
   }
 
-  // Only requests that can actually cost us a Quiltt search are counted. A
-  // 1-character query returned above never leaves this isolate, so charging
-  // the caller's allowance for it would spend the budget on nothing.
+  // Only requests that can actually cost us a Quiltt search are counted, and
+  // the ORDER of the next two blocks is what makes that sentence true. A
+  // 1-character query returned above never leaves this isolate. A term already
+  // in the memo costs zero upstream calls too, so the memo is read FIRST: a
+  // memo hit is never charged against the caller's allowance and can never be
+  // answered 429. The picker fires on each keystroke, so the caller most
+  // likely to trip a limiter is an ordinary user typing through terms we can
+  // serve for free.
   const now = Date.now();
+  const memoKey = cacheKey(connectorId, q);
+  const memoized = readCatalogCache(memoKey, now);
+  if (memoized) {
+    return jsonResponse(
+      { connector_id: connectorId, q, institutions: memoized },
+      200,
+      { ...cors, 'cache-control': 'public, max-age=600' },
+    );
+  }
+
   const clientId = clientIdOrNull(req);
   if (clientId) {
     const retryAfter = rateLimitRetryAfter(clientId, now);
@@ -360,16 +399,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         { ...cors, 'retry-after': String(retryAfter), 'cache-control': 'no-store' },
       );
     }
-  }
-
-  const memoKey = cacheKey(connectorId, q);
-  const memoized = readCatalogCache(memoKey, now);
-  if (memoized) {
-    return jsonResponse(
-      { connector_id: connectorId, q, institutions: memoized },
-      200,
-      { ...cors, 'cache-control': 'public, max-age=600' },
-    );
   }
 
   const apiKey = Deno.env.get('QUILTT_API_KEY');
@@ -421,17 +450,30 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     );
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
-    console.error('[or-institutions-catalog] search failed:', errMsg);
+    // The upstream text is LOGGED, never returned. errMsg can carry up to 200
+    // characters of Quiltt's own response body from a failed session mint. Our
+    // API key is never in it, but whatever Quiltt chooses to say about our
+    // account or auth state can be, and this endpoint answers anonymous
+    // callers with no identity at all. The correlation id is what lets support
+    // tie a user's report to this log line without putting the provider's
+    // words on the wire.
+    const correlationId = crypto.randomUUID();
+    console.error(
+      `[or-institutions-catalog] search failed (correlation_id=${correlationId}):`,
+      errMsg,
+    );
     return jsonResponse(
       {
         connector_id: connectorId,
         q,
         institutions: [],
-        // Surfaces upstream Quiltt errors so callers can distinguish
-        // "Quiltt down" from "no banks matched". Returns 502, not 200,
-        // so callers detect failure via HTTP status (not body scanning).
+        // Returns 502, not 200, so callers detect failure via HTTP status
+        // rather than body scanning. The status is the whole signal a caller
+        // needs: it separates "Quiltt down" from "no banks matched", which is
+        // the job the removed upstream text was doing.
         error: 'upstream_failure',
-        warning: `Catalog search failed: ${errMsg.slice(0, 250)}`,
+        correlation_id: correlationId,
+        warning: 'Catalog search failed upstream. Quote correlation_id when reporting this.',
       },
       502,
       { ...cors, 'cache-control': 'no-store' },
