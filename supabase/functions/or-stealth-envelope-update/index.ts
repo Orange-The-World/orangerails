@@ -58,6 +58,14 @@ interface EnvelopeUpdateRequestBody {
 interface EnvelopeUpdateResponseBody {
   connection_id: string;
   last_block_scanned: number;
+  /**
+   * Whether record_stealth_scan_range was attempted and, if so, whether it
+   * succeeded. Omitted when the request carried no from_height (cursor-only,
+   * DL-1478). A failed write no longer fails the sync (still non-fatal by
+   * design), but it is now visible to the caller instead of only a log line
+   * (OR-T0925).
+   */
+  scan_range_recorded?: boolean;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -172,7 +180,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // identity, token-pinned above (direct: equals ctx.userId, widget:
     // enforceWidgetAppUser, platform: scoped by platform_id on the row read).
     // DL-1597.
-    await recordScanRange(ctx.serviceClient, {
+    const scanRangeResult = await recordScanRange(ctx.serviceClient, {
       connection_id:      body.connection_id,
       app_user_id:        body.app_user_id,
       last_block_scanned: body.last_block_scanned,
@@ -182,6 +190,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const resp: EnvelopeUpdateResponseBody = {
       connection_id: body.connection_id,
       last_block_scanned: effectiveCursor,
+      ...(scanRangeResult.attempted ? { scan_range_recorded: scanRangeResult.ok } : {}),
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {
