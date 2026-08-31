@@ -6,6 +6,8 @@
  *
  * Covers:
  *   - deriveResponseCursor semantics (DL-0419 trackMax-inside-guard).
+ *   - boundedCursorAdvance: the cursor cannot pass the height the caller
+ *     actually scanned contiguously (OR-T1120).
  *   - DL-0608 regression: app_user_id must accept cuids, not just UUIDs.
  *     Three stealth functions shared the UUID_RE validator on app_user_id
  *     and silently rejected every real customer's cuid since June. These
@@ -14,7 +16,12 @@
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { deriveResponseCursor, isSealedTx, isValidAppUserId } from './index.ts';
+import {
+  boundedCursorAdvance,
+  deriveResponseCursor,
+  isSealedTx,
+  isValidAppUserId,
+} from './index.ts';
 
 // ── DL-0608: cuid app_user_id must pass validation ────────────────────
 //
@@ -215,5 +222,86 @@ Deno.test('deriveResponseCursor: client scan tip cannot move cursor without actu
     deriveResponseCursor(null, 0, 9999),
     null,
     'zero inserts on fresh connection: cursor stays null regardless of maxBlock argument',
+  );
+});
+
+// ── boundedCursorAdvance (OR-T1120) ──────────────────────────────────
+//
+// What this bounds is not a rounding question. A transaction can be inserted
+// from ABOVE a coverage gap: the widget hits a permanent filter failure part
+// way through a range, and its rolling-window extension pass then walks the
+// whole range again and can match a block past the failure point. Advancing
+// the cursor to that block's height marks the gap as scanned, every later sync
+// starts above it, and a payment inside it is missing from the balance with no
+// error and no retry.
+
+Deno.test('boundedCursorAdvance: will not carry the cursor over a coverage gap', () => {
+  assertEquals(
+    boundedCursorAdvance(900_120, 900_100),
+    900_100,
+    'a tx inserted 20 blocks above the gap cannot advance the cursor past the gap',
+  );
+  assertEquals(
+    deriveResponseCursor(900_000, 1, boundedCursorAdvance(900_120, 900_100)),
+    900_100,
+    'the cursor reported to the caller is the bounded one, so it matches what was persisted',
+  );
+});
+
+Deno.test('boundedCursorAdvance: does not hold the cursor back in the normal case', () => {
+  assertEquals(
+    boundedCursorAdvance(900_100, 900_120),
+    900_100,
+    'scanned past the last transaction found: the transaction height still wins',
+  );
+  assertEquals(
+    boundedCursorAdvance(900_100, 900_100),
+    900_100,
+    'transaction in the last scanned block: unchanged',
+  );
+});
+
+Deno.test('boundedCursorAdvance: the ceiling can only narrow, never widen', () => {
+  // This is the property that makes taking a client-supplied value safe here
+  // when the function deliberately refuses to trust the same field as a cursor.
+  // A caller claiming an enormous scanned height gains nothing, because the
+  // height being bounded is itself derived from rows that caller sent.
+  assertEquals(
+    boundedCursorAdvance(900_100, 9_999_999),
+    900_100,
+    'an inflated scanned height cannot push the cursor past the rows that landed',
+  );
+  assertEquals(
+    deriveResponseCursor(900_000, 0, boundedCursorAdvance(-1, 9_999_999)),
+    900_000,
+    'nothing inserted: the ceiling cannot invent an advance out of no rows',
+  );
+});
+
+Deno.test('boundedCursorAdvance: no usable ceiling leaves the advance exactly as before', () => {
+  // Not reachable over HTTP: the request path already answers 400 when
+  // last_block_scanned is absent or is not a non-negative integer. Pinned
+  // anyway because the function is exported, and because the direction of the
+  // fallback matters: no ceiling must mean "behave as before", never "advance
+  // to zero".
+  assertEquals(
+    boundedCursorAdvance(900_100, undefined),
+    900_100,
+    'absent ceiling: unchanged',
+  );
+  assertEquals(
+    boundedCursorAdvance(900_100, null),
+    900_100,
+    'null ceiling: unchanged',
+  );
+  assertEquals(
+    boundedCursorAdvance(900_100, '900000'),
+    900_100,
+    'a numeric string is not a ceiling',
+  );
+  assertEquals(
+    boundedCursorAdvance(900_100, 900_000.5),
+    900_100,
+    'a non-integer is not a ceiling',
   );
 });
