@@ -219,9 +219,10 @@ jobs:
             echo "## About this automation"
             echo
             echo "The schedule runs every 2 days. If dev is level with prod the run is a clean"
-            echo "no-op. If an open dev to prod pull request already exists, this workflow"
-            echo "updates it rather than opening a second one, because a duplicate promotion"
-            echo "would be actively harmful."
+            echo "no-op. If a promotion into prod is already open, whether its head is dev or"
+            echo "a release branch cut for the purpose, this workflow updates that one rather"
+            echo "than opening a second, because a duplicate promotion would be actively"
+            echo "harmful."
             echo
             echo "This workflow is inert until a repository secret named \`FLEET_PAT\` is added"
             echo "(a token for the \`orange-builder\` machine user, being created shortly). That"
