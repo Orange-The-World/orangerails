@@ -44,6 +44,16 @@
  *       { id, name, logo_url, kind, providers?, primary_provider? }
  *     ]
  *   }
+ *
+ * Other responses a caller must handle:
+ *   400 { error: "invalid connector_id" }  the connector_id in the query
+ *        string is not 1 to 64 characters of A-Z, a-z, 0-9, hyphen or
+ *        underscore. Not retryable: fix the value.
+ *   429 { error: "rate_limited" } with a retry-after header, in seconds.
+ *        Retryable after that many seconds.
+ *   502 { error: "upstream_failure" }  Quiltt failed. Retryable.
+ *   503 { error: "Quiltt not configured on OR" }  our configuration, not
+ *        the caller's request. Retrying will not help until we fix it.
  */
 
 import { buildPublicCorsHeaders, jsonResponse } from '../_shared/http.ts';
