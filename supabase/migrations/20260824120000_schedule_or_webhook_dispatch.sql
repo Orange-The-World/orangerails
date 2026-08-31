@@ -21,6 +21,25 @@
 -- next pulled. Data was stale rather than absent. That is why this is worth
 -- fixing properly and is not an emergency.
 --
+-- ORDER DEPENDENCY, recorded 2026-08-31, OR-T0419. This schedule gives
+-- webhook_delivery its first drain, and 20260824105000_mark_pre_cutoff_webhook_backlog_dead
+-- retires the pre-cutoff backlog so that first drain does not replay stale
+-- payloads. That file's header says it must run BEFORE this one exists, and its
+-- stated reason was that filename order guarantees it. It does not. Filename
+-- order is a within-run property of the apply loop; it cannot reorder across
+-- runs, and on a partly-applied database a file that merges later while
+-- numbering earlier runs after the ones above it.
+--
+-- On dev on 2026-08-24 that is exactly what happened: THIS file merged first and
+-- applied, the retirement merged later with a lower version and did not. For
+-- about forty minutes the dev ledger held this schedule alone with jobid 6
+-- or_webhook_dispatch_drain active every minute and the retirement unapplied.
+-- No wrong delivery occurred only because webhook_delivery on dev held 0 rows.
+--
+-- The apply job in .github/workflows/supabase-deploy.yml now refuses a migration
+-- numbered below the highest version already in the target ledger. That guard,
+-- not the filenames, is what enforces this dependency.
+--
 -- Mirrors invoke_or_quiltt_sync (20260804140000_or_quiltt_sync_fail_loudly.sql)
 -- deliberately, including the loud-failure behaviour: a missing Vault secret
 -- RAISES rather than returning NULL, so a broken config shows up as a failed
