@@ -206,6 +206,10 @@ function AppHome() {
     row: CoAdminRow;
     keyRemoved: boolean;
   } | null>(null);
+  // Set when a grant added the list entry but could not store the key that
+  // gives it access, so the owner needs the same next step revoke already
+  // offers for that half-written state: clear the entry.
+  const [pendingGrantIncomplete, setPendingGrantIncomplete] = useState<CoAdminRow | null>(null);
 
   // Security (change vault password) state
   const [securityOpen, setSecurityOpen] = useState(false);
