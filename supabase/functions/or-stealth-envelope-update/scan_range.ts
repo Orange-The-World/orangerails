@@ -52,6 +52,33 @@ export interface ScanRangeRequest {
  * p_app_user_id is req.app_user_id, the caller identity, never a value read
  * back from stealth_connections.
  */
+/**
+ * OR-T1177: to_height (req.last_block_scanned) and from_height are passed
+ * through to record_stealth_scan_range with only the shape checks below --
+ * both non-negative integers, from <= to. Neither is checked against
+ * anything the server independently knows was scanned. I read the RPC
+ * itself (public.record_stealth_scan_range, dev project): it verifies
+ * connection ownership and merges the new interval with any overlapping
+ * ones already stored; it applies no bound of its own either.
+ *
+ * This is the more consequential half of the OR-T1177 finding, worse than
+ * the cursor gap in advanceCursor (see that module's comment): per
+ * OR-T1162/OR-T1172 a stealth_scan_ranges row can be the value that decides
+ * where a sync resumes, AHEAD of last_block_scanned. A false interval
+ * recorded here is believed at face value and the gap inside it never
+ * closes.
+ *
+ * I looked for a bound to add and could not find one that survives the
+ * gap-fill case sync.tsx already relies on: filledBelow deliberately sends a
+ * to_height BELOW the currently stored cursor to record ground scanned
+ * earlier than the cursor's current position. Any check of the shape
+ * "to_height must not be behind the stored cursor" rejects that legitimate
+ * call along with the bad one it is meant to catch. A bound that is actually
+ * correct here needs a source of truth this module does not have: an
+ * independent reference for how far the chain has really progressed. That is
+ * a real, separate piece of infrastructure, not a one-line fix, and building
+ * it is the open decision on OR-T1177.
+ */
 export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | null {
   const from = req.from_height;
   if (
