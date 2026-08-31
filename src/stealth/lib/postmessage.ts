@@ -343,6 +343,10 @@ export interface SealedTransaction {
   occurred_at: string;
   /** Plaintext block height for resume on the next sync. */
   block_height: number;
+  /** Plaintext canonical block hash (RPC display order, lowercase hex) of
+   *  the block that included this transaction. Public chain data, same
+   *  class as block_height. Feeds the reorg detector server-side. */
+  block_hash: string;
   /**
    * Lowercase hex HMAC-SHA-256 of txid under the per-app blind-index subkey.
    * Server cannot reverse: the subkey is derived from the per-app stealth key
