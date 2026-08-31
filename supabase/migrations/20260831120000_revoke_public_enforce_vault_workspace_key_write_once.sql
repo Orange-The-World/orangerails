@@ -13,10 +13,17 @@
 -- for it.
 --
 -- WHAT THIS DOES
--- Revokes EXECUTE from PUBLIC on this one function. PUBLIC is named
--- explicitly rather than anon, because this function has no separate named
--- anon= entry to remove; the bare "=X/..." entry IS the PUBLIC grant, and
--- revoking only anon would leave it in place.
+-- Revokes EXECUTE from PUBLIC and from anon on this one function. Both roles
+-- are named, because which entry is actually present depends on the project's
+-- default privileges for functions in schema public.
+--
+-- The dev reading above holds on dev only, and generalising it was a defect in
+-- the first version of this file. Where those defaults still include anon, a
+-- newly created function lands with BOTH a bare "=X/..." PUBLIC entry AND a
+-- named "anon=X/..." entry. Revoking only PUBLIC leaves the named grant in
+-- place, the post condition below then finds that anon still holds EXECUTE, and
+-- the migration aborts partway through an ordered batch apply. Naming both
+-- roles is correct everywhere and is a no op wherever one is already absent.
 --
 -- WHAT THIS DOES NOT DO
 -- Does not touch authenticated, service_role or postgres. It is also not
@@ -45,7 +52,10 @@ BEGIN
   END IF;
 
   EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', v_sig);
-  RAISE NOTICE '[revoke-public] revoked PUBLIC EXECUTE on %', v_sig;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM anon', v_sig);
+  END IF;
+  RAISE NOTICE '[revoke-public] revoked PUBLIC and anon EXECUTE on %', v_sig;
 END
 $migration$;
 
