@@ -16,6 +16,13 @@
 --     1. both exit codes are 0
 --     2. both .out files contain a line reading guard=passed
 --     3. both .err files are empty
+--     4. both .out files report the SAME current_user in the CONNECTION block.
+--        Reading only pg_catalog removes the row filtering that a role
+--        difference used to cause, but relacl, proacl and the policy
+--        expressions are still rendered through the connecting role. Two
+--        artifacts made by different roles can differ with no drift present,
+--        and that difference is a digest difference, which is exactly what a
+--        reader would otherwise call drift.
 --   Only then:
 --   diff -u /tmp/dev.out /tmp/prod.out
 --
@@ -252,6 +259,23 @@ SELECT 'guard=passed'       AS guard,
        count(*)             AS objects_compared,
        count(DISTINCT kind) AS kinds_compared
   FROM pg_temp.drift_out;
+
+-- Who produced this artifact. Not decoration: an artifact that does not say
+-- who made it cannot be compared honestly with one made by someone else.
+-- Reading only pg_catalog removes the privilege FILTERING on rows, so the
+-- object counts no longer depend on the role. What still depends on the role
+-- is what those rows RENDER as: relacl, proacl and the policy expressions are
+-- all produced through the connecting identity. So two runs by different roles
+-- can agree on every count and disagree on the digests, and a reader with no
+-- way to see the roles would report that as drift and go looking for a
+-- migration that does not exist.
+--
+-- It is its own section, above the object detail and outside the diffed
+-- object lines, so it informs the comparison without ever joining it.
+\echo '=== CONNECTION (both runs must report the same current_user) ==='
+SELECT current_user     AS current_user,
+       session_user     AS session_user,
+       current_database() AS database;
 
 -- Summary. Read this first: it says what was compared. Two clusters whose
 -- summaries are identical line for line have identical public schemas as far
