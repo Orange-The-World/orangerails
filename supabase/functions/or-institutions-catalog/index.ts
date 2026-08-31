@@ -146,26 +146,42 @@ const catalogCache = new Map<string, { storedAt: number; institutions: CatalogIn
  * X-Forwarded-For on every request and each one lands in a fresh bucket, so
  * rateLimitRetryAfter returns 0 forever. Only cf-connecting-ip is trusted: it
  * is written at Cloudflare's true edge and a client cannot forge it there.
- * x-real-ip is NOT trusted, and an earlier version of this function was wrong
- * to trust it: workers/api-gateway (forwardHeaders) strips cf-connecting-ip
- * and every cf-* header on the way to this function, but forwards a
- * caller-supplied x-real-ip through completely unchanged and never sets one
- * itself. A caller going through that gateway could set x-real-ip to a fresh
- * value every request and land in a new bucket every time, the exact bypass
- * this function exists to close (OR-C0493). x-real-ip is read as an ordinary
- * forgeable header, same footing as x-forwarded-for, which is read from its
- * LAST entry, the one appended by the proxy nearest to us.
+ *
+ * x-real-ip is NOT read anywhere in this function, at all. An earlier
+ * version trusted it and was wrong to: workers/api-gateway (forwardHeaders)
+ * strips cf-connecting-ip and every cf-* header on the way to this function,
+ * but forwards a caller-supplied x-real-ip through completely unchanged and
+ * never sets one itself, so trusting it let a gateway-routed caller forge a
+ * fresh bucket every request (OR-C0493).
+ *
+ * Removing x-real-ip is not enough on its own: the fallback below still
+ * reads x-forwarded-for's LAST entry, on the theory that the proxy nearest
+ * to us appended it. Checked directly against workers/api-gateway's
+ * forwardHeaders, that is false: it does not append to x-forwarded-for, it
+ * copies whatever the caller sent verbatim (out.set(k, v), no push, no
+ * concat). So on a gateway-routed request the last x-forwarded-for entry is
+ * exactly as caller-chosen as the first one was.
+ *
+ * Because of that, the bucket KEY is namespaced by which header produced it
+ * ('cf:' for the trustworthy edge-set value, 'xff:' for the forgeable
+ * fallback). That namespace is what actually closes the cross-contamination
+ * bypass: a caller who controls x-forwarded-for can still get themselves
+ * throttled or not, but can never spend or exhaust a cf: bucket that
+ * belongs to someone else's real address, however many hops they append.
  *
  * KNOWN GAP, stated rather than hidden: a request that reaches this function
  * through workers/api-gateway has already lost cf-connecting-ip (stripped
- * there) and carries only caller-controlled headers, so clientIdOrNull
- * returns null for every gateway-routed caller and that request is not
- * throttled at all, the same fail-open path described below. A direct call
- * to this function, bypassing the gateway, still carries a genuine
- * cf-connecting-ip and is throttled correctly. Closing the gateway-routed
- * gap means the gateway forwarding the real incoming cf-connecting-ip under
- * a header this function trusts, overwriting whatever the caller sent; that
- * is a change to workers/api-gateway, not to this function.
+ * there). With no x-forwarded-for either, clientIdOrNull returns null and
+ * the request is not throttled at all (fail-open, see below). With an
+ * x-forwarded-for, the request lands in an xff: bucket that the caller can
+ * still reset at will by changing the header, same bypass as before this
+ * function existed, just isolated to the xff: namespace instead of able to
+ * spend a cf: caller's allowance. A direct call to this function, bypassing
+ * the gateway, still carries a genuine cf-connecting-ip and is throttled
+ * correctly. Closing the gateway-routed gap means the gateway forwarding the
+ * real incoming cf-connecting-ip under a header this function trusts,
+ * overwriting whatever the caller sent; that is a change to
+ * workers/api-gateway, not to this function (tracked as OR-T1103).
  *
  * When we cannot identify a caller at all we do NOT throttle, deliberately:
  * bucketing every unidentified request under a single key would turn a
@@ -174,10 +190,10 @@ const catalogCache = new Map<string, { storedAt: number; institutions: CatalogIn
  */
 function clientIdOrNull(req: Request): string | null {
   const edgeSet = (req.headers.get('cf-connecting-ip') ?? '').trim();
-  if (edgeSet) return edgeSet;
+  if (edgeSet) return `cf:${edgeSet}`;
   const forwarded = req.headers.get('x-forwarded-for') ?? '';
   const hops = forwarded.split(',').map((hop) => hop.trim()).filter((hop) => hop.length > 0);
-  return hops.length > 0 ? hops[hops.length - 1] : null;
+  return hops.length > 0 ? `xff:${hops[hops.length - 1]}` : null;
 }
 
 /**
