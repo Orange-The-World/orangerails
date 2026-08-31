@@ -256,34 +256,39 @@ jobs:
 
       - name: deno test supabase/functions
         shell: bash
-        env:
-          # The baseline is the number of test files actually present on the
-          # branch this job is running against, and it is PER BRANCH because
-          # the two branches genuinely differ.
-          #
-          # MEASURED 2026-08-03 with this job's own find pattern:
-          #   dev  16 files
-          #   prod  9 files
-          #
-          # The value shipped when this guard landed was 3, which was the count
-          # of test-file DIRECTORIES someone eyeballed rather than the count of
-          # files the pattern collects. A baseline of 3 against a real 15 means
-          # twelve test files can disappear and this job still reports green,
-          # which is the exact failure DL-0459 was opened to stop. The guard was
-          # correct; only its number was wrong.
-          #
-          # Why this is an expression and not one number: prod's tree has 9,
-          # so a single hardcoded 15 promoted from dev to prod turns this job
-          # red on prod the moment it lands, on a count that is correct for
-          # prod. Selecting on the branch lets the same file be true on both.
-          #
-          # When you add or remove a test file, change the number for that
-          # branch in the same PR, and say why in the message if it goes down.
-          # dev raised 17 -> 18 by DEV-0270, which adds
-          # supabase/functions/_shared/error-redaction.test.ts.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '18' }}
         run: |
           set -euo pipefail
+
+          # The baseline is the number of test files actually present on the
+          # TREE this job checked out, read from a file committed alongside
+          # the tests instead of selected by branch name (OR-T1064). A
+          # branch name is not the tree: a hotfix branch cut from prod has a
+          # base_ref that is neither "prod" nor "dev", so picking the number
+          # off the name silently fell through to dev's baseline even when
+          # the checked-out tree was prod's. The file travels with the tree
+          # it describes, so a prod-derived branch always carries prod's own
+          # count and this can no longer mis-select.
+          #
+          # MEASURED 2026-08-03 with this job's own find pattern:
+          #   dev  16 files (raised to 18 by DEV-0270)
+          #   prod  9 files
+          #
+          # When you add or remove a test file, update
+          # supabase/functions/.test-file-baseline for that branch in the
+          # same PR, and say why in the message if the number goes down.
+          # Promoting dev's ci.yml to prod requires prod's own baseline file
+          # to keep reading 9: the count is data on the tree, not code, so a
+          # normal promotion does not overwrite it.
+          BASELINE_FILE="supabase/functions/.test-file-baseline"
+          if [ ! -f "$BASELINE_FILE" ]; then
+            echo "::error::${BASELINE_FILE} is missing -- cannot determine the expected test file count for this tree."
+            exit 2
+          fi
+          DENO_TEST_FILE_BASELINE="$(tr -d '[:space:]' < "$BASELINE_FILE")"
+          if ! [[ "$DENO_TEST_FILE_BASELINE" =~ ^[0-9]+$ ]]; then
+            echo "::error::${BASELINE_FILE} does not contain a plain integer (got: '${DENO_TEST_FILE_BASELINE}')."
+            exit 2
+          fi
 
           # Guard: find must not fail silently. A non-zero exit (missing dir,
           # permission error) must not collapse to count=0 and must not read
