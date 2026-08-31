@@ -487,8 +487,7 @@ Deno.test('a half applied reset over an unscanned gap starts at the birthday, no
     nextSyncStartHeight(db, CONNECTION, GAP_BIRTHDAY),
     GAP_BIRTHDAY,
     'the half applied reset must start at the wallet birthday and not at the old cursor ' +
-      'plus one. Under the previous write order this returned 850001, the old cursor ' +
-      'plus one, '
+      'plus one. Under the previous write order this returned 850001, ' +
       'and 700000 to 799999 was then invisible to every future sync, permanently, with ' +
       'no error and nothing the user could see.',
   );
