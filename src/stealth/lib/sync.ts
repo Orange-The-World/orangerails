@@ -141,6 +141,29 @@ export class WindowExhaustedError extends Error {
   }
 }
 
+/**
+ * How far below the chain tip a block must sit before we will record a
+ * transaction from it.
+ *
+ * Bitcoin occasionally rewrites its most recent block or two. That is normal.
+ * When it happens, a transaction we already recorded can stop existing, and
+ * nothing in this orchestrator ever looks back at a height it has covered, so
+ * the wrong balance is permanent rather than temporary. Six confirmations is
+ * the long-standing Bitcoin convention and covers every reorg observed on
+ * mainnet since 2013.
+ *
+ * The cost is visible to the customer and is accepted: an incoming payment
+ * does not appear for roughly an hour. Showing money that might vanish is
+ * worse than showing it late.
+ *
+ * This constant is only the PREVENTION. The DETECTION half re-checks the
+ * stored block hash of already-recorded transactions over a window an order
+ * of magnitude deeper than this, so that the single event which defeats this
+ * buffer is not also the event that defeats the detector. The two numbers are
+ * deliberately far apart and must not be collapsed into one.
+ */
+export const CONFIRMATION_DEPTH = 6;
+
 export interface RunSyncOptions {
   envelope: SealedEnvelope;
   orStealthKey: string;
@@ -611,18 +634,45 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('deriving', 100, `${derived.length} addresses ready`));
 
   // ── fetching_filters + matching (interleaved by height for fast-fail UX) ──
-  const tip = await opts.fetchTip();
+  const chainTip = await opts.fetchTip();
 
-  // Requirement 1 (issue #335): reject a birthday height outside [0, tip]
+  // Requirement 1 (issue #335): reject a birthday height outside [0, chainTip]
   // before any scan. Coercing a known-wrong start onto the chain tip would
   // silently claim a range was scanned that was not, and that is not
   // recoverable. Rejection is recoverable: fix wallet_birthday, retry.
-  if (opts.birthdayHeight < 0 || opts.birthdayHeight > tip) {
+  //
+  // This checks the RAW chain tip, not the buffered scan ceiling below. A
+  // birthday that lands inside the confirmation buffer is a legitimate date
+  // the user picked, not a mistake they could correct, so rejecting it would
+  // be wrong and unactionable. The already-up-to-date short-circuit below
+  // handles that case, and the blocks are picked up by a later sync once they
+  // are buried deep enough.
+  if (opts.birthdayHeight < 0 || opts.birthdayHeight > chainTip) {
     throw new Error(
-      `stealth/sync: birthday height ${opts.birthdayHeight} is out of range [0, ${tip}] -- ` +
+      `stealth/sync: birthday height ${opts.birthdayHeight} is out of range [0, ${chainTip}] -- ` +
       `abort before scanning; fix wallet_birthday and retry`,
     );
   }
+
+  // The scan ceiling, and the only thing this function treats as "the tip"
+  // from here down: the filter workers, the contiguous-cursor walk, and the
+  // rolling-window extension passes are all bounded by it.
+  //
+  // Deriving the ceiling once, here, is the point. lastBlockScanned is
+  // computed from this same bounded walk, so the coverage watermark cannot
+  // advance past the last block actually scanned. If the scan stopped at
+  // chainTip - CONFIRMATION_DEPTH while coverage was still recorded up to
+  // chainTip, those blocks would never be scanned by anyone, ever, and the
+  // money in them would never appear at all. That failure is worse than the
+  // one the buffer fixes: a delayed balance would become a permanently
+  // missing one. Keeping it to a single expression means there is no second
+  // place that has to remember to agree with this one.
+  //
+  // Goes negative on a chain shorter than CONFIRMATION_DEPTH blocks. That is
+  // handled rather than special-cased: birthdayHeight is >= 0, so fromHeight
+  // is > tip and the short-circuit below returns the stored cursor without
+  // scanning anything or advancing coverage.
+  const tip = chainTip - CONFIRMATION_DEPTH;
 
   // Resume point. `resumeFromHeight` is already anchored at the birthday by
   // resumeHeightFromRanges, so it is used as-is rather than incremented: the
