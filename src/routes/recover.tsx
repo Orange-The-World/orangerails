@@ -5,6 +5,7 @@ import { useVault } from "@/context/VaultContext";
 import { MIN_PASSWORD_LENGTH, CURRENT_VAULT_KEY_VERSION } from "@/lib/vault";
 import { formatError } from "@/lib/format-error";
 import { logSecurityEvent } from "@/lib/audit";
+import { migrateAndPersistRotatedVault, type VaultPersistClient } from "@/lib/vault-persist";
 
 export const Route = createFileRoute("/recover")({
   component: RecoverPage,
@@ -74,128 +75,27 @@ function RecoverPage() {
           newPassword,
         });
 
-      // Re-encrypt connections first, then transactions, then meta.
-      // Meta is written last so a partial failure leaves the STORED wrappers
-      // still pointing at the old MEK: the user can still unlock, and every
-      // row that has not moved yet still reads. That is the only property
-      // this ordering buys. It does NOT make a retry safe. See the note on
-      // the meta write below before relying on it.
-      // credentials subkey changes with the MEK.
-      const { data: conns, error: connsErr } = await (supabase as any)
-        .from("connections")
-        .select("id, encrypted_credentials, encrypted_label");
-      if (connsErr) throw connsErr;
-
-      for (const conn of (conns ?? []) as Array<{
-        id: string;
-        encrypted_credentials: string;
-        encrypted_label: string | null;
-      }>) {
-        const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
-        const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
-        if (conn.encrypted_label) {
-          try {
-            connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
-          } catch {
-            try {
-              connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
-            } catch {
-              // Label migration failed with both keys. Leave the stale ciphertext.
-              // encrypted_label is cosmetic and the connection remains usable.
-            }
-          }
-        }
-        const { error: connErr } = await (supabase as any)
-          .from("connections")
-          .update(connUpdate)
-          .eq("id", conn.id);
-        if (connErr) throw connErr;
-      }
-
-      // Re-encrypt transactions in pages of 500.
-      // encrypted_payload uses the transactions subkey, which changes with the MEK.
-      const PAGE_SIZE = 500;
-      let offset = 0;
-      for (;;) {
-        const { data: txns, error: txnsErr } = await (supabase as any)
-          .from("encrypted_transactions")
-          .select("id, encrypted_payload")
-          .range(offset, offset + PAGE_SIZE - 1);
-        if (txnsErr) throw txnsErr;
-        if (!txns || (txns as unknown[]).length === 0) break;
-
-        await Promise.all(
-          (txns as Array<{ id: string; encrypted_payload: string }>).map(async (txn) => {
-            const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
-            const { error: txnErr } = await (supabase as any)
-              .from("encrypted_transactions")
-              .update({ encrypted_payload: newPayload })
-              .eq("id", txn.id);
-            if (txnErr) throw txnErr;
-          }),
-        );
-
-        if ((txns as unknown[]).length < PAGE_SIZE) break;
-        offset += PAGE_SIZE;
-      }
-
-      // All ciphertexts migrated. Persist rotated vault meta now that every
-      // row is under the new MEK.
+      // Everything from here to the meta write lives in src/lib/vault-persist.ts.
+      // It is the part that loses vaults when it is wrong, and while it sat
+      // inline in this component no test could reach it without mounting the
+      // page, so a green suite said nothing about it. The order, the
+      // compare-and-swap and the row-count check are unchanged; read the
+      // comments there for what writing meta last does and does not buy.
       //
-      // WHAT WRITING META LAST ACTUALLY BUYS, and what it does not.
-      // If a row migration above threw, the stored enc_mek_ciphertext and
-      // recovery_ciphertext still wrap the OLD MEK, so the user can still
-      // unlock and every un-migrated row still reads. Nothing stored is
-      // invalidated. That is real and it is why this order stays.
-      //
-      // It does NOT make a retry safe. recoverWithCode() generates a FRESH
-      // random MEK on every call and nothing records which rows already
-      // moved, so after a partial failure the rows are split across two MEKs.
-      // A retry unwraps the old MEK again and cannot read the rows the first
-      // attempt already rewrote: it throws on the first of them. Recovering
-      // from a partial migration needs a resumable or per-row-keyed rotation,
-      // which does not exist yet. Do not describe this path as retryable.
-      //
-      // Worse than a failed retry: from the first rewritten row until this
-      // write lands, the ONLY copy of the new MEK is in this page's memory.
-      // It is not in the recovery ciphertext, not in the password wrapper,
-      // not on the server. Closing or reloading the tab anywhere in that
-      // window strands every row that already moved, permanently. The
-      // migration loop above is therefore the dangerous stretch, not this
-      // write, and the user-facing copy should say so for the whole loop.
-      // vault_verifier_ciphertext MUST be updated: it is derived from the MEK.
-      // This write has to be PROVEN to have landed, not assumed. Every row above
-      // is now under the new MEK and the only copies of that MEK are the wrappers
-      // in this statement. An update that matches zero rows comes back without an
-      // error, so the row count is the only signal that it actually happened.
-      // The compare-and-swap on recovery_ciphertext (read at the top of this
-      // submit) makes a concurrent rotation fail loudly rather than be overwritten.
-      const { data: updatedRows, error: updateErr } = await (supabase as any)
-        .from("user_vault_meta")
-        .update({
-          enc_mek_ciphertext: newEncMekCiphertext,
-          recovery_ciphertext: newRecoveryCiphertext,
-          vault_verifier_ciphertext: newVerifierCiphertext,
-          vault_key_version: CURRENT_VAULT_KEY_VERSION,
-        })
-        .eq("user_id", session.user.id)
-        .eq("recovery_ciphertext", meta.recovery_ciphertext)
-        .select("user_id");
-      if (updateErr) throw updateErr;
-      if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
-        throw new Error(
-          "Vault recovery did not save. Your data has been re-encrypted but the new keys were not stored. Do not close or reload this page, and contact support with this message.",
-        );
-      }
-
-      // Zero old key material. Only reached once the meta write above is
-      // proven to have landed.
-      // clearMigrationKeys is deliberately NOT called in the catch branch
-      // below: after a partial failure these stashed subkeys are the only
-      // thing that can still read data left under the old MEK in this
-      // session. Keeping them is worth doing on its own; it is not the same
-      // as the migration being retryable, and it does not make it so.
-      clearMigrationKeys();
+      // It throws unless the meta write is proven to have landed, and it only
+      // zeroes the old key material once that proof exists.
+      await migrateAndPersistRotatedVault({
+        supabase: supabase as unknown as VaultPersistClient,
+        userId: session.user.id,
+        priorRecoveryCiphertext: meta.recovery_ciphertext,
+        newEncMekCiphertext,
+        newRecoveryCiphertext,
+        newVerifierCiphertext,
+        vaultKeyVersion: CURRENT_VAULT_KEY_VERSION,
+        migrateCredentialsCiphertext,
+        migrateTransactionCiphertext,
+        clearMigrationKeys,
+      });
 
       void logSecurityEvent(supabase, session.user.id, "vault_recover");
 
