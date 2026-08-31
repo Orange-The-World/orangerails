@@ -902,6 +902,34 @@ function AppHome() {
     }
   }
 
+  /**
+   * Re-fetch this owner's co-admin list with emails resolved, and update
+   * coAdmins state. Shared by the initial load path's shape (see the
+   * gate useEffect above), the grant-success path, and the grant-incomplete
+   * path below, which all need the same rows for different reasons.
+   */
+  async function loadCoAdminList(): Promise<CoAdminRow[]> {
+    if (!userId) return [];
+    const { data: admins } = await supabase
+      .from("workspace_admins")
+      .select("id, admin_user_id, added_at")
+      .eq("owner_user_id", userId);
+    const freshRows = (admins ?? []) as CoAdminRow[];
+    const freshIds = freshRows.map((r) => r.admin_user_id);
+    const emailMap = new Map<string, string>();
+    if (freshIds.length > 0) {
+      const { data: emailRows } = await supabase.rpc("get_coadmin_emails", {
+        user_ids: freshIds,
+      });
+      for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
+        emailMap.set(row.user_id, row.email);
+      }
+    }
+    const withEmails = freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) }));
+    setCoAdmins(withEmails);
+    return withEmails;
+  }
+
   async function handleSignOut() {
     lock();
     await supabase.auth.signOut();
