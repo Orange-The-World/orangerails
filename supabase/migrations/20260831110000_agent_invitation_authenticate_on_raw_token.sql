@@ -125,6 +125,26 @@
 -- rather than trusting the restore loop to have done the right thing.
 --
 -- ------------------------------------------------------------
+-- SECURITY DEFINER SEARCH PATH
+-- ------------------------------------------------------------
+-- Both functions pin SET search_path = public, pg_temp, with pg_temp LAST.
+-- PostgreSQL searches the temporary schema FIRST for relation names unless
+-- pg_temp is named explicitly, so a bare SET search_path TO 'public' inside
+-- a SECURITY DEFINER body still lets a caller who can create a temp table
+-- shadow public.agent_invitation_tokens or public.agent_members.
+--
+-- No such caller exists on the ruled path today: OR-T0988 rules the caller
+-- is service_role through an edge function speaking PostgREST, which cannot
+-- issue CREATE TEMP TABLE. So this is hardening and NOT a live hole. It is
+-- done because the mitigation otherwise rests on a property of the current
+-- deployment rather than on a property of these functions.
+--
+-- HOUSE STANDARD, ruled on OR-T1131: every SECURITY DEFINER function in
+-- this repo pins search_path with pg_temp LAST, and the migration that
+-- creates it asserts that pin BY NAME. The assertion block below does that
+-- for both functions, so a later edit that drops pg_temp trips this file.
+--
+-- ------------------------------------------------------------
 -- IDEMPOTENT
 -- ------------------------------------------------------------
 -- Safe to re-run. Both old signatures are dropped IF EXISTS and the new
@@ -286,7 +306,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'public'
+SET search_path = public, pg_temp
 AS $peek$
 BEGIN
   IF p_token IS NULL
@@ -334,7 +354,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'public'
+SET search_path = public, pg_temp
 AS $complete$
 DECLARE
   v_agent_member_id uuid;
@@ -558,6 +578,31 @@ BEGIN
   IF position('sha256' IN v_def) = 0 THEN
     RAISE EXCEPTION 'OR-T0965 assert: peek_agent_invitation does not hash inside the body';
   END IF;
+
+  -- Both functions must pin search_path, must include public, and must name
+  -- pg_temp LAST (OR-T1131). proconfig carries the pin verbatim, e.g.
+  -- {"search_path=public, pg_temp"}. A SECURITY DEFINER body whose path does
+  -- not name pg_temp searches the temporary schema first for relation names.
+  FOR r IN
+    SELECT p.proname AS proname,
+           coalesce(
+             (SELECT cfg FROM unnest(p.proconfig) AS cfg
+               WHERE cfg LIKE 'search_path=%' LIMIT 1),
+             '<none>') AS sp
+      FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+     WHERE ns.nspname = 'public'
+       AND p.proname IN ('complete_agent_invitation', 'peek_agent_invitation')
+  LOOP
+    IF r.sp = '<none>' THEN
+      RAISE EXCEPTION 'OR-T1131 assert: % pins no search_path at all', r.proname;
+    END IF;
+    IF position('public' IN r.sp) = 0 THEN
+      RAISE EXCEPTION 'OR-T1131 assert: % pins a search_path without public, got %', r.proname, r.sp;
+    END IF;
+    IF r.sp !~ ',\s*pg_temp$' THEN
+      RAISE EXCEPTION 'OR-T1131 assert: % must name pg_temp LAST in its pinned search_path, got %', r.proname, r.sp;
+    END IF;
+  END LOOP;
 
   -- no PUBLIC execute on either, on any cluster
   SELECT count(*) INTO v_public
