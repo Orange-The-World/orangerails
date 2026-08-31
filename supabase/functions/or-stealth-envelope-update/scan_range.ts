@@ -73,21 +73,41 @@ export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | nu
 }
 
 /**
+ * Outcome of recordScanRange, so a failed write is observable to the caller
+ * instead of only appearing in a log line (OR-T0925).
+ *
+ *   attempted: false -- no from_height was supplied; this request opted out
+ *              of range recording (DL-1478 cursor-only fallback).
+ *   attempted: true, ok: true  -- the RPC wrote the range.
+ *   attempted: true, ok: false -- the RPC was called and failed; `error`
+ *              carries the message for logging/telemetry by the caller.
+ */
+export type ScanRangeResult =
+  | { attempted: false }
+  | { attempted: true; ok: true }
+  | { attempted: true; ok: false; error: string };
+
+/**
  * Record the scan range for this request, if it carries one.
  *
- * Failure is logged and swallowed by design: the cursor write that precedes
- * this is the safe fallback while range recording is rolled out, so a rejected
- * range must not fail the caller's sync (DL-1478). Note that an ownership
- * rejection from the database lands here as a logged error, which is the
- * correct outcome: nothing is written.
+ * The write stays non-fatal by design: the cursor write that precedes this
+ * is the safe fallback while range recording is rolled out, so a rejected
+ * range must not fail the caller's sync (DL-1478). What changed is that the
+ * outcome is now returned rather than only console.error-ed, so the handler
+ * can surface it (for example as a boolean on the response body) instead of
+ * a failure being visible only in a log line. Note that an ownership
+ * rejection from the database lands here as ok: false, which is the correct
+ * outcome: nothing is written, and now the caller can tell.
  */
 // deno-lint-ignore no-explicit-any
-export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<void> {
+export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<ScanRangeResult> {
   const args = buildScanRangeArgs(req);
-  if (args === null) return;
+  if (args === null) return { attempted: false };
 
   const { error } = await client.rpc('record_stealth_scan_range', args);
   if (error) {
     console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', error);
+    return { attempted: true, ok: false, error: String(error.message ?? error) };
   }
+  return { attempted: true, ok: true };
 }
