@@ -6,6 +6,7 @@ import { useVault } from "@/context/VaultContext";
 import type { GrantSupabaseLike } from "@/context/VaultContext";
 import {
   clearCoAdminListEntry,
+  CoAdminGrantIncompleteError,
   CoAdminRevocationIncompleteError,
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
