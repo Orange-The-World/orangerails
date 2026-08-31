@@ -40,6 +40,17 @@ name: prod pr source guard
 # before, it trusted a branch NAME; now it asks the commit graph, and a rename
 # cannot spoof ancestry.
 #
+# HOW THE ANCESTRY STEP WAS PROVEN ABLE TO FAIL, and how to prove it again.
+# The self-test step below covers the pure decision logic in both directions,
+# but it cannot cover the ancestry lookup, because that is an API call. So the
+# lookup was pointed at a real branch and watched to refuse: a release/* branch
+# carrying a commit that was not on dev was opened into prod, the compare
+# returned "ahead", and this job failed with the ancestry message rather than
+# the wrong-branch message. To repeat it: cut a release/* branch, add any commit
+# that is not on dev, open it into prod, and watch this check go red. Then close
+# the pull request. If it ever goes green in that state, the lookup has stopped
+# looking and every promotion it has waved through since is unproven.
+#
 # THE JOB NAME BELOW NO LONGER DESCRIBES THE WHOLE BEHAVIOUR, ON PURPOSE.
 # "prod pull requests must come from dev" is the required-check context name in
 # the prod ruleset. Renaming it would leave the ruleset waiting for a check that
