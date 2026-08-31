@@ -85,8 +85,9 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // Meta is written last so a partial failure leaves the STORED wrappers still
   // pointing at the old MEK: the user can still unlock, and every row that has
   // not moved yet still reads. That is the only property this ordering buys.
-  // It does NOT make a retry safe. See the note on the meta write below before
-  // relying on it.
+  // It does NOT make a retry safe, and it does NOT save the rows that already
+  // moved, which are lost. See the note on the meta write below before relying
+  // on it.
   // credentials subkey changes with the MEK.
   //
   // WHY THIS PAGES AT ALL. An unfiltered select LOOKS like it returns every
@@ -243,9 +244,24 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   //
   // WHAT WRITING META LAST ACTUALLY BUYS, and what it does not.
   // If a row migration above threw, the stored enc_mek_ciphertext and
-  // recovery_ciphertext still wrap the OLD MEK, so the user can still unlock
-  // and every un-migrated row still reads. Nothing stored is invalidated. That
-  // is real and it is why this order stays.
+  // recovery_ciphertext still wrap the OLD MEK, so the user can still UNLOCK
+  // and every row that has NOT moved yet still reads. That is the whole of it,
+  // and it is why this order stays.
+  //
+  // It does NOT mean nothing stored is invalidated. Every row this function
+  // already rewrote is now under the new MEK, and the only copies of the new
+  // MEK are in session memory, because the write that would persist them is
+  // the one below and it has not run. So a mid-walk failure leaves a SPLIT
+  // vault, not an intact one: the already-migrated prefix is permanently
+  // unreadable once this session ends, and the un-migrated suffix still reads.
+  // The connections walk above runs to completion before the transaction walk
+  // starts, so a throw anywhere in the transaction walk puts EVERY connection
+  // credential the user owns in that lost prefix.
+  //
+  // Do not read this ordering as making a partial failure survivable. It only
+  // keeps the user able to unlock. Making it survivable means persisting the
+  // new wrapper before the walks, or versioning the key per row, and neither
+  // exists yet.
   //
   // It does NOT make a retry safe. recoverWithCode() generates a FRESH random
   // MEK on every call and nothing records which rows already moved, so after a
