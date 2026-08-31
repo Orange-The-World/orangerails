@@ -41,6 +41,7 @@ interface FakeOptions {
 
 function makeFakeClient(options: FakeOptions = {}) {
   const inserts: RecordedInsert[] = [];
+  const deletes: string[] = [];
 
   const client = {
     from(table: string) {
@@ -54,6 +55,10 @@ function makeFakeClient(options: FakeOptions = {}) {
           throw new Error("a grant does not read; this client only records inserts");
         },
         delete() {
+          // Recorded rather than only thrown, so a compensating delete shows
+          // up as a failed assertion on `deletes` instead of being swallowed
+          // by rejection() capturing the thrown error as the rejection reason.
+          deletes.push(table);
           throw new Error("a grant does not delete; see the note about compensating deletes");
         },
       };
@@ -66,6 +71,7 @@ function makeFakeClient(options: FakeOptions = {}) {
   return {
     client: client as unknown as Parameters<typeof persistCoAdminGrant>[0]["supabase"],
     inserts,
+    deletes,
   };
 }
 
