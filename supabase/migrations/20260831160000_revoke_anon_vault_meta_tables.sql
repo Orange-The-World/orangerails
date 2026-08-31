@@ -15,10 +15,10 @@
 -- recovery blob and the wrapped PQC secret keys. Read live from
 -- pg_class.relacl on 2026-08-31:
 --
---   hosted prod lcdicqalreskibdfxkzb
+--   hosted production
 --     user_vault_meta     : postgres=arwdDxtm, anon=arw, authenticated=arw, service_role=arwxtm
 --     customer_vault_meta : postgres=arwdDxtm, anon=arw, authenticated=arw, service_role=arwxtm
---   hosted dev fzwmnzmtqidumdqjdddz
+--   hosted dev
 --     user_vault_meta     : postgres=arwdDxtm, service_role=arwxtm, authenticated=r
 --     customer_vault_meta : postgres=arwdDxtm, service_role=arwxtm, authenticated=arw
 --
