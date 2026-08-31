@@ -1429,6 +1429,21 @@ async function fetchFilterPair(height: number, baseUrl: string): Promise<FilterR
   }
 
   const sidecar = (await jsonResp.json()) as FilterSidecar;
+  // OR-T1167: the SipHash match below proves the filter and the hash came
+  // from the same block; it proves nothing about which HEIGHT that block is
+  // at. A producer or CDN serving one height's pair under another height's
+  // URL passes that match cleanly. Catch it here, before the mismatch is
+  // carried into a stored transaction and read by nobody. Durable, not
+  // retried: a producer serving the wrong sidecar under this height will
+  // serve it again.
+  if (sidecar.block_height !== height) {
+    throw new DurableFilterError(
+      `liveFetchFilter: sidecar at height ${height} reports block_height ` +
+      `${sidecar.block_height} -- the .gcs.gz and .json pair does not match ` +
+      `the height requested. This is a producer/CDN misfile, not a transient ` +
+      `error; retrying would only fetch the same mismatched pair again.`,
+    );
+  }
   const gzBuf = new Uint8Array(await gzResp.arrayBuffer());
   const filter = await gunzip(gzBuf);
 
@@ -1490,7 +1505,14 @@ export async function liveFetchFilter(
 /**
  * Fetch raw block bytes for the given block hash. The block source attaches
  * X-Block-Hash and X-Block-Height response headers; we trust those for the
- * height field but verify the hash matches what we asked for.
+ * height field. The hash is NOT verified against blockHashHex here: when the
+ * X-Block-Hash header is absent, reportedHash falls back to the requested
+ * blockHashHex, and there is no comparison anywhere in this function.
+ * Pre-existing, confirmed byte-identical against dev before OR-T1167; the
+ * docstring above used to claim a check that was never in the code. Currently
+ * harmless because the hash this module stores and matches transactions
+ * against comes from the filter sidecar (see fetchFilterPair), and never
+ * passes through this function.
  */
 export async function liveFetchBlock(
   blockHashHex: string,
