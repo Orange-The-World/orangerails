@@ -69,28 +69,40 @@ jobs:
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Skip if any checks still in progress
+      - name: Wait for checks to settle
         id: settled
         if: steps.find-pr.outputs.pr_number != ''
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.find-pr.outputs.head_sha }}
         run: |
-          # Count check_runs on this head that are not yet in a terminal state.
-          # A head that still has pending/in_progress checks cannot be evaluated:
-          # a missing check might simply not have started yet.
-          RUNNING=$(gh api \
-            "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
-            --paginate \
-            -H "Accept: application/vnd.github+json" \
-            --jq '[.check_runs[] | select(.status != "completed" and .name != "Evaluate STALE CI label")] | length')
-          if [ "$RUNNING" -gt 0 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "${RUNNING} check(s) still running -- deferring STALE CI evaluation"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "All checks settled -- proceeding with STALE CI evaluation"
-          fi
+          # Poll the head's check-runs instead of looking once. Under the
+          # workflow_run trigger this workflow fires exactly once per CI run,
+          # and a check-run from outside CI (a Cloudflare Pages deploy, for
+          # example) can settle after CI does. A single look would then see
+          # an unsettled check and give up for good, since nothing else
+          # re-triggers this workflow for that head. Poll instead, bounded so
+          # a genuinely stuck check does not hold the job open forever.
+          DEADLINE=$(( $(date +%s) + 300 ))
+          while true; do
+            RUNNING=$(gh api \
+              "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
+              --paginate \
+              -H "Accept: application/vnd.github+json" \
+              --jq '[.check_runs[] | select(.status != "completed" and .name != "Evaluate STALE CI label")] | length')
+            if [ "$RUNNING" -eq 0 ]; then
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "All checks settled -- proceeding with STALE CI evaluation"
+              break
+            fi
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "${RUNNING} check(s) still running after 5 minutes -- timed out, deferring STALE CI evaluation"
+              break
+            fi
+            echo "${RUNNING} check(s) still running -- waiting 30s before re-checking"
+            sleep 30
+          done
 
       - name: Ensure STALE CI label exists
         if: >
