@@ -17,7 +17,6 @@
   "scripts": {
     "dev": "vite dev",
     "check:legal": "node scripts/check-legal-placeholders.mjs",
-    "migration:new": "node scripts/new-migration.mjs",
     "db:new": "node scripts/new-migration.mjs",
     "build": "node scripts/check-legal-placeholders.mjs && vite build",
     "build:dev": "vite build --mode development",
