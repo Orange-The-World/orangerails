@@ -40,7 +40,7 @@ export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
 /** Transactions are re-encrypted in pages of this size. */
-const TRANSACTION_PAGE_SIZE = 500;
+export const TRANSACTION_PAGE_SIZE = 500;
 
 export interface RotateVaultArgs {
   supabase: VaultPersistClient;
@@ -144,6 +144,11 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     if ((txns as unknown[]).length < TRANSACTION_PAGE_SIZE) break;
     offset += TRANSACTION_PAGE_SIZE;
   }
+
+  // From the first rewritten row until the meta write below lands, the only
+  // copy of the new MEK is in the page's memory. Closing or reloading the tab
+  // anywhere in that window strands every row that already moved, and the
+  // migration loop above is therefore the dangerous stretch, not the write.
 
   // All ciphertexts migrated. Persist rotated vault meta now that every row is
   // under the new MEK.
