@@ -662,8 +662,8 @@ jobs:
           # into a migration, or the marker sitting inside a quoted SQL string,
           # any of which would silently opt a backwards numbered migration out
           # of the guard. The marker is reviewed in the PR that introduces it
-          # and travels
-          # with the file instead of living in a repo variable somebody forgets:
+          # and travels with the file instead of living in a repo variable
+          # that somebody forgets:
           #
           #     -- out-of-order-apply: <one line saying why this is safe>
           #
