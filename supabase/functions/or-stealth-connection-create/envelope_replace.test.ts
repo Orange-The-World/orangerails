@@ -326,10 +326,14 @@ Deno.test('a failed envelope write reports an error and leaves the connection re
 
   assert(isEnvelopeReplacementError(result), 'a failed envelope write must not answer ok');
   assertEquals(db.ranges.length, 0, 'coverage went first, so this half already landed');
-  assertEquals(
-    nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT),
-    BIRTHDAY_HEIGHT,
-    'the wrong half to lose: a rescan that was not needed, rather than one that was ' +
-      'promised and silently skipped',
-  );
+
+  // The residual state is the OLD envelope with its cursor untouched, so the
+  // connection resumes exactly where it was: one block past the cursor. That
+  // is the safe half to lose. Losing them the other way round would store the
+  // NEW envelope, carrying the birthday the user just asked for, behind
+  // coverage that still blocks the rescan, and a caller who does not retry is
+  // then back in the silent failure this whole change is about.
+  assertEquals(db.connections[0].sealed_envelope, OLD_ENVELOPE);
+  assertEquals(db.connections[0].last_block_scanned, COVERAGE_TOP);
+  assertEquals(nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT), COVERAGE_TOP + 1);
 });
