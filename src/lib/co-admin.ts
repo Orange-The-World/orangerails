@@ -395,14 +395,14 @@ export async function grantCoAdmin(params: {
     algorithm: "hybrid-x25519-mlkem768-blob64",
     grant_sig: grantSig,
   });
-  if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${wdkErr}`);
+  if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${errorText(wdkErr)}`);
 
   // Step g , insert workspace_admins row.
   const { error: adminErr } = await supabase.from("workspace_admins").insert({
     owner_user_id: ownerUserId,
     admin_user_id: targetUserId,
   });
-  if (adminErr) throw new Error(`Failed to insert workspace_admins: ${adminErr}`);
+  if (adminErr) throw new Error(`Failed to insert workspace_admins: ${errorText(adminErr)}`);
 
   return { workspaceKeyId };
 }
