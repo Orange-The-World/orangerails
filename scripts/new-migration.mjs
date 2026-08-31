@@ -37,14 +37,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MIGRATIONS_DIR = path.join(ROOT, "supabase", "migrations");
 
 /** A migration slug: lowercase, starts with a letter, underscores between words. */
-const SLUG = /^[a-z][a-z0-9_]*$/;
+export const SLUG = /^[a-z][a-z0-9_]*$/;
 
 function pad(n, width) {
   return String(n).padStart(width, "0");
 }
 
 /** The 14 digit version for a moment, in UTC. Fixed width, so it sorts lexically. */
-function versionFor(date) {
+export function versionFor(date) {
   return (
     pad(date.getUTCFullYear(), 4) +
     pad(date.getUTCMonth() + 1, 2) +
@@ -59,7 +59,7 @@ function versionFor(date) {
  * Versions already present in the tree. Read with the same rule the deploy check
  * uses, everything before the first underscore, so this cannot disagree with it.
  */
-function takenVersions() {
+export function takenVersions() {
   if (!existsSync(MIGRATIONS_DIR)) return new Set();
   return new Set(
     readdirSync(MIGRATIONS_DIR)
@@ -72,8 +72,7 @@ function takenVersions() {
  * The clock's version, or the next free second after it. Walking forward is what
  * removes the reason anyone ever typed a manual "plus one second" by hand.
  */
-function nextFreeVersion(now) {
-  const taken = takenVersions();
+export function nextFreeVersion(now, taken = takenVersions()) {
   const at = new Date(now.getTime());
   let version = versionFor(at);
   let moved = 0;
@@ -92,7 +91,7 @@ function nextFreeVersion(now) {
   return { version, moved };
 }
 
-function stubFor(version, slug) {
+export function stubFor(version, slug) {
   return `-- ${version}_${slug}.sql
 --
 -- WHAT THIS CHANGES:
@@ -152,4 +151,8 @@ function main() {
   console.log(`supabase/migrations/${filename}`);
 }
 
-main();
+// Only run the CLI when this file IS the entry point. Importing it, which the test
+// does, must not create files or exit the process.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
