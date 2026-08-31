@@ -22,6 +22,7 @@ import { gzipSync } from 'node:zlib';
 
 import { sealEnvelope, unsealEnvelope } from './seal';
 import {
+  CONFIRMATION_DEPTH,
   FILTER_FETCH_ATTEMPTS,
   liveFetchBlock,
   liveFetchFilter,
@@ -292,7 +293,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 700_000,
       lastBlockScanned: 700_000,
-      fetchTip: async () => 700_001,
+      fetchTip: async () => 700_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 700_001) {
           return { height: h, blockHashHex, filter: fakeFilter };
@@ -437,7 +438,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 800_000,
       lastBlockScanned: null,
-      fetchTip: async () => 800_010,
+      fetchTip: async () => 800_010 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h >= 800_005) return null;
         return { height: h, blockHashHex: '00'.repeat(32), filter: new Uint8Array(0) };
@@ -523,7 +524,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
         orStealthKey,
         birthdayHeight: 850_000,
         lastBlockScanned: 850_000,
-        fetchTip: async () => 850_001,
+        fetchTip: async () => 850_001 + CONFIRMATION_DEPTH,
         fetchFilter: async (h) => ({
           height: h,
           blockHashHex: 'ab'.repeat(32),
@@ -568,7 +569,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 850_000,
       lastBlockScanned: 850_000,
-      fetchTip: async () => 850_001,
+      fetchTip: async () => 850_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 850_001) {
           return { height: h, blockHashHex, filter: new Uint8Array([1, 2, 3]) };
@@ -621,7 +622,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 900_000,
       lastBlockScanned: 900_000,
-      fetchTip: async () => 900_001,
+      fetchTip: async () => 900_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) =>
         h === 900_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
       fetchBlock: async () => ({ height: 900_001, blockHashHex, raw: blockBuild.raw }),
@@ -659,7 +660,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 910_000,
       lastBlockScanned: 910_000,
-      fetchTip: async () => 910_001,
+      fetchTip: async () => 910_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) =>
         h === 910_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
       fetchBlock: async () => ({ height: 910_001, blockHashHex, raw: blockBuild.raw }),
@@ -709,7 +710,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 800_000,
       lastBlockScanned: 800_000,
-      fetchTip: async () => 800_002,
+      fetchTip: async () => 800_002 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 800_001) return { height: h, blockHashHex: hashHexA, filter: filterA };
         if (h === 800_002) return { height: h, blockHashHex: hashHexB, filter: filterB };
@@ -792,7 +793,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 800_000,
       lastBlockScanned: 800_000,
-      fetchTip: async () => 800_001,
+      fetchTip: async () => 800_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         fetchFilterCalls.push(h);
         if (h === 800_001) return { height: h, blockHashHex, filter: fakeFilter };
@@ -854,7 +855,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 900_000,
       lastBlockScanned: 900_000,
-      fetchTip: async () => 900_001,
+      fetchTip: async () => 900_001 + CONFIRMATION_DEPTH,
       // Simulate liveFetchFilter throwing on 404 for the only height in range.
       fetchFilter: async (_h) => { throw fetchFilterError; },
       fetchBlock: async () => { throw new Error('should not be reached'); },
@@ -910,7 +911,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
         orStealthKey,
         birthdayHeight: 900_001,
         lastBlockScanned: null,
-        fetchTip: async () => 900_002,
+        fetchTip: async () => 900_002 + CONFIRMATION_DEPTH,
         fetchFilter: async (h) => {
           if (h === 900_001) return { height: h, blockHashHex: hash1Hex, filter: fakeFilter };
           if (h === 900_002) return { height: h, blockHashHex: hash2Hex, filter: fakeFilter };
@@ -973,7 +974,7 @@ describe('runSync height source and block ordering regressions', () => {
       orStealthKey,
       birthdayHeight: 700_000,
       lastBlockScanned: 700_000,
-      fetchTip: async () => 700_001,
+      fetchTip: async () => 700_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) =>
         h === 700_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
       // Simulate the browser CORS reality: the block record carries
@@ -1022,7 +1023,7 @@ describe('runSync height source and block ordering regressions', () => {
       orStealthKey,
       birthdayHeight: 700_000,
       lastBlockScanned: 700_000,
-      fetchTip: async () => 700_002,
+      fetchTip: async () => 700_002 + CONFIRMATION_DEPTH,
       // The LOWER height resolves LAST (40ms delay), so completion order
       // is high-then-low. Without the ascending sort, the low block
       // would be processed second.
@@ -1369,7 +1370,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     const envelope = await sealEnvelope(payload, orStealthKey);
 
     const storedCursor = 800_000;
-    const tip = 800_003;
+    const tip = 800_003 + CONFIRMATION_DEPTH;
     const fakeFilter = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
     const zeroHashHex = bytesToHex(new Uint8Array(32));
 
@@ -1398,9 +1399,12 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(fetchFilter).toHaveBeenCalled();
     // No filter matched, so no block fetch happened...
     expect(fetchBlock).not.toHaveBeenCalled();
-    // ...but the cursor still advanced above the stored value, up to tip.
+    // ...but the cursor still advanced above the stored value, up to the scan
+    // ceiling. The ceiling is CONFIRMATION_DEPTH below the chain tip, never the
+    // chain tip itself: see the confirmation-buffer describe at the end of this
+    // file for why, and for the guard on that specific gap.
     expect(result.lastBlockScanned).toBeGreaterThan(storedCursor);
-    expect(result.lastBlockScanned).toBe(tip);
+    expect(result.lastBlockScanned).toBe(tip - CONFIRMATION_DEPTH);
     expect(result.txCount).toBe(0);
   });
 
@@ -1421,7 +1425,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     const envelope = await sealEnvelope(payload, orStealthKey);
 
     const storedCursor = 800_000;
-    const tip = 800_005;
+    const tip = 800_005 + CONFIRMATION_DEPTH;
     // Heights 800001 and 800002 have filters; 800003-800005 are not yet
     // produced by the filter service (404 -> null). The cursor must stop at
     // 800002 so the next sync retries 800003-800005 once they are available.
@@ -1498,7 +1502,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
         orStealthKey,
         birthdayHeight: BASE_HEIGHT - 1,
         lastBlockScanned: BASE_HEIGHT - 1,
-        fetchTip: async () => BASE_HEIGHT + 2,
+        fetchTip: async () => BASE_HEIGHT + 2 + CONFIRMATION_DEPTH,
         fetchFilter: async (h: number) => {
           const idx = h - BASE_HEIGHT;
           if (idx >= 0 && idx < 3) {
@@ -1572,7 +1576,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
           orStealthKey,
           birthdayHeight: BASE_HEIGHT - 1,
           lastBlockScanned: BASE_HEIGHT - 1,
-          fetchTip: async () => BASE_HEIGHT + 2,
+          fetchTip: async () => BASE_HEIGHT + 2 + CONFIRMATION_DEPTH,
           fetchFilter: async (h: number) => {
             const idx = h - BASE_HEIGHT;
             if (idx >= 0 && idx < 3) {
@@ -1636,7 +1640,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
       const envelope = await sealEnvelope(payload, orStealthKey);
 
       const storedCursor = 800_000;
-      const tip = 800_005;
+      const tip = 800_005 + CONFIRMATION_DEPTH;
       const failHeight = 800_003; // heights 800001 and 800002 succeed; 800003 fails
       const zeroHashHex = bytesToHex(new Uint8Array(32));
       const fakeFilter = new Uint8Array([0xde, 0xad]);
@@ -1699,7 +1703,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
         orStealthKey,
         birthdayHeight: 800_000,
         lastBlockScanned: 800_000,
-        fetchTip: async () => 800_005,
+        fetchTip: async () => 800_005 + CONFIRMATION_DEPTH,
         fetchFilter: async (h) => {
           if (h >= FAIL_HEIGHT) throw new Error('transient-gone');
           return { height: h, blockHashHex: h === HIT_HEIGHT ? blockHashHex : bytesToHex(new Uint8Array(32)), filter: fakeFilter };
@@ -1754,7 +1758,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
         orStealthKey,
         birthdayHeight: 900_000,
         lastBlockScanned: 900_000,
-        fetchTip: async () => 900_005,
+        fetchTip: async () => 900_005 + CONFIRMATION_DEPTH,
         fetchFilter: async (h) => {
           if (h >= FAIL_HEIGHT) throw new Error('gone-permanent');
           return {
@@ -1875,7 +1879,7 @@ describe('runSync , spend arithmetic and change tracking', () => {
       orStealthKey,
       birthdayHeight: 800_000,
       lastBlockScanned: 800_000,
-      fetchTip: async () => 800_003,
+      fetchTip: async () => 800_003 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 800_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xb1]) };
         if (h === 800_002) return { height: h, blockHashHex: spendHash, filter: new Uint8Array([0xb2]) };
@@ -1954,7 +1958,7 @@ describe('runSync , spend arithmetic and change tracking', () => {
       orStealthKey,
       birthdayHeight: 810_000,
       lastBlockScanned: 810_000,
-      fetchTip: async () => 810_002,
+      fetchTip: async () => 810_002 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 810_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xc1]) };
         if (h === 810_002) return { height: h, blockHashHex: consolidateHash, filter: new Uint8Array([0xc2]) };
@@ -1998,7 +2002,7 @@ describe('runSync , spend arithmetic and change tracking', () => {
       orStealthKey,
       birthdayHeight: 820_000,
       lastBlockScanned: 820_000,
-      fetchTip: async () => 820_001,
+      fetchTip: async () => 820_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) =>
         h === 820_001 ? { height: h, blockHashHex: blockHash, filter: new Uint8Array([0xd1]) } : null,
       fetchBlock: async () => ({ height: 0, blockHashHex: blockHash, raw: block.raw }),
@@ -2064,7 +2068,7 @@ describe('runSync , spend arithmetic and change tracking', () => {
       orStealthKey,
       birthdayHeight: 830_000,
       lastBlockScanned: 830_000,
-      fetchTip: async () => 830_002,
+      fetchTip: async () => 830_002 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 830_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xe1]) };
         if (h === 830_002) return { height: h, blockHashHex: spendHash, filter: new Uint8Array([0xe2]) };
@@ -2106,5 +2110,170 @@ describe('runSync , spend arithmetic and change tracking', () => {
     // the window was extended.
     expect(result.windowExhausted).toBe(true);
     expect(result.sealedTransactions).toHaveLength(2);
+  });
+});
+
+// ─── Reorg safety: the confirmation buffer ──────────────────────────────
+//
+// Bitcoin occasionally rewrites its most recent block or two. That is normal.
+// A transaction recorded from a block that is then replaced stops existing,
+// and runSync never revisits a height it has already covered, so the wrong
+// balance is permanent rather than brief.
+//
+// The prevention is a scan ceiling at chainTip - CONFIRMATION_DEPTH. The trap
+// inside that change, and the reason for the second test below, is that the
+// coverage watermark has to move with the ceiling. A watermark that advanced
+// to the raw chain tip while the scan stopped six blocks short would leave
+// those six blocks unscanned by every future sync as well, because coverage
+// would already claim them. A delayed balance would become a permanently
+// missing one, which is worse than the defect being fixed.
+
+describe('runSync , confirmation buffer and coverage watermark', () => {
+  async function envelopeFor(label: string, key: string, gapLimit = 2) {
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label,
+      wallet_birthday: '2024-01-01',
+      gap_limit: gapLimit,
+      script_type: 'p2wpkh',
+    };
+    return sealEnvelope(payload, key);
+  }
+
+  it('scans no higher than CONFIRMATION_DEPTH below the chain tip', async () => {
+    const orStealthKey = randomKeyB64();
+    const envelope = await envelopeFor('buffer-ceiling', orStealthKey);
+
+    // Every height up to the RAW tip has a filter, so nothing except the
+    // buffer can stop the walk. Without the buffer both assertions below
+    // land on chainTip instead.
+    const chainTip = 800_020;
+    const heightsAsked: number[] = [];
+    const zeroHashHex = bytesToHex(new Uint8Array(32));
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => chainTip,
+      fetchFilter: async (h) => {
+        heightsAsked.push(h);
+        return { height: h, blockHashHex: zeroHashHex, filter: new Uint8Array([0xf0]) };
+      },
+      fetchBlock: async () => { throw new Error('no block fetch expected'); },
+      matcher: { matchAny: () => false },
+    });
+
+    expect(Math.max(...heightsAsked)).toBe(chainTip - CONFIRMATION_DEPTH);
+    expect(result.lastBlockScanned).toBe(chainTip - CONFIRMATION_DEPTH);
+
+    // Pin the value, not just the behaviour. 6 is the Bitcoin convention and
+    // it decides how long a customer waits before money appears; changing it
+    // should require changing a test that says so out loud.
+    expect(CONFIRMATION_DEPTH).toBe(6);
+  });
+
+  it('never advances the cursor past the highest block it actually scanned', async () => {
+    // Three shapes, because the cursor is arrived at differently in each:
+    // everything available, a filter producer that lags, and a permanent
+    // fetch failure part way through the range.
+    const shapes = [
+      { name: 'all filters available', gapAt: null, throwAt: null },
+      { name: 'filter producer lags', gapAt: 800_004, throwAt: null },
+      { name: 'filter fetch fails permanently', gapAt: null, throwAt: 800_004 },
+    ] as const;
+
+    for (const shape of shapes) {
+      const orStealthKey = randomKeyB64();
+      const envelope = await envelopeFor(`watermark-${shape.name}`, orStealthKey);
+
+      const chainTip = 800_020;
+      const scanned: number[] = [];
+      const zeroHashHex = bytesToHex(new Uint8Array(32));
+
+      const result = await runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 800_000,
+        lastBlockScanned: 800_000,
+        fetchTip: async () => chainTip,
+        fetchFilter: async (h) => {
+          if (shape.throwAt !== null && h >= shape.throwAt) {
+            throw new Error('permanent-fetch-failure');
+          }
+          if (shape.gapAt !== null && h >= shape.gapAt) return null;
+          scanned.push(h);
+          return { height: h, blockHashHex: zeroHashHex, filter: new Uint8Array([0xf1]) };
+        },
+        fetchBlock: async () => { throw new Error('no block fetch expected'); },
+        matcher: { matchAny: () => false },
+      });
+
+      // Stated as an invariant rather than as a number, so it keeps holding
+      // when the fixtures move: the watermark may never claim a height that
+      // was not actually read...
+      expect(result.lastBlockScanned).toBeLessThanOrEqual(Math.max(...scanned));
+      // ...and may never reach into the confirmation buffer.
+      expect(result.lastBlockScanned).toBeLessThanOrEqual(chainTip - CONFIRMATION_DEPTH);
+    }
+  });
+
+  it('withholds a transaction while its block is unconfirmed, then records it once buried', async () => {
+    // The whole point, from the customer's side. Same block, same
+    // transaction, two syncs, and the only thing that changes between them is
+    // how deep the block sits.
+    const orStealthKey = randomKeyB64();
+    const envelope = await envelopeFor('buffer-then-record', orStealthKey);
+
+    const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+    const ts = Math.floor(new Date('2024-06-01T12:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({
+      payToScript: targetScript,
+      amountSats: 5_000_000n,
+      timestamp: ts,
+    });
+    const blockHashHex = bytesToHex(
+      reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80))),
+    );
+    const fakeFilter = new Uint8Array([0xf2]);
+    const PAYING_HEIGHT = 900_000;
+
+    const io = (chainTip: number) => ({
+      envelope,
+      orStealthKey,
+      birthdayHeight: PAYING_HEIGHT,
+      lastBlockScanned: PAYING_HEIGHT - 1,
+      fetchTip: async () => chainTip,
+      fetchFilter: async (h: number) => ({
+        height: h,
+        blockHashHex: h === PAYING_HEIGHT ? blockHashHex : bytesToHex(new Uint8Array(32)),
+        filter: fakeFilter,
+      }),
+      fetchBlock: async () => ({ height: PAYING_HEIGHT, blockHashHex, raw: blockBuild.raw }),
+      // Matches only the paying block, by hash. The orchestrator hands the
+      // hash over in internal little-endian order, hence the reversal here.
+      matcher: {
+        matchAny: (_filter: Uint8Array, hash: Uint8Array) =>
+          bytesToHex(hash) === bytesToHex(reverseBytes(hexToBytes(blockHashHex))),
+      },
+    });
+
+    // Sync one. The paying block is 2 deep, inside the 6-block buffer.
+    const early = await runSync(io(PAYING_HEIGHT + 2));
+    expect(early.txCount).toBe(0);
+    expect(early.normalized).toEqual([]);
+    // And the cursor must NOT have moved past the paying block. If it had,
+    // the money would never be found by any later sync either, which is the
+    // failure this whole change is trying not to introduce.
+    expect(early.lastBlockScanned).toBeLessThan(PAYING_HEIGHT);
+
+    // Sync two. Nothing about the chain data changed; only its depth did.
+    const later = await runSync(io(PAYING_HEIGHT + CONFIRMATION_DEPTH));
+    expect(later.txCount).toBe(1);
+    expect(later.normalized[0].amount_sats).toBe(5_000_000);
+    expect(later.normalized[0].block_height).toBe(PAYING_HEIGHT);
+    expect(later.lastBlockScanned).toBe(PAYING_HEIGHT);
   });
 });
