@@ -67,6 +67,26 @@
 --   hosted dev   fzwmnzmtqidumdqjdddz
 --     grantor postgres       : postgres=X, authenticated=X, service_role=X
 --     grantor supabase_admin : postgres=X, anon=X, authenticated=X, service_role=X
+--   self hosted  (container supabase-db, database postgres)
+--     grantor postgres       : postgres=X, service_role=X
+--     grantor supabase_admin : postgres=X, service_role=X
+--     (neither row names anon or authenticated)
+--
+-- The default ACL is not the only source of a grant, so the CURRENT proacl
+-- of both functions was read on the same three clusters on 2026-08-31 as
+-- well. It does NOT agree with the default ACLs above, and that is the whole
+-- reason this paragraph exists:
+--
+--   hosted prod  : postgres=X, service_role=X on both, old signatures
+--                  (uuid,uuid,text,text) and (p_token_hash text)
+--   hosted dev   : postgres=X, service_role=X on both, already the new
+--                  signatures, from the out of band apply noted below
+--   self hosted  : postgres=X, anon=X, authenticated=X, service_role=X on
+--                  BOTH functions, old signatures. Those anon and
+--                  authenticated grants are live and pre-existing there,
+--                  not inherited from that cluster's pg_default_acl, which
+--                  names neither role. Section 1 says what this file does
+--                  to them.
 --
 -- So on production, creating a function as postgres IS granting anon AND
 -- authenticated EXECUTE on it. On dev, creating as postgres grants
@@ -200,6 +220,24 @@ $precheck$;
 --    2026-08-31. It is revoked unconditionally below and never restored,
 --    so an authenticated grant arriving from pg_default_acl is REMOVED
 --    rather than recorded as intent.
+--
+--    READ THIS BEFORE APPLYING TO THE SELF HOSTED CLUSTER. There,
+--    authenticated DOES hold EXECUTE on both functions today: proacl is
+--    postgres, anon, authenticated, service_role on each, read live
+--    2026-08-31. That grant is live and pre-existing, not inherited from
+--    pg_default_acl, which on that cluster names only postgres and
+--    service_role. This file therefore REVOKES authenticated EXECUTE on
+--    both functions there and does NOT restore it. That is INTENDED. It is
+--    a privilege reduction on a key binding function, no ruling grants
+--    authenticated EXECUTE on either, and the pre-land counts below are
+--    zero on every cluster, so nothing in service depends on it. Reversing
+--    it, if it is ever wanted, is one GRANT.
+--    It is also SILENT: authenticated is outside the capture table and so
+--    outside both assertions, which compare the post state against the
+--    captured anon set only. The apply output will not mention it. That is
+--    why it is written here instead.
+--    anon is unaffected on that cluster: it is captured before the drop and
+--    restored after it, per the OR-T0937 ruling.
 --    PUBLIC is never captured and never restored. Grantee 0 in aclexplode
 --    is PUBLIC and is dropped by the pg_roles join, which is the intended
 --    behaviour, not an oversight.
