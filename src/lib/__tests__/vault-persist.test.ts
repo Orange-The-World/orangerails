@@ -69,7 +69,16 @@ function makeFakeClient(options: FakeOptions = {}) {
     if (call.op === "select") {
       const override = options.selectResult?.[call.table];
       if (override) return override;
-      return { data: options.rows?.[call.table] ?? [], error: null };
+      const rows = options.rows?.[call.table] ?? [];
+      // Honour .range(from, to) like the real client does. Without this every
+      // page returns the same rows regardless of offset, so a fixture larger
+      // than one page can never actually exercise paging.
+      const rangeFilter = call.filters.find((f) => f.column === "range");
+      if (rangeFilter) {
+        const [from, to] = rangeFilter.value as [number, number];
+        return { data: rows.slice(from, to + 1), error: null };
+      }
+      return { data: rows, error: null };
     }
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
