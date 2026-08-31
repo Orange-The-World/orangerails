@@ -270,7 +270,7 @@ jobs:
 
 
   check-pending-migrations:
-    needs: [target, apply-migrations]
+    needs: [target, check-duplicate-migrations, apply-migrations]
     # Runs BEFORE the deploy job, not after it. deploy declares
     # needs: [target, check-pending-migrations], so when this job exits 1 the
     # deploy is SKIPPED and code cannot ship ahead of its schema. That is the
@@ -300,6 +300,7 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
           APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+          DUPES_RESULT: ${{ needs['check-duplicate-migrations'].result }}
         run: |
           set -uo pipefail
 
@@ -342,26 +343,17 @@ jobs:
           # recorded the `grep -qx` below matches for BOTH and the other is
           # counted as applied forever -- no red, on any project, ever. That is
           # not a drift report failing, it is a drift report that cannot see.
-          # Caught here rather than in a lint job because this is the check
-          # whose answer the duplicate invalidates.
-          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
-          if [ -n "$DUPES" ]; then
-            {
-              echo "## :rotating_light: Duplicate migration version(s)"
-              echo ""
-              for V in $DUPES; do
-                echo "\`${V}\` is used by more than one file:"
-                echo ""
-                ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
-                echo ""
-              done
-              echo "\`supabase_migrations.schema_migrations\` stores one row per"
-              echo "version, so at most one of these can ever be tracked and the"
-              echo "rest are reported as applied whether they ran or not. Rename"
-              echo "the later file to an unused timestamp."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- this report cannot see drift in the shadowed file(s)."
-            exit 1
+          #
+          # The comparison itself no longer lives here. It lived here until
+          # OR-T1189, and this job declares needs: [..., apply-migrations], so it
+          # could only ever announce a collision that the apply had already
+          # resolved by silently skipping one of the two files. It is now
+          # check-duplicate-migrations, which apply-migrations needs, so a
+          # colliding pair stops the apply rather than describing it afterwards.
+          # What remains here is the consequence for THIS report: if that check
+          # did not pass, this comparison cannot see, and it must say so.
+          if [ "${DUPES_RESULT}" != "success" ]; then
+            unknown "check-duplicate-migrations ended '${DUPES_RESULT}'. Until every migration file has its own version, the ledger cannot distinguish a file that was applied from one that was shadowed by a namesake, so the comparison below cannot see drift. That job's summary names the colliding files."
           fi
 
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
@@ -637,8 +629,68 @@ jobs:
 
           echo "0 anon-executable function(s) in schema public on ${SUPABASE_REF} (outside the allowlist)."
 
+  # ---------------------------------------------------------------------------
+  # OR-T1189. This comparison used to live inside check-pending-migrations, and
+  # that job needs apply-migrations, so the check ran AFTER the apply it should
+  # have gated. By the time it could go red the shadowed file had already been
+  # skipped against a real database. The check was correct; it was downstream of
+  # the only thing it could have protected.
+  #
+  # It needs nothing but a checkout: no database, no secrets, no environment, no
+  # output from target. That is why there was never a reason for it to run late,
+  # and why it can gate the apply without slowing anything down.
+  # ---------------------------------------------------------------------------
+  check-duplicate-migrations:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Refuse two migration files sharing a version prefix
+        run: |
+          set -uo pipefail
+
+          MIG_DIR="supabase/migrations"
+          if [ ! -d "$MIG_DIR" ]; then
+            echo "no migrations directory; nothing to compare"
+            exit 0
+          fi
+
+          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
+          if [ -n "$DUPES" ]; then
+            {
+              echo "## :rotating_light: Duplicate migration version(s)"
+              echo ""
+              for V in $DUPES; do
+                echo "\`${V}\` is used by more than one file:"
+                echo ""
+                ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
+                echo ""
+              done
+              echo "\`supabase_migrations.schema_migrations\` stores one row per"
+              echo "version, so at most one of these can ever be tracked and the"
+              echo "rest are reported as applied whether they ran or not. Rename"
+              echo "the later file to an unused timestamp."
+              echo ""
+              echo "apply-migrations needs this job, so nothing has been applied"
+              echo "on this run. Rename the file and push again."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- refusing to apply; one of these files would be recorded and the rest treated as applied without running."
+            exit 1
+          fi
+
+          echo "no duplicate migration version(s) in $MIG_DIR"
+
   apply-migrations:
-    needs: [target]
+    # needs check-duplicate-migrations, not just target. A colliding pair of
+    # filenames makes this job's own record of what it did untrue: the ledger
+    # holds ONE row per version, so it applies one file, records that version,
+    # and treats the namesake as already applied on every future run. The if:
+    # below is a plain expression rather than always(), so a failed need skips
+    # this job outright instead of the condition re-enabling it (OR-T1189).
+    needs: [target, check-duplicate-migrations]
     # A PUSH TO DEV REACHES THIS JOB. That is the whole change: dev applies its
     # own migrations at merge time, so the dev backlog is always 0 or 1 and prod
     # promotion is a batch that has already run once on a real database.
