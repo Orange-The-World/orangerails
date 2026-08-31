@@ -2277,3 +2277,102 @@ describe('runSync , confirmation buffer and coverage watermark', () => {
     expect(later.lastBlockScanned).toBe(PAYING_HEIGHT);
   });
 });
+
+describe('stealth sync , the abort gap and what may be uploaded (OR-T1120)', () => {
+  it('does not seal an extension-pass match found above an aborted filter fetch', async () => {
+    // THE FAILURE THIS GUARDS. A filter fetch fails permanently part way
+    // through a sync. The main scan trims its own hits back to the last
+    // contiguous height it read. The rolling-window extension pass builds a
+    // SEPARATE array and, before the fix, had no equivalent trim: its
+    // cache-miss branch skips a broken height and keeps walking, so it can
+    // match a block ABOVE the gap. That transaction is sealed and uploaded,
+    // and the server advances the stored cursor to the height it landed at.
+    // The next sync then resumes above heights nobody ever read, and any
+    // payment inside them is missing from the customer's balance for good,
+    // with no error and no retry path.
+    //
+    // LAYOUT. gap_limit=2 gives an initial window of indices 0..3 per chain,
+    // so a match at index 3 sits near the edge and fires the extension loop.
+    //   800_001  pays index 3, inside the scanned range, must be kept
+    //   800_002  filter fetch throws permanently, this is the gap
+    //   800_003  pays index 4, matchable ONLY by the extension pass, above the gap
+    //   800_004  no filter
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'abort-gap-extension',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const scriptIdx3 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 3, 'p2wpkh');
+    const scriptIdx4 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 4, 'p2wpkh');
+
+    const tsA = Math.floor(new Date('2024-09-01T10:00:00Z').getTime() / 1000);
+    const tsC = Math.floor(new Date('2024-09-03T10:00:00Z').getTime() / 1000);
+    const blockA = buildFixtureBlock({ payToScript: scriptIdx3, amountSats: 11_000n, timestamp: tsA });
+    const blockC = buildFixtureBlock({ payToScript: scriptIdx4, amountSats: 22_000n, timestamp: tsC });
+
+    const hashHexA = bytesToHex(reverseBytes(await dsha256Async(blockA.raw.subarray(0, 80))));
+    const hashHexC = bytesToHex(reverseBytes(await dsha256Async(blockC.raw.subarray(0, 80))));
+
+    // Filters are distinguishable by first byte so the stub matcher can answer
+    // per-block without a WASM GCS implementation, same trick as the tests above.
+    const filterA = new Uint8Array([0xb1]);
+    const filterC = new Uint8Array([0xb3]);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => 800_004 + CONFIRMATION_DEPTH,
+      fetchFilter: async (h) => {
+        if (h === 800_001) return { height: h, blockHashHex: hashHexA, filter: filterA };
+        // A PERMANENT failure. opts.fetchFilter is the layer that retries, so a
+        // throw here is exactly what the orchestrator sees once attempts are
+        // exhausted, not a transient blip it would recover from.
+        if (h === 800_002) throw new Error('filter 800_002 permanently unavailable');
+        if (h === 800_003) return { height: h, blockHashHex: hashHexC, filter: filterC };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === hashHexA) return { height: 0, blockHashHex: hashHexA, raw: blockA.raw };
+        if (hashHex === hashHexC) return { height: 0, blockHashHex: hashHexC, raw: blockC.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      //   filterA (pays idx3): matches while idx3 is in scripts, the initial scan only.
+      //   filterC (pays idx4): matches only once idx4 exists, the extension pass only.
+      matcher: {
+        matchAny: (filter, _hash, scripts) => {
+          const target = filter[0] === 0xb1 ? scriptIdx3
+            : filter[0] === 0xb3 ? scriptIdx4
+            : null;
+          if (!target) return false;
+          return scripts.some((s) => s.length === target.length && s.every((b, i) => b === target[i]));
+        },
+      },
+    });
+
+    // The abort is real and not merely assumed: the run names the height that failed.
+    expect(result.filterFetchError?.failedHeight).toBe(800_002);
+
+    // The cursor stops below the gap. This part was already correct.
+    expect(result.lastBlockScanned).toBe(800_001);
+
+    // THE ASSERTIONS THAT FAIL WITHOUT THE TRIM. The extension match at 800_003
+    // sits above the gap, so it must not be recorded, sealed or uploaded.
+    expect(result.normalized.map((t) => t.block_height)).toEqual([800_001]);
+    expect(result.normalized.find((t) => t.amount_sats === 22_000)).toBeUndefined();
+    expect(result.sealedTransactions).toHaveLength(1);
+
+    // The invariant, stated directly rather than pinned to this fixture's counts:
+    // nothing is ever uploaded from a height above the last one actually scanned.
+    for (const sealed of result.sealedTransactions) {
+      expect(sealed.block_height).toBeLessThanOrEqual(result.lastBlockScanned);
+    }
+  });
+});
