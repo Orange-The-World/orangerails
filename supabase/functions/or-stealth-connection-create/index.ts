@@ -223,7 +223,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           existing.id as string,
           {
             sealed_envelope: body.sealed_envelope,
-            wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
+            // Not coerced with `?? null`: a request that omits this key
+            // (undefined) must leave the stored birthday alone, and only
+            // an explicit null (or a real date) should touch it. See
+            // OR-T1242 and the field comment on EnvelopeReplacementFields.
+            wallet_birthday_plaintext: body.wallet_birthday_plaintext,
           },
         );
         if (isEnvelopeReplacementError(replaced)) {
@@ -284,7 +288,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             raceRow.id as string,
             {
               sealed_envelope: body.sealed_envelope,
-              wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
+              // Same reasoning as the primary dedup path above: do not
+              // coerce an omitted key into null.
+              wallet_birthday_plaintext: body.wallet_birthday_plaintext,
             },
           );
           if (isEnvelopeReplacementError(replaced)) {
