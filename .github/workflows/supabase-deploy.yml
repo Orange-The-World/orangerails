@@ -342,8 +342,15 @@ jobs:
           # recorded the `grep -qx` below matches for BOTH and the other is
           # counted as applied forever -- no red, on any project, ever. That is
           # not a drift report failing, it is a drift report that cannot see.
-          # Caught here rather than in a lint job because this is the check
-          # whose answer the duplicate invalidates.
+          # THIS IS NO LONGER THE GATE. The check-migration-versions job runs
+          # before apply-migrations and blocks it (OR-T1184). This copy is kept
+          # on purpose because it is the one that still runs on a PROD push,
+          # where apply-migrations is skipped and this job runs anyway under
+          # if: always() -- and because the duplicate is exactly what makes the
+          # drift report below structurally blind, so this report must refuse to
+          # speak rather than report a clean schema it cannot see. Collapsing
+          # the two implementations is tracked separately; when that happens the
+          # single implementation belongs in check-migration-versions.
           DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
           if [ -n "$DUPES" ]; then
             {
