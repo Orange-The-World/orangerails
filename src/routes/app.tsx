@@ -1382,6 +1382,27 @@ function AppHome() {
         }}
       />
 
+      <ConfirmDialog
+        open={pendingGrantIncomplete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingGrantIncomplete(null);
+        }}
+        title="Remove this incomplete co-admin?"
+        description={
+          pendingGrantIncomplete
+            ? `${pendingGrantIncomplete.adminEmail ?? "This co-admin"} was added to your list, but the key that gives them access was never stored, so they cannot open your data. Removing them here only clears the list entry. You can grant them again at any time.`
+            : ""
+        }
+        confirmLabel="Remove from list"
+        destructive
+        onConfirm={async () => {
+          if (pendingGrantIncomplete) {
+            await confirmClearCoAdminListEntry(pendingGrantIncomplete, true);
+            setPendingGrantIncomplete(null);
+          }
+        }}
+      />
+
       {grantDialogOpen && userId && vaultSalt && (
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
