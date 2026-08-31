@@ -277,6 +277,33 @@ describe("vault recovery: the rotated meta write", () => {
     expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
     expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
+
+  it("pages through more than TRANSACTION_PAGE_SIZE rows and migrates every row exactly once", async () => {
+    const total = 650; // more than one 500-row page
+    const encrypted_transactions = Array.from({ length: total }, (_, i) => ({
+      id: `txn-${i}`,
+      encrypted_payload: `payload-${i}`,
+    }));
+    const migratedIds: string[] = [];
+    const { client } = makeFakeClient({
+      rows: { connections: [], encrypted_transactions },
+    });
+    const args = {
+      ...rotateArgs(client, vi.fn()),
+      migrateTransactionCiphertext: async (c: string) => {
+        migratedIds.push(c);
+        return `${c}-migrated`;
+      },
+    };
+
+    await migrateAndPersistRotatedVault(args);
+
+    // Every row migrated, none skipped, none migrated twice: this is the
+    // property a range()-ignoring fake could never have caught, because it
+    // would have handed back the same first page forever.
+    expect(migratedIds.length).toBe(total);
+    expect(new Set(migratedIds).size).toBe(total);
+  });
 });
 
 describe("vault password change: the re-wrapped meta write", () => {
