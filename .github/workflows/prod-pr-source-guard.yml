@@ -51,6 +51,19 @@ name: prod pr source guard
 # the pull request. If it ever goes green in that state, the lookup has stopped
 # looking and every promotion it has waved through since is unproven.
 #
+# ONE IMPLEMENTATION OF THE DECISION, INVOKED TWICE (OR-T1098).
+# The decision lives in scripts/prod-source-verdict.sh and nowhere else. Both
+# the self-test step and the enforcing step below call that one script. Before
+# OR-T1098 each step carried its own copy of the same logic: they were
+# textually independent, nothing compared them, and adding an accepted head
+# pattern to one and not the other left the self-test passing 12 of 12 while
+# this check went green having proved nothing about the code that decided.
+#
+# That is why the job now checks the repository out. Note what that means when
+# a pull request into prod cannot be merged cleanly: the merge ref does not
+# exist, the checkout fails, and this job goes RED. It fails closed, which is
+# the correct direction, and such a pull request is unmergeable anyway.
+#
 # THE JOB NAME BELOW NO LONGER DESCRIBES THE WHOLE BEHAVIOUR, ON PURPOSE.
 # "prod pull requests must come from dev" is the required-check context name in
 # the prod ruleset. Renaming it would leave the ruleset waiting for a check that
