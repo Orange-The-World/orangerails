@@ -127,7 +127,18 @@ function lookupV1(method: string, pathname: string): V1Route | null {
   return V1_ROUTES[key] ?? null;
 }
 
-function forwardHeaders(src: Headers): Headers {
+/**
+ * Header this gateway sets on every proxied request, carrying the
+ * edge-verified client IP downstream. Cloudflare writes cf-connecting-ip
+ * at its own edge before this Worker ever runs, so a caller cannot forge
+ * it there; this gateway is the only thing that sets x-gateway-verified-ip,
+ * and it always overwrites whatever arrived under that name.
+ */
+export const GATEWAY_VERIFIED_IP_HEADER = "x-gateway-verified-ip";
+
+export function forwardHeaders(src: Headers): Headers {
+  // Read before the strip loop below removes it.
+  const edgeIp = src.get("cf-connecting-ip");
   const out = new Headers();
   for (const [k, v] of src) {
     const lk = k.toLowerCase();
@@ -135,11 +146,22 @@ function forwardHeaders(src: Headers): Headers {
       lk === "host" ||
       lk === "cf-connecting-ip" ||
       lk.startsWith("cf-") ||
-      lk === "x-forwarded-host"
+      lk === "x-forwarded-host" ||
+      // Drop any caller-supplied value under our trusted header name so
+      // it cannot ride through underneath the real one set below.
+      lk === GATEWAY_VERIFIED_IP_HEADER
     )
       continue;
     out.set(k, v);
   }
+  // Every function behind this gateway loses cf-connecting-ip (stripped
+  // above, since it is a Cloudflare-to-Worker hop header, not something
+  // safe to hand to an arbitrary upstream unchanged). Re-issue it under a
+  // header name downstream functions can trust. When there is no
+  // edge-set IP (e.g. a non-Cloudflare local test), no header is set and
+  // downstream code should treat that as "caller unidentified", not as a
+  // real value.
+  if (edgeIp) out.set(GATEWAY_VERIFIED_IP_HEADER, edgeIp);
   return out;
 }
 
