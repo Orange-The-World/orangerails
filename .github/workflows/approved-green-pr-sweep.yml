@@ -23,6 +23,7 @@ jobs:
           ISSUE_TITLE: 'Approved and green PRs waiting to merge (DL-0544)'
         run: |
           set -euo pipefail
+          trap 'echo "::error::sweep failed (exit $?) at line ${LINENO}: ${BASH_COMMAND}"' ERR
 
           chat_ready=1
           if [ -z "${ZULIP_SITE:-}" ] || [ -z "${ZULIP_BOT_EMAIL:-}" ] || [ -z "${ZULIP_API_KEY:-}" ]; then
