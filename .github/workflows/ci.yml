@@ -37,6 +37,23 @@ jobs:
         # it enumerates zero files: a run that checked nothing is not a run that passed.
         run: node scripts/check-migration-versions.mjs
 
+      - name: Migration Requires-header self-test
+        # Same reasoning as the self-test above it: the parser and comparison run here first,
+        # so a broken check fails as a broken check and not as a silent pass over every
+        # "-- Requires:" declaration.
+        run: node scripts/check-migration-requires.mjs --selftest
+
+      - name: Migration Requires-header check
+        # A real gate, no continue-on-error. A migration can declare "-- Requires: <version>"
+        # to name an earlier migration it depends on and does not itself create. This fails the
+        # pull request when the named version has no matching file in the merge-result tree --
+        # the one situation where version-sorted apply order stops being correct, because the
+        # dependent file merged ahead of the file it needs. This is a merge-order constraint on
+        # dev, so tree presence is the whole question: no database connection, no ledger read,
+        # no environment credentials required. See the script header for the full argument and
+        # for what a "-- Requires:" declaration deliberately does NOT catch.
+        run: node scripts/check-migration-requires.mjs
+
       # The project is managed with Bun (bun.lock, bunfig.toml).
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
