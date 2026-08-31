@@ -107,8 +107,20 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
         try {
           connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
         } catch {
-          // Label migration failed with both keys. Leave the stale ciphertext.
-          // encrypted_label is cosmetic and the connection remains usable.
+          // Label migration failed with BOTH the old and the new subkey.
+          //
+          // The decision is to continue. The credentials are what make a
+          // connection usable and they have already migrated, so aborting the
+          // whole rotation here would strand the user in the half-done state
+          // described at the meta write below, which is far worse than losing
+          // one label.
+          //
+          // Be exact about what continuing costs, because the old wording said
+          // "stale" and that reads as recoverable. It is not. Execution runs on
+          // to the meta write and then to clearMigrationKeys(), after which the
+          // old MEK does not exist anywhere. From that point this label is
+          // permanently unreadable. The connection keeps working; its name does
+          // not come back.
         }
       }
     }
@@ -121,17 +133,44 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
 
   // Re-encrypt transactions in pages of 500.
   // encrypted_payload uses the transactions subkey, which changes with the MEK.
-  let offset = 0;
+  //
+  // WHY THIS PAGES BY KEY AND NOT BY OFFSET. This loop UPDATES every row in
+  // the page it just read and then asks for the next page. Under LIMIT/OFFSET
+  // with no ORDER BY, which is what .range() alone produces, PostgreSQL owes
+  // us no ordering at all: a row rewritten here can come back behind the
+  // offset boundary and never be selected again. It would never be
+  // re-encrypted, this loop would still finish normally, the meta write below
+  // would land and clearMigrationKeys() would destroy the only key that could
+  // still read it. That transaction would be permanently and silently
+  // unreadable. The other direction is a row selected twice, which throws on
+  // the second decrypt and aborts the rotation half-done.
+  //
+  // Paging by the primary key removes that, rather than making it less likely.
+  // id is a uuid primary key: NOT NULL, unique, and never written by this
+  // loop, so ascending id plus "greater than the last id of the previous page"
+  // is a stable total order. It cannot skip a row or return one twice however
+  // PostgreSQL moves the row physically when it is updated.
+  //
+  // NOT solved here, deliberately: a row INSERTED by another session while
+  // this loop runs. A uuid is random, so a new row can sort below lastId and
+  // be missed. Concurrent writes during a rotation need the whole rotation to
+  // be resumable, which is the same gap the meta write note below describes.
+  let lastId: string | null = null;
   for (;;) {
-    const { data: txns, error: txnsErr } = await supabase
+    const page = supabase
       .from("encrypted_transactions")
       .select("id, encrypted_payload")
-      .range(offset, offset + TRANSACTION_PAGE_SIZE - 1);
+      .order("id", { ascending: true })
+      .limit(TRANSACTION_PAGE_SIZE);
+    const { data: txns, error: txnsErr } = await (lastId === null
+      ? page
+      : page.gt("id", lastId));
     if (txnsErr) throw txnsErr;
-    if (!txns || (txns as unknown[]).length === 0) break;
+    const rows = (txns ?? []) as Array<{ id: string; encrypted_payload: string }>;
+    if (rows.length === 0) break;
 
     await Promise.all(
-      (txns as Array<{ id: string; encrypted_payload: string }>).map(async (txn) => {
+      rows.map(async (txn) => {
         const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
         const { error: txnErr } = await supabase
           .from("encrypted_transactions")
@@ -141,8 +180,10 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       }),
     );
 
-    if ((txns as unknown[]).length < TRANSACTION_PAGE_SIZE) break;
-    offset += TRANSACTION_PAGE_SIZE;
+    if (rows.length < TRANSACTION_PAGE_SIZE) break;
+    // The page came back ordered by id ascending, so the last row carries the
+    // high-water mark for the next page.
+    lastId = rows[rows.length - 1].id;
   }
 
   // All ciphertexts migrated. Persist rotated vault meta now that every row is
