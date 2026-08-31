@@ -213,9 +213,10 @@ BEGIN
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
       CROSS JOIN LATERAL aclexplode(c.relacl) a
+      LEFT JOIN pg_roles r ON r.oid = a.grantee
      WHERE n.nspname = 'public'
        AND c.relname = v_tbl
-       AND (a.grantee = 0 OR a.grantee = 'anon'::regrole::oid);
+       AND (a.grantee = 0 OR r.rolname = 'anon');
 
     IF v_left <> '' THEN
       RAISE EXCEPTION 'OR-T1155 assert: anon or PUBLIC still holds % on public.%', v_left, v_tbl;
@@ -229,9 +230,10 @@ BEGIN
         JOIN pg_class c ON c.oid = at.attrelid
         JOIN pg_namespace n ON n.oid = c.relnamespace
         CROSS JOIN LATERAL aclexplode(at.attacl) a
+        LEFT JOIN pg_roles r ON r.oid = a.grantee
        WHERE n.nspname = 'public'
          AND c.relname = v_tbl
-         AND (a.grantee = 0 OR a.grantee = 'anon'::regrole::oid)
+         AND (a.grantee = 0 OR r.rolname = 'anon')
     ) THEN
       RAISE EXCEPTION 'OR-T1155 assert: anon or PUBLIC holds a COLUMN level grant on public.%', v_tbl;
     END IF;
