@@ -439,6 +439,12 @@ jobs:
           fi
 
       - name: Check anon EXECUTE grants on public functions
+        # Runs even when the migration check above exited 1. Steps default to
+        # if: success(), so on a target already carrying a migration backlog,
+        # the target this check is most wanted on, it produced no answer at all.
+        # The job is red either way, but "no answer" and "clean" must never look
+        # the same.
+        if: always()
         # DEV-0238 / DL-1661 / DEV-0226. A default-privilege row (ours or a
         # platform role's) can hand the anonymous role EXECUTE on a function
         # the moment it is created in schema public. We hold no membership in
@@ -449,6 +455,31 @@ jobs:
         # Zero rows is PASS. Grantor-agnostic on purpose: filtering by grantor
         # is what made 20260825120000's assertion unable to see the platform
         # row at all.
+        #
+        # OR-T0946: it was NOT grantee-agnostic, and that is why it could print
+        # a success line on a database that had anon-executable functions in it.
+        # Three routes reach the same privilege and only one of them puts the
+        # string "anon" in the ACL text:
+        #   1. anon=X/owner   anon named directly. The only case the old
+        #                     LIKE 'anon=%' predicate could see.
+        #   2. =X/owner       PUBLIC, which renders with an EMPTY grantee, and
+        #                     PUBLIC includes anon. Read live on the dev project
+        #                     2026-08-31: one function in schema public in
+        #                     exactly this shape, and the old predicate returned
+        #                     zero rows for it.
+        #   3. proacl IS NULL no ACL row at all, so the built-in default applies,
+        #                     which for a function is EXECUTE to PUBLIC.
+        #                     unnest() over NULL yields no rows, so no text match
+        #                     can ever reach this one. Read live 2026-08-31: all
+        #                     3,257 pg_catalog functions with a NULL proacl
+        #                     answer true to has_function_privilege('anon', oid,
+        #                     'EXECUTE').
+        # has_function_privilege() asks what this check actually means to ask,
+        # can the anonymous role call this, and covers all three routes plus role
+        # membership. The ACL text is still reported, for the reader. If the anon
+        # role did not exist the function would error, the request would not
+        # return 2xx, and the step would report UNKNOWN rather than a clean pass.
+        # That is deliberate: a query that cannot run must be loud.
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
@@ -480,8 +511,33 @@ jobs:
           fi
 
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
-          trap 'rm -f "$PAYLOAD"' EXIT
-          jq -n '{query:"SELECT n.nspname, p.proname, ace::text AS ace FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, unnest(p.proacl) ace WHERE n.nspname = '\''public'\'' AND ace::text LIKE '\''anon=%'\'';"}' > "$PAYLOAD"
+          SQL_FILE=$(mktemp); chmod 600 "$SQL_FILE"
+          trap 'rm -f "$PAYLOAD" "$SQL_FILE"' EXIT
+
+          # Written to a file and handed to jq -Rs rather than escaped inline.
+          # The inline single-quote escaping this replaced made the predicate
+          # unreadable, and an unreadable predicate is how the PUBLIC case
+          # survived review in the first place.
+          cat > "$SQL_FILE" <<'SQL'
+          SELECT n.nspname AS nspname,
+                 p.proname AS proname,
+                 CASE
+                   WHEN p.proacl IS NULL
+                     THEN 'null-acl-default-public'
+                   WHEN EXISTS (SELECT 1 FROM unnest(p.proacl) a WHERE a::text LIKE 'anon=%')
+                     THEN 'anon-direct'
+                   WHEN EXISTS (SELECT 1 FROM unnest(p.proacl) a WHERE a::text LIKE '=%')
+                     THEN 'bare-public'
+                   ELSE 'role-membership'
+                 END AS reason,
+                 coalesce(array_to_string(p.proacl, ','), '(no acl row)') AS ace
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'public'
+             AND has_function_privilege('anon', p.oid, 'EXECUTE')
+           ORDER BY p.proname;
+          SQL
+          jq -Rs '{query:.}' < "$SQL_FILE" > "$PAYLOAD"
 
           # --fail-with-body, not bare -sS: without it curl exits 0 on a 401,
           # 403 or 500, the error body parses as valid JSON, row extraction
@@ -512,13 +568,30 @@ jobs:
           # empty by default so today "any row is a regression" holds exactly
           # as DEV-0226 measured it.
           IFS=',' read -ra ALLOWED_ARR <<< "${ALLOWLIST}"
-          ROWS=$(echo "$RESPONSE" | jq -r '.[] | "\(.nspname).\(.proname)\t\(.ace)"')
+          ROWS=$(echo "$RESPONSE" | jq -r '.[] | "\(.nspname).\(.proname)\t\(.reason)\t\(.ace)"')
+
+          # Name the ROUTE, not just the function. "anon holds a direct grant"
+          # is the wrong sentence for a PUBLIC row: it sends the next reader
+          # looking for an anon entry that is not in that ACL at all (OR-T0946).
+          explain () {
+            case "$1" in
+              anon-direct)
+                echo "anon is named directly in the function ACL" ;;
+              bare-public)
+                echo "PUBLIC holds EXECUTE (empty grantee, renders as \`=X/owner\`) and PUBLIC includes anon; there is NO anon entry in this ACL" ;;
+              null-acl-default-public)
+                echo "the function has no ACL row, so the built-in default applies and PUBLIC holds EXECUTE; there is NO anon entry in this ACL" ;;
+              *)
+                echo "anon reaches EXECUTE through role membership; read the ACL directly" ;;
+            esac
+          }
 
           OFFENDING=""
           ALLOWED_HIT=""
-          while IFS=$'\t' read -r QUALIFIED ACE; do
+          while IFS=$'\t' read -r QUALIFIED REASON ACE; do
             [ -z "$QUALIFIED" ] && continue
             FUNC="${QUALIFIED#public.}"
+            WHY=$(explain "$REASON")
             IS_ALLOWED=0
             for A in "${ALLOWED_ARR[@]}"; do
               TRIMMED=$(echo "$A" | tr -d '[:space:]')
@@ -527,9 +600,9 @@ jobs:
               fi
             done
             if [ "$IS_ALLOWED" -eq 1 ]; then
-              ALLOWED_HIT="${ALLOWED_HIT}- \`${QUALIFIED}\` (${ACE}) -- allowlisted via ANON_EXECUTE_RPC_ALLOWLIST\n"
+              ALLOWED_HIT="${ALLOWED_HIT}- \`${QUALIFIED}\` -- ${WHY} -- acl: \`${ACE}\` -- allowlisted via ANON_EXECUTE_RPC_ALLOWLIST\n"
             else
-              OFFENDING="${OFFENDING}- \`${QUALIFIED}\` (${ACE})\n"
+              OFFENDING="${OFFENDING}- \`${QUALIFIED}\` -- ${WHY} -- acl: \`${ACE}\`\n"
             fi
           done <<< "$ROWS"
 
@@ -546,11 +619,15 @@ jobs:
             {
               echo "## :no_entry: anon-executable function(s) found in \`public\` on \`${SUPABASE_REF}\`"
               echo ""
-              echo "A default-privilege row (ours or a platform role's) handed the anonymous"
-              echo "role EXECUTE on these at creation time (DEV-0226/DEV-0238). Revoke it"
-              echo "explicitly, naming the roles, or add the function to the"
-              echo "ANON_EXECUTE_RPC_ALLOWLIST repo variable with a reason in the PR if it is"
-              echo "meant to stay public."
+              echo "The anonymous role can call these. Each line names the ROUTE by which it"
+              echo "holds the privilege: named directly in the ACL, through PUBLIC (an empty"
+              echo "grantee), or through no ACL row at all, where the built-in default hands"
+              echo "EXECUTE to PUBLIC (DEV-0226/DEV-0238/OR-T0946)."
+              echo ""
+              echo "Revoke it explicitly, naming BOTH anon AND PUBLIC: revoking only anon"
+              echo "leaves the PUBLIC entry behind and this check stays red, correctly."
+              echo "Or add the function to the ANON_EXECUTE_RPC_ALLOWLIST repo variable, with"
+              echo "a reason in the PR, if it is meant to stay public."
               echo ""
               printf '%b' "$OFFENDING"
             } >> "$GITHUB_STEP_SUMMARY"
