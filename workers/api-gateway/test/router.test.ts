@@ -185,7 +185,7 @@ describe("catch-all", () => {
 });
 
 describe("header hygiene", () => {
-  it("strips host and cf-* headers when forwarding", async () => {
+  it("strips host and other cf-* headers when forwarding", async () => {
     const calls = capture();
     await worker.fetch(
       new Request("https://api.orangerails.com/v1/providers", {
@@ -201,7 +201,45 @@ describe("header hygiene", () => {
     const sent = calls[0].headers;
     expect(sent["host"]).toBeUndefined();
     expect(sent["cf-ray"]).toBeUndefined();
-    expect(sent["cf-connecting-ip"]).toBeUndefined();
     expect(sent["authorization"]).toBe("Bearer k");
+  });
+
+  it("re-injects the genuine cf-connecting-ip after stripping it (OR-T1103)", async () => {
+    // In production Cloudflare's edge sets this header on every request
+    // that reaches the Worker and overwrites anything a caller sent
+    // under that name, so the value on the incoming Request here stands
+    // in for the genuine edge value. The gateway used to drop it and
+    // never replace it, leaving every downstream function with no
+    // trustworthy client-IP signal at all.
+    const calls = capture();
+    await worker.fetch(
+      new Request("https://api.orangerails.com/v1/providers", {
+        headers: { "cf-connecting-ip": "203.0.113.7" },
+      }),
+      ENV,
+    );
+    expect(calls[0].headers["cf-connecting-ip"]).toBe("203.0.113.7");
+  });
+
+  it("does not let a caller forge cf-connecting-ip via x-real-ip or x-forwarded-for (OR-C0493)", async () => {
+    // No cf-connecting-ip on the incoming request at all here, simulating
+    // a caller who has nothing genuine to offer under that name and
+    // tries to substitute other, caller-writable headers instead. Those
+    // must pass through unchanged and must NOT surface as
+    // cf-connecting-ip on the outbound request.
+    const calls = capture();
+    await worker.fetch(
+      new Request("https://api.orangerails.com/v1/providers", {
+        headers: {
+          "x-real-ip": "6.6.6.6",
+          "x-forwarded-for": "6.6.6.6, 7.7.7.7",
+        },
+      }),
+      ENV,
+    );
+    const sent = calls[0].headers;
+    expect(sent["cf-connecting-ip"]).toBeUndefined();
+    expect(sent["x-real-ip"]).toBe("6.6.6.6");
+    expect(sent["x-forwarded-for"]).toBe("6.6.6.6, 7.7.7.7");
   });
 });
