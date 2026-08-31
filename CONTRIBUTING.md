@@ -94,6 +94,47 @@ We tag beginner-friendly tickets with `good first issue`. If you're new and want
 
 ---
 
+## Database migrations
+
+Migrations live in `supabase/migrations/` and are named `<version>_<slug>.sql`,
+where the version is a 14 digit UTC timestamp: `YYYYMMDDHHMMSS`.
+
+**Do not type the version by hand.** Generate it:
+
+```bash
+npm run migration:new -- add_keyring_epoch_guard
+# supabase/migrations/20260831130742_add_keyring_epoch_guard.sql
+```
+
+This matters more than it looks. `supabase_migrations.schema_migrations` stores
+**one row per version**, so if two files share a version, the second one to
+arrive is recorded as already applied and is silently skipped. There is no error.
+It surfaces much later as an object that does not exist on a database the
+migration ledger says is fully up to date.
+
+Hand typed versions were being rounded to the hour, which made that collision
+likely rather than rare. The generator reads the real clock to the second, and if
+that second is already used it steps forward until it finds a free one, so a
+duplicate cannot be created.
+
+Two properties the version must keep, if you ever touch the naming:
+
+- **Fixed width and lexically sortable.** Migrations apply in filename order and
+  there are guards that depend on that ordering. Do not shorten the field and do
+  not put a random suffix before the first underscore.
+- **Everything before the first underscore is the version.** The duplicate check
+  in `.github/workflows/supabase-deploy.yml` parses it with `cut -d_ -f1`.
+
+Write the migration so it can be re-run safely (`IF NOT EXISTS` / `IF EXISTS`
+guards), and say in the file header why the change is needed and how to undo it.
+If it cannot be undone, say that explicitly: an irreversible migration is a
+different kind of review.
+
+Schema changes are in the "coordinate first" list above. Open an issue before
+sending the PR.
+
+---
+
 ## Commit messages
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/) loosely:
