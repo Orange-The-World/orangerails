@@ -281,8 +281,10 @@ jobs:
           # When you add or remove a test file, change the number for that
           # branch in the same PR, and say why in the message if it goes down.
           # dev raised 17 -> 18 by DEV-0270, which adds
-          # supabase/functions/_shared/error-redaction.test.ts.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '18' }}
+          # supabase/functions/_shared/error-redaction.test.ts, then 18 -> 19
+          # by OR-T1140/OR-T1141, which adds
+          # supabase/functions/or-institutions-catalog/rate-limit.test.ts.
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '19' }}
         run: |
           set -euo pipefail
 
