@@ -184,8 +184,9 @@ privacy model (a date alone reveals nothing about addresses, balances,
 or history), and it is what makes the probe below possible. Changing the
 birthday means re-sealing and re-submitting the envelope through
 `or-stealth-connection-create`, which detects the re-add of the same
-wallet (by blind index), replaces the stored envelope, and resets the
-sync cursor.
+wallet (by blind index), replaces the stored envelope, and clears both
+halves of the resume state: the sync cursor and the recorded scan
+coverage.
 
 If a re-added wallet still syncs with the old birthday, probe the
 envelope the server actually has (same envelope-fetch call as §5) and
