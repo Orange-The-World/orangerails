@@ -729,7 +729,7 @@ jobs:
                 echo "-- out-of-order-apply: <why this is safe to run after ${MAX_APPLIED}>"
                 echo '```'
               } >> "$GITHUB_STEP_SUMMARY"
-              echo "::error::APPLY ABORTED on ${SUPABASE_REF}: migration(s)${OUT_OF_ORDER} number below the highest applied version ${MAX_APPLIED}. NOTHING was applied. Renumber above ${MAX_APPLIED}, or add an '-- out-of-order-apply:' marker line to the file."
+              echo "::error::APPLY ABORTED on ${SUPABASE_REF}: migration(s)${OUT_OF_ORDER} number below the highest applied version ${MAX_APPLIED}. NOTHING was applied. Renumber above ${MAX_APPLIED}, or add an '-- out-of-order-apply:' marker line to the file HEADER, within the first 40 lines."
               exit 1
             fi
           fi
