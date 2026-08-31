@@ -16,6 +16,8 @@
  * Lifting them out of the components changed no behaviour.
  */
 
+import { formatError } from "./format-error";
+
 /**
  * Structural stand-in for the supabase client.
  *
@@ -27,13 +29,101 @@
 export type VaultPersistClient = { from: (table: string) => any };
 
 /**
+ * The sentence that answers the question a user in this state will actually
+ * ask: which password opens my vault now.
+ *
+ * After ANY failure in this function the stored enc_mek_ciphertext still wraps
+ * the OLD MEK under the OLD password KEK, because the write that would replace
+ * it is the last statement here and it either did not run or did not land. So
+ * the vault opens with the password the user had BEFORE this recovery attempt,
+ * NOT the new one they just typed into the form. That is counter-intuitive and
+ * nothing used to say it, so the user's obvious next move was to try the new
+ * password, fail, and conclude the vault was gone.
+ */
+export const VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE =
+  "Your vault still opens with the vault password you had BEFORE this recovery attempt, not the new password you just chose.";
+
+/**
  * Shown when the rotated vault meta write did not land. By the time this can
  * happen every ciphertext the user owns is already under the new MEK, and the
  * only copies of that MEK are in the write that just failed. That is why the
  * message tells the user not to close the page rather than to try again.
  */
 export const RECOVERY_META_NOT_SAVED_MESSAGE =
-  "Vault recovery did not save. Your data has been re-encrypted but the new keys were not stored. Do not close or reload this page, and contact support with this message.";
+  "Vault recovery did not save. Your data has been re-encrypted but the new keys were not stored. Do not close or reload this page, and contact support with this message. " +
+  VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE;
+
+/**
+ * Shown when the rotation failed part way through one of the row walks, before
+ * the meta write was ever reached.
+ *
+ * This is the same irreversible state the message above exists to prevent,
+ * reached by a different door. Rows have already been rewritten under the new
+ * MEK, and the only copies of that MEK are in session memory: mekRef in
+ * VaultContext and the wrappers held by the calling route. Nothing has
+ * persisted them. Close or reload the page and every row already migrated is
+ * permanently unreadable.
+ *
+ * Until this existed the user was shown the raw PostgREST error instead, which
+ * is worse than merely unhelpful: a database error invites a reload, and a
+ * reload is the single action that makes the loss permanent.
+ */
+export const RECOVERY_PARTIAL_FAILURE_MESSAGE =
+  "Vault recovery stopped part way through. Some of your data has already been re-encrypted with a new key that has not been saved anywhere yet. Do not close or reload this page, and contact support with this message. " +
+  VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE;
+
+/**
+ * Marks an error whose message ALREADY carries the do-not-close-this-page
+ * warning, so the boundary in migrateAndPersistRotatedVault passes it through
+ * instead of replacing a specific message with the generic one.
+ */
+const VAULT_WARNING_MARKER = "__vaultRotationWarning";
+
+function markVaultWarning<T extends Error>(err: T): T {
+  (err as unknown as Record<string, unknown>)[VAULT_WARNING_MARKER] = true;
+  return err;
+}
+
+function carriesVaultWarning(err: unknown): boolean {
+  return Boolean(
+    err && typeof err === "object" && (err as Record<string, unknown>)[VAULT_WARNING_MARKER],
+  );
+}
+
+/** A mid-rotation failure, with the error that caused it kept rather than lost. */
+export interface VaultRotationPartialFailure extends Error {
+  /**
+   * The original thrown value, usually a PostgrestError. Kept so support can
+   * diagnose the cause. Deliberately NOT the headline: it is appended after the
+   * warning, because what the user does in the next ten seconds matters more
+   * than what the database said.
+   */
+  underlyingError: unknown;
+}
+
+function rotationPartialFailure(cause: unknown): VaultRotationPartialFailure {
+  const detail = formatError(cause);
+  const err = new Error(
+    detail
+      ? `${RECOVERY_PARTIAL_FAILURE_MESSAGE} Technical detail for support: ${detail}`
+      : RECOVERY_PARTIAL_FAILURE_MESSAGE,
+  ) as VaultRotationPartialFailure;
+  err.underlyingError = cause;
+  return markVaultWarning(err);
+}
+
+/**
+ * Whether this rotation has passed the point of no return.
+ *
+ * ISSUED, not confirmed. A row update whose response never arrived may still
+ * have landed, and we cannot tell the two apart from here, so the flag is set
+ * before the statement goes out rather than after it succeeds. The cost of
+ * being wrong in that direction is one unnecessary warning; the cost of being
+ * wrong in the other direction is a vault.
+ */
+interface RotationProgress {
+  anyRowWriteIssued: boolean;
+}
 
 /** Shown when the compare-and-swap on a password change matched no row. */
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
@@ -68,6 +158,29 @@ export interface RotateVaultArgs {
  * unless this resolves.
  */
 export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Promise<void> {
+  const progress: RotationProgress = { anyRowWriteIssued: false };
+  try {
+    await rotateAndPersistVault(args, progress);
+  } catch (err) {
+    // The trigger is "has anything been written yet", NOT "which statement
+    // failed". That is why this is one boundary around the whole function
+    // rather than an edit at each throw site: a throw site added later is
+    // covered without anyone having to remember this rule.
+    //
+    // Nothing written means nothing lost, so the raw error is the honest
+    // answer and dressing it up would only hide a real fault. Once a row write
+    // has been issued the user is in the irreversible state and needs the
+    // warning, whatever the underlying failure was.
+    if (!progress.anyRowWriteIssued) throw err;
+    if (carriesVaultWarning(err)) throw err;
+    throw rotationPartialFailure(err);
+  }
+}
+
+async function rotateAndPersistVault(
+  args: RotateVaultArgs,
+  progress: RotationProgress,
+): Promise<void> {
   const {
     supabase,
     userId,
@@ -155,6 +268,10 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
           }
         }
       }
+      // Set BEFORE the statement goes out. Once it has been issued we cannot
+      // know whether it landed, and a row that did land is unreadable without
+      // the new MEK that only exists in this session.
+      progress.anyRowWriteIssued = true;
       const { error: connErr } = await supabase
         .from("connections")
         .update(connUpdate)
@@ -212,6 +329,11 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     await Promise.all(
       rows.map(async (txn) => {
         const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
+        // Set BEFORE the statement goes out, for the reason given in the
+        // connections walk. It matters more here: these run concurrently under
+        // Promise.all, so one rejecting says nothing about whether its siblings
+        // landed.
+        progress.anyRowWriteIssued = true;
         const { error: txnErr } = await supabase
           .from("encrypted_transactions")
           .update({ encrypted_payload: newPayload })
@@ -290,7 +412,9 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     .select("user_id");
   if (updateErr) throw updateErr;
   if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
-    throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
+    // Marked so the boundary keeps this more specific message instead of
+    // replacing it with the generic partial-failure one.
+    throw markVaultWarning(new Error(RECOVERY_META_NOT_SAVED_MESSAGE));
   }
 
   // Zero old key material. Only reached once the meta write above is proven to
