@@ -33,9 +33,10 @@ CREATE TABLE IF NOT EXISTS public.quiltt_institutions_cache (
 CREATE INDEX IF NOT EXISTS quiltt_institutions_cache_searchable_idx
   ON public.quiltt_institutions_cache (connector_id, searchable text_pattern_ops);
 
--- Whole-catalog age. or-institutions-catalog reads MIN(refreshed_at)
--- to decide whether to refresh. Per-row refreshed_at lets us partially
--- update if Quiltt's paginated response splits across multiple calls.
+-- Whole-catalog age. NOT currently read by anything (see the header
+-- comment); intended for a future refresher to decide whether to
+-- refresh. Per-row refreshed_at lets us partially update if Quiltt's
+-- paginated response splits across multiple calls.
 CREATE INDEX IF NOT EXISTS quiltt_institutions_cache_refreshed_idx
   ON public.quiltt_institutions_cache (connector_id, refreshed_at);
 
