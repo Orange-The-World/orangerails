@@ -77,6 +77,11 @@ export interface NormalizedTransaction {
   /** Hex, RPC display order. */
   txid: string;
   block_height: number;
+  /** Canonical hash of the block this transaction was found in (RPC display
+   *  order, lowercase hex). Public chain data, not a customer secret --
+   *  stored in the clear on OR's server, same class as block_height, so the
+   *  reorg detector can verify it without decrypting anything. See OR-T0999. */
+  block_hash: string;
   /** ISO date YYYY-MM-DD derived from the block header timestamp. Kept for
    *  the server's date-scoped storage index and pagination, and for
    *  backward compatibility with records sealed before `timestamp` existed. */
@@ -946,6 +951,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         normalized.push({
           txid: tx.txid,
           block_height: blockHeight,
+          block_hash: block.blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
           direction: 'out',
@@ -969,6 +975,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         normalized.push({
           txid: tx.txid,
           block_height: blockHeight,
+          block_hash: block.blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
           direction: 'in',
@@ -1175,7 +1182,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
             }
           }
           normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            txid: tx.txid, block_height: blockHeight, block_hash: block.blockHashHex,
+            occurred_at: occurredAt,
             timestamp: occurredAtInstant, direction: 'out',
             amount_sats: Number(netOut), address: recipientAddress,
             vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
@@ -1184,7 +1192,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
           for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
         } else if (anyReceive && !alreadySeen) {
           normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            txid: tx.txid, block_height: blockHeight, block_hash: block.blockHashHex,
+            occurred_at: occurredAt,
             timestamp: occurredAtInstant, direction: 'in',
             amount_sats: Number(receivedAmount), address: receivedAddress,
             vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
@@ -1231,6 +1240,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       ciphertext_b64: env.ciphertext_b64,
       occurred_at: tx.occurred_at,
       block_height: tx.block_height,
+      block_hash: tx.block_hash,
       txid_blind_index_hex: blind,
     });
     if (i % 8 === 0 || i === normalized.length - 1) {
