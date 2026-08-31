@@ -434,7 +434,22 @@ jobs:
           # dev and prod branches have no Cloudflare branch preview; their
           # builds go to the static host. Only feature-branch PRs get
           # a per-branch preview URL.
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$GITHUB_HEAD_REF" != "dev" ] && [ "$GITHUB_HEAD_REF" != "prod" ]; then
+          #
+          # A release/* head belongs with dev and prod here, not with the feature
+          # branches (OR-T0990). A promotion into prod is now opened from a
+          # release branch cut at a sha that is already on dev, rather than from
+          # dev itself, because a promotion whose head is dev loses its approval
+          # every time anything merges into dev. Such a branch is a snapshot of
+          # dev, so the surface to smoke it against is the deployed dev site,
+          # exactly as it was when the head was dev. Sending it down the preview
+          # path instead would aim these tests at a Pages build that may never
+          # have been made, and turn the promotion red for a reason that has
+          # nothing to do with the code.
+          IS_FEATURE_BRANCH=1
+          case "$GITHUB_HEAD_REF" in
+            dev|prod|release/*) IS_FEATURE_BRANCH=0 ;;
+          esac
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$IS_FEATURE_BRANCH" = "1" ]; then
             SLUG=$(echo "$GITHUB_HEAD_REF" \
               | tr '[:upper:]' '[:lower:]' \
               | sed 's/[^a-z0-9]/-/g' \
