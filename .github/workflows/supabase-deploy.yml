@@ -270,7 +270,7 @@ jobs:
 
 
   check-pending-migrations:
-    needs: [target, apply-migrations]
+    needs: [target, check-duplicate-migrations, apply-migrations]
     # Runs BEFORE the deploy job, not after it. deploy declares
     # needs: [target, check-pending-migrations], so when this job exits 1 the
     # deploy is SKIPPED and code cannot ship ahead of its schema. That is the
@@ -300,6 +300,7 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
           APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+          DUPES_RESULT: ${{ needs['check-duplicate-migrations'].result }}
         run: |
           set -uo pipefail
 
