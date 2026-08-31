@@ -299,6 +299,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         },
         occurred_at: tx.occurred_at,
         block_height: tx.block_height,
+        block_hash: tx.block_hash ? tx.block_hash.toLowerCase() : null,
         txid_blind_index_hex: tx.txid_blind_index_hex,
       }));
 
