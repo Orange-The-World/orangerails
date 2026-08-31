@@ -335,8 +335,13 @@ function isUniqueViolation(err: unknown): boolean {
  * did not land, only that its answer did not come back, so a delete issued on
  * that assumption is one of the ways the dangerous state gets created. The row
  * stays, and the owner is told what it means.
+ *
+ * EXPORTED FOR ITS TESTS, not as a second way to write a grant. grantCoAdmin is
+ * the only caller and should stay the only caller: everything it does before
+ * this point, deriving the MEK, wrapping the blob and signing the binding, is
+ * what makes the rows written here mean anything.
  */
-async function persistCoAdminGrant(params: {
+export async function persistCoAdminGrant(params: {
   ownerUserId: string;
   targetUserId: string;
   workspaceKeyId: string;
