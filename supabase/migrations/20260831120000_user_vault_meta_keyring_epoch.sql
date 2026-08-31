@@ -110,7 +110,41 @@
 -- ships. After that, dropping the column makes stored blobs unopenable and the undo is
 -- no longer safe.
 --
--- Refs: OR-T0967, OR-T0796, OR-T0718, OR-T0676
+-- RESTORING THESE TABLES FROM A LOGICAL DUMP: read this before you try. OR-T1133.
+-- The three triggers below are ENABLE ALWAYS, deliberately: that is the only mode that
+-- keeps firing when session_replication_role = 'replica', and replica mode is exactly
+-- what a logical restore, pg_restore --disable-triggers and logical replication use to
+-- load rows without running triggers. Keeping this guard unbypassable is the point of the
+-- file, so ENABLE ALWAYS stays and the restore becomes a written procedure instead.
+-- Physical PITR replays WAL and is unaffected. This concerns a logical dump restore, a
+-- project clone, or a branch seeded from production data.
+--
+-- A NAIVE restore fails in BOTH possible orders. Exercised 2026-08-31 on a non-production
+-- copy (hosted dev, a throwaway schema of the same shape, dropped at the end):
+--   meta first, then watermark : 23505, duplicate key on the watermark primary key. The
+--     guard wrote the watermark itself while the meta rows were being loaded.
+--   watermark first, then meta : 23514, keyring_epoch 3 must be strictly above the
+--     watermark 3.
+--
+-- THE PROCEDURE, in this order. Step 1 and step 4 need table ownership.
+--   1. ALTER TABLE public.user_vault_meta DISABLE TRIGGER trg_keyring_epoch_guard;
+--   2. load public.user_vault_meta and public.user_vault_keyring_watermark from the dump
+--   3. re-derive the watermark from the restored data so it can never sit below what was
+--      loaded:
+--        INSERT INTO public.user_vault_keyring_watermark AS w
+--               (user_id, max_keyring_epoch, updated_at)
+--        SELECT m.user_id, m.keyring_epoch, now() FROM public.user_vault_meta m
+--        ON CONFLICT (user_id) DO UPDATE
+--           SET max_keyring_epoch = GREATEST(w.max_keyring_epoch, EXCLUDED.max_keyring_epoch),
+--               updated_at = now();
+--   4. ALTER TABLE public.user_vault_meta ENABLE ALWAYS TRIGGER trg_keyring_epoch_guard;
+--   5. prove the guard is live again BEFORE letting traffic in: an epoch downgrade must be
+--      refused, and a legitimate re-seal (higher epoch, different ciphertext) accepted.
+-- In the drill, step 4 left tgenabled = A, the downgrade was refused with 'keyring_epoch
+-- must not decrease (old=3, new=2)', and a re-seal to epoch 4 was accepted with the
+-- watermark following to 4.
+--
+-- Refs: OR-T0967, OR-T0796, OR-T0718, OR-T0676, OR-T1130, OR-T1133
 
 BEGIN;
 
