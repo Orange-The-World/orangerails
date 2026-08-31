@@ -440,6 +440,98 @@ describe("vault recovery: the transaction re-encryption page walk", () => {
   });
 });
 
+describe("vault recovery: the connection re-encryption page walk", () => {
+  const PAGE_SIZE = 500;
+
+  /** uuid-shaped ids that sort in a known order, so a skip is detectable. */
+  function connFixture(count: number) {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `00000000-0000-4000-9000-${String(i).padStart(12, "0")}`,
+      encrypted_credentials: `creds-${i}`,
+      encrypted_label: null,
+    }));
+  }
+
+  function updatedConnIds(calls: RecordedCall[]): string[] {
+    return calls
+      .filter((c) => c.table === "connections" && c.op === "update")
+      .map((c) => c.filters.find((f) => f.column === "id")?.value as string);
+  }
+
+  function connSelects(calls: RecordedCall[]): RecordedCall[] {
+    return calls.filter((c) => c.table === "connections" && c.op === "select");
+  }
+
+  it("keeps walking when the server caps a page below the size asked for", async () => {
+    const rows = connFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({
+      rows: { connections: rows },
+      // PostgREST's db-max-rows caps a response server-side, whatever the
+      // client asked for. This is the case an unfiltered select cannot survive:
+      // it would re-encrypt the rows that came back, finish with no error, and
+      // clearMigrationKeys() would destroy the only key that could still read
+      // the rest. Those connections are then permanently unusable and recovery
+      // reports success.
+      maxRows: 200,
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(new Set(updatedConnIds(calls))).toEqual(new Set(rows.map((r) => r.id)));
+    expect(updatedConnIds(calls).length).toBe(rows.length);
+    // 200 + 200 + 101 + 0.
+    expect(connSelects(calls).length).toBe(4);
+  });
+
+  it("walks both pages of a 501 row fixture and updates every row exactly once", async () => {
+    const rows = connFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({ rows: { connections: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const ids = updatedConnIds(calls);
+    expect(new Set(ids)).toEqual(new Set(rows.map((r) => r.id)));
+    expect(ids.length).toBe(rows.length);
+    // Three, not two. The loop stops on an empty page and on nothing else, so
+    // 501 rows cost 500 + 1 + 0. If this ever reads two again, someone has put
+    // a short-page break in.
+    expect(connSelects(calls).length).toBe(3);
+  });
+
+  it("pages by the primary key in a stable order, never by bare offset", async () => {
+    const rows = connFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({ rows: { connections: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const selects = connSelects(calls);
+    for (const select of selects) {
+      expect(select.order).toEqual({ column: "id", ascending: true });
+      expect(select.limit).toBe(PAGE_SIZE);
+      expect(select.range).toBeUndefined();
+    }
+    expect(selects[0].gt).toBeUndefined();
+    expect(selects[1].gt).toEqual({ column: "id", value: rows[PAGE_SIZE - 1].id });
+  });
+
+  it("loses no row when the backing set reorders under the loop, as an update does", async () => {
+    const rows = connFixture(PAGE_SIZE + 1);
+    const backing = [...rows];
+    const { client, calls } = makeFakeClient({
+      rows: { connections: backing },
+      beforeSelect: (table) => {
+        if (table !== "connections") return;
+        const first = backing.shift();
+        if (first) backing.push(first);
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(new Set(updatedConnIds(calls))).toEqual(new Set(rows.map((r) => r.id)));
+  });
+});
+
 describe("vault password change: the re-wrapped meta write", () => {
   function rewrapArgs(client: VaultPersistClient) {
     return {
