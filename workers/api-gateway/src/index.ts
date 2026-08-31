@@ -128,6 +128,14 @@ function lookupV1(method: string, pathname: string): V1Route | null {
 }
 
 function forwardHeaders(src: Headers): Headers {
+  // Cloudflare's own edge sets cf-connecting-ip on every request that
+  // reaches this Worker, overwriting any value a caller tries to send
+  // under that name, so it is the one client-IP signal here nobody but
+  // Cloudflare can write. Capture it BEFORE the strip loop below removes
+  // it, so it survives the proxy in a form the downstream function can
+  // trust: something re-set by this gateway's own code, never a value
+  // copied straight through from the caller.
+  const edgeClientIp = src.get("cf-connecting-ip");
   const out = new Headers();
   for (const [k, v] of src) {
     const lk = k.toLowerCase();
@@ -140,6 +148,9 @@ function forwardHeaders(src: Headers): Headers {
       continue;
     out.set(k, v);
   }
+  // Re-inject under the same header name, after the strip loop, so this
+  // is always the genuine edge value and never whatever the caller sent.
+  if (edgeClientIp) out.set("cf-connecting-ip", edgeClientIp);
   return out;
 }
 
