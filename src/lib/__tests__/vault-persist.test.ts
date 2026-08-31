@@ -20,6 +20,7 @@ import {
   persistRewrappedVaultMeta,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
+  TRANSACTION_PAGE_SIZE,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -69,7 +70,17 @@ function makeFakeClient(options: FakeOptions = {}) {
     if (call.op === "select") {
       const override = options.selectResult?.[call.table];
       if (override) return override;
-      return { data: options.rows?.[call.table] ?? [], error: null };
+      const allRows = options.rows?.[call.table] ?? [];
+      // Honour .range(from, to). A fake that always returns the same page
+      // regardless of its arguments can never exercise pagination, and a
+      // fixture of TRANSACTION_PAGE_SIZE or more rows would loop forever
+      // against it instead of failing loudly (see the paging test below).
+      const rangeFilter = call.filters.find((f) => f.column === "range");
+      if (rangeFilter) {
+        const [from, to] = rangeFilter.value as [number, number];
+        return { data: allRows.slice(from, to + 1), error: null };
+      }
+      return { data: allRows, error: null };
     }
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
@@ -267,6 +278,27 @@ describe("vault recovery: the rotated meta write", () => {
 
     expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
     expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("terminates and migrates every row exactly once against a fixture bigger than one page", async () => {
+    const rowCount = TRANSACTION_PAGE_SIZE + 1;
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: `txn-${i}`,
+      encrypted_payload: `payload-${i}`,
+    }));
+    const { client, calls } = makeFakeClient({ rows: { encrypted_transactions: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const txnUpdates = calls.filter((c) => c.table === "encrypted_transactions" && c.op === "update");
+    const updatedIds = txnUpdates.map((c) => c.filters.find((f) => f.column === "id")?.value);
+    expect(txnUpdates.length).toBe(rowCount);
+    expect(new Set(updatedIds).size).toBe(rowCount);
+
+    // One full page plus one short page is what ends the loop; two select
+    // calls is the direct evidence the cursor actually advanced.
+    const selectCalls = calls.filter((c) => c.table === "encrypted_transactions" && c.op === "select");
+    expect(selectCalls.length).toBe(2);
   });
 });
 
