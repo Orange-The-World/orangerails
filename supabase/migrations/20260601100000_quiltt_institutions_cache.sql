@@ -2,7 +2,12 @@
 -- catalog so V2/OW/etc. can render bank tiles in their picker WITHOUT
 -- a per-user Quiltt session.
 --
--- Refreshed by the or-institutions-catalog edge function (24h TTL).
+-- NOT currently refreshed by anything: as of 2026-08-31 no code path writes or
+-- reads this table (0 rows, refreshed_at never set). Originally intended to be
+-- refreshed by the or-institutions-catalog edge function (24h TTL); that was
+-- never implemented. See OR-T1076 for the plan to wire it up: a scheduled job
+-- (not the public edge function) writes it, and or-institutions-catalog reads
+-- it with the anon key.
 -- Public read; service-role write only.
 
 CREATE TABLE IF NOT EXISTS public.quiltt_institutions_cache (
