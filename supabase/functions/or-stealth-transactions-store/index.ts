@@ -182,6 +182,13 @@ export function boundCursorAdvance(
  * value returned to the caller always equals the value persisted. A caller told
  * the cursor reached a height the database never stored would resume from the
  * wrong place.
+ *
+ * clientContiguousScanned is REQUIRED and deliberately has no default. It used
+ * to default to undefined, which fails isContiguousScannedHeight, so a caller
+ * that simply forgot the argument got the old unbounded behaviour with no type
+ * error and no failing test -- in a function whose entire job is to mirror the
+ * persist path. Unbounded is still reachable by passing undefined explicitly,
+ * which is a decision a reviewer can see rather than an omission nobody can.
  */
 export function deriveResponseCursor(
   storedCursor: number | null,
