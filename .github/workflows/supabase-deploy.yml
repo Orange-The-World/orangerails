@@ -550,6 +550,24 @@ jobs:
             exit 0
           fi
 
+          # DUPLICATE VERSION GUARD, before anything is applied.
+          #
+          # An identical guard exists in check-pending-migrations, but that job
+          # declares `needs: [target, apply-migrations]` while this one declares
+          # `needs: [target]`. On a push to dev this job therefore runs FIRST and
+          # the duplicate is already applied by the time that guard fires. A guard
+          # that reports after the write is a record, not a control.
+          #
+          # It matters here for the same reason it matters there:
+          # supabase_migrations.schema_migrations holds ONE row per version, so
+          # once either file is recorded the `grep -qx` below matches for BOTH and
+          # the other is skipped forever, applied or not.
+          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d || true)
+          if [ -n "$DUPES" ]; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- the ledger stores one row per version, so at most one of these can ever be tracked and the rest are skipped whether they ran or not. NOTHING was applied. Rename the later file to an unused timestamp."
+            exit 1
+          fi
+
           # Fetch already-applied versions.
           #
           # This is the SAME call the drift report makes, and it is hardened the
@@ -607,6 +625,94 @@ jobs:
           echo "-- already applied versions on ${SUPABASE_REF} --"
           echo "$APPLIED" | tail -10
           echo
+
+          # ------------------------------------------------------------------
+          # OUT-OF-ORDER GUARD. Filename order is a WITHIN-RUN property of the
+          # loop below, not a cross-run guarantee.
+          #
+          # That loop walks supabase/migrations/*.sql in filename order and skips
+          # anything already in the ledger. On a database that is already partly
+          # applied, which is every environment we own, a file that merges LATER
+          # while numbering EARLIER is therefore applied AFTER migrations that
+          # number above it. Any migration whose safety argument is "the filename
+          # guarantees I run first" is relying on a control that does not exist.
+          #
+          # This ran on dev on 2026-08-24. 20260824120000_schedule_or_webhook_dispatch
+          # merged first and applied. 20260824105000_mark_pre_cutoff_webhook_backlog_dead,
+          # whose own header states it must run BEFORE the schedule exists, merged
+          # later with a lower version and did not apply. The runner exited 0, the
+          # ledger looked healthy, and the only symptom was a migration running in
+          # an order its author had ruled out. Nothing was harmed because the
+          # affected table was empty on dev. That is luck, not a control.
+          #
+          # So: refuse, and make the operator decide deliberately. A migration
+          # that genuinely may run late opts in with a marker line in its own
+          # header, which is reviewed in the PR that introduces it and travels
+          # with the file instead of living in a repo variable somebody forgets:
+          #
+          #     -- out-of-order-apply: <one line saying why this is safe>
+          #
+          # SOUNDNESS NOTE, do not remove. This guard is only as good as $APPLIED.
+          # An empty $APPLIED here means the ledger is genuinely empty (a fresh
+          # database), NOT that the query failed: the fetch above ABORTS the job
+          # on an unreadable ledger rather than returning empty. Weakening that
+          # abort would make MAX_APPLIED empty and turn this guard into a no-op
+          # exactly when it is most needed.
+          # ------------------------------------------------------------------
+          MAX_APPLIED=$(echo "$APPLIED" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
+          if [ -z "$MAX_APPLIED" ]; then
+            echo "ledger holds no numeric versions on ${SUPABASE_REF}; treating this as a fresh database, so every migration is in order by definition"
+          else
+            echo "highest version already applied on ${SUPABASE_REF}: ${MAX_APPLIED}"
+            OUT_OF_ORDER=""
+            for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
+              BASENAME=$(basename "$FILE")
+              VERSION="${BASENAME%%_*}"
+              # Already applied: its order is history, not a decision available
+              # to this run.
+              if echo "$APPLIED" | grep -qx "$VERSION"; then
+                continue
+              fi
+              case "$VERSION" in
+                ''|*[!0-9]*)
+                  echo "::error::APPLY ABORTED on ${SUPABASE_REF}: '${BASENAME}' does not begin with a numeric version, so its position relative to ${MAX_APPLIED} cannot be determined. NOTHING was applied. This is UNKNOWN, not safe."
+                  exit 1
+                  ;;
+              esac
+              if [ "$VERSION" -ge "$MAX_APPLIED" ]; then
+                continue
+              fi
+              if grep -qiE '^[[:space:]]*--[[:space:]]*out-of-order-apply:' "$FILE"; then
+                echo "  ! ${BASENAME} numbers below ${MAX_APPLIED} and carries an explicit out-of-order-apply marker; allowing"
+                continue
+              fi
+              OUT_OF_ORDER="${OUT_OF_ORDER} ${BASENAME}"
+            done
+
+            if [ -n "$OUT_OF_ORDER" ]; then
+              {
+                echo "## :rotating_light: Backwards-numbered migration(s) on \`${SUPABASE_REF}\`"
+                echo ""
+                echo "Highest version already applied: \`${MAX_APPLIED}\`"
+                echo ""
+                for B in $OUT_OF_ORDER; do echo "- \`${B}\`"; done
+                echo ""
+                echo "These number BELOW a migration that has already run, so they cannot"
+                echo "be applied in the order their filenames imply. **Nothing was applied"
+                echo "by this run.**"
+                echo ""
+                echo "Either renumber the file to an unused timestamp above"
+                echo "\`${MAX_APPLIED}\`, or, if running late is genuinely safe, say so in"
+                echo "the file itself so the next reader sees the decision:"
+                echo ""
+                echo '```'
+                echo "-- out-of-order-apply: <why this is safe to run after ${MAX_APPLIED}>"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::APPLY ABORTED on ${SUPABASE_REF}: migration(s)${OUT_OF_ORDER} number below the highest applied version ${MAX_APPLIED}. NOTHING was applied. Renumber above ${MAX_APPLIED}, or add an '-- out-of-order-apply:' marker line to the file."
+              exit 1
+            fi
+          fi
 
           # For each migration file, apply if not in the applied set
           APPLIED_COUNT=0
