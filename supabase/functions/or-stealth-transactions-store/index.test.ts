@@ -111,6 +111,51 @@ Deno.test('isSealedTx: rejects null, non-objects, and malformed records', () => 
   }), 'short blind index hex must fail');
 });
 
+// -- isSealedTx: block_hash (OR-T0999) --
+//
+// block_hash is OPTIONAL on the wire (an older widget build or an app-mode
+// caller may not send one) but must be well-formed when present. These
+// three cases are the ones that matter: absent, present and valid
+// (any case), present and malformed.
+
+Deno.test('isSealedTx: accepts a sealed transaction with no block_hash (older caller)', () => {
+  assert(isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'AAAAAAAAAAAAAAAA',
+    ciphertext_b64: 'AAAAAAAAAAAAAAAA',
+    occurred_at: '2024-01-01',
+    block_height: 1,
+    txid_blind_index_hex: 'a'.repeat(64),
+  }), 'object with no block_hash must still pass isSealedTx');
+});
+
+Deno.test('isSealedTx: accepts a mixed-case block_hash (normalized to lowercase at insert, not here)', () => {
+  assert(isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'AAAAAAAAAAAAAAAA',
+    ciphertext_b64: 'AAAAAAAAAAAAAAAA',
+    occurred_at: '2024-01-01',
+    block_height: 1,
+    block_hash: 'A1b2'.repeat(16),
+    txid_blind_index_hex: 'a'.repeat(64),
+  }), 'mixed-case block_hash of the right length must pass isSealedTx');
+});
+
+Deno.test('isSealedTx: rejects a block_hash of the wrong length', () => {
+  assert(!isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'AAAAAAAAAAAAAAAA',
+    ciphertext_b64: 'AAAAAAAAAAAAAAAA',
+    occurred_at: '2024-01-01',
+    block_height: 1,
+    block_hash: 'ab',
+    txid_blind_index_hex: 'a'.repeat(64),
+  }), 'short block_hash must fail isSealedTx, not be silently stored');
+});
+
 // -- app_user_id guard: call the real isValidAppUserId --
 //
 // All assertions below call the real isValidAppUserId exported from
