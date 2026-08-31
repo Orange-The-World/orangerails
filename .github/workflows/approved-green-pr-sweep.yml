@@ -102,17 +102,28 @@ jobs:
             "Approved and green pull requests waiting to merge (${count} of ${total} open):${partial}" \
             "${report}")
 
-          existing=$(gh issue list \
+          existing=""
+          if existing_list=$(gh issue list \
             --repo "$GITHUB_REPOSITORY" \
             --state open \
             --limit 100 \
-            --json number,title \
-            | jq -r --arg t "$ISSUE_TITLE" 'map(select(.title == $t)) | .[0].number // empty')
+            --json number,title 2>&1); then
+            existing=$(echo "$existing_list" | jq -r --arg t "$ISSUE_TITLE" 'map(select(.title == $t)) | .[0].number // empty')
+          else
+            echo "::error::gh issue list failed, cannot check for a duplicate tracking issue: ${existing_list}"
+            echo "Falling back to creating a new issue instead of aborting."
+          fi
 
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$issue_body"
+            if ! gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$issue_body"; then
+              echo "::error::gh issue comment failed on existing issue #${existing}. The sweep found ${count} approved and green PR(s) but could not report them anywhere."
+              exit 1
+            fi
             echo "Reported ${count} PR(s) on existing issue #${existing}."
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$issue_body"
+            if ! gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$issue_body"; then
+              echo "::error::gh issue create failed. The sweep found ${count} approved and green PR(s) but could not report them anywhere."
+              exit 1
+            fi
             echo "Reported ${count} PR(s) on a new issue."
           fi
