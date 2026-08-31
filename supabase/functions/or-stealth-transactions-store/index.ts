@@ -121,7 +121,9 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
     Number.isInteger(o.block_height) &&
     (o.block_height as number) >= 0 &&
     typeof o.txid_blind_index_hex === 'string' &&
-    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string)
+    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string) &&
+    (o.block_hash === undefined ||
+      (typeof o.block_hash === 'string' && BLOCK_HASH_HEX_RE.test(o.block_hash as string)))
   );
 }
 
