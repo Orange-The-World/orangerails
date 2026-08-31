@@ -52,6 +52,13 @@ interface SealedTransactionInput {
   ciphertext_b64: string;
   occurred_at: string;
   block_height: number;
+  /**
+   * Canonical hash of the block this transaction was found in, RPC display
+   * order hex, 64 chars. Optional: absent on rows from an older widget
+   * build or an app-mode caller that has not adopted this field yet.
+   * Accepted in any case, stored lowercase (see BLOCK_HASH_HEX_RE).
+   */
+  block_hash?: string;
   /** Lowercase hex, 64 chars. HMAC-SHA-256 output, not base64. */
   txid_blind_index_hex: string;
 }
