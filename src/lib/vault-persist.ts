@@ -140,6 +140,9 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // still not immune to another session INSERTing or DELETing a row while this
   // loop runs, which shifts the window. Keyset pagination on id would close
   // that too. It is deliberately out of scope here and is not a regression.
+  // Both of those residuals are now caught by the reconciliation below rather
+  // than only described here.
+  //
   // Counted as each row's update lands, so it is what this run actually
   // migrated rather than what a read said was there.
   let connectionsMigrated = 0;
