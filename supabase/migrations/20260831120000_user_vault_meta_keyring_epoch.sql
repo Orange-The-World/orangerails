@@ -128,7 +128,17 @@
 --     watermark 3.
 --
 -- THE PROCEDURE, in this order. Step 1 and step 4 need table ownership.
---   1. ALTER TABLE public.user_vault_meta DISABLE TRIGGER trg_keyring_epoch_guard;
+--   1. Switch off the epoch guard, AND the two TRUNCATE guards if your restore clears the
+--      target tables before loading. forbid_vault_keyring_truncate raises unconditionally,
+--      so a data-only reload or a branch seeded from production data that truncates first
+--      stops on a guard this procedure used not to mention. Disabling one you did not need
+--      to is harmless; finding the third one halfway through a restore is not. OR-T1168.
+--      HONEST LIMIT: whether our own restore flow truncates was not established. The step
+--      is correct either way.
+--        ALTER TABLE public.user_vault_meta DISABLE TRIGGER trg_keyring_epoch_guard;
+--        ALTER TABLE public.user_vault_meta DISABLE TRIGGER trg_user_vault_meta_no_truncate;
+--        ALTER TABLE public.user_vault_keyring_watermark
+--          DISABLE TRIGGER trg_keyring_watermark_no_truncate;
 --   2. load public.user_vault_meta and public.user_vault_keyring_watermark from the dump
 --   3. re-derive the watermark from the restored data so it can never sit below what was
 --      loaded:
@@ -138,7 +148,14 @@
 --        ON CONFLICT (user_id) DO UPDATE
 --           SET max_keyring_epoch = GREATEST(w.max_keyring_epoch, EXCLUDED.max_keyring_epoch),
 --               updated_at = now();
---   4. ALTER TABLE public.user_vault_meta ENABLE ALWAYS TRIGGER trg_keyring_epoch_guard;
+--   4. Put back every guard you switched off, and put it back with ENABLE ALWAYS. Plain
+--      ENABLE TRIGGER sets tgenabled = 'O', which is bypassed under
+--      session_replication_role = 'replica', and that is the state OR-T1133 ruled against:
+--        ALTER TABLE public.user_vault_meta ENABLE ALWAYS TRIGGER trg_keyring_epoch_guard;
+--        ALTER TABLE public.user_vault_meta
+--          ENABLE ALWAYS TRIGGER trg_user_vault_meta_no_truncate;
+--        ALTER TABLE public.user_vault_keyring_watermark
+--          ENABLE ALWAYS TRIGGER trg_keyring_watermark_no_truncate;
 --   5. prove the guard is live again BEFORE letting traffic in: an epoch downgrade must be
 --      refused, and a legitimate re-seal (higher epoch, different ciphertext) accepted.
 -- In the drill, step 4 left tgenabled = A, the downgrade was refused with 'keyring_epoch
@@ -284,6 +301,8 @@ DECLARE
   v_def  text;
   v_secdef boolean; v_config text[];
   v_fk int; v_priv text := '';
+  v_guard record; v_enabled text;
+  v_fn text; v_path text; v_parts text[];
 BEGIN
   -- The guard this file arms reads NEW.keyring_ciphertext at runtime. If that column is
   -- missing the arming still succeeds and the first row write fails with 42703 instead,
@@ -314,13 +333,68 @@ BEGIN
     RAISE EXCEPTION 'FAIL: trg_user_vault_meta_no_truncate must be BEFORE TRUNCATE, got %', coalesce(v_def,'<missing>');
   END IF;
 
-  SELECT p.prosecdef, p.proconfig INTO v_secdef, v_config
-    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-   WHERE n.nspname='public' AND p.proname='enforce_keyring_epoch';
-  IF NOT v_secdef THEN RAISE EXCEPTION 'FAIL: enforce_keyring_epoch must be SECURITY DEFINER'; END IF;
-  IF v_config IS NULL OR NOT (array_to_string(v_config,',') ILIKE '%search_path=%') THEN
-    RAISE EXCEPTION 'FAIL: enforce_keyring_epoch must pin search_path';
+  -- The watermark table's TRUNCATE guard, asserted like its sibling. This file creates and
+  -- arms it a few lines above, and the block below never mentioned it, so an edit that
+  -- dropped it passed unchanged. OR-T1168.
+  SELECT pg_get_triggerdef(t.oid) INTO v_def FROM pg_trigger t
+   WHERE t.tgrelid='public.user_vault_keyring_watermark'::regclass AND t.tgname='trg_keyring_watermark_no_truncate';
+  IF v_def IS NULL OR v_def NOT ILIKE '%BEFORE TRUNCATE%' THEN
+    RAISE EXCEPTION 'FAIL: trg_keyring_watermark_no_truncate must be BEFORE TRUNCATE, got %', coalesce(v_def,'<missing>');
   END IF;
+
+  -- ENABLE STATE, which is not part of the shape. pg_get_triggerdef renders the CREATE
+  -- TRIGGER statement and the enable mode is not in it, so every check above passes just as
+  -- happily on a trigger that is switched off. The mode lives in pg_trigger.tgenabled:
+  -- 'O' origin, which is the plain ENABLE TRIGGER default and is bypassed under
+  -- session_replication_role = 'replica'; 'D' disabled; 'R' replica; 'A' always.
+  -- ENABLE ALWAYS is the ruling this file implements, and the restore procedure in the
+  -- header instructs an operator to switch these guards off and put them back, so the state
+  -- that procedure can leave behind is exactly the state that has to be asserted here.
+  -- Without this, a guard that is OFF still prints 'OR-T0967 ok'. OR-T1168.
+  FOR v_guard IN
+    SELECT g.rel, g.trg FROM (VALUES
+      ('public.user_vault_meta',              'trg_keyring_epoch_guard'),
+      ('public.user_vault_meta',              'trg_user_vault_meta_no_truncate'),
+      ('public.user_vault_keyring_watermark', 'trg_keyring_watermark_no_truncate')
+    ) AS g(rel, trg)
+  LOOP
+    SELECT t.tgenabled::text INTO v_enabled FROM pg_trigger t
+     WHERE t.tgrelid = v_guard.rel::regclass AND t.tgname = v_guard.trg;
+    IF v_enabled IS NULL THEN
+      RAISE EXCEPTION 'FAIL: trigger % is missing from %', v_guard.trg, v_guard.rel;
+    END IF;
+    IF v_enabled <> 'A' THEN
+      RAISE EXCEPTION 'FAIL: trigger % on % must be ENABLE ALWAYS (pg_trigger.tgenabled = A), found tgenabled = %. O is the plain ENABLE TRIGGER default and is bypassed under session_replication_role = replica; D is off. Restore it with: ALTER TABLE % ENABLE ALWAYS TRIGGER %;', v_guard.trg, v_guard.rel, v_enabled, v_guard.rel, v_guard.trg;
+    END IF;
+  END LOOP;
+
+  -- Both trigger functions, and the search_path pin is checked for what it CONTAINS rather
+  -- than for merely existing. A test of '%search_path=%' passes on a pin of public with no
+  -- pg_temp, which is the weakness raised as OR-T1131 and asserted against properly in the
+  -- sibling migration on PR #1011. Two sibling files holding the same property to two
+  -- different standards is worse than either standard alone. OR-T1168.
+  FOREACH v_fn IN ARRAY ARRAY['enforce_keyring_epoch','forbid_vault_keyring_truncate']
+  LOOP
+    SELECT p.prosecdef, p.proconfig INTO v_secdef, v_config
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+     WHERE n.nspname='public' AND p.proname=v_fn;
+    IF v_secdef IS NULL THEN RAISE EXCEPTION 'FAIL: public.% does not exist', v_fn; END IF;
+    IF NOT v_secdef THEN RAISE EXCEPTION 'FAIL: % must be SECURITY DEFINER', v_fn; END IF;
+
+    v_path := NULL;
+    SELECT c INTO v_path FROM unnest(coalesce(v_config, ARRAY[]::text[])) AS c
+     WHERE c LIKE 'search_path=%';
+    IF v_path IS NULL THEN
+      RAISE EXCEPTION 'FAIL: % must pin search_path, and its proconfig carries no search_path entry', v_fn;
+    END IF;
+    v_parts := string_to_array(replace(substr(v_path, length('search_path=') + 1), ' ', ''), ',');
+    IF NOT ('public' = ANY(v_parts)) THEN
+      RAISE EXCEPTION 'FAIL: the search_path pin on % must include public, got %', v_fn, v_path;
+    END IF;
+    IF v_parts[array_length(v_parts, 1)] <> 'pg_temp' THEN
+      RAISE EXCEPTION 'FAIL: the search_path pin on % must END in pg_temp, so that an unqualified name cannot be resolved out of a caller-controlled temp schema. Got %', v_fn, v_path;
+    END IF;
+  END LOOP;
 
   SELECT count(*) INTO v_fk FROM pg_constraint
    WHERE conrelid='public.user_vault_keyring_watermark'::regclass AND contype='f';
@@ -335,7 +409,7 @@ BEGIN
     RAISE EXCEPTION 'FAIL: application roles hold write privileges on the watermark table: %', v_priv;
   END IF;
 
-  RAISE NOTICE 'OR-T0967 ok: keyring_epoch, watermark table, epoch guard and truncate guards all in place';
+  RAISE NOTICE 'OR-T0967 ok: keyring_epoch, watermark table, epoch guard and both truncate guards present; all three triggers ENABLE ALWAYS (tgenabled A); both trigger functions SECURITY DEFINER with search_path including public and ending in pg_temp';
 END $assert$;
 
 COMMIT;
