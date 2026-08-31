@@ -57,13 +57,23 @@
 -- ------------------------------------------------------------
 -- A dropped and recreated function is born with the pg_default_acl of the
 -- CREATING ROLE, not with its old ACL. Migrations execute as postgres.
--- Read live from pg_default_acl on 2026-08-31, objtype f, schema public,
--- granted by postgres:
+-- Read live from pg_default_acl on 2026-08-31, objtype f, schema public.
+-- EVERY row is listed, not only the postgres one, because which row applies
+-- depends on which role creates the object:
 --
---   hosted prod  lcdicqalreskibdfxkzb : anon=X, authenticated=X, service_role=X
---   hosted dev   fzwmnzmtqidumdqjdddz : postgres=X, authenticated=X, service_role=X
+--   hosted prod  lcdicqalreskibdfxkzb
+--     grantor postgres       : anon=X, authenticated=X, service_role=X
+--     (that is the only row)
+--   hosted dev   fzwmnzmtqidumdqjdddz
+--     grantor postgres       : postgres=X, authenticated=X, service_role=X
+--     grantor supabase_admin : postgres=X, anon=X, authenticated=X, service_role=X
 --
--- So on production, creating a function IS granting anon EXECUTE on it.
+-- So on production, creating a function as postgres IS granting anon AND
+-- authenticated EXECUTE on it. On dev, creating as postgres grants
+-- authenticated, and creating as supabase_admin would also grant anon. An
+-- earlier version of this header quoted only the dev postgres row and
+-- concluded dev cannot regrant anon. That was incomplete; the correction is
+-- the Auditor's on OR-T1087 and it is verified live above.
 -- Without the explicit REVOKE below, this file would silently hand anon
 -- EXECUTE back on a key binding function. That is the same defect class
 -- tracked on OR-T0701, OR-T0717, OR-T0963 and fixed at source by OR-T1027.
@@ -79,19 +89,30 @@
 --                             ruling keeps it.
 --
 -- A hard coded grant would be wrong on two clusters out of three whichever
--- way it was written. So this file CAPTURES the EXECUTE grants actually in
--- force before the drop and restores exactly those afterwards. That is the
--- only formulation that is correct on every cluster, and it is stable on
--- re-run because the captured post state equals the intended state.
--- PUBLIC is never restored: it is revoked unconditionally and deliberately.
+-- way it was written. So this file CAPTURES the anon EXECUTE grants actually
+-- in force before the drop and restores exactly those afterwards. It is
+-- stable on re-run because the captured post state equals the intended state.
+-- PUBLIC is never captured and never restored: it is revoked unconditionally
+-- and deliberately. authenticated is treated the same way, and section 1
+-- says why.
+--
+-- THE LIMIT OF THIS FORMULATION, stated because it is real. Capture and
+-- restore is correct only on a cluster whose CURRENT grants are already
+-- correct. It preserves a wrong grant exactly as faithfully as a right one,
+-- so on its own it records drift as intent. That is why the capture is
+-- narrowed to the single role a ruling actually covers, and why the
+-- assertions at the end compare the post state against the captured set
+-- rather than trusting the restore loop to have done the right thing.
 --
 -- ------------------------------------------------------------
 -- IDEMPOTENT
 -- ------------------------------------------------------------
--- Safe to re-run. Both old signatures are dropped IF EXISTS, the capture
--- table is created IF NOT EXISTS and inserted ON CONFLICT DO NOTHING, and
--- the new functions are created unconditionally. A second run is a no-op
--- in effect. Hosted dev already carries this shape, applied out of band
+-- Safe to re-run. Both old signatures are dropped IF EXISTS and the new
+-- functions are created unconditionally, so a second run is a no-op in
+-- effect. The capture table's CREATE TABLE IF NOT EXISTS contributes
+-- nothing to that and is not claimed to: the whole file is one transaction
+-- and the table is dropped inside it, so it cannot survive a run either
+-- way, committed or aborted. Hosted dev already carries this shape, applied out of band
 -- with no migration file and no ledger row (that drift is the reason this
 -- file exists at all); re-running it there is expected and harmless.
 --
@@ -172,9 +193,16 @@ $precheck$;
 
 -- ------------------------------------------------------------
 -- 1. Capture the EXECUTE grants in force BEFORE the drop.
---    Only anon and authenticated are captured. PUBLIC is never restored.
---    Grantee 0 in aclexplode is PUBLIC and is dropped by the pg_roles
---    join, which is the intended behaviour, not an oversight.
+--    ONLY anon is captured, so only anon can be restored.
+--    authenticated is NOT captured. No ruling grants it EXECUTE on either
+--    function on any cluster, and it holds none on either hosted project
+--    today: proacl is postgres plus service_role on both, read live
+--    2026-08-31. It is revoked unconditionally below and never restored,
+--    so an authenticated grant arriving from pg_default_acl is REMOVED
+--    rather than recorded as intent.
+--    PUBLIC is never captured and never restored. Grantee 0 in aclexplode
+--    is PUBLIC and is dropped by the pg_roles join, which is the intended
+--    behaviour, not an oversight.
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public._or_t0965_acl_capture (
   proname text NOT NULL,
@@ -191,7 +219,7 @@ SELECT DISTINCT p.proname, r.rolname
  WHERE n.nspname = 'public'
    AND p.proname IN ('complete_agent_invitation', 'peek_agent_invitation')
    AND a.privilege_type = 'EXECUTE'
-   AND r.rolname IN ('anon', 'authenticated')
+   AND r.rolname = 'anon'
 ON CONFLICT DO NOTHING;
 
 -- ------------------------------------------------------------
@@ -388,10 +416,10 @@ $revoke_roles$;
 GRANT EXECUTE ON FUNCTION public.peek_agent_invitation(text)                       TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_agent_invitation(text, uuid, text, text) TO service_role;
 
--- Restore exactly the anon / authenticated grants that were in force
--- before the drop, and nothing else. On the hosted projects this loop
--- restores nothing, because nothing was there. On the self hosted cluster
--- it restores the anon grant the OR-T0937 ruling keeps.
+-- Restore exactly the anon grants that were in force before the drop, and
+-- nothing else. On the hosted projects this loop restores nothing, because
+-- nothing was there. On the self hosted cluster it restores the anon grant
+-- the OR-T0937 ruling keeps.
 DO $restore$
 DECLARE
   r record;
@@ -415,13 +443,29 @@ BEGIN
 END
 $restore$;
 
-DROP TABLE public._or_t0965_acl_capture;
-
 -- ------------------------------------------------------------
 -- 6. Assertions. These pin SHAPE, not just existence, so that a later
 --    edit that changes the shape trips this file rather than passing it.
 --    A file whose assertions still pass after the fix is reverted is
 --    asserting nothing.
+--
+--    THE CAPTURE TABLE IS STILL ALIVE HERE ON PURPOSE and is dropped only
+--    after this block. Dropping it first destroyed the only record of the
+--    pre-state, which left the grant half of these assertions with nothing
+--    to compare against: it could see only grantee 0 (PUBLIC), and a NAMED
+--    anon or authenticated grant is a different grantee. On hosted prod,
+--    where pg_default_acl for objtype f granted by postgres carries anon=X
+--    and authenticated=X, a drop and create materialises exactly such a
+--    named grant, so the one defect this file exists to prevent was the
+--    one thing the assertions could not go red on.
+--
+--    KNOWN LIMIT, written down rather than left implicit: the three body
+--    checks below are text searches over pg_get_functiondef, and that text
+--    includes comments. A FULL revert to the old signatures IS caught, by
+--    the argument shape checks. A deliberately subtle rewrite that took a
+--    pre-computed digest while carrying the word sha256 in a comment would
+--    NOT be caught. Catching that needs a behavioural assertion, which
+--    needs fixture rows inside a migration, which is why it is not here.
 -- ------------------------------------------------------------
 DO $assert$
 DECLARE
@@ -429,6 +473,7 @@ DECLARE
   v_args    text;
   v_def     text;
   v_public  integer;
+  r         record;
 BEGIN
   -- exactly one overload of each, so no old signature survives
   SELECT count(*) INTO n
@@ -523,8 +568,56 @@ BEGIN
     RAISE EXCEPTION 'OR-T0965 assert: UNIQUE (shadow_user_id) missing';
   END IF;
 
+  -- The post state named role grants must EQUAL what was captured before
+  -- the drop. This is the assertion that CAN go red on the defect this file
+  -- exists to prevent. Two directions, because they are two different
+  -- failures:
+  --   ARRIVED : a grant exists now that did not exist before. That is the
+  --             pg_default_acl of the creating role materialising on a
+  --             recreated function, which on hosted prod means anon and
+  --             authenticated, and it means the revoke did not hold.
+  --   LOST    : a grant that was deliberately in force before is gone,
+  --             which on the self hosted cluster is the OR-T0937 anon
+  --             grant being silently stripped.
+  FOR r IN
+    SELECT p.proname AS proname, rr.rolname AS rolname
+      FROM pg_proc p
+      JOIN pg_namespace ns ON ns.oid = p.pronamespace
+      CROSS JOIN LATERAL aclexplode(p.proacl) a
+      JOIN pg_roles rr ON rr.oid = a.grantee
+     WHERE ns.nspname = 'public'
+       AND p.proname IN ('complete_agent_invitation', 'peek_agent_invitation')
+       AND a.privilege_type = 'EXECUTE'
+       AND rr.rolname IN ('anon', 'authenticated')
+    EXCEPT
+    SELECT c.proname, c.rolname FROM public._or_t0965_acl_capture c
+  LOOP
+    RAISE EXCEPTION 'OR-T0965 assert: % holds EXECUTE on % and did not before this migration', r.rolname, r.proname;
+  END LOOP;
+
+  FOR r IN
+    SELECT c.proname AS proname, c.rolname AS rolname
+      FROM public._or_t0965_acl_capture c
+    EXCEPT
+    SELECT p.proname, rr.rolname
+      FROM pg_proc p
+      JOIN pg_namespace ns ON ns.oid = p.pronamespace
+      CROSS JOIN LATERAL aclexplode(p.proacl) a
+      JOIN pg_roles rr ON rr.oid = a.grantee
+     WHERE ns.nspname = 'public'
+       AND p.proname IN ('complete_agent_invitation', 'peek_agent_invitation')
+       AND a.privilege_type = 'EXECUTE'
+       AND rr.rolname IN ('anon', 'authenticated')
+  LOOP
+    RAISE EXCEPTION 'OR-T0965 assert: % lost the EXECUTE on % it held before this migration', r.rolname, r.proname;
+  END LOOP;
+
   RAISE NOTICE 'OR-T0965: all assertions passed';
 END
 $assert$;
+
+-- Only now is the pre-state safe to discard: nothing after this point reads
+-- it. Inside the transaction either way, so an abort leaves nothing behind.
+DROP TABLE public._or_t0965_acl_capture;
 
 COMMIT;
