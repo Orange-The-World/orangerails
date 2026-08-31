@@ -144,8 +144,14 @@ BEGIN
   -- Prove the widened CHECK did not simply open the column: a genuinely
   -- unregistered value must still be refused, demonstrated live.
   BEGIN
-    INSERT INTO public.platforms (id, slug, sink_format)
-    VALUES (gen_random_uuid(), 'or-t1249-constraint-probe', 'not-a-real-sink');
+    INSERT INTO public.platforms (id, slug, name, api_key_hash, sink_format)
+    VALUES (
+      gen_random_uuid(),
+      'or-t1249-constraint-probe',
+      'OR-T1249 constraint probe (rolled back)',
+      'or-t1249-constraint-probe-' || gen_random_uuid()::text,
+      'not-a-real-sink'
+    );
     -- If the insert succeeded, roll it back and fail loud: the constraint
     -- did not do its job.
     DELETE FROM public.platforms WHERE slug = 'or-t1249-constraint-probe';
