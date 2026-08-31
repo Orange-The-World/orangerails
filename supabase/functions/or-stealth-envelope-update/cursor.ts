@@ -28,6 +28,35 @@ export function isAdvanceCursorError(
   return 'error' in r;
 }
 
+/**
+ * OR-T1177: incomingTip is trusted, not verified, and that is a structural
+ * fact about this function rather than an oversight.
+ *
+ * or-stealth-transactions-store bounds its cursor advance because it can:
+ * it only advances when new rows actually landed, and it checks the
+ * client's claimed scan tip against the real block_height of one of those
+ * rows (boundCursorAdvance, that module). This function is the one that
+ * must ALSO advance the cursor when a sync found zero new transactions --
+ * that is its entire reason to exist (see the header comment in index.ts).
+ * On that path nothing was inserted, so there is no server-established
+ * height to check incomingTip against. A check built from data this
+ * function has access to would only be comparing the client's number to
+ * itself, which is not a bound.
+ *
+ * The forward-only guarantee below is real and holds regardless: a lying
+ * client can never move the cursor backward, and can never move it past
+ * what the STORED cursor already was without this specific incomingTip
+ * value being accepted at face value once. The residual risk is that a
+ * single call with an inflated incomingTip is trusted outright. Today that
+ * risk is closed only by convention: sync.tsx sends the identical value to
+ * or-stealth-transactions-store and to this function (result.lastBlockScanned
+ * in both places), so an inflated claim would already have to have passed
+ * whatever bound the store applied in the same round, on syncs that found
+ * transactions. On a zero-transaction sync there is no such cross-check
+ * anywhere in the system. Closing that for real needs a source of truth
+ * this function does not have today (an independent chain-height reference);
+ * see OR-T1177 for the open decision on whether to build one.
+ */
 export async function advanceCursor(
   client: SupabaseClient,
   platformId: string,
