@@ -962,24 +962,80 @@ jobs:
             fi
             echo "  v SQL applied (HTTP $CODE)"
 
-            # Record in schema_migrations
+            # Record in schema_migrations, WITH the name of the file that ran.
+            #
+            # OR-T1252. Recording only the version is what lets a renamed or
+            # re-added file be skipped for ever: the loop above treats a version
+            # present in the ledger as applied, whatever file carried it. The
+            # name column already exists and the Supabase CLI populates it; this
+            # workflow never did, so every row it wrote was unverifiable. From
+            # here on each row says which file ran and the shadow scan can
+            # compare it against the tree.
+            #
+            # OR-T1254. The SQL is ALREADY APPLIED by the time we get here. If
+            # the record does not land, the database carries the change and the
+            # ledger does not know it, so the next run applies the same file
+            # again. That is harmless only if the migration is idempotent, which
+            # nothing in this repo requires or checks. So the write is retried,
+            # then read back, and a total failure names the exact recovery
+            # statement rather than only reporting that it failed.
+            #
+            # NOT merged into the apply call above as one multi-statement
+            # request, deliberately: supabase/migrations contains CREATE INDEX
+            # CONCURRENTLY and DROP INDEX CONCURRENTLY migrations
+            # (20260715130000 and 20260716140000) and neither may run inside a
+            # transaction block, so a combined request would make those files
+            # impossible to apply at all.
+            NAME="${BASENAME#*_}"; NAME="${NAME%.sql}"
+            V_SQL="${VERSION//\'/\'\'}"
+            N_SQL="${NAME//\'/\'\'}"
+            REC_SQL="INSERT INTO supabase_migrations.schema_migrations (version, name) VALUES ('${V_SQL}', '${N_SQL}') ON CONFLICT (version) DO UPDATE SET name = COALESCE(schema_migrations.name, EXCLUDED.name);"
             REC=$(mktemp); chmod 600 "$REC"
-            jq -n --arg v "$VERSION" \
-              '{query:"INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('"'"'\($v)'"'"') ON CONFLICT DO NOTHING;"}' > "$REC"
-            REC_CODE=$(curl -sS -o /tmp/mig.resp -w "%{http_code}" \
-              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
-              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data-binary "@$REC")
+            jq -n --arg q "$REC_SQL" '{query:$q}' > "$REC"
+
+            REC_OK=0
+            REC_CODE=""
+            for attempt in 1 2 3; do
+              REC_CODE=$(curl -sS -o /tmp/mig.resp -w "%{http_code}" \
+                -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+                -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data-binary "@$REC")
+              if [[ "$REC_CODE" =~ ^2 ]]; then
+                REC_OK=1
+                break
+              fi
+              echo "  ! ledger record attempt ${attempt}/3 returned HTTP ${REC_CODE}"
+              if [ "$attempt" -lt 3 ]; then
+                sleep 10
+              fi
+            done
             rm -f "$REC"
 
-            if [[ ! "$REC_CODE" =~ ^2 ]]; then
-              echo "  x FAILED to record migration in ledger (HTTP $REC_CODE): $(head -c 400 /tmp/mig.resp)"
+            # The response body is deliberately not echoed on any failure path:
+            # on an auth failure it is the only place a token-shaped string could
+            # reach a public build log.
+            if [ "$REC_OK" -ne 1 ]; then
               rm -f /tmp/mig.resp
+              echo "::error::${BASENAME} WAS APPLIED to ${SUPABASE_REF} and could NOT be recorded in the ledger after 3 attempts (last HTTP ${REC_CODE}). The database carries this change and the ledger does not know it, so a re-run would apply the same file a second time. Record it by hand before re-running: INSERT INTO supabase_migrations.schema_migrations (version, name) VALUES ('${VERSION}', '${NAME}') ON CONFLICT (version) DO UPDATE SET name = COALESCE(schema_migrations.name, EXCLUDED.name);"
+              exit 1
+            fi
+
+            # A 2xx is the API accepting the call. It is not the row being there.
+            RB=$(mktemp); chmod 600 "$RB"
+            jq -n --arg q "SELECT count(*) AS n FROM supabase_migrations.schema_migrations WHERE version = '${V_SQL}';" '{query:$q}' > "$RB"
+            RB_BODY=$(curl -sS -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$RB" || true)
+            rm -f "$RB"
+            if ! echo "$RB_BODY" | jq -e '(.[0].n | tonumber) == 1' >/dev/null 2>&1; then
+              rm -f /tmp/mig.resp
+              echo "::error::${BASENAME} was applied to ${SUPABASE_REF} and the ledger write returned success, but reading it back did not find exactly one row for version ${VERSION}. Treat the ledger as NOT carrying this migration and record it by hand before re-running."
               exit 1
             fi
             rm -f /tmp/mig.resp
-            echo "  v migration recorded in ledger (HTTP $REC_CODE)"
+            echo "  v migration recorded in ledger and read back (version ${VERSION}, name ${NAME})"
             APPLIED_COUNT=$((APPLIED_COUNT + 1))
           done
 
