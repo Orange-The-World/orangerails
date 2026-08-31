@@ -987,8 +987,9 @@ jobs:
             # transaction block, so a combined request would make those files
             # impossible to apply at all.
             NAME="${BASENAME#*_}"; NAME="${NAME%.sql}"
-            V_SQL="${VERSION//\'/\'\'}"
-            N_SQL="${NAME//\'/\'\'}"
+            SQ="'"
+            V_SQL="${VERSION//$SQ/$SQ$SQ}"
+            N_SQL="${NAME//$SQ/$SQ$SQ}"
             REC_SQL="INSERT INTO supabase_migrations.schema_migrations (version, name) VALUES ('${V_SQL}', '${N_SQL}') ON CONFLICT (version) DO UPDATE SET name = COALESCE(schema_migrations.name, EXCLUDED.name);"
             REC=$(mktemp); chmod 600 "$REC"
             jq -n --arg q "$REC_SQL" '{query:$q}' > "$REC"
