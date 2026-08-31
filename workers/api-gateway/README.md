@@ -14,7 +14,11 @@ Single canonical entry point for every external client of Orange Rails.
 | `/health` | Served locally by the Worker | Liveness only |
 | anything else | 404 | Closed by default |
 
-Headers pass through unchanged except `host` and `cf-*` (stripped).
+Headers pass through unchanged except `host` and `cf-*` (stripped). The one
+exception is `cf-connecting-ip`: it is captured from the genuine incoming
+request before the strip, then re-set on the outbound request under the
+same name, so downstream functions still get Cloudflare's real edge IP
+and never a caller-supplied substitute.
 
 ## Environments
 
