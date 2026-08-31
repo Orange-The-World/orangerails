@@ -1,4 +1,5 @@
 -- 20260831120000_user_vault_meta_keyring_epoch.sql
+-- Requires: 20260831071500
 --
 -- Give the keyring a generation counter, and make the counter an invariant the
 -- database enforces rather than something the client is trusted to maintain.
