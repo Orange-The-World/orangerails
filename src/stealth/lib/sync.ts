@@ -43,6 +43,7 @@ import {
   type ParsedDescriptor,
   type ScriptType,
 } from './derive';
+import { scanStartHeight } from './ranges';
 import { sealEnvelope, unsealEnvelope, blindIndex } from './seal';
 import { loadBip158Matcher, type Bip158Matcher } from './wasm/index';
 import {
@@ -674,16 +675,18 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // scanning anything or advancing coverage.
   const tip = chainTip - CONFIRMATION_DEPTH;
 
-  // Resume point. `resumeFromHeight` is already anchored at the birthday by
-  // resumeHeightFromRanges, so it is used as-is rather than incremented: the
-  // coverage rule deliberately re-reads the boundary block instead of risking
-  // an off-by-one gap. The legacy cursor is one BEHIND the next unread block,
-  // hence the +1 on that arm only. Math.max still guards both, so neither path
-  // can start before the wallet birthday.
-  const fromHeight = Math.max(
-    opts.birthdayHeight,
-    opts.resumeFromHeight ?? (opts.lastBlockScanned ?? -1) + 1,
-  );
+  // Resume point. The rule itself lives in ./ranges.ts as scanStartHeight, in
+  // one place, so that a caller which must reason about where the next sync
+  // will start (the envelope replacement path, which promises the user a full
+  // rescan) can import it rather than restate it. Restating it is what went
+  // wrong before: a comment in an edge function quoted a two term version of
+  // this expression that had already grown a third term, and the recovery path
+  // written against that comment quietly stopped working.
+  const fromHeight = scanStartHeight({
+    birthdayHeight: opts.birthdayHeight,
+    lastBlockScanned: opts.lastBlockScanned,
+    resumeFromHeight: opts.resumeFromHeight,
+  });
   if (fromHeight > tip) {
     // Already current. Short-circuit with empty result.
     emit(opts, progress('fetching_filters', 100, 'Already up to date.'));
