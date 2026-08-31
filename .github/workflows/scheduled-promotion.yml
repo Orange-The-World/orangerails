@@ -62,6 +62,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}
+      # The one jq expression that decides which open pull requests into prod
+      # count as a promotion candidate. Both the self-test below and the real
+      # step feed data through THIS SAME STRING (OR-T1102), so deleting
+      # `.head_repo == $repo` or narrowing the head match can no longer leave
+      # a green self-test standing over a broken gate: change the string once
+      # and both the test and the gate see the new behaviour.
+      CANDIDATE_FILTER: '.[] | select(.head_repo == $repo and (.head == "dev" or (.head | startswith("release/"))))'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
