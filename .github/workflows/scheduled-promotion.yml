@@ -40,7 +40,6 @@ on:
     # runners and schedule delivery there is the least reliable.
     - cron: '17 6 */2 * *'
   workflow_dispatch:
-  pull_request: # TEMP, OR-T1102 proof-of-failure only, reverted before merge
 
 # Least privilege for the built-in token. contents:read is what the compare
 # call needs; pull-requests:write is declared because this workflow's purpose
