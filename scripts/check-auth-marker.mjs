@@ -61,6 +61,7 @@ const KNOWN_EXCEPTIONS = new Set([
   "or-link-mint-token",
   "or-platform-bootstrap",
   "or-provision",
+  "or-queue-health",
   "or-quiltt-accounts",
   "or-quiltt-disconnect",
   "or-quiltt-drain-alert",
