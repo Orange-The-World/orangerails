@@ -193,6 +193,15 @@ function AppHome() {
   const [myKemSecretWrapped, setMyKemSecretWrapped] = useState<string | null>(null);
   const [adminWorkspaces, setAdminWorkspaces] = useState<WorkspaceOption[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceOption | null>(null);
+  // Per-workspace load problems (duplicate wrapped key, read error), keyed by
+  // owner. Deliberately separate from `err`: `err` is cleared unconditionally
+  // by refresh() on every run (OR-T1291), which made this message disappear
+  // the moment the page did anything else. This state is only ever set by the
+  // co-admin workspace loader effect below, and only cleared when that effect
+  // re-runs, so it survives every refresh() in between.
+  const [workspaceLoadIssues, setWorkspaceLoadIssues] = useState<
+    { ownerUserId: string; ownerEmail: string; message: string }[]
+  >([]);
   // Cached admin subkeys , persists until tab closes (MVP limitation).
   const adminSubkeysRef = useRef<
     Map<string, { credentialsKey: CryptoKey; transactionsKey: CryptoKey }>
@@ -305,6 +314,7 @@ function AppHome() {
         .eq("admin_user_id", session.user.id);
 
       const workspaces: WorkspaceOption[] = [];
+      const issues: { ownerUserId: string; message: string }[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
         const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
         for (const ownerId of ownerIds) {
@@ -333,11 +343,11 @@ function AppHome() {
             ownerKeyId,
           );
           if (wdkRead.status === "ambiguous") {
-            setErr(DUPLICATE_WRAPPED_KEY_MESSAGE);
+            issues.push({ ownerUserId: ownerId, message: DUPLICATE_WRAPPED_KEY_MESSAGE });
             continue;
           }
           if (wdkRead.status === "error") {
-            setErr(formatError(wdkRead.error));
+            issues.push({ ownerUserId: ownerId, message: formatError(wdkRead.error) });
             continue;
           }
           // No grant at all is ordinary: this user is in the owner's list but
@@ -360,6 +370,7 @@ function AppHome() {
       const allIds = [
         ...adminRows.map((r) => r.admin_user_id),
         ...workspaces.map((w) => w.ownerUserId),
+        ...issues.map((i) => i.ownerUserId),
       ];
       const emailMap = new Map<string, string>();
       if (allIds.length > 0) {
@@ -374,6 +385,12 @@ function AppHome() {
       setCoAdmins(adminRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
       setAdminWorkspaces(
         workspaces.map((w) => ({ ...w, ownerEmail: emailMap.get(w.ownerUserId) ?? w.ownerUserId })),
+      );
+      // Replaces the previous list wholesale: this effect only re-runs on
+      // [isUnlocked, navigate], so a duplicate row the owner has since fixed
+      // clears on the next real reload rather than lingering forever.
+      setWorkspaceLoadIssues(
+        issues.map((i) => ({ ...i, ownerEmail: emailMap.get(i.ownerUserId) ?? i.ownerUserId })),
       );
     })();
   }, [isUnlocked, navigate]);
@@ -1024,6 +1041,23 @@ function AppHome() {
         {err && (
           <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
             {err}
+          </div>
+        )}
+        {/* Surfaced next to the workspace list itself (OR-T1291), not as a
+            page-level error: it does not share a slot with `err`, so it is
+            not cleared by refresh(), and each ambiguous owner gets their own
+            line so a second ambiguous workspace does not overwrite the first. */}
+        {workspaceLoadIssues.length > 0 && (
+          <div className="space-y-2">
+            {workspaceLoadIssues.map((issue) => (
+              <div
+                key={issue.ownerUserId}
+                className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              >
+                <span className="font-medium">{issue.ownerEmail}: </span>
+                {issue.message}
+              </div>
+            ))}
           </div>
         )}
 
