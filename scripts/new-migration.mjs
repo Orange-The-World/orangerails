@@ -1,60 +1,50 @@
 #!/usr/bin/env node
 /**
- * Create a new Supabase migration file, with the version taken from the real
+ * Prints the filename for a new migration, with the version taken from the real
  * UTC clock to the second.
  *
- * WHY THIS EXISTS
+ * Why this exists rather than a sentence in a document telling people to use
+ * `date -u`. Every migration version in this repo was typed by hand and typed
+ * rounded: of 60 distinct versions referenced since 2026-08-20, 45 landed on an
+ * exact hour, not one carried a real seconds value, two were manual "plus one
+ * second" dodges of an earlier collision, and one was hour 24, which is not a
+ * time that exists. A convention nobody invokes is how that happened, so this is
+ * something you run.
  *
- * Migration versions in this repo were typed by hand and typed rounded to the
- * hour. `supabase_migrations.schema_migrations` holds exactly ONE row per
- * version, so two files sharing a version prefix is not a cosmetic clash: the
- * first file to be recorded makes the second one look already applied, and the
- * second is skipped silently, on every cluster, forever. The symptom arrives
- * much later, as an object that does not exist on a database the ledger says
- * is current.
+ * Why a duplicate version is expensive rather than untidy.
+ * supabase_migrations.schema_migrations holds one row per version, so the second
+ * file to arrive is recorded as already applied and is silently skipped. It does
+ * not fail at apply time. It surfaces much later as an object that does not
+ * exist on a cluster whose ledger says it is current.
  *
- * The version field is fourteen digits and already carries seconds. Taking it
- * from the clock instead of from a person removes the collision at the source.
+ * Two constraints this must not break, and does not:
+ *   - the version stays a fixed width, left-padded, lexically sortable 14 digit
+ *     string, because out-of-order apply guards depend on that ordering
+ *   - everything before the FIRST underscore is the version, because the deploy
+ *     check parses it with `ls | cut -d_ -f1`
  *
- * USAGE
- *
- *   npm run migration:new -- add_widget_table
- *       creates supabase/migrations/<version>_add_widget_table.sql and prints
- *       the path.
- *
- *   npm run migration:new -- --version-only
- *       prints just the fourteen digit version and writes nothing. Use this
- *       when you want to name the file yourself.
- *
- * FORMAT CONTRACT, do not break these
- *
- *   - Fourteen digits, YYYYMMDDHHMMSS, UTC, zero padded, fixed width. Fixed
- *     width is what makes a lexical sort equal a chronological sort.
- *   - Everything before the FIRST underscore is the version. The deploy
- *     workflow parses it with `cut -d_ -f1`, so the version must never contain
- *     an underscore.
- *   - The version must sort strictly above every version already in the tree,
- *     because migrations apply in order.
+ * Usage:
+ *   npm run db:new                          prints just the version
+ *   npm run db:new -- add_widget_table      prints the full path, creates nothing
+ *   npm run db:new -- add_widget_table --write   also writes the file with a header stub
  */
 
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
-const MIG_DIR = "supabase/migrations";
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const MIGRATIONS_DIR = path.join(ROOT, "supabase", "migrations");
 
-/** A well formed version: exactly fourteen digits. */
-const VERSION_RE = /^\d{14}$/;
+/** A migration slug: lowercase, starts with a letter, underscores between words. */
+export const SLUG = /^[a-z][a-z0-9_]*$/;
 
-/** lower_snake_case, no leading or trailing underscore, no double underscore. */
-const SLUG_RE = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
+function pad(n, width) {
+  return String(n).padStart(width, "0");
+}
 
-/**
- * The version for an instant, in UTC, to the second.
- * Every component is zero padded so the result is always fourteen characters,
- * which is what keeps a lexical sort chronological.
- */
-function versionFor(date) {
-  const pad = (value, width) => String(value).padStart(width, "0");
+/** The 14 digit version for a moment, in UTC. Fixed width, so it sorts lexically. */
+export function versionFor(date) {
   return (
     pad(date.getUTCFullYear(), 4) +
     pad(date.getUTCMonth() + 1, 2) +
@@ -65,129 +55,104 @@ function versionFor(date) {
   );
 }
 
-/** Every migration filename in the tree, or an empty list if there is no dir. */
-function migrationFiles() {
-  if (!existsSync(MIG_DIR)) return [];
-  return readdirSync(MIG_DIR).filter((name) => name.endsWith(".sql"));
+/**
+ * Versions already present in the tree. Read with the same rule the deploy check
+ * uses, everything before the first underscore, so this cannot disagree with it.
+ */
+export function takenVersions() {
+  if (!existsSync(MIGRATIONS_DIR)) return new Set();
+  return new Set(
+    readdirSync(MIGRATIONS_DIR)
+      .filter((name) => name.endsWith(".sql"))
+      .map((name) => name.split("_")[0]),
+  );
 }
 
 /**
- * The version prefix of a filename: everything before the first underscore.
- * This deliberately mirrors `cut -d_ -f1` in the deploy workflow. If the two
- * ever disagree, this script is wrong and the workflow is right, because the
- * workflow is what actually decides whether a file is applied.
+ * The clock's version, or the next free second after it. Walking forward is what
+ * removes the reason anyone ever typed a manual "plus one second" by hand.
  */
-function versionOf(filename) {
-  return filename.split("_")[0];
+export function nextFreeVersion(now, taken = takenVersions()) {
+  const at = new Date(now.getTime());
+  let version = versionFor(at);
+  let moved = 0;
+
+  while (taken.has(version)) {
+    at.setUTCSeconds(at.getUTCSeconds() + 1);
+    version = versionFor(at);
+    moved += 1;
+    if (moved > 3600) {
+      throw new Error(
+        "every version for the next hour is already taken, which is not a real state. Look at supabase/migrations before going further.",
+      );
+    }
+  }
+
+  return { version, moved };
 }
 
-function fail(message) {
-  console.error(`new-migration: ${message}`);
-  process.exit(1);
+export function stubFor(version, slug) {
+  return `-- ${version}_${slug}.sql
+--
+-- WHAT THIS CHANGES:
+-- WHY NOW:
+-- CAN IT BE UNDONE: state the undo, or say plainly that there is none and why.
+-- IS IT IDEMPOTENT: IF NOT EXISTS / IF EXISTS guards, so a re-run never doubles
+--   anything and never wedges.
+--
+-- The version above came from the UTC clock via scripts/new-migration.mjs. Do not
+-- hand-edit it to a rounder number. A duplicate version is recorded as already
+-- applied and the second file is then silently skipped.
+
+BEGIN;
+
+-- the change goes here
+
+COMMIT;
+`;
 }
 
 function main() {
-  const args = process.argv.slice(2).filter((arg) => arg.length > 0);
-  const versionOnly = args.includes("--version-only");
-  const positional = args.filter((arg) => !arg.startsWith("--"));
+  const args = process.argv.slice(2);
+  const write = args.includes("--write");
+  const slug = args.find((arg) => !arg.startsWith("--"));
 
-  const version = versionFor(new Date());
-
-  // Should be unreachable, but this is the one invariant everything else
-  // rests on, so it is checked rather than trusted.
-  if (!VERSION_RE.test(version)) {
-    fail(`generated version ${version} is not fourteen digits, refusing to continue`);
+  if (slug !== undefined && !SLUG.test(slug)) {
+    console.error(
+      `refused: "${slug}" is not a usable migration slug. Use lowercase letters, digits and underscores, starting with a letter, for example add_widget_table.`,
+    );
+    process.exit(1);
   }
 
-  const files = migrationFiles();
-
-  // 1. Collision. Another file already claims this exact version.
-  //    Only reachable if a hand-typed file happens to sit on this second.
-  const collision = files.filter((name) => versionOf(name) === version);
-  if (collision.length > 0) {
-    fail(
-      `version ${version} is already used by ${collision.join(", ")}. ` +
-        `Wait one second and run again.`,
+  const { version, moved } = nextFreeVersion(new Date());
+  if (moved > 0) {
+    console.error(
+      `note: ${moved} second(s) from now were already used by an existing migration, so this is ${version}.`,
     );
   }
 
-  // 2. Ordering. Migrations apply in order, so a new file must sort above
-  //    everything already present. A hand-typed version set in the future
-  //    (we have shipped at least one, and one with an hour of 24) would
-  //    otherwise let this script emit a version that applies too early.
-  //    All versions are fixed width, so a string compare is a time compare.
-  const known = files.map(versionOf).filter((value) => VERSION_RE.test(value));
-  const highest = known.length > 0 ? known.reduce((a, b) => (a > b ? a : b)) : null;
-  if (highest !== null && version <= highest) {
-    const owner = files.find((name) => versionOf(name) === highest);
-    fail(
-      `the clock says ${version}, but ${owner} already claims the higher version ${highest}. ` +
-        `A new migration must sort above every existing one because they apply in order. ` +
-        `That file is dated in the future: correct its version, or wait until the clock passes it.`,
-    );
-  }
-
-  if (versionOnly) {
+  if (slug === undefined) {
     console.log(version);
     return;
   }
 
-  const slug = positional[0];
-  if (!slug) {
-    fail(
-      "give the migration a name, for example: npm run migration:new -- add_widget_table " +
-        "(or pass --version-only to just print a version)",
-    );
-  }
-  if (!SLUG_RE.test(slug)) {
-    fail(
-      `"${slug}" is not a usable name. Use lower_snake_case: letters, digits and ` +
-        `single underscores, no leading or trailing underscore.`,
-    );
-  }
-
   const filename = `${version}_${slug}.sql`;
-  const path = join(MIG_DIR, filename);
+  const full = path.join(MIGRATIONS_DIR, filename);
 
-  // Belt and braces: the version must survive the workflow's own parse.
-  if (versionOf(filename) !== version) {
-    fail(`refusing to write ${filename}: its version does not parse back to ${version}`);
+  if (write) {
+    if (existsSync(full)) {
+      console.error(`refused: ${filename} already exists.`);
+      process.exit(1);
+    }
+    writeFileSync(full, stubFor(version, slug), { flag: "wx" });
+    console.error(`created supabase/migrations/${filename}`);
   }
-  if (existsSync(path)) {
-    fail(`${path} already exists, refusing to overwrite it`);
-  }
 
-  writeFileSync(
-    path,
-    `-- ============================================================
--- ${slug.replace(/_/g, " ")}
--- ============================================================
--- Ticket:
---
--- WHY
---   What problem this solves, and why now.
---
--- WHAT CHANGES
---   The change itself, in plain terms.
---
--- IDEMPOTENT
---   Say whether a re-run is a no-op, and what makes it so.
---
--- REVERSIBLE
---   How to undo this, or why it cannot be undone. If it cannot be
---   undone, say so plainly here: that is what makes it founder gated.
--- ============================================================
-
-BEGIN;
-
--- your change here
-
-COMMIT;
-`,
-    { encoding: "utf8", flag: "wx" },
-  );
-
-  console.log(path);
+  console.log(`supabase/migrations/${filename}`);
 }
 
-main();
+// Only run the CLI when this file IS the entry point. Importing it, which the test
+// does, must not create files or exit the process.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
