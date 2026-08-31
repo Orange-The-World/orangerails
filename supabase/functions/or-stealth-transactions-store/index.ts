@@ -52,6 +52,14 @@ interface SealedTransactionInput {
   ciphertext_b64: string;
   occurred_at: string;
   block_height: number;
+  /**
+   * Lowercase hex, canonical hash of the block at block_height. Optional:
+   * absent on records from a widget build that predates the reorg
+   * detector. Stored as-is (already lowercased client-side, re-lowercased
+   * here as defense in depth) so or-stealth-reorg-check can later compare
+   * it against a canonical observation.
+   */
+  block_hash_hex?: string;
   /** Lowercase hex, 64 chars. HMAC-SHA-256 output, not base64. */
   txid_blind_index_hex: string;
 }
@@ -85,6 +93,11 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // value the dedup constraint would treat as a distinct transaction forever.
 const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
 
+// A block hash is 32 bytes, so 64 hex chars too, but a distinct field with a
+// distinct meaning. Case-insensitive here: the client is asked to send
+// lowercase, the code below normalizes before storing either way.
+const BLOCK_HASH_HEX_RE = /^[0-9a-fA-F]{64}$/;
+
 // Cap at 10k transactions per request and 16 KB per sealed record. A whole
 // 5-year wallet history with ~500 txs comes in well under that.
 const MAX_TX_PER_REQUEST = 10_000;
@@ -109,7 +122,9 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
     Number.isInteger(o.block_height) &&
     (o.block_height as number) >= 0 &&
     typeof o.txid_blind_index_hex === 'string' &&
-    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string)
+    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string) &&
+    (o.block_hash_hex === undefined ||
+      (typeof o.block_hash_hex === 'string' && BLOCK_HASH_HEX_RE.test(o.block_hash_hex as string)))
   );
 }
 
@@ -285,6 +300,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         },
         occurred_at: tx.occurred_at,
         block_height: tx.block_height,
+        // Normalized to lowercase here too (defense in depth): the client is
+        // asked to send lowercase already, but storage must not depend on it.
+        block_hash: tx.block_hash_hex ? tx.block_hash_hex.toLowerCase() : null,
         txid_blind_index_hex: tx.txid_blind_index_hex,
       }));
 
