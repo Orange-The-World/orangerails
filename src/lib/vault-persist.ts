@@ -151,6 +151,10 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // is a stable total order. It cannot skip a row or return one twice however
   // PostgreSQL moves the row physically when it is updated.
   //
+  // That claim holds only because the loop exits on an EMPTY page and on
+  // nothing else. A short page is NOT an end-of-table signal here; the note at
+  // the bottom of the loop says why, and it is load bearing.
+  //
   // NOT solved here, deliberately: a row INSERTED by another session while
   // this loop runs. A uuid is random, so a new row can sort below lastId and
   // be missed. Concurrent writes during a rotation need the whole rotation to
@@ -180,7 +184,20 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       }),
     );
 
-    if (rows.length < TRANSACTION_PAGE_SIZE) break;
+    // NO SHORT-PAGE BREAK, deliberately. "rows.length < TRANSACTION_PAGE_SIZE"
+    // reads like end-of-table and is not: PostgREST applies its own db-max-rows
+    // cap server-side, so a request for 500 can legitimately return fewer while
+    // rows remain above the cursor. Stopping there would leave those rows never
+    // re-encrypted, the loop would still finish normally, the meta write would
+    // land and clearMigrationKeys() would destroy the only key that could read
+    // them. That is the same permanent, silent loss the keyset rewrite above
+    // exists to remove, reintroduced one line lower down.
+    //
+    // The empty-page exit is sufficient on its own and cannot spin: the cursor
+    // strictly increases, so every page starts past the last id of the previous
+    // one and the set above it shrinks each time. The cost is one extra round
+    // trip per rotation.
+    //
     // The page came back ordered by id ascending, so the last row carries the
     // high-water mark for the next page.
     lastId = rows[rows.length - 1].id;
