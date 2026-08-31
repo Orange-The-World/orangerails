@@ -39,8 +39,8 @@ export const RECOVERY_META_NOT_SAVED_MESSAGE =
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
-/** Transactions are re-encrypted in pages of this size. */
-const TRANSACTION_PAGE_SIZE = 500;
+/** Connections and transactions are re-encrypted in pages of this size. */
+const ROTATION_PAGE_SIZE = 500;
 
 export interface RotateVaultArgs {
   supabase: VaultPersistClient;
@@ -88,50 +88,128 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // It does NOT make a retry safe. See the note on the meta write below before
   // relying on it.
   // credentials subkey changes with the MEK.
-  const { data: conns, error: connsErr } = await supabase
-    .from("connections")
-    .select("id, encrypted_credentials, encrypted_label");
-  if (connsErr) throw connsErr;
+  //
+  // WHY THIS PAGES AT ALL. An unfiltered select LOOKS like it returns every
+  // row and does not. PostgREST applies its own db-max-rows cap server side,
+  // whatever the client asked for. A capped read here would re-encrypt only
+  // the rows that came back, finish with no error, let the meta write land and
+  // let clearMigrationKeys() destroy the old MEK. Every connection past the
+  // cap would then hold credentials wrapped under a key that does not exist
+  // anywhere, permanently unusable, with recovery reported as successful.
+  //
+  // The keyset argument is the same one the transaction walk below sets out:
+  // id is a uuid primary key, NOT NULL and unique, and this loop never writes
+  // it, so ascending id plus "greater than the last id of the previous page"
+  // is a stable total order. It cannot skip a row or return one twice however
+  // PostgreSQL moves the row physically when it is updated. The loop exits on
+  // an EMPTY page and on nothing else, for the reason spelled out at the
+  // bottom of the transaction walk, and that exit cannot spin because the
+  // cursor strictly increases.
+  //
+  // NOT solved here, deliberately, and the same gap the transaction walk has:
+  // a row INSERTED by another session mid-rotation. A uuid is random, so a new
+  // row can sort below the cursor and be missed.
+  let lastConnId: string | null = null;
+  for (;;) {
+    const connPage = supabase
+      .from("connections")
+      .select("id, encrypted_credentials, encrypted_label")
+      .order("id", { ascending: true })
+      .limit(ROTATION_PAGE_SIZE);
+    const { data: conns, error: connsErr } = await (lastConnId === null
+      ? connPage
+      : connPage.gt("id", lastConnId));
+    if (connsErr) throw connsErr;
+    const connRows = (conns ?? []) as Array<{
+      id: string;
+      encrypted_credentials: string;
+      encrypted_label: string | null;
+    }>;
+    if (connRows.length === 0) break;
 
-  for (const conn of (conns ?? []) as Array<{
-    id: string;
-    encrypted_credentials: string;
-    encrypted_label: string | null;
-  }>) {
-    const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
-    const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
-    if (conn.encrypted_label) {
-      try {
-        connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
-      } catch {
+    for (const conn of connRows) {
+      const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
+      const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
+      if (conn.encrypted_label) {
         try {
-          connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
+          connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
         } catch {
-          // Label migration failed with both keys. Leave the stale ciphertext.
-          // encrypted_label is cosmetic and the connection remains usable.
+          try {
+            connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
+          } catch {
+            // Label migration failed with BOTH the old and the new subkey.
+            //
+            // The decision is to continue. The credentials are what make a
+            // connection usable and they have already migrated, so aborting
+            // the whole rotation here would strand the user in the half-done
+            // state described at the meta write below, which is far worse
+            // than losing one label.
+            //
+            // Be exact about what continuing costs, because the old wording
+            // said "stale" and that reads as recoverable. It is not.
+            // Execution runs on to the meta write and then to
+            // clearMigrationKeys(), after which the old MEK does not exist
+            // anywhere. From that point this label is permanently unreadable.
+            // The connection keeps working; its name does not come back.
+          }
         }
       }
+      const { error: connErr } = await supabase
+        .from("connections")
+        .update(connUpdate)
+        .eq("id", conn.id);
+      if (connErr) throw connErr;
     }
-    const { error: connErr } = await supabase
-      .from("connections")
-      .update(connUpdate)
-      .eq("id", conn.id);
-    if (connErr) throw connErr;
+
+    // The page came back ordered by id ascending, so the last row carries the
+    // high-water mark for the next page.
+    lastConnId = connRows[connRows.length - 1].id;
   }
 
   // Re-encrypt transactions in pages of 500.
   // encrypted_payload uses the transactions subkey, which changes with the MEK.
-  let offset = 0;
+  //
+  // WHY THIS PAGES BY KEY AND NOT BY OFFSET. This loop UPDATES every row in
+  // the page it just read and then asks for the next page. Under LIMIT/OFFSET
+  // with no ORDER BY, which is what .range() alone produces, PostgreSQL owes
+  // us no ordering at all: a row rewritten here can come back behind the
+  // offset boundary and never be selected again. It would never be
+  // re-encrypted, this loop would still finish normally, the meta write below
+  // would land and clearMigrationKeys() would destroy the only key that could
+  // still read it. That transaction would be permanently and silently
+  // unreadable. The other direction is a row selected twice, which throws on
+  // the second decrypt and aborts the rotation half-done.
+  //
+  // Paging by the primary key removes that, rather than making it less likely.
+  // id is a uuid primary key: NOT NULL, unique, and never written by this
+  // loop, so ascending id plus "greater than the last id of the previous page"
+  // is a stable total order. It cannot skip a row or return one twice however
+  // PostgreSQL moves the row physically when it is updated.
+  //
+  // That claim holds only because the loop exits on an EMPTY page and on
+  // nothing else. A short page is NOT an end-of-table signal here; the note at
+  // the bottom of the loop says why, and it is load bearing.
+  //
+  // NOT solved here, deliberately: a row INSERTED by another session while
+  // this loop runs. A uuid is random, so a new row can sort below lastId and
+  // be missed. Concurrent writes during a rotation need the whole rotation to
+  // be resumable, which is the same gap the meta write note below describes.
+  let lastId: string | null = null;
   for (;;) {
-    const { data: txns, error: txnsErr } = await supabase
+    const page = supabase
       .from("encrypted_transactions")
       .select("id, encrypted_payload")
-      .range(offset, offset + TRANSACTION_PAGE_SIZE - 1);
+      .order("id", { ascending: true })
+      .limit(ROTATION_PAGE_SIZE);
+    const { data: txns, error: txnsErr } = await (lastId === null
+      ? page
+      : page.gt("id", lastId));
     if (txnsErr) throw txnsErr;
-    if (!txns || (txns as unknown[]).length === 0) break;
+    const rows = (txns ?? []) as Array<{ id: string; encrypted_payload: string }>;
+    if (rows.length === 0) break;
 
     await Promise.all(
-      (txns as Array<{ id: string; encrypted_payload: string }>).map(async (txn) => {
+      rows.map(async (txn) => {
         const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
         const { error: txnErr } = await supabase
           .from("encrypted_transactions")
@@ -141,8 +219,23 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       }),
     );
 
-    if ((txns as unknown[]).length < TRANSACTION_PAGE_SIZE) break;
-    offset += TRANSACTION_PAGE_SIZE;
+    // NO SHORT-PAGE BREAK, deliberately. "rows.length < ROTATION_PAGE_SIZE"
+    // reads like end-of-table and is not: PostgREST applies its own db-max-rows
+    // cap server-side, so a request for 500 can legitimately return fewer while
+    // rows remain above the cursor. Stopping there would leave those rows never
+    // re-encrypted, the loop would still finish normally, the meta write would
+    // land and clearMigrationKeys() would destroy the only key that could read
+    // them. That is the same permanent, silent loss the keyset rewrite above
+    // exists to remove, reintroduced one line lower down.
+    //
+    // The empty-page exit is sufficient on its own and cannot spin: the cursor
+    // strictly increases, so every page starts past the last id of the previous
+    // one and the set above it shrinks each time. The cost is one extra round
+    // trip per rotation.
+    //
+    // The page came back ordered by id ascending, so the last row carries the
+    // high-water mark for the next page.
+    lastId = rows[rows.length - 1].id;
   }
 
   // All ciphertexts migrated. Persist rotated vault meta now that every row is

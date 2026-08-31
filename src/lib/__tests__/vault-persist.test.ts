@@ -32,6 +32,32 @@ interface RecordedCall {
   columns?: string;
   values?: Record<string, unknown>;
   filters: Array<{ column: string; value: unknown }>;
+  /** .order(), so a test can prove the page walk asked for a stable order */
+  order?: { column: string; ascending: boolean };
+  /** .limit() */
+  limit?: number;
+  /** the keyset cursor, .gt(column, value) */
+  gt?: { column: string; value: unknown };
+  /** .range(from, to), which this fake now HONOURS instead of ignoring */
+  range?: [number, number];
+}
+
+/** Plain byte order, the same comparison the keyset cursor uses. */
+function compareText(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+interface SelectChain {
+  then(
+    onFulfilled: (value: QueryResult) => unknown,
+    onRejected?: (reason: unknown) => unknown,
+  ): Promise<unknown>;
+  order(column: string, opts?: { ascending?: boolean }): SelectChain;
+  limit(count: number): SelectChain;
+  gt(column: string, value: unknown): SelectChain;
+  range(from: number, to: number): SelectChain;
 }
 
 interface UpdateChain {
@@ -52,15 +78,31 @@ interface FakeOptions {
   otherUpdate?: QueryResult;
   /** what a select returns instead of rows, for the error cases */
   selectResult?: Record<string, QueryResult>;
+  /**
+   * Called before every select resolves. A test uses this to reorder the
+   * backing rows mid-loop, which is what an UPDATE does to physical order.
+   */
+  beforeSelect?: (table: string) => void;
+  /**
+   * A hard cap on how many rows any select returns, whatever the caller asked
+   * for. PostgREST's db-max-rows behaves exactly like this, which is why a
+   * short page is not evidence that the table is exhausted.
+   */
+  maxRows?: number;
 }
 
 /**
  * A fake supabase client that records what was asked of it.
  *
  * It reproduces only the shape the persist code uses: from().select() with an
- * optional .range(), and from().update().eq().eq().select(). Every builder is
- * thenable, because the real client is awaited both with and without a
- * trailing .select().
+ * optional .order()/.limit()/.gt()/.range(), and from().update().eq().eq()
+ * .select(). Every builder is thenable, because the real client is awaited both
+ * with and without a trailing .select().
+ *
+ * The paging arguments are HONOURED, not merely recorded. An earlier version
+ * ignored them and returned the same rows for every page, which meant the
+ * paging branch of the rotation was never executed by any test and a fixture
+ * of a full page or more would have looped forever.
  */
 function makeFakeClient(options: FakeOptions = {}) {
   const calls: RecordedCall[] = [];
@@ -69,7 +111,23 @@ function makeFakeClient(options: FakeOptions = {}) {
     if (call.op === "select") {
       const override = options.selectResult?.[call.table];
       if (override) return override;
-      return { data: options.rows?.[call.table] ?? [], error: null };
+      options.beforeSelect?.(call.table);
+      let data = [...((options.rows?.[call.table] ?? []) as Array<Record<string, unknown>>)];
+      if (call.order) {
+        const column = call.order.column;
+        data.sort((a, b) => compareText(String(a[column]), String(b[column])));
+        if (!call.order.ascending) data.reverse();
+      }
+      if (call.gt) {
+        const { column, value } = call.gt;
+        data = data.filter((row) => String(row[column]) > String(value));
+      }
+      if (call.range) data = data.slice(call.range[0], call.range[1] + 1);
+      if (call.limit !== undefined) data = data.slice(0, call.limit);
+      // Applied LAST, and deliberately after .limit(): a server-side cap does
+      // not care what the client asked for.
+      if (options.maxRows !== undefined) data = data.slice(0, options.maxRows);
+      return { data, error: null };
     }
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
@@ -94,13 +152,26 @@ function makeFakeClient(options: FakeOptions = {}) {
         select(columns: string) {
           const call: RecordedCall = { table, op: "select", columns, filters: [] };
           calls.push(call);
-          return {
+          const chain: SelectChain = {
             ...thenable(call),
+            order(column: string, opts?: { ascending?: boolean }) {
+              call.order = { column, ascending: opts?.ascending !== false };
+              return chain;
+            },
+            limit(count: number) {
+              call.limit = count;
+              return chain;
+            },
+            gt(column: string, value: unknown) {
+              call.gt = { column, value };
+              return chain;
+            },
             range(from: number, to: number) {
-              call.filters.push({ column: "range", value: [from, to] });
-              return Promise.resolve(resultFor(call));
+              call.range = [from, to];
+              return chain;
             },
           };
+          return chain;
         },
         update(values: Record<string, unknown>) {
           const call: RecordedCall = { table, op: "update", values, filters: [] };
@@ -267,6 +338,197 @@ describe("vault recovery: the rotated meta write", () => {
 
     expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
     expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+});
+
+describe("vault recovery: the transaction re-encryption page walk", () => {
+  const PAGE_SIZE = 500;
+
+  /** uuid-shaped ids that sort in a known order, so a skip is detectable. */
+  function txnFixture(count: number) {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      encrypted_payload: `payload-${i}`,
+    }));
+  }
+
+  function updatedIds(calls: RecordedCall[]): string[] {
+    return calls
+      .filter((c) => c.table === "encrypted_transactions" && c.op === "update")
+      .map((c) => c.filters.find((f) => f.column === "id")?.value as string);
+  }
+
+  function txnSelects(calls: RecordedCall[]): RecordedCall[] {
+    return calls.filter((c) => c.table === "encrypted_transactions" && c.op === "select");
+  }
+
+  it("walks both pages of a 501 row fixture and updates every row exactly once", async () => {
+    const rows = txnFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({ rows: { encrypted_transactions: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    // The assertion that can go red, and the reason this test exists. A row
+    // this loop fails to select is never re-encrypted, and clearMigrationKeys()
+    // then destroys the only key that could still read it.
+    const ids = updatedIds(calls);
+    expect(new Set(ids)).toEqual(new Set(rows.map((r) => r.id)));
+    expect(ids.length).toBe(rows.length);
+    // Three, not two. The loop stops on an empty page and on nothing else, so
+    // 501 rows cost 500 + 1 + 0. If this ever reads two again, someone has put
+    // the short-page break back.
+    expect(txnSelects(calls).length).toBe(3);
+  });
+
+  it("pages by the primary key in a stable order, never by bare offset", async () => {
+    const rows = txnFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({ rows: { encrypted_transactions: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const selects = txnSelects(calls);
+    for (const select of selects) {
+      expect(select.order).toEqual({ column: "id", ascending: true });
+      expect(select.limit).toBe(PAGE_SIZE);
+      // OFFSET paging over a set this loop is mutating is the defect itself.
+      expect(select.range).toBeUndefined();
+    }
+    expect(selects[0].gt).toBeUndefined();
+    expect(selects[1].gt).toEqual({ column: "id", value: rows[PAGE_SIZE - 1].id });
+  });
+
+  it("loses no row when the backing set reorders under the loop, as an update does", async () => {
+    const rows = txnFixture(PAGE_SIZE + 1);
+    const backing = [...rows];
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: backing },
+      // Physical order is not logical order. Rotating the array between pages
+      // is what a heap rewrite does to an unordered scan: under offset paging
+      // rows fall past the boundary and are lost, under keyset paging the
+      // cursor is unaffected.
+      beforeSelect: (table) => {
+        if (table !== "encrypted_transactions") return;
+        const first = backing.shift();
+        if (first) backing.push(first);
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(new Set(updatedIds(calls))).toEqual(new Set(rows.map((r) => r.id)));
+  });
+
+  it("keeps walking when the server caps a page below the size asked for", async () => {
+    const rows = txnFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: rows },
+      // PostgREST's db-max-rows caps a response server-side. A page of 200 in
+      // answer to a request for 500 does NOT mean the table is exhausted.
+      maxRows: 200,
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    // This is the assertion that goes red if the loop treats a short page as
+    // the end. It would stop after 200 of 501 rows, finish without error, and
+    // clearMigrationKeys() would then destroy the only key that could still
+    // read the other 301.
+    expect(new Set(updatedIds(calls))).toEqual(new Set(rows.map((r) => r.id)));
+    expect(updatedIds(calls).length).toBe(rows.length);
+    // 200 + 200 + 101 + 0.
+    expect(txnSelects(calls).length).toBe(4);
+  });
+});
+
+describe("vault recovery: the connection re-encryption page walk", () => {
+  const PAGE_SIZE = 500;
+
+  /** uuid-shaped ids that sort in a known order, so a skip is detectable. */
+  function connFixture(count: number) {
+    return Array.from({ length: count }, (_, i) => ({
+      id: `00000000-0000-4000-9000-${String(i).padStart(12, "0")}`,
+      encrypted_credentials: `creds-${i}`,
+      encrypted_label: null,
+    }));
+  }
+
+  function updatedConnIds(calls: RecordedCall[]): string[] {
+    return calls
+      .filter((c) => c.table === "connections" && c.op === "update")
+      .map((c) => c.filters.find((f) => f.column === "id")?.value as string);
+  }
+
+  function connSelects(calls: RecordedCall[]): RecordedCall[] {
+    return calls.filter((c) => c.table === "connections" && c.op === "select");
+  }
+
+  it("keeps walking when the server caps a page below the size asked for", async () => {
+    const rows = connFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({
+      rows: { connections: rows },
+      // PostgREST's db-max-rows caps a response server-side, whatever the
+      // client asked for. This is the case an unfiltered select cannot survive:
+      // it would re-encrypt the rows that came back, finish with no error, and
+      // clearMigrationKeys() would destroy the only key that could still read
+      // the rest. Those connections are then permanently unusable and recovery
+      // reports success.
+      maxRows: 200,
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(new Set(updatedConnIds(calls))).toEqual(new Set(rows.map((r) => r.id)));
+    expect(updatedConnIds(calls).length).toBe(rows.length);
+    // 200 + 200 + 101 + 0.
+    expect(connSelects(calls).length).toBe(4);
+  });
+
+  it("walks both pages of a 501 row fixture and updates every row exactly once", async () => {
+    const rows = connFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({ rows: { connections: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const ids = updatedConnIds(calls);
+    expect(new Set(ids)).toEqual(new Set(rows.map((r) => r.id)));
+    expect(ids.length).toBe(rows.length);
+    // Three, not two. The loop stops on an empty page and on nothing else, so
+    // 501 rows cost 500 + 1 + 0. If this ever reads two again, someone has put
+    // a short-page break in.
+    expect(connSelects(calls).length).toBe(3);
+  });
+
+  it("pages by the primary key in a stable order, never by bare offset", async () => {
+    const rows = connFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({ rows: { connections: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const selects = connSelects(calls);
+    for (const select of selects) {
+      expect(select.order).toEqual({ column: "id", ascending: true });
+      expect(select.limit).toBe(PAGE_SIZE);
+      expect(select.range).toBeUndefined();
+    }
+    expect(selects[0].gt).toBeUndefined();
+    expect(selects[1].gt).toEqual({ column: "id", value: rows[PAGE_SIZE - 1].id });
+  });
+
+  it("loses no row when the backing set reorders under the loop, as an update does", async () => {
+    const rows = connFixture(PAGE_SIZE + 1);
+    const backing = [...rows];
+    const { client, calls } = makeFakeClient({
+      rows: { connections: backing },
+      beforeSelect: (table) => {
+        if (table !== "connections") return;
+        const first = backing.shift();
+        if (first) backing.push(first);
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(new Set(updatedConnIds(calls))).toEqual(new Set(rows.map((r) => r.id)));
   });
 });
 
