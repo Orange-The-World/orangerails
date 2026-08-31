@@ -86,56 +86,32 @@ jobs:
     name: prod pull requests must come from dev
     runs-on: ubuntu-latest
     steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
       - name: Self-test the decision logic
         run: |
           set -euo pipefail
 
-          # The same decision order the real check uses, exercised against the
-          # cases that matter before it is trusted with a verdict. A gate that
-          # has never been shown to fail is not known to work.
+          # Exercises scripts/prod-source-verdict.sh, which is the SAME file the
+          # enforcing step below calls. Not a copy of it, the same file. A gate
+          # that has never been shown to fail is not known to work, and a
+          # self-test of a second implementation shows nothing about the first.
           #
-          # Ancestry is passed IN as an argument rather than looked up here.
-          # That keeps this function pure string-and-label logic, so it runs
-          # with no network and no token, and it is the reason the ancestry
-          # lookup is a separate step below: an API call cannot be unit-tested
-          # inside this function, so it is not pretended otherwise.
-          verdict() {
-            head_ref="$1"
-            labels="$2"
-            ancestry="$3"
-
-            if [ "${head_ref}" = "dev" ]; then
-              echo "allow-promotion"
-              return
-            fi
-
-            if printf '%s' "${labels}" | jq -e 'any(. == "prod-hotfix")' >/dev/null; then
-              echo "allow-hotfix"
-              return
-            fi
-
-            case "${head_ref}" in
-              release/*)
-                # behind    = every commit on this head is already on dev
-                # identical = this head IS dev's tip
-                # Anything else blocks, INCLUDING the empty string, which is
-                # what a failed lookup produces. "I could not look" is not a
-                # pass, and it never becomes one by falling through.
-                if [ "${ancestry}" = "behind" ] || [ "${ancestry}" = "identical" ]; then
-                  echo "allow-release"
-                else
-                  echo "block-ancestry"
-                fi
-                return
-                ;;
-            esac
-
-            echo "block"
-          }
+          # Ancestry is passed IN as an argument rather than looked up by the
+          # script. That keeps the script pure string-and-label logic, so it
+          # runs with no network and no token, and it is the reason the ancestry
+          # lookup lives in the step below: an API call cannot be unit-tested
+          # inside a pure function, so it is not pretended otherwise.
+          VERDICT_SH="${GITHUB_WORKSPACE}/scripts/prod-source-verdict.sh"
+          if [ ! -f "${VERDICT_SH}" ]; then
+            echo "::error::scripts/prod-source-verdict.sh is missing from this checkout. The decision this gate makes is not here, so nothing can be enforced. Blocked."
+            exit 1
+          fi
 
           fail=0
           check() {
-            got="$(verdict "$2" "$3" "$4")"
+            got="$(bash "${VERDICT_SH}" "$2" "$3" "$4")"
             if [ "${got}" != "$5" ]; then
               echo "::error::self-test '$1' expected '$5', got '${got}'"
               fail=1
