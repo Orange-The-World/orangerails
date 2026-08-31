@@ -62,6 +62,7 @@
 
 import { buildPublicCorsHeaders, jsonResponse } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { clientIdOrNull, rateLimitRetryAfter } from './rate-limit.ts';
 
 const QUILTT_AUTH_URL = 'https://auth.quiltt.io/v1/users/sessions';
 const QUILTT_REST_BASE = 'https://api.quiltt.io/v1';
@@ -101,14 +102,15 @@ interface CatalogInstitution {
 // stops people looking.
 //
 //   1. A per-isolate, per-client-IP counter over a 60 second window, keyed on
-//      an edge-set header wherever one exists. See clientIdOrNull: it does
-//      NOT trust the caller-supplied first hop of x-forwarded-for, which is
-//      what made an earlier version of this counter bypassable from a single
-//      machine. It slows the naive loop from one machine. It does NOT stop a
-//      caller spread over many addresses, it does not stop a caller who can
-//      forge every identifying header, and because every edge isolate keeps
-//      its own counter, a caller whose requests land on different isolates
-//      gets one allowance per isolate. It is a floor, not a ceiling.
+//      an edge-set header wherever one exists. Lives in ./rate-limit.ts now
+//      (OR-T1140, OR-T1141), split out so it carries no Deno.serve call and
+//      can be unit tested directly; see clientIdOrNull and pruneRateWindows
+//      there for the header precedence and the eviction-order reasoning. It
+//      slows the naive loop from one machine. It does NOT stop a caller
+//      spread over many addresses, it does not stop a caller who can forge
+//      every identifying header, and because every edge isolate keeps its
+//      own counter, a caller whose requests land on different isolates gets
+//      one allowance per isolate. It is a floor, not a ceiling.
 //   2. A per-isolate memo of the mapped response, keyed by connector_id and
 //      the exact term. This is the one that protects the credential: a
 //      repeated term costs zero upstream calls for its TTL, whoever is
@@ -126,107 +128,10 @@ interface CatalogInstitution {
 // than the one it fixes, so it is not done here. The durable fix is a
 // gateway-level rule in front of the function: separate change, separate
 // owner.
-const RATE_WINDOW_MS = 60_000;
-const RATE_MAX_PER_WINDOW = 60;
-const RATE_MAX_TRACKED_CLIENTS = 5_000;
-const rateWindows = new Map<string, { windowStart: number; count: number }>();
 
 const CATALOG_CACHE_TTL_MS = 10 * 60 * 1000; // matches the max-age we already send
 const CATALOG_CACHE_MAX_ENTRIES = 500;
 const catalogCache = new Map<string, { storedAt: number; institutions: CatalogInstitution[] }>();
-
-/**
- * Identify the caller for throttling, preferring the one header a caller
- * cannot write.
- *
- * The precedence is the whole point. x-forwarded-for is caller-supplied: a
- * proxy APPENDS to whatever the client already sent, so its FIRST entry is a
- * value the client chose. Reading that first entry, as this function used to,
- * made the counter bypassable from a single machine: send a different random
- * X-Forwarded-For on every request and each one lands in a fresh bucket, so
- * rateLimitRetryAfter returns 0 forever. Only cf-connecting-ip is trusted: it
- * is written at Cloudflare's true edge and a client cannot forge it there.
- *
- * x-real-ip is NOT read anywhere in this function, at all. An earlier
- * version trusted it and was wrong to: workers/api-gateway (forwardHeaders)
- * strips cf-connecting-ip and every cf-* header on the way to this function,
- * but forwards a caller-supplied x-real-ip through completely unchanged and
- * never sets one itself, so trusting it let a gateway-routed caller forge a
- * fresh bucket every request (OR-C0493).
- *
- * Removing x-real-ip is not enough on its own: the fallback below still
- * reads x-forwarded-for's LAST entry, on the theory that the proxy nearest
- * to us appended it. Checked directly against workers/api-gateway's
- * forwardHeaders, that is false: it does not append to x-forwarded-for, it
- * copies whatever the caller sent verbatim (out.set(k, v), no push, no
- * concat). So on a gateway-routed request the last x-forwarded-for entry is
- * exactly as caller-chosen as the first one was.
- *
- * Because of that, the bucket KEY is namespaced by which header produced it
- * ('cf:' for the trustworthy edge-set value, 'xff:' for the forgeable
- * fallback). That namespace is what actually closes the cross-contamination
- * bypass: a caller who controls x-forwarded-for can still get themselves
- * throttled or not, but can never spend or exhaust a cf: bucket that
- * belongs to someone else's real address, however many hops they append.
- *
- * KNOWN GAP, stated rather than hidden: a request that reaches this function
- * through workers/api-gateway has already lost cf-connecting-ip (stripped
- * there). With no x-forwarded-for either, clientIdOrNull returns null and
- * the request is not throttled at all (fail-open, see below). With an
- * x-forwarded-for, the request lands in an xff: bucket that the caller can
- * still reset at will by changing the header, same bypass as before this
- * function existed, just isolated to the xff: namespace instead of able to
- * spend a cf: caller's allowance. A direct call to this function, bypassing
- * the gateway, still carries a genuine cf-connecting-ip and is throttled
- * correctly. Closing the gateway-routed gap means the gateway forwarding the
- * real incoming cf-connecting-ip under a header this function trusts,
- * overwriting whatever the caller sent; that is a change to
- * workers/api-gateway, not to this function (tracked as OR-T1103).
- *
- * When we cannot identify a caller at all we do NOT throttle, deliberately:
- * bucketing every unidentified request under a single key would turn a
- * missing header into a global cap on a hot path the picker calls on each
- * keystroke. Failing open is the safer of the two ways to be wrong here.
- */
-function clientIdOrNull(req: Request): string | null {
-  const edgeSet = (req.headers.get('cf-connecting-ip') ?? '').trim();
-  if (edgeSet) return `cf:${edgeSet}`;
-  const forwarded = req.headers.get('x-forwarded-for') ?? '';
-  const hops = forwarded.split(',').map((hop) => hop.trim()).filter((hop) => hop.length > 0);
-  return hops.length > 0 ? `xff:${hops[hops.length - 1]}` : null;
-}
-
-/**
- * Drop expired windows so the counter map stays bounded. If that is not
- * enough the map is genuinely full of live callers, so clear it rather than
- * grow without limit. Clearing forgives everyone one window, which is the
- * correct direction to be wrong in on an availability-sensitive path.
- */
-function pruneRateWindows(now: number): void {
-  for (const [id, entry] of rateWindows) {
-    if (now - entry.windowStart >= RATE_WINDOW_MS) rateWindows.delete(id);
-  }
-  if (rateWindows.size >= RATE_MAX_TRACKED_CLIENTS) rateWindows.clear();
-}
-
-/**
- * Count this request against the caller's window. Returns 0 when the caller
- * is allowed through, otherwise the seconds until their window resets, which
- * is what goes in retry-after.
- */
-function rateLimitRetryAfter(clientId: string, now: number): number {
-  const entry = rateWindows.get(clientId);
-  if (!entry || now - entry.windowStart >= RATE_WINDOW_MS) {
-    if (rateWindows.size >= RATE_MAX_TRACKED_CLIENTS) pruneRateWindows(now);
-    rateWindows.set(clientId, { windowStart: now, count: 1 });
-    return 0;
-  }
-  entry.count += 1;
-  if (entry.count > RATE_MAX_PER_WINDOW) {
-    return Math.max(1, Math.ceil((entry.windowStart + RATE_WINDOW_MS - now) / 1000));
-  }
-  return 0;
-}
 
 /** NUL cannot appear in either part, so the joined key is unambiguous. */
 function cacheKey(connectorId: string, term: string): string {
