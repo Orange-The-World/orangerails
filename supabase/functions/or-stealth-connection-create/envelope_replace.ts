@@ -18,23 +18,40 @@
  * cursor changed a stored number and changed nothing the user could see. No
  * rescan, no error, no way out.
  *
- * So the reset clears both. Coverage rows for a connection live in
- * stealth_scan_ranges, keyed by connection_id, written only by
- * record_stealth_scan_range().
+ * So the reset clears both, and the order it clears them in is load bearing.
+ * Coverage rows for a connection live in stealth_scan_ranges, keyed by
+ * connection_id, written only by record_stealth_scan_range().
  *
- * ORDER MATTERS AND IS DELIBERATE. Coverage goes first, the connection row
- * second. If the coverage delete succeeds and the row update then fails, the
- * connection keeps its old envelope and rescans from its old birthday: slower
- * than it needed to be, and correct. The other order fails the other way, with
- * a new envelope and uncleared coverage, which is exactly the silent
- * no-rescan this module exists to remove. When only one of the two can land,
- * land the one whose failure the user can see.
+ * ORDER MATTERS, AND IT FOLLOWS FROM AN INVARIANT RATHER THAN A PREFERENCE:
+ * a lost cursor can never cause a skip, a lost coverage row can. So the reset
+ * is three writes, cursor first, coverage second, envelope last, and every way
+ * it can stop partway through still starts the next sync at or before the
+ * first block nobody has read.
  *
- * BOTH FAILURES ARE REPORTED. A half applied reset that answers 200 tells the
+ *   fails at step 1   nothing changed at all: old cursor, old coverage, old
+ *                     envelope. The retry is the whole reset again.
+ *   stops after 1     cursor null, coverage intact, old envelope. The coverage
+ *                     arm answers, and it can only return the birthday or a
+ *                     to_height that was genuinely scanned, so it cannot skip.
+ *   stops after 2     cursor null, no coverage, old envelope. Neither arm can
+ *                     point past the birthday, so the start height is the old
+ *                     birthday: a rescan nobody needed, slow and correct.
+ *
+ * Both other orders have a partial outcome that skips blocks, which is why
+ * this one is pinned by a test rather than left to a reader's judgement.
+ * Deleting the coverage while the original cursor still stands is the
+ * dangerous one: the coverage arm goes silent, the cursor arm answers
+ * lastBlockScanned + 1, and any block below that cursor which no range covered
+ * becomes invisible to every future sync, permanently, with no error and
+ * nothing the user can see. Storing the envelope before the coverage is
+ * cleared is the original defect this module exists to remove: a new envelope
+ * behind stale coverage, and no rescan. See OR-T1256.
+ *
+ * EVERY FAILURE IS REPORTED. A half applied reset that answers 200 tells the
  * user their wallet is being rescanned when it is not, and that silence is
  * what made the original defect expensive to find. A caller that gets an error
  * can retry the re-add, and the retry is idempotent: the delete of an already
- * empty range set is a no-op, and the update writes the same values again.
+ * empty range set is a no-op, and the updates write the same values again.
  *
  * SCOPING. stealth_scan_ranges rows carry only connection_id and cascade on
  * delete from stealth_connections, so deleting by the connection id the caller
@@ -86,7 +103,26 @@ export async function applyEnvelopeReplacement(
   connectionId: string,
   fields: EnvelopeReplacementFields,
 ): Promise<EnvelopeReplacementResult> {
-  // 1. Coverage first. See ORDER MATTERS above.
+  // 1. The cursor first. See ORDER MATTERS above: this is the write whose
+  //    loss cannot cause a skip, so it is the one that goes first. On its own
+  //    it no longer decides where a scan starts, but it is still the arm that
+  //    answers for a connection with no coverage at all, so leaving it
+  //    standing after step 2 is what would hide an unscanned gap forever.
+  const { error: cursorErr } = await client
+    .from('stealth_connections')
+    .update({ last_block_scanned: null })
+    .eq('id', connectionId);
+
+  if (cursorErr) {
+    console.error('[applyEnvelopeReplacement] cursor clear failed:', cursorErr);
+    return {
+      ok: false,
+      error: 'Failed to clear the scan cursor for the replaced envelope',
+      status: 500,
+    };
+  }
+
+  // 2. The coverage rows.
   const { error: coverageErr } = await client
     .from('stealth_scan_ranges')
     .delete()
@@ -101,11 +137,10 @@ export async function applyEnvelopeReplacement(
     };
   }
 
-  // 2. The connection row. last_block_scanned is reset alongside the envelope
-  //    for the same reason the coverage is: on its own it no longer decides
-  //    where the scan starts, but it is still the arm that answers for a
-  //    connection with no coverage at all, and both arms must agree that this
-  //    connection has read nothing since the new birthday.
+  // 3. The envelope itself, last, so it can never be stored behind coverage
+  //    that would block the rescan it promises. last_block_scanned is not in
+  //    this patch: step 1 already nulled it, and re-sending it here would put
+  //    the write that matters back into the one that is allowed to fail.
   //
   //    wallet_birthday_plaintext is included in the patch only when the
   //    caller actually named a value (a string, or an explicit null). When
@@ -115,7 +150,6 @@ export async function applyEnvelopeReplacement(
   //    that distinction matters.
   const patch: Record<string, unknown> = {
     sealed_envelope: fields.sealed_envelope,
-    last_block_scanned: null,
     updated_at: new Date().toISOString(),
   };
   if (fields.wallet_birthday_plaintext !== undefined) {
