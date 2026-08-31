@@ -143,8 +143,14 @@ BEGIN;
 ALTER TABLE public.user_vault_meta
   ADD COLUMN IF NOT EXISTS keyring_ciphertext text;
 
+-- This COMMENT is a REPLACEMENT, not an append. Hosted dev already carries a comment on
+-- this column and applying this file overwrites it, so every fact that comment held is
+-- carried through below. Read off dev 2026-08-31 before writing this: "Envelope v3.
+-- Single AES-256-GCM blob holding this vault's data keys and its two PQC secrets,
+-- wrapped under the MEK. Opaque ciphertext: never parsed, indexed or constrained by the
+-- database. Null on a v2 vault, populated at its next unlock."
 COMMENT ON COLUMN public.user_vault_meta.keyring_ciphertext IS
-  'The sealed vault keyring, base64 of the client AEAD envelope, opaque to the server. NULL means this vault has no keyring yet, which is a legitimate state between vault creation and the first data key generation. REQUIREMENT: it is written only by the client with the vault unlocked, and its generation counter is user_vault_meta.keyring_epoch, which trg_keyring_epoch_guard forces to rise on every change to this value. Writing this column for the first time, NULL to a blob, is a seal event and must consume an epoch. No CHECK constrains its shape on purpose: the envelope format belongs to the client and is changing under OR-T0676. OR-T1145, OR-T0967.';
+  'Envelope v3. A single AES-256-GCM blob holding this vault''s data keys and its two PQC secrets, wrapped under the MEK, stored as base64 of the client AEAD envelope. Opaque ciphertext: never parsed, indexed or constrained by the database, and the server holds no key that opens it. NULL is a legitimate state, not a defect: a v2 vault has none and is populated at its next unlock, and a v3 vault has none between its creation and the first data key generation. REQUIREMENT: written only by the client with the vault unlocked. Its generation counter is user_vault_meta.keyring_epoch, which trg_keyring_epoch_guard forces to rise on every change to this value, so writing this column for the first time, NULL to a blob, is a seal event and consumes an epoch. No CHECK constrains its shape on purpose: the envelope format belongs to the client and is changing under OR-T0676. OR-T1145, OR-T0967.';
 
 -- Stated, not inherited. On prod the table level grant to authenticated already covers
 -- a new column; on dev it does not, because dev grants INSERT and UPDATE per column.
@@ -187,6 +193,14 @@ BEGIN
   -- privilege exists only because the GRANT above names the column; on prod the table
   -- grant also supplies it. Either route satisfies this, which is the point: the
   -- assertion checks the OUTCOME, not the route.
+  --
+  -- HONEST LIMIT, so nobody reads more into this than it says. On the per column shape
+  -- dev uses, this assertion goes red if the column grant is missing, proven by removing
+  -- it. On prod it CANNOT go red today, because authenticated holds a table level arw and
+  -- has_column_privilege keeps answering true no matter what happens at column level. It
+  -- is kept because it is exactly right for the shape prod is being moved onto (OR-T0966),
+  -- and because a privilege this file grants should be a privilege this file checks. It is
+  -- not, today, a guard on production.
   IF NOT has_column_privilege('authenticated', 'public.user_vault_meta', 'keyring_ciphertext', 'SELECT') THEN
     RAISE EXCEPTION 'FAIL: authenticated cannot SELECT keyring_ciphertext, so a user could not read their own keyring';
   END IF;
