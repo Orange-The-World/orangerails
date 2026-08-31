@@ -22,6 +22,7 @@ import { orangewayMeSink } from './orangeway-me.ts';
 
 const SINK_ADAPTERS: ReadonlyMap<string, SinkAdapter> = new Map<string, SinkAdapter>([
   [bitbooksV2Sink.format, bitbooksV2Sink],
+  [orangewayMeSink.format, orangewayMeSink],
   // Future:
   // [bitbooksV3Sink.format, bitbooksV3Sink],
   // [orangewayBooksSink.format, orangewayBooksSink],
