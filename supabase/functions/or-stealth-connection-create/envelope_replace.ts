@@ -58,7 +58,17 @@ type SupabaseClient = any;
 /** The fields an envelope replacement writes onto the connection row. */
 export interface EnvelopeReplacementFields {
   sealed_envelope: unknown;
-  wallet_birthday_plaintext: string | null;
+  /**
+   * `undefined` (the request body omitted this key) leaves the stored
+   * birthday untouched, so a caller that resends the envelope without
+   * resending the birthday cannot silently null out a value it never
+   * meant to touch. `null` (the request body included the key with an
+   * explicit null, as the widget always does under ZKA) still clears
+   * it, unchanged from before this distinction existed. A string still
+   * replaces it. See OR-T1242 for why "absent" and "explicit null" must
+   * not be collapsed into the same case here.
+   */
+  wallet_birthday_plaintext: string | null | undefined;
 }
 
 export type EnvelopeReplacementResult =
