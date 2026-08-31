@@ -319,12 +319,23 @@ jobs:
           # source repo was since deleted reports repo as null, which // ""
           # turns into an empty string that can never equal GH_REPO, so it is
           # correctly rejected rather than silently passing.
-          OPEN_INTO_PROD="$(gh api "repos/${GH_REPO}/pulls?state=open&base=prod&per_page=100" \
+          # --paginate walks every page of results rather than trusting the
+          # first 100 to be everything (OR-T1102): past 100 open pull
+          # requests into prod, an unpaginated call silently dropped the
+          # rest, and the one open promotion among them could be missed,
+          # opening a duplicate.
+          OPEN_INTO_PROD="$(gh api --paginate "repos/${GH_REPO}/pulls?state=open&base=prod&per_page=100" \
                               --jq '[.[] | {number, head: .head.ref, head_repo: (.head.repo.full_name // "")}]')"
 
+          # CANDIDATE_FILTER is the exact string the self-test step above
+          # just proved against fixtures (OR-T1102): one implementation,
+          # called twice. sort_by(.number) makes "the first candidate" the
+          # LOWEST pull request number, the oldest open promotion, rather
+          # than whatever order the API happened to return, which was never
+          # documented or guaranteed.
           CANDIDATES="$(printf '%s' "${OPEN_INTO_PROD}" \
                           | jq --arg repo "${GH_REPO}" \
-                              '[.[] | select(.head_repo == $repo and (.head == "dev" or (.head | startswith("release/"))))]')"
+                              "[${CANDIDATE_FILTER}] | sort_by(.number)")"
 
           echo "open pull requests into prod: $(printf '%s' "${OPEN_INTO_PROD}" | jq 'length')"
           printf '%s\n' "${OPEN_INTO_PROD}" | jq -r '.[] | "  pull request \(.number) head=\(.head)"'
