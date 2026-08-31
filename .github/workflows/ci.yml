@@ -48,6 +48,17 @@ jobs:
         # is a declaration rather than a code scan.
         run: node scripts/check-public-auth.mjs
 
+      - name: Auth-marker check
+        # A real gate, no continue-on-error. Closes the gap the check above does not cover:
+        # that check proves the manifest and config.toml agree with EACH OTHER, this one proves
+        # the mode a function DECLARES matches a marker call in the code it actually ships
+        # (requireCallerAuth for a caller-auth mode, no such call for "none"). Pre-existing
+        # non-conforming functions are carried as dated known exceptions inside the script,
+        # tracked by OR-T1039 and OR-T1040, not exempted from this workflow. See the script
+        # header for why this is a marker search and not an analysis of whether the auth is
+        # correct.
+        run: node scripts/check-auth-marker.mjs
+
       - name: Anon RPC grant self-test
         # The parser IS the control, so it is tested here rather than trusted. Runs before the
         # check itself so a broken parser fails as a broken parser, not as a silent pass over
