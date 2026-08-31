@@ -227,14 +227,21 @@ if (process.argv.includes("--selftest")) {
 
   const { errors, checked, duplicates } = verdict(names);
 
-  if (errors.length) {
+  if (!duplicates.length && errors.length) {
+    // The directory is there and holds no .sql file. Nothing to compare is UNKNOWN, and
+    // UNKNOWN must never borrow the vocabulary of a clean result or of a collision.
+    for (const message of errors) console.error(message);
+    console.error(
+      "::error::the migration version check enumerated 0 file(s) under " + MIGRATIONS_DIR +
+      ". It proved nothing, so it is red rather than green.");
+    process.exit(1);
+  }
+
+  if (duplicates.length) {
     console.error("duplicate migration version(s) found:");
     for (const dupe of duplicates) {
       console.error("  version " + dupe.version + " is used by " + dupe.files.length + " files:");
       for (const file of dupe.files) console.error("    - " + file);
-    }
-    for (const message of errors) {
-      if (!duplicates.length) console.error("  " + message);
     }
     console.error(
       "\nsupabase_migrations.schema_migrations stores one row per version, so at most one of " +
@@ -242,8 +249,7 @@ if (process.argv.includes("--selftest")) {
       "or not, on every project, forever. Rename the later file to an unused timestamp.");
     console.error(
       "::error::duplicate migration version(s): " +
-      (duplicates.map((d) => d.version).join(", ") || "enumeration failed") +
-      ". See the list above.");
+      duplicates.map((d) => d.version).join(", ") + ". See the list above.");
     process.exit(1);
   }
 
