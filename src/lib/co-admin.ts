@@ -56,6 +56,22 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/**
+ * Pull the human-readable text out of a Supabase error.
+ *
+ * These errors are objects, and interpolating one straight into a template
+ * literal yields "[object Object]". GrantCoAdminDialog renders whatever message
+ * this module throws directly to the owner, so the Postgres message is the part
+ * that has to survive.
+ */
+function errorText(err: unknown): string {
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string" && message.length > 0) return message;
+  }
+  return String(err);
+}
+
 // ------------------------------------------------------------------
 // HKDF from raw bytes , derives a 32-byte subkey without going through
 // a non-extractable CryptoKey, so the raw output can be concatenated.
@@ -180,9 +196,26 @@ export async function unwrapBlob64(
 // Public types
 // ------------------------------------------------------------------
 
-/** Narrow Supabase surface needed by the co-admin flows. */
+/**
+ * Narrow Supabase surface needed by the co-admin flows.
+ *
+ * There is deliberately no update() anywhere in here. The only column this
+ * module ever wrote was user_vault_meta.workspace_key_id, and the authenticated
+ * role no longer holds that privilege: the value is minted by
+ * allocate_workspace_key() instead. Declaring the method would let the same
+ * write back in as something TypeScript accepts and the database refuses.
+ */
 export interface CoAdminSupabaseLike {
   from(table: string): CoAdminTableBuilder;
+  /**
+   * allocate_workspace_key() takes no argument by design: the caller may not
+   * propose a workspace key id by any path. params stays optional so this
+   * surface still describes the argument-taking RPCs the callers hold.
+   */
+  rpc(
+    fn: string,
+    params?: Record<string, unknown>,
+  ): Promise<{ data: unknown; error: unknown }>;
 }
 
 interface CoAdminTableBuilder {
@@ -191,7 +224,6 @@ interface CoAdminTableBuilder {
     row: Record<string, unknown>,
   ): Promise<{ data: Record<string, unknown>[] | null; error: unknown }>;
   delete(): CoAdminDeleteBuilder;
-  update(values: Record<string, unknown>): CoAdminUpdateBuilder;
 }
 
 interface CoAdminSelectBuilder {
@@ -227,10 +259,6 @@ interface CoAdminDeleteBuilder {
   then(fn: (v: { error: unknown }) => void): Promise<{ error: unknown }>;
 }
 
-interface CoAdminUpdateBuilder {
-  eq(col: string, val: string): Promise<{ error: unknown }>;
-}
-
 /** Result returned by grantCoAdmin. */
 export interface GrantResult {
   workspaceKeyId: string;
@@ -257,7 +285,8 @@ export interface AdminSubkeys {
  * @param params.ownerPassword     Re-confirmed vault password (never leaves the browser).
  * @param params.targetUserId      The recipient's user ID (from pqc-lookup-user).
  * @param params.targetKemPubB64   The recipient's KEM public key, base64 (from pqc-lookup-user).
- * @param params.existingKeyId     Current workspace_key_id from user_vault_meta (null if not yet set).
+ * @param params.existingKeyId     Current workspace_key_id from user_vault_meta (null if not yet
+ *                                 allocated, in which case the server allocates one).
  * @param params.supabase          Authenticated Supabase client for the owner.
  */
 export async function grantCoAdmin(params: {
@@ -292,16 +321,45 @@ export async function grantCoAdmin(params: {
   blob.set(credsRaw, 0);
   blob.set(txnsRaw, 32);
 
-  // Step d , allocate workspace_key_id if not yet set.
+  // Step d , get the workspace key id. The SERVER mints it; this browser must
+  // not, and as of the server-allocation migration it no longer can.
+  //
+  // WHY. Ownership on every wrapped_data_keys policy is decided by the VALUE of
+  // user_vault_meta.workspace_key_id, so a caller who can choose that value can
+  // claim another tenant's data_key_id and then delete every wrapped copy of
+  // their data key. The authenticated role therefore holds no INSERT or UPDATE
+  // on the column at all (it still holds SELECT), and allocate_workspace_key()
+  // is a SECURITY DEFINER function that takes no argument on purpose: there is
+  // no path by which a caller proposes an id.
+  //
+  // RETRIES ARE SAFE. A second call returns the id already allocated rather
+  // than raising or minting a second one, so a dropped response needs no guard
+  // here.
+  //
+  // IT CAN REFUSE, AND THAT REFUSAL MUST STOP THE GRANT. It raises when there
+  // is no authenticated session, and when the caller has no user_vault_meta row
+  // yet , allocate AFTER the vault exists, never before. There is deliberately
+  // no fallback to a locally minted id: a fallback would write nothing, because
+  // the privilege is gone, and would then sign an id no row carries.
+  //
+  // ORDER. This runs BEFORE signMemberGrant below, and the id signed there is
+  // the one returned here. signMemberGrant binds the workspace key id and all
+  // four signed fields must match at verify time, so a signature over a locally
+  // minted id verifies against nothing , and that would surface later as a
+  // co-admin who cannot open anything, not as an error at grant time.
   let workspaceKeyId = params.existingKeyId;
   if (!workspaceKeyId) {
-    workspaceKeyId = crypto.randomUUID();
-    const { error: updateErr } = await (
-      supabase
-        .from("user_vault_meta")
-        .update({ workspace_key_id: workspaceKeyId }) as unknown as CoAdminUpdateBuilder
-    ).eq("user_id", ownerUserId);
-    if (updateErr) throw new Error(`Failed to write workspace_key_id: ${updateErr}`);
+    const { data: allocated, error: allocErr } = await supabase.rpc("allocate_workspace_key");
+    if (allocErr) {
+      throw new Error(`Failed to allocate workspace_key_id: ${errorText(allocErr)}`);
+    }
+    if (typeof allocated !== "string" || allocated.length === 0) {
+      throw new Error(
+        "allocate_workspace_key returned no workspace key id. Refusing to continue: a grant signed " +
+          "against an id the vault row does not carry would verify against nothing.",
+      );
+    }
+    workspaceKeyId = allocated;
   }
 
   // Step e , wrap the 64-byte blob for the recipient's KEM public key.
