@@ -20,18 +20,23 @@ import {
   persistRewrappedVaultMeta,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
+  rowCountMismatchMessage,
+  rowCountUnreadableMessage,
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
   type VaultPersistClient,
 } from "../vault-persist";
 
-type QueryResult = { data: unknown[] | null; error: unknown };
+type QueryResult = { data: unknown[] | null; count?: number | null; error: unknown };
 
 interface RecordedCall {
   table: string;
-  op: "select" | "update";
+  op: "select" | "update" | "count";
   /** columns passed to .select(), which is what makes the row count readable */
   columns?: string;
+  /** count mode asked for on a head request, e.g. "exact" */
+  countMode?: string;
+  head?: boolean;
   values?: Record<string, unknown>;
   filters: Array<{ column: string; value: unknown }>;
 }
@@ -71,6 +76,12 @@ interface FakeOptions {
    * in a different order next time.
    */
   reorderAfterSelect?: Record<string, (rows: unknown[]) => unknown[]>;
+  /**
+   * What a head count on a table returns, instead of the backing store's real
+   * length. Lets a test model a count that came back null or errored, which the
+   * reconciliation has to treat as a failure rather than a pass.
+   */
+  countResult?: Record<string, QueryResult>;
 }
 
 /**
@@ -135,6 +146,16 @@ function makeFakeClient(options: FakeOptions = {}) {
     return options.otherUpdate ?? { data: [], error: null };
   }
 
+  // A head request with an exact count returns a count and no rows. PostgREST
+  // computes it separately from the rows, so it is the true total rather than
+  // whatever a capped read happened to return, which is the property the
+  // reconciliation depends on.
+  function countResultFor(call: RecordedCall): QueryResult {
+    const override = options.countResult?.[call.table];
+    if (override) return override;
+    return { data: null, count: (store[call.table] ?? []).length, error: null };
+  }
+
   function thenable(call: RecordedCall) {
     return {
       then(
@@ -149,7 +170,22 @@ function makeFakeClient(options: FakeOptions = {}) {
   const client = {
     from(table: string) {
       return {
-        select(columns: string) {
+        select(columns: string, selectOptions?: { count?: string; head?: boolean }) {
+          // Recorded under its own op on purpose. A head count is not a page
+          // read, and folding it in would quietly change what the paging tests
+          // above are counting.
+          if (selectOptions?.head) {
+            const countCall: RecordedCall = {
+              table,
+              op: "count",
+              columns,
+              countMode: selectOptions.count,
+              head: true,
+              filters: [],
+            };
+            calls.push(countCall);
+            return Promise.resolve(countResultFor(countCall));
+          }
           const call: RecordedCall = { table, op: "select", columns, filters: [] };
           calls.push(call);
           const chain: SelectChain = {
@@ -436,6 +472,124 @@ describe("vault recovery: the rotated meta write", () => {
     )) {
       expect(call.filters).toContainEqual({ column: "order", value: ["id", true] });
     }
+  });
+});
+
+describe("vault recovery: reconciling the row counts before the meta write", () => {
+  it("stops before the meta write when the table gains a row after the page was read", async () => {
+    // The concurrent insert. During a recovery this is not exotic: a sync in a
+    // second tab writes rows, and any row written before the meta write is
+    // written under the OLD MEK by construction. The loop ends on a short page
+    // with no error anywhere, so without the reconciliation the meta write
+    // lands and that row is stranded under a key nothing stores any more.
+    // Keyset pagination on id would NOT catch this: a row inserted below the
+    // cursor is missed exactly the same way.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [
+          { id: "conn-1", encrypted_credentials: "creds-1", encrypted_label: null },
+          { id: "conn-2", encrypted_credentials: "creds-2", encrypted_label: null },
+        ],
+      },
+      reorderAfterSelect: {
+        connections: (rows) =>
+          rows.length === 2
+            ? [...rows, { id: "conn-3", encrypted_credentials: "creds-3", encrypted_label: null }]
+            : rows,
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(rowCountMismatchMessage("connections", 2, 3));
+
+    // Before the meta write is the whole point: up to here the stored wrappers
+    // still hold the old MEK, so stopping costs nothing irreversible.
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("stops before the meta write when a transaction row is added under the loop", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-1" }] },
+      reorderAfterSelect: {
+        encrypted_transactions: (rows) =>
+          rows.length === 1 ? [...rows, { id: "txn-2", encrypted_payload: "payload-2" }] : rows,
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(rowCountMismatchMessage("encrypted_transactions", 1, 2));
+
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("treats a count that cannot be read as a failure, not a pass", async () => {
+    // Absence of evidence is not evidence of absence. A run that could not
+    // check must not be indistinguishable from a run that checked and matched.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      countResult: { connections: { data: null, count: null, error: null } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(rowCountUnreadableMessage("connections"));
+
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("stops when the count itself returns an error", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      countResult: {
+        connections: { data: null, count: null, error: { message: "count failed" } },
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toBeTruthy();
+
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("names both numbers, so a run that reconciled nothing does not read as a clean one", () => {
+    expect(rowCountMismatchMessage("connections", 0, 900)).toContain("migrated 0 of 900");
+    expect(rowCountMismatchMessage("connections", 900, 900)).toContain("migrated 900 of 900");
+  });
+
+  it("counts both tables exactly, and does it before the meta write", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0" }],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const countCalls = calls.filter((c) => c.op === "count");
+    expect(countCalls.map((c) => c.table)).toEqual(["connections", "encrypted_transactions"]);
+
+    // An estimated count would not be evidence of anything, and a head request
+    // is what keeps the count itself out of reach of the server row cap that is
+    // one of the two failures being guarded against.
+    for (const call of countCalls) {
+      expect(call.countMode).toBe("exact");
+      expect(call.head).toBe(true);
+    }
+
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    for (const call of countCalls) expect(calls.indexOf(call)).toBeLessThan(metaIndex);
   });
 });
 
