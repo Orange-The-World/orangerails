@@ -1746,9 +1746,7 @@ function EnterCredentialsStep({
               </p>
               <p className="text-muted-foreground">
                 <span className="font-medium text-foreground">Your past, one file.</span> Export a
-                CSV from your Strike dashboard and keep it. Bringing it into this same account is
-                being built right now, and anything that also arrives automatically is matched up
-                rather than counted twice.
+                CSV from your Strike dashboard and keep it for your records and tax tools.
               </p>
               <a
                 href="/docs/strike-csv"

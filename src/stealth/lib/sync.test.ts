@@ -31,7 +31,7 @@ import {
   type BlockRecord,
   type WalletEnvelopePayload,
 } from './sync';
-import { deriveScriptPubkeyBytes } from './derive';
+import { deriveAddress, deriveScriptPubkeyBytes } from './derive';
 import type { StealthStage } from './postmessage';
 
 // BIP84 official test vector (https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki).
@@ -101,24 +101,97 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/** One input of a fixture transaction: a genuine previous outpoint. */
+interface FixtureTxInput {
+  /** Previous txid in RPC display order, which is what parseTx reports. */
+  prevTxidHex: string;
+  voutIdx: number;
+}
+
+/** One output of a fixture transaction. */
+interface FixtureTxOutput {
+  script: Uint8Array;
+  amountSats: bigint;
+}
+
+interface FixtureTx {
+  /**
+   * Omit for the all-zero outpoint the single-output fixtures have always
+   * used. parseTx drops that input as coinbase-like, which is correct and
+   * is exactly why a spend test has to supply real outpoints here.
+   */
+  inputs?: FixtureTxInput[];
+  outputs: FixtureTxOutput[];
+}
+
 /**
- * Build a minimal valid block containing a single non-segwit transaction
- * with one input and one output that pays to the given scriptPubKey for
- * the given amount in sats.
+ * Serialize one legacy (non-witness) transaction.
  *
  * Layout:
- *   [80-byte header][varint(txCount=1)][tx]
- * Tx layout (legacy, no witness):
- *   [version=2 LE 4][vin count=1 varint][outpoint 36 + scriptSig 0 + seq 0xffffffff][
- *    vout count=1 varint][value 8 LE][scriptPubKey varint+bytes][locktime 4]
+ *   [version=2 LE 4][vin count varint]
+ *   [per input: outpoint 36 + scriptSig 0 + seq 0xffffffff]
+ *   [vout count varint][per output: value 8 LE + scriptPubKey varint+bytes]
+ *   [locktime 4]
+ *
+ * Because there is no witness, this serialization IS the pre-image the
+ * orchestrator hashes for the txid, so fixtureTxid below can hash it
+ * directly and get the same value parseTx will report.
+ */
+function serializeFixtureTx(tx: FixtureTx): Uint8Array {
+  const inputs: FixtureTxInput[] = tx.inputs ?? [
+    { prevTxidHex: '00'.repeat(32), voutIdx: 0xffffffff },
+  ];
+
+  const parts: Uint8Array[] = [
+    u32LE(2),                 // version
+    varInt(inputs.length),    // vin count
+  ];
+  for (const inp of inputs) {
+    // On the wire the previous txid is internal little-endian; parseTx
+    // reverses it back to display order. Write it reversed here so the
+    // caller can pass the txid string the orchestrator hands back.
+    parts.push(reverseBytes(hexToBytes(inp.prevTxidHex)));
+    parts.push(u32LE(inp.voutIdx));
+    parts.push(varInt(0));            // empty scriptSig
+    parts.push(u32LE(0xffffffff));    // sequence
+  }
+
+  parts.push(varInt(tx.outputs.length));
+  for (const out of tx.outputs) {
+    parts.push(u64LE(out.amountSats));
+    parts.push(varInt(out.script.length));
+    parts.push(out.script);
+  }
+  parts.push(u32LE(0));               // locktime
+
+  return concat(...parts);
+}
+
+/**
+ * Build a minimal valid block.
+ *
+ * Two call shapes:
+ *   { payToScript, amountSats, timestamp }  one transaction, one
+ *     coinbase-like input, one output. The original shape; every existing
+ *     call site produces byte-identical blocks.
+ *   { txs, timestamp }                      any number of transactions,
+ *     each with real previous outpoints and any number of outputs. This is
+ *     what makes a spend expressible.
+ *
+ * Layout:
+ *   [80-byte header][varint(txCount)][tx...]
  *
  * Header timestamp is bytes 68..72.
+ *
+ * Returns the serialized bytes of each transaction alongside the block so
+ * the caller can derive txids for use as inputs in a later block.
  */
 function buildFixtureBlock(opts: {
-  payToScript: Uint8Array;
-  amountSats: bigint;
+  payToScript?: Uint8Array;
+  amountSats?: bigint;
   timestamp: number;
-}): { raw: Uint8Array; blockHashHex: string } {
+  txs?: FixtureTx[];
+}): { raw: Uint8Array; blockHashHex: string; txs: Uint8Array[] } {
   // Header: version + prev hash + merkle + ts + bits + nonce. We do not
   // bother making the merkle root match (the orchestrator does not verify);
   // for txid we hash the legacy serialization independently.
@@ -129,21 +202,23 @@ function buildFixtureBlock(opts: {
   header.set(u32LE(0x1d00ffff), 72);   // bits
   header.set(u32LE(0), 76);            // nonce
 
-  const tx = concat(
-    u32LE(2),                                          // version
-    varInt(1),                                         // vin count
-    new Uint8Array(32),                                // prev txid (zero)
-    u32LE(0xffffffff),                                 // prev vout (coinbase-like, fine for fixture)
-    varInt(0),                                         // empty scriptSig
-    u32LE(0xffffffff),                                 // sequence
-    varInt(1),                                         // vout count
-    u64LE(opts.amountSats),                            // value
-    varInt(opts.payToScript.length),
-    opts.payToScript,
-    u32LE(0),                                          // locktime
-  );
+  let txList: FixtureTx[];
+  if (opts.txs !== undefined) {
+    txList = opts.txs;
+  } else {
+    if (opts.payToScript === undefined || opts.amountSats === undefined) {
+      // Loud rather than quietly building an empty block: a fixture that
+      // silently contains nothing would make an assertion pass for the
+      // wrong reason.
+      throw new Error(
+        'buildFixtureBlock: pass either txs, or payToScript together with amountSats',
+      );
+    }
+    txList = [{ outputs: [{ script: opts.payToScript, amountSats: opts.amountSats }] }];
+  }
 
-  const raw = concat(header, varInt(1), tx);
+  const serialized = txList.map(serializeFixtureTx);
+  const raw = concat(header, varInt(serialized.length), ...serialized);
 
   // We do NOT compute the real block hash from the header double-sha256
   // here; the orchestrator's parseBlockHeader does that itself. We need
@@ -151,7 +226,16 @@ function buildFixtureBlock(opts: {
   // it inline using SubtleCrypto.
   // Vitest's node env has globalThis.crypto.subtle.digest with SHA-256.
   // But for synchronous fixture creation we use a tiny inline routine.
-  return { raw, blockHashHex: '' /* filled in by caller using async sha */ };
+  return { raw, blockHashHex: '' /* filled in by caller using async sha */, txs: serialized };
+}
+
+/**
+ * The txid the orchestrator will report for a fixture transaction. These
+ * fixtures carry no witness, so the whole serialization is the legacy
+ * serialization parseTx hashes.
+ */
+async function fixtureTxid(txBytes: Uint8Array): Promise<string> {
+  return bytesToHex(reverseBytes(await dsha256Async(txBytes)));
 }
 
 async function dsha256Async(b: Uint8Array): Promise<Uint8Array> {
@@ -1691,5 +1775,336 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
       // Cursor must stop at the last successfully scanned height.
       expect(result.lastBlockScanned).toBe(FAIL_HEIGHT - 1);
     });
+  });
+});
+
+// ─── Spend arithmetic and change tracking ───────────────────────────────
+//
+// Why these exist. Until the fixture builder above grew real previous
+// outpoints, every transaction this file produced carried a single
+// all-zero input. parseTx drops those as coinbase-like, which is correct,
+// so tx.inputs was always empty and spentInputs was always 0n. The whole
+// `if (spentInputs > 0n)` arm of runSync, and its twin in the extension
+// loop, had therefore never run in any test while the suite reported
+// green. That arm is what decides what a customer spent and what came
+// back to them as change.
+//
+// The UTXO map is private to runSync, so these tests do not reach into
+// it. They assert on what the caller can see: the normalized records, and
+// whether spending an earlier change output is detected at all.
+
+describe('runSync , spend arithmetic and change tracking', () => {
+  // gap_limit 5 gives an initial window of indices [0, 10) on each chain.
+  const GAP_LIMIT = 5;
+
+  const RECEIVE_0 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+  const CHANGE_0 = deriveScriptPubkeyBytes(BIP84_XPUB, 1, 0, 'p2wpkh');
+  const CHANGE_0_ADDRESS = deriveAddress(BIP84_XPUB, 1, 0, 'p2wpkh');
+
+  // Index 50 sits far outside any window these tests derive, so the
+  // orchestrator treats it as somebody else's address, while the test
+  // still knows the exact string the recipient label must equal. That is
+  // stronger than a bech32 shaped regex: it pins the bytes as well.
+  const STRANGER = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 50, 'p2wpkh');
+  const STRANGER_ADDRESS = deriveAddress(BIP84_XPUB, 0, 50, 'p2wpkh');
+
+  async function sealedEnvelopeFor(label: string, key: string) {
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label,
+      wallet_birthday: '2024-01-01',
+      gap_limit: GAP_LIMIT,
+      script_type: 'p2wpkh',
+    };
+    return sealEnvelope(payload, key);
+  }
+
+  async function blockHashOf(raw: Uint8Array): Promise<string> {
+    return bytesToHex(reverseBytes(await dsha256Async(raw.subarray(0, 80))));
+  }
+
+  it('records a spend: amount net of change, recipient labelled, change kept as ours', async () => {
+    const orStealthKey = randomKeyB64();
+    const envelope = await sealedEnvelopeFor('spend-arithmetic', orStealthKey);
+    const ts = Math.floor(new Date('2024-06-01T00:00:00Z').getTime() / 1000);
+
+    // Block 1 funds us with 100,000 sats on receive index 0.
+    const fund = buildFixtureBlock({
+      timestamp: ts,
+      txs: [{ outputs: [{ script: RECEIVE_0, amountSats: 100_000n }] }],
+    });
+    const fundTxid = await fixtureTxid(fund.txs[0]);
+
+    // Block 2 spends it: 60,000 to a stranger, 39,000 back to change
+    // index 0, and the missing 1,000 is the network fee.
+    const spend = buildFixtureBlock({
+      timestamp: ts + 600,
+      txs: [
+        {
+          inputs: [{ prevTxidHex: fundTxid, voutIdx: 0 }],
+          outputs: [
+            { script: STRANGER, amountSats: 60_000n },
+            { script: CHANGE_0, amountSats: 39_000n },
+          ],
+        },
+      ],
+    });
+    const spendTxid = await fixtureTxid(spend.txs[0]);
+
+    // Block 3 spends the CHANGE output of block 2. This is the only
+    // observable proof that the change output was recorded as ours: if it
+    // had not been, this transaction pays nobody we know and spends
+    // nothing we own, so it produces no record at all.
+    const spendChange = buildFixtureBlock({
+      timestamp: ts + 1200,
+      txs: [
+        {
+          inputs: [{ prevTxidHex: spendTxid, voutIdx: 1 }],
+          outputs: [{ script: STRANGER, amountSats: 38_500n }],
+        },
+      ],
+    });
+
+    const fundHash = await blockHashOf(fund.raw);
+    const spendHash = await blockHashOf(spend.raw);
+    const changeHash = await blockHashOf(spendChange.raw);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => 800_003,
+      fetchFilter: async (h) => {
+        if (h === 800_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xb1]) };
+        if (h === 800_002) return { height: h, blockHashHex: spendHash, filter: new Uint8Array([0xb2]) };
+        if (h === 800_003) return { height: h, blockHashHex: changeHash, filter: new Uint8Array([0xb3]) };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === fundHash) return { height: 0, blockHashHex: fundHash, raw: fund.raw };
+        if (hashHex === spendHash) return { height: 0, blockHashHex: spendHash, raw: spend.raw };
+        if (hashHex === changeHash) return { height: 0, blockHashHex: changeHash, raw: spendChange.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.normalized).toHaveLength(3);
+    const [received, sent, sentChange] = result.normalized;
+
+    expect(received.direction).toBe('in');
+    expect(received.amount_sats).toBe(100_000);
+    expect(received.txid).toBe(fundTxid);
+
+    // The arithmetic under test: amount = spent inputs minus change back.
+    // 100,000 - 39,000 = 61,000. Note what it is NOT: not the 60,000 that
+    // went to the stranger, and not the 100,000 that was consumed. A sign
+    // flip or an off-by-one lands on neither number.
+    expect(sent.direction).toBe('out');
+    expect(sent.amount_sats).toBe(61_000);
+    expect(sent.address).toBe(STRANGER_ADDRESS);
+    expect(sent.txid).toBe(spendTxid);
+    expect(sent.block_height).toBe(800_002);
+    expect(sent.vin_count).toBe(1);
+    expect(sent.vout_count).toBe(2);
+
+    // Change tracking. Block 3 spends the 39,000 change output, so it is
+    // reported as an outgoing 39,000 with no change of its own. If the
+    // change output had never been recorded as ours, result.normalized
+    // would have two entries here, not three.
+    expect(sentChange.direction).toBe('out');
+    expect(sentChange.amount_sats).toBe(39_000);
+    expect(sentChange.block_height).toBe(800_003);
+
+    // The whole set round-trips through sealing, extension included.
+    expect(result.sealedTransactions).toHaveLength(3);
+    expect(result.txCount).toBe(3);
+  });
+
+  it('a pure self transfer nets to the fee alone and has no recipient to label', async () => {
+    const orStealthKey = randomKeyB64();
+    const envelope = await sealedEnvelopeFor('self-transfer', orStealthKey);
+    const ts = Math.floor(new Date('2024-06-05T00:00:00Z').getTime() / 1000);
+
+    const fund = buildFixtureBlock({
+      timestamp: ts,
+      txs: [{ outputs: [{ script: RECEIVE_0, amountSats: 100_000n }] }],
+    });
+    const fundTxid = await fixtureTxid(fund.txs[0]);
+
+    // Everything comes back to our own change address. Nothing left the
+    // wallet except the fee, so the amount must be exactly 500.
+    const consolidate = buildFixtureBlock({
+      timestamp: ts + 600,
+      txs: [
+        {
+          inputs: [{ prevTxidHex: fundTxid, voutIdx: 0 }],
+          outputs: [{ script: CHANGE_0, amountSats: 99_500n }],
+        },
+      ],
+    });
+
+    const fundHash = await blockHashOf(fund.raw);
+    const consolidateHash = await blockHashOf(consolidate.raw);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 810_000,
+      lastBlockScanned: 810_000,
+      fetchTip: async () => 810_002,
+      fetchFilter: async (h) => {
+        if (h === 810_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xc1]) };
+        if (h === 810_002) return { height: h, blockHashHex: consolidateHash, filter: new Uint8Array([0xc2]) };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === fundHash) return { height: 0, blockHashHex: fundHash, raw: fund.raw };
+        if (hashHex === consolidateHash) return { height: 0, blockHashHex: consolidateHash, raw: consolidate.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.normalized).toHaveLength(2);
+    const sent = result.normalized[1];
+    expect(sent.direction).toBe('out');
+    // 100,000 spent, 99,500 back to us: the fee, and nothing else.
+    expect(sent.amount_sats).toBe(500);
+    // Every output pays us, so there is no recipient to name. An empty
+    // string is the documented answer, not a placeholder for a failure.
+    expect(sent.address).toBe('');
+    expect(sent.vout_count).toBe(1);
+  });
+
+  it('labels a receive on the change chain with its chain 1 address', async () => {
+    // Threading a chain 1 script through the fixture is what makes the
+    // change branch of address derivation observable. If derivation ever
+    // stopped walking both chains, this receive would not be seen at all.
+    const orStealthKey = randomKeyB64();
+    const envelope = await sealedEnvelopeFor('change-chain-receive', orStealthKey);
+    const ts = Math.floor(new Date('2024-06-10T00:00:00Z').getTime() / 1000);
+
+    const block = buildFixtureBlock({
+      timestamp: ts,
+      txs: [{ outputs: [{ script: CHANGE_0, amountSats: 25_000n }] }],
+    });
+    const blockHash = await blockHashOf(block.raw);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 820_000,
+      lastBlockScanned: 820_000,
+      fetchTip: async () => 820_001,
+      fetchFilter: async (h) =>
+        h === 820_001 ? { height: h, blockHashHex: blockHash, filter: new Uint8Array([0xd1]) } : null,
+      fetchBlock: async () => ({ height: 0, blockHashHex: blockHash, raw: block.raw }),
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.normalized).toHaveLength(1);
+    expect(result.normalized[0].direction).toBe('in');
+    expect(result.normalized[0].amount_sats).toBe(25_000);
+    expect(result.normalized[0].address).toBe(CHANGE_0_ADDRESS);
+    // Sanity: the change address is genuinely a different string from the
+    // receive-chain address at the same index, so this assertion cannot
+    // pass by accident on a chain 0 label.
+    expect(CHANGE_0_ADDRESS).not.toBe(deriveAddress(BIP84_XPUB, 0, 0, 'p2wpkh'));
+  });
+
+  it('detects a spend that is only found in a rolling window extension pass', async () => {
+    // The extension loop carries its own copy of the spend arithmetic,
+    // and it was as unreached as the main one. Setup:
+    //   block 1 pays receive index 5, which is inside the initial window
+    //     [0, 10) and at the near-edge threshold, so extension fires.
+    //   block 2 spends that outpoint and pays 39,000 to receive index 12,
+    //     which no initial-window scan can match. The stub matcher models
+    //     that honestly: it matches a block only when the script that
+    //     block pays is among the scripts it was handed.
+    // So the spending transaction is seen for the first time inside the
+    // extension pass, which is the branch under test.
+    const orStealthKey = randomKeyB64();
+    const envelope = await sealedEnvelopeFor('spend-in-extension', orStealthKey);
+    const ts = Math.floor(new Date('2024-06-20T00:00:00Z').getTime() / 1000);
+
+    const nearEdge = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 5, 'p2wpkh');
+    const beyondWindow = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 12, 'p2wpkh');
+
+    const fund = buildFixtureBlock({
+      timestamp: ts,
+      txs: [{ outputs: [{ script: nearEdge, amountSats: 100_000n }] }],
+    });
+    const fundTxid = await fixtureTxid(fund.txs[0]);
+
+    const spend = buildFixtureBlock({
+      timestamp: ts + 600,
+      txs: [
+        {
+          inputs: [{ prevTxidHex: fundTxid, voutIdx: 0 }],
+          outputs: [
+            { script: STRANGER, amountSats: 60_000n },
+            { script: beyondWindow, amountSats: 39_000n },
+          ],
+        },
+      ],
+    });
+    const spendTxid = await fixtureTxid(spend.txs[0]);
+
+    const fundHash = await blockHashOf(fund.raw);
+    const spendHash = await blockHashOf(spend.raw);
+
+    const scriptPresent = (scripts: readonly Uint8Array[], target: Uint8Array): boolean =>
+      scripts.some((s) => s.length === target.length && s.every((b, i) => b === target[i]));
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 830_000,
+      lastBlockScanned: 830_000,
+      fetchTip: async () => 830_002,
+      fetchFilter: async (h) => {
+        if (h === 830_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xe1]) };
+        if (h === 830_002) return { height: h, blockHashHex: spendHash, filter: new Uint8Array([0xe2]) };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === fundHash) return { height: 0, blockHashHex: fundHash, raw: fund.raw };
+        if (hashHex === spendHash) return { height: 0, blockHashHex: spendHash, raw: spend.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      // GCS semantics without WASM: a filter matches only when the script
+      // its block actually pays is in the list handed to the matcher.
+      matcher: {
+        matchAny: (filter, _hash, scripts) => {
+          if (filter[0] === 0xe1) return scriptPresent(scripts, nearEdge);
+          if (filter[0] === 0xe2) return scriptPresent(scripts, beyondWindow);
+          return false;
+        },
+      },
+    });
+
+    expect(result.normalized).toHaveLength(2);
+
+    const received = result.normalized.find((t) => t.txid === fundTxid);
+    expect(received).toBeDefined();
+    expect(received!.direction).toBe('in');
+    expect(received!.amount_sats).toBe(100_000);
+
+    const sent = result.normalized.find((t) => t.txid === spendTxid);
+    expect(sent).toBeDefined();
+    expect(sent!.direction).toBe('out');
+    // Same arithmetic as the main loop: 100,000 spent, 39,000 back to an
+    // address only the extension pass knows about, so 61,000 left.
+    expect(sent!.amount_sats).toBe(61_000);
+    expect(sent!.address).toBe(STRANGER_ADDRESS);
+    expect(sent!.block_height).toBe(830_002);
+
+    // The match landed at the near-edge threshold, so the caller is told
+    // the window was extended.
+    expect(result.windowExhausted).toBe(true);
+    expect(result.sealedTransactions).toHaveLength(2);
   });
 });

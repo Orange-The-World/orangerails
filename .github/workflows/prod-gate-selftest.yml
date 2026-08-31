@@ -1,0 +1,51 @@
+name: Prod gate selftest (no-op)
+
+# PROVES THE supabase-prod GATE STILL BLOCKS. Deploys nothing, touches no database, runs no
+# migration, reads no secret. The job body is one echo. Its only purpose is to bind to the
+# supabase-prod environment so GitHub's protection rules are exercised for real.
+#
+# WHY THIS EXISTS. On 2026-08-18 a production migration parked at this gate, ran zero steps for
+# 2 days 9 hours 56 minutes, and was cancelled. The gate worked; nothing reported that it had
+# fired. A control nobody exercises is indistinguishable from a control that has been switched
+# off - and this repo's history has several of those. So the gate gets an exercise it cannot
+# quietly fail.
+#
+# HOW IT IS USED. The `prod-gate-selftest` fleet checker dispatches this workflow, asserts the
+# run reaches `waiting` (i.e. the required-reviewer gate held), then CANCELS the run. Nobody has
+# to approve anything. If the run ever reaches a conclusion WITHOUT having waited, the gate is
+# gone and that is an alarm, not a passing test.
+#
+# WHY THE STEP TEXT MATTERS. If a human ever sees that echo in a log, it means someone approved
+# a selftest deployment by hand - harmless, but worth knowing, because it means the run was not
+# cancelled by the checker as designed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why this selftest is being run (recorded in the run title)'
+        required: false
+        default: 'scheduled gate regression check'
+        type: string
+
+permissions:
+  contents: read
+
+# Serialise: two concurrent selftests would each create a pending deployment and the checker
+# could cancel the wrong one. Never cancel-in-progress - cancelling is the checker's job.
+concurrency:
+  group: prod-gate-selftest
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    # THIS LINE IS THE ENTIRE TEST. Binding to supabase-prod makes GitHub apply that
+    # environment's required-reviewer rules to this job. If the rules are intact the job parks
+    # before its first step; if they have been removed it runs straight through.
+    environment: supabase-prod
+    steps:
+      - name: This step must never run unattended
+        run: |
+          echo "The supabase-prod gate was APPROVED by a human for a selftest run."
+          echo "Expected behaviour is for this run to be cancelled while waiting, not approved."

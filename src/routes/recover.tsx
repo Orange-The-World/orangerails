@@ -74,8 +74,12 @@ function RecoverPage() {
           newPassword,
         });
 
-      // Re-encrypt connections first. Meta is written only after all rows
-      // are migrated so a partial failure leaves the old MEK wrappers intact.
+      // Re-encrypt connections first, then transactions, then meta.
+      // Meta is written last so a partial failure leaves the STORED wrappers
+      // still pointing at the old MEK: the user can still unlock, and every
+      // row that has not moved yet still reads. That is the only property
+      // this ordering buys. It does NOT make a retry safe. See the note on
+      // the meta write below before relying on it.
       // credentials subkey changes with the MEK.
       const { data: conns, error: connsErr } = await (supabase as any)
         .from("connections")
@@ -136,12 +140,37 @@ function RecoverPage() {
       }
 
       // All ciphertexts migrated. Persist rotated vault meta now that every
-      // row is safely under the new MEK. Writing meta last means the old
-      // enc_mek_ciphertext and recovery_ciphertext remain valid for a retry
-      // if any row migration above threw -- the user is never left with
-      // invalidated wrappers and un-migrated rows simultaneously.
+      // row is under the new MEK.
+      //
+      // WHAT WRITING META LAST ACTUALLY BUYS, and what it does not.
+      // If a row migration above threw, the stored enc_mek_ciphertext and
+      // recovery_ciphertext still wrap the OLD MEK, so the user can still
+      // unlock and every un-migrated row still reads. Nothing stored is
+      // invalidated. That is real and it is why this order stays.
+      //
+      // It does NOT make a retry safe. recoverWithCode() generates a FRESH
+      // random MEK on every call and nothing records which rows already
+      // moved, so after a partial failure the rows are split across two MEKs.
+      // A retry unwraps the old MEK again and cannot read the rows the first
+      // attempt already rewrote: it throws on the first of them. Recovering
+      // from a partial migration needs a resumable or per-row-keyed rotation,
+      // which does not exist yet. Do not describe this path as retryable.
+      //
+      // Worse than a failed retry: from the first rewritten row until this
+      // write lands, the ONLY copy of the new MEK is in this page's memory.
+      // It is not in the recovery ciphertext, not in the password wrapper,
+      // not on the server. Closing or reloading the tab anywhere in that
+      // window strands every row that already moved, permanently. The
+      // migration loop above is therefore the dangerous stretch, not this
+      // write, and the user-facing copy should say so for the whole loop.
       // vault_verifier_ciphertext MUST be updated: it is derived from the MEK.
-      const { error: updateErr } = await (supabase as any)
+      // This write has to be PROVEN to have landed, not assumed. Every row above
+      // is now under the new MEK and the only copies of that MEK are the wrappers
+      // in this statement. An update that matches zero rows comes back without an
+      // error, so the row count is the only signal that it actually happened.
+      // The compare-and-swap on recovery_ciphertext (read at the top of this
+      // submit) makes a concurrent rotation fail loudly rather than be overwritten.
+      const { data: updatedRows, error: updateErr } = await (supabase as any)
         .from("user_vault_meta")
         .update({
           enc_mek_ciphertext: newEncMekCiphertext,
@@ -149,12 +178,23 @@ function RecoverPage() {
           vault_verifier_ciphertext: newVerifierCiphertext,
           vault_key_version: CURRENT_VAULT_KEY_VERSION,
         })
-        .eq("user_id", session.user.id);
+        .eq("user_id", session.user.id)
+        .eq("recovery_ciphertext", meta.recovery_ciphertext)
+        .select("user_id");
       if (updateErr) throw updateErr;
+      if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
+        throw new Error(
+          "Vault recovery did not save. Your data has been re-encrypted but the new keys were not stored. Do not close or reload this page, and contact support with this message.",
+        );
+      }
 
-      // Zero old key material.
-      // clearMigrationKeys is intentionally NOT called in the catch branch below
-      // so in-session retry can reuse the stashed old keys.
+      // Zero old key material. Only reached once the meta write above is
+      // proven to have landed.
+      // clearMigrationKeys is deliberately NOT called in the catch branch
+      // below: after a partial failure these stashed subkeys are the only
+      // thing that can still read data left under the old MEK in this
+      // session. Keeping them is worth doing on its own; it is not the same
+      // as the migration being retryable, and it does not make it so.
       clearMigrationKeys();
 
       void logSecurityEvent(supabase, session.user.id, "vault_recover");

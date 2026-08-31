@@ -33,6 +33,11 @@ export const HKDF_CONTEXTS = Object.freeze({
   /** Encrypts the user's PQC secret keys (hybrid KEM + ML-DSA) at rest. */
   ORANGERAILS_PQC_SECRET_WRAP_V1: 'orangerails-pqc-secret-wrap-v1',
   /**
+   * Wraps the envelope v3 vault keyring blob stored in
+   * user_vault_meta.keyring_ciphertext. See src/lib/keyring.ts.
+   */
+  ORANGERAILS_KEYRING_WRAP_V1: 'orangerails-keyring-wrap-v1',
+  /**
    * HMAC key for blind index computation. Never used for encryption , only for
    * deterministic HMAC-SHA256 of plaintext field values before storage.
    * Keeping this context separate means a leaked HMAC output cannot help an
@@ -104,6 +109,33 @@ export async function deriveTransactionsKey(mek: CryptoKey, saltB64: string): Pr
  */
 export async function derivePqcSecretWrapKey(mek: CryptoKey, saltB64: string): Promise<CryptoKey> {
   return deriveSubkey(mek, HKDF_CONTEXTS.ORANGERAILS_PQC_SECRET_WRAP_V1, saltB64);
+}
+
+/**
+ * Derive the AES-256-GCM key that wraps the envelope v3 vault keyring.
+ *
+ * The keyring holds the random data keys, so this is the one key that must
+ * change on every MEK rotation and the one key that must never be derivable
+ * from anything except the MEK. Non-extractable: it is used only for a local
+ * wrap/unwrap of user_vault_meta.keyring_ciphertext and, unlike the data keys
+ * themselves, it is never exported for the sync handoff.
+ */
+export async function deriveKeyringWrapKey(mek: CryptoKey, saltB64: string): Promise<CryptoKey> {
+  const saltBytes = base64ToBytes(saltB64);
+  const infoBytes = new TextEncoder().encode(HKDF_CONTEXTS.ORANGERAILS_KEYRING_WRAP_V1);
+
+  const rawBits = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: saltBytes as BufferSource,
+      info: infoBytes as BufferSource,
+    },
+    mek,
+    256,
+  );
+
+  return importAesKeyNonExtractable(rawBits);
 }
 
 /**

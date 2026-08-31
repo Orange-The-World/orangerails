@@ -70,6 +70,24 @@ export function strikeSubscriptionErrorMarker(message: string): string {
   return 'STRIKE_SUBSCRIPTION_FAILED';
 }
 
+/**
+ * Classify a drain-event fetch failure into a fixed closed-vocabulary reason
+ * code. Raw error text MUST NOT enter the marker: encrypted_last_error is a
+ * plaintext field consumed downstream, and provider error strings can carry
+ * entity ids or URLs. The raw message is already logged by the caller.
+ *
+ * Strike API errors arrive as `Strike <status> GET /<path>: <detail>`, so
+ * the status code drives the class.
+ */
+export function classifyDrainEventError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/\b404\b|not.?found/i.test(msg)) return 'NOT_FOUND';
+  if (/\b(401|403)\b|unauthori|forbidden/i.test(msg)) return 'AUTH_ERROR';
+  if (/\b429\b|rate.?limit/i.test(msg)) return 'RATE_LIMITED';
+  if (/network|fetch|ECONNRESET|timeout/i.test(msg)) return 'NETWORK_ERROR';
+  return 'PROVIDER_ERROR';
+}
+
 export interface DrainConnection {
   id: string;
   strike_subscription_id: string | null;
@@ -188,6 +206,11 @@ export async function drainStrikeQueue(args: {
 
   const transactions: NormalizedTransaction[] = [];
   const processedIds: string[] = [];
+  // First per-event error encountered this drain pass. Written to
+  // encrypted_last_error by the or-sync caller so the consumer sees a
+  // CTA rather than a silently stale connection. Only the first error is
+  // captured; subsequent events continue (idempotent on retry).
+  let firstDrainEventError: string | null = null;
 
   for (const ev of events) {
     try {
@@ -245,9 +268,15 @@ export async function drainStrikeQueue(args: {
       if (norm) transactions.push(norm);
       processedIds.push(ev.id);
     } catch (err) {
-      // GET-by-id failed (404, network, CF flake). Leave processed_at NULL
-      // so the next sync retries. Log and continue with the next event.
+      // GET-by-id failed (404, auth, network, CF flake). Leave processed_at
+      // NULL so the next sync retries. Log and continue with next event.
+      // Capture the first error as a marker so or-sync can write it to
+      // encrypted_last_error; without this the connection looked healthy
+      // while the drain silently discarded every event (DL-1505 Group B).
       console.error(`[strike-queue] event ${ev.id} (${ev.event_type} ${ev.entity_id}) failed:`, err);
+      if (!firstDrainEventError) {
+        firstDrainEventError = `STRIKE_DRAIN_EVENT_FAILED:${ev.event_type}:${classifyDrainEventError(err)}`;
+      }
     }
   }
 
@@ -267,6 +296,9 @@ export async function drainStrikeQueue(args: {
   return {
     transactions,
     next_cursor: conn.last_sync_cursor, // cursor unused in the webhook model
+    // Surface the first drain-level event error to the caller so it can
+    // write it to encrypted_last_error. Null when all events processed OK.
+    ...(firstDrainEventError ? { subscriptionError: firstDrainEventError } : {}),
   };
 }
 

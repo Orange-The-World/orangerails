@@ -148,3 +148,11 @@ verify_jwt = false
 # validates X-Internal-Worker-Token itself. Gateway must pass through.
 [functions.or-quiltt-drain-alert]
 verify_jwt = false
+
+# or-queue-health is invoked by pg_cron the same way and validates the same
+# header itself. The gate comes off here and the guard inside the function
+# replaces it: they ship together. Removing this entry without removing the
+# guard makes the probe unreachable; removing the guard without this entry
+# leaves it open.
+[functions.or-queue-health]
+verify_jwt = false
