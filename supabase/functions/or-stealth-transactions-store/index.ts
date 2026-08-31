@@ -92,6 +92,11 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // value the dedup constraint would treat as a distinct transaction forever.
 const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
 
+// Block hash is accepted case-insensitively (a data source is not guaranteed
+// to hand back lowercase hex) and normalized to lowercase before it is
+// written, so what lands always matches the DB CHECK constraint.
+const BLOCK_HASH_HEX_RE = /^[0-9a-f]{64}$/i;
+
 // Cap at 10k transactions per request and 16 KB per sealed record. A whole
 // 5-year wallet history with ~500 txs comes in well under that.
 const MAX_TX_PER_REQUEST = 10_000;
