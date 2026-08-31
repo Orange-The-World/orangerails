@@ -113,13 +113,21 @@ Deno.test('hours_since_sync and sync_freshness never disagree', () => {
   }
 });
 
-Deno.test('a future stamp reports negative hours rather than a clamped zero', () => {
-  // Clock skew is reported, not hidden. A clamped zero would read as a sync
-  // that just happened, which is the exact false reassurance this signal
-  // exists to remove.
-  const result = computeSyncFreshness(hoursAgo(-5), NOW);
-  assertEquals(result.hours_since_sync, -5);
-  assertEquals(result.sync_freshness, 'fresh');
+Deno.test('a future stamp reports negative hours and a stale verdict, not fresh', () => {
+  // hours_since_sync is reported, not hidden or clamped: a clamped zero
+  // would read as a sync that just happened, which is the exact false
+  // reassurance this signal exists to remove. But the verdict itself must
+  // not give that same reassurance. A stamp in the future is not evidence
+  // of a real sync inside the freshness window, so sync_freshness is
+  // 'stale', the same principle already applied to an unparseable stamp
+  // returning 'never' rather than 'fresh'.
+  const fiveHoursFuture = computeSyncFreshness(hoursAgo(-5), NOW);
+  assertEquals(fiveHoursFuture.hours_since_sync, -5);
+  assertEquals(fiveHoursFuture.sync_freshness, 'stale');
+
+  const oneYearFuture = computeSyncFreshness(hoursAgo(-24 * 365), NOW);
+  assertEquals(oneYearFuture.hours_since_sync, -8760);
+  assertEquals(oneYearFuture.sync_freshness, 'stale');
 });
 
 Deno.test('the clock is a parameter, so one response measures one instant', () => {
