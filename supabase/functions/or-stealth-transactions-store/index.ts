@@ -126,8 +126,16 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
 /**
  * True when the caller supplied a usable "last height I actually scanned
  * contiguously" value. Anything else (absent, non-integer, negative, wrong
- * type) counts as not supplied, so an older widget that never sent the field
- * keeps behaving exactly as it did before.
+ * type) counts as not supplied.
+ *
+ * REACHABILITY, written down so nobody has to work it out again: the request
+ * validation in the handler below already answers 400 when last_block_scanned
+ * is absent, non-integer or negative, so on the live path this predicate is
+ * always true. It is kept because boundCursorAdvance is an exported pure
+ * function that must be safe for any caller, and because a bound that silently
+ * depends on a validation three hundred lines away is the coupling that rots
+ * first. It is NOT a backward-compatibility path: no client can reach this
+ * endpoint without sending the field.
  */
 export function isContiguousScannedHeight(x: unknown): x is number {
   return typeof x === 'number' && Number.isInteger(x) && x >= 0;
@@ -148,9 +156,10 @@ export function isContiguousScannedHeight(x: unknown): x is number {
  *
  * The client value is used ONLY as a ceiling, never to raise the cursor. That
  * keeps the DL-0419 property intact: a client that lies still cannot move the
- * watermark forward, it can only hold it back. When no usable value is supplied
- * we fall back to the previous behaviour rather than refusing the advance,
- * because an older widget must not have its cursor frozen by this change.
+ * watermark forward, it can only hold it back. A caller supplying no usable
+ * value gets the old, unbounded behaviour; on this endpoint that branch is
+ * unreachable, because the request validation rejects such a body with a 400.
+ * See isContiguousScannedHeight.
  *
  * In every correct sync max(block_height) is already at or below the contiguous
  * height, so this is a no-op. It only bites on the defect path.
