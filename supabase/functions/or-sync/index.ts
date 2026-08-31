@@ -142,6 +142,40 @@ export function upstreamDetailSuffix(code: string, raw: string): string {
   return code === 'UPSTREAM_OTHER' ? ` detail=${JSON.stringify(redactedUpstreamDetail(raw))}` : '';
 }
 
+// ─── sink_format enforcement guard (OR-T1183) ──────────────────────────────
+// platforms.sink_format is meant to OVERRIDE a caller-sent format, not
+// CREATE one. A platform-mode caller that sends no format at all has not
+// asked for sink mode, so enforcement must never be the thing that puts it
+// there. Split out as pure functions so the guard is unit-testable without
+// standing up a request/Supabase client.
+
+/**
+ * True only when enforcement should replace the caller's body.format with
+ * the platform's resolved sink format. Guarded to callers that sent a
+ * non-empty format: enforcement overrides what was asked for, it does not
+ * turn sink mode on for a caller that asked for nothing.
+ */
+export function shouldApplySinkFormatEnforcement(
+  enforceSinkFormat: boolean,
+  bodyFormat: string | null | undefined,
+): boolean {
+  return enforceSinkFormat && typeof bodyFormat === 'string' && bodyFormat.length > 0;
+}
+
+/**
+ * True when the platform's resolved format would flip a caller that sent NO
+ * format into sink mode -- the mode-change case sink_format-observe could
+ * not previously distinguish from a benign body-format override.
+ */
+export function wouldEnableSinkMode(
+  bodyFormat: string | null | undefined,
+  serverFormat: string | null | undefined,
+): boolean {
+  const bodyEmpty = bodyFormat == null || bodyFormat === '';
+  const serverSet = typeof serverFormat === 'string' && serverFormat.length > 0;
+  return bodyEmpty && serverSet;
+}
+
 /**
  * Determine the HTTP status for a batch sync response.
  *   200 -- every connection succeeded (or the batch was empty).
@@ -247,6 +281,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     //
     // platformId only exists on a platform-mode context, so the resolution is
     // guarded to that mode. Direct-mode callers keep the body.format fallback.
+    //
+    // Enforcement only OVERRIDES a caller-sent format (shouldApplySinkFormatEnforcement
+    // below); it must never be the thing that CREATES a format, or a caller
+    // that never asked for sink mode gets put into it (OR-T1183).
     const enforceSinkFormat = Deno.env.get('OR_SYNC_SINK_FORMAT_ENFORCE') === '1';
     let resolvedFormat: string | null = bodyFormat ?? null;
     if (ctx.mode === 'platform') {
@@ -261,10 +299,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           console.log(
             `[or-sync] sink_format-observe platform=${ctx.platformId} ` +
             `would_change=1 body_format=${bodyFormat ?? 'null'} ` +
-            `server_format=${serverFormat ?? 'null'} enforced=${enforceSinkFormat ? '1' : '0'}`,
+            `server_format=${serverFormat ?? 'null'} enforced=${enforceSinkFormat ? '1' : '0'} ` +
+            `would_enable_sink_mode=${wouldEnableSinkMode(bodyFormat, serverFormat) ? '1' : '0'}`,
           );
         }
-        if (enforceSinkFormat) {
+        if (shouldApplySinkFormatEnforcement(enforceSinkFormat, bodyFormat)) {
           resolvedFormat = serverFormat;
         }
       } catch (resolveErr) {
