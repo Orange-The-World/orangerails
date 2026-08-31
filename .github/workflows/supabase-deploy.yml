@@ -816,7 +816,7 @@ jobs:
           # applied set is UNKNOWN, and UNKNOWN is not the same fact as empty.
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
-          jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
+          jq -n '{query:"SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
 
           RESPONSE=""
           HTTP_OK=0
