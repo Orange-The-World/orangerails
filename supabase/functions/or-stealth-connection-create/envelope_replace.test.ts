@@ -206,7 +206,7 @@ Deno.test('with coverage recorded, an envelope replacement makes the next sync s
   const conn = db.connections[0];
   assertEquals(conn.sealed_envelope, NEW_ENVELOPE);
   assertEquals(conn.wallet_birthday_plaintext, '2023-06-01');
-  assertEquals(conn.last_block_scanned, null, 'the cursor is cleared alongside the coverage');
+  assertEquals(conn.last_block_scanned, null, 'the cursor is cleared as well as the coverage');
   assertEquals(db.ranges.length, 0, 'the coverage rows are gone');
 });
 
@@ -487,7 +487,8 @@ Deno.test('a half applied reset over an unscanned gap starts at the birthday, no
     nextSyncStartHeight(db, CONNECTION, GAP_BIRTHDAY),
     GAP_BIRTHDAY,
     'the half applied reset must start at the wallet birthday and not at the old cursor ' +
-      'plus one (851000 - 1 + 1). Under the previous write order this returned 850001, ' +
+      'plus one. Under the previous write order this returned 850001, the old cursor ' +
+      'plus one, '
       'and 700000 to 799999 was then invisible to every future sync, permanently, with ' +
       'no error and nothing the user could see.',
   );
