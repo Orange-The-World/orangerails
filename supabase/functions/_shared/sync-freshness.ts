@@ -116,8 +116,16 @@ export function computeSyncFreshness(
   const hoursSinceSync =
     Math.round(((now.getTime() - stampedAt) / MS_PER_HOUR) * 100) / 100;
 
+  // A negative hoursSinceSync means the stored stamp is in the future. That
+  // is not evidence of a real sync inside the freshness window, so it must
+  // not return the value that means all is well, the same rule already
+  // applied a few lines up to an unparseable stamp. hours_since_sync itself
+  // is left exactly as computed, negative and all: only the verdict gets
+  // the lower bound.
+  const isFresh = hoursSinceSync >= 0 && hoursSinceSync <= STALE_AFTER_HOURS;
+
   return {
-    sync_freshness: hoursSinceSync <= STALE_AFTER_HOURS ? 'fresh' : 'stale',
+    sync_freshness: isFresh ? 'fresh' : 'stale',
     hours_since_sync: hoursSinceSync,
     stale_after_hours: STALE_AFTER_HOURS,
   };
