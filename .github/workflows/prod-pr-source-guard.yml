@@ -164,21 +164,15 @@ jobs:
             exit 0
           fi
 
-          if [ "${HEAD_REF}" = "dev" ]; then
-            echo "This is the promotion PR. Allowed."
-            exit 0
-          fi
-
-          if printf '%s' "${LABELS}" | jq -e 'any(. == "prod-hotfix")' >/dev/null; then
-            echo "::warning::Emergency hotfix straight to prod, allowed by the 'prod-hotfix' label."
-            echo "::warning::This creates a commit that exists only on prod. Back-merge prod into dev the SAME DAY, or the promotion PR will conflict and the cherry-pick loop starts again."
-            exit 0
-          fi
-
-          # A promotion from a release branch. Allowed only if the commit graph
-          # says dev already contains this exact sha. One API call: no clone, no
-          # git, no checkout. The job holds contents: read and that is all a
-          # compare needs.
+          # Gather the one input the decision needs that cannot be read off a
+          # string: does dev already contain this exact sha? One API call: no
+          # clone, no git. The job holds contents: read and that is all a
+          # compare needs. Only asked for a release/* head, because that is the
+          # only head the decision uses it for.
+          #
+          # GATHERING IS ALL THIS DOES. The decision itself is made once, below,
+          # by the same script the self-test step exercised.
+          ANCESTRY=""
           case "${HEAD_REF}" in
             release/*)
               echo ""
@@ -193,15 +187,34 @@ jobs:
               # finding, and this is not another one.
               ANCESTRY="$(gh api "repos/${GH_REPO}/compare/dev...${HEAD_SHA}" --jq .status || true)"
               echo "compare status: '${ANCESTRY:-<none>}'"
+              ;;
+          esac
 
-              if [ "${ANCESTRY}" = "behind" ] || [ "${ANCESTRY}" = "identical" ]; then
-                echo ""
-                echo "Allowed. Every commit on '${HEAD_REF}' is already on dev, so merging"
-                echo "this into prod cannot create a commit that exists only on prod, which"
-                echo "is the thing this gate exists to prevent."
-                exit 0
-              fi
+          VERDICT="$(bash "${GITHUB_WORKSPACE}/scripts/prod-source-verdict.sh" "${HEAD_REF}" "${LABELS}" "${ANCESTRY}")"
+          echo ""
+          echo "verdict: ${VERDICT}"
+          echo ""
 
+          case "${VERDICT}" in
+            allow-promotion)
+              echo "This is the promotion PR. Allowed."
+              exit 0
+              ;;
+
+            allow-hotfix)
+              echo "::warning::Emergency hotfix straight to prod, allowed by the 'prod-hotfix' label."
+              echo "::warning::This creates a commit that exists only on prod. Back-merge prod into dev the SAME DAY, or the promotion PR will conflict and the cherry-pick loop starts again."
+              exit 0
+              ;;
+
+            allow-release)
+              echo "Allowed. Every commit on '${HEAD_REF}' is already on dev, so merging"
+              echo "this into prod cannot create a commit that exists only on prod, which"
+              echo "is the thing this gate exists to prevent."
+              exit 0
+              ;;
+
+            block-ancestry)
               echo "::error::Could not confirm that '${HEAD_REF}' is contained in dev. compare dev...${HEAD_SHA} returned '${ANCESTRY:-nothing}', and only 'behind' or 'identical' are accepted. Blocked."
               echo ""
               echo "Read this as a DIFFERENT failure from 'your branch is not dev'. The"
@@ -219,23 +232,30 @@ jobs:
               echo "                    blocks on purpose rather than guessing."
               exit 1
               ;;
-          esac
 
-          echo "::error::A pull request into prod must come from dev, or from a release/* branch that dev already contains. This one comes from '${HEAD_REF}'."
-          echo ""
-          echo "Why this is blocked:"
-          echo "  Merging this would create a commit that exists only on prod. That is what"
-          echo "  makes the promotion PR conflict, which is what forces the next fix to be"
-          echo "  cherry-picked onto prod, which deepens the conflict again."
-          echo ""
-          echo "What to do instead:"
-          echo "  1. Open this against dev. It reaches prod with the next promotion."
-          echo "  2. If the content is ALREADY in dev, this PR is a hand-promotion. Close it:"
-          echo "     the promotion PR carries it, and merging it here only adds divergence."
-          echo "  3. If you are promoting, cut a 'release/<name>' branch at a sha that is"
-          echo "     already on dev and open the promotion from that. It is accepted because"
-          echo "     dev contains it, and unlike dev itself it does not move under review."
-          echo "  4. If prod is genuinely broken right now and cannot wait for a promotion,"
-          echo "     add the 'prod-hotfix' label. That is deliberate, visible and auditable,"
-          echo "     and it obliges you to back-merge prod into dev the same day."
-          exit 1
+            block)
+              echo "::error::A pull request into prod must come from dev, or from a release/* branch that dev already contains. This one comes from '${HEAD_REF}'."
+              echo ""
+              echo "Why this is blocked:"
+              echo "  Merging this would create a commit that exists only on prod. That is what"
+              echo "  makes the promotion PR conflict, which is what forces the next fix to be"
+              echo "  cherry-picked onto prod, which deepens the conflict again."
+              echo ""
+              echo "What to do instead:"
+              echo "  1. Open this against dev. It reaches prod with the next promotion."
+              echo "  2. If the content is ALREADY in dev, this PR is a hand-promotion. Close it:"
+              echo "     the promotion PR carries it, and merging it here only adds divergence."
+              echo "  3. If you are promoting, cut a 'release/<name>' branch at a sha that is"
+              echo "     already on dev and open the promotion from that. It is accepted because"
+              echo "     dev contains it, and unlike dev itself it does not move under review."
+              echo "  4. If prod is genuinely broken right now and cannot wait for a promotion,"
+              echo "     add the 'prod-hotfix' label. That is deliberate, visible and auditable,"
+              echo "     and it obliges you to back-merge prod into dev the same day."
+              exit 1
+              ;;
+
+            *)
+              echo "::error::The decision script returned '${VERDICT}', which is not a verdict this job knows how to act on. Blocked: a gate that does not understand its own answer must not wave anything through."
+              exit 1
+              ;;
+          esac
