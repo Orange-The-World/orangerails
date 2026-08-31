@@ -20,7 +20,10 @@ import {
   persistRewrappedVaultMeta,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
+  RECOVERY_PARTIAL_FAILURE_MESSAGE,
+  VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE,
   type VaultPersistClient,
+  type VaultRotationPartialFailure,
 } from "../vault-persist";
 
 type QueryResult = { data: unknown[] | null; error: unknown };
@@ -89,6 +92,13 @@ interface FakeOptions {
    * short page is not evidence that the table is exhausted.
    */
   maxRows?: number;
+  /**
+   * Fail the update of ONE named row. This is what a dropped connection, an
+   * RLS refusal or a mid-walk timeout looks like from here: earlier rows were
+   * rewritten, this one was not, and the rotation stops with the vault split
+   * across two keys.
+   */
+  failUpdate?: { table: string; id: string; error: unknown };
 }
 
 /**
@@ -131,6 +141,12 @@ function makeFakeClient(options: FakeOptions = {}) {
     }
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
+    }
+    if (options.failUpdate && call.table === options.failUpdate.table) {
+      const id = call.filters.find((f) => f.column === "id")?.value;
+      if (id === options.failUpdate.id) {
+        return { data: null, error: options.failUpdate.error };
+      }
     }
     return options.otherUpdate ?? { data: [], error: null };
   }
@@ -587,5 +603,138 @@ describe("vault password change: the re-wrapped meta write", () => {
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     expect(calls.every((c) => c.table === "user_vault_meta")).toBe(true);
+  });
+});
+
+describe("vault recovery: a failure part way through the row walks", () => {
+  /**
+   * An ordinary PostgREST failure. Nothing exotic is needed to reach this
+   * path: a dropped connection, an RLS refusal or a timeout on a large vault
+   * all arrive here looking like this.
+   */
+  const RAW_DB_ERROR = {
+    message: "Could not update row: connection reset by peer",
+    code: "PGRST301",
+  };
+
+  const twoConnections: FakeOptions = {
+    rows: {
+      connections: [
+        { id: "conn-1", encrypted_credentials: "creds-1", encrypted_label: null },
+        { id: "conn-2", encrypted_credentials: "creds-2", encrypted_label: null },
+      ],
+    },
+  };
+
+  /** Resolve with the rejection reason, so a test can assert on the value itself. */
+  async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+    return promise.then(
+      () => {
+        throw new Error("expected a rejection and there was none");
+      },
+      (err) => err,
+    );
+  }
+
+  it("warns the user not to close the page when the SECOND connection row fails", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      ...twoConnections,
+      failUpdate: { table: "connections", id: "conn-2", error: RAW_DB_ERROR },
+    });
+
+    // conn-1 has already been rewritten under the new MEK and the only copy of
+    // that MEK is in session memory. Showing a database error here is what
+    // makes the user reload, and reloading is what makes the loss permanent.
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(RECOVERY_PARTIAL_FAILURE_MESSAGE);
+
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("says which password still opens the vault, because it is not the new one", async () => {
+    const { client } = makeFakeClient({
+      ...twoConnections,
+      failUpdate: { table: "connections", id: "conn-2", error: RAW_DB_ERROR },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    ).rejects.toThrow(VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE);
+  });
+
+  it("keeps the underlying error for support, after the warning and not as the headline", async () => {
+    const { client } = makeFakeClient({
+      ...twoConnections,
+      failUpdate: { table: "connections", id: "conn-2", error: RAW_DB_ERROR },
+    });
+
+    const err = (await rejectionOf(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    )) as VaultRotationPartialFailure;
+
+    expect(err.underlyingError).toEqual(RAW_DB_ERROR);
+    expect(err.message).toContain("Could not update row: connection reset by peer");
+    // Order is the point, not mere presence. If a refactor ever promotes the
+    // database detail back to the front of the message, this goes red.
+    expect(err.message.indexOf("Do not close or reload this page")).toBeLessThan(
+      err.message.indexOf("Could not update row"),
+    );
+  });
+
+  it("warns the same way for a transaction row, with no connections involved at all", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      rows: {
+        encrypted_transactions: [
+          { id: "txn-1", encrypted_payload: "payload-1" },
+          { id: "txn-2", encrypted_payload: "payload-2" },
+        ],
+      },
+      failUpdate: { table: "encrypted_transactions", id: "txn-2", error: RAW_DB_ERROR },
+    });
+
+    // No connections, so the transaction walk has to record the write itself
+    // rather than inheriting the flag from the walk above it. The trigger is
+    // "has anything been written", not "which statement failed".
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(RECOVERY_PARTIAL_FAILURE_MESSAGE);
+
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("passes a failure that happened BEFORE any write through untouched", async () => {
+    const raw = { message: "permission denied for table connections" };
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      selectResult: { connections: { data: null, error: raw } },
+    });
+
+    const err = await rejectionOf(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    );
+
+    // Identity, not shape: the raw error is handed back exactly as thrown.
+    // Nothing was rewritten, so nothing is lost and there is nothing to warn
+    // about. Dressing an ordinary permission error up as key loss would teach
+    // users to ignore the one warning that matters.
+    expect(err).toBe(raw);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("keeps the specific meta-not-saved message instead of replacing it with the generic one", async () => {
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      metaUpdate: { data: [], error: null },
+    });
+
+    const err = (await rejectionOf(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    )) as Error;
+
+    expect(err.message).toContain(RECOVERY_META_NOT_SAVED_MESSAGE);
+    expect(err.message).not.toContain("stopped part way through");
   });
 });
