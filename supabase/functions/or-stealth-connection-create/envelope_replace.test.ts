@@ -67,6 +67,15 @@ interface RecordedCall {
 interface FailurePoint {
   table: string;
   op: 'delete' | 'update';
+  /**
+   * Which occurrence of that table and op to fail, 1-based. The reset issues
+   * TWO updates against stealth_connections now (the cursor clear, then the
+   * envelope), so a failure point that names only the table would break the
+   * first one and a case meaning to test the second would silently test the
+   * first instead. Omitted means fail every occurrence, which is what the
+   * single-write cases want.
+   */
+  nth?: number;
 }
 
 function makeClient(db: FakeDb, failAt: FailurePoint | null = null) {
@@ -84,7 +93,11 @@ function makeClient(db: FakeDb, failAt: FailurePoint | null = null) {
       then(resolve: (r: { error: unknown }) => void) {
         calls.push({ table, op, filters });
 
-        if (failAt && failAt.table === table && failAt.op === op) {
+        const occurrence = calls.filter((c) => c.table === table && c.op === op).length;
+        if (
+          failAt && failAt.table === table && failAt.op === op &&
+          (failAt.nth === undefined || failAt.nth === occurrence)
+        ) {
           resolve({ error: { message: 'simulated database failure' } });
           return;
         }
@@ -313,6 +326,17 @@ Deno.test('a failed coverage clear reports an error and does not replace the env
       'user would hold a new envelope with stale coverage and no rescan',
   );
   assertEquals(db.ranges.length, 1);
+
+  // The cursor clear landed before the delete was attempted, so the residual
+  // state is a null cursor behind intact coverage. That arm can only return
+  // the birthday or a to_height that was genuinely scanned, so it cannot skip
+  // a block: losing the cursor is the harmless half by construction.
+  assertEquals(db.connections[0].last_block_scanned, null);
+  assertEquals(
+    nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT),
+    COVERAGE_TOP,
+    'the coverage arm answers, at a height this connection really did scan',
+  );
 });
 
 // ── 6. OR-T1242: an absent birthday must not be collapsed with an explicit null ──
@@ -361,9 +385,12 @@ Deno.test('wallet_birthday_plaintext sent as an explicit null still clears it (w
   );
 });
 
-Deno.test('a failed envelope write reports an error and leaves the connection rescanning', async () => {
+Deno.test('a failed envelope write reports an error and leaves the connection rescanning from the birthday', async () => {
   const db = dbWithCoverage();
-  const { client } = makeClient(db, { table: 'stealth_connections', op: 'update' });
+  // The SECOND update against stealth_connections is the envelope. The first
+  // is the cursor clear, and it must be allowed to land for this to be the
+  // half applied state at all.
+  const { client } = makeClient(db, { table: 'stealth_connections', op: 'update', nth: 2 });
 
   const result = await applyEnvelopeReplacement(client, CONNECTION, {
     sealed_envelope: NEW_ENVELOPE,
@@ -371,15 +398,97 @@ Deno.test('a failed envelope write reports an error and leaves the connection re
   });
 
   assert(isEnvelopeReplacementError(result), 'a failed envelope write must not answer ok');
-  assertEquals(db.ranges.length, 0, 'coverage went first, so this half already landed');
+  assertEquals(db.ranges.length, 0, 'the cursor clear and the coverage delete both landed');
+  assertEquals(db.connections[0].sealed_envelope, OLD_ENVELOPE, 'only the envelope write was lost');
+  assertEquals(db.connections[0].last_block_scanned, null, 'the cursor was cleared first');
 
-  // The residual state is the OLD envelope with its cursor untouched, so the
-  // connection resumes exactly where it was: one block past the cursor. That
-  // is the safe half to lose. Losing them the other way round would store the
-  // NEW envelope, carrying the birthday the user just asked for, behind
-  // coverage that still blocks the rescan, and a caller who does not retry is
-  // then back in the silent failure this whole change is about.
-  assertEquals(db.connections[0].sealed_envelope, OLD_ENVELOPE);
-  assertEquals(db.connections[0].last_block_scanned, COVERAGE_TOP);
-  assertEquals(nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT), COVERAGE_TOP + 1);
+  // Neither arm can point past the birthday now, so the residual state is the
+  // old envelope rescanning from the old birthday: slow, and correct. That is
+  // the promise the module header has always made, and before OR-T1256 it was
+  // not kept, because the cursor rode along in the write that failed and so
+  // survived at COVERAGE_TOP.
+  assertEquals(nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT), BIRTHDAY_HEIGHT);
+});
+
+// ── 7. OR-T1256: the half applied reset must not step over an unscanned gap ──
+
+const GAP_BIRTHDAY = 700_000;
+const GAP_RANGE_FROM = 800_000;
+const GAP_RANGE_TO = 850_000;
+
+/**
+ * A connection with a real hole in its coverage: it has read 800000 to 850000
+ * and nothing between its birthday at 700000 and 799999. This is the shape
+ * that makes the write order matter, because it is the shape where the cursor
+ * and the coverage map disagree about what has been read.
+ */
+function dbWithUnscannedGap(): FakeDb {
+  return {
+    connections: [
+      {
+        id: CONNECTION,
+        sealed_envelope: OLD_ENVELOPE,
+        wallet_birthday_plaintext: '2024-01-01',
+        last_block_scanned: GAP_RANGE_TO,
+      },
+    ],
+    ranges: [
+      { connection_id: CONNECTION, from_height: GAP_RANGE_FROM, to_height: GAP_RANGE_TO },
+    ],
+  };
+}
+
+Deno.test('the cursor is cleared before the coverage rows are deleted', async () => {
+  const db = dbWithUnscannedGap();
+  const { client, calls } = makeClient(db);
+
+  await applyEnvelopeReplacement(client, CONNECTION, {
+    sealed_envelope: NEW_ENVELOPE,
+    wallet_birthday_plaintext: '2021-01-01',
+  });
+
+  const cursorClear = calls.findIndex((c) => c.table === 'stealth_connections' && c.op === 'update');
+  const coverageClear = calls.findIndex((c) => c.table === 'stealth_scan_ranges' && c.op === 'delete');
+  assert(cursorClear >= 0, 'no update was issued against the connection row');
+  assert(coverageClear >= 0, 'no delete was issued against the coverage table');
+  assert(
+    cursorClear < coverageClear,
+    'a lost cursor can never cause a skip and a lost coverage row can, so the cursor ' +
+      'clear must be issued first. The case below is what a reorder costs.',
+  );
+});
+
+Deno.test('a half applied reset over an unscanned gap starts at the birthday, not one past the old cursor', async () => {
+  const db = dbWithUnscannedGap();
+
+  // PRECONDITION, and the whole point of the case: before the reset this
+  // connection heals itself. No recorded range contains the birthday, so the
+  // coverage arm declines to skip ahead and the next sync re-reads the hole.
+  assertEquals(
+    nextSyncStartHeight(db, CONNECTION, GAP_BIRTHDAY),
+    GAP_BIRTHDAY,
+    'precondition: coverage that does not reach the birthday leaves the gap self healing',
+  );
+
+  // Fail the LAST write. The cursor clear and the coverage delete have both
+  // landed by then, which is exactly the half applied state.
+  const { client } = makeClient(db, { table: 'stealth_connections', op: 'update', nth: 2 });
+  const result = await applyEnvelopeReplacement(client, CONNECTION, {
+    sealed_envelope: NEW_ENVELOPE,
+    wallet_birthday_plaintext: '2021-01-01',
+  });
+
+  assert(isEnvelopeReplacementError(result), 'a failed envelope write must not answer ok');
+  assertEquals(db.ranges.length, 0, 'the coverage delete landed');
+  assertEquals(db.connections[0].sealed_envelope, OLD_ENVELOPE, 'the envelope write did not');
+  assertEquals(db.connections[0].last_block_scanned, null, 'the cursor was cleared first');
+
+  assertEquals(
+    nextSyncStartHeight(db, CONNECTION, GAP_BIRTHDAY),
+    GAP_BIRTHDAY,
+    'the half applied reset must start at the wallet birthday and not at the old cursor ' +
+      'plus one (851000 - 1 + 1). Under the previous write order this returned 850001, ' +
+      'and 700000 to 799999 was then invisible to every future sync, permanently, with ' +
+      'no error and nothing the user could see.',
+  );
 });
