@@ -637,8 +637,68 @@ jobs:
 
           echo "0 anon-executable function(s) in schema public on ${SUPABASE_REF} (outside the allowlist)."
 
+  # ---------------------------------------------------------------------------
+  # OR-T1184. This comparison already existed and was in the wrong place: it sat
+  # inside check-pending-migrations, which declares needs: [target,
+  # apply-migrations], so it ran AFTER the apply it was meant to gate. A report
+  # downstream of the act it describes is not a gate.
+  #
+  # It is its own job, with NO needs at all: it reads only the checked-out tree,
+  # so it does not need the target project resolved and it can start at once.
+  # apply-migrations declares it in needs, so a colliding pair now STOPS the
+  # apply rather than being described after it.
+  #
+  # Deliberately not a required status check on any branch: this workflow only
+  # runs on a push to dev or prod, so it can never gate a merge. What it gates
+  # is the apply that follows the merge.
+  # ---------------------------------------------------------------------------
+  check-migration-versions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: No two migration files may share a version prefix
+        run: |
+          set -uo pipefail
+          MIG_DIR="supabase/migrations"
+
+          # A count, always, on every path. A check that cannot say how many
+          # files it looked at cannot tell "checked 60, found none" apart from
+          # "looked at nothing and finished".
+          TOTAL=$(ls "$MIG_DIR"/*.sql 2>/dev/null | wc -l)
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "0 migration file(s) in ${MIG_DIR}; no versions to compare."
+            exit 0
+          fi
+
+          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
+          if [ -z "$DUPES" ]; then
+            echo "${TOTAL} migration file(s) checked, 0 duplicate version prefix(es)."
+            exit 0
+          fi
+
+          {
+            echo "## :rotating_light: Duplicate migration version(s) -- apply BLOCKED"
+            echo ""
+            for V in $DUPES; do
+              echo "\`${V}\` is used by more than one file:"
+              echo ""
+              ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
+              echo ""
+            done
+            echo "\`supabase_migrations.schema_migrations\` stores one row per version, so"
+            echo "at most one of these can ever be tracked. Applying them would record the"
+            echo "first and count the rest as applied whether they ran or not, on every"
+            echo "project, permanently. Rename the later file to an unused timestamp."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- refusing to apply. See the step summary."
+          exit 1
+
   apply-migrations:
-    needs: [target]
+    needs: [target, check-migration-versions]
     # A PUSH TO DEV REACHES THIS JOB. That is the whole change: dev applies its
     # own migrations at merge time, so the dev backlog is always 0 or 1 and prod
     # promotion is a batch that has already run once on a real database.
