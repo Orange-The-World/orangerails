@@ -3,13 +3,31 @@
  *
  * Master plan: STEALTH-SYNC-MASTER-PLAN.md section 4.6.
  *
- * Called by the widget in step 4 of the sync flow (sync.tsx lines 286-337),
- * after or-stealth-transactions-store has stored any new sealed transactions.
- * or-stealth-transactions-store advances last_block_scanned only to the max
- * block_height of rows it actually committed; this function advances it to the
- * true scan tip (the chain tip at the time runSync finished), so syncs that
- * found zero matching transactions still move the window forward and the next
- * sync does not rescan the same range.
+ * Called by the widget in step 5 of the sync flow (sync.tsx, the persist-cursor
+ * step), after or-stealth-transactions-store has stored any new sealed
+ * transactions (step 3, when there were any). or-stealth-transactions-store
+ * advances last_block_scanned only to the max block_height of rows it
+ * actually committed; this function advances the cursor to WHATEVER HEIGHT
+ * THE CLIENT REPORTS in last_block_scanned, so syncs that found zero matching
+ * transactions still move the window forward and the next sync does not
+ * rescan the same range.
+ *
+ * THAT IS NOT "the chain tip", and it never was: an earlier version of this
+ * comment claimed the cursor advances to "the true scan tip (the chain tip at
+ * the time runSync finished)". False. sync.tsx sends
+ * result.lastBlockScanned, which is lastContiguousScanned -- the last height
+ * the client's own scan loop actually walked, held back by CONFIRMATION_DEPTH
+ * and by the gap-safety trims in src/stealth/lib/sync.ts. If a future caller
+ * were built to honour the OLD wording and send the real chain tip instead,
+ * the cursor would step over whatever gap the client's scan stopped short of,
+ * and nothing in this function would catch it. See the OR-T1177 notes on
+ * advanceCursor (cursor.ts) and buildScanRangeArgs (scan_range.ts) for why:
+ * unlike or-stealth-transactions-store, which cross-checks the client's claim
+ * against the height of a transaction it actually persisted, this function
+ * receives no data it can independently verify a scan tip against. The
+ * safety property here rests entirely on the caller sending the same value
+ * it sends to the store endpoint, which is true today by construction of
+ * sync.tsx, not by construction of this function.
  *
  * POST body:
  *   connection_id:      string (uuid)
