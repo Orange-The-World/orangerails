@@ -136,6 +136,18 @@ export async function resolveQuilttConfigForPlatform(
  * platform row has sink_format populated, server-side resolution wins
  * (defends against a malicious or buggy caller asking for a sink that's not
  * theirs). If the column is NULL (transition state), fall back to body.format.
+ *
+ * `sink_format = 'none'` is the explicit no-sink sentinel (OR-T1208): a
+ * platform row that has been backfilled to say "this platform deliberately
+ * has no sink" rather than "this platform hasn't been migrated yet" (NULL).
+ * It is a real, registered value in platforms_sink_format_registered, but it
+ * must never reach or-sync as a format string -- getSinkAdapter('none')
+ * would 400 with "Unknown format: none". Map it to null here, at the single
+ * point every caller resolves through, so "no sink" and "not yet configured"
+ * both come out as null and or-sync's sink-mode check (index.ts, `sinkMode =
+ * typeof format === 'string' && format.length > 0`) naturally stays out of
+ * sink mode for either one. No second sentinel check is needed at that call
+ * site: it only ever sees the value this function returns.
  */
 export async function resolveSinkFormatForPlatform(
   service: SupabaseClient,
@@ -152,5 +164,10 @@ export async function resolveSinkFormatForPlatform(
     throw new Error(`platforms.sink_format lookup failed: ${error.message}`);
   }
 
-  return data?.sink_format ?? bodyFormatFallback ?? null;
+  const stored = data?.sink_format ?? null;
+  if (stored === 'none') {
+    return null;
+  }
+
+  return stored ?? bodyFormatFallback ?? null;
 }
