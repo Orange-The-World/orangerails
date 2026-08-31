@@ -14,7 +14,12 @@
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { deriveResponseCursor, isSealedTx, isValidAppUserId } from './index.ts';
+import {
+  boundCursorAdvance,
+  deriveResponseCursor,
+  isSealedTx,
+  isValidAppUserId,
+} from './index.ts';
 
 // ── DL-0608: cuid app_user_id must pass validation ────────────────────
 //
@@ -215,5 +220,81 @@ Deno.test('deriveResponseCursor: client scan tip cannot move cursor without actu
     deriveResponseCursor(null, 0, 9999),
     null,
     'zero inserts on fresh connection: cursor stays null regardless of maxBlock argument',
+  );
+});
+
+// ── boundCursorAdvance (OR-T1120) ─────────────────────────────────────
+// max(block_height) of the inserted rows is a real height, but it is not
+// evidence that every height below it was read. The client's rolling-window
+// extension pass can match a block above the point where a filter fetch
+// aborted, so a transaction can be inserted from above a gap nobody scanned.
+// If the cursor follows it up there, the next sync resumes above the gap and
+// any payment inside it is missing from the balance permanently, with no error
+// and no retry. The client half of the fix is the extension-pass trim in
+// src/stealth/lib/sync.ts; this is the server half.
+
+Deno.test('boundCursorAdvance: caps the advance at the last height the client scanned contiguously', () => {
+  // The defect path. A transaction landed at 900_003, but the client only read
+  // as far as 900_001 before its filter fetch aborted. 900_002 was never read
+  // by anyone, so the cursor must stop below it.
+  assertEquals(
+    boundCursorAdvance(900_003, 900_001),
+    900_001,
+    'a row inserted at 900_003 cannot move the cursor past the 900_001 actually read',
+  );
+});
+
+Deno.test('boundCursorAdvance: is a no-op when the inserted height is at or below the contiguous height', () => {
+  // This is the healthy case and every correct sync lands here, because hits
+  // are trimmed to the contiguous height before anything is sealed. Pinning it
+  // is the point: if this bound ever started biting on healthy traffic it would
+  // surface as a stuck cursor, which is the failure this area exists to avoid.
+  assertEquals(boundCursorAdvance(900_001, 900_001), 900_001, 'equal: unchanged');
+  assertEquals(boundCursorAdvance(899_998, 900_001), 899_998, 'below: unchanged');
+  assertEquals(boundCursorAdvance(-1, 900_001), -1, 'no rows inserted: the -1 sentinel is preserved');
+});
+
+Deno.test('boundCursorAdvance: the client value can only hold the cursor back, never push it forward', () => {
+  // The DL-0419 property has to survive this change. A client claiming to have
+  // scanned to 9_999_999 still cannot move the cursor past a height that was
+  // actually inserted, because min() never raises its first argument.
+  assertEquals(
+    boundCursorAdvance(900_001, 9_999_999),
+    900_001,
+    'a larger client value is ignored',
+  );
+});
+
+Deno.test('boundCursorAdvance: no usable client value leaves the advance unbounded', () => {
+  // Defence in depth on an exported pure function, NOT a backward-compatibility
+  // path: the handler validation answers 400 for every one of these bodies, so
+  // this branch is unreachable over HTTP. Asserted anyway so a future caller of
+  // the function gets defined behaviour rather than a NaN or a crash.
+  assertEquals(boundCursorAdvance(900_003, undefined), 900_003, 'absent: no bound');
+  assertEquals(boundCursorAdvance(900_003, null), 900_003, 'null: no bound');
+  assertEquals(boundCursorAdvance(900_003, '900001'), 900_003, 'wrong type: no bound');
+  assertEquals(boundCursorAdvance(900_003, 900_001.5), 900_003, 'non-integer: no bound');
+  assertEquals(boundCursorAdvance(900_003, -1), 900_003, 'negative: no bound');
+  assertEquals(boundCursorAdvance(900_003, Number.NaN), 900_003, 'NaN: no bound');
+});
+
+Deno.test('deriveResponseCursor: the reported cursor carries the same bound as the persisted one', () => {
+  // The response must equal what was written. If the bound applied to the patch
+  // but not to the response, the caller would be told the cursor reached a
+  // height the database never stored, and would resume from the wrong place.
+  assertEquals(
+    deriveResponseCursor(899_000, 2, 900_003, 900_001),
+    900_001,
+    'the bounded height is reported, not maxBlockInserted',
+  );
+  assertEquals(
+    deriveResponseCursor(900_002, 2, 900_003, 900_001),
+    900_002,
+    'bound at or below the stored cursor: the cursor does not move at all',
+  );
+  assertEquals(
+    deriveResponseCursor(100, 2, 150),
+    150,
+    'three-argument calls keep their existing meaning',
   );
 });
