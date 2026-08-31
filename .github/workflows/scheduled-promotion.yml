@@ -242,11 +242,41 @@ jobs:
           fi
 
           # ---- reuse or open ----------------------------------------------
-          # Duplicate guard. Ask GitHub for any OPEN pull request whose base is
-          # prod and whose head is dev. If one exists we update it. We never
-          # reach gh pr create while one is open.
-          EXISTING=$(gh api "repos/${GH_REPO}/pulls?state=open&base=prod&head=${GH_REPO%%/*}:dev" \
-                       --jq '.[0].number // ""')
+          # Duplicate guard. Ask GitHub for every OPEN pull request whose base
+          # is prod, with NO filter on the head. If a promotion is already open
+          # we update it, and we never reach gh pr create while one is open.
+          #
+          # The head filter that used to be here had to go (OR-T0990). A
+          # promotion is now opened from a release/* branch cut at a fixed sha,
+          # because the prod ruleset requires the last push to be approved and a
+          # promotion whose head IS dev loses its approval every time anything
+          # merges into dev. With a release/* promotion open, a query filtered on
+          # head=dev returns empty and this job opens a SECOND promotion into
+          # prod. The cron runs every two days, so that lands within two days of
+          # the first release-branch promotion.
+          #
+          # Dropping the filter widens the answer to every open pull request into
+          # prod, and not all of those are promotions: a prod-hotfix is one too.
+          # So the candidates are narrowed by head ref, to dev or release/*.
+          # Taking a hotfix as the promotion would be worse than the duplicate
+          # this guard exists to stop. It would rewrite that pull request's body,
+          # and because this job would then believe a promotion was already open,
+          # no promotion would be opened at all. That omission would be silent.
+          OPEN_INTO_PROD="$(gh api "repos/${GH_REPO}/pulls?state=open&base=prod&per_page=100" \
+                              --jq '[.[] | {number, head: .head.ref}]')"
+
+          CANDIDATES="$(printf '%s' "${OPEN_INTO_PROD}" \
+                          | jq '[.[] | select(.head == "dev" or (.head | startswith("release/")))]')"
+
+          echo "open pull requests into prod: $(printf '%s' "${OPEN_INTO_PROD}" | jq 'length')"
+          printf '%s\n' "${OPEN_INTO_PROD}" | jq -r '.[] | "  pull request \(.number) head=\(.head)"'
+          echo "promotion candidates among them (head dev or release/*): $(printf '%s' "${CANDIDATES}" | jq 'length')"
+
+          if [ "$(printf '%s' "${CANDIDATES}" | jq 'length')" -gt 1 ]; then
+            echo "::warning::More than one promotion into prod is open. Updating the first and leaving the others untouched. Two open promotions is a state a human has to resolve; close the one that is not wanted."
+          fi
+
+          EXISTING="$(printf '%s' "${CANDIDATES}" | jq -r '.[0].number // ""')"
 
           if [ -n "${EXISTING}" ]; then
             EXISTING_TITLE=$(gh api "repos/${GH_REPO}/pulls/${EXISTING}" --jq '.title')
