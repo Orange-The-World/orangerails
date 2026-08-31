@@ -6,8 +6,10 @@
  * browser; the server never sees plaintext subkeys.
  *
  * ## Grant flow (owner side)
- *   1. Re-derive MEK raw bytes from the owner's vault password.
- *   2. Run HKDF on the raw bytes to extract credentials + transactions subkeys.
+ *   1. Confirm the owner's vault password. Presence check only: no key
+ *      material is derived from it (see confirmVaultPassword).
+ *   2. Run HKDF on the UNLOCKED MEK to extract credentials + transactions
+ *      subkeys as raw bits.
  *   3. Concatenate into a 64-byte blob.
  *   4. Wrap the blob with the admin's hybrid KEM public key (see wrapBlob64).
  *   5. Insert into wrapped_data_keys + workspace_admins.
@@ -39,7 +41,8 @@
  * revocation until the tab is closed. See docs/OrangeRails-CoAdmins.md.
  */
 
-import { deriveMekRaw, importAesKey } from "./vault";
+import { importAesKey } from "./vault";
+import { confirmVaultPassword } from "./password-confirm";
 import { HKDF_CONTEXTS, derivePqcSecretWrapKey } from "./key-derivation";
 import { base64ToBytes } from "./key-wrapping";
 import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } from "./pqc";
@@ -73,23 +76,28 @@ function errorText(err: unknown): string {
 }
 
 // ------------------------------------------------------------------
-// HKDF from raw bytes , derives a 32-byte subkey without going through
-// a non-extractable CryptoKey, so the raw output can be concatenated.
+// HKDF to raw bits , derives a 32-byte subkey as bytes so two of them can be
+// concatenated into the 64-byte blob.
+//
+// THIS TAKES THE MEK ITSELF. An earlier version took raw bytes, on the stated
+// grounds that a non-extractable CryptoKey cannot produce raw output. That is
+// not true: deriveBits RETURNS raw bits, and non-extractability blocks
+// exporting the key, not deriving from it. deriveSubkey in key-derivation.ts
+// has always worked this way. Believing otherwise is what made the grant
+// re-derive from the vault password, which on a key-version-2 vault is the KEK
+// that wraps the MEK and not the MEK.
+//
+// The salt, the context string and the output length match deriveSubkey
+// exactly, so a granted subkey is byte-identical to the subkey the owner's own
+// data path uses. That equality is what keeps grants made before this change
+// valid, and it is asserted in the tests rather than assumed.
 // ------------------------------------------------------------------
 
 async function hkdfSubkeyRaw(
-  mekRaw: Uint8Array,
+  mek: CryptoKey,
   context: string,
   saltB64: string,
 ): Promise<Uint8Array> {
-  const hkdfKey = await crypto.subtle.importKey(
-    "raw",
-    mekRaw as BufferSource,
-    { name: "HKDF" },
-    /* extractable */ false,
-    ["deriveBits"],
-  );
-
   const saltBytes = base64ToBytes(saltB64);
   const infoBytes = new TextEncoder().encode(context);
 
@@ -100,7 +108,7 @@ async function hkdfSubkeyRaw(
       salt: saltBytes as BufferSource,
       info: infoBytes as BufferSource,
     },
-    hkdfKey,
+    mek,
     256,
   );
 
@@ -278,12 +286,24 @@ export interface AdminSubkeys {
 /**
  * Grant full co-admin access to a target user.
  *
- * The owner must re-confirm their vault password so we can derive
- * subkeys as raw bytes without having access to the non-extractable MEK.
+ * WHERE THE KEY MATERIAL COMES FROM. The subkeys are derived from the UNLOCKED
+ * MEK held by VaultContext, which is the same key the owner's own data path
+ * uses. It is not re-derived from the password: on a key-version-2 vault the
+ * stretched password is the KEK that wraps the MEK, so subkeys built from it
+ * would open nothing and the owner's signing secret would not unwrap at all.
+ *
+ * WHAT THE PASSWORD IS STILL FOR. The owner re-types it because this hands
+ * another person access, and the person doing that must be the owner rather
+ * than whoever found an unlocked tab. It is checked and discarded; nothing is
+ * derived from it here.
  *
  * @param params.ownerUserId       The authenticated owner's user ID.
  * @param params.ownerSaltB64      The owner's vault salt (from user_vault_meta).
  * @param params.ownerPassword     Re-confirmed vault password (never leaves the browser).
+ * @param params.ownerVerifierCiphertext  user_vault_meta.vault_verifier_ciphertext.
+ * @param params.ownerKeyVersion   user_vault_meta.vault_key_version.
+ * @param params.ownerEncMekCiphertext    user_vault_meta.enc_mek_ciphertext, null on legacy.
+ * @param params.vaultMek          The unlocked MEK from VaultContext.
  * @param params.targetUserId      The recipient's user ID (from pqc-lookup-user).
  * @param params.targetKemPubB64   The recipient's KEM public key, base64 (from pqc-lookup-user).
  * @param params.existingKeyId     Current workspace_key_id from user_vault_meta (null if not yet
@@ -294,26 +314,55 @@ export async function grantCoAdmin(params: {
   ownerUserId: string;
   ownerSaltB64: string;
   ownerPassword: string;
+  ownerVerifierCiphertext: string;
+  ownerKeyVersion: number;
+  ownerEncMekCiphertext: string | null;
+  vaultMek: CryptoKey;
   ownerSigSecretWrapped: string;
   targetUserId: string;
   targetKemPubB64: string;
   existingKeyId: string | null;
   supabase: CoAdminSupabaseLike;
 }): Promise<GrantResult> {
-  const { ownerUserId, ownerSaltB64, ownerPassword, ownerSigSecretWrapped, targetUserId, targetKemPubB64, supabase } =
-    params;
+  const {
+    ownerUserId,
+    ownerSaltB64,
+    ownerPassword,
+    ownerVerifierCiphertext,
+    ownerKeyVersion,
+    ownerEncMekCiphertext,
+    vaultMek,
+    ownerSigSecretWrapped,
+    targetUserId,
+    targetKemPubB64,
+    supabase,
+  } = params;
 
-  // Step a , derive raw MEK bytes from the re-confirmed password.
-  const mekRaw = await deriveMekRaw(ownerPassword, ownerSaltB64);
+  // Step a , confirm the owner is present. This is the only thing the password
+  // does in this flow, and it runs before anything is allocated, wrapped or
+  // written, so a wrong password leaves nothing behind.
+  const ownerConfirmed = await confirmVaultPassword({
+    password: ownerPassword,
+    saltB64: ownerSaltB64,
+    verifierCiphertext: ownerVerifierCiphertext,
+    keyVersion: ownerKeyVersion,
+    encMekCiphertext: ownerEncMekCiphertext,
+  });
+  if (!ownerConfirmed) {
+    throw new Error(
+      "That vault password is not correct. Nothing was granted and nothing was changed.",
+    );
+  }
 
-  // Step b-c , derive both subkeys as raw bytes and concat into 64-byte blob.
+  // Step b-c , derive both subkeys from the UNLOCKED MEK as raw bytes and
+  // concat into the 64-byte blob.
   const credsRaw = await hkdfSubkeyRaw(
-    mekRaw,
+    vaultMek,
     HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1,
     ownerSaltB64,
   );
   const txnsRaw = await hkdfSubkeyRaw(
-    mekRaw,
+    vaultMek,
     HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1,
     ownerSaltB64,
   );
@@ -372,14 +421,12 @@ export async function grantCoAdmin(params: {
   // the wrapped ciphertext can be swapped after the fact. The signed payload
   // binds all four fields: context, grantee user id, workspace key id, and the
   // wrapped ciphertext bytes. All four must match at verify time.
-  const mekHkdf = await crypto.subtle.importKey(
-    "raw",
-    mekRaw,
-    { name: "HKDF" },
-    false,
-    ["deriveBits"],
-  );
-  const pqcWrapKey = await derivePqcSecretWrapKey(mekHkdf, ownerSaltB64);
+  //
+  // The owner's signing secret was wrapped under a subkey of the MEK by
+  // ensurePqcKeypairs, so it unwraps under that same MEK and nothing else.
+  // This is the identical call the consume side makes in
+  // loadAdminSubkeysDirect.
+  const pqcWrapKey = await derivePqcSecretWrapKey(vaultMek, ownerSaltB64);
   const ownerSigSecretBytes = await unwrapPqcSecretKey(pqcWrapKey, ownerSigSecretWrapped);
   const { signature: grantSig } = await signMemberGrant(ownerSigSecretBytes, {
     memberUserId: targetUserId,
