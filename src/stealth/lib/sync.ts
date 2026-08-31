@@ -1149,6 +1149,19 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, extWorker));
     extHits.sort((a, b) => a.height - b.height);
 
+    // The same rule as the trim after the main scan, applied to the second
+    // array this function builds (OR-T1120). The walk above runs all the way
+    // to tip and its cache-miss fetch failure path is `continue`, so after an
+    // abort it steps over the height that broke the initial scan and carries
+    // on matching above it. Processing such a hit records a transaction from a
+    // height nothing has read contiguously; the stored cursor then advances
+    // past the gap and no later sync ever comes back to it. Trim in place so
+    // everything below sees only the safe, contiguous range.
+    if (fetchAborted && extHits.length > 0) {
+      const safeExt = extHits.filter((hit) => hit.height <= lastContiguousScanned);
+      extHits.splice(0, extHits.length, ...safeExt);
+    }
+
     // Process extension hits. Only new-address outputs are checked for receives
     // (passNewDerived), but inputs are checked against the full UTXO map so a
     // spend of a previously-received UTXO is detected correctly even when the
