@@ -40,10 +40,6 @@ on:
     # runners and schedule delivery there is the least reliable.
     - cron: '17 6 */2 * *'
   workflow_dispatch:
-  # SCRATCH, temporary, OR-T1132 negative proof only: removed in the very
-  # next commit. See that commit message for why.
-  pull_request:
-    branches: [fix/or-t1102-real-jq-self-test]
 
 # Least privilege for the built-in token. contents:read is what the compare
 # call needs; pull-requests:write is declared because this workflow's purpose
@@ -72,7 +68,7 @@ jobs:
       # STRING (OR-T1132), so a rename of .head.ref or .head.repo.full_name,
       # or dropping the `// ""` null-repo fallback, breaks the self-test
       # instead of leaving it green over a broken gate.
-      SHAPE_FILTER: '{number, head: .head.label, head_repo: (.head.repo.full_name // "")}'
+      SHAPE_FILTER: '{number, head: .head.ref, head_repo: (.head.repo.full_name // "")}'
       # The one jq expression that decides which open pull requests into prod
       # count as a promotion candidate. Both the self-test below and the real
       # step feed data through THIS SAME STRING (OR-T1102), so deleting
