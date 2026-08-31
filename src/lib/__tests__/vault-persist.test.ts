@@ -83,6 +83,12 @@ interface FakeOptions {
    * backing rows mid-loop, which is what an UPDATE does to physical order.
    */
   beforeSelect?: (table: string) => void;
+  /**
+   * A hard cap on how many rows any select returns, whatever the caller asked
+   * for. PostgREST's db-max-rows behaves exactly like this, which is why a
+   * short page is not evidence that the table is exhausted.
+   */
+  maxRows?: number;
 }
 
 /**
@@ -118,6 +124,9 @@ function makeFakeClient(options: FakeOptions = {}) {
       }
       if (call.range) data = data.slice(call.range[0], call.range[1] + 1);
       if (call.limit !== undefined) data = data.slice(0, call.limit);
+      // Applied LAST, and deliberately after .limit(): a server-side cap does
+      // not care what the client asked for.
+      if (options.maxRows !== undefined) data = data.slice(0, options.maxRows);
       return { data, error: null };
     }
     if (call.table === "user_vault_meta") {
@@ -365,7 +374,10 @@ describe("vault recovery: the transaction re-encryption page walk", () => {
     const ids = updatedIds(calls);
     expect(new Set(ids)).toEqual(new Set(rows.map((r) => r.id)));
     expect(ids.length).toBe(rows.length);
-    expect(txnSelects(calls).length).toBe(2);
+    // Three, not two. The loop stops on an empty page and on nothing else, so
+    // 501 rows cost 500 + 1 + 0. If this ever reads two again, someone has put
+    // the short-page break back.
+    expect(txnSelects(calls).length).toBe(3);
   });
 
   it("pages by the primary key in a stable order, never by bare offset", async () => {
@@ -404,6 +416,27 @@ describe("vault recovery: the transaction re-encryption page walk", () => {
     await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
 
     expect(new Set(updatedIds(calls))).toEqual(new Set(rows.map((r) => r.id)));
+  });
+
+  it("keeps walking when the server caps a page below the size asked for", async () => {
+    const rows = txnFixture(PAGE_SIZE + 1);
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: rows },
+      // PostgREST's db-max-rows caps a response server-side. A page of 200 in
+      // answer to a request for 500 does NOT mean the table is exhausted.
+      maxRows: 200,
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    // This is the assertion that goes red if the loop treats a short page as
+    // the end. It would stop after 200 of 501 rows, finish without error, and
+    // clearMigrationKeys() would then destroy the only key that could still
+    // read the other 301.
+    expect(new Set(updatedIds(calls))).toEqual(new Set(rows.map((r) => r.id)));
+    expect(updatedIds(calls).length).toBe(rows.length);
+    // 200 + 200 + 101 + 0.
+    expect(txnSelects(calls).length).toBe(4);
   });
 });
 
