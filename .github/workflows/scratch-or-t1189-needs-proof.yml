@@ -1,0 +1,100 @@
+name: SCRATCH OR-T1189 proof, do not merge
+
+# WHY THIS FILE EXISTS, and why it is scratch.
+#
+# OR-T1189 changes supabase-deploy.yml so apply-migrations declares
+# needs: [target, check-duplicate-migrations]. The claim that needs to be true
+# is: when the duplicate-version check goes red, apply-migrations does not run
+# at all -- not "goes red afterwards", not "is reported".
+#
+# supabase-deploy.yml triggers only on `push: branches: [dev, prod]`, so that
+# claim cannot be exercised on a feature branch. Exercising it for real means
+# pushing two same-versioned migration files to dev, which blocks dev's deploy
+# until it is reverted. This file reproduces the graph SHAPE on a scratch branch
+# instead, and is never merged.
+#
+# IT IS BUILT TO BE ABLE TO FAIL, which is the only reason to trust it:
+#
+#   dupes-colliding (red)   -> replica-after-red    MUST be skipped
+#   dupes-clean     (green) -> replica-after-green  MUST run
+#
+# Both replicas carry the SAME if-condition, and that condition is true on this
+# branch. So if replica-after-red is skipped while replica-after-green runs, the
+# skip is attributable to the failed need and to nothing else. If the condition
+# were the real cause, both would be skipped and the proof would visibly fail.
+#
+# Each detector job also asserts its own verdict, so a detector that stopped
+# detecting exits non-zero with a message saying the fixture is wrong, rather
+# than exiting 0 and reading as a pass.
+
+on:
+  push:
+    branches: ['scratch/or-t1189-needs-proof']
+
+jobs:
+  # The real comparison from check-duplicate-migrations, against a fixture that
+  # collides. Expected conclusion: FAILURE.
+  dupes-colliding:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detector on a colliding fixture (expected RED)
+        run: |
+          set -uo pipefail
+          MIG_DIR="$RUNNER_TEMP/mig-colliding"
+          mkdir -p "$MIG_DIR"
+          : > "$MIG_DIR/20260831120000_keyring_epoch.sql"
+          : > "$MIG_DIR/20260831120000_keyring_ciphertext.sql"
+          : > "$MIG_DIR/20260831130000_unrelated.sql"
+
+          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
+          if [ -n "$DUPES" ]; then
+            echo "detector found: $(echo "$DUPES" | tr '\n' ' ')"
+            echo "::error::duplicate migration version(s) present, refusing to apply"
+            exit 1
+          fi
+
+          echo "::error::detector saw NO duplicate in a fixture that contains one. The detector is broken, and this proof is void."
+          exit 1
+
+  # The same comparison against a fixture that does not collide. Expected
+  # conclusion: SUCCESS. Without this half, "skipped" would prove nothing.
+  dupes-clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detector on a clean fixture (expected GREEN)
+        run: |
+          set -uo pipefail
+          MIG_DIR="$RUNNER_TEMP/mig-clean"
+          mkdir -p "$MIG_DIR"
+          : > "$MIG_DIR/20260831120000_keyring_epoch.sql"
+          : > "$MIG_DIR/20260831120001_keyring_ciphertext.sql"
+          : > "$MIG_DIR/20260831130000_unrelated.sql"
+
+          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
+          if [ -n "$DUPES" ]; then
+            echo "::error::detector found a duplicate in a fixture that has none: $(echo "$DUPES" | tr '\n' ' '). The detector is broken, and this proof is void."
+            exit 1
+          fi
+
+          echo "no duplicate migration version(s); apply may proceed"
+
+  # Stands in for apply-migrations. Plain if-expression, exactly as the real job
+  # has -- NOT always(), NOT !cancelled(). Expected: SKIPPED, never started.
+  replica-after-red:
+    needs: [dupes-colliding]
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: This step must never appear in the log
+        run: |
+          echo "::error::apply replica RAN behind a failed duplicate-version check. The needs edge does not gate it."
+          exit 1
+
+  # The control. Same job, same condition, green dependency. Expected: SUCCESS.
+  replica-after-green:
+    needs: [dupes-clean]
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Control ran, so the if-condition is true on this branch
+        run: echo "apply replica ran behind a passing duplicate-version check, as it should"
