@@ -69,7 +69,16 @@ function makeFakeClient(options: FakeOptions = {}) {
     if (call.op === "select") {
       const override = options.selectResult?.[call.table];
       if (override) return override;
-      return { data: options.rows?.[call.table] ?? [], error: null };
+      const rows = options.rows?.[call.table] ?? [];
+      // Honour .range(from, to) like the real client does. Without this every
+      // page returns the same rows regardless of offset, so a fixture larger
+      // than one page can never actually exercise paging.
+      const rangeFilter = call.filters.find((f) => f.column === "range");
+      if (rangeFilter) {
+        const [from, to] = rangeFilter.value as [number, number];
+        return { data: rows.slice(from, to + 1), error: null };
+      }
+      return { data: rows, error: null };
     }
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
@@ -267,6 +276,33 @@ describe("vault recovery: the rotated meta write", () => {
 
     expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
     expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("pages through more than TRANSACTION_PAGE_SIZE rows and migrates every row exactly once", async () => {
+    const total = 650; // more than one 500-row page
+    const encrypted_transactions = Array.from({ length: total }, (_, i) => ({
+      id: `txn-${i}`,
+      encrypted_payload: `payload-${i}`,
+    }));
+    const migratedIds: string[] = [];
+    const { client } = makeFakeClient({
+      rows: { connections: [], encrypted_transactions },
+    });
+    const args = {
+      ...rotateArgs(client, vi.fn()),
+      migrateTransactionCiphertext: async (c: string) => {
+        migratedIds.push(c);
+        return `${c}-migrated`;
+      },
+    };
+
+    await migrateAndPersistRotatedVault(args);
+
+    // Every row migrated, none skipped, none migrated twice: this is the
+    // property a range()-ignoring fake could never have caught, because it
+    // would have handed back the same first page forever.
+    expect(migratedIds.length).toBe(total);
+    expect(new Set(migratedIds).size).toBe(total);
   });
 });
 
