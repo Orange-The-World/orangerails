@@ -72,6 +72,28 @@
 -- the first blob exists it becomes a browser-side re-seal of every stored blob with the
 -- vault unlocked, which is the operation envelope v3 exists to remove.
 --
+-- DEPENDS ON A COLUMN THIS FILE DOES NOT CREATE: user_vault_meta.keyring_ciphertext.
+-- public.enforce_keyring_epoch reads NEW.keyring_ciphertext and OLD.keyring_ciphertext.
+-- plpgsql resolves record fields at RUNTIME, not at CREATE time, so CREATE OR REPLACE
+-- FUNCTION and the trigger arming both succeed on a cluster where that column does not
+-- exist. With zero rows in user_vault_meta nothing writes during the migration either, so
+-- the apply would print ok and COMMIT. The failure would then land on the first customer
+-- who creates a vault: SQLSTATE 42703, record "new" has no field "keyring_ciphertext",
+-- vault creation dead from that moment, and no visible link back to the migration that
+-- armed the trigger. The assertion block below therefore REFUSES to leave the guard armed
+-- unless the column is present, which turns a silent arming into a loud abort. OR-T1130.
+--
+-- WHERE THAT COLUMN COMES FROM, read live 2026-08-31 and stated rather than assumed:
+--   hosted dev  fzwmnzmtqidumdqjdddz : present, text, nullable
+--   hosted prod lcdicqalreskibdfxkzb : ABSENT (16 columns, none of them this one)
+--   supabase_migrations.schema_migrations on dev, searched for any tracked statement
+--     containing keyring_ciphertext : 0 rows
+--   exact text search for keyring_ciphertext across every local repo clone, 1257 files
+--     : 0 matches
+-- So NO migration in this repo creates it. It reached hosted dev out of band, the same
+-- drift class as OR-T0965. A migration that creates the column must land first, and until
+-- it does this file must NOT be included in a production apply (OR-T0997).
+--
 -- IDEMPOTENT. ADD COLUMN IF NOT EXISTS, CREATE TABLE IF NOT EXISTS, CREATE OR REPLACE
 -- FUNCTION, DROP TRIGGER IF EXISTS before each CREATE TRIGGER, and grants that are
 -- naturally repeatable. A re-run is a no-op rather than an error.
@@ -228,6 +250,16 @@ DECLARE
   v_secdef boolean; v_config text[];
   v_fk int; v_priv text := '';
 BEGIN
+  -- The guard this file arms reads NEW.keyring_ciphertext at runtime. If that column is
+  -- missing the arming still succeeds and the first row write fails with 42703 instead,
+  -- long after the apply. Refuse here, inside the transaction, so nothing is left armed.
+  -- OR-T1130.
+  PERFORM 1 FROM information_schema.columns
+   WHERE table_schema='public' AND table_name='user_vault_meta' AND column_name='keyring_ciphertext';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'FAIL: public.user_vault_meta has no keyring_ciphertext column, and public.enforce_keyring_epoch reads NEW.keyring_ciphertext at runtime. Arming the guard here would leave vault creation broken with SQLSTATE 42703 on the first write. Land the migration that creates the column first (OR-T1130).';
+  END IF;
+
   SELECT data_type, is_nullable INTO v_type, v_nullable
     FROM information_schema.columns
    WHERE table_schema='public' AND table_name='user_vault_meta' AND column_name='keyring_epoch';
