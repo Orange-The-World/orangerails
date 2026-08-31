@@ -550,14 +550,60 @@ jobs:
             exit 0
           fi
 
-          # Fetch already-applied versions
+          # Fetch already-applied versions.
+          #
+          # This is the SAME call the drift report makes, and it is hardened the
+          # same way, for the opposite reason. Bare `curl -sS` exits 0 on a 401,
+          # 403 or 500: the error body parses as valid JSON, `.[].version` over
+          # an object yields nothing, and APPLIED comes back EMPTY. In the drift
+          # report an empty APPLIED is a false red claiming total drift, which is
+          # noisy and harmless. HERE an empty APPLIED means the loop below finds
+          # no version in the set, treats EVERY .sql file in supabase/migrations
+          # as unapplied, and replays the whole migration history against the
+          # target project. On a prod dispatch that target is the production
+          # database. So an unreadable ledger must ABORT, never proceed: the
+          # applied set is UNKNOWN, and UNKNOWN is not the same fact as empty.
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
           jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
-          APPLIED=$(curl -sS -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
-            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data-binary "@$PAYLOAD" | jq -r '.[].version' | sort -u)
+
+          RESPONSE=""
+          HTTP_OK=0
+          for attempt in 1 2 3; do
+            if RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$PAYLOAD"); then
+              HTTP_OK=1
+              break
+            fi
+            echo "ledger query attempt ${attempt}/3 did not return a success status"
+            # An `if`, not `[ "$attempt" -lt 3 ] && sleep 10`. This step runs
+            # under `set -e` (the drift step does not), and on the third attempt
+            # that AND-list evaluates false and would exit the step by itself.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+
+          # The response body is deliberately NOT echoed on any failure path. On
+          # an auth failure it is the only place a token-shaped string could
+          # reach a public build log.
+          if [ "$HTTP_OK" -ne 1 ]; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the Supabase Management API did not return a success status for the migration ledger after 3 attempts. The applied-version set is UNKNOWN, so NOTHING was applied. Most often an expired or rotated SUPABASE_ACCESS_TOKEN, or the project being paused."
+            exit 1
+          fi
+
+          # A success status is still not a usable answer until the shape is
+          # right. Only a JSON array of rows can be trusted to mean "these are
+          # the versions that are applied"; anything else is UNKNOWN, not zero.
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger query returned a success status but not a JSON array of rows. The applied-version set is UNKNOWN, so NOTHING was applied."
+            exit 1
+          fi
+
+          APPLIED=$(echo "$RESPONSE" | jq -r '.[].version' | sort -u)
           echo "-- already applied versions on ${SUPABASE_REF} --"
           echo "$APPLIED" | tail -10
           echo
