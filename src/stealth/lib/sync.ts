@@ -77,6 +77,11 @@ export interface NormalizedTransaction {
   /** Hex, RPC display order. */
   txid: string;
   block_height: number;
+  /** Lowercase hex, canonical hash of the block at block_height, captured
+   *  from the same filter match that produced block_height. Used by the
+   *  reorg detector to tell a still-valid height from one whose block has
+   *  since changed. */
+  block_hash: string;
   /** ISO date YYYY-MM-DD derived from the block header timestamp. Kept for
    *  the server's date-scoped storage index and pagination, and for
    *  backward compatibility with records sealed before `timestamp` existed. */
@@ -927,6 +932,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // block source exposes it via Access-Control-Expose-Headers, so the
     // block record height can silently arrive as 0.
     const blockHeight = hits[i].height;
+    // Lowercase, RPC display order; canonical hash for this height, stored
+    // per transaction for the reorg detector to compare against later.
+    const blockHashHex = hits[i].blockHashHex.toLowerCase();
     const header = parseBlockHeader(block.raw);
     const occurredAt = isoDateFromUnix(header.timestamp);
     // Full instant, not just the date. Rides inside the sealed envelope so
@@ -996,6 +1004,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         normalized.push({
           txid: tx.txid,
           block_height: blockHeight,
+          block_hash: blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
           direction: 'out',
@@ -1019,6 +1028,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         normalized.push({
           txid: tx.txid,
           block_height: blockHeight,
+          block_hash: blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
           direction: 'in',
@@ -1169,6 +1179,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       extBlockFetches[ei] = undefined;
       bytesDownloaded += block.raw.length;
       const blockHeight = extHits[ei].height;
+      const blockHashHex = extHits[ei].blockHashHex.toLowerCase();
       const header = parseBlockHeader(block.raw);
       const occurredAt = isoDateFromUnix(header.timestamp);
       const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
@@ -1225,7 +1236,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
             }
           }
           normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            txid: tx.txid, block_height: blockHeight, block_hash: blockHashHex,
+            occurred_at: occurredAt,
             timestamp: occurredAtInstant, direction: 'out',
             amount_sats: Number(netOut), address: recipientAddress,
             vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
@@ -1234,7 +1246,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
           for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
         } else if (anyReceive && !alreadySeen) {
           normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            txid: tx.txid, block_height: blockHeight, block_hash: blockHashHex,
+            occurred_at: occurredAt,
             timestamp: occurredAtInstant, direction: 'in',
             amount_sats: Number(receivedAmount), address: receivedAddress,
             vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
@@ -1281,6 +1294,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       ciphertext_b64: env.ciphertext_b64,
       occurred_at: tx.occurred_at,
       block_height: tx.block_height,
+      block_hash_hex: tx.block_hash,
       txid_blind_index_hex: blind,
     });
     if (i % 8 === 0 || i === normalized.length - 1) {
