@@ -136,23 +136,36 @@ const CATALOG_CACHE_MAX_ENTRIES = 500;
 const catalogCache = new Map<string, { storedAt: number; institutions: CatalogInstitution[] }>();
 
 /**
- * Identify the caller for throttling, preferring the headers a caller cannot
- * write.
+ * Identify the caller for throttling, preferring the one header a caller
+ * cannot write.
  *
  * The precedence is the whole point. x-forwarded-for is caller-supplied: a
  * proxy APPENDS to whatever the client already sent, so its FIRST entry is a
  * value the client chose. Reading that first entry, as this function used to,
  * made the counter bypassable from a single machine: send a different random
  * X-Forwarded-For on every request and each one lands in a fresh bucket, so
- * rateLimitRetryAfter returns 0 forever. cf-connecting-ip and x-real-ip are
- * written at the edge and are not caller-forgeable, so they are tried first,
- * and x-forwarded-for is a last resort read from its LAST entry, the one
- * appended by the proxy nearest to us.
+ * rateLimitRetryAfter returns 0 forever. Only cf-connecting-ip is trusted: it
+ * is written at Cloudflare's true edge and a client cannot forge it there.
+ * x-real-ip is NOT trusted, and an earlier version of this function was wrong
+ * to trust it: workers/api-gateway (forwardHeaders) strips cf-connecting-ip
+ * and every cf-* header on the way to this function, but forwards a
+ * caller-supplied x-real-ip through completely unchanged and never sets one
+ * itself. A caller going through that gateway could set x-real-ip to a fresh
+ * value every request and land in a new bucket every time, the exact bypass
+ * this function exists to close (OR-C0493). x-real-ip is read as an ordinary
+ * forgeable header, same footing as x-forwarded-for, which is read from its
+ * LAST entry, the one appended by the proxy nearest to us.
  *
- * UNKNOWN, stated rather than assumed: whether the platform gateway in front
- * of this function overwrites a caller-supplied x-forwarded-for or appends to
- * it. Nobody has established that. This ordering makes the answer irrelevant
- * instead of quietly depending on it.
+ * KNOWN GAP, stated rather than hidden: a request that reaches this function
+ * through workers/api-gateway has already lost cf-connecting-ip (stripped
+ * there) and carries only caller-controlled headers, so clientIdOrNull
+ * returns null for every gateway-routed caller and that request is not
+ * throttled at all, the same fail-open path described below. A direct call
+ * to this function, bypassing the gateway, still carries a genuine
+ * cf-connecting-ip and is throttled correctly. Closing the gateway-routed
+ * gap means the gateway forwarding the real incoming cf-connecting-ip under
+ * a header this function trusts, overwriting whatever the caller sent; that
+ * is a change to workers/api-gateway, not to this function.
  *
  * When we cannot identify a caller at all we do NOT throttle, deliberately:
  * bucketing every unidentified request under a single key would turn a
@@ -160,7 +173,7 @@ const catalogCache = new Map<string, { storedAt: number; institutions: CatalogIn
  * keystroke. Failing open is the safer of the two ways to be wrong here.
  */
 function clientIdOrNull(req: Request): string | null {
-  const edgeSet = (req.headers.get('cf-connecting-ip') ?? req.headers.get('x-real-ip') ?? '').trim();
+  const edgeSet = (req.headers.get('cf-connecting-ip') ?? '').trim();
   if (edgeSet) return edgeSet;
   const forwarded = req.headers.get('x-forwarded-for') ?? '';
   const hops = forwarded.split(',').map((hop) => hop.trim()).filter((hop) => hop.length > 0);
