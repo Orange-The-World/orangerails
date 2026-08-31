@@ -155,6 +155,21 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // mode is reserved for server-to-server integrations and will pass
     // app_user_id explicitly.
     //
+    // OR-T1242 asked in writing whether that is intended: can a platform
+    // API key trigger a full rescan (envelope replacement clears scan
+    // coverage, see envelope_replace.ts) for an ARBITRARY app_user_id
+    // within its own platform, not just the one that opened the request.
+    // CONFIRMED YES, this is the existing platform-mode trust model, not a
+    // gap this endpoint introduced: the same X-Platform-API-Key already
+    // lets a platform name any subaccount_id belonging to it elsewhere
+    // (docs/Consumer-Integration-Guide.md: "Body must include
+    // subaccount_id, validated to belong to this platform"; see also the
+    // module docstring on _shared/platform-auth.ts). Server-to-server
+    // credentials are trusted for every user of the platform they belong
+    // to; only crossing INTO another platform's rows is refused, and that
+    // boundary was checked and holds (every stealth_connections and
+    // stealth_scan_ranges read/write here is scoped by platform_id).
+    //
     // The widget reaches this endpoint in direct mode only when the consuming
     // app shares our Supabase project, so its user has an OrangeRails JWT.
     // When it does not, the widget authenticates in widget mode instead,
