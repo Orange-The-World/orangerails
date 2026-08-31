@@ -871,6 +871,13 @@ jobs:
           # cannot see this, because it compares the tree with itself and there
           # is exactly one file.
           #
+          # OR-T1270. A mismatch has TWO possible causes and this scan cannot
+          # distinguish them: a file renamed BEFORE it ever ran (the SQL is not
+          # in the database), or a file renamed AFTER it ran (the SQL is already
+          # applied). Their remedies are opposites, so the abort below must name
+          # both rather than printing the one that is destructive in the other
+          # case.
+          #
           # The ledger carries a name column, so the shadow IS detectable: the
           # version is recorded under one file name and the tree carries another.
           # Rows written before this workflow started recording names have a NULL
@@ -903,6 +910,13 @@ jobs:
               fi
             done <<< "$files"
             echo "SHADOW SCAN: ${checked} already-recorded file(s) compared, ${matched} name-matched, ${unverifiable} unverifiable (ledger row predates name recording), ${mismatched} shadowed."
+            # A count buried in a summary line is not visible enough. If most of
+            # the tree is unverifiable, this scan proves almost nothing, and a
+            # run that verified nothing must not look like a run that verified
+            # everything. Surface it on the run itself.
+            if [ "$unverifiable" -gt 0 ]; then
+              echo "::warning::${unverifiable} of ${checked} already-recorded migration file(s) could NOT be checked for a rename: those ledger rows carry no file name, so a rename or a re-add of those files would be invisible here. This scan verified ${matched} of ${checked}."
+            fi
             [ "$mismatched" -eq 0 ]
           }
 
@@ -930,7 +944,33 @@ jobs:
             echo "SHADOW SCAN: no .sql files in $MIG_DIR to compare."
           elif ! shadow_scan "$LEDGER_MAP" "$TREE_FILES"; then
             rm -f "$LEDGER_MAP"
-            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more migration files carry a version that the ledger recorded under a DIFFERENT file name. Those files have never run and never will, because a version already in the ledger is skipped. Give each one a new, unused version timestamp and push again. NOTHING was applied on this run."
+            echo
+            echo "TWO DIFFERENT THINGS PRODUCE THE LINES ABOVE, AND THIS WORKFLOW CANNOT"
+            echo "TELL THEM APART. All it can see is that the ledger recorded the version"
+            echo "under one file name and the tree now carries another. Establish which"
+            echo "case you are in BEFORE you act: the two remedies are opposites, and"
+            echo "applying the wrong one runs a migration twice."
+            echo
+            echo "  CASE A, the SQL has NEVER run. The file was renamed, or reverted and"
+            echo "  re-added under a different name, before it was ever applied. The"
+            echo "  change is NOT in the database."
+            echo "    Remedy: give the file a new, unused version timestamp and push"
+            echo "    again, so that it actually runs."
+            echo
+            echo "  CASE B, the SQL ALREADY ran and the file was renamed afterwards, as"
+            echo "  a cosmetic tidy-up. The change IS in the database."
+            echo "    Remedy: correct the name on the existing ledger row so it matches"
+            echo "    the file. Do NOT mint a new version. That would apply this"
+            echo "    migration a SECOND time: against dev on the next push, and against"
+            echo "    production on a dispatch. Nothing in this repo requires or checks"
+            echo "    that a migration is idempotent, so a second run either fails part"
+            echo "    way through or silently re-executes DML."
+            echo
+            echo "  IF YOU CANNOT TELL, ask the target database. Does the object this"
+            echo "  migration creates already exist on ${SUPABASE_REF}? Present means"
+            echo "  case B. Absent means case A."
+            echo
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more migration files carry a version that the ledger recorded under a DIFFERENT file name, so those files are skipped on every run. NOTHING was applied. Two causes produce this and the workflow cannot tell them apart: a file renamed BEFORE it ran (mint a new unused version so it runs) or a file renamed AFTER it ran (correct the ledger row name instead; minting a new version would re-execute an applied migration). Read the two cases printed above and establish which one you are in before acting."
             exit 1
           fi
           rm -f "$LEDGER_MAP"
