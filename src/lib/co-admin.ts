@@ -200,10 +200,11 @@ export async function unwrapBlob64(
  * Narrow Supabase surface needed by the co-admin flows.
  *
  * There is deliberately no update() anywhere in here. The only column this
- * module ever wrote was user_vault_meta.workspace_key_id, and the authenticated
- * role no longer holds that privilege: the value is minted by
- * allocate_workspace_key() instead. Declaring the method would let the same
- * write back in as something TypeScript accepts and the database refuses.
+ * module ever wrote was user_vault_meta.workspace_key_id, and that value must
+ * be assigned by the server: the authenticated role no longer holds the
+ * privilege, and allocate_workspace_key() assigns it instead. Declaring the
+ * method would let the same write back in as something TypeScript accepts and
+ * the database refuses.
  */
 export interface CoAdminSupabaseLike {
   from(table: string): CoAdminTableBuilder;
@@ -325,12 +326,12 @@ export async function grantCoAdmin(params: {
   // not, and as of the server-allocation migration it no longer can.
   //
   // WHY. Ownership on every wrapped_data_keys policy is decided by the VALUE of
-  // user_vault_meta.workspace_key_id, so a caller who can choose that value can
-  // claim another tenant's data_key_id and then delete every wrapped copy of
-  // their data key. The authenticated role therefore holds no INSERT or UPDATE
-  // on the column at all (it still holds SELECT), and allocate_workspace_key()
-  // is a SECURITY DEFINER function that takes no argument on purpose: there is
-  // no path by which a caller proposes an id.
+  // user_vault_meta.workspace_key_id, so that value must be assigned by the
+  // server and must never be proposed by a caller. The authenticated role
+  // therefore holds no INSERT or UPDATE on the column at all (it still holds
+  // SELECT), and allocate_workspace_key() is a SECURITY DEFINER function that
+  // takes no argument on purpose: there is no path by which a caller proposes
+  // an id.
   //
   // RETRIES ARE SAFE. A second call returns the id already allocated rather
   // than raising or minting a second one, so a dropped response needs no guard
