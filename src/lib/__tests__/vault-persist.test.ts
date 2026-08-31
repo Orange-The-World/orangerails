@@ -20,6 +20,7 @@ import {
   persistRewrappedVaultMeta,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
+  CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
   type VaultPersistClient,
 } from "../vault-persist";
@@ -44,6 +45,15 @@ interface UpdateChain {
   select(columns: string): Promise<QueryResult>;
 }
 
+interface SelectChain {
+  then(
+    onFulfilled: (value: QueryResult) => unknown,
+    onRejected?: (reason: unknown) => unknown,
+  ): Promise<unknown>;
+  order(column: string, options?: { ascending?: boolean }): SelectChain;
+  range(from: number, to: number): Promise<QueryResult>;
+}
+
 interface FakeOptions {
   /** rows a select on each table returns */
   rows?: Record<string, unknown[]>;
@@ -53,6 +63,14 @@ interface FakeOptions {
   otherUpdate?: QueryResult;
   /** what a select returns instead of rows, for the error cases */
   selectResult?: Record<string, QueryResult>;
+  /**
+   * Rewrites a table's backing rows immediately AFTER each select on it, so a
+   * test can model the physical row order changing between pages. The real
+   * database is free to do exactly that: the updates issued inside the paging
+   * loop write new tuple versions, and a scan with no ORDER BY may return them
+   * in a different order next time.
+   */
+  reorderAfterSelect?: Record<string, (rows: unknown[]) => unknown[]>;
 }
 
 /**
@@ -66,21 +84,50 @@ interface FakeOptions {
 function makeFakeClient(options: FakeOptions = {}) {
   const calls: RecordedCall[] = [];
 
+  // The backing store. It is a copy, because reorderAfterSelect rewrites it and
+  // a test's fixture must not be mutated underneath it.
+  const store: Record<string, unknown[]> = {};
+  for (const [table, rows] of Object.entries(options.rows ?? {})) store[table] = rows.slice();
+
   function resultFor(call: RecordedCall): QueryResult {
     if (call.op === "select") {
       const override = options.selectResult?.[call.table];
       if (override) return override;
-      const allRows = options.rows?.[call.table] ?? [];
+      const stored = store[call.table] ?? [];
+
+      // Honour .order(column). A query that asked for an order gets a
+      // deterministic view. One that did not gets the store in whatever
+      // physical order it currently holds, which is exactly the latitude the
+      // real database has, and is what lets the reordering tests below fail.
+      const orderFilter = call.filters.find((f) => f.column === "order");
+      const view = stored.slice();
+      if (orderFilter) {
+        const [column, ascending] = orderFilter.value as [string, boolean];
+        view.sort((a, b) => {
+          const left = String((a as Record<string, unknown>)[column]);
+          const right = String((b as Record<string, unknown>)[column]);
+          if (left === right) return 0;
+          const ahead = left < right ? -1 : 1;
+          return ascending ? ahead : -ahead;
+        });
+      }
+
       // Honour .range(from, to). A fake that always returns the same page
       // regardless of its arguments can never exercise pagination, and a
       // fixture of TRANSACTION_PAGE_SIZE or more rows would loop forever
       // against it instead of failing loudly (see the paging test below).
       const rangeFilter = call.filters.find((f) => f.column === "range");
-      if (rangeFilter) {
-        const [from, to] = rangeFilter.value as [number, number];
-        return { data: allRows.slice(from, to + 1), error: null };
-      }
-      return { data: allRows, error: null };
+      const page = rangeFilter
+        ? view.slice(
+            (rangeFilter.value as [number, number])[0],
+            (rangeFilter.value as [number, number])[1] + 1,
+          )
+        : view;
+
+      const reorder = options.reorderAfterSelect?.[call.table];
+      if (reorder) store[call.table] = reorder(stored.slice());
+
+      return { data: page, error: null };
     }
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
@@ -105,13 +152,21 @@ function makeFakeClient(options: FakeOptions = {}) {
         select(columns: string) {
           const call: RecordedCall = { table, op: "select", columns, filters: [] };
           calls.push(call);
-          return {
+          const chain: SelectChain = {
             ...thenable(call),
+            order(column: string, orderOptions?: { ascending?: boolean }) {
+              call.filters.push({
+                column: "order",
+                value: [column, orderOptions?.ascending !== false],
+              });
+              return chain;
+            },
             range(from: number, to: number) {
               call.filters.push({ column: "range", value: [from, to] });
               return Promise.resolve(resultFor(call));
             },
           };
+          return chain;
         },
         update(values: Record<string, unknown>) {
           const call: RecordedCall = { table, op: "update", values, filters: [] };
@@ -299,6 +354,88 @@ describe("vault recovery: the rotated meta write", () => {
     // calls is the direct evidence the cursor actually advanced.
     const selectCalls = calls.filter((c) => c.table === "encrypted_transactions" && c.op === "select");
     expect(selectCalls.length).toBe(2);
+  });
+
+  it("pages the connections read instead of trusting one capped select", async () => {
+    // A single unpaged select is capped server side, and a capped read is a
+    // SUCCESSFUL read: no error is raised. Every connection past the cap used to
+    // stay wrapped under the old MEK while the meta write still landed, which
+    // strands those rows under a key nothing stores any more.
+    const rowCount = CONNECTION_PAGE_SIZE + 3;
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: `conn-${String(i).padStart(4, "0")}`,
+      encrypted_credentials: `creds-${i}`,
+      encrypted_label: null,
+    }));
+    const { client, calls } = makeFakeClient({ rows: { connections: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const updatedIds = calls
+      .filter((c) => c.table === "connections" && c.op === "update")
+      .map((c) => c.filters.find((f) => f.column === "id")?.value);
+    expect(updatedIds.length).toBe(rowCount);
+    expect(new Set(updatedIds).size).toBe(rowCount);
+
+    // One full page plus one short page. Two selects is the direct evidence the
+    // cursor advanced rather than the read being trusted to return everything.
+    const selectCalls = calls.filter((c) => c.table === "connections" && c.op === "select");
+    expect(selectCalls.length).toBe(2);
+  });
+
+  it("migrates every connection exactly once when the order changes between pages", async () => {
+    const rowCount = CONNECTION_PAGE_SIZE + 3;
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: `conn-${String(i).padStart(4, "0")}`,
+      encrypted_credentials: `creds-${i}`,
+      encrypted_label: null,
+    }));
+    const { client, calls } = makeFakeClient({
+      rows: { connections: rows },
+      reorderAfterSelect: { connections: (r) => r.slice().reverse() },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const updatedIds = calls
+      .filter((c) => c.table === "connections" && c.op === "update")
+      .map((c) => c.filters.find((f) => f.column === "id")?.value);
+    expect(updatedIds.length).toBe(rowCount);
+    expect(new Set(updatedIds).size).toBe(rowCount);
+    for (const call of calls.filter((c) => c.table === "connections" && c.op === "select")) {
+      expect(call.filters).toContainEqual({ column: "order", value: ["id", true] });
+    }
+  });
+
+  it("migrates every transaction exactly once when the order changes between pages", async () => {
+    // The case the fixed-array paging test above cannot reach. Postgres returns
+    // no guaranteed order without ORDER BY, and the update inside the loop
+    // writes a new tuple version, so the physical order can change under it.
+    // Reversing the store after every select models that. Take the order clause
+    // out of the source and this fails: rows are both skipped, which strands
+    // them permanently, and returned twice, which throws mid-rotation.
+    const rowCount = TRANSACTION_PAGE_SIZE + 5;
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: `txn-${String(i).padStart(4, "0")}`,
+      encrypted_payload: `payload-${i}`,
+    }));
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: rows },
+      reorderAfterSelect: { encrypted_transactions: (r) => r.slice().reverse() },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const updatedIds = calls
+      .filter((c) => c.table === "encrypted_transactions" && c.op === "update")
+      .map((c) => c.filters.find((f) => f.column === "id")?.value);
+    expect(updatedIds.length).toBe(rowCount);
+    expect(new Set(updatedIds).size).toBe(rowCount);
+    for (const call of calls.filter(
+      (c) => c.table === "encrypted_transactions" && c.op === "select",
+    )) {
+      expect(call.filters).toContainEqual({ column: "order", value: ["id", true] });
+    }
   });
 });
 
