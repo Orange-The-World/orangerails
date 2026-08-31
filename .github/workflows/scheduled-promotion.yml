@@ -301,6 +301,14 @@ jobs:
             exit 0
           fi
 
+          # No promotion is open, so open one from dev. This stays --head dev on
+          # purpose. Cutting a release branch is a contents WRITE, which would
+          # mean widening this workflow's token from Contents:read on a public
+          # repository and deleting the persist-credentials: false on the
+          # checkout above, whose comment says this workflow never pushes. That
+          # trade was considered and refused: Release cuts the branch by hand and
+          # owns the runbook. head=dev is still accepted by the source guard, so
+          # when no release branch has been cut this behaves as it always has.
           URL=$(gh pr create \
                   --base prod \
                   --head dev \
