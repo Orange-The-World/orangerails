@@ -187,7 +187,7 @@ export function deriveResponseCursor(
   storedCursor: number | null,
   inserted: number,
   maxBlockInserted: number,
-  clientContiguousScanned: unknown = undefined,
+  clientContiguousScanned: unknown,
 ): number | null {
   const candidate = boundCursorAdvance(maxBlockInserted, clientContiguousScanned);
   const advanced = inserted > 0 && candidate > (storedCursor ?? -1);
