@@ -1386,34 +1386,37 @@ function AppHome() {
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
           onSubmit={async ({ targetEmail, password }) => {
-            const result = await grantCoAdmin({
-              ownerUserId: userId,
-              ownerSaltB64: vaultSalt,
-              ownerPassword: password,
-              targetEmail,
-              existingKeyId: workspaceKeyId,
-              supabase: supabase as unknown as GrantSupabaseLike,
-            });
-            void logSecurityEvent(supabase, userId, "coadmin_granted", { target_email: targetEmail });
-            if (result.workspaceKeyId !== workspaceKeyId) {
-              setWorkspaceKeyId(result.workspaceKeyId);
-            }
-            // Reload co-admin list with resolved emails.
-            const { data: admins } = await supabase
-              .from("workspace_admins")
-              .select("id, admin_user_id, added_at")
-              .eq("owner_user_id", userId);
-            const freshRows = (admins ?? []) as CoAdminRow[];
-            const freshIds = freshRows.map((r) => r.admin_user_id);
-            const emailMap = new Map<string, string>();
-            if (freshIds.length > 0) {
-              const { data: emailRows } = await supabase.rpc("get_coadmin_emails", { user_ids: freshIds });
-              for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
-                emailMap.set(row.user_id, row.email);
+            try {
+              const result = await grantCoAdmin({
+                ownerUserId: userId,
+                ownerSaltB64: vaultSalt,
+                ownerPassword: password,
+                targetEmail,
+                existingKeyId: workspaceKeyId,
+                supabase: supabase as unknown as GrantSupabaseLike,
+              });
+              void logSecurityEvent(supabase, userId, "coadmin_granted", { target_email: targetEmail });
+              if (result.workspaceKeyId !== workspaceKeyId) {
+                setWorkspaceKeyId(result.workspaceKeyId);
               }
+              await loadCoAdminList();
+              setNotice("Co-admin added. They'll see your data on their next unlock.");
+            } catch (e) {
+              // The list row was written but the key that grants access was
+              // not, so this co-admin is on the list and can open nothing.
+              // That is the same half-written state revokeCoAdmin can leave,
+              // and it gets the same next step: reload the list so the new
+              // (keyless) row is there to act on, then offer to clear it
+              // instead of leaving the owner with only the raw error text.
+              if (e instanceof CoAdminGrantIncompleteError) {
+                setErr(e.message);
+                const freshRows = await loadCoAdminList();
+                const addedRow = freshRows.find((r) => r.adminEmail === targetEmail);
+                if (addedRow) setPendingGrantIncomplete(addedRow);
+                return;
+              }
+              throw e;
             }
-            setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
-            setNotice("Co-admin added. They'll see your data on their next unlock.");
           }}
         />
       )}
