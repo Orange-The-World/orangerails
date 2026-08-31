@@ -344,6 +344,13 @@ export interface SealedTransaction {
   /** Plaintext block height for resume on the next sync. */
   block_height: number;
   /**
+   * Lowercase hex, canonical hash of the block at block_height. Optional:
+   * absent on records sealed by a widget build that predates the reorg
+   * detector, and the server treats an absent hash as unverifiable rather
+   * than as a mismatch. Additive field, does not change protocol_version.
+   */
+  block_hash_hex?: string;
+  /**
    * Lowercase hex HMAC-SHA-256 of txid under the per-app blind-index subkey.
    * Server cannot reverse: the subkey is derived from the per-app stealth key
    * (HKDF-SHA-256, info="or-stealth/blind-index/v1"), which the server never holds.
