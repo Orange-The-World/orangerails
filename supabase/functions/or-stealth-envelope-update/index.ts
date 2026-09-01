@@ -17,11 +17,13 @@
  *   last_block_scanned: number (non-negative integer, the scan tip)
  *
  * Response:
- *   { connection_id, last_block_scanned }
+ *   { connection_id, last_block_scanned, scan_range }
  *   last_block_scanned reflects the stored cursor after the call. It may be
  *   higher than the supplied value when a concurrent call already advanced it.
  *   The forward-only guarantee is enforced atomically by the UPDATE itself
  *   (conditional WHERE on the row, not application-level read-then-compare).
+ *   scan_range says what happened to the block range on this call, one of
+ *   skipped / invalid / recorded / failed. See scan_range.ts (DEV-0136).
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
@@ -33,7 +35,7 @@ import {
 } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import { advanceCursor, isAdvanceCursorError } from './cursor.ts';
-import { recordScanRange } from './scan_range.ts';
+import { recordScanRange, type ScanRangeOutcome } from './scan_range.ts';
 
 interface EnvelopeUpdateRequestBody {
   connection_id?: string;
@@ -58,6 +60,16 @@ interface EnvelopeUpdateRequestBody {
 interface EnvelopeUpdateResponseBody {
   connection_id: string;
   last_block_scanned: number;
+  /**
+   * What happened to the scan range on this request (DEV-0136).
+   *
+   * Additive and safe to ignore: the sync succeeds whatever this says, and no
+   * existing caller has to read it. It is here because the response used to be
+   * identical whether the range was written or silently lost, and
+   * stealth_scan_ranges carries no timestamp, so "did that sync record its
+   * range" was unanswerable from outside this function's own logs.
+   */
+  scan_range: ScanRangeOutcome;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -172,7 +184,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // identity, token-pinned above (direct: equals ctx.userId, widget:
     // enforceWidgetAppUser, platform: scoped by platform_id on the row read).
     // DL-1597.
-    await recordScanRange(ctx.serviceClient, {
+    //
+    // The outcome is carried into the response rather than dropped. A failure
+    // here still leaves the sync successful (DL-1478), so this is the only
+    // place the caller can learn that the range it thought it was recording
+    // was not recorded. DEV-0136.
+    const scanRange = await recordScanRange(ctx.serviceClient, {
       connection_id:      body.connection_id,
       app_user_id:        body.app_user_id,
       last_block_scanned: body.last_block_scanned,
@@ -182,6 +199,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const resp: EnvelopeUpdateResponseBody = {
       connection_id: body.connection_id,
       last_block_scanned: effectiveCursor,
+      scan_range: scanRange,
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {
