@@ -270,7 +270,7 @@ jobs:
 
 
   check-pending-migrations:
-    needs: [target, apply-migrations]
+    needs: [target, check-duplicate-migrations, apply-migrations]
     # Runs BEFORE the deploy job, not after it. deploy declares
     # needs: [target, check-pending-migrations], so when this job exits 1 the
     # deploy is SKIPPED and code cannot ship ahead of its schema. That is the
@@ -300,6 +300,7 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
           APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+          DUPES_RESULT: ${{ needs['check-duplicate-migrations'].result }}
         run: |
           set -uo pipefail
 
@@ -342,26 +343,17 @@ jobs:
           # recorded the `grep -qx` below matches for BOTH and the other is
           # counted as applied forever -- no red, on any project, ever. That is
           # not a drift report failing, it is a drift report that cannot see.
-          # Caught here rather than in a lint job because this is the check
-          # whose answer the duplicate invalidates.
-          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
-          if [ -n "$DUPES" ]; then
-            {
-              echo "## :rotating_light: Duplicate migration version(s)"
-              echo ""
-              for V in $DUPES; do
-                echo "\`${V}\` is used by more than one file:"
-                echo ""
-                ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
-                echo ""
-              done
-              echo "\`supabase_migrations.schema_migrations\` stores one row per"
-              echo "version, so at most one of these can ever be tracked and the"
-              echo "rest are reported as applied whether they ran or not. Rename"
-              echo "the later file to an unused timestamp."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- this report cannot see drift in the shadowed file(s)."
-            exit 1
+          #
+          # The comparison itself no longer lives here. It lived here until
+          # OR-T1189, and this job declares needs: [..., apply-migrations], so it
+          # could only ever announce a collision that the apply had already
+          # resolved by silently skipping one of the two files. It is now
+          # check-duplicate-migrations, which apply-migrations needs, so a
+          # colliding pair stops the apply rather than describing it afterwards.
+          # What remains here is the consequence for THIS report: if that check
+          # did not pass, this comparison cannot see, and it must say so.
+          if [ "${DUPES_RESULT}" != "success" ]; then
+            unknown "check-duplicate-migrations ended '${DUPES_RESULT}'. Until every migration file has its own version, the ledger cannot distinguish a file that was applied from one that was shadowed by a namesake, so the comparison below cannot see drift. That job's summary names the colliding files."
           fi
 
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
@@ -438,8 +430,267 @@ jobs:
             echo "Schema in sync on ${SUPABASE_REF}." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Check anon EXECUTE grants on public functions
+        # Runs even when the migration check above exited 1. Steps default to
+        # if: success(), so on a target already carrying a migration backlog,
+        # the target this check is most wanted on, it produced no answer at all.
+        # The job is red either way, but "no answer" and "clean" must never look
+        # the same.
+        if: always()
+        # DEV-0238 / DL-1661 / DEV-0226. A default-privilege row (ours or a
+        # platform role's) can hand the anonymous role EXECUTE on a function
+        # the moment it is created in schema public. We hold no membership in
+        # supabase_admin, so no migration we own can prevent that row; this is
+        # the detection DEV-0226 decided on, running automatically instead of
+        # depending on someone remembering a cadence.
+        #
+        # Zero rows is PASS. Grantor-agnostic on purpose: filtering by grantor
+        # is what made 20260825120000's assertion unable to see the platform
+        # row at all.
+        #
+        # OR-T0946: it was NOT grantee-agnostic, and that is why it could print
+        # a success line on a database that had anon-executable functions in it.
+        # Three routes reach the same privilege and only one of them puts the
+        # string "anon" in the ACL text:
+        #   1. anon=X/owner   anon named directly. The only case the old
+        #                     LIKE 'anon=%' predicate could see.
+        #   2. =X/owner       PUBLIC, which renders with an EMPTY grantee, and
+        #                     PUBLIC includes anon. Read live on the dev project
+        #                     2026-08-31: one function in schema public in
+        #                     exactly this shape, and the old predicate returned
+        #                     zero rows for it.
+        #   3. proacl IS NULL no ACL row at all, so the built-in default applies,
+        #                     which for a function is EXECUTE to PUBLIC.
+        #                     unnest() over NULL yields no rows, so no text match
+        #                     can ever reach this one. Read live 2026-08-31: all
+        #                     3,257 pg_catalog functions with a NULL proacl
+        #                     answer true to has_function_privilege('anon', oid,
+        #                     'EXECUTE').
+        # has_function_privilege() asks what this check actually means to ask,
+        # can the anonymous role call this, and covers all three routes plus role
+        # membership. The ACL text is still reported, for the reader. If the anon
+        # role did not exist the function would error, the request would not
+        # return 2xx, and the step would report UNKNOWN rather than a clean pass.
+        # That is deliberate: a query that cannot run must be loud.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+          ALLOWLIST: ${{ vars.ANON_EXECUTE_RPC_ALLOWLIST }}
+        run: |
+          set -uo pipefail
+
+          # Same shape as the migration check above, duplicated rather than
+          # shared because each `run:` block is its own shell process. A query
+          # that could not run must exit non-zero with a distinct message and
+          # never read as a pass -- that matters more here than on the
+          # migration check, because EMPTY is the pass condition for this one.
+          unknown () {
+            {
+              echo "## :grey_question: anon-EXECUTE check UNKNOWN on \`${SUPABASE_REF:-unresolved}\`"
+              echo ""
+              echo "$1"
+              echo ""
+              echo "This is **not** a report that a function is anon-executable, and **not**"
+              echo "a report that the surface is clean. The check could not determine the"
+              echo "state. Re-run it, or read pg_proc directly, before promoting."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::anon-EXECUTE check state UNKNOWN on ${SUPABASE_REF:-unresolved}: $1"
+            exit 1
+          }
+
+          if [ -z "${SUPABASE_REF}" ]; then
+            unknown "The target job produced no supabase_ref output."
+          fi
+
+          PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
+          SQL_FILE=$(mktemp); chmod 600 "$SQL_FILE"
+          trap 'rm -f "$PAYLOAD" "$SQL_FILE"' EXIT
+
+          # Written to a file and handed to jq -Rs rather than escaped inline.
+          # The inline single-quote escaping this replaced made the predicate
+          # unreadable, and an unreadable predicate is how the PUBLIC case
+          # survived review in the first place.
+          cat > "$SQL_FILE" <<'SQL'
+          SELECT n.nspname AS nspname,
+                 p.proname AS proname,
+                 CASE
+                   WHEN p.proacl IS NULL
+                     THEN 'null-acl-default-public'
+                   WHEN EXISTS (SELECT 1 FROM unnest(p.proacl) a WHERE a::text LIKE 'anon=%')
+                     THEN 'anon-direct'
+                   WHEN EXISTS (SELECT 1 FROM unnest(p.proacl) a WHERE a::text LIKE '=%')
+                     THEN 'bare-public'
+                   ELSE 'role-membership'
+                 END AS reason,
+                 coalesce(array_to_string(p.proacl, ','), '(no acl row)') AS ace
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'public'
+             AND has_function_privilege('anon', p.oid, 'EXECUTE')
+           ORDER BY p.proname;
+          SQL
+          jq -Rs '{query:.}' < "$SQL_FILE" > "$PAYLOAD"
+
+          # --fail-with-body, not bare -sS: without it curl exits 0 on a 401,
+          # 403 or 500, the error body parses as valid JSON, row extraction
+          # yields nothing, and an auth failure reads as a clean pass.
+          RESPONSE=""
+          HTTP_OK=0
+          for attempt in 1 2 3; do
+            if RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$PAYLOAD"); then
+              HTTP_OK=1
+              break
+            fi
+            echo "anon-EXECUTE query attempt ${attempt}/3 did not return a success status"
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          # Response body not echoed on failure -- the one place a
+          # token-shaped string could reach a public build log.
+          [ "$HTTP_OK" -eq 1 ] || unknown "The Supabase Management API did not return a success status after 3 attempts. Most often an expired or rotated SUPABASE_ACCESS_TOKEN, or the project being paused."
+
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            unknown "The anon-EXECUTE query returned a success status but not a JSON array of rows."
+          fi
+
+          # Allowlist filter. Comma-separated, unqualified function names,
+          # empty by default so today "any row is a regression" holds exactly
+          # as DEV-0226 measured it.
+          IFS=',' read -ra ALLOWED_ARR <<< "${ALLOWLIST}"
+          ROWS=$(echo "$RESPONSE" | jq -r '.[] | "\(.nspname).\(.proname)\t\(.reason)\t\(.ace)"')
+
+          # Name the ROUTE, not just the function. "anon holds a direct grant"
+          # is the wrong sentence for a PUBLIC row: it sends the next reader
+          # looking for an anon entry that is not in that ACL at all (OR-T0946).
+          explain () {
+            case "$1" in
+              anon-direct)
+                echo "anon is named directly in the function ACL" ;;
+              bare-public)
+                echo "PUBLIC holds EXECUTE (empty grantee, renders as \`=X/owner\`) and PUBLIC includes anon; there is NO anon entry in this ACL" ;;
+              null-acl-default-public)
+                echo "the function has no ACL row, so the built-in default applies and PUBLIC holds EXECUTE; there is NO anon entry in this ACL" ;;
+              *)
+                echo "anon reaches EXECUTE through role membership; read the ACL directly" ;;
+            esac
+          }
+
+          OFFENDING=""
+          ALLOWED_HIT=""
+          while IFS=$'\t' read -r QUALIFIED REASON ACE; do
+            [ -z "$QUALIFIED" ] && continue
+            FUNC="${QUALIFIED#public.}"
+            WHY=$(explain "$REASON")
+            IS_ALLOWED=0
+            for A in "${ALLOWED_ARR[@]}"; do
+              TRIMMED=$(echo "$A" | tr -d '[:space:]')
+              if [ -n "$TRIMMED" ] && [ "$TRIMMED" = "$FUNC" ]; then
+                IS_ALLOWED=1
+              fi
+            done
+            if [ "$IS_ALLOWED" -eq 1 ]; then
+              ALLOWED_HIT="${ALLOWED_HIT}- \`${QUALIFIED}\` -- ${WHY} -- acl: \`${ACE}\` -- allowlisted via ANON_EXECUTE_RPC_ALLOWLIST\n"
+            else
+              OFFENDING="${OFFENDING}- \`${QUALIFIED}\` -- ${WHY} -- acl: \`${ACE}\`\n"
+            fi
+          done <<< "$ROWS"
+
+          if [ -n "$ALLOWED_HIT" ]; then
+            {
+              echo "## :warning: anon-executable function(s) allowlisted on \`${SUPABASE_REF}\`"
+              echo ""
+              printf '%b' "$ALLOWED_HIT"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "allowlisted anon-executable function(s) present, named above; not failing the check for these"
+          fi
+
+          if [ -n "$OFFENDING" ]; then
+            {
+              echo "## :no_entry: anon-executable function(s) found in \`public\` on \`${SUPABASE_REF}\`"
+              echo ""
+              echo "The anonymous role can call these. Each line names the ROUTE by which it"
+              echo "holds the privilege: named directly in the ACL, through PUBLIC (an empty"
+              echo "grantee), or through no ACL row at all, where the built-in default hands"
+              echo "EXECUTE to PUBLIC (DEV-0226/DEV-0238/OR-T0946)."
+              echo ""
+              echo "Revoke it explicitly, naming BOTH anon AND PUBLIC: revoking only anon"
+              echo "leaves the PUBLIC entry behind and this check stays red, correctly."
+              echo "Or add the function to the ANON_EXECUTE_RPC_ALLOWLIST repo variable, with"
+              echo "a reason in the PR, if it is meant to stay public."
+              echo ""
+              printf '%b' "$OFFENDING"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::anon-executable function(s) found in schema public on ${SUPABASE_REF}. See step summary."
+            exit 1
+          fi
+
+          echo "0 anon-executable function(s) in schema public on ${SUPABASE_REF} (outside the allowlist)."
+
+  # ---------------------------------------------------------------------------
+  # OR-T1189. This comparison used to live inside check-pending-migrations, and
+  # that job needs apply-migrations, so the check ran AFTER the apply it should
+  # have gated. By the time it could go red the shadowed file had already been
+  # skipped against a real database. The check was correct; it was downstream of
+  # the only thing it could have protected.
+  #
+  # It needs nothing but a checkout: no database, no secrets, no environment, no
+  # output from target. That is why there was never a reason for it to run late,
+  # and why it can gate the apply without slowing anything down.
+  # ---------------------------------------------------------------------------
+  check-duplicate-migrations:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Refuse two migration files sharing a version prefix
+        run: |
+          set -uo pipefail
+
+          MIG_DIR="supabase/migrations"
+          if [ ! -d "$MIG_DIR" ]; then
+            echo "no migrations directory; nothing to compare"
+            exit 0
+          fi
+
+          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
+          if [ -n "$DUPES" ]; then
+            {
+              echo "## :rotating_light: Duplicate migration version(s)"
+              echo ""
+              for V in $DUPES; do
+                echo "\`${V}\` is used by more than one file:"
+                echo ""
+                ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
+                echo ""
+              done
+              echo "\`supabase_migrations.schema_migrations\` stores one row per"
+              echo "version, so at most one of these can ever be tracked and the"
+              echo "rest are reported as applied whether they ran or not. Rename"
+              echo "the later file to an unused timestamp."
+              echo ""
+              echo "apply-migrations needs this job, so nothing has been applied"
+              echo "on this run. Rename the file and push again."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- refusing to apply; one of these files would be recorded and the rest treated as applied without running."
+            exit 1
+          fi
+
+          echo "no duplicate migration version(s) in $MIG_DIR"
+
   apply-migrations:
-    needs: [target]
+    # needs check-duplicate-migrations, not just target. A colliding pair of
+    # filenames makes this job's own record of what it did untrue: the ledger
+    # holds ONE row per version, so it applies one file, records that version,
+    # and treats the namesake as already applied on every future run. The if:
+    # below is a plain expression rather than always(), so a failed need skips
+    # this job outright instead of the condition re-enabling it (OR-T1189).
+    needs: [target, check-duplicate-migrations]
     # A PUSH TO DEV REACHES THIS JOB. That is the whole change: dev applies its
     # own migrations at merge time, so the dev backlog is always 0 or 1 and prod
     # promotion is a batch that has already run once on a real database.

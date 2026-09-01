@@ -10,7 +10,8 @@
  *   2. Run HKDF on the raw bytes to extract credentials + transactions subkeys.
  *   3. Concatenate into a 64-byte blob.
  *   4. Wrap the blob with the admin's hybrid KEM public key (see wrapBlob64).
- *   5. Insert into wrapped_data_keys + workspace_admins.
+ *   5. Insert workspace_admins, then wrapped_data_keys. That order is not
+ *      interchangeable; see persistCoAdminGrant for why.
  *
  * ## Consume flow (admin side, post-unlock)
  *   1. Fetch wrapped_data_keys row for the owner's workspace_key_id.
@@ -19,8 +20,10 @@
  *   4. Return for use in encrypt/decrypt calls.
  *
  * ## Revoke flow (owner side)
- *   1. Delete workspace_admins row (RLS ensures only the owner can do this).
- *   2. Delete the corresponding wrapped_data_keys row.
+ *   1. Delete the wrapped_data_keys row, which is what removes access.
+ *   2. Delete the workspace_admins row, which is only the record of it.
+ *   The reverse of the grant, for the same reason: a stop between the two must
+ *   leave the evidence rather than the access. See revokeCoAdmin.
  *
  * ## Why not KEY_WRAP_STRATEGIES[...].wrapForRecipient?
  *   That function enforces a 32-byte data-key size (it was designed for
@@ -54,6 +57,22 @@ function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary);
+}
+
+/**
+ * Pull the human-readable text out of a Supabase error.
+ *
+ * These errors are objects, and interpolating one straight into a template
+ * literal yields "[object Object]". GrantCoAdminDialog renders whatever message
+ * this module throws directly to the owner, so the Postgres message is the part
+ * that has to survive.
+ */
+function errorText(err: unknown): string {
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string" && message.length > 0) return message;
+  }
+  return String(err);
 }
 
 // ------------------------------------------------------------------
@@ -180,9 +199,27 @@ export async function unwrapBlob64(
 // Public types
 // ------------------------------------------------------------------
 
-/** Narrow Supabase surface needed by the co-admin flows. */
+/**
+ * Narrow Supabase surface needed by the co-admin flows.
+ *
+ * There is deliberately no update() anywhere in here. The only column this
+ * module ever wrote was user_vault_meta.workspace_key_id, and that value must
+ * be assigned by the server: the authenticated role no longer holds the
+ * privilege, and allocate_workspace_key() assigns it instead. Declaring the
+ * method would let the same write back in as something TypeScript accepts and
+ * the database refuses.
+ */
 export interface CoAdminSupabaseLike {
   from(table: string): CoAdminTableBuilder;
+  /**
+   * allocate_workspace_key() takes no argument by design: the caller may not
+   * propose a workspace key id by any path. params stays optional so this
+   * surface still describes the argument-taking RPCs the callers hold.
+   */
+  rpc(
+    fn: string,
+    params?: Record<string, unknown>,
+  ): Promise<{ data: unknown; error: unknown }>;
 }
 
 interface CoAdminTableBuilder {
@@ -191,7 +228,6 @@ interface CoAdminTableBuilder {
     row: Record<string, unknown>,
   ): Promise<{ data: Record<string, unknown>[] | null; error: unknown }>;
   delete(): CoAdminDeleteBuilder;
-  update(values: Record<string, unknown>): CoAdminUpdateBuilder;
 }
 
 interface CoAdminSelectBuilder {
@@ -227,10 +263,6 @@ interface CoAdminDeleteBuilder {
   then(fn: (v: { error: unknown }) => void): Promise<{ error: unknown }>;
 }
 
-interface CoAdminUpdateBuilder {
-  eq(col: string, val: string): Promise<{ error: unknown }>;
-}
-
 /** Result returned by grantCoAdmin. */
 export interface GrantResult {
   workspaceKeyId: string;
@@ -247,6 +279,107 @@ export interface AdminSubkeys {
 // ------------------------------------------------------------------
 
 /**
+ * Thrown when a grant recorded the co-admin in the owner's list and then could
+ * not store the key that actually gives them access.
+ *
+ * This needs its own type for the same reason CoAdminRevocationIncompleteError
+ * does: there is a next step to offer and a plain Error gives the caller
+ * nothing to branch on. The state it names is the SAFE half of the pair. The
+ * recipient can open nothing, the owner can see the attempt, and both granting
+ * again and removing the entry are available. The dangerous half, a stored key
+ * with no list entry, is the state the write order exists to make unreachable,
+ * so nothing here ever constructs it.
+ */
+export class CoAdminGrantIncompleteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CoAdminGrantIncompleteError";
+  }
+}
+
+/** Postgres unique_violation, as PostgREST passes it back in error.code. */
+const PG_UNIQUE_VIOLATION = "23505";
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code?: unknown }).code === PG_UNIQUE_VIOLATION
+  );
+}
+
+/**
+ * Write the two rows a grant consists of, in the order that makes a stop
+ * between them safe.
+ *
+ * ORDER, and it is the rule revokeCoAdmin already states: the wrapped key is
+ * what actually grants access, and the admin list row is only the record of who
+ * holds it. Stopping between the two must leave the EVIDENCE rather than the
+ * ACCESS. On revoke that means the key goes first. On grant it means the list
+ * row goes first, so access is the last thing to appear and the first thing
+ * missing when anything goes wrong. Until this function existed, grant did the
+ * opposite of the rule stated in its own file, and the state it could leave had
+ * no way out: a recipient holding a validly signed wrapped key that
+ * loadAdminSubkeysDirect would open, and an owner shown nothing to revoke.
+ *
+ * THE LIST WRITE IS IDEMPOTENT, NARROWLY. workspace_admins carries UNIQUE
+ * (owner_user_id, admin_user_id), so after a stop a second attempt would fail
+ * on the first write and never reach the second. Treating that one conflict as
+ * "already recorded" is what makes granting again the remedy instead of a
+ * second dead end. Only 23505, and only on this insert: a blanket ignore would
+ * hide an RLS refusal, which means something entirely different.
+ *
+ * NOTHING IS COMPENSATED WHEN THE KEY WRITE FAILS. Deleting the list row back
+ * out looks tidier and is wrong. An error from a write is not proof the write
+ * did not land, only that its answer did not come back, so a delete issued on
+ * that assumption is one of the ways the dangerous state gets created. The row
+ * stays, and the owner is told what it means.
+ *
+ * EXPORTED FOR ITS TESTS, not as a second way to write a grant. grantCoAdmin is
+ * the only caller and should stay the only caller: everything it does before
+ * this point, deriving the MEK, wrapping the blob and signing the binding, is
+ * what makes the rows written here mean anything.
+ */
+export async function persistCoAdminGrant(params: {
+  ownerUserId: string;
+  targetUserId: string;
+  workspaceKeyId: string;
+  wrappedCiphertextB64: string;
+  grantSig: string;
+  supabase: CoAdminSupabaseLike;
+}): Promise<void> {
+  const { ownerUserId, targetUserId, workspaceKeyId, wrappedCiphertextB64, grantSig, supabase } =
+    params;
+
+  // The record of who holds access. Deliberately first.
+  const { error: adminErr } = await supabase.from("workspace_admins").insert({
+    owner_user_id: ownerUserId,
+    admin_user_id: targetUserId,
+  });
+  if (adminErr && !isUniqueViolation(adminErr)) {
+    throw new Error(`Failed to insert workspace_admins: ${errorText(adminErr)}`);
+  }
+
+  // The wrapped key. THIS is the write that grants access.
+  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
+    data_key_id: workspaceKeyId,
+    recipient_user_id: targetUserId,
+    wrapped_ciphertext: wrappedCiphertextB64,
+    algorithm: "hybrid-x25519-mlkem768-blob64",
+    grant_sig: grantSig,
+  });
+  if (wdkErr) {
+    throw new CoAdminGrantIncompleteError(
+      "This co-admin was added to your list, but the key that gives them access was not stored, " +
+        "so they cannot open any of your data. They are shown in your list on purpose, so the " +
+        "attempt is visible rather than silent. Reload the page, then either try granting again " +
+        `or remove them from your list. (${errorText(wdkErr)})`,
+    );
+  }
+}
+
+/**
  * Grant full co-admin access to a target user.
  *
  * The owner must re-confirm their vault password so we can derive
@@ -257,7 +390,8 @@ export interface AdminSubkeys {
  * @param params.ownerPassword     Re-confirmed vault password (never leaves the browser).
  * @param params.targetUserId      The recipient's user ID (from pqc-lookup-user).
  * @param params.targetKemPubB64   The recipient's KEM public key, base64 (from pqc-lookup-user).
- * @param params.existingKeyId     Current workspace_key_id from user_vault_meta (null if not yet set).
+ * @param params.existingKeyId     Current workspace_key_id from user_vault_meta (null if not yet
+ *                                 allocated, in which case the server allocates one).
  * @param params.supabase          Authenticated Supabase client for the owner.
  */
 export async function grantCoAdmin(params: {
@@ -292,16 +426,45 @@ export async function grantCoAdmin(params: {
   blob.set(credsRaw, 0);
   blob.set(txnsRaw, 32);
 
-  // Step d , allocate workspace_key_id if not yet set.
+  // Step d , get the workspace key id. The SERVER mints it; this browser must
+  // not, and as of the server-allocation migration it no longer can.
+  //
+  // WHY. Ownership on every wrapped_data_keys policy is decided by the VALUE of
+  // user_vault_meta.workspace_key_id, so that value must be assigned by the
+  // server and must never be proposed by a caller. The authenticated role
+  // therefore holds no INSERT or UPDATE on the column at all (it still holds
+  // SELECT), and allocate_workspace_key() is a SECURITY DEFINER function that
+  // takes no argument on purpose: there is no path by which a caller proposes
+  // an id.
+  //
+  // RETRIES ARE SAFE. A second call returns the id already allocated rather
+  // than raising or minting a second one, so a dropped response needs no guard
+  // here.
+  //
+  // IT CAN REFUSE, AND THAT REFUSAL MUST STOP THE GRANT. It raises when there
+  // is no authenticated session, and when the caller has no user_vault_meta row
+  // yet , allocate AFTER the vault exists, never before. There is deliberately
+  // no fallback to a locally minted id: a fallback would write nothing, because
+  // the privilege is gone, and would then sign an id no row carries.
+  //
+  // ORDER. This runs BEFORE signMemberGrant below, and the id signed there is
+  // the one returned here. signMemberGrant binds the workspace key id and all
+  // four signed fields must match at verify time, so a signature over a locally
+  // minted id verifies against nothing , and that would surface later as a
+  // co-admin who cannot open anything, not as an error at grant time.
   let workspaceKeyId = params.existingKeyId;
   if (!workspaceKeyId) {
-    workspaceKeyId = crypto.randomUUID();
-    const { error: updateErr } = await (
-      supabase
-        .from("user_vault_meta")
-        .update({ workspace_key_id: workspaceKeyId }) as unknown as CoAdminUpdateBuilder
-    ).eq("user_id", ownerUserId);
-    if (updateErr) throw new Error(`Failed to write workspace_key_id: ${updateErr}`);
+    const { data: allocated, error: allocErr } = await supabase.rpc("allocate_workspace_key");
+    if (allocErr) {
+      throw new Error(`Failed to allocate workspace_key_id: ${errorText(allocErr)}`);
+    }
+    if (typeof allocated !== "string" || allocated.length === 0) {
+      throw new Error(
+        "allocate_workspace_key returned no workspace key id. Refusing to continue: a grant signed " +
+          "against an id the vault row does not carry would verify against nothing.",
+      );
+    }
+    workspaceKeyId = allocated;
   }
 
   // Step e , wrap the 64-byte blob for the recipient's KEM public key.
@@ -328,22 +491,18 @@ export async function grantCoAdmin(params: {
     wrappedMekCiphertextB64: wrappedCt,
   });
 
-  // Step f , insert wrapped_data_keys row.
-  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
-    data_key_id: workspaceKeyId,
-    recipient_user_id: targetUserId,
-    wrapped_ciphertext: wrappedCt,
-    algorithm: "hybrid-x25519-mlkem768-blob64",
-    grant_sig: grantSig,
+  // Steps f-g , write the two rows. The list row goes first and the wrapped
+  // key second, so a stop between them leaves the evidence rather than the
+  // access. persistCoAdminGrant is the only path by which this module writes a
+  // grant, and its docstring is where that rule is argued.
+  await persistCoAdminGrant({
+    ownerUserId,
+    targetUserId,
+    workspaceKeyId,
+    wrappedCiphertextB64: wrappedCt,
+    grantSig,
+    supabase,
   });
-  if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${wdkErr}`);
-
-  // Step g , insert workspace_admins row.
-  const { error: adminErr } = await supabase.from("workspace_admins").insert({
-    owner_user_id: ownerUserId,
-    admin_user_id: targetUserId,
-  });
-  if (adminErr) throw new Error(`Failed to insert workspace_admins: ${adminErr}`);
 
   return { workspaceKeyId };
 }

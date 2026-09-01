@@ -3,7 +3,6 @@ name: CI
 
 on:
   pull_request:
-    branches: [dev, prod]
   push:
     branches: [dev, prod]
   workflow_dispatch:
@@ -48,6 +47,17 @@ jobs:
         # itself public while the gateway check is still on. See the script header for why this
         # is a declaration rather than a code scan.
         run: node scripts/check-public-auth.mjs
+
+      - name: Auth-marker check
+        # A real gate, no continue-on-error. Closes the gap the check above does not cover:
+        # that check proves the manifest and config.toml agree with EACH OTHER, this one proves
+        # the mode a function DECLARES matches a marker call in the code it actually ships
+        # (requireCallerAuth for a caller-auth mode, no such call for "none"). Pre-existing
+        # non-conforming functions are carried as dated known exceptions inside the script,
+        # tracked by OR-T1039 and OR-T1040, not exempted from this workflow. See the script
+        # header for why this is a marker search and not an analysis of whether the auth is
+        # correct.
+        run: node scripts/check-auth-marker.mjs
 
       - name: Anon RPC grant self-test
         # The parser IS the control, so it is tested here rather than trusted. Runs before the
@@ -282,7 +292,9 @@ jobs:
           # branch in the same PR, and say why in the message if it goes down.
           # dev raised 17 -> 18 by DEV-0270, which adds
           # supabase/functions/_shared/error-redaction.test.ts.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '18' }}
+          # dev raised 18 -> 19 by OR-T1203, which adds
+          # supabase/functions/or-stealth-connection-create/envelope_replace.test.ts.
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '19' }}
         run: |
           set -euo pipefail
 
@@ -424,7 +436,22 @@ jobs:
           # dev and prod branches have no Cloudflare branch preview; their
           # builds go to the static host. Only feature-branch PRs get
           # a per-branch preview URL.
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$GITHUB_HEAD_REF" != "dev" ] && [ "$GITHUB_HEAD_REF" != "prod" ]; then
+          #
+          # A release/* head belongs with dev and prod here, not with the feature
+          # branches (OR-T0990). A promotion into prod is now opened from a
+          # release branch cut at a sha that is already on dev, rather than from
+          # dev itself, because a promotion whose head is dev loses its approval
+          # every time anything merges into dev. Such a branch is a snapshot of
+          # dev, so the surface to smoke it against is the deployed dev site,
+          # exactly as it was when the head was dev. Sending it down the preview
+          # path instead would aim these tests at a Pages build that may never
+          # have been made, and turn the promotion red for a reason that has
+          # nothing to do with the code.
+          IS_FEATURE_BRANCH=1
+          case "$GITHUB_HEAD_REF" in
+            dev|prod|release/*) IS_FEATURE_BRANCH=0 ;;
+          esac
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$IS_FEATURE_BRANCH" = "1" ]; then
             SLUG=$(echo "$GITHUB_HEAD_REF" \
               | tr '[:upper:]' '[:lower:]' \
               | sed 's/[^a-z0-9]/-/g' \
@@ -452,7 +479,12 @@ jobs:
         # job. Its env-var guard is a beforeAll, so deselecting the suite skips
         # it cleanly. A module-level throw would instead crash THIS job at
         # collection, because Playwright imports every spec to enumerate tests.
-        run: bunx playwright test --forbid-only --grep-invert 'Sparrow host-routing smoke'
+        # 'Connect protocol compatibility' is excluded for the same reason as
+        # the Sparrow suite: it targets a specific artifact, not this job's base
+        # URL. It builds and serves its own bundle in the connect-protocol-compat
+        # job below, and its beforeAll guard throws when CONNECT_COMPAT_BASE_URL
+        # is unset, which is correct there and would be noise here.
+        run: bunx playwright test --forbid-only --grep-invert 'Sparrow host-routing smoke|Connect protocol compatibility'
 
       - name: Upload Playwright report
         if: always()
@@ -664,3 +696,193 @@ jobs:
           name: playwright-stealth-cursor-report
           path: playwright-report/
           retention-days: 14
+
+  connect-protocol-compat:
+    name: Connect previous-version handshake gate (DL-1809)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Why this job exists: connect.orangerails.com is a hosted surface with no
+    # version pin. On 2026-06-19 an integrator's connect flow hung on the
+    # Stealth Sync screen because the widget had shipped a new handshake and
+    # the integrator was still on the old one. The ruling that followed is that
+    # the deployed widget speaks a SET of versions, current N and previous N-1,
+    # with a 90 day window before N-1 is removed.
+    #
+    # A supported set is a promise. This job is what makes it true of the
+    # artifact rather than true of a document.
+    #
+    # NOT REQUIRED BY THIS CHANGE. Adding this check to the branch ruleset is a
+    # separate, deliberate act, and nothing here touches branch protection.
+    # Until that is done this job reports and does not block, and it must not be
+    # described as enforcing anything. That sentence is here so nobody reads the
+    # job name and assumes the gate is armed.
+    #
+    # Deliberately NOT `needs: lint-and-build`. It builds its own artifact, and
+    # keeping it independent means its answer arrives even when an unrelated
+    # part of the pipeline is red.
+    env:
+      CONNECT_COMPAT_PORT: '4178'
+      CONNECT_COMPAT_VERDICT_PATH: connect-compat-verdict.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # pinned: floating bun-version made CI non-reproducible (DL-0446).
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium
+
+      # THE BUILT ARTIFACT, not the dev server. The gate has to measure what we
+      # would ship: a production build is tree-shaken and minified, and a dev
+      # server can behave differently from it in exactly the places that matter.
+      - name: Build the artifact
+        run: bun run build
+
+      - name: Serve the built artifact
+        run: |
+          set -uo pipefail
+          bun run preview -- --port "$CONNECT_COMPAT_PORT" --strictPort &
+          for i in $(seq 1 60); do
+            if curl -sf "http://localhost:${CONNECT_COMPAT_PORT}/" -o /dev/null; then
+              echo "preview server up after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -sf "http://localhost:${CONNECT_COMPAT_PORT}/" -o /dev/null; then
+            echo "::error::The preview server did not start within 60s, so the gate has"
+            echo "::error::nothing to measure. This is an UNKNOWN, not a passing protocol check."
+            exit 1
+          fi
+
+      # THE NEGATIVE CONTROL, AND IT RUNS EVERY TIME.
+      #
+      # A check nobody has watched go red is untested, and a one-off
+      # demonstration recorded in a ticket decays the moment somebody edits the
+      # harness. So the gate is run with its assertion set to a code the widget
+      # can never send. The whole machinery runs for real, against the real
+      # artifact, with a real handshake behind it, and the assertion is false.
+      # If that exits ZERO the harness is asserting nothing and every green run
+      # after it would be worthless, so the job fails here.
+      - name: Negative control (the gate must be able to go red)
+        env:
+          CONNECT_COMPAT_BASE_URL: http://localhost:4178
+          CONNECT_COMPAT_NEGATIVE_CONTROL: '1'
+        run: |
+          set -uo pipefail
+          if bunx playwright test tests/e2e/connect-protocol-compat.spec.ts \
+               --forbid-only --retries=0 --reporter=list; then
+            echo "::error::NEGATIVE CONTROL FAILED: the gate exited 0 while asserting something"
+            echo "::error::that cannot be true. It is not measuring the handshake. Every green"
+            echo "::error::run of this job is worthless until this is fixed."
+            exit 1
+          fi
+          echo "Negative control PASS: the gate exited non-zero on a false assertion."
+
+      # The negative control wrote its own verdict file. Remove it so the real
+      # run below cannot inherit a stale verdict if it dies before writing one.
+      # Without this, a crashed real run would be scored on the control's file.
+      - name: Clear the negative control's verdict
+        run: rm -f "$CONNECT_COMPAT_VERDICT_PATH"
+
+      - name: Previous-version handshake gate
+        env:
+          CONNECT_COMPAT_BASE_URL: http://localhost:4178
+        run: |
+          bunx playwright test tests/e2e/connect-protocol-compat.spec.ts \
+            --forbid-only --retries=1 --reporter=list
+
+      # THE VERDICT IS READ FROM A FILE, NOT INFERRED FROM AN EXIT CODE.
+      #
+      # Today exactly one protocol version is live, so the previous-version
+      # comparison has nothing to drive. A Playwright test.skip() there would
+      # render green and keep rendering green for as long as that stays true,
+      # which is the precise failure this gate exists to end. The suite instead
+      # writes what it actually concluded, and this step reports it.
+      #
+      # A MISSING verdict file is a FAILURE. A check that did not report is not
+      # a check that passed.
+      - name: Report the verdict
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ ! -f "$CONNECT_COMPAT_VERDICT_PATH" ]; then
+            echo "::error::The gate wrote no verdict. It did not reach a conclusion, so this is"
+            echo "::error::an UNKNOWN and not a pass. Read the Playwright output above."
+            {
+              echo "## :grey_question: Connect previous-version gate: NO VERDICT"
+              echo
+              echo "The suite wrote no verdict file, so it did not reach a conclusion."
+              echo "This is **not** a report that the previous version is fine."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          cat "$CONNECT_COMPAT_VERDICT_PATH"
+          STATUS=$(jq -r '.status' "$CONNECT_COMPAT_VERDICT_PATH")
+          DETAIL=$(jq -r '.detail' "$CONNECT_COMPAT_VERDICT_PATH")
+          SUPPORTED=$(jq -r '(.supported // []) | join(", ")' "$CONNECT_COMPAT_VERDICT_PATH")
+
+          case "$STATUS" in
+            RAN_PASS)
+              {
+                echo "## :check: Connect previous-version gate: PASS"
+                echo
+                echo "Supported versions advertised by the built artifact: \`${SUPPORTED}\`"
+                echo
+                echo "${DETAIL}"
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "PASS: ${DETAIL}"
+              ;;
+            SKIPPED)
+              # Loud on purpose. This is the state we are in today and it must
+              # never be mistaken for a pass by anyone reading a green tick.
+              echo "::warning::CONNECT PREVIOUS-VERSION GATE SKIPPED. ${DETAIL} This is NOT a pass: the previous-version handshake was not exercised because there is no previous version yet."
+              {
+                echo "## :warning: Connect previous-version gate: SKIPPED, not passed"
+                echo
+                echo "Supported versions advertised by the built artifact: \`${SUPPORTED}\`"
+                echo
+                echo "${DETAIL}"
+                echo
+                echo "**Nothing about previous-version compatibility was proven by this run.**"
+                echo "The liveness half of the gate DID run: an unsupported version was refused"
+                echo "with a typed terminal error, and the negative control confirmed the gate"
+                echo "can go red. What did not run is the comparison, because there is only one"
+                echo "live version to compare."
+                echo
+                echo "This skip stops being legal the moment the supported set grows. The suite"
+                echo "asserts that, so it will turn red on its own rather than waiting to be"
+                echo "noticed."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "::error::Connect previous-version gate: ${STATUS}. ${DETAIL}"
+              {
+                echo "## :x: Connect previous-version gate: ${STATUS}"
+                echo
+                echo "${DETAIL}"
+                echo
+                jq -r '(.divergences // []) | .[] | "- " + .' "$CONNECT_COMPAT_VERDICT_PATH"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+
+      - name: Upload gate report and verdict
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: connect-protocol-compat-report
+          path: |
+            playwright-report/
+            connect-compat-verdict.json
+          retention-days: 14
+          if-no-files-found: warn
