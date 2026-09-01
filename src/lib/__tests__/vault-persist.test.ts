@@ -22,6 +22,7 @@ import {
   RECOVERY_META_NOT_SAVED_MESSAGE,
   rowCountMismatchMessage,
   rowCountUnreadableMessage,
+  rowNotWrittenMessage,
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
   type VaultPersistClient,
@@ -143,7 +144,15 @@ function makeFakeClient(options: FakeOptions = {}) {
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
     }
-    return options.otherUpdate ?? { data: [], error: null };
+    // A row update returns the rows it changed. The default models an update
+    // that matched the row it filtered on, because that is the only outcome
+    // which proves the re-encrypted ciphertext was written. The previous
+    // default, an empty array, is the shape of an update that matched NOTHING,
+    // so every test here passed against a client that wrote no rows at all.
+    // A test that wants that outcome now has to ask for it, with otherUpdate.
+    if (options.otherUpdate) return options.otherUpdate;
+    const idFilter = call.filters.find((f) => f.column === "id");
+    return { data: idFilter ? [{ id: idFilter.value }] : [], error: null };
   }
 
   // A head request with an exact count returns a count and no rows. PostgREST
@@ -560,6 +569,59 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
 
     expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
     expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("stops before the meta write when a connection update changes no row", async () => {
+    // The failure a row count on its own cannot see. An update that matches
+    // nothing raises no error, so a counter incremented on the absence of an
+    // error reaches the same number as the table count, and the reconciliation
+    // certifies a run in which not one ciphertext actually moved.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      otherUpdate: { data: [], error: null },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(rowNotWrittenMessage("connections", "conn-1"));
+
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("stops before the meta write when a transaction update changes no row", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-1" }] },
+      otherUpdate: { data: [], error: null },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(rowNotWrittenMessage("encrypted_transactions", "txn-1"));
+
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("asks every row update for the row it changed, not only for the absence of an error", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0" }],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const rowUpdates = calls.filter((c) => c.op === "update" && c.table !== "user_vault_meta");
+    expect(rowUpdates.length).toBe(2);
+    for (const call of rowUpdates) expect(call.columns).toBe("id");
+  });
+
+  it("names the row that was not written, so support has something to act on", () => {
+    expect(rowNotWrittenMessage("connections", "conn-9")).toContain("connections row conn-9");
   });
 
   it("names both numbers, so a run that reconciled nothing does not read as a clean one", () => {
