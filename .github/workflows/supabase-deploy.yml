@@ -816,7 +816,7 @@ jobs:
           # applied set is UNKNOWN, and UNKNOWN is not the same fact as empty.
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
-          jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
+          jq -n '{query:"SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
 
           RESPONSE=""
           HTTP_OK=0
@@ -859,6 +859,83 @@ jobs:
           echo "$APPLIED" | tail -10
           echo
 
+          # -------------------------------------------------------------------
+          # OR-T1252. SHADOW SCAN, before anything is applied.
+          #
+          # "Applied" in this loop means "a row with that version number exists",
+          # never "this file ran". So a file can be merged, deployed and reported
+          # clean on every check while its SQL has never executed anywhere:
+          # rename a migration, or revert and re-add it under a different name,
+          # and the loop below finds its version already in the ledger and skips
+          # it, on this run and on every future run. check-duplicate-migrations
+          # cannot see this, because it compares the tree with itself and there
+          # is exactly one file.
+          #
+          # The ledger carries a name column, so the shadow IS detectable: the
+          # version is recorded under one file name and the tree carries another.
+          # Rows written before this workflow started recording names have a NULL
+          # name and cannot be compared. Those are counted and reported as
+          # UNVERIFIABLE and are never folded into the pass count, because "I
+          # could not check" is not the same fact as "I checked and it was fine".
+          # -------------------------------------------------------------------
+          LEDGER_MAP=$(mktemp); chmod 600 "$LEDGER_MAP"
+          echo "$RESPONSE" | jq -r '.[] | "\(.version)=\(.name // "")"' | sort -u > "$LEDGER_MAP"
+
+          shadow_scan() {
+            local map="$1" files="$2"
+            local base version fname ledger_line ledger_name
+            local checked=0 matched=0 unverifiable=0 mismatched=0
+            while IFS= read -r base; do
+              [ -n "$base" ] || continue
+              version="${base%%_*}"
+              fname="${base#*_}"; fname="${fname%.sql}"
+              ledger_line=$(grep -m1 "^${version}=" "$map" || true)
+              [ -n "$ledger_line" ] || continue
+              checked=$((checked + 1))
+              ledger_name="${ledger_line#*=}"
+              if [ -z "$ledger_name" ]; then
+                unverifiable=$((unverifiable + 1))
+              elif [ "$ledger_name" = "$fname" ]; then
+                matched=$((matched + 1))
+              else
+                mismatched=$((mismatched + 1))
+                echo "  x SHADOWED: ${base} -- version ${version} is recorded in the ledger under the name '${ledger_name}'. This file has never run against ${SUPABASE_REF} and never will."
+              fi
+            done <<< "$files"
+            echo "SHADOW SCAN: ${checked} already-recorded file(s) compared, ${matched} name-matched, ${unverifiable} unverifiable (ledger row predates name recording), ${mismatched} shadowed."
+            [ "$mismatched" -eq 0 ]
+          }
+
+          # The scan must be able to go RED. Run it first over a synthetic pair
+          # with a known shadow and a known match, and refuse to apply if the
+          # detector does not behave both ways. A comparison that silently checks
+          # nothing would otherwise read exactly like a clean tree.
+          ST_MAP=$(mktemp); chmod 600 "$ST_MAP"
+          printf '%s\n' '20990101000000=add_thing' '20990101000001=fine' > "$ST_MAP"
+          if shadow_scan "$ST_MAP" '20990101000000_add_thing_properly.sql' >/dev/null 2>&1; then
+            rm -f "$ST_MAP" "$LEDGER_MAP"
+            echo "::error::shadow-scan self-test FAILED: the detector did not fire on a file that IS shadowed. Refusing to apply, because a check that cannot go red proves nothing."
+            exit 1
+          fi
+          if ! shadow_scan "$ST_MAP" '20990101000001_fine.sql' >/dev/null 2>&1; then
+            rm -f "$ST_MAP" "$LEDGER_MAP"
+            echo "::error::shadow-scan self-test FAILED: the detector fired on a file whose name matches the ledger. Refusing to apply."
+            exit 1
+          fi
+          rm -f "$ST_MAP"
+          echo "shadow-scan self-test ok: fires on a mismatch, silent on a match."
+
+          TREE_FILES=$(ls "$MIG_DIR" 2>/dev/null | grep -E '\.sql$' | sort || true)
+          if [ -z "$TREE_FILES" ]; then
+            echo "SHADOW SCAN: no .sql files in $MIG_DIR to compare."
+          elif ! shadow_scan "$LEDGER_MAP" "$TREE_FILES"; then
+            rm -f "$LEDGER_MAP"
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more migration files carry a version that the ledger recorded under a DIFFERENT file name. Those files have never run and never will, because a version already in the ledger is skipped. Give each one a new, unused version timestamp and push again. NOTHING was applied on this run."
+            exit 1
+          fi
+          rm -f "$LEDGER_MAP"
+          echo
+
           # For each migration file, apply if not in the applied set
           APPLIED_COUNT=0
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
@@ -885,24 +962,81 @@ jobs:
             fi
             echo "  v SQL applied (HTTP $CODE)"
 
-            # Record in schema_migrations
+            # Record in schema_migrations, WITH the name of the file that ran.
+            #
+            # OR-T1252. Recording only the version is what lets a renamed or
+            # re-added file be skipped for ever: the loop above treats a version
+            # present in the ledger as applied, whatever file carried it. The
+            # name column already exists and the Supabase CLI populates it; this
+            # workflow never did, so every row it wrote was unverifiable. From
+            # here on each row says which file ran and the shadow scan can
+            # compare it against the tree.
+            #
+            # OR-T1254. The SQL is ALREADY APPLIED by the time we get here. If
+            # the record does not land, the database carries the change and the
+            # ledger does not know it, so the next run applies the same file
+            # again. That is harmless only if the migration is idempotent, which
+            # nothing in this repo requires or checks. So the write is retried,
+            # then read back, and a total failure names the exact recovery
+            # statement rather than only reporting that it failed.
+            #
+            # NOT merged into the apply call above as one multi-statement
+            # request, deliberately: supabase/migrations contains CREATE INDEX
+            # CONCURRENTLY and DROP INDEX CONCURRENTLY migrations
+            # (20260715130000 and 20260716140000) and neither may run inside a
+            # transaction block, so a combined request would make those files
+            # impossible to apply at all.
+            NAME="${BASENAME#*_}"; NAME="${NAME%.sql}"
+            SQ="'"
+            V_SQL="${VERSION//$SQ/$SQ$SQ}"
+            N_SQL="${NAME//$SQ/$SQ$SQ}"
+            REC_SQL="INSERT INTO supabase_migrations.schema_migrations (version, name) VALUES ('${V_SQL}', '${N_SQL}') ON CONFLICT (version) DO UPDATE SET name = COALESCE(schema_migrations.name, EXCLUDED.name);"
             REC=$(mktemp); chmod 600 "$REC"
-            jq -n --arg v "$VERSION" \
-              '{query:"INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('"'"'\($v)'"'"') ON CONFLICT DO NOTHING;"}' > "$REC"
-            REC_CODE=$(curl -sS -o /tmp/mig.resp -w "%{http_code}" \
-              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
-              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data-binary "@$REC")
+            jq -n --arg q "$REC_SQL" '{query:$q}' > "$REC"
+
+            REC_OK=0
+            REC_CODE=""
+            for attempt in 1 2 3; do
+              REC_CODE=$(curl -sS -o /tmp/mig.resp -w "%{http_code}" \
+                -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+                -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data-binary "@$REC")
+              if [[ "$REC_CODE" =~ ^2 ]]; then
+                REC_OK=1
+                break
+              fi
+              echo "  ! ledger record attempt ${attempt}/3 returned HTTP ${REC_CODE}"
+              if [ "$attempt" -lt 3 ]; then
+                sleep 10
+              fi
+            done
             rm -f "$REC"
 
-            if [[ ! "$REC_CODE" =~ ^2 ]]; then
-              echo "  x FAILED to record migration in ledger (HTTP $REC_CODE): $(head -c 400 /tmp/mig.resp)"
+            # The response body is deliberately not echoed on any failure path:
+            # on an auth failure it is the only place a token-shaped string could
+            # reach a public build log.
+            if [ "$REC_OK" -ne 1 ]; then
               rm -f /tmp/mig.resp
+              echo "::error::${BASENAME} WAS APPLIED to ${SUPABASE_REF} and could NOT be recorded in the ledger after 3 attempts (last HTTP ${REC_CODE}). The database carries this change and the ledger does not know it, so a re-run would apply the same file a second time. Record it by hand before re-running: INSERT INTO supabase_migrations.schema_migrations (version, name) VALUES ('${VERSION}', '${NAME}') ON CONFLICT (version) DO UPDATE SET name = COALESCE(schema_migrations.name, EXCLUDED.name);"
+              exit 1
+            fi
+
+            # A 2xx is the API accepting the call. It is not the row being there.
+            RB=$(mktemp); chmod 600 "$RB"
+            jq -n --arg q "SELECT count(*) AS n FROM supabase_migrations.schema_migrations WHERE version = '${V_SQL}';" '{query:$q}' > "$RB"
+            RB_BODY=$(curl -sS -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$RB" || true)
+            rm -f "$RB"
+            if ! echo "$RB_BODY" | jq -e '(.[0].n | tonumber) == 1' >/dev/null 2>&1; then
+              rm -f /tmp/mig.resp
+              echo "::error::${BASENAME} was applied to ${SUPABASE_REF} and the ledger write returned success, but reading it back did not find exactly one row for version ${VERSION}. Treat the ledger as NOT carrying this migration and record it by hand before re-running."
               exit 1
             fi
             rm -f /tmp/mig.resp
-            echo "  v migration recorded in ledger (HTTP $REC_CODE)"
+            echo "  v migration recorded in ledger and read back (version ${VERSION}, name ${NAME})"
             APPLIED_COUNT=$((APPLIED_COUNT + 1))
           done
 
