@@ -181,13 +181,13 @@ function DocsIndexPage() {
             </div>
 
             <div className="mt-12 grid gap-4 md:grid-cols-2">
-              <a href="https://docs.orangerails.com/support" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
+              <a href="https://github.com/Orange-The-World/orangerails/issues/new?labels=support" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
                 <h3 className="font-semibold">Need support?</h3>
-                <p className="mt-1 text-sm text-muted-foreground">Open a ticket at docs.orangerails.com/support.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Open a ticket on GitHub Issues.</p>
               </a>
-              <a href="https://docs.orangerails.com/feedback" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
+              <a href="https://github.com/Orange-The-World/orangerails/issues/new?labels=feedback" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
                 <h3 className="font-semibold">Request a feature</h3>
-                <p className="mt-1 text-sm text-muted-foreground">Vote and propose at docs.orangerails.com/feedback.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Vote and propose on GitHub Issues.</p>
               </a>
             </div>
           </div>
