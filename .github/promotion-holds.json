@@ -1,0 +1,7 @@
+[
+  {
+    "sha": "0fa8a425",
+    "ticket": "OR-T1310",
+    "note": "Merge commit for PR #1049 (stealth sync envelope replacement, OR-T1203) must not reach prod without PR #1061 (OR-T1242) landing on dev first. See cold_start row or-promotion-commit-holds for the full reasoning. Clear this entry only via its own merged PR to dev, before the next promotion is cut."
+  }
+]
