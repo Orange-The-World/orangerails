@@ -38,7 +38,7 @@ import {
   deriveVerifierKey,
   HKDF_CONTEXTS,
 } from "../key-derivation";
-import { buildPqcKeyMaterial } from "../pqc-lifecycle";
+import { buildPqcKeyMaterial, unwrapPqcSecretKey } from "../pqc-lifecycle";
 import { generateHybridKemKeyPair } from "../pqc";
 import { base64ToBytes } from "../key-wrapping";
 
@@ -258,14 +258,16 @@ describe("co-admin grant on a key-version-2 vault", () => {
         return;
       }
 
-      // A completed grant must write the key first and the list entry second,
-      // in one order, every time. Revoke removes them in the opposite order
-      // for the same reason: stopping in between must leave the evidence
-      // rather than the access.
+      // The write order belongs to persistCoAdminGrant and is not this test's
+      // to choose: the list row goes first and the wrapped key second, so a
+      // stop between them leaves a co-admin who is listed and holds nothing,
+      // rather than one who holds a usable key while appearing nowhere. This
+      // assertion is here to catch a silent change to that order, so it is
+      // pinned to the order that module documents and argues for.
       expect(run.recorder.calls, describeRun(run)).toEqual([
         "rpc allocate_workspace_key",
-        "insert wrapped_data_keys",
         "insert workspace_admins",
+        "insert wrapped_data_keys",
       ]);
     },
     ARGON2_TIMEOUT_MS,
@@ -314,6 +316,35 @@ describe("co-admin grant on a key-version-2 vault", () => {
 
       expect(run.outcome, describeRun(run)).toBe("threw");
       expect(run.recorder.inserts, describeRun(run)).toHaveLength(0);
+    },
+    ARGON2_TIMEOUT_MS,
+  );
+
+  it(
+    "records what the password-derived key material does here: it opens nothing",
+    async () => {
+      // The defect this change removes, kept as a standing record rather than
+      // as a sentence in a comment. The grant used to run HKDF over the
+      // Argon2id stretch of the password. On a vault of the shape setupVault
+      // creates, that value is the KEK which WRAPS the master key, so the wrap
+      // key it produces is not the one the owner's PQC secrets were wrapped
+      // under, and the ML-DSA signing secret does not come back at all.
+      const vault = await buildOwnerVault(OWNER_PASSWORD, 2);
+
+      // deriveMEK is the Argon2id stretch imported as an HKDF key, which is
+      // exactly the key material the grant used to build its subkeys from.
+      const passwordStretch = await deriveMEK(OWNER_PASSWORD, vault.saltB64);
+      const wrongWrapKey = await derivePqcSecretWrapKey(passwordStretch, vault.saltB64);
+      await expect(
+        unwrapPqcSecretKey(wrongWrapKey, vault.sigSecretWrapped),
+      ).rejects.toBeTruthy();
+
+      // And the key the vault really holds does open it. Without this half the
+      // line above would also pass against a fixture that is simply unreadable,
+      // which would prove nothing about where the key material came from.
+      const rightWrapKey = await derivePqcSecretWrapKey(vault.mek, vault.saltB64);
+      const secret = await unwrapPqcSecretKey(rightWrapKey, vault.sigSecretWrapped);
+      expect(new Uint8Array(secret as unknown as ArrayBuffer).byteLength).toBeGreaterThan(0);
     },
     ARGON2_TIMEOUT_MS,
   );
