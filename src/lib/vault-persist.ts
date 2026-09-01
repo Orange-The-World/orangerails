@@ -66,6 +66,22 @@ export function rowCountUnreadableMessage(table: string): string {
   );
 }
 
+/**
+ * Shown when a row update returned no error and no row.
+ *
+ * An update that matches nothing is a SUCCESS: no error is raised on any path.
+ * So the rows the update hands back are the only proof the re-encrypted
+ * ciphertext was actually written. A write that is refused at the row layer
+ * looks exactly like a write that changed a row, apart from those rows.
+ */
+export function rowNotWrittenMessage(table: string, rowId: string): string {
+  return (
+    `Vault recovery stopped before saving: the ${table} row ${rowId} was not written when it was ` +
+    "re-encrypted, so it is still under the old key. Your stored keys were not changed by this " +
+    "step. Do not close or reload this page, and contact support with this message."
+  );
+}
+
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
 
@@ -143,8 +159,12 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // Both of those residuals are now caught by the reconciliation below rather
   // than only described here.
   //
-  // Counted as each row's update lands, so it is what this run actually
-  // migrated rather than what a read said was there.
+  // Counted only when the update hands back the row it changed. The absence of
+  // an error is NOT proof that a row moved: an update matching nothing, or one
+  // filtered out at the row layer, returns no error and no rows. Counting
+  // attempts instead would let a run that rewrote nothing reconcile as clean
+  // against the row count below, which is the one thing that check exists to
+  // make impossible.
   let connectionsMigrated = 0;
   let connOffset = 0;
   for (;;) {
@@ -177,11 +197,15 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
           }
         }
       }
-      const { error: connErr } = await supabase
+      const { data: connWritten, error: connErr } = await supabase
         .from("connections")
         .update(connUpdate)
-        .eq("id", conn.id);
+        .eq("id", conn.id)
+        .select("id");
       if (connErr) throw connErr;
+      if (!connWritten || (connWritten as unknown[]).length !== 1) {
+        throw new Error(rowNotWrittenMessage("connections", conn.id));
+      }
       connectionsMigrated += 1;
     }
 
@@ -211,11 +235,15 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     await Promise.all(
       (txns as Array<{ id: string; encrypted_payload: string }>).map(async (txn) => {
         const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
-        const { error: txnErr } = await supabase
+        const { data: txnWritten, error: txnErr } = await supabase
           .from("encrypted_transactions")
           .update({ encrypted_payload: newPayload })
-          .eq("id", txn.id);
+          .eq("id", txn.id)
+          .select("id");
         if (txnErr) throw txnErr;
+        if (!txnWritten || (txnWritten as unknown[]).length !== 1) {
+          throw new Error(rowNotWrittenMessage("encrypted_transactions", txn.id));
+        }
         transactionsMigrated += 1;
       }),
     );
@@ -324,6 +352,12 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
  * and row level security is what scopes them to the caller (VERIFIED on the dev
  * project 2026-08-31: relrowsecurity is true on both). The paging reads carry
  * no filter either, so adding one only here would compare two different sets.
+ *
+ * WHAT THE MIGRATED NUMBER IS. It is incremented only when a row update handed
+ * back the row it changed, so it is proof of a landed write. Were it counting
+ * updates that merely did not error, this would compare a read count against a
+ * read count, and a run in which every write was refused at the row layer would
+ * reconcile as clean and go on to the irreversible meta write.
  *
  * A count LOWER than migrated fails too, which is deliberate. It means a row
  * was deleted from under the loop, and this path cannot tell that apart from a
