@@ -122,6 +122,19 @@ export function clientIdOrNull(req: Request): string | null {
   return hops.length > 0 ? `xff:${hops[hops.length - 1]}` : null;
 }
 
+// The headers worth reporting on when a caller could not be identified.
+// x-real-ip and x-gateway-verified-ip are listed even though clientIdOrNull
+// reads neither: x-real-ip is caller-controlled and must never become an
+// identity (OR-C0493), and x-gateway-verified-ip is the header the gateway work
+// will introduce. Knowing whether they were on the request is exactly what
+// tells us where an unidentified call came from.
+const IDENTITY_HEADERS = [
+  'cf-connecting-ip',
+  'x-forwarded-for',
+  'x-real-ip',
+  'x-gateway-verified-ip',
+] as const;
+
 /**
  * Describe why a caller could not be identified, for the log line in index.ts.
  *
@@ -134,20 +147,7 @@ export function clientIdOrNull(req: Request): string | null {
  * intermediary stripped and a header forwarded with nothing in it come from
  * different causes and point at different places to look, and a single
  * "missing" would collapse the two.
- *
- * x-real-ip and x-gateway-verified-ip are listed even though clientIdOrNull
- * does not read either. x-real-ip is caller-controlled and must never become
- * an identity (OR-C0493), and x-gateway-verified-ip is the header the gateway
- * work will introduce. Knowing whether they were on the request is exactly
- * what tells us where an unidentified call came from.
  */
-const IDENTITY_HEADERS = [
-  'cf-connecting-ip',
-  'x-forwarded-for',
-  'x-real-ip',
-  'x-gateway-verified-ip',
-] as const;
-
 export function unidentifiedCallerHeaders(req: Request): string {
   return IDENTITY_HEADERS.map((name) => {
     const raw = req.headers.get(name);
