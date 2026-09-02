@@ -10,8 +10,7 @@
 -- spellings have to reach the same verdict, the same rule and the same line.
 -- Before OR-T1695 they did not: the invocation test wanted whitespace or an
 -- open parenthesis directly after the name, a double quote is neither, the body
--- was never read, and this file classified REVERSIBLE while applying it empties
--- a table.
+-- was never read, and this file classified REVERSIBLE while it empties a table.
 --
 -- This file is NOT a migration. It lives under scripts/fixtures and the 2099
 -- version prefix cannot collide with a real one.
