@@ -253,6 +253,39 @@ DECLARE
     'service_role',
     'authenticated'
   ];
+  -- The agent read role, admitted for SELECT at COLUMN level and nothing else.
+  -- Deliberately NOT a member of expected_grantees: that set is trusted at any
+  -- level for any privilege, and this role is not. See the header.
+  agent_reader text := 'or_agent_reader';
+  -- The exact (table, column) pairs it may hold SELECT on. Written out for the
+  -- same reason expected_grantees is: a list derived from the catalogue at
+  -- apply time would describe whatever it found and could never disagree with
+  -- it. Every other column of both tables is sealed and is proved unreadable to
+  -- this role in the header.
+  agent_reader_columns text[] := ARRAY[
+    'public.user_vault_meta.created_at',
+    'public.user_vault_meta.kdf_algorithm',
+    'public.user_vault_meta.kdf_params',
+    'public.user_vault_meta.kem_public_key',
+    'public.user_vault_meta.keyring_epoch',
+    'public.user_vault_meta.pqc_key_version',
+    'public.user_vault_meta.sig_public_key',
+    'public.user_vault_meta.updated_at',
+    'public.user_vault_meta.user_id',
+    'public.user_vault_meta.vault_key_version',
+    'public.user_vault_meta.workspace_key_id',
+    'public.customer_vault_meta.created_at',
+    'public.customer_vault_meta.customer_id',
+    'public.customer_vault_meta.kdf_algorithm',
+    'public.customer_vault_meta.kdf_params',
+    'public.customer_vault_meta.kem_public_key',
+    'public.customer_vault_meta.pqc_key_version',
+    'public.customer_vault_meta.sig_public_key',
+    'public.customer_vault_meta.updated_at',
+    'public.customer_vault_meta.vault_key_version',
+    'public.customer_vault_meta.vault_mode',
+    'public.customer_vault_meta.workspace_key_id'
+  ];
   offenders text;
 BEGIN
   WITH acl AS (
