@@ -114,16 +114,64 @@ export const CONNECTION_PAGE_SIZE = 500;
  *
  * A MISMATCH IS NOT RETRIED. A count that was read successfully and disagrees
  * is a decision, not a flake. Only a failed or unreadable count comes back here.
+ *
+ * WHY THE BUDGET IS TENS OF SECONDS, NOT UNDER ONE (OR-T1342). The original
+ * budget here summed to about three quarters of a second (3 attempts, a
+ * 250ms base, linear backoff), which a single 429 with a multi-second
+ * Retry-After, or a gateway restart, exhausts outright. The alternative to
+ * waiting is a lost vault on a page the user has already been told not to
+ * close, so tens of seconds of waiting costs nothing anyone will notice.
+ * COUNT_READ_ATTEMPTS and COUNT_READ_RETRY_MS together sum to at least 30
+ * seconds of backoff. A test sums them from the constants themselves rather
+ * than a hardcoded number, so this comment cannot drift out of date with the
+ * values below it.
  */
-export const COUNT_READ_ATTEMPTS = 3;
+export const COUNT_READ_ATTEMPTS = 6;
 
-/** Base delay between count read attempts, in milliseconds. It backs off. */
-export const COUNT_READ_RETRY_MS = 250;
+/**
+ * Base delay between count read attempts, in milliseconds. Backs off linearly
+ * (attempt * COUNT_READ_RETRY_MS), so 6 attempts sum to 33 seconds of waiting
+ * before giving up: 2200 * (1+2+3+4+5) = 33000ms.
+ */
+export const COUNT_READ_RETRY_MS = 2200;
 
 /** Waits between count read attempts. */
 export type SleepFn = (ms: number) => Promise<void>;
 
 const realSleep: SleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The longest a single Retry-After style hint is allowed to stretch one wait,
+ * regardless of what an error object claims. Without a ceiling a hostile or
+ * malformed value could stall the whole recovery indefinitely; this keeps a
+ * bad hint no worse than a few extra rounds of the plain backoff.
+ */
+const MAX_HONOURED_RETRY_AFTER_MS = 20000;
+
+/**
+ * Read an optional retry-after hint off a count-read error, in milliseconds.
+ *
+ * WHY THIS EXISTS BUT DOES LITTLE TODAY. VaultPersistClient is a narrow,
+ * structural stand-in for the supabase client (see the type above) and it
+ * does not carry HTTP response headers, so there is no live Retry-After for
+ * this function to read off the wire right now. This is the extension point
+ * for the day something upstream does surface it, a supabase error wrapper or
+ * a fetch interceptor, so the retry loop already knows what to do with it
+ * rather than only ever falling back to the fixed backoff. Bounded below by
+ * the base backoff and above by MAX_HONOURED_RETRY_AFTER_MS, so neither a
+ * missing value nor a bad one can produce a worse wait than the plain
+ * schedule already gives.
+ */
+function retryAfterMsFromError(error: unknown, attempt: number): number {
+  const fallback = COUNT_READ_RETRY_MS * attempt;
+  if (error && typeof error === "object" && "retryAfterMs" in error) {
+    const hint = (error as { retryAfterMs?: unknown }).retryAfterMs;
+    if (typeof hint === "number" && Number.isFinite(hint) && hint > 0) {
+      return Math.min(Math.max(hint, COUNT_READ_RETRY_MS), MAX_HONOURED_RETRY_AFTER_MS);
+    }
+  }
+  return fallback;
+}
 
 export interface RotateVaultArgs {
   supabase: VaultPersistClient;
@@ -292,10 +340,17 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     // updates, so writes kept landing AFTER this function had already thrown,
     // which is the one thing a fail-closed path must not do. And the burst
     // itself is what makes a 429 or a 5xx likely, and on this path a transient
-    // error is the failure that strands a vault. Throughput is worth nothing
-    // here: the user is sitting on a recovery screen, and bounding the
-    // concurrency instead of removing it would still leave writes landing
-    // after the throw.
+    // error is the failure that strands a vault.
+    //
+    // CORRECTED CLAIM (OR-T1342): an earlier version of this comment argued
+    // that bounding the concurrency "would still leave writes landing after
+    // the throw". That is not right. A bounded pool with a shared abort flag
+    // checked before each update issues no write once the flag is set, exactly
+    // as this sequential loop does, and returns most of the throughput. The
+    // sequential loop stays as written because nothing has measured this as
+    // slow at current volumes, not because a pool cannot preserve the
+    // fail-closed property. Reconsider a bounded pool if this is ever measured
+    // as slow.
     for (const txn of txns as Array<{ id: string; encrypted_payload: string }>) {
       const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
       const { data: txnWritten, error: txnErr } = await supabase
@@ -358,21 +413,26 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // error, so the row count is the only signal that it actually happened.
   // The compare-and-swap on recovery_ciphertext (read at the top of the submit)
   // makes a concurrent rotation fail loudly rather than be overwritten.
-  const { data: updatedRows, error: updateErr } = await supabase
-    .from("user_vault_meta")
-    .update({
+  // WHY THIS IS A RECONCILING RETRY AND NOT A SINGLE ATTEMPT (OR-T1342). This
+  // write happens at the exact instant the count-read retry above exists for:
+  // every ciphertext is already under the new MEK and the only copy of that
+  // MEK is on this page. See updateVaultMetaWithReconcile for how a lost
+  // response is told apart from a write that never landed, without ever
+  // risking a double write: the compare-and-swap on recovery_ciphertext makes
+  // a second attempt safe by construction, and the reconcile read is what
+  // tells a safe retry apart from a genuine conflict.
+  await updateVaultMetaWithReconcile(
+    supabase,
+    userId,
+    priorRecoveryCiphertext,
+    {
       enc_mek_ciphertext: newEncMekCiphertext,
       recovery_ciphertext: newRecoveryCiphertext,
       vault_verifier_ciphertext: newVerifierCiphertext,
       vault_key_version: vaultKeyVersion,
-    })
-    .eq("user_id", userId)
-    .eq("recovery_ciphertext", priorRecoveryCiphertext)
-    .select("user_id");
-  if (updateErr) throw updateErr;
-  if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
-    throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
-  }
+    },
+    sleep,
+  );
 
   // Zero old key material. Only reached once the meta write above is proven to
   // have landed.
@@ -382,6 +442,154 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // worth doing on its own; it is not the same as the migration being
   // retryable, and it does not make it so.
   clearMigrationKeys();
+}
+
+/** How many times the meta write is retried after a TRANSPORT failure (a
+ * thrown error: a dropped connection, a gateway timeout) before giving up.
+ * Not used for a structured error response, see updateVaultMetaWithReconcile.
+ */
+export const META_WRITE_ATTEMPTS = 4;
+
+/** Base delay between meta write retries, in milliseconds. Backs off linearly,
+ * same shape as COUNT_READ_RETRY_MS.
+ */
+export const META_WRITE_RETRY_MS = 1000;
+
+interface VaultMetaValues {
+  enc_mek_ciphertext: string;
+  recovery_ciphertext: string;
+  vault_verifier_ciphertext: string;
+  vault_key_version: number;
+}
+
+type MetaReconcileOutcome = "written" | "pending" | "conflict";
+
+/**
+ * Re-read user_vault_meta and decide what a lost response actually meant.
+ *
+ * Three answers, and only three:
+ *   "written"  , the stored row already matches what we were writing. Our
+ *                update landed; only the response was lost. Nothing left to do.
+ *   "pending"  , the stored row still matches the PRIOR values (or could not
+ *                be read at all). Nothing has landed yet; the write is safe
+ *                to retry, because the compare-and-swap on recovery_ciphertext
+ *                means a retry can only ever match the row once.
+ *   "conflict" , the stored row matches neither ours nor the prior values. A
+ *                different session won the race. This is a real conflict and
+ *                must not be retried.
+ *
+ * A read failure is folded into "pending" rather than treated as its own
+ * outcome: the caller's retry loop is what re-attempts it, bounded by
+ * META_WRITE_ATTEMPTS, so an unreadable row still ends in a loud throw rather
+ * than a silent pass, it just takes one more lap to get there.
+ */
+async function reconcileVaultMetaWrite(
+  supabase: VaultPersistClient,
+  userId: string,
+  priorRecoveryCiphertext: string,
+  values: VaultMetaValues,
+): Promise<MetaReconcileOutcome> {
+  let data: unknown;
+  let error: unknown;
+  try {
+    const result = await supabase
+      .from("user_vault_meta")
+      .select(
+        "enc_mek_ciphertext, recovery_ciphertext, vault_verifier_ciphertext, vault_key_version",
+      )
+      .eq("user_id", userId);
+    data = (result as { data?: unknown }).data;
+    error = (result as { error?: unknown }).error;
+  } catch (err) {
+    error = err;
+  }
+  if (error) return "pending";
+
+  const row = (data as Array<Record<string, unknown>> | null)?.[0];
+  if (!row) return "pending";
+
+  if (
+    row.recovery_ciphertext === values.recovery_ciphertext &&
+    row.enc_mek_ciphertext === values.enc_mek_ciphertext &&
+    row.vault_verifier_ciphertext === values.vault_verifier_ciphertext
+  ) {
+    return "written";
+  }
+  if (row.recovery_ciphertext === priorRecoveryCiphertext) {
+    return "pending";
+  }
+  return "conflict";
+}
+
+/**
+ * Write the rotated vault meta, and survive a LOST RESPONSE on that write.
+ *
+ * THE PROBLEM. The update below is a compare-and-swap on recovery_ciphertext:
+ * it can land once and only once, because a second attempt no longer matches
+ * priorRecoveryCiphertext. That makes RETRYING it safe by construction against
+ * a double write. What it does not do on its own is tell a safe retry apart
+ * from a genuine conflict: both come back as zero rows updated, no error. A
+ * blind retry after a dropped connection would report
+ * RECOVERY_META_NOT_SAVED_MESSAGE on a write that actually succeeded, which is
+ * the wrong message at the worst possible moment: the user is told their
+ * recovery failed when their data is safe.
+ *
+ * THE FIX. A TRANSPORT failure (the await throws: a dropped connection, a
+ * gateway timeout, a 502) is not taken as a failure to write. It is taken as
+ * an UNKNOWN outcome, and reconcileVaultMetaWrite re-reads the row to find out
+ * which of three things happened, then either returns, retries, or throws.
+ *
+ * A STRUCTURED error response (the server responded and refused the write) is
+ * different: the server told us definitively what happened, so there is
+ * nothing to reconcile, and this throws immediately exactly as it always did.
+ */
+async function updateVaultMetaWithReconcile(
+  supabase: VaultPersistClient,
+  userId: string,
+  priorRecoveryCiphertext: string,
+  values: VaultMetaValues,
+  sleep: SleepFn,
+): Promise<void> {
+  for (let attempt = 1; attempt <= META_WRITE_ATTEMPTS; attempt += 1) {
+    let transportFailed = false;
+    let updatedRows: unknown[] | null = null;
+    let updateErr: unknown = null;
+    try {
+      const result = await supabase
+        .from("user_vault_meta")
+        .update(values)
+        .eq("user_id", userId)
+        .eq("recovery_ciphertext", priorRecoveryCiphertext)
+        .select("user_id");
+      updatedRows = (result as { data: unknown[] | null }).data;
+      updateErr = (result as { error: unknown }).error;
+    } catch (err) {
+      transportFailed = true;
+      updateErr = err;
+    }
+
+    if (!transportFailed) {
+      // The server responded. Whatever it said is the whole answer; there is
+      // nothing ambiguous left to reconcile.
+      if (updateErr) throw updateErr;
+      if (updatedRows && updatedRows.length === 1) return;
+      throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
+    }
+
+    const outcome = await reconcileVaultMetaWrite(
+      supabase,
+      userId,
+      priorRecoveryCiphertext,
+      values,
+    );
+    if (outcome === "written") return;
+    if (outcome === "conflict") throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
+    // outcome === "pending": nothing has landed yet (or could not be read).
+    // Retry the same conditional update.
+    if (attempt < META_WRITE_ATTEMPTS) await sleep(META_WRITE_RETRY_MS * attempt);
+  }
+
+  throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
 }
 
 /**
@@ -460,13 +668,16 @@ async function assertEveryRowMigrated(
 ): Promise<void> {
   for (let attempt = 1; attempt <= COUNT_READ_ATTEMPTS; attempt += 1) {
     let count: unknown = null;
+    let readError: unknown = null;
     let readFailed = false;
     try {
       const result = await supabase.from(table).select("id", { count: "exact", head: true });
       count = (result as { count?: unknown }).count;
-      readFailed = Boolean((result as { error?: unknown }).error);
-    } catch {
+      readError = (result as { error?: unknown }).error;
+      readFailed = Boolean(readError);
+    } catch (err) {
       readFailed = true;
+      readError = err;
     }
 
     if (!readFailed && typeof count === "number" && Number.isFinite(count)) {
@@ -478,7 +689,7 @@ async function assertEveryRowMigrated(
       return;
     }
 
-    if (attempt < COUNT_READ_ATTEMPTS) await sleep(COUNT_READ_RETRY_MS * attempt);
+    if (attempt < COUNT_READ_ATTEMPTS) await sleep(retryAfterMsFromError(readError, attempt));
   }
 
   // Every attempt failed. Only now is this a real failure rather than a flaky
