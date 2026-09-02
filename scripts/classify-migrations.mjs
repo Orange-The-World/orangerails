@@ -241,7 +241,10 @@ const RULES = [
   },
   {
     id: 'TRUNCATE',
-    test: (s) => /\bTRUNCATE\b/i.test(s),
+    // GRANT TRUNCATE and REVOKE TRUNCATE name the privilege, they do not empty
+    // anything. A statement that grants or revokes cannot also truncate, so the
+    // exclusion cannot hide a real TRUNCATE behind a GRANT.
+    test: (s) => /\bTRUNCATE\b/i.test(s) && !/\b(GRANT|REVOKE)\b/i.test(s),
     why: 'empties a table with no restore path',
   },
   {
