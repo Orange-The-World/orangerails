@@ -85,7 +85,9 @@ BEGIN
   -- step where a hurried reader stops.
   SELECT coalesce(string_agg(line, ' / ' ORDER BY line), 'NONE') INTO census
     FROM (
-      SELECT c.relname || '|' || p.polname || '|cmd=' || p.polcmd
+      -- polcmd is the internal "char" type, not text. Without the cast, text ||
+      -- "char" is ambiguous and the block does not compile at all.
+      SELECT c.relname || '|' || p.polname || '|cmd=' || p.polcmd::text
              || '|' || CASE WHEN p.polpermissive THEN 'permissive' ELSE 'restrictive' END
              || '|roles=' ||
              CASE WHEN p.polroles = '{0}'::oid[] THEN 'PUBLIC'
