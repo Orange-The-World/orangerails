@@ -349,6 +349,7 @@ interface TableReconcile {
  */
 async function reconcileEveryRow(
   supabase: VaultPersistClient,
+  generation: number,
   tables: TableReconcile[],
 ): Promise<void> {
   for (let pass = 0; ; pass++) {
