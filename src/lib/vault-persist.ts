@@ -88,6 +88,50 @@ export function rowNotWrittenMessage(label: string, rowId: string): string {
   );
 }
 
+/**
+ * Shown when rows this user owns are still not stamped with this rotation's
+ * key generation once the sweeps have stopped finding work.
+ *
+ * It is a different failure from rowsNotReconciledMessage above and says so.
+ * That one means the table holds more rows than this run wrote. This one means
+ * a row exists that is NOT under the key this run just created, which is the
+ * thing that actually strands data, and it is detected by asking the server
+ * rather than by comparing two client-side readings that can cancel.
+ */
+export function rowsNotAtGenerationMessage(
+  label: string,
+  stale: number,
+  generation: number,
+): string {
+  return (
+    `Vault recovery stopped before saving: ${stale} ${label} are still under the previous ` +
+    `key (not at generation ${generation}). Your stored vault keys were not changed. Do not ` +
+    "close or reload this page, and contact support with this message."
+  );
+}
+
+/** Shown when the generation marker on a table cannot be read at all. */
+export const GENERATION_UNREADABLE_MESSAGE =
+  "Vault recovery stopped before saving: the key generation of your stored rows could not be read. Your stored vault keys were not changed. Do not close or reload this page, and contact support with this message.";
+
+/**
+ * What the database puts in data_key_generation when nobody sets it.
+ *
+ * VERIFIED against information_schema on the dev project: connections and
+ * encrypted_transactions both carry data_key_generation smallint NOT NULL
+ * DEFAULT 1. Two things follow and the whole check below rests on them.
+ *
+ * NOT NULL means a filter of "not equal to this generation" is complete: there
+ * is no third state that silently escapes both sides of the comparison.
+ *
+ * DEFAULT 1, and nothing anywhere writes this column, means every row another
+ * session inserts while a rotation is running arrives carrying exactly this
+ * value. A rotation therefore only has to pick a generation ABOVE it, and a
+ * concurrent insert is guaranteed to be distinguishable from a row this run
+ * rewrote, without any coordination between the two sessions.
+ */
+export const DATA_KEY_GENERATION_DEFAULT = 1;
+
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
 
