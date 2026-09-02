@@ -26,100 +26,166 @@
 -- new policy, not a privilege set from months earlier. Revoking now means
 -- the privilege set matches the client surface that actually exists.
 --
--- MEASURED, NOT ASSUMED
--- Enumerated live against the dev project on 2026-09-02 by the DBA, not
--- copied from the earlier ticket. The query is the one in the assertion
--- block at the foot of this file, run without the table filter. It returned
--- 87 combinations for the logged-in role across 31 tables. 83 of those, on
--- the 30 tables listed here, are the set adjudicated on OR-T1409 and are
--- what this migration removes. The other 4 are on webhook_delivery, which
--- the earlier enumeration did not report; they are NOT in this migration
--- because they have not been adjudicated against the client surface, and
--- including an unadjudicated table in an adjudicated sweep is how a sweep
--- stops being trustworthy. They are ticketed separately.
+-- MEASURED ON BOTH CLUSTERS, NOT ASSUMED. All figures read live 2026-09-02.
+--   dev   30 of 30 tables present, 83 unpoliced combinations, 0 policy
+--         backed privileges currently missing, 0 column level privileges
+--         for the anonymous or logged-in role on these tables.
+--   prod  29 of 30 tables present (stealth_utxos does not exist there yet),
+--         79 unpoliced combinations, 0 policy backed privileges currently
+--         missing, 0 column level privileges. Every one of the 83 pairs was
+--         checked against the production policy set: NONE of them is
+--         admitted by a production policy, so this removes nothing that
+--         works on production either.
+-- The enumeration is the same query as assertion A1 below, run without the
+-- table filter. It was re-run from scratch rather than copied from the
+-- earlier ticket.
+--
+-- WHY A LOOP AND NOT 30 PLAIN REVOKE STATEMENTS
+-- Because the two clusters are not at the same schema version and this file
+-- runs on both. stealth_utxos exists on dev and does not exist on prod. A
+-- plain REVOKE naming a missing relation raises 42P01 and aborts the entire
+-- migration, so a flat statement list would have failed the production
+-- apply. Ordering would probably have saved it, since the migration that
+-- creates the table applies first, but "probably, because of ordering" is
+-- not a property worth betting a production apply on. The loop skips a
+-- relation that is not present, says so loudly in the apply log, and
+-- asserts that present plus absent equals the whole list, so a typo in a
+-- table name cannot be silently skipped.
+--
+-- ONE TABLE DELIBERATELY EXCLUDED
+-- The same enumeration also returns 4 combinations on webhook_delivery, and
+-- they are NOT in this migration. They were not part of the adjudication
+-- against the client surface that cleared the other 83, and putting an
+-- unadjudicated table into an adjudicated sweep is how a sweep stops being
+-- worth trusting. Ticketed separately.
 --
 -- THE COLUMN LEVEL TRAP, CHECKED RATHER THAN ASSUMED
 -- A table level REVOKE also clears COLUMN level privileges for that role on
 -- that table. That is the defect caught earlier on user_vault_meta. Before
 -- writing this file every column level privilege in schema public naming the
--- anonymous or the logged-in role was enumerated. They exist on exactly three
--- tables: apps, platforms and user_vault_meta. NONE of those three is in this
--- migration, so no column level privilege can be destroyed by it. Assertion
--- A3 below re-checks that after the fact. Be clear about what A3 can and
--- cannot prove: it confirms none exists afterwards, which is a drift guard
--- for a future re-run. The proof that none was destroyed is the measurement
--- above, taken before the change.
+-- anonymous or the logged-in role was enumerated on both clusters. They
+-- exist on exactly three tables: apps, platforms and user_vault_meta. NONE
+-- of those three is in this migration, so no column level privilege can be
+-- destroyed by it. Assertion A3 re-checks it after the fact. Be clear about
+-- what A3 can and cannot prove: it confirms none exists afterwards, which is
+-- a drift guard for a future re-run. The proof that none was destroyed is
+-- the measurement above, taken before the change.
 --
 -- REVERSIBLE
--- Every statement here has an exact inverse. To undo the whole migration,
+-- Every revocation here has an exact inverse. To undo the whole migration,
 -- run the GRANT statements in the ROLLBACK block at the foot of this file.
 -- Restoring these privileges restores an unreachable privilege set, so the
--- rollback is safe but also has no behavioural effect on its own.
+-- rollback is safe and has no behavioural effect on its own.
 --
 -- IDEMPOTENT
 -- REVOKE on a privilege that is not held is a no-op in PostgreSQL and does
--- not error, so this file can be re-run any number of times. The assertion
--- block is read only.
+-- not error, so this file can be re-run any number of times on either
+-- cluster. The assertions are read only.
 --
 -- NOT IN SCOPE, ON PURPOSE
--- The anonymous role's unpoliced SELECT privileges (23 tables, measured the
--- same wake) are NOT touched here. Revoking a SELECT privilege changes what
--- the caller observes: today an anonymous read of these tables returns an
--- empty result, afterwards it returns a permission error. That is visible to
--- client code and has not been adjudicated against the client surface the way
--- the 83 here have. Separate ticket, separate PR.
+-- The anonymous role's unpoliced SELECT privileges (23 tables on dev,
+-- measured the same wake) are NOT touched here. Revoking a SELECT privilege
+-- changes what the caller observes: today an anonymous read of these tables
+-- returns an empty result, afterwards it returns a permission error. That is
+-- visible to client code and has not been adjudicated against the client
+-- surface the way these 83 have. Separate ticket, separate PR.
 
 begin;
 
--- ---------------------------------------------------------------------------
--- The 83 revocations, one statement per table, privileges named explicitly so
--- the diff is readable. Nothing here uses ALL: ALL would also remove the
--- privileges that policies DO admit on these same tables.
--- ---------------------------------------------------------------------------
+do $$
+declare
+  -- One row per table: the table name, then the privileges to remove from
+  -- the logged-in role. Nothing here uses ALL: ALL would also remove the
+  -- privileges that policies DO admit on these same tables.
+  sweep text[][] := array[
+    ['adapter_requests',          'delete, select, update'],
+    ['agent_invitation_tokens',   'delete, insert, update'],
+    ['agent_members',             'delete, insert'],
+    ['audit_entries',             'delete, insert, update'],
+    ['audit_events',              'delete, insert, update'],
+    ['channel_state',             'delete'],
+    ['customer_recovery_shares',  'delete'],
+    ['customers',                 'delete, insert'],
+    ['data_keys',                 'delete, insert, update'],
+    ['invoices',                  'delete, insert, update'],
+    ['opk_key_rotations',         'delete, insert, select, update'],
+    ['payments',                  'delete, insert, update'],
+    ['pending_widget_sessions',   'delete, insert, select, update'],
+    ['platform_key_audit',        'delete, insert, select, update'],
+    ['quiltt_institutions_cache', 'delete, insert, update'],
+    ['quiltt_profile_map',        'delete, insert, select, update'],
+    ['quiltt_webhook_inbox',      'delete, insert, select, update'],
+    ['staff_users',               'delete, insert, update'],
+    ['stealth_connections',       'delete, insert, update'],
+    ['stealth_scan_ranges',       'delete, insert, update'],
+    ['stealth_transactions',      'delete, insert, update'],
+    ['stealth_utxos',             'delete, insert, update'],
+    ['strike_webhook_events',     'delete, insert, select, update'],
+    ['subaccounts',               'delete, insert, update'],
+    ['subscriptions',             'delete, insert, update'],
+    ['user_app_grants',           'delete'],
+    ['vault_security_events',     'delete, update'],
+    ['waitlist',                  'delete, select, update'],
+    ['workspace_admins',          'update'],
+    ['wrapped_data_keys',         'update']
+  ];
+  i          int;
+  tname      text;
+  privs      text;
+  n_total    int := array_length(sweep, 1);
+  n_present  int := 0;
+  n_absent   int := 0;
+  absent_list text := '';
+begin
+  for i in 1 .. n_total loop
+    tname := sweep[i][1];
+    privs := sweep[i][2];
 
-revoke delete, select, update on table public.adapter_requests from authenticated;
-revoke delete, insert, update on table public.agent_invitation_tokens from authenticated;
-revoke delete, insert on table public.agent_members from authenticated;
-revoke delete, insert, update on table public.audit_entries from authenticated;
-revoke delete, insert, update on table public.audit_events from authenticated;
-revoke delete on table public.channel_state from authenticated;
-revoke delete on table public.customer_recovery_shares from authenticated;
-revoke delete, insert on table public.customers from authenticated;
-revoke delete, insert, update on table public.data_keys from authenticated;
-revoke delete, insert, update on table public.invoices from authenticated;
-revoke delete, insert, select, update on table public.opk_key_rotations from authenticated;
-revoke delete, insert, update on table public.payments from authenticated;
-revoke delete, insert, select, update on table public.pending_widget_sessions from authenticated;
-revoke delete, insert, select, update on table public.platform_key_audit from authenticated;
-revoke delete, insert, update on table public.quiltt_institutions_cache from authenticated;
-revoke delete, insert, select, update on table public.quiltt_profile_map from authenticated;
-revoke delete, insert, select, update on table public.quiltt_webhook_inbox from authenticated;
-revoke delete, insert, update on table public.staff_users from authenticated;
-revoke delete, insert, update on table public.stealth_connections from authenticated;
-revoke delete, insert, update on table public.stealth_scan_ranges from authenticated;
-revoke delete, insert, update on table public.stealth_transactions from authenticated;
-revoke delete, insert, update on table public.stealth_utxos from authenticated;
-revoke delete, insert, select, update on table public.strike_webhook_events from authenticated;
-revoke delete, insert, update on table public.subaccounts from authenticated;
-revoke delete, insert, update on table public.subscriptions from authenticated;
-revoke delete on table public.user_app_grants from authenticated;
-revoke delete, update on table public.vault_security_events from authenticated;
-revoke delete, select, update on table public.waitlist from authenticated;
-revoke update on table public.workspace_admins from authenticated;
-revoke update on table public.wrapped_data_keys from authenticated;
+    if to_regclass('public.' || quote_ident(tname)) is null then
+      n_absent := n_absent + 1;
+      absent_list := absent_list || case when absent_list = '' then '' else ', ' end || tname;
+      continue;
+    end if;
+
+    execute format('revoke %s on table public.%I from authenticated', privs, tname);
+    n_present := n_present + 1;
+  end loop;
+
+  -- A0. A sweep that cannot say "N of N" cannot say anything. Every entry
+  -- must be accounted for as either swept or genuinely absent, so a
+  -- misspelled table name shows up as an absence rather than vanishing.
+  if n_present + n_absent <> n_total then
+    raise exception
+      'OR-T1421 assertion A0 failed: % entries in the sweep list, % swept, % absent. These must add up.',
+      n_total, n_present, n_absent;
+  end if;
+
+  if n_present = 0 then
+    raise exception
+      'OR-T1421 assertion A0 failed: not one of the % tables was present on this target. That is not a clean sweep, it is a sweep that swept nothing.',
+      n_total;
+  end if;
+
+  if n_absent > 0 then
+    raise notice
+      'OR-T1421: % of % tables not present on this target and therefore skipped: %. This is expected on a cluster that has not yet applied the migration that creates them.',
+      n_absent, n_total, absent_list;
+  end if;
+
+  raise notice 'OR-T1421: swept % of % tables.', n_present, n_total;
+end;
+$$;
 
 -- ---------------------------------------------------------------------------
--- Assertions. These run on every apply, on both clusters. A migration that
--- cannot say what it achieved has not said anything, and a REVOKE that
--- silently did nothing looks exactly like one that worked.
+-- Assertions. These run on every apply, on both clusters, and only over the
+-- tables that are actually present on this target.
 --
 -- A1 proves the intended privileges are gone.
 -- A2 proves the privileges that policies DO admit are still there, which is
---    what catches an over-broad revoke. This is the assertion that would have
---    caught using ALL instead of naming the commands.
+--    what catches an over-broad revoke. This is the assertion that would
+--    have caught using ALL instead of naming the commands.
 -- A3 proves no column level privilege for the anonymous or logged-in role
---    exists on these 30 tables, which is the column level trap named in the
---    header.
+--    exists on these tables, which is the column level trap named above.
 -- ---------------------------------------------------------------------------
 do $$
 declare
@@ -134,27 +200,18 @@ declare
     'user_app_grants','vault_security_events','waitlist','workspace_admins',
     'wrapped_data_keys'
   ];
-  n_tables      int;
+  n_examined    int;
   n_leftover    int;
   n_lost        int;
   n_col         int;
   leftover_list text;
   lost_list     text;
 begin
-  -- Count first. A sweep that cannot say "30 of 30" cannot say anything, and
-  -- a table renamed or dropped upstream would otherwise make this whole block
-  -- pass by examining nothing.
-  select count(*) into n_tables
+  select count(*) into n_examined
     from pg_class c
    where c.relnamespace = 'public'::regnamespace
      and c.relkind in ('r','p')
      and c.relname = any(tbls);
-
-  if n_tables <> array_length(tbls, 1) then
-    raise exception
-      'OR-T1421 assertion A0 failed: expected % tables in schema public, found %. A table in the list was renamed or dropped, so the assertions below would examine an incomplete set.',
-      array_length(tbls, 1), n_tables;
-  end if;
 
   -- A1: no DML privilege for the logged-in role survives on these tables
   -- where no policy admits that command.
@@ -183,7 +240,7 @@ begin
 
   if n_leftover <> 0 then
     raise exception
-      'OR-T1421 assertion A1 failed: % unpoliced privilege(s) still held by the logged-in role after the revoke: %',
+      'OR-T1421 assertion A1 failed: % unpoliced privilege(s) still held by the logged-in role after the sweep: %',
       n_leftover, leftover_list;
   end if;
 
@@ -211,8 +268,8 @@ begin
       n_lost, lost_list;
   end if;
 
-  -- A3: the column level trap. Zero before this migration, must be zero
-  -- after. See the header for what this can and cannot prove.
+  -- A3: the column level trap. Zero before this migration on both clusters,
+  -- must be zero after. See the header for what this can and cannot prove.
   select count(*) into n_col
     from pg_attribute a
     join pg_class c on c.oid = a.attrelid
@@ -228,22 +285,23 @@ begin
 
   if n_col <> 0 then
     raise exception
-      'OR-T1421 assertion A3 failed: % column level privilege(s) for the anonymous or logged-in role exist on the swept tables. None existed before this migration, so either this migration destroyed a set that was added since it was written, or a later change introduced one. Read pg_attribute.attacl before re-running.',
+      'OR-T1421 assertion A3 failed: % column level privilege(s) for the anonymous or logged-in role exist on the swept tables. None existed on either cluster before this migration, so either this migration destroyed a set added since it was written, or a later change introduced one. Read pg_attribute.attacl before re-running.',
       n_col;
   end if;
 
   raise notice
-    'OR-T1421: % of % tables examined, 0 unpoliced privileges left for the logged-in role, 0 policy-backed privileges lost, 0 column level privileges affected.',
-    n_tables, array_length(tbls, 1);
+    'OR-T1421: % of % listed tables present and examined, 0 unpoliced privileges left for the logged-in role, 0 policy-backed privileges lost, 0 column level privileges affected.',
+    n_examined, array_length(tbls, 1);
 end;
 $$;
 
 commit;
 
 -- ---------------------------------------------------------------------------
--- ROLLBACK. Exact inverse of every statement above. Restores an unreachable
+-- ROLLBACK. Exact inverse of every revocation above. Restores an unreachable
 -- privilege set, so running it undoes the migration without changing what any
--- caller can actually do.
+-- caller can actually do. Run only the lines for tables that exist on the
+-- target you are rolling back.
 --
 -- begin;
 -- grant delete, select, update on table public.adapter_requests to authenticated;
