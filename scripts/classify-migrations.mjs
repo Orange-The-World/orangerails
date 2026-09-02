@@ -217,6 +217,7 @@ function scrub(sql) {
   const out = [];
   const notes = [];
   const routines = [];
+  const doBlocks = [];
   const n = sql.length;
   let i = 0;
 
@@ -344,9 +345,29 @@ function scrub(sql) {
         });
         blank(sql.slice(i, end));
       } else if (/(^|;)\s*DO\b/i.test(fragment)) {
-        blank(tag);
-        for (const c of body) out.push(c);
-        blank(tag);
+        // OR-T1709 + OR-T1730. This body executes at apply time, so it must be
+        // read under exactly the same rules as everything else: a comment or a
+        // string literal inside it is not executable SQL, and a semicolon
+        // inside either must not split a statement. Copying it through
+        // verbatim switched scrub() off, and the EXECUTE refusal below along
+        // with it, for the one place both matter most: a DO block runs
+        // unconditionally, with no invocation to gate it (unlike a routine
+        // body, which classifySql only scans once it proves the file invokes
+        // it).
+        const inner = scrub(body);
+        if (inner.error) {
+          return { error: `a DO block body could not be read: ${inner.error}` };
+        }
+        if ((inner.routines || []).length > 0) {
+          return {
+            error:
+              'a DO block body defines a routine, and whether that routine\'s own body ' +
+              'runs cannot be answered by this scanner, so the file is refused rather ' +
+              'than read as clean',
+          };
+        }
+        doBlocks.push({ body: inner.text, bodyOffset: i + tag.length });
+        blank(sql.slice(i, end));
       } else {
         return {
           error:
@@ -362,7 +383,7 @@ function scrub(sql) {
     i += 1;
   }
 
-  return { text: out.join(''), notes, routines };
+  return { text: out.join(''), notes, routines, doBlocks };
 }
 
 /** Split scrubbed SQL into statements, keeping each one's offset in the file. */
@@ -504,6 +525,48 @@ export function classifySql(sql) {
     applyRules(st.text.replace(/\s+/g, ' ').trim(), lineAt(scrubbed.text, st.offset + lead));
   }
 
+  // OR-T1709 + OR-T1730. A DO block runs UNCONDITIONALLY when the migration is
+  // applied: unlike a routine body there is no invocation to gate it, so its
+  // (re-scrubbed) statements are scanned right here instead of in the
+  // reachability loop below. And exactly like an invoked routine body
+  // (OR-T1715), a DO block statement that builds SQL at run time with EXECUTE
+  // is refused BEFORE it is scanned: what it actually runs is not in this
+  // file, so a verdict about the rest of the block would be a verdict about
+  // the part we can see, presented as a verdict about the file.
+  const doBlocks = scrubbed.doBlocks || [];
+  const doBlockSts = [];
+  for (const block of doBlocks) {
+    const bodyLine0 = lineAt(sql, block.bodyOffset) - 1;
+    const innerSts = statements(block.body);
+
+    for (const st of innerSts) {
+      const flat = st.text.replace(/\s+/g, ' ').trim();
+      if (!isDynamicSql(flat)) continue;
+      const lead = st.text.length - st.text.replace(/^\s+/, '').length;
+      return {
+        verdict: UNPARSEABLE,
+        findings: [
+          {
+            line: bodyLine0 + lineAt(block.body, st.offset + lead),
+            id: 'UNPARSEABLE',
+            why:
+              'this migration runs a DO block, which executes when the migration is ' +
+              'applied, and that block builds SQL at run time with EXECUTE. The statement ' +
+              'it runs is not in the file, so it cannot be classified and is refused',
+            snippet: flat.length > 160 ? `${flat.slice(0, 160)} ...` : flat,
+          },
+        ],
+        notes,
+      };
+    }
+
+    for (const st of innerSts) {
+      const lead = st.text.length - st.text.replace(/^\s+/, '').length;
+      applyRules(st.text.replace(/\s+/g, ' ').trim(), bodyLine0 + lineAt(block.body, st.offset + lead));
+    }
+    doBlockSts.push(...innerSts);
+  }
+
   // OR-T1658. A routine body is only harmless if nothing in this same file can
   // make it run. The scrub set each body aside rather than judging it, because a
   // single forward pass cannot see the statements that come after. Now that the
@@ -514,7 +577,7 @@ export function classifySql(sql) {
   // file, so this runs to a fixed point rather than once.
   const routines = scrubbed.routines || [];
   const scanned = new Set();
-  let reachable = sts;
+  let reachable = sts.concat(doBlockSts);
   let progressed = true;
 
   while (progressed) {
@@ -715,6 +778,14 @@ const EXPECTED = {
   // claimed independently by two branches of this stack (OR-T1716), leaving
   // 000015 and 000016 free for the renumber that ticket needs.
   '20990101000017_unparseable_dynamic_sql_in_invoked_body.sql': { verdict: UNPARSEABLE, id: 'UNPARSEABLE', line: 24 },
+  // OR-T1730. The same refusal, on the path OR-T1715 did not reach: a DO
+  // block, which runs unconditionally rather than only when invoked. Before
+  // this fix a DO block's body was scanned raw and unscrubbed, so a LITERAL
+  // argument to EXECUTE happened to still trip a rule on its own text (an
+  // accident, not an understanding of EXECUTE) while a non-literal one, built
+  // from a query, tripped nothing and classified REVERSIBLE. This fixture is
+  // the non-literal case.
+  '20990101000018_unparseable_dynamic_sql_in_do_block.sql': { verdict: UNPARSEABLE, id: 'UNPARSEABLE', line: 24 },
 };
 
 function selftest() {
