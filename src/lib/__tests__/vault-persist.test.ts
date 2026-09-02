@@ -750,7 +750,7 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
       (c) => c.table === "encrypted_transactions" && c.op === "update",
     );
     expect(txnUpdates.length).toBe(1);
-    expect(txnUpdates[0].filters).toContainEqual({ column: "id", value: "txn-1" });
+    expect(txnUpdates[0]?.filters).toContainEqual({ column: "id", value: "txn-1" });
     expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
     expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
