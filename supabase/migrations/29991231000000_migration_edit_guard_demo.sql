@@ -1,0 +1,14 @@
+-- DEMONSTRATION ONLY. NOT FOR MERGE.
+--
+-- This file exists to demonstrate the migration edit guard (OR-T1669) and is
+-- carried only on a demonstration branch whose pull request is closed rather
+-- than merged.
+--
+-- It does nothing. The version is dated to the end of time so that it cannot
+-- collide with any real migration, and there is no statement here to apply.
+--
+-- Two things are shown with it:
+--   1. a tree that only ADDS a migration passes the guard, so the guard is not
+--      refusing for some unrelated reason;
+--   2. a later branch edits THIS file in place rather than a migration that
+--      matters, so the refusal can be demonstrated without touching real SQL.
