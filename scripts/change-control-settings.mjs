@@ -175,6 +175,28 @@ async function readLive() {
   const repo = process.env.GITHUB_REPOSITORY
   if (!repo) die(5, 'GITHUB_REPOSITORY is not set, so there is no repository to read')
 
+  // Validate the recorded variables BEFORE spending a network call. An unset
+  // or empty allowlist is a refusal whatever the API answers, and proving that
+  // must not depend on the environments endpoint being reachable or readable.
+  // A failure mode that can only be demonstrated when an unrelated call
+  // succeeds is not a demonstrated failure mode.
+  let variables
+  try {
+    variables = {
+      MIGRATION_APPLY_ALLOWED_ACTORS_PROD: normalizeActorList(
+        'MIGRATION_APPLY_ALLOWED_ACTORS_PROD',
+        process.env.VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD,
+      ),
+      MIGRATION_APPLY_ALLOWED_ACTORS_DEV: normalizeActorList(
+        'MIGRATION_APPLY_ALLOWED_ACTORS_DEV',
+        process.env.VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV,
+      ),
+    }
+  } catch (err) {
+    if (err instanceof ShapeError) die(5, err.message)
+    throw err
+  }
+
   const token = process.env.GITHUB_TOKEN
   const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }
   if (token) headers.Authorization = `Bearer ${token}`
@@ -198,19 +220,8 @@ async function readLive() {
   }
 
   let environments
-  let variables
   try {
     environments = normalizeEnvironments(payload)
-    variables = {
-      MIGRATION_APPLY_ALLOWED_ACTORS_PROD: normalizeActorList(
-        'MIGRATION_APPLY_ALLOWED_ACTORS_PROD',
-        process.env.VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD,
-      ),
-      MIGRATION_APPLY_ALLOWED_ACTORS_DEV: normalizeActorList(
-        'MIGRATION_APPLY_ALLOWED_ACTORS_DEV',
-        process.env.VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV,
-      ),
-    }
   } catch (err) {
     if (err instanceof ShapeError) die(5, err.message)
     throw err
