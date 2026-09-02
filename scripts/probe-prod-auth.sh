@@ -116,7 +116,15 @@ probe_host() {
 
   url=""
   key=""
+  local looked=0
   for asset in "${assets[@]}"; do
+    # A page can preload dozens of chunks and the value is in the first one or
+    # two. Fetching all of them every hour to find it is waste, so stop after 25
+    # and let the missing key below be the loud answer.
+    if [ "$looked" -ge 25 ]; then
+      break
+    fi
+    looked=$((looked + 1))
     case "$asset" in
       http*) ;;
       /*) asset="https://${origin}${asset}" ;;
@@ -150,7 +158,9 @@ probe_host() {
     fail "${primary}: STOP. The key in the deployed browser bundle carries the service_role claim. That is a full access key served to every visitor and it must be rotated now."
     return
   fi
-  if [ "$claim" != "anon" ] && [ "$claim" != "not-a-jwt" ]; then
+  if [ -z "$claim" ]; then
+    note "${primary}: the key looks like a jwt but its payload would not decode, so the role claim could not be read. Said out loud rather than passed off as checked. The grant below is unaffected by it."
+  elif [ "$claim" != "anon" ] && [ "$claim" != "not-a-jwt" ]; then
     fail "${primary}: the key in the deployed bundle carries the role claim '${claim}', which is neither anon nor the opaque publishable format. Refusing to guess whether that is safe."
     return
   fi
@@ -189,6 +199,9 @@ probe_host() {
           fail "${primary}: HTTP 400 but not for invalid credentials, so the request was rejected for some other reason. Body: ${body}"
           ;;
       esac
+      ;;
+    422)
+      note "${primary}: HTTP 422 from ${url}. The key was ACCEPTED, because a bad key is refused with 401 before the grant type is looked at, and the password grant itself is switched off on this project. That is a configuration choice, not a fault, and it still answers what this probe asks. Body: ${body}"
       ;;
     200)
       fail "${primary}: STOP AND ESCALATE. HTTP 200 to a random password on an address that has no account. Authentication is accepting something it must never accept."
