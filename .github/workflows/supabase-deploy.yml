@@ -2,7 +2,7 @@ name: Deploy Supabase edge functions and migrations
 
 on:
   push:
-    branches: [dev, prod]
+    branches: [dev, prod, test/or-t1727-skip-signal-poc]
   workflow_dispatch:
     inputs:
       reason:
@@ -684,6 +684,11 @@ jobs:
         with:
           node-version: 24
 
+      - name: "TEMP TEST ONLY: force this job to fail (OR-T1727 PoC, not part of the real change)"
+        run: |
+          echo "::error::deliberate forced failure for OR-T1727 skip-signal test"
+          exit 1
+
       - name: "Self-test: prove the diff can go both red and green"
         run: |
           set -euo pipefail
@@ -1270,3 +1275,41 @@ jobs:
 
           echo
           echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
+
+  # ---------------------------------------------------------------------------
+  # OR-T1727 PoC job, temporary on this throwaway branch only.
+  # ---------------------------------------------------------------------------
+  deploy-skip-signal:
+    needs: [target, check-pending-migrations, check-rls-policy-baseline, deploy]
+    if: always() && github.event_name == 'push' && needs.deploy.result == 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the deploy-skipped issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_RESULT: ${{ needs.target.result }}
+          PENDING_RESULT: ${{ needs['check-pending-migrations'].result }}
+          RLS_RESULT: ${{ needs['check-rls-policy-baseline'].result }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          BLOCKERS=""
+          [ "$TARGET_RESULT" != "success" ] && BLOCKERS="${BLOCKERS}- target: ${TARGET_RESULT}\n"
+          [ "$PENDING_RESULT" != "success" ] && BLOCKERS="${BLOCKERS}- check-pending-migrations: ${PENDING_RESULT}\n"
+          [ "$RLS_RESULT" != "success" ] && BLOCKERS="${BLOCKERS}- check-rls-policy-baseline: ${RLS_RESULT}\n"
+          if [ -z "$BLOCKERS" ]; then
+            BLOCKERS="- none of deploy's named needs reported non-success; read the run directly\n"
+          fi
+          TITLE="[OR-T1727 PoC] dev deploy is being skipped"
+          BODY=$(printf 'The deploy job was SKIPPED at %s.\n\nBlocking need(s), read from needs.<job>.result:\n%s\nRun: %s' "$SHA" "$(printf '%b' "$BLOCKERS")" "$RUN_URL")
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$TITLE\" in:title" --json number -q '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+            echo "commented on existing issue #$EXISTING"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+            echo "opened a new deploy-skipped issue"
+          fi
