@@ -714,7 +714,18 @@ jobs:
             exit 1
           fi
 
-          echo "self-test passed: the diff goes red on a removed policy, red on a changed expression, and green on a match"
+          # RED: an extra policy live that the baseline does not carry, what a
+          # migration ADDING a policy without updating the baseline produces.
+          # This is the third drift class named in OR-T1340 and the one the
+          # first version of this self-test never exercised.
+          cp "$WORKDIR/baseline.tsv" "$WORKDIR/live-extra.tsv"
+          printf 'public\tdemo_table\tdemo delete\tDELETE\t{authenticated}\teeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\td41d8cd98f00b204e9800998ecf8427e\n' >> "$WORKDIR/live-extra.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-extra.tsv" >/dev/null; then
+            echo "::error::self-test failed: a policy present live and absent from the baseline was reported as clean"
+            exit 1
+          fi
+
+          echo "self-test passed: the diff goes red on a removed policy, red on an added policy, red on a changed expression, and green on a match"
 
       - name: Compare live RLS policies to the committed baseline
         env:
