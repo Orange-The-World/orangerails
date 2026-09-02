@@ -86,14 +86,33 @@ export const rateWindows = new Map<string, { windowStart: number; count: number 
  * there). With no x-forwarded-for either, clientIdOrNull returns null and
  * the request is not throttled at all (fail-open, see below). With an
  * x-forwarded-for present, the request lands in an xff: bucket whose real
- * behaviour is exactly the open question above. A direct call to this
- * function, bypassing the gateway, still carries a genuine cf-connecting-ip
- * and is throttled correctly.
+ * behaviour is exactly the open question above.
+ *
+ * UNMEASURED, and until now written here as though it were established: that
+ * a direct call bypassing the gateway still carries a genuine
+ * cf-connecting-ip and is therefore throttled correctly. It is plausible and
+ * it may well be true. Nobody has observed it. It is also the assumption the
+ * whole limiter rests on, and the one that carries money rather than CPU: a
+ * caller we cannot identify is not throttled at all, and every fresh search
+ * term it sends spends an upstream Quiltt call on our API key.
+ *
+ * So it is instrumented rather than argued about. Every request that reaches
+ * the throttle with no identity logs one line naming, for each candidate
+ * header, whether it was absent, present or empty: see
+ * unidentifiedCallerHeaders below and its caller in index.ts. Until that log
+ * has been read against the deployed function, the paragraph above is an open
+ * question and must not be quoted as a fact.
  *
  * When we cannot identify a caller at all we do NOT throttle, deliberately:
  * bucketing every unidentified request under a single key would turn a
  * missing header into a global cap on a hot path the picker calls on each
  * keystroke. Failing open is the safer of the two ways to be wrong here.
+ *
+ * That trade-off is provisional too. If the log shows null-identity requests
+ * arriving at any material rate, the answer is a separate bucket under a
+ * fixed key with a materially LOWER cap, not the allowance an identified
+ * caller gets and not the shared global cap this paragraph rejects. That
+ * decision waits on the measurement and is tracked on its own ticket.
  */
 export function clientIdOrNull(req: Request): string | null {
   const edgeSet = (req.headers.get('cf-connecting-ip') ?? '').trim();
@@ -101,6 +120,40 @@ export function clientIdOrNull(req: Request): string | null {
   const forwarded = req.headers.get('x-forwarded-for') ?? '';
   const hops = forwarded.split(',').map((hop) => hop.trim()).filter((hop) => hop.length > 0);
   return hops.length > 0 ? `xff:${hops[hops.length - 1]}` : null;
+}
+
+/**
+ * Describe why a caller could not be identified, for the log line in index.ts.
+ *
+ * Reports PRESENCE only, never a value. The values here are client IP
+ * addresses and a log is not the place to put one. Presence is all the
+ * question needs: we are asking whether requests with no identity actually
+ * happen, and if so which header was missing when they did.
+ *
+ * Absent and empty are reported separately on purpose. A header an
+ * intermediary stripped and a header forwarded with nothing in it come from
+ * different causes and point at different places to look, and a single
+ * "missing" would collapse the two.
+ *
+ * x-real-ip and x-gateway-verified-ip are listed even though clientIdOrNull
+ * does not read either. x-real-ip is caller-controlled and must never become
+ * an identity (OR-C0493), and x-gateway-verified-ip is the header the gateway
+ * work will introduce. Knowing whether they were on the request is exactly
+ * what tells us where an unidentified call came from.
+ */
+const IDENTITY_HEADERS = [
+  'cf-connecting-ip',
+  'x-forwarded-for',
+  'x-real-ip',
+  'x-gateway-verified-ip',
+] as const;
+
+export function unidentifiedCallerHeaders(req: Request): string {
+  return IDENTITY_HEADERS.map((name) => {
+    const raw = req.headers.get(name);
+    if (raw === null) return `${name}=absent`;
+    return raw.trim() === '' ? `${name}=empty` : `${name}=present`;
+  }).join(' ');
 }
 
 /**
