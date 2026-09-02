@@ -435,11 +435,19 @@ function AppHome() {
 
       // Determine which subaccount's connections to fetch.
       //
-      // Admin view (isAdminView) of another
-      // user's workspace requires a co-admin RLS policy on subaccounts +
-      // connections + encrypted_transactions. Until that policy lands, we
-      // refuse rather than silently substitute the admin's own data , the
-      // old behavior was confusing and could mask data leaks.
+      // Admin view (isAdminView) of another user's workspace requires a
+      // co-admin RLS policy on subaccounts, connections and
+      // encrypted_transactions. None of those three currently grant
+      // co-admin read. A co-admin policy on encrypted_transactions did
+      // exist for one day (created 2026-04-20, removed 2026-04-21 by an
+      // unrelated migration that dropped and rebuilt every policy on that
+      // table for direct users only); it was not a deliberate withdrawal.
+      // Restoring that one policy alone would not deliver this view, since
+      // it keys on a subaccount row the co-admin also cannot read: the
+      // work is three policies, and whether co-admins should read another
+      // user's transactions at all is an open decision, not a repair. So
+      // we refuse rather than silently substitute the admin's own data ,
+      // the old behavior was confusing and could mask data leaks.
       if (isAdminView) {
         toast.error(
           "Cross-workspace admin view is not yet implemented. Showing your own data is not safe to fall back to silently; reverting.",
