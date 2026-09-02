@@ -726,7 +726,27 @@ jobs:
             exit 1
           fi
 
-          echo "self-test passed: the diff goes red on a removed policy, red on an added policy, red on a changed expression, and green on a match"
+          # RED: same policy name and expressions, different cmd. A migration
+          # that drops and recreates a policy under the same name but a wider
+          # command (SELECT becoming ALL) changes neither hash, so the cmd
+          # column is the only thing that can catch it.
+          sed 's/SELECT/ALL/' "$WORKDIR/baseline.tsv" > "$WORKDIR/live-cmd.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-cmd.tsv" >/dev/null; then
+            echo "::error::self-test failed: a policy whose cmd widened was reported as clean"
+            exit 1
+          fi
+
+          # RED: same policy name, cmd and expressions, different roles.
+          # Widening {authenticated} to include anon is the drift that actually
+          # exposes data to the public, and it too leaves both hashes untouched.
+          sed 's/{authenticated}/{authenticated,anon}/' \
+            "$WORKDIR/baseline.tsv" > "$WORKDIR/live-roles.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-roles.tsv" >/dev/null; then
+            echo "::error::self-test failed: a policy whose roles widened to include anon was reported as clean"
+            exit 1
+          fi
+
+          echo "self-test passed: the diff goes red on a removed policy, red on an added policy, red on a changed expression, red on a widened cmd, red on widened roles, and green on a match"
 
       - name: Compare live RLS policies to the committed baseline
         env:
@@ -793,7 +813,14 @@ jobs:
 
           BASELINE_COUNT=$(wc -l < "$BASELINE")
           LIVE_COUNT=$(wc -l < "$LIVE")
-          echo "${BASELINE_COUNT} in baseline, ${LIVE_COUNT} read live from ${SUPABASE_PROJECT_REF}, comparing."
+          # The third number is the point. "N in baseline" and "N read live"
+          # alone let two different outcomes print the same pair: 67 and 67
+          # reads as a match even when a policy was renamed, because one row
+          # left and another arrived. COMPARED counts the rows that are
+          # byte-identical in both files, so on a clean run all three are equal
+          # and any gap is the size of the drift.
+          COMPARED=$(comm -12 <(sort "$BASELINE") <(sort "$LIVE") | wc -l)
+          echo "${BASELINE_COUNT} in baseline, ${LIVE_COUNT} read live from ${SUPABASE_PROJECT_REF}, ${COMPARED} identical in both -- comparing."
 
           if ! diff -u "$BASELINE" "$LIVE" > /tmp/rls-diff.txt; then
             {
