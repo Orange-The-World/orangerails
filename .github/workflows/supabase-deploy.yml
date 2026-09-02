@@ -812,6 +812,15 @@ jobs:
           TARGET_ENV: ${{ needs.target.outputs.environment_name }}
           APPROVAL_REF: ${{ inputs.irreversible_approval_ref }}
         run: |
+          # `set +e` FIRST, and it is load bearing. A run step's default shell
+          # is `bash -e`, and `set -uo pipefail` does not clear e. This step
+          # runs the classifier and then READS its exit code, so with errexit
+          # still on it would die the moment the classifier said "irreversible":
+          # no step summary, no file, no line, no statement class, and on the
+          # dev target a blocked apply where the design says report and stand
+          # aside. Observed on CI run 33637547005, where the equivalent step
+          # exited at its first non-zero capture and printed nothing.
+          set +e
           set -uo pipefail
 
           MANIFEST="${RUNNER_TEMP}/or-t1518-pending.txt"
