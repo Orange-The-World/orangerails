@@ -55,7 +55,9 @@ interface SelectChain {
     onRejected?: (reason: unknown) => unknown,
   ): Promise<unknown>;
   order(column: string, options?: { ascending?: boolean }): SelectChain;
+  gt(column: string, value: unknown): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
+  limit(count: number): Promise<QueryResult>;
 }
 
 /**
@@ -145,17 +147,37 @@ function makeFakeClient(options: FakeOptions = {}) {
         });
       }
 
-      // Honour .range(from, to). A fake that always returns the same page
-      // regardless of its arguments can never exercise pagination, and a
-      // fixture of TRANSACTION_PAGE_SIZE or more rows would loop forever
+      // Honour .gt(column, value), which is how a keyset walk asks for the rows
+      // after its cursor. A fake that ignored it would hand back page one for
+      // ever and the walk would never terminate.
+      const gtFilter = call.filters.find((f) => f.column === "gt");
+      const afterCursor = gtFilter
+        ? view.filter((row) => {
+            const [column, value] = gtFilter.value as [string, unknown];
+            return String((row as Record<string, unknown>)[column]) > String(value);
+          })
+        : view;
+
+      // Honour .limit(n), and .range(from, to). A fake that always returns the
+      // same page regardless of its arguments can never exercise pagination,
+      // and a fixture of TRANSACTION_PAGE_SIZE or more rows would loop forever
       // against it instead of failing loudly (see the paging test below).
+      //
+      // .range is modelled even though the walk no longer uses it. That is
+      // deliberate: putting offset paging back in the source has to RUN these
+      // fixtures and go red on them, not error on a chain method the fake does
+      // not have. A harness that cannot run the old version cannot show the new
+      // test failing against it.
       const rangeFilter = call.filters.find((f) => f.column === "range");
+      const limitFilter = call.filters.find((f) => f.column === "limit");
       const page = rangeFilter
-        ? view.slice(
+        ? afterCursor.slice(
             (rangeFilter.value as [number, number])[0],
             (rangeFilter.value as [number, number])[1] + 1,
           )
-        : view;
+        : limitFilter
+          ? afterCursor.slice(0, limitFilter.value as number)
+          : afterCursor;
 
       const reorder = options.reorderAfterSelect?.[call.table];
       if (reorder) store[call.table] = reorder(stored.slice());
@@ -208,8 +230,16 @@ function makeFakeClient(options: FakeOptions = {}) {
               });
               return chain;
             },
+            gt(column: string, value: unknown) {
+              call.filters.push({ column: "gt", value: [column, value] });
+              return chain;
+            },
             range(from: number, to: number) {
               call.filters.push({ column: "range", value: [from, to] });
+              return Promise.resolve(resultFor(call));
+            },
+            limit(count: number) {
+              call.filters.push({ column: "limit", value: count });
               return Promise.resolve(resultFor(call));
             },
           };
@@ -547,27 +577,32 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
   });
 
-  it("migrates the row a concurrent DELETE shifted out of the offset window", async () => {
-    // THE CASE THAT DEFEATED THE COUNT COMPARISON. It is silent, permanent key
-    // loss, so it is worth spelling out in full.
+  it("migrates every connection when one is deleted mid-walk", async () => {
+    // THE CASE THAT DEFEATED THE COUNT COMPARISON, kept because it is silent,
+    // permanent key loss and the fixture is the clearest statement of it.
     //
-    // Offset paging addresses rows by POSITION. Deleting a row from a page that
-    // has already been read shifts every later row one place toward the start,
-    // so exactly one row falls between the window just read and the next window
-    // and is never returned at all. That same delete lowers the exact count by
+    // Offset paging addressed rows by POSITION. Deleting a row from a page that
+    // had already been read shifted every later row one place toward the start,
+    // so exactly one row fell between the window just read and the next window
+    // and was never returned at all. That same delete lowers the exact count by
     // one, and the deleted row's id stays in the migrated set because it was
     // written before it was removed. All three effects cancel one for one.
     //
     // Here: 1000 connections at a page size of 500. Page one reads
-    // conn-0000..conn-0499 and conn-0007 is then deleted. Page two asks for
-    // positions 500..999 and receives conn-0501..conn-0999, because conn-0500
-    // has moved to position 499, inside the window already consumed. Migrated
-    // 999, counted 999, the counts agree, the meta write lands, the keys are
-    // cleared, and conn-0500 is left under a MEK that exists nowhere.
+    // conn-0000..conn-0499 and conn-0007 is then deleted. Under offset paging,
+    // page two asked for positions 500..999 and received conn-0501..conn-0999,
+    // because conn-0500 had moved to position 499 inside the window already
+    // consumed. The walk now asks for ids above conn-0499 instead, so conn-0500
+    // is returned and the shift never happens.
     //
-    // Put the old count comparison back in reconcileEveryRow and this fails:
-    // conn-0500 is never updated and the rotation still resolves. That is the
-    // only reason to trust it.
+    // WHAT THIS TEST NOW PROVES, stated exactly, because it used to claim more.
+    // It proved the sweep was load bearing while the walk paged by offset: the
+    // sweep was the only thing that went back for conn-0500. It no longer does,
+    // because the walk itself never loses that row now. Keep it as a regression
+    // on the delete-mid-walk path and read it as nothing more. The two tests
+    // that still fail if reconcileEveryRow is removed are the one above, where
+    // a row is INSERTED below the cursor, and the one below it, where a delete
+    // and an insert cancel in the count.
     const clearMigrationKeys = vi.fn();
     const rowCount = CONNECTION_PAGE_SIZE * 2;
     const rows = Array.from({ length: rowCount }, (_, i) => ({
@@ -655,6 +690,132 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
     for (const { i } of txnUpdates) expect(i).toBeLessThan(metaIndex);
     expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("migrates the row a delete hides from the CONFIRMING sweep", async () => {
+    // THE RESIDUAL THE COVERAGE SWEEP CANNOT CLOSE ON ITS OWN, and the reason
+    // the walk pages by key. A sweep can only prove what it actually returned,
+    // so a shift that happens DURING the confirming sweep is invisible to it.
+    //
+    // The sequence, at a page size of 500 with the walk paging by OFFSET:
+    //
+    //   Read 1 (positions 0..499) returns conn-0000..conn-0499 and migrates
+    //   them. The page is full, so the walk asks for more.
+    //   Read 2 (positions 500..999) returns nothing, and the walk ends. A row
+    //   conn-0500 then arrives from another session, above the cursor that has
+    //   just stopped, so no walk has ever seen it. It is under the OLD MEK.
+    //   The count is 501 against 500 migrated, so the pass does not settle and
+    //   a confirming sweep runs. So far the sweep is working.
+    //   Read 3 is that sweep's first page, positions 0..499, and returns
+    //   conn-0000..conn-0499, all already migrated. conn-0000 is then deleted
+    //   by another session. conn-0500 shifts from position 500 to 499, inside
+    //   the window the sweep has just consumed.
+    //   Read 4 asks for positions 500..999 and gets nothing. added is 0.
+    //   The delete also lowered the exact count to 500, and conn-0000's id
+    //   stays in the migrated set because it was written before it was removed,
+    //   so migrated is 500 too. added > 0 is false and total > migrated is
+    //   false. The pass SETTLES, the meta write lands, clearMigrationKeys runs,
+    //   and conn-0500 is left wrapped under a MEK that exists nowhere.
+    //
+    // Paging by key removes step 2 of that: read 4 asks for ids above
+    // conn-0499 rather than for position 500, the delete below the cursor moves
+    // nothing, and conn-0500 is returned and migrated.
+    //
+    // PUT `.range(offset, offset + pageSize - 1)` BACK IN walkAndMigrate AND
+    // THIS TEST FAILS: conn-0500 is never updated and the rotation still
+    // resolves. That is the only reason to trust it. The fake still models
+    // .range precisely so that version runs rather than erroring.
+    const clearMigrationKeys = vi.fn();
+    const rows = Array.from({ length: CONNECTION_PAGE_SIZE }, (_, i) => ({
+      id: `conn-${String(i).padStart(4, "0")}`,
+      encrypted_credentials: `creds-${i}`,
+      encrypted_label: null,
+    }));
+    const lateId = `conn-${String(CONNECTION_PAGE_SIZE).padStart(4, "0")}`;
+
+    // Counted rather than flagged, because WHICH read the change lands on is
+    // the whole fixture. Head count reads do not reach here, so the numbering
+    // is the numbering of the paged reads.
+    let pagedReads = 0;
+    const { client, calls } = makeFakeClient({
+      rows: { connections: rows },
+      reorderAfterSelect: {
+        connections: (current) => {
+          pagedReads += 1;
+          if (pagedReads === 2) {
+            // Read 2 is the end of the first walk. The row arrives after the
+            // cursor has passed the end of the table, so it is missed by
+            // construction and only a sweep can find it.
+            return [
+              ...current,
+              { id: lateId, encrypted_credentials: "creds-late", encrypted_label: null },
+            ];
+          }
+          if (pagedReads === 3) {
+            // Read 3 is the first page of the confirming sweep. Deleting an
+            // already-migrated row from the window it has just consumed is what
+            // shifts the late row behind an offset cursor already at 500.
+            return current.filter((row) => (row as { id: string }).id !== "conn-0000");
+          }
+          return current;
+        },
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).resolves.toBeUndefined();
+
+    const connUpdates = calls
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.table === "connections" && c.op === "update");
+    const updatedIds = connUpdates.map(({ c }) => c.filters.find((f) => f.column === "id")?.value);
+
+    // The row the shift would have hidden. This single assertion is the point.
+    expect(updatedIds).toContain(lateId);
+
+    // And every row exactly once, including conn-0000, which was rewritten
+    // before it was deleted and must not be handed to the migration helper a
+    // second time.
+    expect(updatedIds.length).toBe(CONNECTION_PAGE_SIZE + 1);
+    expect(new Set(updatedIds).size).toBe(CONNECTION_PAGE_SIZE + 1);
+
+    // Before the meta write, which is the only moment at which the rotation can
+    // still be finished rather than lost.
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaIndex).toBeGreaterThan(-1);
+    for (const { i } of connUpdates) expect(i).toBeLessThan(metaIndex);
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("addresses each page by the last id seen, never by a position", async () => {
+    // The shape, not the outcome. The test above only goes red when a fixture
+    // reproduces the concurrent delete; this one goes red the moment the walk
+    // returns to positional paging at all, which is the edit that would quietly
+    // reopen the case.
+    const rowCount = CONNECTION_PAGE_SIZE + 3;
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: `conn-${String(i).padStart(4, "0")}`,
+      encrypted_credentials: `creds-${i}`,
+      encrypted_label: null,
+    }));
+    const { client, calls } = makeFakeClient({ rows: { connections: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const reads = pagedSelects(calls, "connections");
+    expect(reads.length).toBeGreaterThan(1);
+    for (const read of reads) {
+      expect(read.filters).toContainEqual({ column: "limit", value: CONNECTION_PAGE_SIZE });
+      expect(read.filters).toContainEqual({ column: "order", value: ["id", true] });
+      expect(read.filters.some((f) => f.column === "range")).toBe(false);
+    }
+
+    // The first page of a walk has no cursor; the one after it asks for the ids
+    // above the last id the first page returned.
+    const lastOfFirstPage = `conn-${String(CONNECTION_PAGE_SIZE - 1).padStart(4, "0")}`;
+    expect(reads[0].filters.some((f) => f.column === "gt")).toBe(false);
+    expect(reads[1].filters).toContainEqual({ column: "gt", value: ["id", lastOfFirstPage] });
   });
 
   it("stops when a row update reports no error and yet changed no row", async () => {
