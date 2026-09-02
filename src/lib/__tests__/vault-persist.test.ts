@@ -215,7 +215,7 @@ function makeFakeClient(options: FakeOptions = {}) {
           : afterCursor;
 
       const reorder = options.reorderAfterSelect?.[call.table];
-      if (reorder) store[call.table] = reorder(stored.slice());
+      if (reorder) store[call.table] = withDefaults(reorder(stored.slice(), store));
 
       return { data: page, error: null };
     }
