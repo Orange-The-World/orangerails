@@ -883,3 +883,137 @@ describe("vault password change: the re-wrapped meta write", () => {
     expect(calls.every((c) => c.table === "user_vault_meta")).toBe(true);
   });
 });
+
+describe("vault recovery: the meta write survives a lost response (OR-T1342)", () => {
+  function priorMetaRow(): Record<string, unknown> {
+    return {
+      user_id: "user-1",
+      enc_mek_ciphertext: "enc-mek-v0",
+      recovery_ciphertext: "recovery-ciphertext-v0",
+      vault_verifier_ciphertext: "verifier-v0",
+      vault_key_version: 2,
+    };
+  }
+
+  it("reconciles a lost response, finds the write already landed, and completes exactly once", async () => {
+    const clearMigrationKeys = vi.fn();
+    const metaRow = priorMetaRow();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      metaRow,
+      // The write actually reaches the database (applyToRow) and then the
+      // response is lost (throwTransportError), exactly like a dropped
+      // connection after the server already committed.
+      metaUpdateSequence: [{ throwTransportError: true, applyToRow: true }],
+    });
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, clearMigrationKeys),
+      sleep: async () => {},
+    });
+
+    expect(metaRow.recovery_ciphertext).toBe("recovery-ciphertext-v1");
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+    // The whole point: a write that already landed must not be sent twice.
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(1);
+  });
+
+  it("retries the write when a lost response leaves the prior values in place", async () => {
+    const clearMigrationKeys = vi.fn();
+    const metaRow = priorMetaRow();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      metaRow,
+      // The response is lost and NOTHING landed: the reconcile read must find
+      // the prior values still in place and retry the same conditional update.
+      metaUpdateSequence: [{ throwTransportError: true, applyToRow: false }],
+    });
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, clearMigrationKeys),
+      sleep: async () => {},
+    });
+
+    expect(metaRow.recovery_ciphertext).toBe("recovery-ciphertext-v1");
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(2); // the failed attempt, then the real retry
+  });
+
+  it("stops on a genuine conflict: a different session's values, neither ours nor prior", async () => {
+    const clearMigrationKeys = vi.fn();
+    const metaRow = {
+      user_id: "user-1",
+      enc_mek_ciphertext: "enc-mek-from-someone-else",
+      recovery_ciphertext: "recovery-ciphertext-from-someone-else",
+      vault_verifier_ciphertext: "verifier-from-someone-else",
+      vault_key_version: 2,
+    };
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      metaRow,
+      metaUpdateSequence: [{ throwTransportError: true, applyToRow: false }],
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(RECOVERY_META_NOT_SAVED_MESSAGE);
+
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("never reconciles or retries a structured error response, only a transport failure", async () => {
+    // The server responded and refused the write. There is nothing
+    // ambiguous to reconcile: the answer is already known.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      metaUpdate: { data: null, error: { message: "constraint violation" } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toBeTruthy();
+
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(1);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+});
+
+describe("vault recovery: the count-read retry budget is tens of seconds, not under one (OR-T1342)", () => {
+  it("sums to at least 30 seconds of backoff, computed from the exported constants", () => {
+    // Proven from COUNT_READ_ATTEMPTS and COUNT_READ_RETRY_MS themselves,
+    // not a hardcoded number, so shrinking either constant later fails this
+    // test instead of silently reintroducing the under-one-second budget.
+    let totalMs = 0;
+    for (let attempt = 1; attempt < COUNT_READ_ATTEMPTS; attempt += 1) {
+      totalMs += COUNT_READ_RETRY_MS * attempt;
+    }
+    expect(totalMs).toBeGreaterThanOrEqual(30000);
+  });
+
+  it("actually waits that long end to end when every count read fails", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      countResult: { connections: { data: null, count: null, error: { message: "still down" } } },
+    });
+    const waits: number[] = [];
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        sleep: async (ms: number) => {
+          waits.push(ms);
+        },
+      }),
+    ).rejects.toThrow(rowCountUnreadableMessage("connections"));
+
+    expect(waits.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThanOrEqual(30000);
+  });
+});
