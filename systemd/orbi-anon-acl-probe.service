@@ -1,0 +1,15 @@
+[Unit]
+Description=ORBI anon ACL invariant probe (both clusters)
+After=network.target
+# Backstop for the paths the probe cannot report itself: it never started,
+# it died before reaching its own alarm helper, or its alarm delivery
+# failed. Install orbi-probe-failed@.service and its script BEFORE enabling
+# this unit -- it already exists on dev for the other probes in this family.
+OnFailure=orbi-probe-failed@%n.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/orbi/orbi-anon-acl-probe.env
+ExecStart=/usr/local/bin/orbi-anon-acl-probe.sh
+StandardOutput=journal
+StandardError=journal
