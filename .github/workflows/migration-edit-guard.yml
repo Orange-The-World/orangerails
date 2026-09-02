@@ -46,7 +46,18 @@ jobs:
 
       - name: Prove the guard can fail before trusting it to pass
         run: |
-          set -uo pipefail
+          # A run step on this runner is executed as `bash -e {0}`, so errexit is
+          # already ON before this line and nothing below turns it off. That is
+          # the single most important fact in this step: every case here runs a
+          # script that is SUPPOSED to exit non-zero, so each capture must end in
+          # `|| rc=$?` or the first failing case kills the step before any verdict
+          # is reached. That is exactly what happened on this workflow's first run.
+          set -Euo pipefail
+
+          # An errexit death is silent, which is the shape of failure this estate
+          # keeps producing: red with nothing to read. The trap turns one into an
+          # annotation naming the line, so the next person does not have to guess.
+          trap 'trc=$?; echo "::error::self test aborted at line ${LINENO} with exit ${trc}, so it reached no verdict"; exit "$trc"' ERR
 
           # Every case below runs the SAME script the real step runs. The point of
           # keeping the logic in one file is that this cannot drift into testing a
@@ -64,13 +75,16 @@ jobs:
             local name="$1" want="$2" body="$3" input="$4"
             local out rc
             cases=$((cases + 1))
-            out="$(printf '%s' "$input" | PR_BODY="$body" bash "$SCRIPT" 2>&1)"
-            rc=$?
+            # A here-string, not a pipe: with pipefail set, a script that stops
+            # reading its input early can hand the writer a broken pipe and turn a
+            # correct verdict into a failed pipeline. And `|| rc=$?` because a
+            # non-zero exit is the ANSWER here, not an error.
+            out="$(PR_BODY="$body" bash "$SCRIPT" <<<"$input" 2>&1)" && rc=0 || rc=$?
             if [ "$rc" -ne "$want" ]; then
               echo "SELF TEST FAIL: ${name}: expected exit ${want}, got ${rc}"
               echo "$out" | sed 's/^/    /'
               failures=$((failures + 1))
-              return
+              return 0
             fi
             echo "self test ok: ${name} (exit ${rc})"
             LAST_OUT="$out"
@@ -102,19 +116,29 @@ jobs:
           run_case "input it cannot parse is exit 2, not a pass" 2 "" "this is not a name-status line"
           # 9. An add alongside an edit is refused for the edit only.
           run_case "an add alongside an edit is refused, naming only the edit" 1 "" "${A_NEW}"$'\n'"${M_OLD}"
+          # Pattern matching rather than a pipe into grep, for the same broken pipe
+          # reason as above: grep -q exits on its first match, and once this output
+          # outgrows a pipe buffer that would report a match as a failure.
           if [ -n "${LAST_OUT-}" ]; then
-            if ! printf '%s' "$LAST_OUT" | grep -q "20260101000000_first.sql"; then
-              echo "SELF TEST FAIL: the refusal did not name the file that was edited"
-              failures=$((failures + 1))
-            fi
-            if printf '%s' "$LAST_OUT" | grep -q "20260303000000_third.sql"; then
-              echo "SELF TEST FAIL: the refusal named a file that was only added"
-              failures=$((failures + 1))
-            fi
-            if ! printf '%s' "$LAST_OUT" | grep -q "MIGRATION-EDIT-ACK:"; then
-              echo "SELF TEST FAIL: the refusal did not say how to clear it"
-              failures=$((failures + 1))
-            fi
+            case "$LAST_OUT" in
+              *20260101000000_first.sql*) ;;
+              *) echo "SELF TEST FAIL: the refusal did not name the file that was edited"
+                 failures=$((failures + 1)) ;;
+            esac
+            case "$LAST_OUT" in
+              *20260303000000_third.sql*)
+                 echo "SELF TEST FAIL: the refusal named a file that was only added"
+                 failures=$((failures + 1)) ;;
+              *) ;;
+            esac
+            case "$LAST_OUT" in
+              *MIGRATION-EDIT-ACK:*) ;;
+              *) echo "SELF TEST FAIL: the refusal did not say how to clear it"
+                 failures=$((failures + 1)) ;;
+            esac
+          else
+            echo "SELF TEST FAIL: no case produced output to inspect"
+            failures=$((failures + 1))
           fi
 
           # A loop that finishes is not a loop that did the work. If a case did not
