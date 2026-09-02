@@ -1,0 +1,250 @@
+name: Production change-control settings drift
+
+# OR-T1520, out of OR-T0537. The settings that gate production database
+# changes on this repository were changed on 2026-08-24, and that was not
+# noticed until 2026-09-02. A P1 risk ticket was closed in between on the
+# pre-change values. The change was permissive: an identity was ADDED to the
+# production actor allowlist. Nothing was harmed, and nothing would have
+# reported it if it had been.
+#
+# This runs daily, records what the API reports, and goes RED when it differs
+# from the reviewed baseline, naming the old value and the new one.
+#
+# WHAT IT DOES NOT DO: it does not change any setting, any reviewer list or
+# any allowlist. It reads and it compares. Whether the shared builder identity
+# should remain on the production allowlist is a decision, and it belongs to
+# the person who owns that decision, not to this file.
+
+on:
+  schedule:
+    # 11:17 UTC, which is 07:17 EDT. Odd minute on purpose: the top of the
+    # hour is the busiest slot on the shared runners and a delayed cron run
+    # is a run that silently did not happen today.
+    - cron: '17 11 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/change-control-drift.yml'
+      - 'scripts/change-control-settings.mjs'
+      - 'ops/change-control/baseline.json'
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Nothing this workflow reports means anything until the comparison itself is
+  # shown able to go red. No network, so it cannot be flaky and it cannot be
+  # skipped by an outage.
+  # ---------------------------------------------------------------------------
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Prove the comparison goes red on each class of change
+        run: node scripts/change-control-settings.mjs --self-test
+
+  # ---------------------------------------------------------------------------
+  # The failure this exists to prevent is a check that could not look and
+  # printed OK anyway. So drive the real script at three real failures and
+  # assert each one exits with its own code. These call api.github.com for
+  # real: they are not fixtures, and they need no secret.
+  # ---------------------------------------------------------------------------
+  failure-modes:
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: A refused token must exit 3, not 0
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: this-is-not-a-valid-token
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: placeholder
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
+        run: |
+          set -uo pipefail
+          node scripts/change-control-settings.mjs --read > /dev/null 2> refused.txt
+          STATUS=$?
+          echo "exit ${STATUS}: $(cat refused.txt)"
+          if [ "${STATUS}" != "3" ]; then
+            echo "::error::a refused token exited ${STATUS}, expected 3. A check that cannot authenticate must say so, not pass."
+            exit 1
+          fi
+
+      - name: A repository that does not exist must exit 4, not 0
+        env:
+          GITHUB_REPOSITORY: Orange-The-World/this-repository-does-not-exist-or-t1520
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: placeholder
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
+        run: |
+          set -uo pipefail
+          node scripts/change-control-settings.mjs --read > /dev/null 2> missing.txt
+          STATUS=$?
+          echo "exit ${STATUS}: $(cat missing.txt)"
+          if [ "${STATUS}" != "4" ]; then
+            echo "::error::a 404 exited ${STATUS}, expected 4. 'I cannot see it' and 'there is nothing there' are different facts."
+            exit 1
+          fi
+
+      - name: An unreachable API must exit 5, not 0
+        env:
+          GITHUB_API_URL: http://127.0.0.1:9
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: placeholder
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
+        run: |
+          set -uo pipefail
+          node scripts/change-control-settings.mjs --read > /dev/null 2> unreachable.txt
+          STATUS=$?
+          echo "exit ${STATUS}: $(cat unreachable.txt)"
+          if [ "${STATUS}" != "5" ]; then
+            echo "::error::an unreachable endpoint exited ${STATUS}, expected 5."
+            exit 1
+          fi
+
+      - name: An empty allowlist variable must exit 5, not record an empty list
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: ''
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
+        run: |
+          set -uo pipefail
+          node scripts/change-control-settings.mjs --read > /dev/null 2> emptyvar.txt
+          STATUS=$?
+          echo "exit ${STATUS}: $(cat emptyvar.txt)"
+          if [ "${STATUS}" != "5" ]; then
+            echo "::error::an empty allowlist variable exited ${STATUS}, expected 5. An unset variable and an empty one are indistinguishable here, and one of them would be a change to who may apply migrations."
+            exit 1
+          fi
+
+      - name: Say what was proven
+        run: echo "every unreadable answer exits with its own non-zero code; none of them can print as a pass"
+
+  # ---------------------------------------------------------------------------
+  # The live reading. Runs after the machinery has been proven able to fail.
+  # ---------------------------------------------------------------------------
+  read-and-compare:
+    runs-on: ubuntu-latest
+    needs: [self-test, failure-modes]
+    # Variable values are not available to a pull request from a fork, so the
+    # read would fail there for a reason that has nothing to do with this
+    # repository's settings. An outside contributor should not be blocked by a
+    # check about our own change control.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Read the live settings
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          # Read from the workflow's own variables context rather than through
+          # the REST API. Same values, one less permission on the path that
+          # must not fail for a boring reason.
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_DEV }}
+        run: |
+          set -uo pipefail
+          node scripts/change-control-settings.mjs --read live.json
+          STATUS=$?
+          if [ "${STATUS}" != "0" ]; then
+            {
+              echo "## :grey_question: Change-control settings UNKNOWN"
+              echo ""
+              echo "The reading did not complete (exit ${STATUS}). This is **not** a report"
+              echo "that the settings are unchanged. Read the step log: each failure has its"
+              echo "own code and message (3 refused, 4 not found, 5 unusable)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Read at $(date -u '+%Y-%m-%d %H:%M UTC'), which is $(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')."
+
+      - name: Publish the reading, whatever the comparison says
+        run: |
+          {
+            echo "## Change-control settings as read"
+            echo ""
+            echo "Read at \`$(date -u '+%Y-%m-%d %H:%M UTC')\` (\`$(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')\`) from \`${{ github.repository }}\`."
+            echo "A green run of this job means these values ARE the live values at that"
+            echo "time, which is what makes a stale reading distinguishable from a fresh one."
+            echo ""
+            echo '```json'
+            cat live.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the reading as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: change-control-reading-${{ github.run_id }}
+          path: live.json
+          retention-days: 90
+
+      - name: Compare against the reviewed baseline
+        run: |
+          set -uo pipefail
+          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json
+          STATUS=$?
+
+          if [ "${STATUS}" = "6" ]; then
+            {
+              echo "## :grey_question: No baseline is committed yet"
+              echo ""
+              echo "\`ops/change-control/baseline.json\` does not exist on this branch, so there"
+              echo "is nothing to compare the reading above against. This is **not** a pass and"
+              echo "**not** a drift."
+              echo ""
+              echo "To seed it: copy the JSON printed above into"
+              echo "\`ops/change-control/baseline.json\` in a reviewed pull request, minus the"
+              echo "\`read_at\` line if you like, since the comparison ignores it. The first"
+              echo "recorded values should be ones a person looked at."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::no change-control baseline committed; nothing was compared"
+            exit 1
+          fi
+
+          if [ "${STATUS}" != "0" ]; then
+            {
+              echo "## :no_entry: Production change-control settings CHANGED"
+              echo ""
+              echo "The live settings differ from \`ops/change-control/baseline.json\`. Every"
+              echo "line below names what moved, what it was, and what it is now."
+              echo ""
+              echo "A permissive change is the one that matters and it is the one that looks"
+              echo "like nothing: an identity added to an allowlist, \`prevent_self_review\`"
+              echo "turned off, admins allowed to bypass."
+              echo ""
+              echo '```'
+              node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json 2>&1 || true
+              echo '```'
+              echo ""
+              echo "If the change was intended, update the baseline in a pull request so the"
+              echo "old and new values are reviewed rather than absorbed. If it was not, that"
+              echo "is an unreviewed change to who may touch production."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::production change-control settings differ from the committed baseline. See step summary."
+            exit 1
+          fi
+
+          echo "No drift: the live settings match ops/change-control/baseline.json."
