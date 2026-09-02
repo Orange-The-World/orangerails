@@ -18,10 +18,12 @@ import { describe, it, expect, vi } from "vitest";
 import {
   migrateAndPersistRotatedVault,
   persistRewrappedVaultMeta,
+  rowNotWrittenMessage,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
+  RECONCILE_MAX_PASSES,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -160,7 +162,15 @@ function makeFakeClient(options: FakeOptions = {}) {
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
     }
-    return options.otherUpdate ?? { data: [], error: null };
+
+    // A row update that matched a row hands that row back when it is asked for
+    // one with .select(). The DEFAULT therefore has to be a match: returning an
+    // empty array by default would make every migrating test below look like a
+    // write that row-level security refused. A test that wants a refused write
+    // asks for one explicitly through otherUpdate.
+    if (options.otherUpdate) return options.otherUpdate;
+    const idFilter = call.filters.find((f) => f.column === "id");
+    return { data: [{ id: idFilter?.value }], error: null };
   }
 
   function thenable(call: RecordedCall) {
@@ -475,16 +485,23 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     return calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
   }
 
-  it("throws BEFORE the meta write when the store gains a row after the page was read", async () => {
+  it("goes back and migrates a row the store gained after the page was read", async () => {
     // A sync running in a second tab inserts an encrypted_transactions row
     // while the rotation is in flight. It is written under the OLD MEK by
-    // construction, the loop has already read past it, and before this check
-    // existed the meta write still landed: that row was then wrapped under a
-    // key nothing stores any more, permanently and with nothing raised.
+    // construction, the walk has already read past it, and with no
+    // reconciliation at all the meta write still landed: that row was then
+    // wrapped under a key nothing stores any more, permanently and with nothing
+    // raised.
     //
-    // Take the reconciliation out of vault-persist.ts and this test passes
-    // again. That is the only reason to trust it. Every defect found on this
-    // path so far was a check that could not go red.
+    // Stopping there is not the fix and this test does not ask for it. At that
+    // moment the two rows already rewritten are under a MEK that exists only in
+    // this page's memory, so stopping gives up two rows to save one. The missed
+    // row is still under the old MEK and the old subkeys are still in memory,
+    // so the right move is to migrate it and finish.
+    //
+    // Take reconcileEveryRow out of vault-persist.ts and this test fails: txn-3
+    // is never updated. That is the only reason to trust it. Every defect found
+    // on this path so far was a check that could not go red.
     const clearMigrationKeys = vi.fn();
     let inserted = false;
     const { client, calls } = makeFakeClient({
@@ -505,11 +522,90 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
 
     await expect(
       migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
-    ).rejects.toThrow("migrated 2 of 3 transactions");
+    ).resolves.toBeUndefined();
 
-    // Both halves matter. No meta write means the stored wrappers still hold
-    // the old MEK, so the rows that did not move still read; not clearing the
-    // migration keys means this session can still read the ones that did.
+    const txnUpdates = calls
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.table === "encrypted_transactions" && c.op === "update");
+    const updatedIds = txnUpdates.map(({ c }) => c.filters.find((f) => f.column === "id")?.value);
+
+    // Every row, each exactly once. The sweep must not rewrite a row that is
+    // already under the new MEK: that ciphertext would be handed to the
+    // migration helper a second time and would throw.
+    expect(updatedIds).toEqual(["txn-1", "txn-2", "txn-3"]);
+
+    // And the late row moved BEFORE the meta write, which is the whole point of
+    // reconciling at that instant rather than after it.
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    for (const { i } of txnUpdates) expect(i).toBeLessThan(metaIndex);
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops when a row update reports no error and yet changed no row", async () => {
+    // The case that decides whether the reconciliation means anything. An
+    // update refused by row-level security comes back with no error, so a run
+    // that counted it would compare a read against a read: on a run where every
+    // write is refused, migrated would equal the table total, the counts would
+    // agree, and the irreversible meta write would proceed having re-encrypted
+    // nothing at all.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      otherUpdate: { data: [], error: null },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(rowNotWrittenMessage("connection", "conn-1"));
+
+    expect(metaUpdates(calls).length).toBe(0);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("does not stop when the total is LOWER than the number of rows this run wrote", async () => {
+    // A row deleted in another tab after this run had already rewritten it. A
+    // row that was MISSED pushes the total UP, never down, so a total below the
+    // migrated count cannot mean anything is stranded, and a row that is gone
+    // cannot be stranded either. Stopping here would abandon every row this run
+    // wrote over one deletion, for no protective value at all.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      countResult: { connections: { count: 0 } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).resolves.toBeUndefined();
+
+    expect(metaUpdates(calls).length).toBe(1);
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up after a bounded number of passes, naming what it counted", async () => {
+    // A table being written about as fast as the rotation can migrate it. Two
+    // properties are pinned here. The sweep must not run for ever, and when it
+    // does give up the message has to carry the arithmetic, because that is
+    // what tells support which set of rows was given up and which was kept.
+    const clearMigrationKeys = vi.fn();
+    let next = 2;
+    const { client, calls } = makeFakeClient({
+      rows: { encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-1" }] },
+      reorderAfterSelect: {
+        encrypted_transactions: (rows) => {
+          const id = `txn-${next}`;
+          next += 1;
+          return [...rows, { id, encrypted_payload: `payload-${id}` }];
+        },
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow("migrated 4 of 5 transactions");
+
+    // One walk plus exactly RECONCILE_MAX_PASSES sweeps, and then it stops.
+    expect(pagedSelects(calls, "encrypted_transactions").length).toBe(1 + RECONCILE_MAX_PASSES);
     expect(metaUpdates(calls).length).toBe(0);
     expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
