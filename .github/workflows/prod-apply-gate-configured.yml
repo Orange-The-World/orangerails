@@ -1,0 +1,37 @@
+name: Prod apply gate configured
+
+# The production migration apply fails closed when its actor allowlist variable
+# is empty or absent. Nothing else reports whether it is configured, so the
+# answer is only discovered at the moment somebody needs it.
+#
+# Exactly one of the two jobs below runs, decided by the variable itself. The
+# job that is not skipped is the answer, readable from the check list. No value
+# is printed, and neither job can fail, so this never blocks other work.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  prod-actor-allowlist-configured:
+    name: Prod apply actor allowlist IS configured
+    if: vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report
+        run: |
+          echo "MIGRATION_APPLY_ALLOWED_ACTORS_PROD is set and non-empty."
+          echo "The value is deliberately not printed."
+
+  prod-actor-allowlist-missing:
+    name: Prod apply actor allowlist is NOT configured
+    if: vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD == ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report
+        run: |
+          echo "MIGRATION_APPLY_ALLOWED_ACTORS_PROD is empty or absent."
+          echo "The production migration apply will refuse to start until it is set."
+          echo "Set it in Settings, then Secrets and variables, then Actions, then Variables."
