@@ -91,7 +91,10 @@ interface FakeOptions {
    * those. Head count reads deliberately do NOT trigger this, so a test can
    * hold the store still while the count is taken.
    */
-  reorderAfterSelect?: Record<string, (rows: unknown[]) => unknown[]>;
+  reorderAfterSelect?: Record<
+    string,
+    (rows: unknown[], store: Record<string, unknown[]>) => unknown[]
+  >;
   /**
    * What a head count returns instead of the store size. Only for the cases
    * where the count itself is the thing under test.
