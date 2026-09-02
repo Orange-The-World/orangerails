@@ -563,31 +563,8 @@ export function classifySql(sql) {
       const bodyLine0 = lineAt(sql, routine.bodyOffset) - 1;
       const innerSts = statements(inner.text);
 
-      // OR-T1715. Refuse BEFORE scanning, not after. This body runs when the
-      // migration is applied and a statement in it builds SQL at run time, so
-      // what the apply actually does is not in this file. Scanning the rest and
-      // reporting on it would be a verdict about the part we can see, presented
-      // as a verdict about the file.
-      for (const st of innerSts) {
-        const flat = st.text.replace(/\s+/g, ' ').trim();
-        if (!isDynamicSql(flat)) continue;
-        const lead = st.text.length - st.text.replace(/^\s+/, '').length;
-        return {
-          verdict: UNPARSEABLE,
-          findings: [
-            {
-              line: bodyLine0 + lineAt(inner.text, st.offset + lead),
-              id: 'UNPARSEABLE',
-              why:
-                `this migration invokes ${routine.name}, so its body runs when the migration ` +
-                'is applied, and that body builds SQL at run time with EXECUTE. The statement ' +
-                'it runs is not in the file, so it cannot be classified and is refused',
-              snippet: flat.length > 160 ? `${flat.slice(0, 160)} ...` : flat,
-            },
-          ],
-          notes,
-        };
-      }
+      // DEMONSTRATION BRANCH: the OR-T1715 refusal is deliberately removed here
+      // so that the new fixture fails. Do not merge this branch.
 
       for (const st of innerSts) {
         const lead = st.text.length - st.text.replace(/^\s+/, '').length;
