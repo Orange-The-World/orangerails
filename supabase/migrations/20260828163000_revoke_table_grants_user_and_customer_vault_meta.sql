@@ -109,12 +109,23 @@
 -- 16 columns on this table. They reached dev out of band, with no file and no
 -- ledger row behind them. The migrations that create them properly are
 -- 20260831071500 (keyring_ciphertext) and 20260831120000 (keyring_epoch), and
--- both of those versions sort ABOVE this file's. The apply selects pending
--- migrations by set difference against the ledger and runs them in VERSION order,
--- not in merge order, so this file always runs BEFORE those columns exist and no
--- merge sequence can change that. Naming them here is a guaranteed SQLSTATE 42703
--- on prod and a clean apply on dev, which is the one environment that cannot
--- catch it.
+-- both of those versions sort ABOVE this file's. Naming them here is a guaranteed
+-- SQLSTATE 42703 on prod, which carries 16 columns, and a clean apply on dev,
+-- which is the one environment that cannot catch it.
+--
+-- VERSION ORDER DOES NOT PROTECT THIS FILE. An earlier version of this header said
+-- that it did, and that was wrong. Read the apply loop in
+-- .github/workflows/supabase-deploy.yml: it selects pending files by SET
+-- DIFFERENCE against the ledger and compares nothing against the highest applied
+-- version. Version order is a total order WITHIN one apply run; it says nothing
+-- across runs. A file that sorts below the ledger maximum is still applied the
+-- first time it appears, so this file can and will run on a project that is
+-- already ahead of it.
+--
+-- Measured on the dev project on 2026-09-02: the ledger holds no row for
+-- 20260828163000, four higher versions are applied, and both keyring columns
+-- already carry an authenticated column grant. So the next apply runs this file
+-- against a table carrying two columns it does not know about.
 --
 -- Measured rather than argued, on a scratch pair of tables on the dev project,
 -- 2026-09-02. The old 17 column form raised 42703, column "keyring_ciphertext"
@@ -126,11 +137,28 @@
 -- states the privilege for the column set that exists at ITS version, 15 writable
 -- columns with workspace_key_id excluded, and reaches forward to nothing.
 --
--- ONE CONSEQUENCE, stated so it is not discovered later. The REVOKE at the top of
--- each block is absolute, so re-running this file after a later migration has
--- granted a new column would take that grant away again. Version ordered apply
--- runs it exactly once, at its own position, which is the only position where it
--- is correct. Do not re-run it by hand on a project that is ahead of it.
+-- WHAT MAKES THAT SAFE IS A SNAPSHOT, NOT AN ORDERING PROMISE. A table level
+-- REVOKE ALL clears column ACLs, so the absolute REVOKE below would otherwise take
+-- away a column grant made by a HIGHER numbered migration, and it would do it
+-- silently: with the grant gone, every assertion in this file still passes,
+-- because assertion 4b can only fire on a column that HAS a privilege it should
+-- not have. On dev today that is exactly the keyring write path.
+--
+-- So before the REVOKE, this file records the column privileges authenticated
+-- holds on user_vault_meta columns that are NOT in its own 16 column vocabulary,
+-- and replays them after the GRANT. It states the privilege for the columns it
+-- knows about and leaves every other column's grant exactly as it found it, on any
+-- project, in any order. Re-running it by hand on a project ahead of it is safe.
+-- Assertion 4b is scoped to match: a column this file preserved is not an
+-- offender, and a column inside its own vocabulary still is.
+--
+-- Proved by execution on the dev project on 2026-09-02, on scratch tables in a
+-- scratch schema that were dropped afterwards. Without the snapshot,
+-- keyring_ciphertext and keyring_epoch came back attacl NULL with INSERT and
+-- UPDATE false, and assertion 4b passed. With it, both kept authenticated=aw,
+-- workspace_key_id stayed unwritable, assertion 3 still fired on a table wide
+-- grant, assertion 4b still fired on a workspace_key_id grant, and a prod shaped
+-- 16 column table applied clean with no 42703.
 --
 -- Idempotent. REVOKE and GRANT can be re-run. The assertions at the end fail
 -- loudly rather than letting a partial apply look like a success.
@@ -141,6 +169,43 @@
 -- excluding workspace_key_id. keyring_ciphertext and keyring_epoch are absent on
 -- purpose: they do not exist at this version, and each is granted by the
 -- migration that creates it. See the header.
+-- Snapshot first. See the header: the REVOKE below is absolute and clears column
+-- ACLs, and this file can run on a project that already carries columns granted by
+-- a higher numbered migration. Everything authenticated holds on a column outside
+-- this file's 16 column vocabulary is recorded here and replayed after the GRANT.
+-- Only the three privileges in the allow list are carried over, so this cannot
+-- reintroduce something assertion 2 would then reject.
+DROP TABLE IF EXISTS pg_temp.uvm_preserved_column_grants;
+CREATE TEMP TABLE uvm_preserved_column_grants AS
+SELECT att.attname::text     AS column_name,
+       a.privilege_type::text AS privilege_type,
+       a.is_grantable         AS is_grantable
+  FROM pg_attribute att
+  CROSS JOIN LATERAL aclexplode(att.attacl) AS a
+ WHERE att.attrelid = 'public.user_vault_meta'::regclass
+   AND att.attnum > 0
+   AND NOT att.attisdropped
+   AND NOT (att.attname = ANY (ARRAY[
+         'user_id',
+         'vault_salt',
+         'vault_verifier_ciphertext',
+         'vault_key_version',
+         'kdf_algorithm',
+         'kdf_params',
+         'created_at',
+         'updated_at',
+         'kem_public_key',
+         'kem_secret_wrapped',
+         'sig_public_key',
+         'sig_secret_wrapped',
+         'pqc_key_version',
+         'enc_mek_ciphertext',
+         'recovery_ciphertext',
+         'workspace_key_id'
+       ]))
+   AND a.grantee = 'authenticated'::regrole
+   AND a.privilege_type IN ('SELECT','INSERT','UPDATE');
+
 ALTER TABLE public.user_vault_meta ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.user_vault_meta FROM PUBLIC;
 REVOKE ALL ON TABLE public.user_vault_meta FROM anon;
@@ -181,6 +246,25 @@ GRANT INSERT (
         recovery_ciphertext
       )
   ON TABLE public.user_vault_meta TO authenticated;
+
+-- Replay the grants this file did not make. On a project at or below this file's
+-- version the snapshot is empty and this loop does nothing. privilege_type is
+-- interpolated unquoted because it comes from the catalogue and the snapshot
+-- restricts it to the three allow list values; the column name is quoted, because
+-- it is a real identifier.
+DO $$
+DECLARE
+  g record;
+BEGIN
+  FOR g IN SELECT * FROM uvm_preserved_column_grants LOOP
+    EXECUTE format(
+      'GRANT %s (%I) ON TABLE public.user_vault_meta TO authenticated%s',
+      g.privilege_type,
+      g.column_name,
+      CASE WHEN g.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+  END LOOP;
+END;
+$$;
 
 -- customer_vault_meta: the same per customer, with no column exclusion.
 ALTER TABLE public.customer_vault_meta ENABLE ROW LEVEL SECURITY;
@@ -347,6 +431,12 @@ BEGIN
   --    GRANT is caught here. Shown able to fail before being trusted: against a
   --    table wide GRANT SELECT, INSERT, UPDATE on the scratch table it reported
   --    workspace_key_id for both privileges.
+  --
+  --    A column the snapshot preserved is NOT an offender: this file did not grant
+  --    it and does not claim to govern it. Without that exclusion the replay above
+  --    would trip this assertion on any project ahead of this version. Everything
+  --    inside the 16 column vocabulary is still checked, so workspace_key_id is
+  --    still caught here as well as by assertion 3.
   SELECT string_agg(att.attname || ':' || p, ', ') INTO offenders
     FROM pg_attribute att
     CROSS JOIN unnest(ARRAY['INSERT','UPDATE']) AS p
@@ -354,6 +444,10 @@ BEGIN
      AND att.attnum > 0
      AND NOT att.attisdropped
      AND NOT (att.attname = ANY(member_writable_columns))
+     AND NOT EXISTS (
+           SELECT 1 FROM uvm_preserved_column_grants k
+            WHERE k.column_name = att.attname
+              AND k.privilege_type = p)
      AND has_column_privilege('authenticated', att.attrelid, att.attname, p);
   IF offenders IS NOT NULL THEN
     RAISE EXCEPTION
@@ -361,3 +455,7 @@ BEGIN
   END IF;
 END;
 $$;
+
+-- The snapshot is scaffolding for this one apply, not state. Drop it so a later
+-- statement in the same session cannot read a stale copy.
+DROP TABLE IF EXISTS pg_temp.uvm_preserved_column_grants;
