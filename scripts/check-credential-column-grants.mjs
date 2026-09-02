@@ -177,8 +177,14 @@ export function chunks(sql) {
  * the DECLARE section ended with the semicolon: the chunk reads
  * `BEGIN FOREACH ... LOOP EXECUTE format( REVOKE ALL ...`. Anchoring to the chunk start reads
  * half the file and reports on the half it read.
+ *
+ * An assignment is also a place a statement begins. `stmt := format('GRANT ...` already
+ * matched, because that text ends in an open paren; `stmt := 'GRANT ...'` did not, because
+ * flatten() removes the quote characters and leaves nothing between `:=` and the statement
+ * itself. Without this alternative that whole shape reached the fold as nothing and the check
+ * printed its OK line over a GRANT it never read.
  */
-const STATEMENT_CONTEXT = /(?:\b(?:EXECUTE|BEGIN|LOOP|THEN|ELSE|DO|END)\s*$)|\(\s*$/i;
+const STATEMENT_CONTEXT = /(?:\b(?:EXECUTE|BEGIN|LOOP|THEN|ELSE|DO|END)\s*$)|\(\s*$|:=\s*$/i;
 
 /** Every place in a chunk where a statement this gate cares about actually starts. */
 export function starts(chunk) {
@@ -268,8 +274,8 @@ export function scan(files) {
         if (/^ALTER\b/i.test(stmt)) {
           if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b/i.test(stmt)) continue;
           if (!/\bON\s+TABLES\b/i.test(stmt)) continue;
-          const schema = /\bIN\s+SCHEMA\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(stmt);
-          if (!schema || schema[1].toLowerCase() !== GUARDED_SCHEMA) continue;
+          const schema = /\bIN\s+SCHEMA\s+("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)/i.exec(stmt);
+          if (!schema || unquote(schema[1]) !== GUARDED_SCHEMA) continue;
           // A REVOKE of the schema default is the durable fix and passes. Only the widening
           // direction is refused, and REVOKE GRANT OPTION FOR reads as the revoke it is.
           if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b(?:(?!\bREVOKE\b).)*\bGRANT\b/i.test(stmt)) continue;
@@ -331,7 +337,23 @@ export function scan(files) {
         }
 
         const target = tableRe.exec(stmt);
-        if (!target) continue;
+        if (!target) {
+          // The grantee resolved (we know exactly who), but the table name did not: built at
+          // runtime by concatenation rather than format('%I'), e.g.
+          // EXECUTE 'GRANT SELECT ON ' || tbl || ' TO anon'. Staying silent here would certify
+          // a grant to a browser facing role whose target this scan never actually read. Only
+          // GRANT is reported: a REVOKE with an unresolvable table stays in the generous
+          // direction this gate already takes for an unresolvable grantee.
+          if (isGrant && affected.length) {
+            hard.push(
+              `${file.name}: GRANT to ${affected.join(", ")} whose target table could not be ` +
+              `resolved from source (built at runtime rather than a literal identifier). This ` +
+              `scan cannot confirm the table is unguarded, so it cannot pass it. Rewrite the ` +
+              `table name as a literal identifier, or as format('%I', ...), so this gate can ` +
+              `read it.`);
+          }
+          continue;
+        }
         const table = tableKey(target[1], target[2]);
         if (!GUARDED[table]) continue;
 
@@ -627,6 +649,32 @@ const CASES = [
         "authenticated hold no privilege on this column, and none may be granted.';",
     }],
     expect: 0,
+  },
+  {
+    name: "a plain string literal assigned to a variable is read as a statement",
+    files: [{
+      name: "a.sql",
+      sql:
+        "DO $$ DECLARE stmt text; BEGIN stmt := 'GRANT SELECT ON TABLE public.platforms " +
+        "TO anon'; EXECUTE stmt; END $$;",
+    }],
+    expect: 1,
+  },
+  {
+    name: "a quoted schema in ALTER DEFAULT PRIVILEGES is read, not dropped silently",
+    files: [{
+      name: "a.sql",
+      sql: 'ALTER DEFAULT PRIVILEGES IN SCHEMA "public" GRANT SELECT ON TABLES TO anon;',
+    }],
+    expect: 1,
+  },
+  {
+    name: "a grant to a known role whose table cannot be resolved is reported, not passed",
+    files: [{
+      name: "a.sql",
+      sql: "DO $$ BEGIN EXECUTE 'GRANT SELECT ON ' || tbl || ' TO anon'; END $$;",
+    }],
+    expect: 1,
   },
 ];
 
