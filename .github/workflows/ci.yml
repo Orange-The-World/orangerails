@@ -294,7 +294,9 @@ jobs:
           # supabase/functions/_shared/error-redaction.test.ts.
           # dev raised 18 -> 19 by OR-T1203, which adds
           # supabase/functions/or-stealth-connection-create/envelope_replace.test.ts.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '19' }}
+          # dev raised 19 -> 20 by OR-T1721, which adds
+          # supabase/functions/or-ldk-channel-state/upsert_sql_shape.test.ts.
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '20' }}
         run: |
           set -euo pipefail
 
