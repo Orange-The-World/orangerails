@@ -30,7 +30,18 @@
 
 import fs from 'node:fs'
 
-const API_ROOT = process.env.GITHUB_API_URL || 'https://api.github.com'
+// CHANGE_CONTROL_* first, then the GITHUB_ name, then the public default.
+//
+// WHY THE FIRST NAME EXISTS. The Actions runner sets GITHUB_REPOSITORY and
+// GITHUB_API_URL itself, and its values win over a step-level env: block of
+// the same name, so a test that tries to point this script at a repository
+// that does not exist, or at an unreachable endpoint, silently runs against
+// the real repository on the real API instead and exits 0. That is a test
+// that cannot fail, which is the exact defect this whole workflow exists to
+// catch. GITHUB_TOKEN is different and is left alone: the runner does not set
+// it, so overriding that one works.
+const API_ROOT =
+  process.env.CHANGE_CONTROL_API_URL || process.env.GITHUB_API_URL || 'https://api.github.com'
 
 class ShapeError extends Error {}
 
@@ -172,8 +183,8 @@ export function renderDiff(rows) {
 // ---------------------------------------------------------------------------
 
 async function readLive() {
-  const repo = process.env.GITHUB_REPOSITORY
-  if (!repo) die(5, 'GITHUB_REPOSITORY is not set, so there is no repository to read')
+  const repo = process.env.CHANGE_CONTROL_REPOSITORY || process.env.GITHUB_REPOSITORY
+  if (!repo) die(5, 'neither CHANGE_CONTROL_REPOSITORY nor GITHUB_REPOSITORY is set, so there is no repository to read')
 
   // Validate the recorded variables BEFORE spending a network call. An unset
   // or empty allowlist is a refusal whatever the API answers, and proving that
