@@ -4,6 +4,7 @@ import {
   pruneRateWindows,
   rateLimitRetryAfter,
   rateWindows,
+  unidentifiedCallerHeaders,
   RATE_MAX_PER_WINDOW,
   RATE_MAX_TRACKED_CLIENTS,
 } from './rate-limit.ts';
@@ -46,6 +47,46 @@ Deno.test('a caller-controlled x-forwarded-for can never collide with a cf: buck
   const cf = clientIdOrNull(req({ 'cf-connecting-ip': '203.0.113.9' }));
   const xff = clientIdOrNull(req({ 'x-forwarded-for': '203.0.113.9' }));
   assertNotEquals(cf, xff);
+});
+
+// --- the unidentified-caller log line (OR-T1452) ----------------------------
+
+Deno.test('a request with no identifying header reports every candidate absent', () => {
+  const described = unidentifiedCallerHeaders(req({}));
+  assertEquals(
+    described,
+    'cf-connecting-ip=absent x-forwarded-for=absent x-real-ip=absent x-gateway-verified-ip=absent',
+  );
+});
+
+Deno.test('an empty header is reported as empty, not as absent', () => {
+  // These come from different causes and point at different places to look: a
+  // header an intermediary stripped, versus one forwarded with nothing in it.
+  // Collapsing them would throw away the answer this log exists to get.
+  const described = unidentifiedCallerHeaders(req({ 'x-forwarded-for': '   ' }));
+  assertEquals(described.includes('x-forwarded-for=empty'), true);
+  assertEquals(described.includes('x-forwarded-for=absent'), false);
+});
+
+Deno.test('the log line never contains a header VALUE', () => {
+  // The values are client IP addresses. A test that only checked the shape of
+  // the line would pass just as happily with one in it, so assert the absence
+  // directly.
+  const described = unidentifiedCallerHeaders(
+    req({ 'x-real-ip': '203.0.113.9', 'x-gateway-verified-ip': '198.51.100.7' }),
+  );
+  assertEquals(described.includes('203.0.113.9'), false);
+  assertEquals(described.includes('198.51.100.7'), false);
+  assertEquals(described.includes('x-real-ip=present'), true);
+});
+
+Deno.test('the case this line describes is exactly the case that skips the throttle', () => {
+  // x-real-ip is not read by clientIdOrNull, so a request carrying only that
+  // header is unidentified and goes unthrottled while still having a header on
+  // it. The log must fire for that request, not only for a bare one.
+  const headers = { 'x-real-ip': '203.0.113.9' };
+  assertEquals(clientIdOrNull(req(headers)), null);
+  assertEquals(unidentifiedCallerHeaders(req(headers)).includes('x-real-ip=present'), true);
 });
 
 // --- overflow eviction order (OR-T1141) -------------------------------------
