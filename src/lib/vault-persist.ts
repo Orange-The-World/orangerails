@@ -362,22 +362,43 @@ async function reconcileEveryRow(
       addedBySweep.set(entry.table, entry.migrated.size - before);
     }
 
-    const unsettled: Array<{ entry: TableReconcile; total: number }> = [];
+    const unsettled: Array<{ entry: TableReconcile; total: number; stale: number }> = [];
     for (const entry of tables) {
       const total = await exactRowCount(supabase, entry.table, entry.label, entry.migrated.size);
+      // The test that does not depend on this run's own bookkeeping. Everything
+      // else in this loop is assembled here on the client and can be made to
+      // agree by two concurrent writes in opposite directions; this asks the
+      // database how many rows are not under the key this rotation created.
+      const stale = await rowsNotAtGeneration(supabase, entry.table, generation);
       const added = addedBySweep.get(entry.table) ?? 0;
       // A sweep that migrated something is proof this run had not finished, so
       // the next sweep has to confirm there is nothing left. A total above the
-      // migrated count means rows exist that no sweep has ever reached.
-      if (added > 0 || total > entry.migrated.size) unsettled.push({ entry, total });
+      // migrated count means rows exist that no sweep has ever reached. A stale
+      // row means one exists that is not under the new key, whatever the other
+      // two say.
+      if (added > 0 || total > entry.migrated.size || stale > 0) {
+        unsettled.push({ entry, total, stale });
+      }
     }
     if (unsettled.length === 0) return;
 
     if (pass >= RECONCILE_MAX_PASSES) {
-      // Prefer a table that is genuinely short, so the numbers in the message
-      // read as "migrated fewer than exist" rather than the other way round.
-      const blocked =
-        unsettled.find(({ entry, total }) => total > entry.migrated.size) ?? unsettled[0];
+      // Say which arithmetic blocked, in the order that reads most usefully to
+      // whoever has to act on it. A table that is genuinely short comes first,
+      // so the numbers read as "migrated fewer than exist". A table whose only
+      // problem is a stale row would otherwise be reported as "migrated 3 of
+      // 3", which tells support nothing at all.
+      const short = unsettled.find(({ entry, total }) => total > entry.migrated.size);
+      if (short) {
+        throw new Error(
+          rowsNotReconciledMessage(short.entry.label, short.entry.migrated.size, short.total),
+        );
+      }
+      const stale = unsettled.find((candidate) => candidate.stale > 0);
+      if (stale) {
+        throw new Error(rowsNotAtGenerationMessage(stale.entry.label, stale.stale, generation));
+      }
+      const blocked = unsettled[0];
       throw new Error(
         rowsNotReconciledMessage(blocked.entry.label, blocked.entry.migrated.size, blocked.total),
       );
