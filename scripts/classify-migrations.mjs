@@ -614,6 +614,11 @@ const EXPECTED = {
   // OR-T1695. The quoted twin of 20990101000011, laid out on the same lines, so
   // the two spellings must agree on all three: verdict, rule and line.
   '20990101000013_irreversible_routine_invoked_via_quoted_identifier.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 27 },
+  // OR-T1709. A DO block body is re-scrubbed before it is scanned. A comment
+  // inside it must not fire a rule, and a real irreversible statement next
+  // to that comment must still be caught.
+  '20990101000015_reversible_do_block_comment_not_executed.sql': { verdict: REVERSIBLE, id: null },
+  '20990101000016_irreversible_do_block_drop_table.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE' },
 };
 
 function selftest() {
