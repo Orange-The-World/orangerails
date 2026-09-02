@@ -146,8 +146,8 @@ interface TableReconcile {
 }
 
 /**
- * Make sure every row each table holds has been re-encrypted, FINISHING the
- * ones this run missed rather than abandoning the ones it already wrote.
+ * Finish the rotation, and do not return until every row this user owns is
+ * PROVEN to be under the new MEK.
  *
  * WHY FINISHING AND NOT STOPPING. Between the first rewritten row and the meta
  * write, the only copy of the new MEK is in this page's memory, so a row this
@@ -158,12 +158,50 @@ interface TableReconcile {
  * so they can simply be migrated too. That is strictly better than abandoning
  * either set.
  *
- * WHY A TOTAL LOWER THAN THE MIGRATED COUNT IS NOT AN ERROR. A row this run did
- * not reach pushes the total UP, never down. A total below the migrated count
- * can only mean rows went away after being rewritten, by deletion or by leaving
- * this user's row-level-security scope, and a row that is gone cannot be
- * stranded. Treating it as a failure would abandon a completed rotation over
- * one row deleted in another tab, for no protective value at all.
+ * WHY COMPLETENESS IS DECIDED BY A SWEEP AND NOT BY COMPARING COUNTS. An
+ * earlier version of this decided the rotation was complete when the exact row
+ * count equalled the number of rows this run had written. One concurrent DELETE
+ * of an already-migrated row defeats that comparison and opens a gap in the
+ * same operation, because offset paging addresses rows by POSITION: removing a
+ * row from a page already consumed shifts every later row one place toward the
+ * start, so exactly one row falls between the window just read and the next
+ * window and is never returned at all. The same delete also lowers the total by
+ * one, and the deleted row's id stays in the migrated set because it was
+ * written before it was removed. Those three effects cancel one for one, so the
+ * counts agree and the skipped row is stranded under a key nothing stores any
+ * more. Worked example at a page size of 500 over 1000 rows: read positions
+ * 0..499, delete the eighth row, read positions 500..999 and receive the
+ * original rows 501..999, because original row 500 has moved to position 499
+ * inside the window already read. Migrated 999, counted 999, one row silently
+ * lost for ever.
+ *
+ * Keyset pagination on id removes that particular shift, but it does NOT make
+ * the count comparison sound: one delete of a migrated row plus one insert
+ * below the cursor cancel each other in the total just as neatly, and the
+ * inserted row is still under the old MEK. So the test here is coverage, which
+ * is a property of what this run actually reached: keep sweeping until a
+ * COMPLETE walk of a table finds every row it returns already migrated. That
+ * does not care WHY a row was missed, which is the only reason to trust it
+ * against the next mechanism nobody has thought of.
+ *
+ * THE COST, stated because it is not free. A clean rotation now walks each
+ * table twice. The second walk is what turns the first walk's completeness from
+ * an assumption into evidence, and it issues no updates, because every row it
+ * sees is already in the migrated set.
+ *
+ * WHY THE COUNT IS STILL HERE. A sweep cannot see a row the read never returns
+ * at all. If the project's server-side maximum row count is ever lowered below
+ * the page size, every walk ends on the same short first page, so every sweep
+ * agrees there is nothing left to do while the rows past the cap sit
+ * unmigrated. Only a count computed server side catches that. The two tests
+ * fail in different directions and neither one replaces the other.
+ *
+ * WHY A TOTAL LOWER THAN THE MIGRATED COUNT IS NOT AN ERROR. It means rows went
+ * away after being rewritten, by deletion or by leaving this user's
+ * row-level-security scope, and a row that is gone cannot be stranded. Note it
+ * is no longer read as evidence that nothing was MISSED, which is exactly what
+ * the old version got wrong; it is only a reason not to abandon the rotation.
+ * The sweep is what decides completeness.
  *
  * WHAT HAPPENS IF IT NEVER CONVERGES. This is a real choice, not a default.
  * After RECONCILE_MAX_PASSES sweeps, something is inserting rows about as fast
@@ -182,19 +220,36 @@ async function reconcileEveryRow(
   tables: TableReconcile[],
 ): Promise<void> {
   for (let pass = 0; ; pass++) {
-    const short: Array<{ entry: TableReconcile; total: number }> = [];
+    // Sweep every table, THEN count every table. Doing both one table at a time
+    // would let a row inserted into the first table while the second is being
+    // swept escape this pass's count entirely.
+    const addedBySweep = new Map<string, number>();
+    for (const entry of tables) {
+      const before = entry.migrated.size;
+      await entry.sweep();
+      addedBySweep.set(entry.table, entry.migrated.size - before);
+    }
+
+    const unsettled: Array<{ entry: TableReconcile; total: number }> = [];
     for (const entry of tables) {
       const total = await exactRowCount(supabase, entry.table, entry.label, entry.migrated.size);
-      if (total > entry.migrated.size) short.push({ entry, total });
+      const added = addedBySweep.get(entry.table) ?? 0;
+      // A sweep that migrated something is proof this run had not finished, so
+      // the next sweep has to confirm there is nothing left. A total above the
+      // migrated count means rows exist that no sweep has ever reached.
+      if (added > 0 || total > entry.migrated.size) unsettled.push({ entry, total });
     }
-    if (short.length === 0) return;
+    if (unsettled.length === 0) return;
 
     if (pass >= RECONCILE_MAX_PASSES) {
-      const { entry, total } = short[0];
-      throw new Error(rowsNotReconciledMessage(entry.label, entry.migrated.size, total));
+      // Prefer a table that is genuinely short, so the numbers in the message
+      // read as "migrated fewer than exist" rather than the other way round.
+      const blocked =
+        unsettled.find(({ entry, total }) => total > entry.migrated.size) ?? unsettled[0];
+      throw new Error(
+        rowsNotReconciledMessage(blocked.entry.label, blocked.entry.migrated.size, blocked.total),
+      );
     }
-
-    for (const { entry } of short) await entry.sweep();
   }
 }
 
@@ -296,13 +351,15 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // recoverWithCode() mints a fresh MEK on every call, the key those rows are
   // still wrapped under is gone. Silent and permanent.
   //
-  // WHAT PAGING CANNOT FIX ON ITS OWN, stated rather than hidden. Offset paging
-  // over a stable order is still not immune to another session INSERTing a row
-  // while the walk runs, and keyset pagination on id would not fix that either:
-  // a row inserted below the cursor is missed exactly as offset paging misses
-  // it, and it is written under the OLD MEK by construction. That case is
-  // handled after both walks instead, by reconcileEveryRow, which goes back and
-  // finishes the rows that were missed.
+  // WHAT PAGING CANNOT FIX ON ITS OWN, stated rather than hidden. A walk over a
+  // stable order is still not immune to another session changing the table
+  // while it runs. An INSERT below the cursor is missed and is written under the
+  // OLD MEK by construction. A DELETE from a page already read shifts every
+  // later row one place toward the start, so a row falls between two windows and
+  // is never returned at all. Keyset pagination on id removes the second of
+  // those and neither of the first, so it is not the fix either. Both are
+  // handled by reconcileEveryRow below, which drives the walks and keeps
+  // sweeping until a complete walk finds nothing left to migrate.
   //
   // Distinct ids, not a running tally, and added only once the UPDATE has
   // returned the row it changed: a read that hands the same row back twice must
@@ -349,8 +406,6 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       migrateConnection,
     );
 
-  await walkConnections();
-
   // encrypted_payload uses the transactions subkey, which changes with the MEK.
   //
   // These updates are issued one at a time rather than through Promise.all. The
@@ -381,27 +436,24 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       migrateTransaction,
     );
 
-  await walkTransactions();
-
-  // RECONCILE BEFORE THE META WRITE.
+  // MIGRATE AND RECONCILE, BEFORE THE META WRITE.
   //
-  // This is the last instant at which the rotation can still be FINISHED. The
-  // stored enc_mek_ciphertext and recovery_ciphertext still wrap the OLD MEK,
-  // every row that has not moved still reads, and clearMigrationKeys has not
-  // run, so a row this run missed is still under the old subkeys and can simply
-  // be migrated now. After the write below, the same disagreement is
-  // unrecoverable AND silent.
+  // This drives both walks and does not return until every row is proven to be
+  // under the new MEK. It is the last instant at which the rotation can still be
+  // FINISHED: the stored enc_mek_ciphertext and recovery_ciphertext still wrap
+  // the OLD MEK, every row that has not moved still reads, and
+  // clearMigrationKeys has not run, so a row this run missed is still under the
+  // old subkeys and can simply be migrated now. After the write below, the same
+  // gap is unrecoverable AND silent.
   //
-  // WHAT THIS CATCHES, and why it is a count rather than another paging fix.
-  // Both walks above are correct only while the page size stays strictly below
-  // the project's server-side maximum row count, and that cap is a project
-  // setting outside version control: lower it under 500 and both walks end on
-  // the first short page, strand every row past it, and the meta write still
-  // lands. A concurrent INSERT is the same strand by a different route. So the
-  // check is deliberately not aimed at either mechanism. Comparing what was
-  // migrated against what the table holds catches every variant of a short
-  // read, including ones nobody has thought of yet, at the one moment there is
-  // still something useful to do about it.
+  // WHAT THIS CATCHES. Completeness is decided by a sweep that finds nothing
+  // left to migrate, so it covers a row missed by a reorder, by a concurrent
+  // insert, or by the position shift a concurrent delete causes, without having
+  // to enumerate those mechanisms. The exact count is kept alongside it for the
+  // one case a sweep cannot see: the page size is only safe while it stays
+  // strictly below the project's server-side maximum row count, and that cap is
+  // a project setting outside version control, so lowering it under 500 would
+  // make every walk end on the same short first page and agree with itself.
   //
   // Both tables are reconciled together rather than one after each walk,
   // deliberately: a row inserted into connections DURING the transaction walk
