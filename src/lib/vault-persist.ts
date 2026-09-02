@@ -14,6 +14,14 @@
  * can drive them with a fake supabase client and pin the property that matters
  * here: nothing irreversible happens until the write is PROVEN to have landed.
  * Lifting them out of the components changed no behaviour.
+ *
+ * WHAT THE READS IN HERE HAVE TO GUARANTEE. Every row the user owns has to be
+ * re-encrypted before the meta write, so a read that quietly returns fewer rows
+ * than the table holds is the same defect as a failed write, and it is harder
+ * to see: a capped read raises no error at all, and a scan with no ORDER BY may
+ * return a row twice or not at all once the loop starts writing new tuple
+ * versions under it. That is why the reads below are paged and ordered rather
+ * than taken on trust.
  */
 
 /**
