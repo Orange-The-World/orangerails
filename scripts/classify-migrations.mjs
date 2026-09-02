@@ -644,6 +644,11 @@ const EXPECTED = {
   // OR-T1695. The quoted twin of 20990101000011, laid out on the same lines, so
   // the two spellings must agree on all three: verdict, rule and line.
   '20990101000013_irreversible_routine_invoked_via_quoted_identifier.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 27 },
+  // OR-T1708. The quoted identifier itself contains a space. Before the fix
+  // the definition side stripped that space out entirely (line 263) while
+  // the invocation side kept it, so the two sides built different tokens and
+  // this file classified REVERSIBLE.
+  '20990101000014_irreversible_routine_invoked_via_quoted_identifier_with_space.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 24 },
 };
 
 function selftest() {
