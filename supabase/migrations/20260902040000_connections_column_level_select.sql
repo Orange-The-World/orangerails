@@ -20,10 +20,29 @@
 --
 -- THE COLUMN SET, AND WHY EACH ONE IS IN IT
 --
--- Enumerated from the only client side reader of this table, which is
--- src/routes/app.tsx. Every other reader is an edge function under
--- supabase/functions, and those hold the service role key, which is a
--- separate grantee and is untouched here.
+-- Enumerated at dev head from the two client side readers of this table:
+-- src/routes/app.tsx (the connection list) and src/lib/vault-persist.ts
+-- (vault recovery, called from src/routes/recover.tsx with the browser
+-- client, so it runs as authenticated). Every other reader is an edge
+-- function under supabase/functions, and those hold the service role key,
+-- which is a separate grantee and is untouched here.
+--
+-- An earlier version of this file said app.tsx was the only client side
+-- reader. That was false. Commit d51ed3d85cad moved the recovery read and
+-- write out of the route component into src/lib/vault-persist.ts, and that
+-- helper reads encrypted_credentials back to re-wrap it under the fresh
+-- master key. Leaving that column out of this grant broke vault recovery
+-- for every signed in user, with a permission error at the read.
+--
+-- HOW COMPLETE THIS LIST IS, stated rather than assumed. Both files above
+-- were read whole at dev head, and every route in the generated router
+-- manifest src/routeTree.gen.ts was checked at dev head for a browser
+-- client read of this table. What cannot be done from here is prove a
+-- string is absent from the current tree: there is no search over live
+-- code and the local clones are days behind. So this list is complete over
+-- the files named here, and it is not proof that no other reader exists. A
+-- new client read of a column on this table has to add that column here in
+-- the same change.
 --
 --   id                    row key, and the filter for the two delete paths
 --   subaccount_id         the WHERE filter on the list query. Postgres
@@ -36,14 +55,23 @@
 --   encrypted_last_error  ciphertext, decrypted in the browser and rendered
 --   last_sync_at          rendered on the connection card
 --   created_at            the ORDER BY on the list query
+--   encrypted_credentials ciphertext under the user's own key. Vault
+--                         recovery reads every row back, re-encrypts it
+--                         under the fresh master key and writes it back:
+--                         src/lib/vault-persist.ts, the paged read at the
+--                         top of migrateAndPersistRotatedVault. Granting
+--                         SELECT on it costs nothing the requirement above
+--                         cares about: the server cannot read it either
+--                         way, and it is not the webhook secret
 --
 -- DELIBERATELY EXCLUDED
 --
 --   strike_webhook_secret     server side only, see the requirement above
---   encrypted_credentials     the client WRITES it on insert and never reads
---   credentials_key_version   it back. INSERT is a separate privilege from
---                             SELECT, so excluding both from SELECT does not
---                             affect the add connection path
+--   credentials_key_version   written by the add connection insert. INSERT
+--                             is a separate privilege from SELECT, so
+--                             excluding it from SELECT does not affect the
+--                             add connection path, and no client reader
+--                             found at dev head reads it back
 --   last_sync_cursor          declared in the client type and read nowhere
 --   updated_at                no client reader
 --   strike_subscription_id    no client reader
@@ -65,13 +93,16 @@
 -- The list query used select("*"). PostgREST passes that through as a whole
 -- row expansion, which needs table level SELECT and would start failing the
 -- moment this migration lands. The same pull request narrows that query to
--- the eight columns above. The migration and the client change have to ship
--- together.
+-- the eight columns it reads. The recovery read in src/lib/vault-persist.ts
+-- already names its three columns and needs no change, but it is the reason
+-- encrypted_credentials is in the grant. The migration and the client
+-- change have to ship together.
 --
 -- ROLLBACK
 --
 --   REVOKE SELECT (id, subaccount_id, provider_type, status, encrypted_label,
---                  encrypted_last_error, last_sync_at, created_at)
+--                  encrypted_last_error, last_sync_at, created_at,
+--                  encrypted_credentials)
 --     ON public.connections FROM authenticated;
 --   GRANT SELECT ON public.connections TO authenticated;
 --   GRANT SELECT ON public.connections TO anon;
@@ -91,7 +122,8 @@ GRANT SELECT (
   encrypted_label,
   encrypted_last_error,
   last_sync_at,
-  created_at
+  created_at,
+  encrypted_credentials
 ) ON public.connections TO authenticated;
 
 -- Self check. This asserts the outcome rather than the statements, so a
@@ -109,7 +141,8 @@ DECLARE
     'encrypted_label',
     'encrypted_last_error',
     'last_sync_at',
-    'created_at'
+    'created_at',
+    'encrypted_credentials'
   ];
   still_readable text;
   missing text;
