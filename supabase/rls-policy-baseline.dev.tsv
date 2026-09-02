@@ -37,12 +37,12 @@ public	quiltt_institutions_cache	quiltt_institutions_cache_public_read	SELECT	{p
 public	source_wallets	Direct users can delete source_wallets via their subaccount	DELETE	{authenticated}	7db97b20d0ba361d129b8ea7eae9755d	d41d8cd98f00b204e9800998ecf8427e
 public	source_wallets	Direct users can insert source_wallets via their subaccount	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	7db97b20d0ba361d129b8ea7eae9755d
 public	source_wallets	Direct users can read source_wallets via their subaccount	SELECT	{authenticated}	7db97b20d0ba361d129b8ea7eae9755d	d41d8cd98f00b204e9800998ecf8427e
-public	source_wallets	Direct users can update source_wallets via their subaccount	UPDATE	{authenticated}	7db97b20d0ba361d129b8ea7eae9755d	7db97b20d0ba361d129b8ea7eae9755d
+public	source_wallets	Direct users can update source_wallets via their subaccount	UPDATE	{authenticated}	7db97b20d0ba361d129b8ea7eae9755d	d41d8cd98f00b204e9800998ecf8427e
 public	staff_users	Staff read staff_users	SELECT	{authenticated}	8a30881afbcacd754d0577f49979525e	d41d8cd98f00b204e9800998ecf8427e
-public	stealth_connections	Owners can read their stealth connections	SELECT	{public}	56432150e324804bab7b2994ce3e7d1e	d41d8cd98f00b204e9800998ecf8427e
-public	stealth_scan_ranges	Owners can read their stealth scan ranges	SELECT	{public}	5c7f4607232447c2f0fd7e328acb394e	d41d8cd98f00b204e9800998ecf8427e
-public	stealth_transactions	Owners can read their stealth transactions	SELECT	{public}	666e185359b5e4f1862c01e22b0583f7	d41d8cd98f00b204e9800998ecf8427e
-public	stealth_utxos	owner read via connection	SELECT	{public}	076cdd53f4509a934c696eea9488b1cd	d41d8cd98f00b204e9800998ecf8427e
+public	stealth_connections	Owners can read their stealth connections	SELECT	{authenticated}	56432150e324804bab7b2994ce3e7d1e	d41d8cd98f00b204e9800998ecf8427e
+public	stealth_scan_ranges	Owners can read their stealth scan ranges	SELECT	{authenticated}	5c7f4607232447c2f0fd7e328acb394e	d41d8cd98f00b204e9800998ecf8427e
+public	stealth_transactions	Owners can read their stealth transactions	SELECT	{authenticated}	666e185359b5e4f1862c01e22b0583f7	d41d8cd98f00b204e9800998ecf8427e
+public	stealth_utxos	owner read via connection	SELECT	{authenticated}	076cdd53f4509a934c696eea9488b1cd	d41d8cd98f00b204e9800998ecf8427e
 public	subaccounts	Direct users can read their own subaccount	SELECT	{authenticated}	feaf32b5096104566091cf1e013da31e	d41d8cd98f00b204e9800998ecf8427e
 public	subscriptions	Customers read own subscriptions	SELECT	{authenticated}	3524221f4c117cdc55aacc0cc685db54	d41d8cd98f00b204e9800998ecf8427e
 public	user_app_grants	Users can insert own grants	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	3a807491e0a912fbfbee0ffa087b82f6
@@ -59,9 +59,9 @@ public	vault_security_events	Users can insert their own vault security events	IN
 public	vault_security_events	Users can read their own vault security events	SELECT	{authenticated}	19300d155780585259ede73ac370586c	d41d8cd98f00b204e9800998ecf8427e
 public	waitlist	Anyone can join waitlist	INSERT	{anon,authenticated}	d41d8cd98f00b204e9800998ecf8427e	b326b5062b2f0e69046810717534cb09
 public	webhook_delivery	webhook_delivery service role only	ALL	{service_role}	b326b5062b2f0e69046810717534cb09	b326b5062b2f0e69046810717534cb09
-public	workspace_admins	workspace_admins: owner and admin can read their rows	SELECT	{public}	00ffd6253c24e08edf2f35cb30ab3212	d41d8cd98f00b204e9800998ecf8427e
+public	workspace_admins	workspace_admins: owner and admin can read their rows	SELECT	{authenticated}	00ffd6253c24e08edf2f35cb30ab3212	d41d8cd98f00b204e9800998ecf8427e
 public	workspace_admins	workspace_admins: owner can delete	DELETE	{public}	01f51f0846ad728411df7afcfae01e11	d41d8cd98f00b204e9800998ecf8427e
 public	workspace_admins	workspace_admins: owner can insert	INSERT	{public}	d41d8cd98f00b204e9800998ecf8427e	01f51f0846ad728411df7afcfae01e11
-public	wrapped_data_keys	Recipients can read their own wrapped data keys	SELECT	{public}	b642f2dc16ef9d6d7df9f6a29fb52334	d41d8cd98f00b204e9800998ecf8427e
+public	wrapped_data_keys	Recipients can read their own wrapped data keys	SELECT	{authenticated}	b642f2dc16ef9d6d7df9f6a29fb52334	d41d8cd98f00b204e9800998ecf8427e
 public	wrapped_data_keys	wrapped_data_keys: owner can delete their wrapped keys	DELETE	{public}	b06603c2653b9633376049652720d905	d41d8cd98f00b204e9800998ecf8427e
 public	wrapped_data_keys	wrapped_data_keys: owner can insert for admins	INSERT	{public}	d41d8cd98f00b204e9800998ecf8427e	b06603c2653b9633376049652720d905
