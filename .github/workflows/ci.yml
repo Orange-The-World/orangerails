@@ -1047,6 +1047,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           # set +e first, same reason as the step above: this step reads exit
           # codes deliberately and exit 2 here is the expected answer.
@@ -1099,13 +1100,22 @@ jobs:
               else ($f.findings[] | "\($f.file) | \($f.verdict) | \(.id) | line \(.line)")
               end' "$JSON")
 
+          # UNPARSEABLE is called out separately and FIRST. It is the rarest
+          # class and the most consequential one, because this gate treats it as
+          # irreversible: a file nobody can parse is a file nobody can promise a
+          # restore path for. Sorted last in the table, it was the part that got
+          # cut off, which is the worst possible thing to lose.
+          UNPARSEABLE_ROWS=$(jq -r '
+            .files[]
+            | select(.verdict == "UNPARSEABLE")
+            | . as $f
+            | ((($f.findings) // [])[] | "\($f.file) | \(.id) | line \(.line) | \(.why)")' "$JSON")
+
           SWEEP="${RUNNER_TEMP}/or-t1696-sweep.md"
           {
             echo "## What the migration classifier says about this tree (OR-T1696)"
             echo ""
-            echo "A REPORT, not a gate. Nothing here blocks this pull request, and the exit code below is the expected one: the tree holds applied migrations that drop tables and columns, so a classifier that refuses that class is supposed to exit 2 over the whole tree."
-            echo ""
-            echo "Command, run on this commit:"
+            echo "A REPORT, not a gate. Nothing here blocks this pull request. The exit code is the expected one: the tree holds applied migrations that drop tables and columns, so a classifier that refuses that class exits 2 over the whole tree."
             echo ""
             echo '```'
             echo "node scripts/classify-migrations.mjs \$(find supabase/migrations -name '*.sql' -type f | sort)"
@@ -1113,17 +1123,17 @@ jobs:
             echo "exit code: ${RC}"
             echo '```'
             echo ""
-            echo "Every file that is not REVERSIBLE, one row per finding:"
+            echo "UNPARSEABLE, which this gate treats as irreversible:"
             echo ""
             echo '```'
-            if [ -n "$TABLE" ]; then
-              echo "$TABLE"
+            if [ -n "$UNPARSEABLE_ROWS" ]; then
+              echo "$UNPARSEABLE_ROWS"
             else
-              echo "(none: every file in the tree classifies REVERSIBLE)"
+              echo "(none)"
             fi
             echo '```'
             echo ""
-            echo "Full output with the statement snippets and the reason for each class is in this run's job summary."
+            echo "The IRREVERSIBLE list follows in numbered comments, split so no row is cut."
           } > "$SWEEP"
 
           cat "$SWEEP" >> "$GITHUB_STEP_SUMMARY"
@@ -1141,14 +1151,53 @@ jobs:
           # only that one is not left thinking the sweep never ran.
           {
             echo ""
-            echo "### Tree sweep (OR-T1696): \`${EXAMINED}\`, exit \`${RC}\`. Posted in full as its own comment."
+            echo "### Tree sweep (OR-T1696): \`${EXAMINED}\`, exit \`${RC}\`."
           } >> "$DEMO"
 
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$PR_NUMBER" ]; then
-            if ! gh pr comment "$PR_NUMBER" --body-file "$SWEEP"; then
-              echo "::warning::the sweep comment was refused. The identical text is in this run's job summary and in the log above, so the evidence is not lost."
-            fi
+          # Same quiet rule as the publish step below, and for the same reason:
+          # a check that comments on every pull request gets muted, and a muted
+          # check is not a check. The job summary carries the numbers either way.
+          TOUCHED=$(git diff --name-only "origin/${BASE_REF}...HEAD" -- \
+            scripts/classify-migrations.mjs \
+            scripts/fixtures/migration-classifier \
+            .github/workflows/supabase-deploy.yml \
+            .github/workflows/ci.yml 2>/dev/null || true)
+
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ] || [ -z "$PR_NUMBER" ] || [ -z "$TOUCHED" ]; then
+            echo "not commenting: either this is not a pull request, or it does not touch the classifier. The numbers are in the job summary."
+            exit 0
           fi
+
+          gh pr comment "$PR_NUMBER" --body-file "$SWEEP" \
+            || echo "::warning::the sweep comment was refused. The identical text is in this run's job summary and in the log above, so the evidence is not lost."
+
+          # The IRREVERSIBLE list is long and a comment body has a size beyond
+          # which readers here get a truncated copy with no marker saying so.
+          # Split on line boundaries so every row lands in some comment.
+          if [ -z "$TABLE" ]; then
+            exit 0
+          fi
+          IRR=$(echo "$TABLE" | grep -v ' | UNPARSEABLE | ' || true)
+          if [ -z "$IRR" ]; then
+            exit 0
+          fi
+          printf '%s\n' "$IRR" > "${RUNNER_TEMP}/or-t1696-irr.txt"
+          split -C 1000 -d -a 2 "${RUNNER_TEMP}/or-t1696-irr.txt" "${RUNNER_TEMP}/or-t1696-part-"
+          PART=0
+          for P in "${RUNNER_TEMP}"/or-t1696-part-*; do
+            PART=$((PART + 1))
+            {
+              echo "### IRREVERSIBLE in this tree, part ${PART} (OR-T1696)"
+              echo ""
+              echo "One row per finding: file, rule id, reported line."
+              echo ""
+              echo '```'
+              cat "$P"
+              echo '```'
+            } > "${P}.md"
+            gh pr comment "$PR_NUMBER" --body-file "${P}.md" \
+              || echo "::warning::part ${PART} of the list was refused. It is in the job summary."
+          done
 
       - name: Publish the demonstration to the pull request
         # The seats that review changes in this repo hold GitHub read tools and
