@@ -1,34 +1,34 @@
-# Cloudflare Pages redirect rules. Applied at edge before the SPA loads.
+;# Cloudflare Pages redirect rules. Applied at edge before the SPA loads.
 #
-# docs.orangerails.com is referenced from the marketing site's nav,
-# footer, and several /docs pages as the integrator knowledge base.
-# The dedicated docs site is on the roadmap (Phase 4) but does not
-# exist yet, so the canonical docs content for now lives at
-# orangerails.com/docs/* inside the main SPA. These rules send every
-# request that lands on the docs.* host to the matching path on the
-# main host. Status 302 (NOT 301) is deliberate: 301 is cached
-# indefinitely by browsers and intermediaries, which would keep
-# routing visitors here even after the dedicated docs site replaces
-# this redirect. 302 keeps the redirect transitional.
+# docs.orangerails.com is a custom domain on THIS project's own Cloudflare
+# Pages deployment (orangerails-prod), the same deployment that contains
+# src/routes/docs.tsx. orangerails.com is served by a DIFFERENT Cloudflare
+# Pages project (orangerails-marketing), which has no /docs route. A
+# visitor on docs.orangerails.com must be kept on this project and pointed
+# at its own /docs route, not sent to the marketing project.
 
 # Probe rule: if /redir-probe-2026 returns 302 to /docs/quickstart, the
-# parser is reading this file. If it returns 200 (SPA fallback), the
-# file is not being parsed at all and the docs.* rules below would
-# never fire either.
+# parser is reading this file. If it returns 200 (SPA fallback), the file
+# is not being parsed at all and the docs.* rule below would never fire
+# either.
 /redir-probe-2026 /docs/quickstart 302
 
-# Domain-prefix forms. These should match for any visitor on the docs.*
-# host even though the host is attached to the same orangerails-prod /
-# orangerails-dev Pages project.
-https://docs.orangerails.com/* https://orangerails.com/docs/:splat 302
-https://docs.orangerails.dev/* https://orangerails.dev/docs/:splat 302
+# docs.orangerails.com shares this deployment, so rewrite (not redirect)
+# onto our own /docs route. Status 200 keeps the visitor's URL on
+# docs.orangerails.com while serving the docs content from this project.
+https://docs.orangerails.com/* /docs/:splat 200
+
+# docs.orangerails.dev is not attached to any Cloudflare Pages project in
+# this account. There used to be a rule here pointing it at the marketing
+# project; removed rather than left as a rule that looks load bearing but
+# can never fire.
 
 # SPA deep-link fallback. MUST be the last rule so the specific rules
 # above match first. Cloudflare Pages serves any real static asset
-# (JS/CSS/images, index.html) before consulting _redirects, so this
-# only fires for paths with no physical file: client-router routes
-# like /docs, /docs/xpub-export, /app, /login. The 200 (rewrite, not
-# redirect) serves index.html at the requested URL and lets the
-# in-app router take over. Without this, those routes 404 on direct
-# load / hard refresh even though their source is deployed.
+# (JS/CSS/images, index.html) before consulting _redirects, so this only
+# fires for paths with no physical file: client-router routes like /docs,
+# /docs/xpub-export, /app, /login. The 200 (rewrite, not redirect) serves
+# index.html at the requested URL and lets the in-app router take over.
+# Without this, those routes 404 on direct load / hard refresh even
+# though their source is deployed.
 /* /index.html 200
