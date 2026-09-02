@@ -99,21 +99,58 @@
 -- standing check belongs in the hourly ACL invariant probe, not here.
 --
 -- SHOWN ABLE TO FAIL BEFORE BEING TRUSTED
--- On the dev project on 2026-09-02, each probe inside a transaction that was
--- rolled back, with no role left behind afterwards (pg_roles re-read: zero):
+-- An allow list that passes is indistinguishable from one that never ran, so
+-- every branch was exercised on the dev project on 2026-09-02, each inside a
+-- transaction that was rolled back. The messages below are the literal text the
+-- assertion emitted, not a summary of it. Afterwards the catalogue was re-read:
+-- zero probe roles left behind, or_agent_reader still holding exactly 22 column
+-- SELECT privileges and zero table privileges, vault_salt still unreadable to
+-- it.
 --
---   table level   CREATE ROLE ...; GRANT SELECT ON TABLE public.user_vault_meta
---                 raised: a grantee outside the expected set holds a privilege
---                 on a sealed vault meta table: public.user_vault_meta TABLE
---                 SELECT to or_t1469_probe
+--   untouched dev catalogue
+--     SILENT
 --
---   column level  CREATE ROLE ...; GRANT UPDATE (workspace_key_id) ON TABLE
---                 public.user_vault_meta
---                 raised: a grantee outside the expected set holds a privilege
---                 on a sealed vault meta table: public.user_vault_meta COLUMN
---                 workspace_key_id UPDATE to or_t1469_probe
+--   a foreign grantee, table level
+--     CREATE ROLE or_t1495_probe;
+--     GRANT SELECT ON TABLE public.customer_vault_meta TO or_t1495_probe;
+--     a privilege outside the allow list exists on a sealed vault meta table:
+--     public.customer_vault_meta TABLE SELECT to or_t1495_probe
 --
--- Run unmodified against the untouched dev catalogue, it passed.
+--   the agent read role given a SEALED column
+--     GRANT SELECT (vault_salt) ON TABLE public.user_vault_meta TO or_agent_reader;
+--     a privilege outside the allow list exists on a sealed vault meta table:
+--     public.user_vault_meta COLUMN vault_salt SELECT to or_agent_reader
+--
+--   the agent read role given a non SELECT privilege on an ALLOWED column
+--     GRANT UPDATE (workspace_key_id) ON TABLE public.user_vault_meta TO or_agent_reader;
+--     a privilege outside the allow list exists on a sealed vault meta table:
+--     public.user_vault_meta COLUMN workspace_key_id UPDATE to or_agent_reader
+--
+--   the agent read role given a TABLE level privilege
+--     GRANT SELECT ON TABLE public.user_vault_meta TO or_agent_reader;
+--     a privilege outside the allow list exists on a sealed vault meta table:
+--     public.user_vault_meta TABLE SELECT to or_agent_reader
+--
+--   both column probes reverted, catalogue back to baseline
+--     SILENT
+--
+--   the agent read role holding nothing on either table
+--     REVOKE ALL ON TABLE public.user_vault_meta, public.customer_vault_meta
+--       FROM or_agent_reader;
+--     SILENT
+--
+--   the admitted role name absent from pg_roles entirely
+--     the same assertion, run with agent_reader set to a name that does not
+--     exist, against the state above
+--     SILENT
+--
+-- HONEST NOTE ON THE LAST TWO. or_agent_reader could not be dropped outright to
+-- test absence: DROP ROLE refused, because the role holds privileges elsewhere
+-- in this database (schema public, and columns of auth.users). So absence was
+-- tested the two ways that were reachable, the role holding nothing on either
+-- sealed table, and the admitted NAME not resolving in pg_roles at all. Both
+-- are silent, and both exercise the same code path a genuinely absent role
+-- would, because the role is only ever reached through an ACL entry.
 --
 -- THE QUERY THE EXPECTED SET WAS READ FROM
 --
