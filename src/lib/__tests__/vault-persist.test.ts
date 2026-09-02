@@ -685,8 +685,8 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     //
     // What this deliberately no longer claims is that a lower total PROVES
     // nothing was missed. It does not: the same delete shifts the offset window
-    // and can hide a row in the same operation, which is what the two tests
-    // below exist to catch. A lower total is a reason not to abandon the
+    // and can hide a row in the same operation, which is what the two DELETE
+    // tests above exist to catch. A lower total is a reason not to abandon the
     // rotation. It is not evidence that the rotation is complete.
     const clearMigrationKeys = vi.fn();
     const { client, calls } = makeFakeClient({
