@@ -104,8 +104,9 @@ interface CatalogInstitution {
 //   1. A per-isolate, per-client-IP counter over a 60 second window, keyed on
 //      an edge-set header wherever one exists. Lives in ./rate-limit.ts now
 //      (OR-T1140, OR-T1141), split out so it carries no Deno.serve call and
-//      can be unit tested directly; see clientIdOrNull and pruneRateWindows
-//      there for the header precedence and the eviction-order reasoning. It
+//      can be unit tested directly (rate-limit.test.ts exercises both the
+//      header precedence and the eviction order); see clientIdOrNull and
+//      pruneRateWindows there for the reasoning. It
 //      slows the naive loop from one machine. It does NOT stop a caller
 //      spread over many addresses, it does not stop a caller who can forge
 //      every identifying header, and because every edge isolate keeps its
