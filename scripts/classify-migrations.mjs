@@ -75,11 +75,29 @@ function namesWithoutInvoking(flat) {
   );
 }
 
-/** Does anything in this statement list cause `routine` to run? */
+/**
+ * Does anything in this statement list cause `routine` to run?
+ *
+ * Double quotes are stripped from the statement before the test. The definition
+ * side already strips them off the routine name, so without this the two halves
+ * of one feature disagree about quoting: public."thing"() is not seen as the
+ * same call as public.thing(), the body is never scanned, and a file that
+ * empties a table classifies REVERSIBLE (OR-T1695). Identifier quotes are the
+ * only double quotes that can reach here, because scrub blanks every string
+ * literal before the statements are split.
+ *
+ * KNOWN AND DELIBERATELY OUT OF SCOPE, recorded so the next reader does not
+ * re-derive them as new (OR-T1695). Two constructions can make a routine run
+ * without naming it with an argument list: an aggregate or an operator defined
+ * over it in the same file, where only the aggregate or the operator is ever
+ * called; and PostgreSQL functional notation, where a call can be written with
+ * no parentheses at all. Both are far from ordinary migration work and neither
+ * is handled here.
+ */
 function isInvokedBy(sts, routine) {
   const call = new RegExp(`(^|[^A-Za-z0-9_$])${escapeForRegExp(routine.short)}\\s*\\(`, 'i');
   for (const st of sts) {
-    const flat = st.text.replace(/\s+/g, ' ').trim();
+    const flat = st.text.replace(/"/g, '').replace(/\s+/g, ' ').trim();
     if (!call.test(flat)) continue;
     if (namesWithoutInvoking(flat)) continue;
     return true;
@@ -561,9 +579,24 @@ const EXPECTED = {
   // a DROP TABLE in its body on purpose, so if the invocation analysis ever
   // starts over-reporting, this fixture goes red instead of the gate quietly
   // starting to refuse ordinary work.
-  '20990101000010_irreversible_routine_invoked_in_same_file.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE' },
-  '20990101000011_irreversible_routine_attached_as_trigger.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
+  //
+  // OR-T1695. The entries below pin the LINE as well as the verdict and the
+  // rule. Where a refusal points is part of the refusal: a gate that names the
+  // wrong line is a gate a human cannot act on, and the body line arithmetic
+  // (the line the body opens on, plus the line within the scrubbed body) is
+  // exactly the kind of thing that regresses without changing a verdict.
+  //
+  // One property to know before reading these numbers. Statements are split on
+  // semicolons and a plpgsql BEGIN is not semicolon terminated, so the first
+  // executable statement of a body is reported at its BEGIN line rather than at
+  // its own. That is consistent with how top level statements are reported and
+  // it is not a defect.
+  '20990101000010_irreversible_routine_invoked_in_same_file.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE', line: 22 },
+  '20990101000011_irreversible_routine_attached_as_trigger.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 27 },
   '20990101000012_reversible_routine_never_invoked.sql': { verdict: REVERSIBLE, id: null },
+  // OR-T1695. The quoted twin of 20990101000011, laid out on the same lines, so
+  // the two spellings must agree on all three: verdict, rule and line.
+  '20990101000013_irreversible_routine_invoked_via_quoted_identifier.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 27 },
 };
 
 function selftest() {
@@ -589,13 +622,23 @@ function selftest() {
     const ids = got.findings.map((f) => f.id);
     const verdictOk = got.verdict === want.verdict;
     const ruleOk = want.id === null ? ids.length === 0 : ids.includes(want.id);
-    if (verdictOk && ruleOk) {
-      console.log(`  ok   ${name}: ${got.verdict}${want.id ? ` [${want.id}]` : ''}`);
+    // OR-T1695. A fixture that pins a line is asserted on it. A fixture that
+    // does not carry one is judged exactly as before, so this adds an assertion
+    // and removes none.
+    const lineOk =
+      want.line === undefined || got.findings.some((f) => f.id === want.id && f.line === want.line);
+    const wantWhere = want.line === undefined ? '' : ` at line ${want.line}`;
+    if (verdictOk && ruleOk && lineOk) {
+      console.log(`  ok   ${name}: ${got.verdict}${want.id ? ` [${want.id}]` : ''}${wantWhere}`);
     } else {
       failures += 1;
+      const gotWhere =
+        want.line === undefined
+          ? ''
+          : ` at line(s) ${got.findings.map((f) => f.line).join(', ') || 'none'}`;
       console.error(
-        `  FAIL ${name}: wanted ${want.verdict}${want.id ? ` [${want.id}]` : ' with no finding'}, ` +
-          `got ${got.verdict} [${ids.join(', ') || 'no finding'}]`,
+        `  FAIL ${name}: wanted ${want.verdict}${want.id ? ` [${want.id}]` : ' with no finding'}${wantWhere}, ` +
+          `got ${got.verdict} [${ids.join(', ') || 'no finding'}]${gotWhere}`,
       );
     }
   }
