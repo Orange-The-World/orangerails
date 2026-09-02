@@ -48,6 +48,75 @@ export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
 /**
+ * The value of encrypted_transactions.sealed_under that means "encrypted with
+ * this user's own transactions subkey during a session", which is the only
+ * seal migrateTransactionCiphertext can open.
+ *
+ * The column is NOT NULL DEFAULT 'ort' and CHECKed to ('ort', 'opk'), so a row
+ * that is not this is a row sealed by a background writer to the subaccount's
+ * public delivery key. That is opened by the browser's private key, never by
+ * the MEK, and no amount of rotating the MEK will change it.
+ */
+export const VAULT_OWN_SEAL = "ort";
+
+/**
+ * Shown when the rotation would meet ciphertext it has no key for.
+ *
+ * It stops before anything moves, so it does not tell the user to keep the page
+ * open. Their vault is exactly as it was.
+ */
+export function foreignSealMessage(count: number): string {
+  return (
+    `Vault recovery cannot run: ${count} of your transactions were saved by background sync ` +
+    "and are sealed with a key this recovery cannot re-encrypt. Nothing has been changed. " +
+    "Contact support with this message."
+  );
+}
+
+/**
+ * Shown when we could not determine what sealed the user's rows.
+ *
+ * Distinct from the message above on purpose: we do not know that any foreign
+ * row exists, only that we could not look. Nothing has moved, so trying again
+ * is genuinely safe here, and this is the one message on this path that says so.
+ */
+export const SEAL_CHECK_FAILED_MESSAGE =
+  "Vault recovery cannot run: we could not check which key your transactions are sealed with. Nothing has been changed. Try again, and contact support if it keeps happening.";
+
+/**
+ * Refuse the rotation if this user holds any transaction row sealed under
+ * anything other than their own vault subkey.
+ *
+ * WHY THIS RUNS FIRST, before a single row is rewritten. The loops below
+ * discover a foreign seal by exception, from inside the crypto, after an
+ * arbitrary number of rows have already moved. recoverWithCode() mints a fresh
+ * MEK on every call and nothing records which rows moved, so that partial state
+ * has no safe retry. Asking first is the only version of this check where the
+ * answer arrives while the answer is still free.
+ *
+ * WHY REFUSING AND NOT FILTERING. Filtering the loops to this seal would leave
+ * the foreign rows behind under a key the rotation never touched, and the row
+ * count reconciliation further down would then refuse the run anyway, after
+ * rows had already been rewritten. That is the worst of both.
+ *
+ * The count runs under the same row-level security as the loops, so it asks
+ * about exactly the rows the loops would have tried to rewrite, and no others.
+ *
+ * A count that cannot be read is a FAILURE, not a pass, for the same reason it
+ * is in the reconciliation below: at the point where it matters, "none" and
+ * "could not look" are not the same fact.
+ */
+async function assertNoForeignSeals(supabase: VaultPersistClient): Promise<void> {
+  const { count, error } = await supabase
+    .from("encrypted_transactions")
+    .select("id", { count: "exact", head: true })
+    .neq("sealed_under", VAULT_OWN_SEAL);
+  if (error) throw error;
+  if (typeof count !== "number") throw new Error(SEAL_CHECK_FAILED_MESSAGE);
+  if (count > 0) throw new Error(foreignSealMessage(count));
+}
+
+/**
  * Shown when the reconciliation below the paging loops finds that this run did
  * not re-encrypt every row the table holds for this user.
  *
@@ -145,6 +214,22 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     migrateTransactionCiphertext,
     clearMigrationKeys,
   } = args;
+
+  // ASK WHAT SEALED THESE ROWS BEFORE TOUCHING ANY OF THEM.
+  //
+  // Everything below assumes every ciphertext this user can see was sealed with
+  // a key derived from their MEK. Row-level security decides what is visible;
+  // it says nothing about what sealed it. A row sealed by a background writer
+  // to the subaccount's public delivery key is opened by the browser's private
+  // key and never by the MEK, so it makes migrateTransactionCiphertext throw
+  // from inside the crypto, partway through a rotation that has no safe retry.
+  //
+  // There is no constraint anywhere that keeps those two seals apart: the
+  // background writer chooses its seal from whether the SUBACCOUNT registered a
+  // delivery key, not from which platform it belongs to. So the question is
+  // asked here, where the answer is still free, rather than discovered later by
+  // exception, when it is not.
+  await assertNoForeignSeals(supabase);
 
   // Re-encrypt connections first, then transactions, then meta.
   // Meta is written last so a partial failure leaves the STORED wrappers still
