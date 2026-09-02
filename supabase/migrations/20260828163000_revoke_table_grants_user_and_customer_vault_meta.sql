@@ -1,16 +1,26 @@
 -- 20260828163000_revoke_table_grants_user_and_customer_vault_meta.sql
 --
--- Give user_vault_meta and customer_vault_meta an explicit table privilege
--- allow list, the same treatment 20260828120000 gave the four org vault tables.
+-- Give user_vault_meta and customer_vault_meta an explicit privilege allow
+-- list, the same treatment 20260828120000 gave the four org vault tables.
 --
 -- WHAT THIS FIXES
 -- The default privileges on schema public grant every table privilege to anon
 -- and to authenticated on any table created there. Both of these tables were
--- created that way and no migration ever revoked it. Measured on the dev
--- project on 2026-08-28, before this migration, pg_class.relacl reported:
+-- created that way and no migration ever revoked it.
 --
---   user_vault_meta     anon=arwxtm  authenticated=arwxtm  service_role=arwxtm
---   customer_vault_meta anon=arwxtm  authenticated=arwxtm  service_role=arwxtm
+-- BEFORE STATE, read from the dev project on 2026-09-02 (an earlier version of
+-- this header recorded a 2026-08-28 reading that no longer describes the
+-- project, because part of the tightening has landed since):
+--
+--   pg_class.relacl
+--     user_vault_meta      postgres=arwdDxtm  service_role=arwxtm  authenticated=r
+--     customer_vault_meta  postgres=arwdDxtm  service_role=arwxtm  authenticated=arw
+--   anon holds nothing at table level on either table today.
+--
+--   pg_attribute.attacl on user_vault_meta
+--     authenticated=aw on 17 of the 18 live columns.
+--     NO column grant on workspace_key_id (attnum 14). That is the only
+--     exclusion, and it is not an accident of 17 separate grants.
 --
 -- That before state is the dev project's and is recorded as a measurement, not
 -- as a claim about every environment. Another project may start from a
@@ -53,6 +63,35 @@
 -- vault creation. Neither table has a DELETE policy, so DELETE is deliberately
 -- absent from the allow list and authenticated cannot delete either row.
 --
+-- WHY user_vault_meta IS COLUMN SCOPED AND customer_vault_meta IS NOT. Read
+-- this before simplifying the two blocks into one shape.
+--
+-- A table level REVOKE ALL clears column level grants as well as table level
+-- ones. That was probed on dev rather than assumed: a scratch table given a
+-- table level SELECT plus column level INSERT and UPDATE, then REVOKE ALL ON
+-- TABLE ... FROM authenticated, came back with column_acl NONE and both
+-- has_insert and has_update false. So a revoke followed by a table wide
+-- GRANT SELECT, INSERT, UPDATE does not preserve a column exclusion, it
+-- destroys it and rebuilds a WIDER surface than it found.
+--
+-- On user_vault_meta the excluded column is workspace_key_id, and it is load
+-- bearing: every row level security policy on wrapped_data_keys decides who
+-- owns a key by reading user_vault_meta.workspace_key_id. That column already
+-- has a unique constraint and a write once trigger in front of it
+-- (20260828214500). The missing column grant is a third, independent wall, and
+-- the one that covers the FIRST write, which is the case the write once
+-- trigger deliberately permits. Prod is already table wide here, so this file
+-- does not regress prod; dev is the narrower of the two and that is the state
+-- worth keeping rather than levelling down.
+--
+-- SELECT stays at table level on user_vault_meta on purpose. The policies
+-- filter on the column, the client has to be able to read what it owns, and
+-- reading an identifier is not writing it.
+--
+-- customer_vault_meta has no such exclusion: its live column ACLs are empty and
+-- its table grants already equal this allow list, so a table wide grant there
+-- is the accurate description of the intended surface, not a widening.
+--
 -- WHY THERE IS NO FORCE ROW LEVEL SECURITY HERE, stated so nobody adds it later
 -- thinking it was an oversight. FORCE subjects the table owner to row level
 -- security, and the SECURITY DEFINER functions this design routes writes
@@ -66,13 +105,54 @@
 -- loudly rather than letting a partial apply look like a success.
 
 -- user_vault_meta: per user vault salt, verifier, wrapped keys and keyring.
+-- SELECT at table level; INSERT and UPDATE column scoped over the 17 columns
+-- the member path writes, deliberately excluding workspace_key_id.
 ALTER TABLE public.user_vault_meta ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.user_vault_meta FROM PUBLIC;
 REVOKE ALL ON TABLE public.user_vault_meta FROM anon;
 REVOKE ALL ON TABLE public.user_vault_meta FROM authenticated;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.user_vault_meta TO authenticated;
+GRANT SELECT ON TABLE public.user_vault_meta TO authenticated;
+GRANT INSERT (
+        user_id,
+        vault_salt,
+        vault_verifier_ciphertext,
+        vault_key_version,
+        kdf_algorithm,
+        kdf_params,
+        created_at,
+        updated_at,
+        kem_public_key,
+        kem_secret_wrapped,
+        sig_public_key,
+        sig_secret_wrapped,
+        pqc_key_version,
+        enc_mek_ciphertext,
+        recovery_ciphertext,
+        keyring_ciphertext,
+        keyring_epoch
+      ),
+      UPDATE (
+        user_id,
+        vault_salt,
+        vault_verifier_ciphertext,
+        vault_key_version,
+        kdf_algorithm,
+        kdf_params,
+        created_at,
+        updated_at,
+        kem_public_key,
+        kem_secret_wrapped,
+        sig_public_key,
+        sig_secret_wrapped,
+        pqc_key_version,
+        enc_mek_ciphertext,
+        recovery_ciphertext,
+        keyring_ciphertext,
+        keyring_epoch
+      )
+  ON TABLE public.user_vault_meta TO authenticated;
 
--- customer_vault_meta: the same per customer.
+-- customer_vault_meta: the same per customer, with no column exclusion.
 ALTER TABLE public.customer_vault_meta ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.customer_vault_meta FROM PUBLIC;
 REVOKE ALL ON TABLE public.customer_vault_meta FROM anon;
@@ -81,12 +161,16 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.customer_vault_meta TO authenticate
 
 -- Prove it, rather than assume the statements above did what they say.
 --
--- These read pg_class.relacl through aclexplode instead of calling
--- has_table_privilege with a fixed privilege list. That is deliberate: a fixed
--- list can only catch the privileges someone remembered to name, and MAINTAIN
--- is a recent addition that an older list would silently skip. Asking the
--- catalogue what is actually granted catches anything, including a privilege
--- that does not exist yet.
+-- These read pg_class.relacl and pg_attribute.attacl through aclexplode instead
+-- of calling has_table_privilege with a fixed privilege list. That is
+-- deliberate: a fixed list can only catch the privileges someone remembered to
+-- name, and MAINTAIN is a recent addition that an older list would silently
+-- skip. Asking the catalogue what is actually granted catches anything,
+-- including a privilege that does not exist yet.
+--
+-- Every assertion below reads COLUMN ACLs as well as TABLE ACLs. An earlier
+-- version of this file read table ACLs only, which meant a surviving column
+-- grant to PUBLIC or anon would have passed it silently.
 DO $$
 DECLARE
   sealed_tables text[] := ARRAY[
@@ -95,42 +179,103 @@ DECLARE
   ];
   offenders text;
 BEGIN
-  -- 1. PUBLIC and anon must hold nothing at all on either table.
-  SELECT string_agg(DISTINCT t || ' (' || a.privilege_type || ' to ' ||
-           CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END || ')', ', ')
-    INTO offenders
-    FROM unnest(sealed_tables) AS t
-    JOIN pg_class c ON c.oid = t::regclass
-    CROSS JOIN LATERAL aclexplode(c.relacl) AS a
-   WHERE a.grantee = 0 OR a.grantee = 'anon'::regrole;
+  -- 1. PUBLIC and anon must hold nothing at all on either table, at table level
+  --    or at column level.
+  SELECT string_agg(x, ', ') INTO offenders FROM (
+    SELECT DISTINCT t || ' TABLE ' || a.privilege_type || ' to ' ||
+             CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS x
+      FROM unnest(sealed_tables) AS t
+      JOIN pg_class c ON c.oid = t::regclass
+      CROSS JOIN LATERAL aclexplode(c.relacl) AS a
+     WHERE a.grantee = 0 OR a.grantee = 'anon'::regrole
+    UNION ALL
+    SELECT DISTINCT t || ' COLUMN ' || att.attname || ' ' || a.privilege_type || ' to ' ||
+             CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS x
+      FROM unnest(sealed_tables) AS t
+      JOIN pg_class c ON c.oid = t::regclass
+      JOIN pg_attribute att
+        ON att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped
+      CROSS JOIN LATERAL aclexplode(att.attacl) AS a
+     WHERE a.grantee = 0 OR a.grantee = 'anon'::regrole
+  ) s;
   IF offenders IS NOT NULL THEN
     RAISE EXCEPTION
-      'PUBLIC or anon still holds a table privilege after the revoke block: %', offenders;
+      'PUBLIC or anon still holds a privilege after the revoke block: %', offenders;
   END IF;
 
-  -- 2. authenticated must hold nothing outside the allow list. Stated as
-  --    "not in the allow list" rather than as a list of forbidden privileges,
-  --    so a privilege nobody thought of is caught too.
-  SELECT string_agg(DISTINCT t || ' (' || a.privilege_type || ')', ', ') INTO offenders
-    FROM unnest(sealed_tables) AS t
-    JOIN pg_class c ON c.oid = t::regclass
-    CROSS JOIN LATERAL aclexplode(c.relacl) AS a
-   WHERE a.grantee = 'authenticated'::regrole
-     AND a.privilege_type NOT IN ('SELECT','INSERT','UPDATE');
+  -- 2. authenticated must hold nothing outside the allow list, at table level
+  --    or at column level. Stated as "not in the allow list" rather than as a
+  --    list of forbidden privileges, so a privilege nobody thought of is caught
+  --    too.
+  SELECT string_agg(x, ', ') INTO offenders FROM (
+    SELECT DISTINCT t || ' TABLE ' || a.privilege_type AS x
+      FROM unnest(sealed_tables) AS t
+      JOIN pg_class c ON c.oid = t::regclass
+      CROSS JOIN LATERAL aclexplode(c.relacl) AS a
+     WHERE a.grantee = 'authenticated'::regrole
+       AND a.privilege_type NOT IN ('SELECT','INSERT','UPDATE')
+    UNION ALL
+    SELECT DISTINCT t || ' COLUMN ' || att.attname || ' ' || a.privilege_type AS x
+      FROM unnest(sealed_tables) AS t
+      JOIN pg_class c ON c.oid = t::regclass
+      JOIN pg_attribute att
+        ON att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped
+      CROSS JOIN LATERAL aclexplode(att.attacl) AS a
+     WHERE a.grantee = 'authenticated'::regrole
+       AND a.privilege_type NOT IN ('SELECT','INSERT','UPDATE')
+  ) s;
   IF offenders IS NOT NULL THEN
     RAISE EXCEPTION
       'authenticated holds a privilege outside the allow list: %', offenders;
   END IF;
 
-  -- 3. authenticated must still hold all three, or the member facing policies
-  --    are dead code and this migration broke the vault creation path.
-  SELECT string_agg(t || ':' || p, ', ') INTO offenders
-    FROM unnest(sealed_tables) AS t
-    CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE']) AS p
-   WHERE NOT has_table_privilege('authenticated', t, p);
+  -- 3. THE EXCLUSION. authenticated must not be able to write
+  --    user_vault_meta.workspace_key_id by ANY route. has_column_privilege is
+  --    used rather than a read of attacl because it answers the real question:
+  --    it returns true for a table wide grant as well as a column grant, so it
+  --    catches the exact regression this file was sent back to fix.
+  --
+  --    Why the column matters: every row level security policy on
+  --    wrapped_data_keys reads this value to decide who owns a key. A unique
+  --    constraint and a write once trigger already guard it; this is the wall
+  --    in front of the first write, which the trigger permits by design.
+  IF has_column_privilege('authenticated', 'public.user_vault_meta', 'workspace_key_id', 'INSERT')
+     OR has_column_privilege('authenticated', 'public.user_vault_meta', 'workspace_key_id', 'UPDATE') THEN
+    RAISE EXCEPTION
+      'authenticated can write user_vault_meta.workspace_key_id, the owner identity exclusion is gone';
+  END IF;
+
+  -- 4. The member facing paths must still work, or this migration turned the
+  --    policies into dead code and broke vault creation.
+  --
+  --    customer_vault_meta: all three at table level.
+  SELECT string_agg('public.customer_vault_meta:' || p, ', ') INTO offenders
+    FROM unnest(ARRAY['SELECT','INSERT','UPDATE']) AS p
+   WHERE NOT has_table_privilege('authenticated', 'public.customer_vault_meta', p);
   IF offenders IS NOT NULL THEN
     RAISE EXCEPTION
       'authenticated lost a privilege its policies need, the member path is broken on: %', offenders;
+  END IF;
+
+  --    user_vault_meta: SELECT at table level, plus INSERT and UPDATE on every
+  --    live column EXCEPT workspace_key_id. The expected column set is derived
+  --    from the catalogue rather than repeated as a second hardcoded list, so
+  --    the assertion cannot drift away from the table it is asserting about.
+  IF NOT has_table_privilege('authenticated', 'public.user_vault_meta', 'SELECT') THEN
+    RAISE EXCEPTION 'authenticated lost SELECT on public.user_vault_meta';
+  END IF;
+
+  SELECT string_agg(att.attname || ':' || p, ', ') INTO offenders
+    FROM pg_attribute att
+    CROSS JOIN unnest(ARRAY['INSERT','UPDATE']) AS p
+   WHERE att.attrelid = 'public.user_vault_meta'::regclass
+     AND att.attnum > 0
+     AND NOT att.attisdropped
+     AND att.attname <> 'workspace_key_id'
+     AND NOT has_column_privilege('authenticated', att.attrelid, att.attname, p);
+  IF offenders IS NOT NULL THEN
+    RAISE EXCEPTION
+      'authenticated cannot write a user_vault_meta column the member path needs: %', offenders;
   END IF;
 END;
 $$;
