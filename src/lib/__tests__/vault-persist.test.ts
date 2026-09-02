@@ -79,10 +79,13 @@ interface FakeOptions {
   selectResult?: Record<string, QueryResult>;
   /**
    * Rewrites a table's backing rows immediately AFTER each select on it, so a
-   * test can model the physical row order changing between pages. The real
-   * database is free to do exactly that: the updates issued inside the paging
-   * loop write new tuple versions, and a scan with no ORDER BY may return them
-   * in a different order next time.
+   * test can model another session changing the table mid-walk. The real
+   * database is free to do all of it: the updates issued inside the paging loop
+   * write new tuple versions, so a scan may return rows in a different order
+   * next time, and a second tab can INSERT or DELETE rows while the rotation is
+   * running. Returning a reordered, longer or shorter array models each of
+   * those. Head count reads deliberately do NOT trigger this, so a test can
+   * hold the store still while the count is taken.
    */
   reorderAfterSelect?: Record<string, (rows: unknown[]) => unknown[]>;
   /**
@@ -394,9 +397,11 @@ describe("vault recovery: the rotated meta write", () => {
     expect(txnUpdates.length).toBe(rowCount);
     expect(new Set(updatedIds).size).toBe(rowCount);
 
-    // One full page plus one short page is what ends the loop; two paged
-    // reads is the direct evidence the cursor actually advanced.
-    expect(pagedSelects(calls, "encrypted_transactions").length).toBe(2);
+    // One full page plus one short page ends each walk, and there are two
+    // walks: the migrating one and the sweep that confirms it left nothing
+    // behind. Four paged reads is the direct evidence both happened and that
+    // the cursor advanced within each.
+    expect(pagedSelects(calls, "encrypted_transactions").length).toBe(4);
   });
 
   it("pages the connections read instead of trusting one capped select", async () => {
@@ -420,10 +425,11 @@ describe("vault recovery: the rotated meta write", () => {
     expect(updatedIds.length).toBe(rowCount);
     expect(new Set(updatedIds).size).toBe(rowCount);
 
-    // One full page plus one short page. Two paged reads is the direct evidence
-    // the cursor advanced rather than the read being trusted to return
+    // One full page plus one short page per walk, and there are two walks: the
+    // migrating one and the confirming sweep. Four paged reads is the direct
+    // evidence the cursor advanced rather than the read being trusted to return
     // everything.
-    expect(pagedSelects(calls, "connections").length).toBe(2);
+    expect(pagedSelects(calls, "connections").length).toBe(4);
   });
 
   it("migrates every connection exactly once when the order changes between pages", async () => {
@@ -541,6 +547,116 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
   });
 
+  it("migrates the row a concurrent DELETE shifted out of the offset window", async () => {
+    // THE CASE THAT DEFEATED THE COUNT COMPARISON. It is silent, permanent key
+    // loss, so it is worth spelling out in full.
+    //
+    // Offset paging addresses rows by POSITION. Deleting a row from a page that
+    // has already been read shifts every later row one place toward the start,
+    // so exactly one row falls between the window just read and the next window
+    // and is never returned at all. That same delete lowers the exact count by
+    // one, and the deleted row's id stays in the migrated set because it was
+    // written before it was removed. All three effects cancel one for one.
+    //
+    // Here: 1000 connections at a page size of 500. Page one reads
+    // conn-0000..conn-0499 and conn-0007 is then deleted. Page two asks for
+    // positions 500..999 and receives conn-0501..conn-0999, because conn-0500
+    // has moved to position 499, inside the window already consumed. Migrated
+    // 999, counted 999, the counts agree, the meta write lands, the keys are
+    // cleared, and conn-0500 is left under a MEK that exists nowhere.
+    //
+    // Put the old count comparison back in reconcileEveryRow and this fails:
+    // conn-0500 is never updated and the rotation still resolves. That is the
+    // only reason to trust it.
+    const clearMigrationKeys = vi.fn();
+    const rowCount = CONNECTION_PAGE_SIZE * 2;
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: `conn-${String(i).padStart(4, "0")}`,
+      encrypted_credentials: `creds-${i}`,
+      encrypted_label: null,
+    }));
+    let deleted = false;
+    const { client, calls } = makeFakeClient({
+      rows: { connections: rows },
+      reorderAfterSelect: {
+        connections: (current) => {
+          if (deleted) return current;
+          deleted = true;
+          return current.filter((row) => (row as { id: string }).id !== "conn-0007");
+        },
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).resolves.toBeUndefined();
+
+    const connUpdates = calls
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.table === "connections" && c.op === "update");
+    const updatedIds = connUpdates.map(({ c }) => c.filters.find((f) => f.column === "id")?.value);
+
+    // The row the shift hid. This single assertion is the whole point.
+    expect(updatedIds).toContain("conn-0500");
+
+    // And every row moved exactly once, including conn-0007, which was
+    // rewritten before it was deleted and must not be rewritten again: handing
+    // an already-migrated ciphertext back to the migration helper would throw.
+    expect(updatedIds.length).toBe(rowCount);
+    expect(new Set(updatedIds)).toEqual(new Set(rows.map((r) => r.id)));
+
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    for (const { i } of connUpdates) expect(i).toBeLessThan(metaIndex);
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("migrates a late row even when a concurrent delete hides it from the count", async () => {
+    // Why the count comparison cannot be rescued by changing the paging. One
+    // delete of an already-migrated row and one insert cancel each other
+    // exactly in the total, so the arithmetic agrees while a row that was never
+    // touched sits under the old MEK. Keyset pagination on id does not help
+    // here either: the inserted row is below the cursor either way.
+    //
+    // txn-1 and txn-2 are read and migrated. The store then loses txn-1 and
+    // gains txn-9. The total is still 2 and this run has written 2, so a count
+    // comparison sees a clean rotation and stops. Only a sweep finds txn-9.
+    const clearMigrationKeys = vi.fn();
+    let churned = false;
+    const { client, calls } = makeFakeClient({
+      rows: {
+        encrypted_transactions: [
+          { id: "txn-1", encrypted_payload: "payload-1" },
+          { id: "txn-2", encrypted_payload: "payload-2" },
+        ],
+      },
+      reorderAfterSelect: {
+        encrypted_transactions: (current) => {
+          if (churned) return current;
+          churned = true;
+          return [
+            ...current.filter((row) => (row as { id: string }).id !== "txn-1"),
+            { id: "txn-9", encrypted_payload: "payload-9" },
+          ];
+        },
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).resolves.toBeUndefined();
+
+    const txnUpdates = calls
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.table === "encrypted_transactions" && c.op === "update");
+    const updatedIds = txnUpdates.map(({ c }) => c.filters.find((f) => f.column === "id")?.value);
+
+    expect(updatedIds).toEqual(["txn-1", "txn-2", "txn-9"]);
+
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    for (const { i } of txnUpdates) expect(i).toBeLessThan(metaIndex);
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
   it("stops when a row update reports no error and yet changed no row", async () => {
     // The case that decides whether the reconciliation means anything. An
     // update refused by row-level security comes back with no error, so a run
@@ -564,10 +680,14 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
 
   it("does not stop when the total is LOWER than the number of rows this run wrote", async () => {
     // A row deleted in another tab after this run had already rewritten it. A
-    // row that was MISSED pushes the total UP, never down, so a total below the
-    // migrated count cannot mean anything is stranded, and a row that is gone
-    // cannot be stranded either. Stopping here would abandon every row this run
-    // wrote over one deletion, for no protective value at all.
+    // row that is gone cannot be stranded, so stopping here would abandon every
+    // row this run wrote over one deletion, for no protective value at all.
+    //
+    // What this deliberately no longer claims is that a lower total PROVES
+    // nothing was missed. It does not: the same delete shifts the offset window
+    // and can hide a row in the same operation, which is what the two tests
+    // below exist to catch. A lower total is a reason not to abandon the
+    // rotation. It is not evidence that the rotation is complete.
     const clearMigrationKeys = vi.fn();
     const { client, calls } = makeFakeClient({
       ...oneConnection,
