@@ -1003,19 +1003,17 @@ jobs:
           #
           # WHY. Everything above treats the authority reference as the record of a
           # two party decision, and a record is only worth what the mechanism behind
-          # it is. That mechanism was assumed to be the required reviewers on the
-          # supabase-prod environment. Read live on 2026-09-02: supabase-prod carries
-          # ONE protection rule, required_reviewers, with two reviewers, and GitHub
-          # needs only ONE of them to approve. One of the two is our reviewing
-          # automation account. Without this step an irreversible change could reach
-          # the production database with the founder never in the path, while the
-          # standing rule is that an irreversible change is founder gated.
+          # it is. A GitHub required-reviewer rule is satisfied by any ONE of the
+          # reviewers it lists, so an environment reviewer list cannot by itself
+          # guarantee that a particular person approved a run. Our standing rule is
+          # that a change with no restore path is founder gated, and a rule that no
+          # mechanism enforces is prose.
           #
-          # WHAT IT ADDS. prevent_self_review is true on that environment, so the
+          # WHAT IT ADDS. prevent_self_review is set on the prod environment, so the
           # account that triggered a run cannot approve it. Requiring the founder to
           # be the dispatcher therefore makes this path genuinely two party: the
           # founder starts it, and because the starter cannot approve it the approval
-          # must come from the other named reviewer.
+          # must come from a different named reviewer.
           #
           # SCOPE. This branch is only reached when the classification is IRREVERSIBLE
           # and the target is the prod project. The reversible path is untouched and
@@ -1036,10 +1034,10 @@ jobs:
               echo "This run was dispatched by \`${ACTOR}\` and run by \`${TRIGGERING_ACTOR}\`."
               echo ""
               echo "A change with no restore path is founder gated, so the founder has to be"
-              echo "the one who dispatches it. The environment reviewers are not a substitute:"
-              echo "only ONE of the two named reviewers has to approve, and one of them is an"
-              echo "automation account, so the reviewer list on its own does not put the"
-              echo "founder in the path."
+              echo "the one who dispatches it. The environment reviewer list is not a"
+              echo "substitute: a required-reviewer rule is satisfied by any ONE of the"
+              echo "reviewers it lists, so it cannot by itself put a particular person in the"
+              echo "path."
               echo ""
               echo "To apply this: the founder dispatches this workflow with"
               echo "\`irreversible_approval_ref\` set, and a different named reviewer approves"
@@ -1061,8 +1059,9 @@ jobs:
             echo "reference names what authorised it. What BOUND it: the founder dispatched"
             echo "this run, the dispatcher cannot approve their own environment request, so"
             echo "the approval came from a different named reviewer on \`supabase-prod\`, and"
-            echo "the actor allowlist was satisfied. The environment itself needs only ONE of"
-            echo "its two reviewers, which is exactly why the founder-dispatch check exists."
+            echo "the actor allowlist was satisfied. A required-reviewer rule is satisfied by"
+            echo "any ONE of its reviewers, which is exactly why the founder-dispatch check"
+            echo "exists."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Apply pending DB migrations via Management API
