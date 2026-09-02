@@ -787,7 +787,8 @@ jobs:
             {
               echo "## :no_entry: RLS policy drift on \`${SUPABASE_PROJECT_REF}\`"
               echo ""
-              echo "The live \`pg_policies\` set does not match \`supabase/rls-policy-baseline.tsv\`."
+              echo "The live \`pg_policies\` set does not match \`${BASELINE}\`, the baseline"
+              echo "captured from this cluster."
               echo "A policy was added, removed, or its USING/WITH CHECK expression changed"
               echo "without the baseline being updated in the same PR (OR-T1340)."
               echo ""
@@ -795,17 +796,20 @@ jobs:
               cat /tmp/rls-diff.txt
               echo '```'
               echo ""
-              echo "If this change is intentional, regenerate the baseline in this PR:"
+              echo "If this change is intentional, regenerate THIS cluster's baseline in this"
+              echo "PR. Regenerate the file named below and no other: the other cluster has a"
+              echo "different policy set, and pointing its baseline at this project is what"
+              echo "makes the two take turns being red."
               echo '```'
               echo "SUPABASE_ACCESS_TOKEN=... SUPABASE_PROJECT_REF=${SUPABASE_PROJECT_REF} \\"
-              echo "  node scripts/generate-rls-policy-baseline.mjs supabase/rls-policy-baseline.tsv"
+              echo "  node scripts/generate-rls-policy-baseline.mjs ${BASELINE}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::RLS policy drift detected on ${SUPABASE_PROJECT_REF}. See step summary for the diff."
             exit 1
           fi
 
-          echo "RLS policy set on ${SUPABASE_PROJECT_REF} matches the committed baseline (${BASELINE_COUNT} policies)."
+          echo "RLS policy set on ${SUPABASE_PROJECT_REF} matches ${BASELINE} (${BASELINE_COUNT} policies)."
 
   # ---------------------------------------------------------------------------
   # OR-T1189. This comparison used to live inside check-pending-migrations, and
