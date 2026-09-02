@@ -54,11 +54,11 @@
  *   runs in this workflow: the check itself runs against a catalog snapshot outside it.
  *
  *   Second, a grantee computed at runtime cannot be resolved to a role name. A dynamic GRANT
- *   is therefore treated as if it named every browser facing role, so it fails; a dynamic
- *   REVOKE is treated as if it cleared every one of them, so it passes. The second half is the
- *   generous direction and it is deliberate, because it is the shape both existing migrations
- *   use (REVOKE ALL ... FROM %I inside a FOREACH over anon and authenticated). A dynamic
- *   revoke that really only cleared one role would be over-credited here.
+ *   is recorded against a grantee this scan cannot name, so it fails and says exactly that; a
+ *   dynamic REVOKE clears every browser facing role and that unresolvable one too, so it
+ *   passes. The second half is the generous direction and it is deliberate, because it is the
+ *   shape both existing migrations use (REVOKE ALL ... FROM %I inside a FOREACH over anon and
+ *   authenticated). A dynamic revoke that really only cleared one role is over-credited here.
  *
  *   Third, it says nothing about RLS, about whether service_role should hold what it holds, or
  *   about how these values are stored. It is about which columns a browser facing role can
@@ -107,6 +107,13 @@ const REFERENCE_MIGRATION = {
 
 /** The grantees this gate cares about. PUBLIC is wider than anon, never narrower. */
 const RISKY_GRANTEES = ["anon", "authenticated", "public"];
+
+/**
+ * Stands in for a grantee built at runtime, as in format('... TO %I', role_name). Reporting it
+ * as itself is the honest shape: the scan knows a grant was made and does not know to whom, and
+ * saying "anon, authenticated and PUBLIC" instead would be three claims it cannot support.
+ */
+const UNRESOLVED_GRANTEE = "a grantee this scan cannot resolve";
 
 const PRIVILEGE_WORD =
   "SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER|MAINTAIN|ALL";
@@ -197,9 +204,9 @@ function tailAfter(stmt, keyword) {
 }
 
 /**
- * Which browser facing roles a grantee list reaches. `dynamic` means the list carries a format
- * placeholder, so the real grantee is not knowable from the source; see the header for how
- * that is treated in each direction.
+ * Which browser facing roles a grantee list names, and whether any grantee in it is built at
+ * runtime. The two are kept apart rather than collapsed, because they carry different
+ * certainty: see the header for how each is treated in each direction.
  */
 export function grantees(tail) {
   if (tail === null) return { roles: [], dynamic: false };
@@ -207,7 +214,7 @@ export function grantees(tail) {
   const dynamic = /%[IsL]/.test(clean);
   const roles = RISKY_GRANTEES.filter((role) =>
     new RegExp(`(^|[\\s,(])${role}(\\s|,|\\)|$)`, "i").test(clean));
-  return { roles: dynamic ? [...RISKY_GRANTEES] : roles, dynamic };
+  return { roles, dynamic };
 }
 
 const unquote = (s) => s.replace(/"/g, "").toLowerCase();
@@ -267,10 +274,11 @@ export function scan(files) {
           // direction is refused, and REVOKE GRANT OPTION FOR reads as the revoke it is.
           if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b(?:(?!\bREVOKE\b).)*\bGRANT\b/i.test(stmt)) continue;
           const who = grantees(tailAfter(stmt, "TO"));
-          if (who.roles.length) {
+          const named = who.dynamic ? [...who.roles, UNRESOLVED_GRANTEE] : who.roles;
+          if (named.length) {
             hard.push(
               `${file.name}: ALTER DEFAULT PRIVILEGES grants on future ${GUARDED_SCHEMA} ` +
-              `tables to ${who.roles.join(", ")}. Any guarded table recreated after this is ` +
+              `tables to ${named.join(", ")}. Any guarded table recreated after this is ` +
               `born with a table wide grant covering its credential column. Not expressible ` +
               `as an exception: grant the exact columns on the exact table instead.`);
           }
@@ -282,7 +290,16 @@ export function scan(files) {
         if (!isGrant && !isRevoke) continue;
 
         const who = grantees(tailAfter(stmt, isGrant ? "TO" : "FROM"));
-        if (!who.roles.length) continue;
+        // A grant to a grantee built at runtime is recorded against that unresolvable grantee,
+        // so it fails once and says what is actually known. A revoke from one clears every
+        // browser facing role and the unresolvable grantee too, which is the generous
+        // direction and is what both column grant migrations do.
+        const affected = isGrant
+          ? [...new Set([...who.roles, ...(who.dynamic ? [UNRESOLVED_GRANTEE] : [])])]
+          : who.dynamic
+            ? [...RISKY_GRANTEES, UNRESOLVED_GRANTEE]
+            : who.roles;
+        if (!affected.length) continue;
 
         const onIndex = stmt.search(/\bON\b/i);
         if (onIndex === -1) continue;
@@ -298,12 +315,12 @@ export function scan(files) {
           if (isGrant) {
             hard.push(
               `${file.name}: blanket GRANT ON ALL TABLES IN SCHEMA ${GUARDED_SCHEMA} to ` +
-              `${who.roles.join(", ")}. That covers every guarded table at once, and a table ` +
+              `${affected.join(", ")}. That covers every guarded table at once, and a table ` +
               `wide grant covers every column of the row including the credential column. Not ` +
               `expressible as an exception: name the table and the columns.`);
           } else {
             for (const table of Object.keys(GUARDED)) {
-              for (const role of who.roles) {
+              for (const role of affected) {
                 const entry = entryFor(state, table, role);
                 entry.wide = null;
                 entry.columns.clear();
@@ -318,7 +335,7 @@ export function scan(files) {
         const table = tableKey(target[1], target[2]);
         if (!GUARDED[table]) continue;
 
-        for (const role of who.roles) {
+        for (const role of affected) {
           const entry = entryFor(state, table, role);
           if (isGrant) {
             if (tableWide) entry.wide = file.name;
@@ -402,7 +419,7 @@ const CASES = [
     expect: 0,
   },
   {
-    name: "a dynamic table wide grant buried mid chunk fails",
+    name: "a dynamic table wide grant fails once, naming what is actually known",
     files: [{
       name: "a.sql",
       sql: "DO $$ BEGIN EXECUTE format('GRANT SELECT ON TABLE public.platforms TO %I', r); END $$;",
