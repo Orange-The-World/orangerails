@@ -143,6 +143,16 @@
 --              on a row it creates, which is the inbound webhook key
 --   Both raised. A check nobody has watched go red is not a check.
 --
+--   Check 4 was amended after review on 2026-09-02 and its amended form was
+--   put through the same treatment. It was shown to RAISE by pointing the
+--   same predicate at a live table whose only policy is permissive FOR ALL to
+--   service_role:
+--     connections: no permissive INSERT (or FOR ALL) policy applies to
+--     authenticated, so the add connection path is refused by row level
+--     security
+--   and shown to PASS against this table's live policy set, which is four
+--   permissive policies to authenticated, one per command.
+--
 -- BEFORE THIS IS APPLIED TO PRODUCTION
 --
 -- The measurements above are from the dev project. The production catalogue is
@@ -226,15 +236,39 @@ BEGIN
   END IF;
 
   -- 4. The add connection path needs the policy as well as the privilege.
-  --    Without an INSERT policy the grant above is permitted and the statement
-  --    is then refused by row level security, which breaks adding a connection
-  --    exactly as a missing grant would.
+  --    Without an applicable INSERT policy the grant above is permitted and the
+  --    statement is then refused by row level security, which breaks adding a
+  --    connection exactly as a missing grant would.
+  --
+  --    THREE THINGS THIS PREDICATE HAS TO GET RIGHT. A test for "a policy with
+  --    polcmd = 'a' exists" answers a different question from "an insert by
+  --    this role is admitted", and the gap runs in both directions:
+  --
+  --      polcmd IN ('a','*')  a FOR ALL policy covers INSERT. Testing 'a'
+  --                           alone raises on a table whose insert is in fact
+  --                           covered, which blocks a legitimate apply.
+  --      polpermissive        a RESTRICTIVE policy grants nothing, it only
+  --                           narrows. With no applicable PERMISSIVE policy the
+  --                           insert is still refused, so a restrictive only
+  --                           policy must not satisfy this check.
+  --      role MEMBERSHIP      row level security applies a policy when the
+  --                           current role is a MEMBER of one of polroles, not
+  --                           only when it is named. An exact oid match reads
+  --                           false for a policy addressed to a group role that
+  --                           authenticated belongs to, which is a false fail.
+  --
+  --    r = 0 is the PUBLIC case and must stay. pg_has_role returns false for
+  --    oid 0 rather than raising (measured on dev, not assumed), so without
+  --    that branch a policy written TO public would read as not applying.
   IF NOT EXISTS (
-        SELECT 1 FROM pg_policy
-         WHERE polrelid = 'public.connections'::regclass
-           AND polcmd = 'a') THEN
+        SELECT 1 FROM pg_policy p
+         WHERE p.polrelid = 'public.connections'::regclass
+           AND p.polcmd IN ('a', '*')
+           AND p.polpermissive
+           AND EXISTS (SELECT 1 FROM unnest(p.polroles) r
+                        WHERE r = 0 OR pg_has_role('authenticated', r, 'MEMBER'))) THEN
     RAISE EXCEPTION
-      'connections: the INSERT policy is gone, so the add connection path is refused by row level security';
+      'connections: no permissive INSERT (or FOR ALL) policy applies to authenticated, so the add connection path is refused by row level security';
   END IF;
 
   -- 5. The client reads the new row's id straight back through the RETURNING
