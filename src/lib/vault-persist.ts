@@ -540,6 +540,30 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // walks and keeps sweeping until a complete walk finds nothing left to
   // migrate.
   //
+  // THE KEY GENERATION THIS ROTATION STAMPS, chosen before a single row moves.
+  //
+  // It is one above the highest either table currently holds, so it cannot
+  // collide with a generation an earlier rotation used, and it is always above
+  // the column default, so a row another session inserts while this runs is
+  // guaranteed to be distinguishable from a row this run rewrote. That single
+  // property is what lets completeness be decided by a count the server
+  // computes instead of by arithmetic on this client that two concurrent
+  // writes can cancel.
+  //
+  // Both tables share one value deliberately. Reading a generation per table
+  // would let the two drift apart, and the reconciliation below judges both
+  // against the same number.
+  //
+  // Overflow is not guarded here on purpose. data_key_generation is a smallint,
+  // so a value past 32767 is refused by the database and the update throws,
+  // which is the loud failure this path wants. Silently wrapping would produce
+  // a generation an old row might already carry.
+  const generation =
+    Math.max(
+      await highestDataKeyGeneration(supabase, "connections"),
+      await highestDataKeyGeneration(supabase, "encrypted_transactions"),
+    ) + 1;
+
   // Distinct ids, not a running tally, and added only once the UPDATE has
   // returned the row it changed: a read that hands the same row back twice must
   // not be able to make the reconciliation agree, and neither must a write that
