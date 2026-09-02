@@ -49,14 +49,26 @@ name: Cloudflare Pages stuck check-run sweep
 #
 # FAIL LOUD. Every run prints, and writes to the job summary, how many stuck
 # check-runs it found, how many it resolved, how many it left alone because
-# they were genuinely still building, and how many it could not resolve. A
-# run that finds nothing because it filtered wrongly must not look the same
-# as a run with genuinely nothing to do. The FORCE_FAIL marker below exists
-# ONLY so this path can be proven to go red before it is trusted, per this
-# ticket's acceptance criteria: push a commit whose message contains
+# they were genuinely still building, how many failed transiently, and how
+# many it could not resolve. A run that finds nothing because it filtered
+# wrongly must not look the same as a run with genuinely nothing to do.
+#
+# EXIT CODE SPLIT, reactive vs sweep. The reactive path (check_run: created)
+# is itself a check-run on the PR it exists to unpin, so a non-zero exit
+# here turns a merely stuck PR into a genuinely RED one, which gh_merge_pr
+# refuses just as firmly. A transient Cloudflare API error (a 5xx or a rate
+# limit inside the 20s curl window) is therefore logged as a ::warning::
+# and does NOT fail the reactive run. The scheduled sweep keeps exit 1 on
+# any unresolved check, because there a red run is a monitoring signal, not
+# a merge gate.
+#
+# The FORCE_FAIL marker below is the one deliberate exception: it exists
+# ONLY so the fail-loud path can be proven before it is trusted, per this
+# ticket's acceptance criteria. Push a commit whose message contains
 # [cf-sweep-force-fail] and the reactive run for that commit resolves
-# against a deployment id that cannot exist, fails for real, and reports it.
-# It never touches a real deployment.
+# against a deployment id that cannot exist, fails for real, turns that
+# commit's own PR check RED ON PURPOSE, and reports it. It never touches a
+# real deployment.
 
 on:
   check_run:
@@ -79,7 +91,7 @@ permissions:
   checks: read
 
 concurrency:
-  group: cf-pages-check-sweep-${{ github.event.check_run.head_sha || 'sweep' }}
+  group: cf-pages-check-sweep-${{ github.event.check_run.id || 'sweep' }}
   cancel-in-progress: false
 
 jobs:
@@ -108,6 +120,7 @@ jobs:
           resolved=0
           left_building=0
           unresolved=0
+          transient_failed=0
           report=""
 
           # One check-run in, one result string out. Never mutates counters
@@ -215,7 +228,16 @@ jobs:
             case "$result" in
               RETRIED:*) resolved=1 ;;
               BUILDING:*) left_building=1; report="- check ${check_id} (${check_name}): ${result}, still building after ${age_min}m, leaving it\n" ;;
-              *) unresolved=1; report="- check ${check_id} (${check_name}): ${result}\n" ;;
+              *)
+                if [ "$force_fail" = "1" ]; then
+                  unresolved=1
+                  report="- check ${check_id} (${check_name}): ${result}\n"
+                else
+                  transient_failed=1
+                  echo "::warning::Cloudflare lookup for check ${check_id} (${check_name}) failed: ${result}. Not failing the reactive run for a transient CF error; the scheduled sweep will retry it."
+                  report="- check ${check_id} (${check_name}): ${result}, transient, not failing the reactive run\n"
+                fi
+                ;;
             esac
           else
             now=$(date +%s)
@@ -245,11 +267,11 @@ jobs:
             done < <(echo "$prs" | jq -c '.[]')
           fi
 
-          echo "Cloudflare Pages stuck check-run sweep: found ${found}, retried ${resolved}, left building ${left_building}, unresolved ${unresolved}."
+          echo "Cloudflare Pages stuck check-run sweep: found ${found}, retried ${resolved}, left building ${left_building}, transient failures ${transient_failed}, unresolved ${unresolved}."
           {
             echo "## Cloudflare Pages stuck check-run sweep"
             echo
-            echo "Found **${found}**, retried **${resolved}**, left building (not our bug) **${left_building}**, unresolved **${unresolved}**."
+            echo "Found **${found}**, retried **${resolved}**, left building (not our bug) **${left_building}**, transient failures (not failing this run) **${transient_failed}**, unresolved **${unresolved}**."
             if [ -n "$report" ]; then
               echo
               printf '%b' "$report"
