@@ -25,7 +25,7 @@ import {
   type VaultPersistClient,
 } from "../vault-persist";
 
-type QueryResult = { data: unknown[] | null; error: unknown };
+type QueryResult = { data: unknown[] | null; error: unknown; count?: number | null };
 
 interface RecordedCall {
   table: string;
@@ -33,6 +33,8 @@ interface RecordedCall {
   /** columns passed to .select(), which is what makes the row count readable */
   columns?: string;
   values?: Record<string, unknown>;
+  /** options passed to .select(), which is how a head count is recognised */
+  options?: { count?: string; head?: boolean };
   filters: Array<{ column: string; value: unknown }>;
 }
 
@@ -54,6 +56,16 @@ interface SelectChain {
   range(from: number, to: number): Promise<QueryResult>;
 }
 
+/**
+ * The paged reads on a table, excluding the reconciliation head count.
+ *
+ * The head count is a select too, so without this the assertions below about
+ * how many times the loop read a table would silently start counting it.
+ */
+function pagedSelects(calls: RecordedCall[], table: string) {
+  return calls.filter((c) => c.table === table && c.op === "select" && !c.options?.head);
+}
+
 interface FakeOptions {
   /** rows a select on each table returns */
   rows?: Record<string, unknown[]>;
@@ -71,6 +83,11 @@ interface FakeOptions {
    * in a different order next time.
    */
   reorderAfterSelect?: Record<string, (rows: unknown[]) => unknown[]>;
+  /**
+   * What a head count returns instead of the store size. Only for the cases
+   * where the count itself is the thing under test.
+   */
+  countResult?: Record<string, { count?: number | null; error?: unknown }>;
 }
 
 /**
@@ -91,9 +108,20 @@ function makeFakeClient(options: FakeOptions = {}) {
 
   function resultFor(call: RecordedCall): QueryResult {
     if (call.op === "select") {
+      const stored = store[call.table] ?? [];
+
+      // A head request with an exact count is the reconciliation read. It
+      // returns no rows: the count IS the answer, and it is deliberately not
+      // derived from any page above, because the whole point of it is to
+      // measure the table with a different ruler than the paged read used.
+      if (call.options?.head) {
+        const forced = options.countResult?.[call.table];
+        if (forced) return { data: null, error: forced.error ?? null, count: forced.count ?? null };
+        return { data: null, error: null, count: stored.length };
+      }
+
       const override = options.selectResult?.[call.table];
       if (override) return override;
-      const stored = store[call.table] ?? [];
 
       // Honour .order(column). A query that asked for an order gets a
       // deterministic view. One that did not gets the store in whatever
@@ -149,8 +177,14 @@ function makeFakeClient(options: FakeOptions = {}) {
   const client = {
     from(table: string) {
       return {
-        select(columns: string) {
-          const call: RecordedCall = { table, op: "select", columns, filters: [] };
+        select(columns: string, selectOptions?: { count?: string; head?: boolean }) {
+          const call: RecordedCall = {
+            table,
+            op: "select",
+            columns,
+            options: selectOptions,
+            filters: [],
+          };
           calls.push(call);
           const chain: SelectChain = {
             ...thenable(call),
@@ -350,10 +384,9 @@ describe("vault recovery: the rotated meta write", () => {
     expect(txnUpdates.length).toBe(rowCount);
     expect(new Set(updatedIds).size).toBe(rowCount);
 
-    // One full page plus one short page is what ends the loop; two select
-    // calls is the direct evidence the cursor actually advanced.
-    const selectCalls = calls.filter((c) => c.table === "encrypted_transactions" && c.op === "select");
-    expect(selectCalls.length).toBe(2);
+    // One full page plus one short page is what ends the loop; two paged
+    // reads is the direct evidence the cursor actually advanced.
+    expect(pagedSelects(calls, "encrypted_transactions").length).toBe(2);
   });
 
   it("pages the connections read instead of trusting one capped select", async () => {
@@ -377,10 +410,10 @@ describe("vault recovery: the rotated meta write", () => {
     expect(updatedIds.length).toBe(rowCount);
     expect(new Set(updatedIds).size).toBe(rowCount);
 
-    // One full page plus one short page. Two selects is the direct evidence the
-    // cursor advanced rather than the read being trusted to return everything.
-    const selectCalls = calls.filter((c) => c.table === "connections" && c.op === "select");
-    expect(selectCalls.length).toBe(2);
+    // One full page plus one short page. Two paged reads is the direct evidence
+    // the cursor advanced rather than the read being trusted to return
+    // everything.
+    expect(pagedSelects(calls, "connections").length).toBe(2);
   });
 
   it("migrates every connection exactly once when the order changes between pages", async () => {
@@ -402,7 +435,7 @@ describe("vault recovery: the rotated meta write", () => {
       .map((c) => c.filters.find((f) => f.column === "id")?.value);
     expect(updatedIds.length).toBe(rowCount);
     expect(new Set(updatedIds).size).toBe(rowCount);
-    for (const call of calls.filter((c) => c.table === "connections" && c.op === "select")) {
+    for (const call of pagedSelects(calls, "connections")) {
       expect(call.filters).toContainEqual({ column: "order", value: ["id", true] });
     }
   });
@@ -431,10 +464,109 @@ describe("vault recovery: the rotated meta write", () => {
       .map((c) => c.filters.find((f) => f.column === "id")?.value);
     expect(updatedIds.length).toBe(rowCount);
     expect(new Set(updatedIds).size).toBe(rowCount);
-    for (const call of calls.filter(
-      (c) => c.table === "encrypted_transactions" && c.op === "select",
-    )) {
+    for (const call of pagedSelects(calls, "encrypted_transactions")) {
       expect(call.filters).toContainEqual({ column: "order", value: ["id", true] });
+    }
+  });
+});
+
+describe("vault recovery: reconciling the row counts before the meta write", () => {
+  function metaUpdates(calls: RecordedCall[]) {
+    return calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+  }
+
+  it("throws BEFORE the meta write when the store gains a row after the page was read", async () => {
+    // A sync running in a second tab inserts an encrypted_transactions row
+    // while the rotation is in flight. It is written under the OLD MEK by
+    // construction, the loop has already read past it, and before this check
+    // existed the meta write still landed: that row was then wrapped under a
+    // key nothing stores any more, permanently and with nothing raised.
+    //
+    // Take the reconciliation out of vault-persist.ts and this test passes
+    // again. That is the only reason to trust it. Every defect found on this
+    // path so far was a check that could not go red.
+    const clearMigrationKeys = vi.fn();
+    let inserted = false;
+    const { client, calls } = makeFakeClient({
+      rows: {
+        encrypted_transactions: [
+          { id: "txn-1", encrypted_payload: "payload-1" },
+          { id: "txn-2", encrypted_payload: "payload-2" },
+        ],
+      },
+      reorderAfterSelect: {
+        encrypted_transactions: (rows) => {
+          if (inserted) return rows;
+          inserted = true;
+          return [...rows, { id: "txn-3", encrypted_payload: "payload-3" }];
+        },
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow("migrated 2 of 3 transactions");
+
+    // Both halves matter. No meta write means the stored wrappers still hold
+    // the old MEK, so the rows that did not move still read; not clearing the
+    // migration keys means this session can still read the ones that did.
+    expect(metaUpdates(calls).length).toBe(0);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("treats a count that cannot be read as a failure, not as agreement", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      countResult: { connections: { count: null } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow("migrated 1 of unknown connections");
+
+    expect(metaUpdates(calls).length).toBe(0);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("stops the rotation when the count read itself errors", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      countResult: { connections: { count: null, error: { message: "count boom" } } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toBeTruthy();
+
+    expect(metaUpdates(calls).length).toBe(0);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("counts both tables with an exact head request, before the meta write", async () => {
+    // An estimate would be worthless here, and counting the rows the paged
+    // read returned would measure the fault with the ruler that has the fault
+    // in it. Assert the shape of the read, not just that some read happened.
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0" }],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaIndex).toBeGreaterThan(-1);
+
+    for (const table of ["connections", "encrypted_transactions"]) {
+      const index = calls.findIndex(
+        (c) => c.table === table && c.op === "select" && c.options?.head === true,
+      );
+      expect(index).toBeGreaterThan(-1);
+      expect(calls[index].options).toEqual({ count: "exact", head: true });
+      expect(index).toBeLessThan(metaIndex);
     }
   });
 });
