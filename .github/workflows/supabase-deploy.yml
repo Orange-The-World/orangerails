@@ -999,7 +999,7 @@ jobs:
             exit 1
           fi
 
-          # OR-T1657. THE FOUNDER MUST BE THE ONE WHO DISPATCHED THIS RUN.
+          # OR-T1657 PROBE. THE FOUNDER MUST BE THE ONE WHO DISPATCHED THIS RUN.
           #
           # WHY. Everything above treats the authority reference as the record of a
           # two party decision, and a record is only worth what the mechanism behind
