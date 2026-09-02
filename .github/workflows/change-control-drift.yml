@@ -77,8 +77,8 @@ jobs:
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
         run: |
           set -uo pipefail
-          node scripts/change-control-settings.mjs --read > /dev/null 2> refused.txt
-          STATUS=$?
+          STATUS=0
+          node scripts/change-control-settings.mjs --read > /dev/null 2> refused.txt || STATUS=$?
           echo "exit ${STATUS}: $(cat refused.txt)"
           if [ "${STATUS}" != "3" ]; then
             echo "::error::a refused token exited ${STATUS}, expected 3. A check that cannot authenticate must say so, not pass."
@@ -92,8 +92,8 @@ jobs:
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
         run: |
           set -uo pipefail
-          node scripts/change-control-settings.mjs --read > /dev/null 2> missing.txt
-          STATUS=$?
+          STATUS=0
+          node scripts/change-control-settings.mjs --read > /dev/null 2> missing.txt || STATUS=$?
           echo "exit ${STATUS}: $(cat missing.txt)"
           if [ "${STATUS}" != "4" ]; then
             echo "::error::a 404 exited ${STATUS}, expected 4. 'I cannot see it' and 'there is nothing there' are different facts."
@@ -108,8 +108,8 @@ jobs:
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
         run: |
           set -uo pipefail
-          node scripts/change-control-settings.mjs --read > /dev/null 2> unreachable.txt
-          STATUS=$?
+          STATUS=0
+          node scripts/change-control-settings.mjs --read > /dev/null 2> unreachable.txt || STATUS=$?
           echo "exit ${STATUS}: $(cat unreachable.txt)"
           if [ "${STATUS}" != "5" ]; then
             echo "::error::an unreachable endpoint exited ${STATUS}, expected 5."
@@ -124,8 +124,8 @@ jobs:
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
         run: |
           set -uo pipefail
-          node scripts/change-control-settings.mjs --read > /dev/null 2> emptyvar.txt
-          STATUS=$?
+          STATUS=0
+          node scripts/change-control-settings.mjs --read > /dev/null 2> emptyvar.txt || STATUS=$?
           echo "exit ${STATUS}: $(cat emptyvar.txt)"
           if [ "${STATUS}" != "5" ]; then
             echo "::error::an empty allowlist variable exited ${STATUS}, expected 5. An unset variable and an empty one are indistinguishable here, and one of them would be a change to who may apply migrations."
@@ -166,8 +166,8 @@ jobs:
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_DEV }}
         run: |
           set -uo pipefail
-          node scripts/change-control-settings.mjs --read live.json
-          STATUS=$?
+          STATUS=0
+          node scripts/change-control-settings.mjs --read live.json || STATUS=$?
           if [ "${STATUS}" != "0" ]; then
             {
               echo "## :grey_question: Change-control settings UNKNOWN"
@@ -204,8 +204,8 @@ jobs:
       - name: Compare against the reviewed baseline
         run: |
           set -uo pipefail
-          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json
-          STATUS=$?
+          STATUS=0
+          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json || STATUS=$?
 
           if [ "${STATUS}" = "6" ]; then
             {
