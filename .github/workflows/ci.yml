@@ -907,15 +907,39 @@ jobs:
     name: Migration classifier (proven able to refuse)
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Needed to work out whether this pull request touches the classifier,
+          # which decides whether the demonstration is worth commenting.
+          fetch-depth: 0
 
       - name: Self test, both directions
         # Asserts every fixture against its expected verdict AND its expected
         # rule, so a rule that fires for the wrong reason is caught too. Also
         # asserts that an empty input list is refused rather than read as clean.
-        run: node scripts/classify-migrations.mjs --selftest
+        run: |
+          set -uo pipefail
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+          {
+            echo "## Migration classifier (OR-T1518)"
+            echo ""
+            echo "### Self test: does the classifier agree with every fixture, both ways"
+            echo ""
+            echo '```'
+          } > "$DEMO"
+          node scripts/classify-migrations.mjs --selftest 2>&1 | tee -a "$DEMO"
+          RC=${PIPESTATUS[0]}
+          {
+            echo '```'
+            echo ""
+            echo "exit code: \`${RC}\` (want 0)"
+          } >> "$DEMO"
+          exit "$RC"
 
       - name: Refuse a deliberately irreversible fixture, and show the red
         run: |
@@ -963,19 +987,78 @@ jobs:
             FAIL=1
           fi
 
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
           {
-            echo "## Migration classifier: proven able to refuse"
             echo ""
-            echo "Exit codes observed: irreversible fixtures \`$RC\` (want 2), reversible fixture \`$OK_RC\` (want 0), empty list \`$EMPTY_RC\` (want non-zero)."
+            echo "### Proven able to refuse"
+            echo ""
+            echo "Exit codes observed: irreversible fixtures \`$RC\` (want 2), reversible fixture \`$OK_RC\` (want 0), empty file list \`$EMPTY_RC\` (want non-zero)."
             echo ""
             echo "The refusal, verbatim:"
             echo ""
             echo '```'
             echo "$OUT"
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo ""
+            echo "The reversible fixture, verbatim:"
+            echo ""
+            echo '```'
+            echo "$OK_OUT"
+            echo '```'
+            echo ""
+            echo "An empty file list, verbatim:"
+            echo ""
+            echo '```'
+            echo "$EMPTY_OUT"
+            echo '```'
+          } >> "$DEMO"
+          cat "$DEMO" >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$FAIL" -ne 0 ]; then
             exit 1
           fi
           echo "classifier refuses the irreversible class, passes the reversible one, and refuses an empty list."
+
+      - name: Publish the demonstration to the pull request
+        # The seats that review changes in this repo hold GitHub read tools and
+        # no shell. An Actions log is not reachable from a review seat and the
+        # API refuses it without a token, so a refusal that exists only in a log
+        # is a refusal nobody reviewing this change can read. This puts the
+        # verbatim output where every reviewer already is.
+        #
+        # Deliberately quiet on ordinary pull requests: it comments only when
+        # the job failed, or when this pull request actually touches the
+        # classifier, its fixtures, or the two workflows. A check that comments
+        # on every PR gets muted, and a muted check is not a check.
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+          if [ ! -f "$DEMO" ]; then
+            echo "no demonstration file was written, so there is nothing to publish. This is not a pass."
+            exit 0
+          fi
+
+          TOUCHED=$(git diff --name-only "origin/${BASE_REF}...HEAD" -- \
+            scripts/classify-migrations.mjs \
+            scripts/fixtures/migration-classifier \
+            .github/workflows/supabase-deploy.yml \
+            .github/workflows/ci.yml 2>/dev/null || true)
+
+          if [ "$JOB_STATUS" = "success" ] && [ -z "$TOUCHED" ]; then
+            echo "this pull request does not touch the classifier and the demonstration passed; not commenting."
+            exit 0
+          fi
+
+          {
+            echo ""
+            echo "---"
+            echo "Job status: \`${JOB_STATUS}\`. Posted by the migration classifier job because this pull request touches it, or because it failed."
+          } >> "$DEMO"
+
+          gh pr comment "$PR_NUMBER" --body-file "$DEMO"
