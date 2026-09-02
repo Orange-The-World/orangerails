@@ -101,12 +101,46 @@
 -- WHY service_role IS UNTOUCHED. It is the server side identity the Edge
 -- Function write path runs as, and it is never exposed to a browser.
 --
+-- WHY keyring_ciphertext AND keyring_epoch ARE NOT NAMED BELOW. Read this before
+-- "completing" the column lists, because adding them makes this file unappliable
+-- to production.
+--
+-- Both columns are present on hosted dev and absent on hosted prod, which carries
+-- 16 columns on this table. They reached dev out of band, with no file and no
+-- ledger row behind them. The migrations that create them properly are
+-- 20260831071500 (keyring_ciphertext) and 20260831120000 (keyring_epoch), and
+-- both of those versions sort ABOVE this file's. The apply selects pending
+-- migrations by set difference against the ledger and runs them in VERSION order,
+-- not in merge order, so this file always runs BEFORE those columns exist and no
+-- merge sequence can change that. Naming them here is a guaranteed SQLSTATE 42703
+-- on prod and a clean apply on dev, which is the one environment that cannot
+-- catch it.
+--
+-- Measured rather than argued, on a scratch pair of tables on the dev project,
+-- 2026-09-02. The old 17 column form raised 42703, column "keyring_ciphertext"
+-- does not exist, against a 16 column table shaped like prod, and applied clean
+-- against an 18 column table shaped like dev.
+--
+-- SO THE RULE FOR THIS TABLE, which is the rule 20260831071500 already follows:
+-- the migration that CREATES a column states that column's privilege. This file
+-- states the privilege for the column set that exists at ITS version, 15 writable
+-- columns with workspace_key_id excluded, and reaches forward to nothing.
+--
+-- ONE CONSEQUENCE, stated so it is not discovered later. The REVOKE at the top of
+-- each block is absolute, so re-running this file after a later migration has
+-- granted a new column would take that grant away again. Version ordered apply
+-- runs it exactly once, at its own position, which is the only position where it
+-- is correct. Do not re-run it by hand on a project that is ahead of it.
+--
 -- Idempotent. REVOKE and GRANT can be re-run. The assertions at the end fail
 -- loudly rather than letting a partial apply look like a success.
 
--- user_vault_meta: per user vault salt, verifier, wrapped keys and keyring.
--- SELECT at table level; INSERT and UPDATE column scoped over the 17 columns
--- the member path writes, deliberately excluding workspace_key_id.
+-- user_vault_meta: per user vault salt, verifier and wrapped keys.
+-- SELECT at table level; INSERT and UPDATE column scoped over the 15 columns
+-- that exist at this version and that the member path writes, deliberately
+-- excluding workspace_key_id. keyring_ciphertext and keyring_epoch are absent on
+-- purpose: they do not exist at this version, and each is granted by the
+-- migration that creates it. See the header.
 ALTER TABLE public.user_vault_meta ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.user_vault_meta FROM PUBLIC;
 REVOKE ALL ON TABLE public.user_vault_meta FROM anon;
@@ -127,9 +161,7 @@ GRANT INSERT (
         sig_secret_wrapped,
         pqc_key_version,
         enc_mek_ciphertext,
-        recovery_ciphertext,
-        keyring_ciphertext,
-        keyring_epoch
+        recovery_ciphertext
       ),
       UPDATE (
         user_id,
@@ -146,9 +178,7 @@ GRANT INSERT (
         sig_secret_wrapped,
         pqc_key_version,
         enc_mek_ciphertext,
-        recovery_ciphertext,
-        keyring_ciphertext,
-        keyring_epoch
+        recovery_ciphertext
       )
   ON TABLE public.user_vault_meta TO authenticated;
 
@@ -176,6 +206,27 @@ DECLARE
   sealed_tables text[] := ARRAY[
     'public.user_vault_meta',
     'public.customer_vault_meta'
+  ];
+  -- The same 15 columns the GRANT above names, and the reason they are written
+  -- twice rather than derived: see assertion 4. This list is the allow list, and
+  -- assertion 4 checks it in both directions, so a name that appears in one place
+  -- and not the other is caught rather than silently tolerated.
+  member_writable_columns text[] := ARRAY[
+    'user_id',
+    'vault_salt',
+    'vault_verifier_ciphertext',
+    'vault_key_version',
+    'kdf_algorithm',
+    'kdf_params',
+    'created_at',
+    'updated_at',
+    'kem_public_key',
+    'kem_secret_wrapped',
+    'sig_public_key',
+    'sig_secret_wrapped',
+    'pqc_key_version',
+    'enc_mek_ciphertext',
+    'recovery_ciphertext'
   ];
   offenders text;
 BEGIN
@@ -257,25 +308,56 @@ BEGIN
       'authenticated lost a privilege its policies need, the member path is broken on: %', offenders;
   END IF;
 
-  --    user_vault_meta: SELECT at table level, plus INSERT and UPDATE on every
-  --    live column EXCEPT workspace_key_id. The expected column set is derived
-  --    from the catalogue rather than repeated as a second hardcoded list, so
-  --    the assertion cannot drift away from the table it is asserting about.
+  --    user_vault_meta: SELECT at table level, plus INSERT and UPDATE on each
+  --    column this file names and on NOTHING else. Both directions are checked,
+  --    because each one catches a different mistake.
+  --
+  --    WHY THIS IS NO LONGER DERIVED FROM THE CATALOGUE. An earlier version read
+  --    every live column and required all of them except workspace_key_id to be
+  --    writable. That is a statement about whatever the table happens to look
+  --    like on the project it lands on, so the same file passed on one and failed
+  --    on another, and it silently tied this migration to columns created by
+  --    files that sort ABOVE it. Probed on a scratch pair of tables on the dev
+  --    project, 2026-09-02: with the reduced grant above, the catalogue form
+  --    passed on a 16 column table and raised on an 18 column one, naming
+  --    keyring_ciphertext and keyring_epoch. The fixed list is what makes this
+  --    file say the same thing on every project.
   IF NOT has_table_privilege('authenticated', 'public.user_vault_meta', 'SELECT') THEN
     RAISE EXCEPTION 'authenticated lost SELECT on public.user_vault_meta';
   END IF;
 
+  --    4a. Every column this file grants must actually be writable. Catches a
+  --    name dropped from the GRANT above, and also a name that is in the GRANT
+  --    but not on the table, since has_column_privilege raises on a column that
+  --    does not exist rather than answering false.
+  SELECT string_agg(x.c || ':' || p, ', ') INTO offenders
+    FROM unnest(member_writable_columns) AS x(c)
+    CROSS JOIN unnest(ARRAY['INSERT','UPDATE']) AS p
+   WHERE NOT has_column_privilege('authenticated', 'public.user_vault_meta', x.c, p);
+  IF offenders IS NOT NULL THEN
+    RAISE EXCEPTION
+      'authenticated cannot write a user_vault_meta column the member path needs: %', offenders;
+  END IF;
+
+  --    4b. Nothing outside that list may be writable, by any route. This is the
+  --    half that makes the list above an allow list rather than a wish, and it is
+  --    what a catalogue derived check could never state. has_column_privilege is
+  --    used rather than a read of attacl because it answers true for a table wide
+  --    grant as well as for a column grant, so a REVOKE followed by a table wide
+  --    GRANT is caught here. Shown able to fail before being trusted: against a
+  --    table wide GRANT SELECT, INSERT, UPDATE on the scratch table it reported
+  --    workspace_key_id for both privileges.
   SELECT string_agg(att.attname || ':' || p, ', ') INTO offenders
     FROM pg_attribute att
     CROSS JOIN unnest(ARRAY['INSERT','UPDATE']) AS p
    WHERE att.attrelid = 'public.user_vault_meta'::regclass
      AND att.attnum > 0
      AND NOT att.attisdropped
-     AND att.attname <> 'workspace_key_id'
-     AND NOT has_column_privilege('authenticated', att.attrelid, att.attname, p);
+     AND NOT (att.attname = ANY(member_writable_columns))
+     AND has_column_privilege('authenticated', att.attrelid, att.attname, p);
   IF offenders IS NOT NULL THEN
     RAISE EXCEPTION
-      'authenticated cannot write a user_vault_meta column the member path needs: %', offenders;
+      'authenticated can write a user_vault_meta column outside the allow list: %', offenders;
   END IF;
 END;
 $$;
