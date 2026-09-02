@@ -26,6 +26,7 @@ import {
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
   COUNT_READ_ATTEMPTS,
+  COUNT_READ_RETRY_MS,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -59,6 +60,7 @@ interface SelectChain {
   ): Promise<unknown>;
   order(column: string, options?: { ascending?: boolean }): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
+  eq(column: string, value: unknown): Promise<QueryResult>;
 }
 
 interface FakeOptions {
@@ -93,6 +95,26 @@ interface FakeOptions {
    * be expressed without a queue.
    */
   countSequence?: Record<string, QueryResult[]>;
+  /**
+   * The CURRENT row in user_vault_meta, field by field. Only needed by the
+   * reconcile-retry tests: proving "the write actually landed but the response
+   * was lost" requires a fake that can show a reconcile READ the real stored
+   * values, which the canned metaUpdate response alone cannot do.
+   */
+  metaRow?: Record<string, unknown> | null;
+  /**
+   * Results (or a simulated transport failure) for successive update() calls
+   * on user_vault_meta specifically, consumed in order, falling back to
+   * metaUpdate once exhausted. An entry of { throwTransportError: true,
+   * applyToRow: true } models a write that actually reached the database and
+   * then had its response dropped, exactly like a connection cut after the
+   * server committed: the row is mutated to the written values AND the call
+   * still throws, the way a real dropped connection would.
+   */
+  metaUpdateSequence?: Array<
+    | { data: unknown[] | null; error: unknown }
+    | { throwTransportError: true; applyToRow?: boolean }
+  >;
 }
 
 /**
@@ -165,6 +187,44 @@ function makeFakeClient(options: FakeOptions = {}) {
     return { data: idFilter ? [{ id: idFilter.value }] : [], error: null };
   }
 
+  // user_vault_meta update, routed through resolveMetaUpdate() below instead
+  // of this generic path once a call reaches .select() on the update chain,
+  // which is every real call site. Left in resultFor() only as a harmless
+  // fallback for a call shape nothing here actually uses (update() awaited
+  // directly with no trailing .select()).
+  function resolveMetaUpdate(call: RecordedCall): Promise<QueryResult> {
+    const queue = options.metaUpdateSequence;
+    if (queue && queue.length > 0) {
+      const next = queue.shift()!;
+      if ("throwTransportError" in next) {
+        if (next.applyToRow && options.metaRow && call.values) {
+          Object.assign(options.metaRow, call.values);
+        }
+        return Promise.reject(new Error("transport error (simulated)"));
+      }
+      if (options.metaRow && call.values && next.data && (next.data as unknown[]).length > 0) {
+        Object.assign(options.metaRow, call.values);
+      }
+      return Promise.resolve(next);
+    }
+    const result = options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
+    if (options.metaRow && call.values && result.data && (result.data as unknown[]).length > 0) {
+      Object.assign(options.metaRow, call.values);
+    }
+    return Promise.resolve(result);
+  }
+
+  // A plain filtered read on user_vault_meta, for the reconcile-retry's
+  // select().eq("user_id", ...) call. Distinct from resultFor()'s select
+  // branch because that one is built around .range()-paged tables; this one
+  // is a single row with no paging concept at all.
+  function metaSelectResultFor(call: RecordedCall): QueryResult {
+    if (!options.metaRow) return { data: [], error: null };
+    const idFilter = call.filters.find((f) => f.column === "user_id");
+    if (idFilter && options.metaRow.user_id !== idFilter.value) return { data: [], error: null };
+    return { data: [{ ...options.metaRow }], error: null };
+  }
+
   // A head request with an exact count returns a count and no rows. PostgREST
   // computes it separately from the rows, so it is the true total rather than
   // whatever a capped read happened to return, which is the property the
@@ -222,6 +282,13 @@ function makeFakeClient(options: FakeOptions = {}) {
               call.filters.push({ column: "range", value: [from, to] });
               return Promise.resolve(resultFor(call));
             },
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              if (table === "user_vault_meta") {
+                return Promise.resolve(metaSelectResultFor(call));
+              }
+              return Promise.resolve(resultFor(call));
+            },
           };
           return chain;
         },
@@ -236,6 +303,9 @@ function makeFakeClient(options: FakeOptions = {}) {
             },
             select(columns: string) {
               call.columns = columns;
+              if (table === "user_vault_meta") {
+                return resolveMetaUpdate(call);
+              }
               return Promise.resolve(resultFor(call));
             },
           };
@@ -811,5 +881,139 @@ describe("vault password change: the re-wrapped meta write", () => {
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     expect(calls.every((c) => c.table === "user_vault_meta")).toBe(true);
+  });
+});
+
+describe("vault recovery: the meta write survives a lost response (OR-T1342)", () => {
+  function priorMetaRow(): Record<string, unknown> {
+    return {
+      user_id: "user-1",
+      enc_mek_ciphertext: "enc-mek-v0",
+      recovery_ciphertext: "recovery-ciphertext-v0",
+      vault_verifier_ciphertext: "verifier-v0",
+      vault_key_version: 2,
+    };
+  }
+
+  it("reconciles a lost response, finds the write already landed, and completes exactly once", async () => {
+    const clearMigrationKeys = vi.fn();
+    const metaRow = priorMetaRow();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      metaRow,
+      // The write actually reaches the database (applyToRow) and then the
+      // response is lost (throwTransportError), exactly like a dropped
+      // connection after the server already committed.
+      metaUpdateSequence: [{ throwTransportError: true, applyToRow: true }],
+    });
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, clearMigrationKeys),
+      sleep: async () => {},
+    });
+
+    expect(metaRow.recovery_ciphertext).toBe("recovery-ciphertext-v1");
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+    // The whole point: a write that already landed must not be sent twice.
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(1);
+  });
+
+  it("retries the write when a lost response leaves the prior values in place", async () => {
+    const clearMigrationKeys = vi.fn();
+    const metaRow = priorMetaRow();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      metaRow,
+      // The response is lost and NOTHING landed: the reconcile read must find
+      // the prior values still in place and retry the same conditional update.
+      metaUpdateSequence: [{ throwTransportError: true, applyToRow: false }],
+    });
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, clearMigrationKeys),
+      sleep: async () => {},
+    });
+
+    expect(metaRow.recovery_ciphertext).toBe("recovery-ciphertext-v1");
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(2); // the failed attempt, then the real retry
+  });
+
+  it("stops on a genuine conflict: a different session's values, neither ours nor prior", async () => {
+    const clearMigrationKeys = vi.fn();
+    const metaRow = {
+      user_id: "user-1",
+      enc_mek_ciphertext: "enc-mek-from-someone-else",
+      recovery_ciphertext: "recovery-ciphertext-from-someone-else",
+      vault_verifier_ciphertext: "verifier-from-someone-else",
+      vault_key_version: 2,
+    };
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      metaRow,
+      metaUpdateSequence: [{ throwTransportError: true, applyToRow: false }],
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(RECOVERY_META_NOT_SAVED_MESSAGE);
+
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("never reconciles or retries a structured error response, only a transport failure", async () => {
+    // The server responded and refused the write. There is nothing
+    // ambiguous to reconcile: the answer is already known.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      metaUpdate: { data: null, error: { message: "constraint violation" } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toBeTruthy();
+
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(1);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+});
+
+describe("vault recovery: the count-read retry budget is tens of seconds, not under one (OR-T1342)", () => {
+  it("sums to at least 30 seconds of backoff, computed from the exported constants", () => {
+    // Proven from COUNT_READ_ATTEMPTS and COUNT_READ_RETRY_MS themselves,
+    // not a hardcoded number, so shrinking either constant later fails this
+    // test instead of silently reintroducing the under-one-second budget.
+    let totalMs = 0;
+    for (let attempt = 1; attempt < COUNT_READ_ATTEMPTS; attempt += 1) {
+      totalMs += COUNT_READ_RETRY_MS * attempt;
+    }
+    expect(totalMs).toBeGreaterThanOrEqual(30000);
+  });
+
+  it("actually waits that long end to end when every count read fails", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      countResult: { connections: { data: null, count: null, error: { message: "still down" } } },
+    });
+    const waits: number[] = [];
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        sleep: async (ms: number) => {
+          waits.push(ms);
+        },
+      }),
+    ).rejects.toThrow(rowCountUnreadableMessage("connections"));
+
+    expect(waits.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThanOrEqual(30000);
   });
 });
