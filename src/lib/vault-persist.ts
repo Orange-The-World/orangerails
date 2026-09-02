@@ -179,6 +179,98 @@ async function exactRowCount(
   return count;
 }
 
+/**
+ * The highest key generation any row this user owns in `table` currently
+ * carries.
+ *
+ * WHY A ROTATION PICKS ITS GENERATION FROM THE ROWS AND NOT FROM A COUNTER.
+ * The obvious design is a per-user counter in user_vault_meta, incremented in
+ * the same compare-and-swap that stores the new wrappers. It is rejected here
+ * for two reasons and both are about failure, not tidiness.
+ *
+ * A rotation that stamps rows and then fails before the meta write would leave
+ * the counter unchanged, so the NEXT rotation would pick the same number the
+ * failed one had already written onto some rows. The marker would then say
+ * "this generation" about rows that are under a key which no longer exists,
+ * which is worse than no marker at all. Reading the maximum off the rows
+ * themselves cannot reuse a number, because the failed run's stamps are
+ * exactly what it reads.
+ *
+ * And user_vault_meta has no such column today (VERIFIED against
+ * information_schema on dev: it carries vault_key_version and pqc_key_version,
+ * nothing else in that family), so a counter means a migration, a production
+ * DDL step and a second thing to keep in step with the rows. This needs
+ * neither: both row tables already carry data_key_generation.
+ *
+ * WHAT vault_key_version IS NOT. It is the KDF SCHEME version, not a rotation
+ * counter: src/routes/recover.tsx writes the literal 2 and src/routes/unlock.tsx
+ * feeds it into key derivation. It does not change from one rotation to the
+ * next, so it cannot tell an old-MEK row from a new-MEK row. Do not repurpose
+ * it.
+ *
+ * An empty table answers with the column default rather than an error: a table
+ * with no rows has nothing stranded in it, and the next generation still has to
+ * be above what a concurrent insert would write.
+ */
+async function highestDataKeyGeneration(
+  supabase: VaultPersistClient,
+  table: string,
+): Promise<number> {
+  const { data, error } = await supabase
+    .from(table)
+    .select("data_key_generation")
+    .order("data_key_generation", { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  const rows = (data ?? []) as Array<{ data_key_generation?: unknown }>;
+  if (rows.length === 0) return DATA_KEY_GENERATION_DEFAULT;
+  const highest = rows[0]?.data_key_generation;
+  if (typeof highest !== "number") throw new Error(GENERATION_UNREADABLE_MESSAGE);
+  return highest;
+}
+
+/**
+ * How many rows this user owns in `table` are NOT stamped with `generation`.
+ *
+ * THIS IS THE TEST THAT DECIDES THE ROTATION IS COMPLETE, and it is a different
+ * kind of test from everything above it. The sweep proves what this run
+ * REACHED. The exact count compares two totals. Both are assembled on the
+ * client, and two concurrent writes in opposite directions cancel in that
+ * arithmetic: one insert of a row under the old MEK and one delete of a row
+ * this run already rewrote leave every number unchanged, because the deleted
+ * id stays in the migrated set. The inserted row is then stranded and nothing
+ * raises.
+ *
+ * A count of rows not at this generation cannot be cancelled that way. It is
+ * computed server side over the rows that exist at the moment it runs, so a
+ * deletion removes a row from the question entirely rather than paying for an
+ * insertion, and a row this run never touched is counted no matter how it came
+ * to be there. It also does not care WHY a row was missed, which is the same
+ * property that makes the sweep worth keeping: it does not depend on anyone
+ * having enumerated the mechanisms.
+ *
+ * It is not clipped by the project's server-side maximum row count either. An
+ * exact count is computed by the database and returned out of band, so it does
+ * not travel in the row payload that the cap applies to.
+ *
+ * A count that cannot be read is a FAILURE. An unreadable count and a clean
+ * rotation are indistinguishable here, and treating them alike is precisely
+ * the silence this whole file exists to remove.
+ */
+async function rowsNotAtGeneration(
+  supabase: VaultPersistClient,
+  table: string,
+  generation: number,
+): Promise<number> {
+  const { count, error } = await supabase
+    .from(table)
+    .select("id", { count: "exact", head: true })
+    .neq("data_key_generation", generation);
+  if (error) throw error;
+  if (typeof count !== "number") throw new Error(GENERATION_UNREADABLE_MESSAGE);
+  return count;
+}
+
 /** One table's share of the rotation, as the reconciliation needs to see it. */
 interface TableReconcile {
   table: string;
