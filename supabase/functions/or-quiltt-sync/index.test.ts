@@ -407,7 +407,7 @@ Deno.test('reDriveReadyDeferrals: clears opk_deferred_at for OPK-ready subaccoun
 });
 
 Deno.test('reDriveReadyDeferrals: returns error string when first query fails, does not throw', async () => {
-  const mockClient = {
+  const mockClient = chainable({
     from(_table: string) {
       return {
         select() { return this; },
@@ -419,7 +419,7 @@ Deno.test('reDriveReadyDeferrals: returns error string when first query fails, d
         },
       };
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   const result = await reDriveReadyDeferrals(mockClient as any);
@@ -442,7 +442,7 @@ Deno.test('reDriveReadyDeferrals: re-drives sink platform subaccounts with no op
   let callSeq = 0;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(table: string) {
       callSeq++;
       const seq = callSeq;
@@ -508,7 +508,7 @@ Deno.test('reDriveReadyDeferrals: re-drives sink platform subaccounts with no op
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, is() { return this as any; }, not() { return Promise.resolve({ data: [], error: null }); } };
     },
-  };
+  });
 
   const result = await reDriveReadyDeferrals(mockClient);
   assertEquals(result.reDriven, 1, 'reDriven must be 1: the sink event is cleared');
@@ -543,7 +543,7 @@ function makeQuilttSyncMock(opts: {
   opkPublic?: string;
 }): { client: any; inserted: string[]; cleanup: () => void } {
   const inserted: string[] = [];
-  const client = {
+  const client = chainable({
     from(table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -608,7 +608,7 @@ function makeQuilttSyncMock(opts: {
     rpc(_name: string) {
       return Promise.resolve({ data: 'stubtoken', error: null });
     },
-  };
+  });
   const origFetch = (globalThis as any).fetch;
   // Patch global fetch for Quiltt GraphQL calls.
   // When source_wallets is empty the code does a GetAccounts pre-fetch (DL-0741)
