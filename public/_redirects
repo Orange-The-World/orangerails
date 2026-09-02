@@ -1,4 +1,4 @@
-;# Cloudflare Pages redirect rules. Applied at edge before the SPA loads.
+# Cloudflare Pages redirect rules. Applied at edge before the SPA loads.
 #
 # docs.orangerails.com is a custom domain on THIS project's own Cloudflare
 # Pages deployment (orangerails-prod), the same deployment that contains
