@@ -20,7 +20,7 @@
 # Domain-prefix forms. These should match for any visitor on the docs.*
 # host even though the host is attached to the same orangerails-prod /
 # orangerails-dev Pages project.
-https://docs.orangerails.com/* https://orangerails.com/docs/:splat 302
+https://docs.orangerails.com/* https://connect.orangerails.com/docs/:splat 302
 https://docs.orangerails.dev/* https://orangerails.dev/docs/:splat 302
 
 # SPA deep-link fallback. MUST be the last rule so the specific rules
