@@ -633,9 +633,17 @@ jobs:
   # OR-T1340. RLS regresses the same silent way anon-EXECUTE grants do: a
   # migration drops or rewrites a policy and nothing throws, it just returns
   # rows (or denies them) to whoever asks next. This job diffs what
-  # pg_policies actually reports on this branch's project against
-  # supabase/rls-policy-baseline.tsv, the committed statement of what the
-  # policy set should be. A mismatch does not mean the change is wrong, it
+  # pg_policies actually reports on this branch's project against the
+  # baseline captured from THAT project: rls-policy-baseline.dev.tsv or
+  # rls-policy-baseline.prod.tsv, selected from the target job's resolved
+  # environment. One file cannot describe two clusters -- measured
+  # 2026-09-02, dev carries 67 policies in schema public and prod carries
+  # 73 -- so a single baseline makes one project permanently red and the
+  # obvious fix flips the failure to the other project. There is no
+  # fallback to the other cluster's file: a resolved target with no
+  # baseline is reported UNKNOWN and blocks the deploy, because measuring
+  # prod against dev's expectations is worse than not measuring it.
+  # A mismatch does not mean the change is wrong, it
   # means an intentional RLS edit must update the baseline in the SAME PR, so
   # the diff is reviewed rather than silently absorbed.
   #
