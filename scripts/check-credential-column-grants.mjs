@@ -5,13 +5,14 @@
  * those roles a table wide grant on a table that carries one.
  *
  * WHY THIS EXISTS. Two migrations already assert this end state, and they assert it well:
- * 20260713160000_platforms_column_grants.sql and 20260713120001_apps_client_secret_column_grants.sql
- * each end in a DO block that fails the migration if a browser facing role can reach one of
- * these columns. What they cannot do is keep asserting it. A migration is applied once and
- * never runs again, and no job in this workflow stands up a Postgres and replays migrations,
- * so those assertions fired the day they landed and will never fire again. A control that has
- * already fired and gone home is not a control. This file is the same invariant as a standing
- * check that runs on every pull request, against our SQL rather than against a database.
+ * 20260713160000_platforms_column_grants.sql and
+ * 20260713120001_apps_client_secret_column_grants.sql each end in a DO block that fails the
+ * migration if a browser facing role can reach one of these columns. What they cannot do is
+ * keep asserting it. A migration is applied once and never runs again, and no job in this
+ * workflow stands up a Postgres and replays migrations, so those assertions fired the day they
+ * landed and will never fire again. A control that has already fired and gone home is not a
+ * control. This file is the same invariant as a standing check that runs on every pull
+ * request, against our SQL rather than against a database.
  *
  * THE RULE IT ENCODES, which is the one the two migrations spell out at length:
  *
@@ -21,8 +22,8 @@
  * A table level GRANT covers every column of the row, credential column included, and no
  * policy can claw that back. Postgres also cannot subtract one column from a table level
  * grant: REVOKE SELECT (col) against a role that holds the table level privilege is a no-op.
- * That is why a single table wide GRANT undoes all of this work at once, and why it is the
- * thing this gate is here to catch.
+ * That is why a single table wide GRANT undoes all of this work in one statement, and why it
+ * is the thing this gate is here to catch.
  *
  * WHAT IT CHECKS, exactly:
  *   1. Migrations are replayed in filename order and GRANT / REVOKE are folded into an END
@@ -38,9 +39,9 @@
  *      written narrowly, so neither is expressible as an exception.
  *   5. A column level REVOKE does NOT cancel a table wide GRANT, because in Postgres it does
  *      not. The fold models the database rather than flattering us.
- *   6. Dynamic SQL is read. Both migrations above run their GRANT and REVOKE inside DO blocks
- *      as EXECUTE format(...), so a parser that drops dollar quoted bodies sees an empty file
- *      and reports green over a read that found nothing. This one unwraps them.
+ *   6. Dynamic SQL is read, wherever it sits. Both migrations above run their GRANT and REVOKE
+ *      inside DO blocks as EXECUTE format(...), so a parser that drops dollar quoted bodies
+ *      sees an empty file and reports green over a read that found nothing.
  *
  * WHAT IT CANNOT SEE. Four real blind spots, written here rather than only in the pull
  * request, because a control that appears to cover more than it does is what stops anyone
@@ -48,9 +49,9 @@
  *
  *   First, it reads our SQL, not the live database. A GRANT typed straight into a SQL console
  *   never reaches a migration and is invisible here. Catching that needs a live read of the
- *   catalog, which needs a database credential CI does not hold. scripts/check-anon-acl-snapshot.mjs
- *   is that other half, and note that only its selftest runs in this workflow: the check
- *   itself runs against a catalog snapshot outside it.
+ *   catalog, which needs a database credential CI does not hold.
+ *   scripts/check-anon-acl-snapshot.mjs is that other half, and note that only its selftest
+ *   runs in this workflow: the check itself runs against a catalog snapshot outside it.
  *
  *   Second, a grantee computed at runtime cannot be resolved to a role name. A dynamic GRANT
  *   is therefore treated as if it named every browser facing role, so it fails; a dynamic
@@ -98,6 +99,12 @@ const GUARDED = {
   "public.apps": ["client_secret"],
 };
 
+/** Where to point a reader when a table's shape regresses. */
+const REFERENCE_MIGRATION = {
+  "public.platforms": "20260713160000_platforms_column_grants.sql",
+  "public.apps": "20260713120001_apps_client_secret_column_grants.sql",
+};
+
 /** The grantees this gate cares about. PUBLIC is wider than anon, never narrower. */
 const RISKY_GRANTEES = ["anon", "authenticated", "public"];
 
@@ -109,15 +116,15 @@ const PRIVILEGE_WORD =
  *   - line and block comments are removed, so a commented out grant is not a grant;
  *   - dollar quote tags are removed but their BODIES ARE KEPT, so the inside of a DO block is
  *     read as SQL;
- *   - single quotes are removed but their contents are kept, so EXECUTE format('GRANT ... '
- *     'ON TABLE ... TO %I') reads as the statement it builds. Quote characters are deleted
- *     rather than tracked as string state on purpose: an apostrophe inside a comment or a
- *     RAISE message would otherwise unbalance the parse and swallow a real statement, and
- *     silently reading less than the whole file is the failure mode this gate exists to end.
+ *   - single quotes are removed but their contents are kept, so
+ *     EXECUTE format('GRANT ... ' 'ON TABLE ... TO %I') reads as the statement it builds.
  *
- * The cost of that choice is stated plainly: prose inside a string that spells out a complete
- * GRANT statement after a semicolon will be read as that statement. It fails loudly, and the
- * fix is to reword the prose.
+ * Quote characters are deleted rather than tracked as string state on purpose: an apostrophe
+ * inside a RAISE message would otherwise unbalance the parse and swallow the rest of the file,
+ * and silently reading less than the whole input is the exact failure mode this gate exists to
+ * end. The cost of that choice, stated plainly: prose inside a string that spells out a
+ * complete GRANT statement, positioned where a statement may legally begin, is read as that
+ * statement. It fails loudly and the fix is to reword the prose.
  */
 export function flatten(sql) {
   let out = "";
@@ -149,22 +156,35 @@ export function flatten(sql) {
   return out;
 }
 
-/** Split flattened SQL into single line statements. */
-export function statements(sql) {
+/** Split flattened SQL into single line chunks. A chunk is not yet a statement. */
+export function chunks(sql) {
   return flatten(sql)
     .split(";")
     .map((s) => s.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 }
 
-/** Strip an EXECUTE / EXECUTE format( wrapper so dynamic SQL is judged as the SQL it is. */
-function unwrapDynamic(stmt) {
-  let s = stmt.trim();
-  const wrapper = /^(?:EXECUTE\s+|format\s*\(\s*)/i;
-  for (let n = 0; n < 4 && wrapper.test(s); n += 1) {
-    s = s.replace(wrapper, "").trim();
+/**
+ * The contexts a statement may legally begin in, other than the start of a chunk. Splitting a
+ * DO block on semicolons leaves the interesting statement in the middle of the chunk, because
+ * the DECLARE section ended with the semicolon: the chunk reads
+ * `BEGIN FOREACH ... LOOP EXECUTE format( REVOKE ALL ...`. Anchoring to the chunk start reads
+ * half the file and reports on the half it read.
+ */
+const STATEMENT_CONTEXT = /(?:\b(?:EXECUTE|BEGIN|LOOP|THEN|ELSE|DO|END)\s*$)|\(\s*$/i;
+
+/** Every place in a chunk where a statement this gate cares about actually starts. */
+export function starts(chunk) {
+  const out = [];
+  const re = /\b(?:GRANT|REVOKE|ALTER)\b/gi;
+  let match;
+  while ((match = re.exec(chunk)) !== null) {
+    const before = chunk.slice(0, match.index);
+    // `REVOKE GRANT OPTION FOR ...` must not be read as a GRANT: the word is preceded by
+    // REVOKE, which is not a place a statement begins.
+    if (before.trim() === "" || STATEMENT_CONTEXT.test(before)) out.push(chunk.slice(match.index));
   }
-  return s;
+  return out;
 }
 
 /** Everything after the last standalone occurrence of a keyword, or null. */
@@ -177,9 +197,9 @@ function tailAfter(stmt, keyword) {
 }
 
 /**
- * Which browser facing roles a grantee list reaches. `dynamic` means the list contains a
- * format placeholder, so the real grantee is not knowable from the source; see the header for
- * how that is treated in each direction.
+ * Which browser facing roles a grantee list reaches. `dynamic` means the list carries a format
+ * placeholder, so the real grantee is not knowable from the source; see the header for how
+ * that is treated in each direction.
  */
 export function grantees(tail) {
   if (tail === null) return { roles: [], dynamic: false };
@@ -194,14 +214,13 @@ const unquote = (s) => s.replace(/"/g, "").toLowerCase();
 
 /** public.platforms from `platforms`, `public.platforms` or `"public"."platforms"`. */
 function tableKey(part1, part2) {
-  const a = unquote(part1);
-  if (!part2) return `${GUARDED_SCHEMA}.${a}`;
-  return `${a}.${unquote(part2)}`;
+  const first = unquote(part1);
+  return part2 ? `${first}.${unquote(part2)}` : `${GUARDED_SCHEMA}.${first}`;
 }
 
 /**
- * Read the privilege clause: which named columns it carries, and whether any privilege in it
- * is table wide (that is, written without a column list).
+ * Read a privilege clause: which named columns it carries, and whether any privilege in it is
+ * table wide, that is, written without a column list.
  */
 export function privileges(clause) {
   const columns = new Set();
@@ -226,7 +245,7 @@ function entryFor(state, table, role) {
 /**
  * Fold an ordered array of { name, sql } into the end state the SQL declares.
  * Returns { state, hard }: `state` maps `table|role` to what that role is left holding, and
- * `hard` holds findings that no end state can excuse.
+ * `hard` holds findings no end state can excuse.
  */
 export function scan(files) {
   const state = new Map();
@@ -237,86 +256,87 @@ export function scan(files) {
     /\bON\s+(?:TABLE\s+)?("[^"]+"|[A-Za-z_][A-Za-z0-9_]*)(?:\s*\.\s*("[^"]+"|[A-Za-z_][A-Za-z0-9_]*))?/i;
 
   for (const file of files) {
-    for (const raw of statements(file.sql)) {
-      const stmt = unwrapDynamic(raw);
-
-      if (/^ALTER\s+DEFAULT\s+PRIVILEGES\b/i.test(stmt)) {
-        if (!/\bON\s+TABLES\b/i.test(stmt)) continue;
-        const schema = /\bIN\s+SCHEMA\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(stmt);
-        if (!schema || schema[1].toLowerCase() !== GUARDED_SCHEMA) continue;
-        // A REVOKE of the schema default is the durable fix and passes. Only the widening
-        // direction is refused, and REVOKE GRANT OPTION FOR reads as the revoke it is.
-        if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b(?:(?!\bREVOKE\b).)*\bGRANT\b/i.test(stmt)) continue;
-        const who = grantees(tailAfter(stmt, "TO"));
-        if (who.roles.length) {
-          hard.push(
-            `${file.name}: ALTER DEFAULT PRIVILEGES grants on future ${GUARDED_SCHEMA} tables ` +
-            `to ${who.roles.join(", ")}. Any guarded table recreated after this is born with a ` +
-            `table wide grant covering its credential column. This is not expressible as an ` +
-            `exception: grant the exact columns on the exact table instead.`);
+    for (const chunk of chunks(file.sql)) {
+      for (const stmt of starts(chunk)) {
+        if (/^ALTER\b/i.test(stmt)) {
+          if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b/i.test(stmt)) continue;
+          if (!/\bON\s+TABLES\b/i.test(stmt)) continue;
+          const schema = /\bIN\s+SCHEMA\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(stmt);
+          if (!schema || schema[1].toLowerCase() !== GUARDED_SCHEMA) continue;
+          // A REVOKE of the schema default is the durable fix and passes. Only the widening
+          // direction is refused, and REVOKE GRANT OPTION FOR reads as the revoke it is.
+          if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b(?:(?!\bREVOKE\b).)*\bGRANT\b/i.test(stmt)) continue;
+          const who = grantees(tailAfter(stmt, "TO"));
+          if (who.roles.length) {
+            hard.push(
+              `${file.name}: ALTER DEFAULT PRIVILEGES grants on future ${GUARDED_SCHEMA} ` +
+              `tables to ${who.roles.join(", ")}. Any guarded table recreated after this is ` +
+              `born with a table wide grant covering its credential column. Not expressible ` +
+              `as an exception: grant the exact columns on the exact table instead.`);
+          }
+          continue;
         }
-        continue;
-      }
 
-      const isGrant = /^GRANT\b/i.test(stmt);
-      const isRevoke = /^REVOKE\b/i.test(stmt);
-      if (!isGrant && !isRevoke) continue;
+        const isGrant = /^GRANT\b/i.test(stmt);
+        const isRevoke = /^REVOKE\b/i.test(stmt);
+        if (!isGrant && !isRevoke) continue;
 
-      const who = grantees(tailAfter(stmt, isGrant ? "TO" : "FROM"));
-      if (!who.roles.length) continue;
+        const who = grantees(tailAfter(stmt, isGrant ? "TO" : "FROM"));
+        if (!who.roles.length) continue;
 
-      const onIndex = stmt.search(/\bON\b/i);
-      if (onIndex === -1) continue;
-      const clause = stmt
-        .slice(0, onIndex)
-        .replace(/^(?:GRANT|REVOKE)\b/i, "")
-        .replace(/^\s*GRANT\s+OPTION\s+FOR\b/i, "");
-      const { columns, tableWide } = privileges(clause);
+        const onIndex = stmt.search(/\bON\b/i);
+        if (onIndex === -1) continue;
+        const clause = stmt
+          .slice(0, onIndex)
+          .replace(/^(?:GRANT|REVOKE)\b/i, "")
+          .replace(/^\s*GRANT\s+OPTION\s+FOR\b/i, "");
+        const { columns, tableWide } = privileges(clause);
 
-      const blanket = allTablesRe.exec(stmt);
-      if (blanket) {
-        if (unquote(blanket[1]) !== GUARDED_SCHEMA) continue;
-        if (isGrant) {
-          hard.push(
-            `${file.name}: blanket GRANT ON ALL TABLES IN SCHEMA ${GUARDED_SCHEMA} to ` +
-            `${who.roles.join(", ")}. That covers every guarded table at once, and a table ` +
-            `wide grant covers every column of the row including the credential column. Not ` +
-            `expressible as an exception: name the table and the columns.`);
-        } else {
-          for (const table of Object.keys(GUARDED)) {
-            for (const role of who.roles) {
-              const entry = entryFor(state, table, role);
-              entry.wide = null;
-              entry.columns.clear();
+        const blanket = allTablesRe.exec(stmt);
+        if (blanket) {
+          if (unquote(blanket[1]) !== GUARDED_SCHEMA) continue;
+          if (isGrant) {
+            hard.push(
+              `${file.name}: blanket GRANT ON ALL TABLES IN SCHEMA ${GUARDED_SCHEMA} to ` +
+              `${who.roles.join(", ")}. That covers every guarded table at once, and a table ` +
+              `wide grant covers every column of the row including the credential column. Not ` +
+              `expressible as an exception: name the table and the columns.`);
+          } else {
+            for (const table of Object.keys(GUARDED)) {
+              for (const role of who.roles) {
+                const entry = entryFor(state, table, role);
+                entry.wide = null;
+                entry.columns.clear();
+              }
             }
           }
+          continue;
         }
-        continue;
-      }
 
-      const target = tableRe.exec(stmt);
-      if (!target) continue;
-      const table = tableKey(target[1], target[2]);
-      if (!GUARDED[table]) continue;
+        const target = tableRe.exec(stmt);
+        if (!target) continue;
+        const table = tableKey(target[1], target[2]);
+        if (!GUARDED[table]) continue;
 
-      for (const role of who.roles) {
-        const entry = entryFor(state, table, role);
-        if (isGrant) {
-          if (tableWide) entry.wide = file.name;
-          for (const column of columns) {
-            if (GUARDED[table].includes(column)) entry.columns.set(column, file.name);
+        for (const role of who.roles) {
+          const entry = entryFor(state, table, role);
+          if (isGrant) {
+            if (tableWide) entry.wide = file.name;
+            for (const column of columns) {
+              if (GUARDED[table].includes(column)) entry.columns.set(column, file.name);
+            }
+          } else if (tableWide) {
+            // A table wide REVOKE takes the lot, which is why both migrations open with
+            // REVOKE ALL before re-granting the display columns.
+            entry.wide = null;
+            entry.columns.clear();
+          } else {
+            // A column level REVOKE does NOT clear a table level grant: Postgres treats it as
+            // a no-op against a role holding the table privilege. Modelling that faithfully is
+            // the point, because assuming otherwise is the exact mistake these migrations
+            // exist to correct.
+            for (const column of columns) entry.columns.delete(column);
           }
-        } else if (tableWide) {
-          // A table wide REVOKE takes the lot, which is exactly why both migrations open with
-          // REVOKE ALL before re-granting the display columns.
-          entry.wide = null;
-          entry.columns.clear();
-        } else {
-          // A column level REVOKE does NOT clear a table level grant: Postgres treats it as a
-          // no-op against a role holding the table privilege. Modelling that faithfully is the
-          // point, because assuming otherwise is the exact mistake these migrations exist to
-          // correct.
-          for (const column of columns) entry.columns.delete(column);
         }
       }
     }
@@ -335,7 +355,7 @@ export function compare(state, hard) {
         `${table}: table wide grant to ${role} in ${entry.wide}. A table level grant covers ` +
         `every column of the row, so it re-exposes ${GUARDED[table].join(", ")} in one ` +
         `statement, and no RLS policy can claw that back. Revoke it and re-grant the exact ` +
-        `display columns, as ${table === "public.apps" ? "20260713120001_apps_client_secret_column_grants.sql" : "20260713160000_platforms_column_grants.sql"} does.`);
+        `display columns, as ${REFERENCE_MIGRATION[table]} does.`);
       continue;
     }
     for (const [column, where] of entry.columns) {
@@ -365,6 +385,29 @@ const CASES = [
         "  END LOOP;\nEND\n$$;",
     }],
     expect: 0,
+  },
+  {
+    name: "a revoke buried mid chunk after BEGIN FOREACH is still read",
+    files: [
+      { name: "a.sql", sql: "GRANT SELECT ON public.platforms TO anon;" },
+      {
+        name: "b.sql",
+        sql:
+          "DO $$\nDECLARE role_name TEXT;\nBEGIN\n" +
+          "  FOREACH role_name IN ARRAY ARRAY['anon'] LOOP\n" +
+          "    EXECUTE format('REVOKE ALL ON TABLE public.platforms FROM %I', role_name);\n" +
+          "  END LOOP;\nEND\n$$;",
+      },
+    ],
+    expect: 0,
+  },
+  {
+    name: "a dynamic table wide grant buried mid chunk fails",
+    files: [{
+      name: "a.sql",
+      sql: "DO $$ BEGIN EXECUTE format('GRANT SELECT ON TABLE public.platforms TO %I', r); END $$;",
+    }],
+    expect: 1,
   },
   {
     name: "a table wide grant to anon fails",
@@ -455,12 +498,12 @@ const CASES = [
     expect: 0,
   },
   {
-    name: "a dynamic table wide grant fails, because the grantee cannot be ruled out",
-    files: [{
-      name: "a.sql",
-      sql: "DO $$ BEGIN EXECUTE format('GRANT SELECT ON TABLE public.platforms TO %I', r); END $$;",
-    }],
-    expect: 1,
+    name: "REVOKE GRANT OPTION FOR is read as the revoke it is",
+    files: [
+      { name: "a.sql", sql: "GRANT SELECT ON public.apps TO anon;" },
+      { name: "b.sql", sql: "REVOKE GRANT OPTION FOR ALL ON public.apps FROM anon;" },
+    ],
+    expect: 0,
   },
   {
     name: "a blanket grant across the schema is refused outright",
@@ -508,6 +551,14 @@ const CASES = [
     expect: 0,
   },
   {
+    name: "the schema default in another schema is out of scope",
+    files: [{
+      name: "a.sql",
+      sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA client_platform GRANT SELECT ON TABLES TO anon;",
+    }],
+    expect: 0,
+  },
+  {
     name: "service_role is untouched by this gate",
     files: [{ name: "a.sql", sql: "GRANT ALL ON public.platforms TO service_role;" }],
     expect: 0,
@@ -518,18 +569,27 @@ const CASES = [
     expect: 0,
   },
   {
+    name: "a function grant is another gate's business",
+    files: [{ name: "a.sql", sql: "GRANT EXECUTE ON FUNCTION public.foo(uuid) TO anon;" }],
+    expect: 0,
+  },
+  {
     name: "a commented out grant is not a grant",
     files: [{
       name: "a.sql",
-      sql: "-- GRANT SELECT ON public.platforms TO anon;\n/* GRANT SELECT ON public.apps TO anon; */\nSELECT 1;",
+      sql:
+        "-- GRANT SELECT ON public.platforms TO anon;\n" +
+        "/* GRANT SELECT ON public.apps TO anon; */\nSELECT 1;",
     }],
     expect: 0,
   },
   {
-    name: "a rollback note in a trailing comment block is not a grant",
+    name: "a rollback note in trailing comments is not a grant",
     files: [{
       name: "a.sql",
-      sql: "SELECT 1;\n--   REVOKE ALL ON TABLE public.apps FROM anon, authenticated;\n--   GRANT SELECT, INSERT ON TABLE public.apps TO anon, authenticated;\n",
+      sql:
+        "SELECT 1;\n--   REVOKE ALL ON TABLE public.apps FROM anon, authenticated;\n" +
+        "--   GRANT SELECT, INSERT ON TABLE public.apps TO anon, authenticated;\n",
     }],
     expect: 0,
   },
@@ -545,7 +605,9 @@ const CASES = [
     name: "a COMMENT ON COLUMN saying none may be granted is not a grant",
     files: [{
       name: "a.sql",
-      sql: "COMMENT ON COLUMN public.apps.client_secret IS 'Server side only: anon and authenticated hold no privilege on this column, and none may be granted.';",
+      sql:
+        "COMMENT ON COLUMN public.apps.client_secret IS 'Server side only: anon and " +
+        "authenticated hold no privilege on this column, and none may be granted.';",
     }],
     expect: 0,
   },
@@ -583,7 +645,7 @@ if (process.argv.includes("--selftest")) {
   if (files.length === 0) {
     console.error(
       `MISSING: ${MIGRATIONS_DIR} holds no .sql files. A scan of nothing passes for free, ` +
-      `which is the failure this line exists to refuse.`);
+      `which is the outcome this line exists to refuse.`);
     process.exit(1);
   }
 
