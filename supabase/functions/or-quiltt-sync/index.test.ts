@@ -971,7 +971,7 @@ Deno.test('DL-1445: errored subtypes map to the catalog, unknown subtypes still 
 function errorReconcileClient(sinkFormat: string | null) {
   const captured: { patch?: Record<string, unknown> } = {};
   // deno-lint-ignore no-explicit-any
-  const client: any = {
+  const client: any = chainable({
     from(table: string) {
       if (table === 'platforms') {
         // deno-lint-ignore no-explicit-any
@@ -998,7 +998,7 @@ function errorReconcileClient(sinkFormat: string | null) {
       };
       return chain;
     },
-  };
+  });
   return { client, captured };
 }
 
@@ -1053,7 +1053,7 @@ Deno.test('DL-1445 follow-up: a platforms read failure must not stop the status 
   let captured: Record<string, unknown> | undefined;
 
   // deno-lint-ignore no-explicit-any
-  const client: any = {
+  const client: any = chainable({
     from(table: string) {
       if (table === 'platforms') {
         // deno-lint-ignore no-explicit-any
@@ -1081,7 +1081,7 @@ Deno.test('DL-1445 follow-up: a platforms read failure must not stop the status 
       };
       return chain;
     },
-  };
+  });
 
   const err = await reconcileConnectionError(client, erroredEvent, 'sub-1');
 
