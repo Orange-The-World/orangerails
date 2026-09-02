@@ -84,6 +84,15 @@ on:
           short poll instead.
         required: false
         default: '10'
+      stuck_max_age_minutes:
+        description: >
+          Stop retrying a check older than this many minutes and report it
+          unresolved instead. Bounds how many times the sweep can retry the
+          same stuck deployment; without this, a retry that does not clear
+          the check-run would otherwise be repeated every cycle forever.
+          Sweep path only.
+        required: false
+        default: '180'
 
 permissions:
   contents: read
@@ -98,11 +107,22 @@ jobs:
   sweep:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # check_run.name and check_run.details_url are attacker-influenceable
+    # text: whoever can create a check-run on this repo controls them, and
+    # this job holds Cloudflare Pages deploy credentials. They are passed
+    # in as env vars below, never interpolated directly into the bash
+    # script, so a value containing shell metacharacters cannot inject.
     env:
       CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       STUCK_AFTER_MINUTES: ${{ github.event.inputs.stuck_after_minutes || '10' }}
+      STUCK_MAX_AGE_MINUTES: ${{ github.event.inputs.stuck_max_age_minutes || '180' }}
+      EVENT_CHECK_RUN_ID: ${{ github.event.check_run.id }}
+      EVENT_CHECK_RUN_NAME: ${{ github.event.check_run.name }}
+      EVENT_CHECK_RUN_DETAILS_URL: ${{ github.event.check_run.details_url }}
+      EVENT_CHECK_RUN_STATUS: ${{ github.event.check_run.status }}
+      EVENT_CHECK_RUN_HEAD_SHA: ${{ github.event.check_run.head_sha }}
     steps:
       - name: Require Cloudflare credentials
         run: |
@@ -179,11 +199,11 @@ jobs:
           }
 
           if [ "${GITHUB_EVENT_NAME}" = "check_run" ]; then
-            check_id="${{ github.event.check_run.id }}"
-            check_name="${{ github.event.check_run.name }}"
-            details_url="${{ github.event.check_run.details_url }}"
-            status="${{ github.event.check_run.status }}"
-            head_sha="${{ github.event.check_run.head_sha }}"
+            check_id="${EVENT_CHECK_RUN_ID}"
+            check_name="${EVENT_CHECK_RUN_NAME}"
+            details_url="${EVENT_CHECK_RUN_DETAILS_URL}"
+            status="${EVENT_CHECK_RUN_STATUS}"
+            head_sha="${EVENT_CHECK_RUN_HEAD_SHA}"
 
             case "$check_name" in
               "Cloudflare Pages: "*) : ;;
@@ -257,6 +277,11 @@ jobs:
                 age_min=$(( (now - $(date -d "$started" +%s)) / 60 ))
                 [ "$age_min" -lt "$STUCK_AFTER_MINUTES" ] && continue
                 found=$((found + 1))
+                if [ "$age_min" -ge "$STUCK_MAX_AGE_MINUTES" ]; then
+                  unresolved=$((unresolved + 1))
+                  report="${report}- PR check ${check_id} (${check_name}), ${age_min}m: EXCEEDS_MAX_RETRY_WINDOW, not retried again, needs a human to look\n"
+                  continue
+                fi
                 result=$(resolve_one "$check_name" "$details_url" "0")
                 case "$result" in
                   RETRIED:*) resolved=$((resolved + 1)) ;;
