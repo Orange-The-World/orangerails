@@ -170,16 +170,43 @@ BEGIN
   END IF;
 
   -- 4. The recovery path needs the policy as well as the privilege. Without an
-  --    UPDATE policy the grant above is permitted and then matches zero rows,
-  --    which breaks rotation exactly as a missing grant would, but quietly.
+  --    applicable UPDATE policy the grant above is permitted and then matches
+  --    zero rows, which breaks rotation exactly as a missing grant would, but
+  --    quietly.
+  --
+  --    THREE THINGS THIS PREDICATE HAS TO GET RIGHT. A test for "a policy with
+  --    polcmd = 'w' exists" answers a different question from "an update by
+  --    this role is admitted", and the gap runs in both directions:
+  --
+  --      polcmd IN ('w','*')  a FOR ALL policy covers UPDATE. Testing 'w'
+  --                           alone raises on a table whose update is in fact
+  --                           covered, which blocks a legitimate apply.
+  --      polpermissive        a RESTRICTIVE policy grants nothing, it only
+  --                           narrows. With no applicable PERMISSIVE policy the
+  --                           update still matches zero rows, so a restrictive
+  --                           only policy must not satisfy this check.
+  --      role MEMBERSHIP      row level security applies a policy when the
+  --                           current role is a MEMBER of one of polroles, not
+  --                           only when it is named. An exact oid match reads
+  --                           false for a policy addressed to a group role that
+  --                           authenticated belongs to, which is a false fail.
+  --
+  --    r = 0 is the PUBLIC case and must stay. pg_has_role returns false for
+  --    oid 0 rather than raising (measured on dev, not assumed), so without
+  --    that branch a policy written TO public would read as not applying.
+  --
+  --    This is the same predicate as check 4 of 20260902234500, with the
+  --    command letter changed, so the two files do not disagree about what a
+  --    live policy is.
   IF NOT EXISTS (
-        SELECT 1 FROM pg_policy
-         WHERE polrelid = 'public.connections'::regclass
-           AND polcmd IN ('w', '*')
-           AND ('authenticated'::regrole = ANY(polroles)
-                OR polroles = '{0}'::oid[])) THEN
+        SELECT 1 FROM pg_policy p
+         WHERE p.polrelid = 'public.connections'::regclass
+           AND p.polcmd IN ('w', '*')
+           AND p.polpermissive
+           AND EXISTS (SELECT 1 FROM unnest(p.polroles) r
+                        WHERE r = 0 OR pg_has_role('authenticated', r, 'MEMBER'))) THEN
     RAISE EXCEPTION
-      'connections: no UPDATE (or FOR ALL) policy applies to authenticated, so the vault recovery write would match zero rows';
+      'connections: no permissive UPDATE (or FOR ALL) policy applies to authenticated, so the vault recovery write would match zero rows';
   END IF;
 
   -- 5. The server side path must be untouched. If this fires, the revoke hit the
