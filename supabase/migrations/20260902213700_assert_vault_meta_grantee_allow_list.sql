@@ -239,6 +239,25 @@
 -- does not name, this file raises and the apply fails loudly rather than passing
 -- quietly, which is the safe direction, but it is still a failure somebody has
 -- to handle. Run the query above on production before the production apply.
+--
+-- This checks ACL ENTRIES, not effective holders. A role granted MEMBERSHIP in
+-- an admitted role (postgres, service_role, or_agent_reader) holds everything
+-- that role holds on these two tables and creates no ACL entry of its own, so
+-- it is invisible to this assertion. Measured rather than assumed: on dev the
+-- only members of those three roles are authenticator and postgres, so live
+-- exposure today is zero. Walking pg_auth_members to close this is deliberately
+-- not done here, because it widens a file that is doing one job well; it
+-- belongs in the standing ACL invariant probe instead.
+--
+-- On a FRESH or RESTORED database this assertion is VACUOUS with respect to
+-- or_agent_reader, the one grantee it was rewritten to constrain. The migration
+-- that grants it access is numbered above this file (see WHAT THIS FILE DOES
+-- NOT DO: it runs once per project, not as a standing monitor), so on a fresh
+-- apply the order is: this file runs and finds nothing because the role and its
+-- grants do not exist yet, the grants are created afterward, and nothing checks
+-- them again. On dev and prod today the 22 pair constraint holds only because
+-- or_agent_reader was already hand granted before this file existed, not
+-- because this file proved it on a fresh database.
 
 DO $$
 DECLARE
