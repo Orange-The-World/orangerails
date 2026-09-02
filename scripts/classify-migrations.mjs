@@ -59,6 +59,43 @@ function escapeForRegExp(s) {
 }
 
 /**
+ * Canonicalise a schema-qualified, possibly quoted routine name so the
+ * definition side and the invocation side agree on the same token for the
+ * same SQL (OR-T1708). Structural whitespace, the kind that tolerates
+ * `public . thing`, is removed entirely, exactly as before. Whitespace
+ * INSIDE a quoted identifier is significant in PostgreSQL and is only
+ * collapsed to a single space here, never stripped, which is exactly what
+ * the invocation side does to the same text once its quotes are removed
+ * (see the flattening in isInvokedBy). Before this, a blanket
+ * `.replace(/\s+/g, '')` on the definition side deleted the space inside
+ * `public."purge audit"` too, producing a name ("purgeaudit") that does not
+ * exist, so the two sides could never agree and the body was never scanned.
+ */
+function normalizeQualifiedName(raw) {
+  const parts = [];
+  let i = 0;
+  const n = raw.length;
+  while (i < n) {
+    if (/\s/.test(raw[i]) || raw[i] === '.') {
+      i += 1;
+      continue;
+    }
+    if (raw[i] === '"') {
+      let j = i + 1;
+      while (j < n && raw[j] !== '"') j += 1;
+      parts.push(raw.slice(i + 1, j).replace(/\s+/g, ' ').trim());
+      i = j + 1;
+      continue;
+    }
+    let j = i;
+    while (j < n && !/[\s."]/.test(raw[j])) j += 1;
+    parts.push(raw.slice(i, j));
+    i = j;
+  }
+  return parts.join('.');
+}
+
+/**
  * Statement forms that NAME a routine without causing it to run: its own
  * definition, and the housekeeping around it.
  *
@@ -93,6 +130,16 @@ function namesWithoutInvoking(flat) {
  * called; and PostgreSQL functional notation, where a call can be written with
  * no parentheses at all. Both are far from ordinary migration work and neither
  * is handled here.
+ *
+ * A THIRD miss existed alongside those two and is now fixed (OR-T1708): a
+ * call that DOES name the routine with an argument list, where the name is a
+ * quoted identifier containing internal whitespace. The definition side used
+ * to strip that whitespace away entirely while this side only collapsed it,
+ * so the two sides built different tokens and the call was never recognised.
+ * Both sides now normalise a quoted identifier the same way
+ * (normalizeQualifiedName), so this is no longer a gap, but it is recorded
+ * here because a reader who only reads the two constructions above would not
+ * have found it either.
  */
 function isInvokedBy(sts, routine) {
   const call = new RegExp(`(^|[^A-Za-z0-9_$])${escapeForRegExp(routine.short)}\\s*\\(`, 'i');
@@ -260,10 +307,10 @@ function scrub(sql) {
               'question takes the irreversible branch, never the silent one',
           };
         }
-        const qualified = named[1].replace(/\s+/g, '');
+        const qualified = normalizeQualifiedName(named[1]);
         routines.push({
           name: qualified,
-          short: qualified.split('.').pop().replace(/"/g, ''),
+          short: qualified.split('.').pop(),
           body,
           bodyOffset: i + tag.length,
         });
@@ -597,6 +644,11 @@ const EXPECTED = {
   // OR-T1695. The quoted twin of 20990101000011, laid out on the same lines, so
   // the two spellings must agree on all three: verdict, rule and line.
   '20990101000013_irreversible_routine_invoked_via_quoted_identifier.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 27 },
+  // OR-T1708. The quoted identifier itself contains a space. Before the fix
+  // the definition side stripped that space out entirely (line 263) while
+  // the invocation side kept it, so the two sides built different tokens and
+  // this file classified REVERSIBLE.
+  '20990101000014_irreversible_routine_invoked_via_quoted_identifier_with_space.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 24 },
 };
 
 function selftest() {
