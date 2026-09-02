@@ -1199,6 +1199,125 @@ jobs:
               || echo "::warning::part ${PART} of the list was refused. It is in the job summary."
           done
 
+      # -----------------------------------------------------------------------
+      # WHAT DOES THIS CHANGE TO THE CLASSIFIER REFUSE THAT IT DID NOT REFUSE
+      # BEFORE? (OR-T1696)
+      #
+      # A classifier change is not describable by its diff. Reading one more
+      # construct can move an ordinary migration from REVERSIBLE to
+      # IRREVERSIBLE, and the only honest way to know how many is to run both
+      # versions over the SAME tree and compare.
+      #
+      # A REPORT. It gates nothing. What it must never do is report nothing and
+      # have that read as agreement, so every path where the comparison cannot
+      # be made says COMPARISON NOT RUN in as many words: "I could not check"
+      # is not "nothing changed".
+      # -----------------------------------------------------------------------
+      - name: What this classifier change moves (verdict diff against the base branch)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # set +e for the same reason as the two steps above: this step reads
+          # exit codes deliberately and a non-zero one is often the answer.
+          set +e
+          set -uo pipefail
+
+          HEAD_JSON="${RUNNER_TEMP}/or-t1696-classify.json"
+          BASE_JSON="${RUNNER_TEMP}/or-t1696-classify-base.json"
+          BASE_SCRIPT="${RUNNER_TEMP}/classify-migrations.base.mjs"
+          DIFF_MD="${RUNNER_TEMP}/or-t1696-diff.md"
+
+          if [ ! -s "$HEAD_JSON" ]; then
+            echo "::warning::COMPARISON NOT RUN: the sweep step wrote no JSON for this commit, so there is nothing to compare against."
+            exit 0
+          fi
+
+          mapfile -t MIGS < <(find supabase/migrations -name '*.sql' -type f | sort)
+          if [ "${#MIGS[@]}" -eq 0 ]; then
+            echo "::warning::COMPARISON NOT RUN: no .sql files were found under supabase/migrations."
+            exit 0
+          fi
+
+          git fetch --depth=1 origin "$BASE_REF" >/dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "::warning::COMPARISON NOT RUN: could not fetch origin/${BASE_REF}, so the previous classifier could not be read."
+            exit 0
+          fi
+
+          git show "FETCH_HEAD:scripts/classify-migrations.mjs" > "$BASE_SCRIPT" 2>/dev/null
+          if [ $? -ne 0 ] || [ ! -s "$BASE_SCRIPT" ]; then
+            echo "the classifier does not exist on ${BASE_REF}, so every verdict reported here is a new verdict and there is no before to compare with."
+            exit 0
+          fi
+
+          if cmp -s "$BASE_SCRIPT" scripts/classify-migrations.mjs; then
+            echo "this pull request does not change the classifier, so no verdict can move. Nothing to compare."
+            exit 0
+          fi
+
+          BOUT=$(node "$BASE_SCRIPT" "${MIGS[@]}" --json "$BASE_JSON" 2>&1); BRC=$?
+          if [ "$BRC" -eq 1 ] || [ ! -s "$BASE_JSON" ]; then
+            echo "::warning::COMPARISON NOT RUN: the base classifier could not run over this tree (exit ${BRC}). That is an UNKNOWN, not a clean comparison."
+            echo "$BOUT" | tail -20
+            exit 0
+          fi
+
+          BASE_EXAMINED=$(echo "$BOUT" | grep '^EXAMINED' || true)
+          HEAD_EXAMINED=$(jq -r '"EXAMINED \(.examined) file(s): \(.reversible) REVERSIBLE, \(.irreversible) IRREVERSIBLE, \(.unparseable) UNPARSEABLE"' "$HEAD_JSON")
+          if [ -z "$BASE_EXAMINED" ] || [ -z "$HEAD_EXAMINED" ]; then
+            echo "::warning::COMPARISON NOT RUN: one of the two runs printed no EXAMINED line, so it reached no conclusion about the tree."
+            exit 0
+          fi
+
+          # One row per file whose verdict is not the same under both versions.
+          # A file the base classifier never saw is reported as ABSENT rather
+          # than quietly counted as unchanged.
+          MOVED=$(jq -rn --slurpfile b "$BASE_JSON" --slurpfile h "$HEAD_JSON" '
+            ($b[0].files | map({key: .file, value: .verdict}) | from_entries) as $before
+            | $h[0].files[]
+            | select(($before[.file] // "ABSENT") != .verdict)
+            | "\(.file) | \($before[.file] // "ABSENT") -> \(.verdict) | \(((.findings) // []) | map(.id) | unique | join(", "))"')
+
+          if [ -n "$MOVED" ]; then
+            MOVED_COUNT=$(printf '%s\n' "$MOVED" | wc -l | tr -d ' ')
+          else
+            MOVED_COUNT=0
+          fi
+
+          {
+            echo "## What this classifier change moves (OR-T1696)"
+            echo ""
+            echo "Both versions of the classifier, run over the same ${#MIGS[@]} file tree at this commit. A report, not a gate."
+            echo ""
+            echo '```'
+            echo "base (${BASE_REF}): ${BASE_EXAMINED}"
+            echo "head (this commit): ${HEAD_EXAMINED}"
+            echo "files whose verdict moves: ${MOVED_COUNT}"
+            echo '```'
+            echo ""
+            if [ "$MOVED_COUNT" -eq 0 ]; then
+              echo "No file in this tree changes verdict under this change. Stated explicitly rather than implied by silence, because zero is the result that makes a classifier change safe to promote and it has to be said out loud to count."
+            else
+              echo "One row per file: file, verdict before and after, and the rule ids reported against it now."
+              echo ""
+              echo '```'
+              printf '%s\n' "$MOVED"
+              echo '```'
+              echo ""
+              echo "Each row is a migration that would take a different path through the apply gate after this change. Read every one before promoting the classifier."
+            fi
+          } > "$DIFF_MD"
+
+          cat "$DIFF_MD" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr comment "$PR_NUMBER" --body-file "$DIFF_MD" \
+              || echo "::warning::the verdict diff comment was refused. The identical text is in this run's job summary and in the log above, so the evidence is not lost."
+          fi
+
       - name: Publish the demonstration to the pull request
         # The seats that review changes in this repo hold GitHub read tools and
         # no shell. An Actions log is not reachable from a review seat and the
