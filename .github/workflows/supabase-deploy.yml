@@ -630,6 +630,132 @@ jobs:
           echo "0 anon-executable function(s) in schema public on ${SUPABASE_REF} (outside the allowlist)."
 
   # ---------------------------------------------------------------------------
+  # OR-T1340. RLS regresses the same silent way anon-EXECUTE grants do: a
+  # migration drops or rewrites a policy and nothing throws, it just returns
+  # rows (or denies them) to whoever asks next. This job diffs what
+  # pg_policies actually reports on this branch's project against
+  # supabase/rls-policy-baseline.tsv, the committed statement of what the
+  # policy set should be. A mismatch does not mean the change is wrong, it
+  # means an intentional RLS edit must update the baseline in the SAME PR, so
+  # the diff is reviewed rather than silently absorbed.
+  #
+  # Self-test runs first, against synthetic rows, and proves the diff can go
+  # both red and green before the live comparison is trusted -- the same
+  # discipline apply-migrations' own self-test uses. A script that can only
+  # ever report "clean" is worse than no script.
+  # ---------------------------------------------------------------------------
+  check-rls-policy-baseline:
+    needs: [target]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Self-test: prove the diff can go both red and green
+        run: |
+          set -euo pipefail
+          WORKDIR=$(mktemp -d)
+          trap 'rm -rf "$WORKDIR"' EXIT
+
+          # Three synthetic policies, the same shape as a live baseline row,
+          # so this exercises the real comparison rather than a stand-in.
+          cat > "$WORKDIR/baseline.tsv" <<'TSV'
+          public	demo_table	demo select	SELECT	{authenticated}	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	d41d8cd98f00b204e9800998ecf8427e
+          public	demo_table	demo insert	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          public	demo_table	demo update	UPDATE	{authenticated}	cccccccccccccccccccccccccccccccc	cccccccccccccccccccccccccccccccc
+          TSV
+
+          # GREEN: an identical set compares clean.
+          cp "$WORKDIR/baseline.tsv" "$WORKDIR/live-clean.tsv"
+          if ! diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-clean.tsv" >/dev/null; then
+            echo "::error::self-test failed: an identical policy set was reported as a diff"
+            exit 1
+          fi
+
+          # RED: drop one policy, what a migration deleting a policy (by
+          # accident or on purpose without updating the baseline) produces.
+          grep -v 'demo update' "$WORKDIR/baseline.tsv" > "$WORKDIR/live-missing.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-missing.tsv" >/dev/null; then
+            echo "::error::self-test failed: a missing policy was reported as clean"
+            exit 1
+          fi
+
+          # RED: change one hash, what a migration rewriting a policy's
+          # USING/WITH CHECK expression without renaming it produces.
+          sed 's/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/00000000000000000000000000000000/' \
+            "$WORKDIR/baseline.tsv" > "$WORKDIR/live-changed.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-changed.tsv" >/dev/null; then
+            echo "::error::self-test failed: a changed policy expression was reported as clean"
+            exit 1
+          fi
+
+          echo "self-test passed: the diff goes red on a removed policy, red on a changed expression, and green on a match"
+
+      - name: Compare live RLS policies to the committed baseline
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ needs.target.outputs.supabase_ref }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${SUPABASE_PROJECT_REF}" ]; then
+            echo "::error::rls-policy-baseline state UNKNOWN: the target job produced no supabase_ref output."
+            exit 1
+          fi
+
+          BASELINE="supabase/rls-policy-baseline.tsv"
+          if [ ! -f "$BASELINE" ]; then
+            echo "::error::rls-policy-baseline state UNKNOWN: $BASELINE does not exist in this branch."
+            exit 1
+          fi
+
+          LIVE=$(mktemp)
+          trap 'rm -f "$LIVE"' EXIT
+
+          if ! node scripts/generate-rls-policy-baseline.mjs --stdout > "$LIVE"; then
+            echo "::error::rls-policy-baseline state UNKNOWN: could not fetch the live policy set from ${SUPABASE_PROJECT_REF}. See the script's own error above; it never echoes the token."
+            exit 1
+          fi
+
+          BASELINE_COUNT=$(wc -l < "$BASELINE")
+          LIVE_COUNT=$(wc -l < "$LIVE")
+          echo "${BASELINE_COUNT} in baseline, ${LIVE_COUNT} read live from ${SUPABASE_PROJECT_REF}, comparing."
+
+          if ! diff -u "$BASELINE" "$LIVE" > /tmp/rls-diff.txt; then
+            {
+              echo "## :no_entry: RLS policy drift on \`${SUPABASE_PROJECT_REF}\`"
+              echo ""
+              echo "The live \`pg_policies\` set does not match \`supabase/rls-policy-baseline.tsv\`."
+              echo "A policy was added, removed, or its USING/WITH CHECK expression changed"
+              echo "without the baseline being updated in the same PR (OR-T1340)."
+              echo ""
+              echo '```diff'
+              cat /tmp/rls-diff.txt
+              echo '```'
+              echo ""
+              echo "If this change is intentional, regenerate the baseline in this PR:"
+              echo '```'
+              echo "SUPABASE_ACCESS_TOKEN=... SUPABASE_PROJECT_REF=${SUPABASE_PROJECT_REF} \\"
+              echo "  node scripts/generate-rls-policy-baseline.mjs supabase/rls-policy-baseline.tsv"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::RLS policy drift detected on ${SUPABASE_PROJECT_REF}. See step summary for the diff."
+            exit 1
+          fi
+
+          echo "RLS policy set on ${SUPABASE_PROJECT_REF} matches the committed baseline (${BASELINE_COUNT} policies)."
+
+  # ---------------------------------------------------------------------------
   # OR-T1189. This comparison used to live inside check-pending-migrations, and
   # that job needs apply-migrations, so the check ran AFTER the apply it should
   # have gated. By the time it could go red the shadowed file had already been
