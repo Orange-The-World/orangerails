@@ -14,6 +14,13 @@
  * can drive them with a fake supabase client and pin the property that matters
  * here: nothing irreversible happens until the write is PROVEN to have landed.
  * Lifting them out of the components changed no behaviour.
+ *
+ * A GREEN CHECK LIST IS THE SAME TRAP ONE LEVEL UP. A pull request whose base
+ * branch is retargeted does not re-run its workflows, because retargeting is
+ * not a push and no synchronize event fires. The result is a pull request that
+ * reports green while none of the jobs that would exercise this file have run
+ * at all. When a change to this path is reviewed, read WHICH checks ran, not
+ * only whether the ones that ran passed.
  */
 
 /**
