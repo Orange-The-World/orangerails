@@ -1,12 +1,14 @@
 name: Prod apply gate configured
 
 # The production migration apply fails closed when its actor allowlist variable
-# is empty or absent. Nothing else reports whether it is configured, so the
-# answer is only discovered at the moment somebody needs it.
+# is empty or absent, and equally closed when the variable is set but does not
+# contain the account trying to run the apply. Nothing else reports either
+# state, so the answer is only discovered at the moment somebody needs it.
 #
-# Exactly one of the two jobs below runs, decided by the variable itself. The
-# job that is not skipped is the answer, readable from the check list. No value
-# is printed, and neither job can fail, so this never blocks other work.
+# Each pair of jobs below reports one fact. Exactly one job in each pair runs,
+# decided by the variable itself. The job that is not skipped is the answer,
+# readable from the check list. The list is never printed, and no job can fail,
+# so this never blocks other work.
 
 on:
   pull_request:
@@ -35,3 +37,21 @@ jobs:
           echo "MIGRATION_APPLY_ALLOWED_ACTORS_PROD is empty or absent."
           echo "The production migration apply will refuse to start until it is set."
           echo "Set it in Settings, then Secrets and variables, then Actions, then Variables."
+
+  prod-actor-allowlist-includes-owner:
+    name: Prod apply allowlist DOES include the repository owner account
+    if: contains(vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD, 'MorningRevolution')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report
+        run: echo "The repository owner account appears on the production apply allowlist."
+
+  prod-actor-allowlist-excludes-owner:
+    name: Prod apply allowlist does NOT include the repository owner account
+    if: ${{ !contains(vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD, 'MorningRevolution') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report
+        run: |
+          echo "The repository owner account does not appear on the production apply allowlist."
+          echo "A production apply dispatched by that account would be refused."
