@@ -811,6 +811,14 @@ jobs:
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
           TARGET_ENV: ${{ needs.target.outputs.environment_name }}
           APPROVAL_REF: ${{ inputs.irreversible_approval_ref }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          # The founder's GitHub login, written here on purpose and NOT read from a
+          # repository variable. A variable can be changed by one party in Settings
+          # with nobody reviewing it. This file cannot change without a pull request
+          # the Auditor sees. For a control whose whole point is that one party
+          # cannot weaken it, the reviewed file is the stronger home.
+          FOUNDER_LOGIN: MorningRevolution
         run: |
           # `set +e` FIRST, and it is load bearing. A run step's default shell
           # is `bash -e`, and `set -uo pipefail` does not clear e. This step
@@ -991,6 +999,57 @@ jobs:
             exit 1
           fi
 
+          # OR-T1657. THE FOUNDER MUST BE THE ONE WHO DISPATCHED THIS RUN.
+          #
+          # WHY. Everything above treats the authority reference as the record of a
+          # two party decision, and a record is only worth what the mechanism behind
+          # it is. That mechanism was assumed to be the required reviewers on the
+          # supabase-prod environment. Read live on 2026-09-02: supabase-prod carries
+          # ONE protection rule, required_reviewers, with two reviewers, and GitHub
+          # needs only ONE of them to approve. One of the two is our reviewing
+          # automation account. Without this step an irreversible change could reach
+          # the production database with the founder never in the path, while the
+          # standing rule is that an irreversible change is founder gated.
+          #
+          # WHAT IT ADDS. prevent_self_review is true on that environment, so the
+          # account that triggered a run cannot approve it. Requiring the founder to
+          # be the dispatcher therefore makes this path genuinely two party: the
+          # founder starts it, and because the starter cannot approve it the approval
+          # must come from the other named reviewer.
+          #
+          # SCOPE. This branch is only reached when the classification is IRREVERSIBLE
+          # and the target is the prod project. The reversible path is untouched and
+          # keeps the actor allowlist it already had.
+          #
+          # BOTH ACTORS. On a re-run github.actor stays the original dispatcher while
+          # github.triggering_actor becomes whoever pressed re-run, so checking only
+          # one of them would let a second party re-run a founder's dispatch of an
+          # irreversible apply.
+          if [ "${ACTOR}" != "${FOUNDER_LOGIN}" ] || [ "${TRIGGERING_ACTOR}" != "${FOUNDER_LOGIN}" ]; then
+            {
+              echo "## :no_entry: Irreversible change(s) refused on \`${SUPABASE_REF}\`: the founder did not start this run"
+              echo ""
+              echo "**Nothing was applied.**"
+              echo ""
+              printf '%s\n' "$DETAIL"
+              echo ""
+              echo "This run was dispatched by \`${ACTOR}\` and run by \`${TRIGGERING_ACTOR}\`."
+              echo ""
+              echo "A change with no restore path is founder gated, so the founder has to be"
+              echo "the one who dispatches it. The environment reviewers are not a substitute:"
+              echo "only ONE of the two named reviewers has to approve, and one of them is an"
+              echo "automation account, so the reviewer list on its own does not put the"
+              echo "founder in the path."
+              echo ""
+              echo "To apply this: the founder dispatches this workflow with"
+              echo "\`irreversible_approval_ref\` set, and a different named reviewer approves"
+              echo "the \`supabase-prod\` environment. An authority reference on its own is a"
+              echo "record of a decision, not the making of one."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::IRREVERSIBLE change(s) in the pending set for ${SUPABASE_REF}, but this run was not dispatched by the founder (actor '${ACTOR}', triggering actor '${TRIGGERING_ACTOR}'). NOTHING was applied."
+            exit 1
+          fi
+
           echo "::warning::OVERRIDE IN USE on ${SUPABASE_REF}: irreversible change(s) are being applied under authority ${APPROVAL_REF}."
           printf '%s\n' "$DETAIL"
           {
@@ -999,8 +1058,11 @@ jobs:
             printf '%s\n' "$DETAIL"
             echo ""
             echo "This apply carried an explicit authority reference, so it proceeded. The"
-            echo "reference names what authorised it; the two required reviewers on the"
-            echo "\`supabase-prod\` environment and the actor allowlist are what bound it."
+            echo "reference names what authorised it. What BOUND it: the founder dispatched"
+            echo "this run, the dispatcher cannot approve their own environment request, so"
+            echo "the approval came from a different named reviewer on \`supabase-prod\`, and"
+            echo "the actor allowlist was satisfied. The environment itself needs only ONE of"
+            echo "its two reviewers, which is exactly why the founder-dispatch check exists."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Apply pending DB migrations via Management API
