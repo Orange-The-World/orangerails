@@ -459,9 +459,43 @@ jobs:
               | cut -c1-28 \
               | sed 's/-$//')
             echo "PLAYWRIGHT_BASE_URL=https://${SLUG}.orangerails-dev.pages.dev" >> "$GITHUB_ENV"
+            echo "WAIT_FOR_PREVIEW=1" >> "$GITHUB_ENV"
           else
             echo "PLAYWRIGHT_BASE_URL=https://dev.orangerails.com" >> "$GITHUB_ENV"
+            echo "WAIT_FOR_PREVIEW=0" >> "$GITHUB_ENV"
           fi
+
+      # OR-T1584: this project's own git integration builds the preview,
+      # and nothing else in this workflow waits for it or checks it matches
+      # this PR's head sha. Only runs on the feature-branch PR path computed
+      # above (WAIT_FOR_PREVIEW=1); dev, prod and release/* smoke the static
+      # host and have nothing to wait for.
+      #
+      # fail_if_absent: true (unlike the prod smoke below, which defaults to
+      # best effort). There is no fallback bundle here: a PR preview that
+      # never appears means the smoke has nothing valid to test, and letting
+      # the specs run anyway turns that into a false red (404) or a silent
+      # stale green (an older build of the branch, since the alias serves
+      # the latest deployment with nothing tying it to this sha).
+      #
+      # commit_sha is the PR's head sha, not github.sha: on a pull_request
+      # event github.sha is the ephemeral merge commit, which Cloudflare
+      # never deploys and this would time out against every time.
+      - name: Wait for the Cloudflare Pages preview deploy
+        if: env.WAIT_FOR_PREVIEW == '1'
+        uses: ./.github/actions/wait-for-pages-deploy
+        with:
+          project: orangerails-dev
+          commit_sha: ${{ github.event.pull_request.head.sha }}
+          environment: preview
+          fail_if_absent: "true"
+          account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Provisional: OR-T1583 (Release) is measuring how long a preview
+          # actually takes to appear. 420s matches this action's own
+          # default and the prod smoke's proven margin; raise it there if
+          # Release's data says previews routinely need longer.
+          timeout_seconds: "420"
 
       - name: Run Playwright
         env:
