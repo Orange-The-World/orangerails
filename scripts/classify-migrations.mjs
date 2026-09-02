@@ -105,6 +105,34 @@ function isInvokedBy(sts, routine) {
   return false;
 }
 
+/**
+ * Does this statement hand SQL to the server to build and run at run time?
+ *
+ * OR-T1715. A routine body is scrubbed before it is scanned, and the scrub
+ * blanks every string literal, so `execute 'drop table t'` arrives at the rules
+ * as the bare word `execute` and no rule can fire on it. Reading that silence as
+ * REVERSIBLE is the script concluding REVERSIBLE from an absence it created
+ * itself, which the header at the top of this file promises never to do.
+ *
+ * There is no version of scanning that fixes this. The text handed to EXECUTE
+ * need not be a literal at all, and when it is built by concatenation or by
+ * format() the statement that finally runs does not appear in the file in any
+ * form. So this is a refusal rather than a rule: the question cannot be asked
+ * here, and an unaskable question takes the irreversible branch.
+ *
+ * Two spellings of EXECUTE are NOT dynamic SQL and are excluded. The trailing
+ * FUNCTION or PROCEDURE of a CREATE TRIGGER clause names a routine rather than
+ * running a string, and EXECUTE inside GRANT or REVOKE is the name of a
+ * privilege. Both tests run on SCRUBBED text, which is what makes the second one
+ * safe: a GRANT written inside a literal has already been blanked, so it cannot
+ * pull a real EXECUTE out of scope.
+ */
+function isDynamicSql(flat) {
+  return (
+    /\bEXECUTE\b(?!\s+(?:FUNCTION|PROCEDURE)\b)/i.test(flat) && !/\b(GRANT|REVOKE)\b/i.test(flat)
+  );
+}
+
 /** 1-based line number of a character offset in `text`. */
 function lineAt(text, offset) {
   return (text.slice(0, offset).match(/\n/g) || []).length + 1;
@@ -487,6 +515,33 @@ export function classifySql(sql) {
 
       const bodyLine0 = lineAt(sql, routine.bodyOffset) - 1;
       const innerSts = statements(inner.text);
+
+      // OR-T1715. Refuse BEFORE scanning, not after. This body runs when the
+      // migration is applied and a statement in it builds SQL at run time, so
+      // what the apply actually does is not in this file. Scanning the rest and
+      // reporting on it would be a verdict about the part we can see, presented
+      // as a verdict about the file.
+      for (const st of innerSts) {
+        const flat = st.text.replace(/\s+/g, ' ').trim();
+        if (!isDynamicSql(flat)) continue;
+        const lead = st.text.length - st.text.replace(/^\s+/, '').length;
+        return {
+          verdict: UNPARSEABLE,
+          findings: [
+            {
+              line: bodyLine0 + lineAt(inner.text, st.offset + lead),
+              id: 'UNPARSEABLE',
+              why:
+                `this migration invokes ${routine.name}, so its body runs when the migration ` +
+                'is applied, and that body builds SQL at run time with EXECUTE. The statement ' +
+                'it runs is not in the file, so it cannot be classified and is refused',
+              snippet: flat.length > 160 ? `${flat.slice(0, 160)} ...` : flat,
+            },
+          ],
+          notes,
+        };
+      }
+
       for (const st of innerSts) {
         const lead = st.text.length - st.text.replace(/^\s+/, '').length;
         applyRules(
@@ -597,6 +652,13 @@ const EXPECTED = {
   // OR-T1695. The quoted twin of 20990101000011, laid out on the same lines, so
   // the two spellings must agree on all three: verdict, rule and line.
   '20990101000013_irreversible_routine_invoked_via_quoted_identifier.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 27 },
+  // OR-T1715. Dynamic SQL in a body this file runs. The scrub blanks the literal
+  // before the rules ever see it, so before the fix this classified REVERSIBLE
+  // with no finding at all: the quietest possible wrong answer. It is
+  // UNPARSEABLE rather than IRREVERSIBLE on purpose, because the file does not
+  // say what the EXECUTE does and a question that cannot be asked must not be
+  // answered with silence.
+  '20990101000017_unparseable_dynamic_sql_in_invoked_body.sql': { verdict: UNPARSEABLE, id: 'UNPARSEABLE', line: 24 },
 };
 
 function selftest() {
