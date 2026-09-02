@@ -1110,7 +1110,7 @@ Deno.test('DL-1409: sink delivery inserts an ACTIVE connection, never pending', 
   let insertedStatus: string | undefined;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(table: string) {
       if (table === 'connections') {
         return {
@@ -1140,7 +1140,7 @@ Deno.test('DL-1409: sink delivery inserts an ACTIVE connection, never pending', 
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-dl1409',
@@ -1164,7 +1164,7 @@ Deno.test('DL-1409: a successful Quiltt sync clears pending as well as error', a
   let statusFilter: string[] | undefined;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(_table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -1182,7 +1182,7 @@ Deno.test('DL-1409: a successful Quiltt sync clears pending as well as error', a
       };
       return chain;
     },
-  };
+  });
 
   const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-1', 'sub-1');
 
@@ -1209,7 +1209,7 @@ Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending'
   let lookupCalls = 0;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(_table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -1236,7 +1236,7 @@ Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending'
       };
       return chain;
     },
-  };
+  });
 
   const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-unknown', 'sub-1');
 
