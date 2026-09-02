@@ -18,11 +18,17 @@
 # never fire either.
 /redir-probe-2026 /docs/quickstart 302
 
-# Domain-prefix forms. These should match for any visitor on the docs.*
-# host even though the host is attached to the same orangerails-prod /
-# orangerails-dev Pages project.
+# Domain-prefix form. This matches for any visitor on the docs.* host
+# even though that host is attached to this same orangerails-prod
+# Pages project.
+#
+# There is deliberately NO docs.orangerails.dev rule. That hostname is
+# not a custom domain on any Pages project in this account, so a rule
+# for it could never fire. The previous version of this file pointed it
+# at a host with no /docs route, which is the same defect the line above
+# fixes; removing it is correct rather than repointing it, because a rule
+# that can never match but looks load-bearing misleads the next reader.
 https://docs.orangerails.com/* https://connect.orangerails.com/docs/:splat 302
-https://docs.orangerails.dev/* https://orangerails.dev/docs/:splat 302
 
 # SPA deep-link fallback. MUST be the last rule so the specific rules
 # above match first. Cloudflare Pages serves any real static asset
