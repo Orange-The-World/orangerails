@@ -143,8 +143,14 @@ jobs:
           # Anything this step cannot do, it must say loudly. A guard that cannot
           # read the diff and exits 0 anyway is worse than no guard, because it
           # reads as a pass.
+          # actions/checkout on a pull_request event fetches the merge ref and
+          # nothing else. fetch-depth: 0 deepens that ref, it does not add the
+          # base branch, so refs/remotes/origin/<base> is not there unless it is
+          # asked for by name.
+          git fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+
           if ! git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}" >/dev/null; then
-            echo "::error::Could not resolve the base branch origin/${BASE_REF}, so no diff could be taken. Refusing rather than passing blind."
+            echo "::error::Could not resolve the base branch origin/${BASE_REF} even after fetching it by name, so no diff could be taken. Refusing rather than passing blind."
             exit 1
           fi
           if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
