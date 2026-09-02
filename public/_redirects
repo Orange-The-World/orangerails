@@ -2,14 +2,15 @@
 #
 # docs.orangerails.com is referenced from the marketing site's nav,
 # footer, and several /docs pages as the integrator knowledge base.
-# The dedicated docs site is on the roadmap (Phase 4) but does not
-# exist yet, so the canonical docs content for now lives at
-# orangerails.com/docs/* inside the main SPA. These rules send every
-# request that lands on the docs.* host to the matching path on the
-# main host. Status 302 (NOT 301) is deliberate: 301 is cached
-# indefinitely by browsers and intermediaries, which would keep
-# routing visitors here even after the dedicated docs site replaces
-# this redirect. 302 keeps the redirect transitional.
+# docs.orangerails.com is a custom domain on this same Cloudflare Pages
+# project (orangerails-prod), which already builds and serves
+# src/routes/docs.tsx on connect.orangerails.com/docs. This rule sends
+# every request that lands on the docs.* host to that same content on
+# connect.orangerails.com so visitors land on real docs instead of a
+# 404 on a different project. Status 302 (NOT 301) is deliberate: 301
+# is cached indefinitely by browsers and intermediaries, which would
+# keep routing visitors through this redirect even after docs.* has
+# its own dedicated deployment. 302 keeps the redirect transitional.
 
 # Probe rule: if /redir-probe-2026 returns 302 to /docs/quickstart, the
 # parser is reading this file. If it returns 200 (SPA fallback), the
