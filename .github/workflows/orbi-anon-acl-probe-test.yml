@@ -1,0 +1,395 @@
+name: ORBI anon ACL probe exit-code tests
+
+# Runs on every pull request or push to dev that touches the anon ACL probe,
+# the CI workflow itself, or the install doc. Acceptance gate for OR-T1418:
+# every exit-code path must be watched going red before the ticket closes.
+# See ANON_ACL_INVARIANT_PROBE_CRON.md for the full exit-code spec.
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - 'scripts/ops/orbi-anon-acl-probe.sh'
+      - 'scripts/ops/orbi-probe-failed.sh'
+      - '.github/workflows/orbi-anon-acl-probe-test.yml'
+      - 'ANON_ACL_INVARIANT_PROBE_CRON.md'
+  push:
+    branches: [dev]
+    paths:
+      - 'scripts/ops/orbi-anon-acl-probe.sh'
+      - 'scripts/ops/orbi-probe-failed.sh'
+      - '.github/workflows/orbi-anon-acl-probe-test.yml'
+      - 'ANON_ACL_INVARIANT_PROBE_CRON.md'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  orbi-anon-acl-probe-test:
+    name: ORBI anon ACL probe exit-code paths
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_USER: testuser
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      PGPASSWORD: testpass
+      DSN: postgres://testuser:testpass@localhost:5432/testdb
+      ORBI_ALERT_SCRIPT: ${{ github.workspace }}/stub-alert.sh
+      ANON_ACL_STATE_FILE: ${{ github.workspace }}/anon-acl-state
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Make scripts executable
+        run: chmod +x scripts/ops/orbi-anon-acl-probe.sh
+
+      # The probe refuses to start unless ORBI_ALERT_SCRIPT points at an
+      # executable file. Every path below that is not deliberately testing a
+      # misconfigured host needs a real alert target, and this stub records
+      # the call so a page that would have been sent is visible in the job
+      # log rather than inferred.
+      - name: Create stub alert script
+        run: |
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'echo "stub-alert called with: $*"' \
+            'echo "$*" >> "'"${GITHUB_WORKSPACE}"'/alert-calls.log"' \
+            'exit 0' \
+            > stub-alert.sh
+          chmod +x stub-alert.sh
+
+      # ---------------------------------------------------------------------
+      # Fixture: a role literally named 'postgres' stands in for the real
+      # cluster role (the assertions filter on that name, not on superuser
+      # status), plus 'anon', 'authenticated', 'service_role' so the ACL
+      # shape matches the real clusters. testuser stays the connecting
+      # superuser and sets defaults FOR ROLE postgres, exactly as this repo's
+      # own dev connection is not supabase_admin and cannot touch that
+      # role's defaults (OR-T1388) -- it can only manage the postgres-role
+      # defaults, which is exactly what this probe asserts.
+      # ---------------------------------------------------------------------
+      - name: Seed roles and the target-shape schema
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            DO \$\$ BEGIN
+              CREATE ROLE postgres;
+            EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;
+            DO \$\$ BEGIN
+              CREATE ROLE anon;
+            EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;
+            DO \$\$ BEGIN
+              CREATE ROLE authenticated;
+            EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;
+            DO \$\$ BEGIN
+              CREATE ROLE service_role;
+            EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;
+
+            ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+              GRANT SELECT ON TABLES TO anon;
+
+            DROP TABLE IF EXISTS public.adapter_requests;
+            DROP TABLE IF EXISTS public.waitlist;
+            DROP TABLE IF EXISTS public.other_table;
+
+            CREATE TABLE public.adapter_requests (id serial primary key);
+            CREATE TABLE public.waitlist (id serial primary key);
+            CREATE TABLE public.other_table (id serial primary key);
+
+            ALTER TABLE public.adapter_requests OWNER TO postgres;
+            ALTER TABLE public.waitlist OWNER TO postgres;
+            ALTER TABLE public.other_table OWNER TO postgres;
+
+            GRANT SELECT, INSERT ON public.adapter_requests TO anon;
+            GRANT SELECT, INSERT ON public.waitlist TO anon;
+            GRANT SELECT ON public.other_table TO anon;
+          "
+
+      # =========================================================================
+      # PATH 1: correct shape on both clusters -> expect exit 0
+      # =========================================================================
+      - name: "path 1 -- clean baseline, both clusters -> expect exit 0"
+        env:
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          rm -f "$ANON_ACL_STATE_FILE" alert-calls.log
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          if [[ -e alert-calls.log ]]; then
+            echo "ERROR: clean cluster paged someone: $(cat alert-calls.log)" >&2
+            exit 1
+          fi
+          if ! grep -q '^CLEAR|' "$ANON_ACL_STATE_FILE"; then
+            echo "ERROR: expected the state file to record CLEAR on a clean run" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0, alert NOT invoked, state file records CLEAR"
+
+      # =========================================================================
+      # PATH 2: A1 red by fixture -- an object owned by something other than
+      # 'postgres'. We cannot do this on the real clusters (OR-T1388: 42501
+      # refusal creating anything owned by a non-postgres role we control),
+      # so this is the fixture proof the ticket calls for.
+      # =========================================================================
+      - name: "[A1] drift other_table's owner away from postgres"
+        run: psql -h localhost -U testuser -d testdb -c "ALTER TABLE public.other_table OWNER TO testuser;"
+
+      - name: "path 2 -- A1 red (ownership drift) -> expect exit 1 (RED, evidence for OR-T1418)"
+        env:
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          rm -f "$ANON_ACL_STATE_FILE" alert-calls.log
+          set +e
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (A1 ownership drift), got $EXIT" >&2
+            exit 1
+          fi
+          BODY=$(cat alert-calls.log)
+          case "$BODY" in
+            *A1*other_table*testuser*) ;;
+            *) echo "ERROR: alarm does not name the drifted object and owner: $BODY" >&2; exit 1 ;;
+          esac
+          echo "confirmed RED: exit 1, alarm names A1 / other_table / testuser: $BODY"
+
+      - name: "[A1] restore owner"
+        run: psql -h localhost -U testuser -d testdb -c "ALTER TABLE public.other_table OWNER TO postgres;"
+
+      # =========================================================================
+      # PATH 3: A2 red -- an extra default privilege for role postgres, an
+      # objtype the assertion must catch (functions), proving A2 does not
+      # just check for absence but for an exact, narrow shape.
+      # =========================================================================
+      - name: "[A2] grant an extra anon default (EXECUTE on functions)"
+        run: psql -h localhost -U testuser -d testdb -c "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon;"
+
+      - name: "path 3 -- A2 red (extra default privilege) -> expect exit 1 (RED)"
+        env:
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          rm -f "$ANON_ACL_STATE_FILE" alert-calls.log
+          set +e
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (A2 extra default), got $EXIT" >&2
+            exit 1
+          fi
+          BODY=$(cat alert-calls.log)
+          case "$BODY" in
+            *A2*objtype=\'f\'*) ;;
+            *) echo "ERROR: alarm does not name the A2 objtype f violation: $BODY" >&2; exit 1 ;;
+          esac
+          echo "confirmed RED: exit 1, alarm names A2 objtype f: $BODY"
+
+      - name: "[A2] revoke the extra default"
+        run: psql -h localhost -U testuser -d testdb -c "ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM anon;"
+
+      # =========================================================================
+      # PATH 4: A3 red -- MISSING member (waitlist loses its INSERT). This is
+      # the "broken public signup form" direction.
+      # =========================================================================
+      - name: "[A3] revoke anon INSERT on waitlist"
+        run: psql -h localhost -U testuser -d testdb -c "REVOKE INSERT ON public.waitlist FROM anon;"
+
+      - name: "path 4 -- A3 red (missing required member) -> expect exit 1 (RED)"
+        env:
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          rm -f "$ANON_ACL_STATE_FILE" alert-calls.log
+          set +e
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (A3 missing member), got $EXIT" >&2
+            exit 1
+          fi
+          BODY=$(cat alert-calls.log)
+          case "$BODY" in
+            *A3*MISSING*waitlist*INSERT*) ;;
+            *) echo "ERROR: alarm does not name the missing A3 member: $BODY" >&2; exit 1 ;;
+          esac
+          echo "confirmed RED: exit 1, alarm names A3 MISSING waitlist INSERT: $BODY"
+
+      - name: "[A3] restore anon INSERT on waitlist"
+        run: psql -h localhost -U testuser -d testdb -c "GRANT INSERT ON public.waitlist TO anon;"
+
+      # =========================================================================
+      # PATH 5: A3 red -- EXTRA member (other_table gains UPDATE). This is
+      # the "privilege escalation" direction; both directions must be red,
+      # not just one, because they are opposite failure modes.
+      # =========================================================================
+      - name: "[A3] grant anon an unexpected privilege on other_table"
+        run: psql -h localhost -U testuser -d testdb -c "GRANT UPDATE ON public.other_table TO anon;"
+
+      - name: "path 5 -- A3 red (extra/unexpected member) -> expect exit 1 (RED)"
+        env:
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          rm -f "$ANON_ACL_STATE_FILE" alert-calls.log
+          set +e
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (A3 extra member), got $EXIT" >&2
+            exit 1
+          fi
+          BODY=$(cat alert-calls.log)
+          case "$BODY" in
+            *A3*EXTRA*other_table*UPDATE*) ;;
+            *) echo "ERROR: alarm does not name the extra A3 member: $BODY" >&2; exit 1 ;;
+          esac
+          echo "confirmed RED: exit 1, alarm names A3 EXTRA other_table UPDATE: $BODY"
+
+      - name: "[A3] revoke the unexpected privilege"
+        run: psql -h localhost -U testuser -d testdb -c "REVOKE UPDATE ON public.other_table FROM anon;"
+
+      # =========================================================================
+      # PATH 6: per-cluster independence. dev is unreachable, prod is clean.
+      # Must still be exit 2 overall (ERROR beats OK), and the body must not
+      # silently drop that prod was fine.
+      # =========================================================================
+      - name: "path 6 -- one cluster unreachable, the other clean -> expect exit 2, worst wins"
+        env:
+          ANON_ACL_DSN_DEV: "postgres://nobody:wrong@unreachable-host:5432/db"
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          rm -f "$ANON_ACL_STATE_FILE" alert-calls.log
+          set +e
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (dev unreachable), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (dev could not be checked; prod's clean result did not suppress it)"
+
+      # =========================================================================
+      # PATH 7: A4 -- ORBI_ALERT_SCRIPT unset -> expect exit 2, no DB call
+      # =========================================================================
+      - name: "path 7 -- alert script unset -> expect exit 2, before any query"
+        env:
+          ORBI_ALERT_SCRIPT: ""
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          rm -f "$ANON_ACL_STATE_FILE"
+          set +e
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (alert script unset), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (ORBI_ALERT_SCRIPT unset)"
+
+      # =========================================================================
+      # PATH 8: A4 -- state file unset -> expect exit 2, before any query
+      # =========================================================================
+      - name: "path 8 -- state file unset -> expect exit 2, before any query"
+        env:
+          ANON_ACL_STATE_FILE: ""
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          set +e
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (state file unset), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (ANON_ACL_STATE_FILE unset)"
+
+      # =========================================================================
+      # PATH 9: 24h dedup suppression. Re-drift other_table's owner (same
+      # fingerprint as path 2) and run twice: the first call pages, the
+      # second (identical fingerprint, within the window) must NOT page
+      # again, yet still exit 1.
+      # =========================================================================
+      - name: "[dedup] drift other_table's owner again"
+        run: psql -h localhost -U testuser -d testdb -c "ALTER TABLE public.other_table OWNER TO testuser;"
+
+      - name: "path 9a -- first red run pages and records state"
+        env:
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          rm -f "$ANON_ACL_STATE_FILE" alert-calls.log
+          set +e
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          EXIT=$?
+          set -e
+          [[ $EXIT -eq 1 ]] || { echo "ERROR: expected exit 1, got $EXIT" >&2; exit 1; }
+          [[ -s alert-calls.log ]] || { echo "ERROR: first red run did not page" >&2; exit 1; }
+          CALLS=$(wc -l < alert-calls.log)
+          echo "$CALLS" > /tmp/calls-after-first
+          echo "confirmed: first run paged ($CALLS call(s))"
+
+      - name: "path 9b -- identical fingerprint, same run again -> exit 1, NOT re-paged"
+        env:
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          set +e
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (suppressed repeat is still a real ALARM), got $EXIT" >&2
+            exit 1
+          fi
+          BEFORE=$(cat /tmp/calls-after-first)
+          AFTER=$(wc -l < alert-calls.log)
+          if [[ "$AFTER" -ne "$BEFORE" ]]; then
+            echo "ERROR: identical fingerprint within the dedup window paged again ($BEFORE -> $AFTER calls); that is the spam the dedup exists to stop" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 1, alert call count unchanged ($BEFORE), repeat correctly suppressed"
+
+      - name: "[dedup] restore owner"
+        run: psql -h localhost -U testuser -d testdb -c "ALTER TABLE public.other_table OWNER TO postgres;"
+
+      # =========================================================================
+      # PATH 10: back to clean -- confirms the probe returns to green and does
+      # not latch, mirroring what OR-T1407's migration promotion will do to
+      # the live prod alarm.
+      # =========================================================================
+      - name: "path 10 -- clean again -> expect exit 0"
+        env:
+          ANON_ACL_DSN_DEV: ${{ env.DSN }}
+          ANON_ACL_DSN_PROD: ${{ env.DSN }}
+        run: |
+          rm -f "$ANON_ACL_STATE_FILE" alert-calls.log
+          ./scripts/ops/orbi-anon-acl-probe.sh
+          if [[ -e alert-calls.log ]]; then
+            echo "ERROR: clean cluster paged someone: $(cat alert-calls.log)" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0, the probe returns to green and does not latch"
