@@ -1270,3 +1270,86 @@ jobs:
 
           echo
           echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
+
+  # ---------------------------------------------------------------------------
+  # OR-T1727. deploy is skipped whenever any of its needs (target,
+  # check-pending-migrations, check-rls-policy-baseline) did not succeed, and
+  # a skipped job renders NEUTRAL in the checks list, not red -- so a push
+  # whose migration half was entirely green (run 33674103380: check-duplicate
+  # -migrations, target and apply-migrations all success) can still ship
+  # nothing and nothing visible says so. This job runs unconditionally after
+  # deploy and, only when deploy was actually skipped on a push to dev, reads
+  # the real needs.<job>.result values (never a hard-coded job name) and
+  # opens or updates a single tracking issue naming which need blocked it.
+  # The companion job below closes that issue the next time deploy actually
+  # succeeds, so it stays a live signal instead of becoming wallpaper.
+  #
+  # Watched live before this PR: throwaway branch
+  # test/or-t1727-skip-signal-poc, run 33695117140, forced
+  # check-rls-policy-baseline to fail, deploy skipped, this job opened issue
+  # #1177 correctly naming target and check-rls-policy-baseline as failed.
+  # ---------------------------------------------------------------------------
+  deploy-skip-signal:
+    needs: [target, check-pending-migrations, check-rls-policy-baseline, deploy]
+    if: always() && github.event_name == 'push' && github.ref_name == 'dev' && needs.deploy.result == 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the dev-deploy-skipped issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_RESULT: ${{ needs.target.result }}
+          PENDING_RESULT: ${{ needs['check-pending-migrations'].result }}
+          RLS_RESULT: ${{ needs['check-rls-policy-baseline'].result }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+
+          # Read the real outcome of every job deploy needs. Never assume
+          # which one blocked it -- on the live PoC run it was target AND
+          # check-rls-policy-baseline together, not the job this PR happened
+          # to be about.
+          BLOCKERS=""
+          [ "$TARGET_RESULT" != "success" ] && BLOCKERS="${BLOCKERS}- target: ${TARGET_RESULT}\n"
+          [ "$PENDING_RESULT" != "success" ] && BLOCKERS="${BLOCKERS}- check-pending-migrations: ${PENDING_RESULT}\n"
+          [ "$RLS_RESULT" != "success" ] && BLOCKERS="${BLOCKERS}- check-rls-policy-baseline: ${RLS_RESULT}\n"
+          if [ -z "$BLOCKERS" ]; then
+            BLOCKERS="- none of deploy's named needs reported non-success; read the run directly\n"
+          fi
+
+          TITLE="dev deploy is being skipped"
+          BODY=$(printf 'The deploy job on dev was SKIPPED at %s.\n\nBlocking need(s), read from needs.<job>.result:\n%s\nRun: %s\n\nThis issue stays open and gets a new comment each time this happens again. It closes automatically the next time a push to dev deploys successfully.' "$SHA" "$(printf '%b' "$BLOCKERS")" "$RUN_URL")
+
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$TITLE\" in:title" --json number -q '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+            echo "commented on existing issue #$EXISTING"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+            echo "opened a new dev-deploy-skipped issue"
+          fi
+
+  deploy-recovered-signal:
+    needs: [deploy]
+    if: always() && github.event_name == 'push' && github.ref_name == 'dev' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Close the dev-deploy-skipped issue if one is open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          TITLE="dev deploy is being skipped"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$TITLE\" in:title" --json number -q '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "Deploy succeeded on dev at ${SHA}. Closing."
+            gh issue close "$EXISTING" --repo "$GITHUB_REPOSITORY"
+            echo "closed issue #$EXISTING"
+          else
+            echo "no open dev-deploy-skipped issue to close"
+          fi
