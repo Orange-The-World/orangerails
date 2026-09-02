@@ -70,13 +70,12 @@
 -- on a project that has no such role yet, and this file then defines the role. Neither file
 -- depends on the other's position.
 --
--- A LIMIT THIS FILE CANNOT CLOSE, stated rather than hidden. The pg_net extension grants USAGE on
--- schema net and EXECUTE on its functions to PUBLIC, and net.http_request_queue is writable by
--- PUBLIC. or_agent_reader inherits all of that through PUBLIC, so it can queue an outbound HTTP
--- request. A grant made to PUBLIC cannot be revoked from one role, so nothing in a role scoped
--- migration can fix it, and revoking it from PUBLIC would change the platform for every role.
--- The assertion below deliberately does not check schema net, because it would fail on a state
--- this file has no power to correct. It is reported separately instead.
+-- SCHEMA net IS OUT OF SCOPE HERE, deliberately. Whatever any role reaches in that schema comes
+-- from grants an extension made to PUBLIC, and a grant made to PUBLIC cannot be revoked from a
+-- single role, so a role scoped migration cannot express anything about it. Changing it would be
+-- a platform wide decision, not part of defining this role. The assertion below therefore does
+-- not check schema net: an assertion that can only ever fail, on a state its own file has no
+-- power to correct, is noise rather than a control. It is tracked separately.
 --
 -- DEVELOPMENT ONLY. No production statement is run from this change. Promotion to production is a
 -- separate two party write and is deliberately not in this file.
@@ -333,11 +332,12 @@ GRANT SELECT (
 -- ---------------------------------------------------------------------------
 -- 6. RESIDUE OUTSIDE THE THREE SCHEMAS.
 -- ---------------------------------------------------------------------------
--- The development project carried 28 column level SELECT grants to this role on auth.users. They
--- are unreachable today because the role has no USAGE on schema auth, so this was not an
--- exposure, but it is one GRANT USAGE away from being one, and a rebuild from this tree would not
--- have them. The guard means this is a strict no-op on a project that never had them, which also
--- keeps the file from needing revoke rights it may not hold on a platform owned table.
+-- The development project carried 28 column level SELECT grants to this role on auth.users, made
+-- out of band and with no file behind them. The requirement is simply that this role holds
+-- nothing outside its three schemas, so they are removed here and the assertion enforces it. A
+-- rebuild from this tree would never have created them, and the file has to leave both paths in
+-- the same state. The guard makes this a strict no-op on a project that never had them, which
+-- also keeps the file from needing revoke rights it may not hold on a platform owned table.
 DO $residue$
 DECLARE
   reader_oid oid;
