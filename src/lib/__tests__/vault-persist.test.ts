@@ -115,8 +115,24 @@ function makeFakeClient(options: FakeOptions = {}) {
 
   // The backing store. It is a copy, because reorderAfterSelect rewrites it and
   // a test's fixture must not be mutated underneath it.
+  //
+  // Rows enter it through withDefaults, which is what models the column
+  // default: a fixture written without data_key_generation reads back as
+  // generation 1, because that is what the database puts there when nobody
+  // sets it. Without this a marker read would answer undefined, which is a
+  // state the real table cannot be in (the column is NOT NULL).
+  const withDefaults = (rows: unknown[]): unknown[] =>
+    rows.map((row) => {
+      const record = row as Record<string, unknown>;
+      return record.data_key_generation === undefined
+        ? { ...record, data_key_generation: DATA_KEY_GENERATION_DEFAULT }
+        : record;
+    });
+
   const store: Record<string, unknown[]> = {};
-  for (const [table, rows] of Object.entries(options.rows ?? {})) store[table] = rows.slice();
+  for (const [table, rows] of Object.entries(options.rows ?? {})) {
+    store[table] = withDefaults(rows);
+  }
 
   function resultFor(call: RecordedCall): QueryResult {
     if (call.op === "select") {
