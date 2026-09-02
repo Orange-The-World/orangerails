@@ -107,11 +107,10 @@ jobs:
           fi
           echo "confirmed: exit 0 (fresh table), alert script NOT invoked. State file: $(cat "$RUNNER_TEMP/freshness-state")"
 
-      - name: "[freshness] push the newest row back 5 hours (beyond the derived 4h floor)"
+      - name: "[freshness] shift every row back 5 hours (beyond the derived 4h floor)"
         run: |
           psql -h localhost -U testuser -d testdb -c "
-            UPDATE public.tt_fresh SET fetched_at = now() - interval '5 hours'
-             WHERE fetched_at = (SELECT max(fetched_at) FROM public.tt_fresh);
+            UPDATE public.tt_fresh SET fetched_at = fetched_at - interval '5 hours';
           "
 
       - name: "[freshness] path 2 -- stale -> expect exit 1 (RED, pasted evidence for OR-T1377)"
