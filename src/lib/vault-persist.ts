@@ -286,144 +286,140 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // not moved yet still reads. That is the only property this ordering buys.
   // It does NOT make a retry safe. See the note on the meta write below before
   // relying on it.
-  // credentials subkey changes with the MEK.
   //
-  // WHY THIS READ IS PAGED. It used to be a single unpaged select. PostgREST
-  // caps a select at a server-side maximum row count, and a capped read is a
-  // SUCCESSFUL read: no error is raised on any path. A user holding more
-  // connection rows than that cap therefore had every row past it left wrapped
-  // under the OLD MEK while the meta write at the bottom of this function still
+  // WHY THESE READS ARE PAGED. Each used to be a single unpaged select.
+  // PostgREST caps a select at a server-side maximum row count, and a capped
+  // read is a SUCCESSFUL read: no error is raised on any path. A user holding
+  // more rows than that cap therefore had every row past it left wrapped under
+  // the OLD MEK while the meta write at the bottom of this function still
   // landed. Nothing in that sequence reports a problem, and because
   // recoverWithCode() mints a fresh MEK on every call, the key those rows are
   // still wrapped under is gone. Silent and permanent.
   //
-  // WHY THE ORDER CLAUSE IS LOAD BEARING. Postgres guarantees no row order
-  // without ORDER BY, and the update inside this loop writes a new tuple
-  // version, which can change the order a later scan returns. Without it a row
-  // can be skipped between pages, which strands it exactly as above, or
-  // returned twice, in which case migrateCredentialsCiphertext is handed
-  // ciphertext that is already under the new MEK, throws, and aborts the
-  // rotation partway with no safe retry.
+  // WHAT PAGING CANNOT FIX ON ITS OWN, stated rather than hidden. Offset paging
+  // over a stable order is still not immune to another session INSERTing a row
+  // while the walk runs, and keyset pagination on id would not fix that either:
+  // a row inserted below the cursor is missed exactly as offset paging misses
+  // it, and it is written under the OLD MEK by construction. That case is
+  // handled after both walks instead, by reconcileEveryRow, which goes back and
+  // finishes the rows that were missed.
   //
-  // Residual, stated rather than hidden: offset paging over a stable order is
-  // still not immune to another session INSERTing or DELETing a row while this
-  // loop runs, which shifts the window. That is NOT fixed here, and keyset
-  // pagination on id would not fix it either: a row inserted below the cursor
-  // is missed exactly as offset paging misses it, and it is written under the
-  // OLD MEK by construction. It is instead made LOUD. The reconciliation below
-  // both loops compares what this run migrated against what the table actually
-  // holds, and throws while failing is still safe.
-  //
-  // Distinct ids, not a running tally: a read that hands the same row back
-  // twice must not be able to make that reconciliation agree.
+  // Distinct ids, not a running tally, and added only once the UPDATE has
+  // returned the row it changed: a read that hands the same row back twice must
+  // not be able to make the reconciliation agree, and neither must a write that
+  // was refused at the row layer.
   const migratedConnectionIds = new Set<string>();
-  let connOffset = 0;
-  for (;;) {
-    const { data: conns, error: connsErr } = await supabase
-      .from("connections")
-      .select("id, encrypted_credentials, encrypted_label")
-      .order("id", { ascending: true })
-      .range(connOffset, connOffset + CONNECTION_PAGE_SIZE - 1);
-    if (connsErr) throw connsErr;
-
-    const connPage = (conns ?? []) as Array<{
-      id: string;
-      encrypted_credentials: string;
-      encrypted_label: string | null;
-    }>;
-    if (connPage.length === 0) break;
-
-    for (const conn of connPage) {
-      const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
-      const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
-      if (conn.encrypted_label) {
+  const migrateConnection = async (conn: {
+    id: string;
+    encrypted_credentials: string;
+    encrypted_label: string | null;
+  }) => {
+    const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
+    const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
+    if (conn.encrypted_label) {
+      try {
+        connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
+      } catch {
         try {
-          connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
+          connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
         } catch {
-          try {
-            connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
-          } catch {
-            // Label migration failed with both keys. Leave the stale ciphertext.
-            // encrypted_label is cosmetic and the connection remains usable.
-          }
+          // Label migration failed with both keys. Leave the stale ciphertext.
+          // encrypted_label is cosmetic and the connection remains usable.
         }
       }
-      const { error: connErr } = await supabase
-        .from("connections")
-        .update(connUpdate)
-        .eq("id", conn.id);
-      if (connErr) throw connErr;
-      migratedConnectionIds.add(conn.id);
     }
-
-    // End on a short page, not on the absence of an error. A capped or empty
-    // read is not an error, so the row count is the only honest signal.
-    if (connPage.length < CONNECTION_PAGE_SIZE) break;
-    connOffset += CONNECTION_PAGE_SIZE;
-  }
-
-  // Re-encrypt transactions in pages of 500, in a deterministic id order.
-  // encrypted_payload uses the transactions subkey, which changes with the MEK.
-  // The order clause carries the same weight it does on the connections read
-  // above: this loop UPDATEs the rows of each page as it goes, so an unordered
-  // scan may skip a row (stranded under the old MEK, silently and permanently)
-  // or return one twice (decryption throws and the rotation aborts partway).
-  const migratedTransactionIds = new Set<string>();
-  let offset = 0;
-  for (;;) {
-    const { data: txns, error: txnsErr } = await supabase
-      .from("encrypted_transactions")
-      .select("id, encrypted_payload")
-      .order("id", { ascending: true })
-      .range(offset, offset + TRANSACTION_PAGE_SIZE - 1);
-    if (txnsErr) throw txnsErr;
-    if (!txns || (txns as unknown[]).length === 0) break;
-
-    await Promise.all(
-      (txns as Array<{ id: string; encrypted_payload: string }>).map(async (txn) => {
-        const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
-        const { error: txnErr } = await supabase
-          .from("encrypted_transactions")
-          .update({ encrypted_payload: newPayload })
-          .eq("id", txn.id);
-        if (txnErr) throw txnErr;
-        migratedTransactionIds.add(txn.id);
-      }),
+    const { data: connWritten, error: connErr } = await supabase
+      .from("connections")
+      .update(connUpdate)
+      .eq("id", conn.id)
+      .select("id");
+    if (connErr) throw connErr;
+    if (!connWritten || (connWritten as unknown[]).length !== 1) {
+      throw new Error(rowNotWrittenMessage("connection", conn.id));
+    }
+    migratedConnectionIds.add(conn.id);
+  };
+  const walkConnections = () =>
+    walkAndMigrate(
+      supabase,
+      "connections",
+      "id, encrypted_credentials, encrypted_label",
+      CONNECTION_PAGE_SIZE,
+      migratedConnectionIds,
+      migrateConnection,
     );
 
-    if ((txns as unknown[]).length < TRANSACTION_PAGE_SIZE) break;
-    offset += TRANSACTION_PAGE_SIZE;
-  }
+  await walkConnections();
+
+  // encrypted_payload uses the transactions subkey, which changes with the MEK.
+  //
+  // These updates are issued one at a time rather than through Promise.all. The
+  // row that failed has to be nameable, and a batch that rejects partway leaves
+  // the migrated set holding whichever siblings happened to settle first, which
+  // is exactly the number the reconciliation below depends on being exact.
+  const migratedTransactionIds = new Set<string>();
+  const migrateTransaction = async (txn: { id: string; encrypted_payload: string }) => {
+    const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
+    const { data: txnWritten, error: txnErr } = await supabase
+      .from("encrypted_transactions")
+      .update({ encrypted_payload: newPayload })
+      .eq("id", txn.id)
+      .select("id");
+    if (txnErr) throw txnErr;
+    if (!txnWritten || (txnWritten as unknown[]).length !== 1) {
+      throw new Error(rowNotWrittenMessage("transaction", txn.id));
+    }
+    migratedTransactionIds.add(txn.id);
+  };
+  const walkTransactions = () =>
+    walkAndMigrate(
+      supabase,
+      "encrypted_transactions",
+      "id, encrypted_payload",
+      TRANSACTION_PAGE_SIZE,
+      migratedTransactionIds,
+      migrateTransaction,
+    );
+
+  await walkTransactions();
 
   // RECONCILE BEFORE THE META WRITE.
   //
-  // This is the last instant at which failing is the safe outcome. The stored
-  // enc_mek_ciphertext and recovery_ciphertext still wrap the OLD MEK, so the
-  // user can still unlock and every row that has not moved still reads, and
-  // clearMigrationKeys has not run. After the write below, the same
-  // disagreement is unrecoverable AND silent.
+  // This is the last instant at which the rotation can still be FINISHED. The
+  // stored enc_mek_ciphertext and recovery_ciphertext still wrap the OLD MEK,
+  // every row that has not moved still reads, and clearMigrationKeys has not
+  // run, so a row this run missed is still under the old subkeys and can simply
+  // be migrated now. After the write below, the same disagreement is
+  // unrecoverable AND silent.
   //
   // WHAT THIS CATCHES, and why it is a count rather than another paging fix.
-  // Both loops above are correct only while the page size stays strictly below
+  // Both walks above are correct only while the page size stays strictly below
   // the project's server-side maximum row count, and that cap is a project
-  // setting outside version control: lower it under 500 and both loops end on
+  // setting outside version control: lower it under 500 and both walks end on
   // the first short page, strand every row past it, and the meta write still
   // lands. A concurrent INSERT is the same strand by a different route. So the
   // check is deliberately not aimed at either mechanism. Comparing what was
-  // migrated against what the table holds converts every variant of a short
-  // read, including ones nobody has thought of yet, into a loud failure at the
-  // one moment failing is safe.
+  // migrated against what the table holds catches every variant of a short
+  // read, including ones nobody has thought of yet, at the one moment there is
+  // still something useful to do about it.
   //
-  // Both counts are taken here rather than one after each loop, deliberately:
-  // a row inserted into connections DURING the transaction loop is caught only
-  // by a check that runs after both.
-  await assertEveryRowMigrated(supabase, "connections", "connections", migratedConnectionIds.size);
-  await assertEveryRowMigrated(
-    supabase,
-    "encrypted_transactions",
-    "transactions",
-    migratedTransactionIds.size,
-  );
+  // Both tables are reconciled together rather than one after each walk,
+  // deliberately: a row inserted into connections DURING the transaction walk
+  // is caught only by a check that runs after both.
+  await reconcileEveryRow(supabase, [
+    {
+      table: "connections",
+      label: "connections",
+      migrated: migratedConnectionIds,
+      sweep: walkConnections,
+    },
+    {
+      table: "encrypted_transactions",
+      label: "transactions",
+      migrated: migratedTransactionIds,
+      sweep: walkTransactions,
+    },
+  ]);
 
   // From the first rewritten row until the meta write below lands, the only
   // copy of the new MEK is in the page's memory. Closing or reloading the tab
