@@ -45,6 +45,54 @@ export const IRREVERSIBLE = 'IRREVERSIBLE';
 export const UNPARSEABLE = 'UNPARSEABLE';
 
 /**
+ * The name in a CREATE [OR REPLACE] FUNCTION|PROCEDURE header, schema qualified
+ * or not, quoted identifiers allowed. If this does not match we do not know
+ * which routine a body belongs to, so we cannot ask whether the file invokes it,
+ * and an unaskable question is a refusal rather than a skip (OR-T1658).
+ */
+const ROUTINE_NAME =
+  /\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\s+((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))*)/i;
+
+/** Escape a routine name so it can be dropped into a RegExp as a literal. */
+function escapeForRegExp(s) {
+  return s.replace(/[^A-Za-z0-9_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Statement forms that NAME a routine without causing it to run: its own
+ * definition, and the housekeeping around it.
+ *
+ * Everything else that mentions the routine with an argument list is treated as
+ * a possible invocation. That is deliberately generous: over-scanning a body
+ * costs an unnecessary refusal that a human can clear in a minute, and
+ * under-scanning it costs the data.
+ */
+function namesWithoutInvoking(flat) {
+  return (
+    /^CREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\b/i.test(flat) ||
+    /^(DROP|COMMENT|GRANT|REVOKE)\b/i.test(flat) ||
+    /^ALTER\s+(FUNCTION|PROCEDURE|ROUTINE)\b/i.test(flat)
+  );
+}
+
+/** Does anything in this statement list cause `routine` to run? */
+function isInvokedBy(sts, routine) {
+  const call = new RegExp(`(^|[^A-Za-z0-9_$])${escapeForRegExp(routine.short)}\\s*\\(`, 'i');
+  for (const st of sts) {
+    const flat = st.text.replace(/\s+/g, ' ').trim();
+    if (!call.test(flat)) continue;
+    if (namesWithoutInvoking(flat)) continue;
+    return true;
+  }
+  return false;
+}
+
+/** 1-based line number of a character offset in `text`. */
+function lineAt(text, offset) {
+  return (text.slice(0, offset).match(/\n/g) || []).length + 1;
+}
+
+/**
  * Blank out everything that is not executable SQL, character for character, so
  * that offsets into the returned text still map onto the original file and a
  * reported line number is the real line number.
@@ -55,8 +103,15 @@ export const UNPARSEABLE = 'UNPARSEABLE';
  * scanner rather than a regex:
  *
  *   CREATE FUNCTION ... AS $$ ... DROP TABLE t; ... $$;
- *       The body does NOT execute when the migration is applied. It executes
- *       when somebody later calls the function. Blanked, and noted.
+ *       Whether this body runs at apply time is a property of the WHOLE file,
+ *       not of this statement. A migration that creates a routine and then
+ *       calls it, or attaches it as a trigger that a later statement fires,
+ *       executes the body during the apply. This is a single forward pass, so
+ *       the rest of the file has not been read yet and the question cannot be
+ *       answered here. The body is set aside with the routine's name and its
+ *       offset, and classifySql decides once everything is scrubbed (OR-T1658).
+ *       A body whose routine cannot even be NAMED makes the file UNPARSEABLE:
+ *       a question that cannot be asked must not be answered with silence.
  *
  *   DO $$ BEGIN ... DROP TABLE t; ... END $$;
  *       The body DOES execute at apply time. Kept, and scanned.
@@ -68,6 +123,7 @@ export const UNPARSEABLE = 'UNPARSEABLE';
 function scrub(sql) {
   const out = [];
   const notes = [];
+  const routines = [];
   const n = sql.length;
   let i = 0;
 
@@ -171,7 +227,28 @@ function scrub(sql) {
       const fragment = produced.slice(produced.lastIndexOf(';') + 1);
 
       if (/\bCREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\b/i.test(fragment)) {
-        notes.push('a routine body was skipped: it does not execute when the migration is applied');
+        // OR-T1658. SET ASIDE, not dismissed. Whether this body runs at apply
+        // time depends on the rest of the file, which this pass has not read
+        // yet, so record the body with the routine's name and its offset in the
+        // original text and let classifySql answer it. Blanked here so that a
+        // body which turns out to be unreachable costs nothing, exactly as
+        // before.
+        const named = ROUTINE_NAME.exec(fragment);
+        if (!named) {
+          return {
+            error:
+              'a routine body was found but the routine it defines could not be named from the ' +
+              'text, so whether this migration invokes it cannot be answered. An unanswered ' +
+              'question takes the irreversible branch, never the silent one',
+          };
+        }
+        const qualified = named[1].replace(/\s+/g, '');
+        routines.push({
+          name: qualified,
+          short: qualified.split('.').pop().replace(/"/g, ''),
+          body,
+          bodyOffset: i + tag.length,
+        });
         blank(sql.slice(i, end));
       } else if (/(^|;)\s*DO\b/i.test(fragment)) {
         blank(tag);
@@ -192,7 +269,7 @@ function scrub(sql) {
     i += 1;
   }
 
-  return { text: out.join(''), notes };
+  return { text: out.join(''), notes, routines };
 }
 
 /** Split scrubbed SQL into statements, keeping each one's offset in the file. */
@@ -314,11 +391,9 @@ export function classifySql(sql) {
   }
 
   const findings = [];
-  for (const st of sts) {
-    const lead = st.text.length - st.text.replace(/^\s+/, '').length;
-    const absolute = st.offset + lead;
-    const line = (scrubbed.text.slice(0, absolute).match(/\n/g) || []).length + 1;
-    const flat = st.text.replace(/\s+/g, ' ').trim();
+  const notes = [...scrubbed.notes];
+
+  const applyRules = (flat, line) => {
     for (const rule of RULES) {
       if (rule.test(flat)) {
         findings.push({
@@ -329,12 +404,99 @@ export function classifySql(sql) {
         });
       }
     }
+  };
+
+  for (const st of sts) {
+    const lead = st.text.length - st.text.replace(/^\s+/, '').length;
+    applyRules(st.text.replace(/\s+/g, ' ').trim(), lineAt(scrubbed.text, st.offset + lead));
+  }
+
+  // OR-T1658. A routine body is only harmless if nothing in this same file can
+  // make it run. The scrub set each body aside rather than judging it, because a
+  // single forward pass cannot see the statements that come after. Now that the
+  // whole file is scrubbed, ask the question per routine and, where the answer
+  // is yes, scan the body under exactly the rules above.
+  //
+  // Scanning one body can reveal a call to ANOTHER routine defined in the same
+  // file, so this runs to a fixed point rather than once.
+  const routines = scrubbed.routines || [];
+  const scanned = new Set();
+  let reachable = sts;
+  let progressed = true;
+
+  while (progressed) {
+    progressed = false;
+    for (const routine of routines) {
+      if (scanned.has(routine)) continue;
+      if (!isInvokedBy(reachable, routine)) continue;
+      scanned.add(routine);
+      progressed = true;
+
+      const inner = scrub(routine.body);
+      if (inner.error) {
+        return {
+          verdict: UNPARSEABLE,
+          findings: [
+            {
+              line: lineAt(sql, routine.bodyOffset),
+              id: 'UNPARSEABLE',
+              why:
+                `this migration invokes ${routine.name}, so its body runs when the migration ` +
+                `is applied, and the body could not be read: ${inner.error}`,
+              snippet: '',
+            },
+          ],
+          notes,
+        };
+      }
+      if ((inner.routines || []).length > 0) {
+        return {
+          verdict: UNPARSEABLE,
+          findings: [
+            {
+              line: lineAt(sql, routine.bodyOffset),
+              id: 'UNPARSEABLE',
+              why:
+                `this migration invokes ${routine.name}, and that body itself defines a ` +
+                'routine. Whether the inner one runs cannot be answered from the file, so this ' +
+                'is refused rather than read as clean',
+              snippet: '',
+            },
+          ],
+          notes,
+        };
+      }
+
+      const bodyLine0 = lineAt(sql, routine.bodyOffset) - 1;
+      const innerSts = statements(inner.text);
+      for (const st of innerSts) {
+        const lead = st.text.length - st.text.replace(/^\s+/, '').length;
+        applyRules(
+          st.text.replace(/\s+/g, ' ').trim(),
+          bodyLine0 + lineAt(inner.text, st.offset + lead),
+        );
+      }
+      reachable = reachable.concat(innerSts);
+      notes.push(
+        `the body of ${routine.name} was SCANNED: this migration invokes it, so the body runs ` +
+          'when the migration is applied',
+      );
+    }
+  }
+
+  for (const routine of routines) {
+    if (scanned.has(routine)) continue;
+    notes.push(
+      `the body of ${routine.name} was not scanned: no statement in this migration calls it, ` +
+        'attaches it as a trigger, or otherwise names it with an argument list, so applying ' +
+        'this migration does not run it',
+    );
   }
 
   return {
     verdict: findings.length > 0 ? IRREVERSIBLE : REVERSIBLE,
     findings,
-    notes: scrubbed.notes,
+    notes,
     statementCount: sts.length,
   };
 }
@@ -392,6 +554,16 @@ const EXPECTED = {
   '20990101000007_irreversible_drop_constraint.sql': { verdict: IRREVERSIBLE, id: 'ALTER TABLE DROP' },
   '20990101000008_unparseable_unterminated_dollar_quote.sql': { verdict: UNPARSEABLE, id: 'UNPARSEABLE' },
   '20990101000009_unparseable_no_statement.sql': { verdict: UNPARSEABLE, id: 'NO STATEMENT' },
+  // OR-T1658. A routine body is not inert by virtue of being a routine body.
+  // These three assert the difference between one this file calls, one it
+  // attaches as a trigger that a later statement fires, and one nothing in the
+  // file can reach. The third is the one that keeps the gate usable: it carries
+  // a DROP TABLE in its body on purpose, so if the invocation analysis ever
+  // starts over-reporting, this fixture goes red instead of the gate quietly
+  // starting to refuse ordinary work.
+  '20990101000010_irreversible_routine_invoked_in_same_file.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE' },
+  '20990101000011_irreversible_routine_attached_as_trigger.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
+  '20990101000012_reversible_routine_never_invoked.sql': { verdict: REVERSIBLE, id: null },
 };
 
 function selftest() {
