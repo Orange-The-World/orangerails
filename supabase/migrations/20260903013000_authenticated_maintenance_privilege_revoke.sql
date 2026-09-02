@@ -411,7 +411,7 @@ begin
      group by 1
      order by 1
   loop
-    raise warning 'authenticated maintenance sweep: a default privilege tap this file CANNOT narrow is still open. Owning role %%, still granting the logged-in role %%. ALTER DEFAULT PRIVILEGES FOR ROLE %% is permitted only to that role or a member of it, and the applying role is not a member, so no migration can close it. Latent while no table in schema public is owned by that role; closing it is a platform request.', v_tap.owner, v_tap.privs, v_tap.owner;
+    raise warning 'authenticated maintenance sweep: a default privilege tap this file CANNOT narrow is still open. Owning role %, still granting the logged-in role %. ALTER DEFAULT PRIVILEGES FOR ROLE % is permitted only to that role or a member of it, and the applying role is not a member, so no migration can close it. Latent while no table in schema public is owned by that role; closing it is a platform request.', v_tap.owner, v_tap.privs, v_tap.owner;
   end loop;
 
   -- B3. THE ASSERTION THAT PROTECTS WHAT WAS DELIBERATELY KEPT. The four data
