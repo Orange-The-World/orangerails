@@ -14,6 +14,14 @@
  * can drive them with a fake supabase client and pin the property that matters
  * here: nothing irreversible happens until the write is PROVEN to have landed.
  * Lifting them out of the components changed no behaviour.
+ *
+ * WHAT THE READS IN HERE HAVE TO GUARANTEE. Every row the user owns has to be
+ * re-encrypted before the meta write, so a read that quietly returns fewer rows
+ * than the table holds is the same defect as a failed write, and it is harder
+ * to see: a capped read raises no error at all, and a scan with no ORDER BY may
+ * return a row twice or not at all once the loop starts writing new tuple
+ * versions under it. That is why the reads below are paged and ordered rather
+ * than taken on trust.
  */
 
 /**
@@ -41,6 +49,9 @@ export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
 
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
+
+/** Connections are re-encrypted in pages of this size. */
+export const CONNECTION_PAGE_SIZE = 500;
 
 export interface RotateVaultArgs {
   supabase: VaultPersistClient;
@@ -88,44 +99,84 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // It does NOT make a retry safe. See the note on the meta write below before
   // relying on it.
   // credentials subkey changes with the MEK.
-  const { data: conns, error: connsErr } = await supabase
-    .from("connections")
-    .select("id, encrypted_credentials, encrypted_label");
-  if (connsErr) throw connsErr;
+  //
+  // WHY THIS READ IS PAGED. It used to be a single unpaged select. PostgREST
+  // caps a select at a server-side maximum row count, and a capped read is a
+  // SUCCESSFUL read: no error is raised on any path. A user holding more
+  // connection rows than that cap therefore had every row past it left wrapped
+  // under the OLD MEK while the meta write at the bottom of this function still
+  // landed. Nothing in that sequence reports a problem, and because
+  // recoverWithCode() mints a fresh MEK on every call, the key those rows are
+  // still wrapped under is gone. Silent and permanent.
+  //
+  // WHY THE ORDER CLAUSE IS LOAD BEARING. Postgres guarantees no row order
+  // without ORDER BY, and the update inside this loop writes a new tuple
+  // version, which can change the order a later scan returns. Without it a row
+  // can be skipped between pages, which strands it exactly as above, or
+  // returned twice, in which case migrateCredentialsCiphertext is handed
+  // ciphertext that is already under the new MEK, throws, and aborts the
+  // rotation partway with no safe retry.
+  //
+  // Residual, stated rather than hidden: offset paging over a stable order is
+  // still not immune to another session INSERTing or DELETing a row while this
+  // loop runs, which shifts the window. Keyset pagination on id would close
+  // that too. It is deliberately out of scope here and is not a regression.
+  let connOffset = 0;
+  for (;;) {
+    const { data: conns, error: connsErr } = await supabase
+      .from("connections")
+      .select("id, encrypted_credentials, encrypted_label")
+      .order("id", { ascending: true })
+      .range(connOffset, connOffset + CONNECTION_PAGE_SIZE - 1);
+    if (connsErr) throw connsErr;
 
-  for (const conn of (conns ?? []) as Array<{
-    id: string;
-    encrypted_credentials: string;
-    encrypted_label: string | null;
-  }>) {
-    const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
-    const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
-    if (conn.encrypted_label) {
-      try {
-        connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
-      } catch {
+    const connPage = (conns ?? []) as Array<{
+      id: string;
+      encrypted_credentials: string;
+      encrypted_label: string | null;
+    }>;
+    if (connPage.length === 0) break;
+
+    for (const conn of connPage) {
+      const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
+      const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
+      if (conn.encrypted_label) {
         try {
-          connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
+          connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
         } catch {
-          // Label migration failed with both keys. Leave the stale ciphertext.
-          // encrypted_label is cosmetic and the connection remains usable.
+          try {
+            connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
+          } catch {
+            // Label migration failed with both keys. Leave the stale ciphertext.
+            // encrypted_label is cosmetic and the connection remains usable.
+          }
         }
       }
+      const { error: connErr } = await supabase
+        .from("connections")
+        .update(connUpdate)
+        .eq("id", conn.id);
+      if (connErr) throw connErr;
     }
-    const { error: connErr } = await supabase
-      .from("connections")
-      .update(connUpdate)
-      .eq("id", conn.id);
-    if (connErr) throw connErr;
+
+    // End on a short page, not on the absence of an error. A capped or empty
+    // read is not an error, so the row count is the only honest signal.
+    if (connPage.length < CONNECTION_PAGE_SIZE) break;
+    connOffset += CONNECTION_PAGE_SIZE;
   }
 
-  // Re-encrypt transactions in pages of 500.
+  // Re-encrypt transactions in pages of 500, in a deterministic id order.
   // encrypted_payload uses the transactions subkey, which changes with the MEK.
+  // The order clause carries the same weight it does on the connections read
+  // above: this loop UPDATEs the rows of each page as it goes, so an unordered
+  // scan may skip a row (stranded under the old MEK, silently and permanently)
+  // or return one twice (decryption throws and the rotation aborts partway).
   let offset = 0;
   for (;;) {
     const { data: txns, error: txnsErr } = await supabase
       .from("encrypted_transactions")
       .select("id, encrypted_payload")
+      .order("id", { ascending: true })
       .range(offset, offset + TRANSACTION_PAGE_SIZE - 1);
     if (txnsErr) throw txnsErr;
     if (!txns || (txns as unknown[]).length === 0) break;
