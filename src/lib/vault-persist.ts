@@ -47,6 +47,60 @@ export const RECOVERY_META_NOT_SAVED_MESSAGE =
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
+/**
+ * Shown when the reconciliation below the paging loops finds that this run did
+ * not re-encrypt every row the table holds for this user.
+ *
+ * It names both numbers on purpose. "migrated 0 of 12 transactions" and
+ * "migrated 12 of 12 transactions" have to read differently, because the whole
+ * family of defects on this path is a check that cannot tell those two apart.
+ */
+export function rowsNotReconciledMessage(
+  label: string,
+  migrated: number,
+  total: number | null | undefined,
+): string {
+  const totalText = typeof total === "number" ? String(total) : "unknown";
+  return (
+    `Vault recovery stopped before saving: migrated ${migrated} of ${totalText} ${label}. ` +
+    "Your stored vault keys were not changed. Do not close or reload this page, and contact " +
+    "support with this message."
+  );
+}
+
+/**
+ * Read the exact number of rows this user owns in `table` and throw unless the
+ * rotation migrated every one of them.
+ *
+ * WHY A HEAD COUNT AND NOT A SELECT OF IDS. The failure being guarded against
+ * is a read that comes back short without erroring, so counting the rows a
+ * select returns would measure the fault with the ruler that has the fault in
+ * it. PostgREST computes an exact count server side and reports it out of band
+ * in the Content-Range header, so it is not clipped by the server-side maximum
+ * row count that clips the row payload.
+ *
+ * The count runs under the same row-level security as the paged reads, so "the
+ * rows this user owns" means the same thing in both places. That equivalence is
+ * the property being compared; this is not a global table count.
+ *
+ * A count that cannot be read is a FAILURE, not a pass. At the point where it
+ * matters, an unreadable count is indistinguishable from agreement, and letting
+ * it through would put the original silence straight back.
+ */
+async function assertEveryRowMigrated(
+  supabase: VaultPersistClient,
+  table: string,
+  label: string,
+  migrated: number,
+): Promise<void> {
+  const { count, error } = await supabase
+    .from(table)
+    .select("id", { count: "exact", head: true });
+  if (error) throw error;
+  if (typeof count !== "number") throw new Error(rowsNotReconciledMessage(label, migrated, null));
+  if (count !== migrated) throw new Error(rowsNotReconciledMessage(label, migrated, count));
+}
+
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
 
@@ -119,8 +173,16 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   //
   // Residual, stated rather than hidden: offset paging over a stable order is
   // still not immune to another session INSERTing or DELETing a row while this
-  // loop runs, which shifts the window. Keyset pagination on id would close
-  // that too. It is deliberately out of scope here and is not a regression.
+  // loop runs, which shifts the window. That is NOT fixed here, and keyset
+  // pagination on id would not fix it either: a row inserted below the cursor
+  // is missed exactly as offset paging misses it, and it is written under the
+  // OLD MEK by construction. It is instead made LOUD. The reconciliation below
+  // both loops compares what this run migrated against what the table actually
+  // holds, and throws while failing is still safe.
+  //
+  // Distinct ids, not a running tally: a read that hands the same row back
+  // twice must not be able to make that reconciliation agree.
+  const migratedConnectionIds = new Set<string>();
   let connOffset = 0;
   for (;;) {
     const { data: conns, error: connsErr } = await supabase
@@ -157,6 +219,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
         .update(connUpdate)
         .eq("id", conn.id);
       if (connErr) throw connErr;
+      migratedConnectionIds.add(conn.id);
     }
 
     // End on a short page, not on the absence of an error. A capped or empty
@@ -171,6 +234,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // above: this loop UPDATEs the rows of each page as it goes, so an unordered
   // scan may skip a row (stranded under the old MEK, silently and permanently)
   // or return one twice (decryption throws and the rotation aborts partway).
+  const migratedTransactionIds = new Set<string>();
   let offset = 0;
   for (;;) {
     const { data: txns, error: txnsErr } = await supabase
@@ -189,12 +253,43 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
           .update({ encrypted_payload: newPayload })
           .eq("id", txn.id);
         if (txnErr) throw txnErr;
+        migratedTransactionIds.add(txn.id);
       }),
     );
 
     if ((txns as unknown[]).length < TRANSACTION_PAGE_SIZE) break;
     offset += TRANSACTION_PAGE_SIZE;
   }
+
+  // RECONCILE BEFORE THE META WRITE.
+  //
+  // This is the last instant at which failing is the safe outcome. The stored
+  // enc_mek_ciphertext and recovery_ciphertext still wrap the OLD MEK, so the
+  // user can still unlock and every row that has not moved still reads, and
+  // clearMigrationKeys has not run. After the write below, the same
+  // disagreement is unrecoverable AND silent.
+  //
+  // WHAT THIS CATCHES, and why it is a count rather than another paging fix.
+  // Both loops above are correct only while the page size stays strictly below
+  // the project's server-side maximum row count, and that cap is a project
+  // setting outside version control: lower it under 500 and both loops end on
+  // the first short page, strand every row past it, and the meta write still
+  // lands. A concurrent INSERT is the same strand by a different route. So the
+  // check is deliberately not aimed at either mechanism. Comparing what was
+  // migrated against what the table holds converts every variant of a short
+  // read, including ones nobody has thought of yet, into a loud failure at the
+  // one moment failing is safe.
+  //
+  // Both counts are taken here rather than one after each loop, deliberately:
+  // a row inserted into connections DURING the transaction loop is caught only
+  // by a check that runs after both.
+  await assertEveryRowMigrated(supabase, "connections", "connections", migratedConnectionIds.size);
+  await assertEveryRowMigrated(
+    supabase,
+    "encrypted_transactions",
+    "transactions",
+    migratedTransactionIds.size,
+  );
 
   // From the first rewritten row until the meta write below lands, the only
   // copy of the new MEK is in the page's memory. Closing or reloading the tab
