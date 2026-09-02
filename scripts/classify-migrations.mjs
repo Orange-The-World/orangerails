@@ -269,8 +269,25 @@ function scrub(sql) {
         });
         blank(sql.slice(i, end));
       } else if (/(^|;)\s*DO\b/i.test(fragment)) {
+        // OR-T1709. The body executes at apply time, so it must be read
+        // under exactly the same rules as everything else: a comment or a
+        // string literal inside it is not executable SQL, and a semicolon
+        // inside either must not split a statement. Copying it through
+        // verbatim switched scrub() off for the one place it matters most.
+        const inner = scrub(body);
+        if (inner.error) {
+          return { error: `a DO block body could not be read: ${inner.error}` };
+        }
+        if ((inner.routines || []).length > 0) {
+          return {
+            error:
+              'a DO block body defines a routine, and whether that routine\'s own body ' +
+              'runs cannot be answered by this scanner, so the file is refused rather ' +
+              'than read as clean',
+          };
+        }
         blank(tag);
-        for (const c of body) out.push(c);
+        for (const c of inner.text) out.push(c);
         blank(tag);
       } else {
         return {
