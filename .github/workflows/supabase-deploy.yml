@@ -1147,6 +1147,61 @@ jobs:
           rm -f "$LEDGER_MAP"
           echo
 
+          # -------------------------------------------------------------------
+          # OR-T1518. COUNT CHECK against what the classifier actually examined.
+          #
+          # The classification step wrote down the exact set of files it read.
+          # This step now recomputes that set from its OWN read of the ledger and
+          # refuses to apply if the two disagree, on count or on names. Two reads
+          # seconds apart can genuinely differ: another dispatch lands between
+          # them, or the checkouts are not the same. A gate that gave an honest
+          # verdict on a different set than the one being applied is worse than
+          # no gate, because it reads as a passed check.
+          # -------------------------------------------------------------------
+          MANIFEST="${RUNNER_TEMP}/or-t1518-pending.txt"
+          COUNTFILE="${RUNNER_TEMP}/or-t1518-pending.count"
+
+          APPLY_LIST=$(mktemp); chmod 600 "$APPLY_LIST"
+          for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
+            B=$(basename "$FILE")
+            V="${B%%_*}"
+            if echo "$APPLIED" | grep -qx "$V"; then
+              continue
+            fi
+            echo "$FILE" >> "$APPLY_LIST"
+          done
+          APPLY_N=$(wc -l < "$APPLY_LIST" | tr -d ' ')
+
+          if [ ! -f "$COUNTFILE" ] || [ ! -f "$MANIFEST" ]; then
+            rm -f "$APPLY_LIST"
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the classification step left no record of what it examined, so nothing here knows whether this set was ever classified. NOTHING was applied."
+            exit 1
+          fi
+
+          CLASS_N=$(cat "$COUNTFILE")
+          if [ "$CLASS_N" = "unknown" ]; then
+            # Reachable on dev only. On prod the classification step exits 1 and
+            # this step never runs. Said out loud, because "I could not compare"
+            # must never render the same as "I compared and they matched".
+            echo "::warning::COUNT CHECK UNKNOWN: the classifier could not compute the pending set on this target, so the ${APPLY_N} file(s) below were NOT compared against a classified set. This is not a passed check."
+          elif [ "$CLASS_N" != "$APPLY_N" ]; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the classifier examined ${CLASS_N} file(s) and this step would apply ${APPLY_N}. The verdict does not cover what is about to run. NOTHING was applied. Re-run so both reads see the same ledger."
+            echo "-- classified --"; cat "$MANIFEST"
+            echo "-- would apply --"; cat "$APPLY_LIST"
+            rm -f "$APPLY_LIST"
+            exit 1
+          elif ! diff -q <(sort "$MANIFEST") <(sort "$APPLY_LIST") >/dev/null 2>&1; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the classifier examined ${CLASS_N} file(s) and this step would apply the same NUMBER of different files. NOTHING was applied."
+            echo "-- classified --"; cat "$MANIFEST"
+            echo "-- would apply --"; cat "$APPLY_LIST"
+            rm -f "$APPLY_LIST"
+            exit 1
+          else
+            echo "COUNT CHECK: ${APPLY_N} of ${CLASS_N} classified file(s) match, by name. Applying exactly what was classified."
+          fi
+          rm -f "$APPLY_LIST"
+          echo
+
           # For each migration file, apply if not in the applied set
           APPLIED_COUNT=0
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
