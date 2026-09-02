@@ -8,6 +8,14 @@
 -- defaclobjtype 'r'. This file closes the same door for relkind 'S'
 -- (sequences) and pg_proc / defaclobjtype 'f' and 'S' (functions).
 --
+--
+-- The objtype 'f' (function) default is revoked here deliberately (see PART 3 and
+-- assertions A3/A5). Three quarters of the functions in schema public run SECURITY
+-- DEFINER, so RLS does not constrain them, and an open 'f' default hands anon EXECUTE
+-- on every future function postgres creates in public with no review anywhere. If a
+-- future migration needs an anon-callable RPC, it must add its own explicit
+-- GRANT EXECUTE ON FUNCTION <fn> TO anon line; that grant does not come back on its own.
+--
 -- ---------------------------------------------------------------------------
 -- PART 1: every sequence in schema public loses every anon privilege.
 -- Resolves dynamically at apply time, so an empty set of sequences is a
@@ -178,5 +186,18 @@ begin
     raise exception 'anon sequence/function sweep FAILED: the postgres default privilege for TABLES in schema public no longer grants anon SELECT. The row was either overwritten or removed, so the default ACL in force is not ours. Expected objtype r to read anon=r.';
   end if;
 
-  raise notice 'anon sequence/function sweep: end state verified. No sequence or function grant for anon in schema public, the postgres default privilege no longer grants one, and the postgres default ACL still reads anon=r on tables and names anon nowhere for sequences or functions.';
+  -- A6, ported from PR #1095's assertion (e). anon's two legitimate INSERT paths must
+  -- survive this sweep untouched: neither waitlist nor adapter_requests uses an
+  -- identity column or a nextval default (both use gen_random_uuid() primary keys), so
+  -- this file has no reason to ever touch either grant, but every other assertion here
+  -- is an allow-list that only fires on a privilege being PRESENT for anon, so an
+  -- over-revoke on these two tables would otherwise pass silently.
+  if not has_table_privilege('anon', 'public.waitlist', 'INSERT') then
+    raise exception 'anon sequence/function sweep FAILED: anon lost INSERT on public.waitlist; this file must never touch that grant';
+  end if;
+  if not has_table_privilege('anon', 'public.adapter_requests', 'INSERT') then
+    raise exception 'anon sequence/function sweep FAILED: anon lost INSERT on public.adapter_requests; this file must never touch that grant';
+  end if;
+
+  raise notice 'anon sequence/function sweep: end state verified. No sequence or function grant for anon in schema public, the postgres default privilege no longer grants one, the postgres default ACL still reads anon=r on tables and names anon nowhere for sequences or functions, and anon still holds its two legitimate INSERT paths.';
 end $$;
