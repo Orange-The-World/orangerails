@@ -58,6 +58,7 @@ interface SelectChain {
   ): Promise<unknown>;
   order(column: string, options?: { ascending?: boolean }): SelectChain;
   gt(column: string, value: unknown): SelectChain;
+  neq(column: string, value: unknown): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
   limit(count: number): Promise<QueryResult>;
 }
@@ -69,7 +70,16 @@ interface SelectChain {
  * how many times the loop read a table would silently start counting it.
  */
 function pagedSelects(calls: RecordedCall[], table: string) {
-  return calls.filter((c) => c.table === table && c.op === "select" && !c.options?.head);
+  return calls.filter(
+    (c) =>
+      c.table === table &&
+      c.op === "select" &&
+      !c.options?.head &&
+      // The generation probe is a select too. It reads one row to pick this
+      // rotation's marker and migrates nothing, so counting it here would make
+      // every assertion about how many times a walk paged a table wrong by one.
+      c.columns !== "data_key_generation",
+  );
 }
 
 interface FakeOptions {
@@ -278,6 +288,10 @@ function makeFakeClient(options: FakeOptions = {}) {
             },
             gt(column: string, value: unknown) {
               call.filters.push({ column: "gt", value: [column, value] });
+              return chain;
+            },
+            neq(column: string, value: unknown) {
+              call.filters.push({ column: "neq", value: [column, value] });
               return chain;
             },
             range(from: number, to: number) {
