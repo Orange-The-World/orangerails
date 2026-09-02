@@ -12,3 +12,13 @@
 --      refusing for some unrelated reason;
 --   2. a later branch edits THIS file in place rather than a migration that
 --      matters, so the refusal can be demonstrated without touching real SQL.
+--
+-- ---------------------------------------------------------------------------
+-- THE LINE BELOW IS THE POINT OF THE DEMONSTRATION.
+--
+-- Everything above this is byte for byte what the base branch already holds.
+-- This line is an edit to a migration that already exists: same version, same
+-- file name, different body. On the apply path this is invisible, because the
+-- loop skips a version the ledger already records and the name comparison sees
+-- two identical names. The guard has to catch it here or nowhere.
+-- ---------------------------------------------------------------------------
