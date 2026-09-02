@@ -744,7 +744,7 @@ Deno.test('DL-0442 account filter: source_wallets DB error -- handleEvent errors
 Deno.test('markDeferred: updates opk_deferred_at field on the correct row', async () => {
   const updates: Array<{ patch: Record<string, unknown>; id: string }> = [];
 
-  const mockClient = {
+  const mockClient = chainable({
     from(_table: string) {
       let pendingPatch: Record<string, unknown> | null = null;
       // deno-lint-ignore no-explicit-any
@@ -763,7 +763,7 @@ Deno.test('markDeferred: updates opk_deferred_at field on the correct row', asyn
       };
       return chain;
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   await markDeferred(mockClient as any, 'evt-xyz');
@@ -803,7 +803,7 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
   let connectionsCallCount = 0;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(table: string) {
       if (table === 'connections') {
         connectionsCallCount++;
@@ -849,7 +849,7 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-sink-23505',
@@ -870,7 +870,7 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
 
 Deno.test('handleEventSinkDelivery: non-23505 insert error surfaces as error string', async () => {
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(table: string) {
       if (table === 'connections') {
         return {
@@ -886,7 +886,7 @@ Deno.test('handleEventSinkDelivery: non-23505 insert error surfaces as error str
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-sink-dberr',
