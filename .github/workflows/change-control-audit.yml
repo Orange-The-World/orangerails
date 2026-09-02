@@ -1,0 +1,292 @@
+name: Change control audit
+
+# ---------------------------------------------------------------------------
+# Records the settings that gate production database changes, once a day, and
+# alarms when one of them moves.
+#
+# WHAT IT READS
+#   GET /repos/{owner}/{repo}/environments      protection rules, reviewers,
+#                                               prevent_self_review, can_admins_bypass
+#   GET /repos/{owner}/{repo}/actions/variables  MIGRATION_APPLY_ALLOWED_ACTORS_PROD
+#                                                and _DEV
+#
+# WHERE IT WRITES
+#   A dedicated log branch, never dev. Two files:
+#     current.json    the latest snapshot AND the timestamp it was read
+#     history.jsonl   one line per CHANGE, so the file is a change log rather
+#                     than a pile of identical daily readings
+#
+#   The log branch is deliberate. Committing a daily reading onto dev would
+#   add roughly 365 commits a year to the branch whose distance from prod is
+#   a release gate, so the audit trail would quietly distort the number it has
+#   nothing to do with.
+#
+# HOW IT FAILS
+#   Every path that means "I could not check" has its own exit code and its
+#   own message, and none of them can print as OK:
+#     10  environments endpoint did not return 200
+#     11  variables endpoint did not return 200
+#     12  environments list came back empty or unparseable
+#     13  a required allowlist variable is missing
+#     14  the self-test could not prove the failure detection still works
+#     20  a monitored setting CHANGED (this is the alarm, not a malfunction)
+#
+#   Exit 20 is the whole point of the workflow. It is not a broken check.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # 06:17 UTC daily. Off the hour on purpose: the top of the hour is when
+    # every scheduled workflow on the platform queues at once and runs late.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: change-control-audit
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  LOG_BRANCH: change-control-audit-log
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Self-test: prove the failure detection still works
+        run: |
+          set -uo pipefail
+
+          # This runs BEFORE the real read, on every run, and it is the reason
+          # a green result here means anything. A monitor that has lost its
+          # ability to fail reports the same "OK" as one that is working, and
+          # that is precisely the shape of check this workflow exists because
+          # of. So each day we make the reader fail on purpose first.
+
+          probe () {
+            # Same shape as the real read: capture the body, capture the HTTP
+            # status separately, and treat anything that is not 200 as a
+            # failure rather than as an empty result.
+            curl -sS -o /tmp/probe.body -w '%{http_code}' --max-time 20 "$1" 2>/dev/null || echo "000"
+          }
+
+          # 1. An unreachable host must NOT come back 200.
+          CODE=$(probe "https://this-host-does-not-resolve.invalid/x")
+          if [ "$CODE" = "200" ]; then
+            echo "::error::self-test failed: an unreachable host reported HTTP 200. The reader cannot distinguish reachable from unreachable, so every result it produces today is meaningless."
+            exit 14
+          fi
+          echo "self-test: unreachable host correctly did not return 200 (got '${CODE}')"
+
+          # 2. A real host returning 404 must NOT be mistaken for success.
+          CODE=$(probe "https://api.github.com/repos/${GITHUB_REPOSITORY}/this-endpoint-does-not-exist")
+          if [ "$CODE" = "200" ]; then
+            echo "::error::self-test failed: a known-missing endpoint reported HTTP 200."
+            exit 14
+          fi
+          echo "self-test: missing endpoint correctly did not return 200 (got '${CODE}')"
+
+          # 3. The empty-list trap, checked directly. This is the exact bug
+          #    this estate keeps shipping: a loop over an empty list finishes
+          #    successfully and exits 0, so "I read nothing" renders as "all
+          #    clear". Assert that our emptiness test actually fires.
+          if echo '[]' | jq -e 'length > 0' >/dev/null 2>&1; then
+            echo "::error::self-test failed: an empty list passed the non-empty assertion. An unreadable environment list would render as 'no environments configured' and this monitor would go green on a blind read."
+            exit 14
+          fi
+          echo "self-test: an empty list is correctly refused"
+
+          echo "self-test passed: the reader can still tell failure from success"
+
+      - name: Read the change control settings
+        env:
+          # Prefer a dedicated token if one has been provisioned. The built-in
+          # GITHUB_TOKEN may not carry the repository administration read that
+          # the environments endpoint requires. If it does not, the run fails
+          # LOUDLY on exit 10 naming the endpoint and the status, which is the
+          # correct outcome: "I could not read it" must never be silent.
+          AUDIT_TOKEN: ${{ secrets.CHANGE_CONTROL_AUDIT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          TOKEN="${AUDIT_TOKEN:-$GH_TOKEN}"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+
+          # Never echoes the token on any path, including the failure paths.
+          # The response body is not printed on an auth failure either: on a
+          # 401 it is the one place a token shaped string could reach a log.
+          read_json () {
+            local url="$1" out="$2"
+            curl -sS -o "$out" -w '%{http_code}' --max-time 30 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$url" 2>/dev/null || echo "000"
+          }
+
+          CODE=$(read_json "${API}/environments" /tmp/envs.json)
+          if [ "$CODE" != "200" ]; then
+            echo "::error::CANNOT CHECK: GET ${API}/environments returned HTTP ${CODE}. This is not a report that the settings are unchanged; nothing was read. If this is 403, the token lacks repository administration read: provision CHANGE_CONTROL_AUDIT_TOKEN as a repository secret."
+            exit 10
+          fi
+
+          CODE=$(read_json "${API}/actions/variables?per_page=100" /tmp/vars.json)
+          if [ "$CODE" != "200" ]; then
+            echo "::error::CANNOT CHECK: GET ${API}/actions/variables returned HTTP ${CODE}. Nothing was read. If this is 403, the token lacks the variables read scope: provision CHANGE_CONTROL_AUDIT_TOKEN as a repository secret."
+            exit 11
+          fi
+
+          # An empty or unparseable environment list is the silent-success
+          # shape this whole workflow is a reaction to. A repository with zero
+          # environments and a repository we could not read produce the same
+          # empty array, so refuse it rather than recording "0 environments"
+          # as a fact.
+          if ! jq -e 'type == "object" and (.environments | type == "array") and (.environments | length > 0)' /tmp/envs.json >/dev/null 2>&1; then
+            echo "::error::CANNOT CHECK: the environments response was empty or not the expected shape. A repository with no environments and one we could not read look identical here, so this is refused rather than recorded as 'none configured'."
+            exit 12
+          fi
+
+          # Normalise to a canonical shape, sorted, so that cosmetic ordering
+          # from the API never reads as a change. Only the fields that gate a
+          # production change are kept: a diff on this snapshot is always a
+          # diff that matters.
+          jq -S '{
+            environments: (
+              [ .environments[] | {
+                  name: .name,
+                  can_admins_bypass: .can_admins_bypass,
+                  protection_rules: (
+                    [ (.protection_rules // [])[] | {
+                        type: .type,
+                        prevent_self_review: (.prevent_self_review // null),
+                        wait_timer: (.wait_timer // null),
+                        reviewers: (
+                          [ (.reviewers // [])[]
+                            | { type: .type, login: (.reviewer.login // .reviewer.slug // null) } ]
+                          | sort_by(.type, (.login // ""))
+                        )
+                      } ] | sort_by(.type)
+                  )
+                } ] | sort_by(.name)
+            )
+          }' /tmp/envs.json > /tmp/envs.norm.json
+
+          # The two allowlists, by name. A MISSING allowlist is reported, not
+          # skipped: the variable disappearing is itself a change-control
+          # event, and treating "absent" as "nothing to compare" is how a
+          # removal becomes invisible.
+          for V in MIGRATION_APPLY_ALLOWED_ACTORS_PROD MIGRATION_APPLY_ALLOWED_ACTORS_DEV; do
+            if ! jq -e --arg n "$V" '[.variables[]? | select(.name == $n)] | length == 1' /tmp/vars.json >/dev/null 2>&1; then
+              echo "::error::CANNOT CHECK: repository variable ${V} was not found. If it was deliberately removed that is itself a change-control change and belongs in the record; it is not something this check may pass over."
+              exit 13
+            fi
+          done
+
+          jq -S '{
+            variables: (
+              [ .variables[]
+                | select(.name == "MIGRATION_APPLY_ALLOWED_ACTORS_PROD"
+                      or .name == "MIGRATION_APPLY_ALLOWED_ACTORS_DEV")
+                | { name: .name, value: .value } ]
+              | sort_by(.name)
+            )
+          }' /tmp/vars.json > /tmp/vars.norm.json
+
+          jq -S -s '.[0] * .[1]' /tmp/envs.norm.json /tmp/vars.norm.json > /tmp/snapshot.json
+
+          echo "read $(jq '.environments | length' /tmp/snapshot.json) environment(s) and $(jq '.variables | length' /tmp/snapshot.json) allowlist variable(s)"
+
+      - name: Compare against the last recorded reading and alarm on change
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          READ_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # The log branch may not exist yet on the first run.
+          FIRST_RUN=0
+          if git ls-remote --exit-code --heads origin "$LOG_BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$LOG_BRANCH" --depth 1
+            git checkout -B "$LOG_BRANCH" "origin/${LOG_BRANCH}"
+          else
+            git checkout --orphan "$LOG_BRANCH"
+            git rm -rf . >/dev/null 2>&1 || true
+            FIRST_RUN=1
+          fi
+
+          CHANGED=0
+          if [ "$FIRST_RUN" -eq 1 ] || [ ! -f current.json ]; then
+            echo "no previous reading on ${LOG_BRANCH}: recording the first baseline. Nothing is compared on this run, and that is stated rather than reported as 'no change'."
+          else
+            jq -S 'del(.read_at)' current.json > /tmp/previous.json 2>/dev/null || echo '{}' > /tmp/previous.json
+            if ! diff -q /tmp/previous.json /tmp/snapshot.json >/dev/null 2>&1; then
+              CHANGED=1
+            fi
+          fi
+
+          jq -S --arg t "$READ_AT" '. + {read_at: $t}' /tmp/snapshot.json > current.json
+
+          if [ "$CHANGED" -eq 1 ]; then
+            jq -c -S --arg t "$READ_AT" '. + {read_at: $t}' /tmp/snapshot.json >> history.jsonl
+          elif [ ! -f history.jsonl ]; then
+            jq -c -S --arg t "$READ_AT" '. + {read_at: $t}' /tmp/snapshot.json >> history.jsonl
+          fi
+
+          git add current.json history.jsonl
+          if ! git diff --cached --quiet; then
+            git commit -m "change control reading ${READ_AT}"
+            git push origin "$LOG_BRANCH"
+          fi
+
+          if [ "$CHANGED" -eq 0 ]; then
+            echo "change control settings unchanged. Value and read date are both in current.json on ${LOG_BRANCH}, read_at=${READ_AT}."
+            exit 0
+          fi
+
+          # ALARM. Name the old and the new value: a diff that says only
+          # "something changed" makes the reader do the work the alarm exists
+          # to do.
+          {
+            echo "## Production change control settings CHANGED"
+            echo ""
+            echo "Read at \`${READ_AT}\`. Previous reading is the parent commit on \`${LOG_BRANCH}\`."
+            echo ""
+            echo '```diff'
+            diff -u /tmp/previous.json /tmp/snapshot.json || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          BODY=$(printf 'The settings that gate production database changes are not what they were at the previous reading.\n\nRead at `%s`.\nRun: %s/%s/actions/runs/%s\n\n```diff\n%s\n```\n\nThis is a report, not a judgement: the change may be entirely intentional. What it must not be is unnoticed. Confirm who made it and why, and record that on the change control ticket.\n' \
+            "$READ_AT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
+            "$(diff -u /tmp/previous.json /tmp/snapshot.json || true)")
+
+          jq -n --arg t "Change control settings changed at ${READ_AT}" --arg b "$BODY" \
+            '{title: $t, body: $b}' > /tmp/issue.json
+
+          ISSUE_CODE=$(curl -sS -o /tmp/issue.resp -w '%{http_code}' --max-time 30 \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues" \
+            --data-binary @/tmp/issue.json 2>/dev/null || echo "000")
+
+          if [ "$ISSUE_CODE" != "201" ]; then
+            echo "::warning::drift was detected and recorded, but opening the alarm issue returned HTTP ${ISSUE_CODE}. The run still fails below, so the alarm is not lost."
+          fi
+
+          echo "::error::CHANGE CONTROL DRIFT: a monitored production gate setting changed since the last reading. See the step summary for the old and new values."
+          exit 20
