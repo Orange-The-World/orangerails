@@ -175,9 +175,11 @@ BEGIN
   IF NOT EXISTS (
         SELECT 1 FROM pg_policy
          WHERE polrelid = 'public.connections'::regclass
-           AND polcmd = 'w') THEN
+           AND polcmd IN ('w', '*')
+           AND ('authenticated'::regrole = ANY(polroles)
+                OR polroles = '{0}'::oid[])) THEN
     RAISE EXCEPTION
-      'connections: the UPDATE policy is gone, so the vault recovery write would match zero rows';
+      'connections: no UPDATE (or FOR ALL) policy applies to authenticated, so the vault recovery write would match zero rows';
   END IF;
 
   -- 5. The server side path must be untouched. If this fires, the revoke hit the
