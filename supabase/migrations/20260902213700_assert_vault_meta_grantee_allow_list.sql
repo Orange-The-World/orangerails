@@ -141,6 +141,60 @@
 --   select rel, lvl, grantee, count(*) as privs
 --     from acls group by 1, 2, 3 order by 1, 2, 3;
 --
+-- THE AGENT READ ROLE, AND WHY IT IS ADMITTED AT COLUMN LEVEL ONLY
+-- or_agent_reader is the read only role the internal agent tooling connects as.
+-- It is a CONDITIONAL entry in this allow list rather than a member of
+-- expected_grantees, and that difference is the entire point. A member of
+-- expected_grantees is trusted at any level, for any privilege, on any column.
+-- This role is trusted for exactly SELECT, at exactly COLUMN level, on exactly
+-- the 22 (table, column) pairs named in agent_reader_columns below. A table
+-- level grant to it, a privilege other than SELECT, or a column outside that
+-- list all raise, exactly as a stranger would. Adding it to expected_grantees
+-- instead would have made this file pass on the table wide grant it exists to
+-- catch, which is the repair this file deliberately does not make.
+--
+-- WHAT IT MAY READ: non secret vault metadata only. Public keys (kem_public_key,
+-- sig_public_key), key derivation parameters (kdf_algorithm, kdf_params),
+-- version and epoch integers (vault_key_version, pqc_key_version,
+-- keyring_epoch), the vault_mode discriminator, timestamps, and row identifiers
+-- (user_id, customer_id, workspace_key_id).
+--
+-- WHAT IT MAY NOT READ. Measured on dev on 2026-09-02 with
+-- has_column_privilege(or_agent_reader, <table>, <column>, 'SELECT'), every one
+-- false, with no column of either table left unaccounted for:
+--
+--   user_vault_meta      enc_mek_ciphertext, kem_secret_wrapped,
+--                        keyring_ciphertext, recovery_ciphertext,
+--                        sig_secret_wrapped, vault_salt,
+--                        vault_verifier_ciphertext
+--   customer_vault_meta  enc_mek_ciphertext, kem_secret_wrapped,
+--                        recovery_ciphertext, sig_secret_wrapped, vault_salt,
+--                        vault_verifier_ciphertext
+--
+-- WHY workspace_key_id IS ON THE READABLE SIDE, so nobody narrows it later
+-- believing that is the safer call. It is a pointer, and the thing it points at
+-- is closed: has_column_privilege(or_agent_reader, 'public.wrapped_data_keys',
+-- 'wrapped_ciphertext', 'SELECT') is false, measured the same day. The join it
+-- enables therefore yields counts and identifiers, never key material.
+--
+-- THE TRADE, STATED PLAINLY. or_agent_reader holds BYPASSRLS. Row level
+-- security does not narrow it, so the column grant is the ONLY thing standing
+-- between this role and a sealed column. That is precisely why this file checks
+-- the column list rather than trusting the role name. It is NOT a superuser
+-- (rolsuper false, measured), so the superuser exemption below does not quietly
+-- swallow it and make this whole section vacuous, and it inherits no other role
+-- (no pg_auth_members row), so it holds nothing by membership either.
+--
+-- ITS ABSENCE IS NOT A FAILURE. This is an allow list, not a require list:
+-- nothing here asks whether or_agent_reader exists. That is load bearing for
+-- apply ordering. The migration that DEFINES this grant set is numbered above
+-- this file, so on a fresh or restored database this assertion runs while the
+-- role does not exist yet. Requiring the role to be present would fail that
+-- apply, and renumbering the grant file below this one would walk into the out
+-- of order apply hazard instead. Because the role is only ever reached through
+-- an ACL entry and is never looked up by name, no role and no grant means
+-- simply nothing to report.
+--
 -- HONEST LIMIT
 -- The expected set was read from the dev project. The production project is not
 -- readable from the seat that wrote this file, so whether production's grantee
