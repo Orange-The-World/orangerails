@@ -684,7 +684,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Self-test: prove the diff can go both red and green
+      - name: "Self-test: prove the diff can go both red and green"
         run: |
           set -euo pipefail
           WORKDIR=$(mktemp -d)
