@@ -329,24 +329,36 @@ declare
   v_bad text;
   v_missing text;
   v_row record;
+  v_via text;
 begin
   -- B1. No table in schema public may leave the logged-in role holding any of
   -- the four maintenance privileges. Deliberately not narrowed to the list in
   -- part 1: if this fires for a table that is not in that list, a table exists
   -- that nobody measured. Add it to part 1 rather than narrowing this check.
-  select string_agg(format('%s:%s', c.relname, a.privilege_type), ', ' order by c.relname, a.privilege_type)
+  -- LEFT join, not inner: aclexplode reports a grant to PUBLIC with grantee = 0,
+  -- and oid 0 has no row in pg_roles, so an inner join silently drops that row
+  -- before the role filter ever runs. PUBLIC is inherited by every role,
+  -- authenticated included, so it is tested here alongside a direct grant, and
+  -- the message names which route each offending row took rather than
+  -- asserting a direct grant this check did not establish.
+  select string_agg(
+           format('%s:%s%s', c.relname, a.privilege_type,
+                  case when (case when a.grantee = 0 then 'PUBLIC' else r.rolname end) = 'PUBLIC'
+                       then ' (via PUBLIC, which authenticated inherits from)'
+                       else '' end),
+           ', ' order by c.relname, a.privilege_type)
     into v_bad
     from pg_class c
     join pg_namespace n on n.oid = c.relnamespace
     cross join lateral aclexplode(c.relacl) a
-    join pg_roles r on r.oid = a.grantee
+    left join pg_roles r on r.oid = a.grantee
    where n.nspname = 'public'
      and c.relkind in ('r', 'p')
      and c.relacl is not null
-     and r.rolname = 'authenticated'
+     and (case when a.grantee = 0 then 'PUBLIC' else r.rolname end) in ('authenticated', 'PUBLIC')
      and a.privilege_type in ('TRUNCATE', 'TRIGGER', 'REFERENCES', 'MAINTAIN');
   if v_bad is not null then
-    raise exception 'authenticated maintenance sweep FAILED: a table still grants the logged-in role a maintenance privilege, and TRUNCATE in particular is not filtered by row level security: %', v_bad;
+    raise exception 'authenticated maintenance sweep FAILED: a table still grants the logged-in role a maintenance privilege, directly or via PUBLIC (which every role inherits from), and TRUNCATE in particular is not filtered by row level security: %', v_bad;
   end if;
 
   -- B2. The default privilege must no longer hand the four out on new tables,
@@ -380,21 +392,31 @@ begin
   -- 2026-09-02: pg_default_acl for schema public carries exactly one
   -- defaclrole, postgres, no supabase_admin row at all) and this loop then
   -- finds nothing and raises nothing, on either branch.
+  -- Same LEFT join fix as B1, and for the same reason: a default privilege
+  -- granted to PUBLIC (grantee = 0) is invisible to an inner join on pg_roles,
+  -- and PUBLIC reaches authenticated by inheritance just as it does on a table
+  -- grant. v_row now carries the rendered grantee so both messages below can
+  -- name the route instead of asserting a direct grant.
   for v_row in
-    select pg_get_userbyid(d.defaclrole) as role, a.privilege_type as priv
+    select pg_get_userbyid(d.defaclrole) as role,
+           a.privilege_type as priv,
+           case when a.grantee = 0 then 'PUBLIC' else r.rolname end as grantee
       from pg_default_acl d
       join pg_namespace n on n.oid = d.defaclnamespace
       cross join lateral aclexplode(d.defaclacl) a
-      join pg_roles r on r.oid = a.grantee
+      left join pg_roles r on r.oid = a.grantee
      where n.nspname = 'public'
        and d.defaclobjtype = 'r'
-       and r.rolname = 'authenticated'
+       and (case when a.grantee = 0 then 'PUBLIC' else r.rolname end) in ('authenticated', 'PUBLIC')
        and a.privilege_type in ('TRUNCATE', 'TRIGGER', 'REFERENCES', 'MAINTAIN')
   loop
+    v_via := case when v_row.grantee = 'PUBLIC'
+                  then 'PUBLIC, which the logged-in role inherits from,'
+                  else 'the logged-in role directly,' end;
     if v_row.role = 'postgres' then
-      raise exception 'authenticated maintenance sweep FAILED: the default privilege for role postgres still grants the logged-in role %: this file was supposed to close this tap', v_row.priv;
+      raise exception 'authenticated maintenance sweep FAILED: the default privilege for role postgres still grants the logged-in role % (%): this file was supposed to close this tap', v_row.priv, v_via;
     else
-      raise warning 'authenticated maintenance sweep: default privilege for role % in schema public still grants the logged-in role %, and this migration cannot close it (ALTER DEFAULT PRIVILEGES FOR ROLE % is refused with permission denied to the applying role). A table created by % in public will arrive granting authenticated this privilege until a role holding % membership closes it.', v_row.role, v_row.priv, v_row.role, v_row.role, v_row.role;
+      raise warning 'authenticated maintenance sweep: default privilege for role % in schema public still grants %, %, and this migration cannot close it (ALTER DEFAULT PRIVILEGES FOR ROLE % is refused with permission denied to the applying role). A table created by % in public will arrive granting authenticated this privilege until a role holding % membership closes it.', v_row.role, v_via, v_row.priv, v_row.role, v_row.role, v_row.role;
     end if;
   end loop;
 
