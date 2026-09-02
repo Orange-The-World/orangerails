@@ -190,8 +190,25 @@ BEGIN
   END IF;
 
   -- 6. The client paths this migration must not break.
-  IF NOT has_table_privilege('authenticated', 'public.connections', 'INSERT') THEN
-    RAISE EXCEPTION 'connections: authenticated lost INSERT, the add connection path is broken';
+  --
+  --    INSERT is checked with has_any_column_privilege, NOT has_table_privilege,
+  --    and that difference is load bearing. 20260902234500 replaces the table
+  --    level INSERT on this table with a column level grant on the six columns
+  --    the add connection path names. That is the intended end state, so a
+  --    table level test would report a break where there is none. It would also
+  --    do it at the worst moment: the apply path applies every file whose
+  --    version is not yet in the ledger, in filename order, and nothing
+  --    requires a pending version to sit above the highest applied one. Applied
+  --    after 20260902234500, a table level test here raises and aborts the
+  --    deploy. The question this check exists to ask is whether the role can
+  --    still create a row, and the honest form of that question is "at table
+  --    level or on any column".
+  --
+  --    DELETE stays on has_table_privilege. PostgreSQL has no column level
+  --    DELETE, and has_any_column_privilege raises 22023 unrecognized privilege
+  --    type when handed it. Verified on dev, not assumed.
+  IF NOT has_any_column_privilege('authenticated', 'public.connections', 'INSERT') THEN
+    RAISE EXCEPTION 'connections: authenticated lost INSERT at table level and on every column, the add connection path is broken';
   END IF;
   IF NOT has_table_privilege('authenticated', 'public.connections', 'DELETE') THEN
     RAISE EXCEPTION 'connections: authenticated lost DELETE, the delete path is broken';
