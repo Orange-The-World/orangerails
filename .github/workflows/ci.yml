@@ -1044,6 +1044,9 @@ jobs:
       # REVERSIBLE from an absence.
       # -----------------------------------------------------------------------
       - name: Sweep every migration in the tree (report, not a gate)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           # set +e first, same reason as the step above: this step reads exit
           # codes deliberately and exit 2 here is the expected answer.
@@ -1058,7 +1061,8 @@ jobs:
           fi
           echo "=== classifying every migration in the tree (${#MIGS[@]} file(s)) ==="
 
-          OUT=$(node scripts/classify-migrations.mjs "${MIGS[@]}" 2>&1); RC=$?
+          JSON="${RUNNER_TEMP}/or-t1696-classify.json"
+          OUT=$(node scripts/classify-migrations.mjs "${MIGS[@]}" --json "$JSON" 2>&1); RC=$?
           echo "$OUT"
           echo "exit code: $RC (2 is expected here: the tree holds applied drops)"
 
@@ -1073,36 +1077,78 @@ jobs:
             exit 1
           fi
 
-          # Every file that is NOT REVERSIBLE, with the note, rule id and line
-          # the classifier reported for it. IRREVERSIBLE does not match
-          # ": REVERSIBLE" because of the space, so the filter keeps both of the
-          # refused classes and drops only the clean ones.
+          if [ ! -s "$JSON" ]; then
+            echo "::error::the sweep wrote no JSON, so there is nothing to report from. Not a clean sweep."
+            exit 1
+          fi
+
+          # Every file that is NOT REVERSIBLE, in the classifier's own prose
+          # form. IRREVERSIBLE does not match ": REVERSIBLE" because of the
+          # space, so this keeps both refused classes and drops the clean ones.
           NOT_CLEAN=$(echo "$OUT" | awk '/^== /{keep = ($0 !~ /: REVERSIBLE$/)} keep')
 
+          # One row per finding, from the classifier's own JSON rather than its
+          # prose, because a reviewer needs the file, the class and the line and
+          # should not have to read a wall of snippets to collect them.
+          TABLE=$(jq -r '
+            .files[]
+            | select(.verdict != "REVERSIBLE")
+            | . as $f
+            | if ((($f.findings) // []) | length) == 0
+              then "\($f.file) | \($f.verdict) | (no finding reported)"
+              else ($f.findings[] | "\($f.file) | \($f.verdict) | \(.id) | line \(.line)")
+              end' "$JSON")
+
+          SWEEP="${RUNNER_TEMP}/or-t1696-sweep.md"
           {
+            echo "## What the migration classifier says about this tree (OR-T1696)"
             echo ""
-            echo "### What the classifier says about the tree as it stands"
+            echo "A REPORT, not a gate. Nothing here blocks this pull request, and the exit code below is the expected one: the tree holds applied migrations that drop tables and columns, so a classifier that refuses that class is supposed to exit 2 over the whole tree."
             echo ""
-            echo "Command:"
+            echo "Command, run on this commit:"
             echo ""
             echo '```'
             echo "node scripts/classify-migrations.mjs \$(find supabase/migrations -name '*.sql' -type f | sort)"
             echo "$EXAMINED"
-            echo "exit code: ${RC} (2 expected: the tree holds applied drops)"
+            echo "exit code: ${RC}"
             echo '```'
             echo ""
-            echo "Every file that is not REVERSIBLE, verbatim:"
+            echo "Every file that is not REVERSIBLE, one row per finding:"
             echo ""
             echo '```'
-            if [ -n "$NOT_CLEAN" ]; then
-              echo "$NOT_CLEAN"
+            if [ -n "$TABLE" ]; then
+              echo "$TABLE"
             else
               echo "(none: every file in the tree classifies REVERSIBLE)"
             fi
             echo '```'
             echo ""
-            echo "This is a report. It does not gate anything, and the exit code above is not a failure."
-          } | tee -a "$DEMO" >> "$GITHUB_STEP_SUMMARY"
+            echo "Full output with the statement snippets and the reason for each class is in this run's job summary."
+          } > "$SWEEP"
+
+          cat "$SWEEP" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo ""
+            echo "<details><summary>Full classifier output for every file that is not REVERSIBLE</summary>"
+            echo ""
+            echo '```'
+            if [ -n "$NOT_CLEAN" ]; then echo "$NOT_CLEAN"; else echo "(none)"; fi
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # A headline on the demonstration comment too, so a reader who sees
+          # only that one is not left thinking the sweep never ran.
+          {
+            echo ""
+            echo "### Tree sweep (OR-T1696): \`${EXAMINED}\`, exit \`${RC}\`. Posted in full as its own comment."
+          } >> "$DEMO"
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$PR_NUMBER" ]; then
+            if ! gh pr comment "$PR_NUMBER" --body-file "$SWEEP"; then
+              echo "::warning::the sweep comment was refused. The identical text is in this run's job summary and in the log above, so the evidence is not lost."
+            fi
+          fi
 
       - name: Publish the demonstration to the pull request
         # The seats that review changes in this repo hold GitHub read tools and
