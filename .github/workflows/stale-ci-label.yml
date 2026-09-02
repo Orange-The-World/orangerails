@@ -1,31 +1,47 @@
 name: STALE CI label
 
-# Fires on every completed check_run. We use this to compare the set of
-# check names on the PR head against the trunk (dev) baseline. A PR whose
-# head SHA is missing any non-skipped trunk check name is labeled STALE CI
-# so the review queue and reviewers can see it at a glance.
+# Sweeps every open PR targeting dev on a fixed schedule and compares each
+# PR head's check-run set against the trunk (dev) baseline. A PR whose head
+# is missing any non-skipped trunk check name is labeled STALE CI so the
+# review queue and reviewers can see it at a glance.
 #
-# Why check_run and not pull_request:
-#   pull_request fires when the PR is created or updated, before checks have
-#   run. We need the checks to have (or not have) fired before we can compare.
-#   check_run fires each time one check completes, which is exactly the moment
-#   we can re-evaluate the set.
+# Why a schedule and not check_run (OR-T1675):
+#   check_run fires once for every check-run that completes anywhere in the
+#   repo, on any PR, and GitHub always attaches a check_run-triggered
+#   workflow's own check-run to the DEFAULT BRANCH head (GITHUB_SHA for
+#   check_run is documented as "last commit on default branch"), never to
+#   the PR head or to the head_sha carried in the event payload. At this
+#   repo's CI volume that put dozens of "Evaluate STALE CI label" entries on
+#   dev's head every hour, which is what buried the real deploy checks past
+#   the 100-row page that CI-truth tooling reads and made the deploy path
+#   invisible. workflow_run has the identical anchor-to-default-branch
+#   behavior, so switching to it would not have helped. A schedule trigger
+#   ALSO anchors to the default branch (same platform rule; there is no
+#   workflow-config way to change what commit a job's own check-run lands
+#   on), so this does not remove check-runs from dev, it bounds them to one
+#   sweep per interval instead of one per completed check-run repo-wide.
 #
-# False-positive guard: if any check on the PR head is still in-progress or
-# queued, we skip the evaluation. Only a fully-settled head can be scored.
+# False-positive guard: unchanged. A PR whose head still has an in-progress
+# or queued check is skipped this sweep and picked up on the next one.
 
 on:
-  check_run:
-    types: [completed]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
 
-# This labeler is advisory. It must never leave an unsuccessful check-run
-# on the head, because that holds mergeable_state at 'unstable' and blocks
-# merge tooling. So: queue runs instead of cancelling them (a cancelled run
-# is an unsuccessful conclusion), and let the compare step fail soft.
+# One sweep at a time. cancel-in-progress is safe here (unlike the old
+# per-check_run grouping): a sweep re-evaluates every open PR from scratch
+# every run, so cancelling a stale in-flight sweep in favor of a fresh one
+# loses no information.
 concurrency:
-  group: stale-ci-${{ github.event.check_run.head_sha }}
-  cancel-in-progress: false
+  group: stale-ci-sweep
+  cancel-in-progress: true
 
+# This labeler is advisory. It must never leave an unsuccessful check-run on
+# dev's head, because dev is itself a PR head on any dev-to-prod promotion
+# PR, and an unstable check there can block that promotion. So: no
+# `exit 1` paths, and the per-PR loop body is wrapped so one PR's API
+# failure cannot fail the whole sweep.
 permissions:
   checks: read
   contents: read
@@ -36,69 +52,12 @@ jobs:
     name: Evaluate STALE CI label
     runs-on: ubuntu-latest
     steps:
-      - name: Find open PR targeting dev for this commit
-        id: find-pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          HEAD_SHA="${{ github.event.check_run.head_sha }}"
-          PR_NUMBER=$(gh api \
-            "repos/${{ github.repository }}/commits/${HEAD_SHA}/pulls" \
-            -H "Accept: application/vnd.github+json" \
-            --jq '[.[] | select(.state == "open" and .base.ref == "dev")] | first | .number // empty')
-          if [ -z "$PR_NUMBER" ]; then
-            echo "No open PR targeting dev for ${HEAD_SHA} -- nothing to label"
-          fi
-          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Skip if any checks still in progress
-        id: settled
-        if: steps.find-pr.outputs.pr_number != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ steps.find-pr.outputs.head_sha }}
-        run: |
-          # Count check_runs on this head that are not yet in a terminal state.
-          # A head that still has pending/in_progress checks cannot be evaluated:
-          # a missing check might simply not have started yet.
-          RUNNING=$(gh api \
-            "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
-            --paginate \
-            -H "Accept: application/vnd.github+json" \
-            --jq '[.check_runs[] | select(.status != "completed" and .name != "Evaluate STALE CI label")] | length')
-          if [ "$RUNNING" -gt 0 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "${RUNNING} check(s) still running -- deferring STALE CI evaluation"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "All checks settled -- proceeding with STALE CI evaluation"
-          fi
-
-      - name: Ensure STALE CI label exists
-        if: >
-          steps.find-pr.outputs.pr_number != '' &&
-          steps.settled.outputs.skip == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh label create "STALE CI" \
-            --repo "${{ github.repository }}" \
-            --description "PR head is missing CI checks present on trunk (dev)" \
-            --color "e4e669" 2>/dev/null || true
-
-      - name: Compare check sets and apply or remove label
+      - name: Sweep open PRs targeting dev
         continue-on-error: true
-        if: >
-          steps.find-pr.outputs.pr_number != '' &&
-          steps.settled.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
-          HEAD_SHA: ${{ steps.find-pr.outputs.head_sha }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           # --- Trunk baseline ---
           # Non-skipped check names on dev HEAD. apply-migrations is always
@@ -111,7 +70,7 @@ jobs:
             --jq '[.check_runs[] | select(.conclusion != "skipped" and .name != "Evaluate STALE CI label") | .name] | sort | unique | .[]')
 
           if [ -z "$TRUNK_CHECKS" ]; then
-            echo "::warning::Trunk check-run list is empty -- refusing to label (empty baseline would produce false positives on every PR)"
+            echo "::warning::Trunk check-run list is empty -- refusing to label any PR this sweep (empty baseline would produce false positives on every PR)"
             exit 0
           fi
 
@@ -119,37 +78,66 @@ jobs:
           echo "Trunk baseline (${TRUNK_COUNT} checks):"
           echo "$TRUNK_CHECKS" | sed 's/^/  /'
 
-          # --- PR head set ---
-          # All check names that have any run on this SHA (any state or conclusion).
-          # A name absent here will never appear: checks are bound to the SHA they
-          # were triggered against.
-          PR_CHECKS=$(gh api \
-            "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
-            --paginate \
-            -H "Accept: application/vnd.github+json" \
-            --jq '[.check_runs[] | select(.name != "Evaluate STALE CI label") | .name] | sort | unique | .[]' || echo "")
+          PR_NUMBERS=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --base dev \
+            --state open \
+            --json number \
+            --jq '.[].number')
 
-          PR_COUNT=$(echo "$PR_CHECKS" | grep -c . || true)
-          echo "PR head checks (${PR_COUNT}):"
-          echo "$PR_CHECKS" | sed 's/^/  /'
-
-          # --- Compare ---
-          # comm -23: lines in trunk (sorted A) not in PR head (sorted B) = missing.
-          MISSING=$(comm -23 \
-            <(echo "$TRUNK_CHECKS") \
-            <(echo "$PR_CHECKS"))
-
-          if [ -n "$MISSING" ]; then
-            MISSING_COUNT=$(echo "$MISSING" | grep -c . || true)
-            echo "STALE CI: ${MISSING_COUNT} trunk check(s) never ran on this PR head:"
-            echo "$MISSING" | sed 's/^/  MISSING: /'
-            gh pr edit "$PR_NUMBER" \
-              --repo "${{ github.repository }}" \
-              --add-label "STALE CI"
-            echo "Label STALE CI applied to PR #${PR_NUMBER}"
-          else
-            echo "All ${TRUNK_COUNT} trunk checks present on PR head -- clearing STALE CI label if set"
-            gh pr edit "$PR_NUMBER" \
-              --repo "${{ github.repository }}" \
-              --remove-label "STALE CI" 2>/dev/null || true
+          if [ -z "$PR_NUMBERS" ]; then
+            echo "No open PRs targeting dev this sweep."
+            exit 0
           fi
+
+          for PR_NUMBER in $PR_NUMBERS; do
+            echo "--- PR #${PR_NUMBER} ---"
+
+            HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json headRefOid --jq '.headRefOid' || echo "")
+            if [ -z "$HEAD_SHA" ]; then
+              echo "::warning::Could not read head sha for PR #${PR_NUMBER}, skipping this sweep"
+              continue
+            fi
+
+            RUNNING=$(gh api \
+              "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
+              --paginate \
+              -H "Accept: application/vnd.github+json" \
+              --jq '[.check_runs[] | select(.status != "completed")] | length' || echo "")
+            if [ -z "$RUNNING" ]; then
+              echo "::warning::Could not read check-runs for PR #${PR_NUMBER} head, skipping this sweep"
+              continue
+            fi
+            if [ "$RUNNING" -gt 0 ]; then
+              echo "${RUNNING} check(s) still running on PR #${PR_NUMBER} -- deferring to next sweep"
+              continue
+            fi
+
+            PR_CHECKS=$(gh api \
+              "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs" \
+              --paginate \
+              -H "Accept: application/vnd.github+json" \
+              --jq '[.check_runs[].name] | sort | unique | .[]' || echo "")
+
+            MISSING=$(comm -23 \
+              <(echo "$TRUNK_CHECKS") \
+              <(echo "$PR_CHECKS"))
+
+            if [ -n "$MISSING" ]; then
+              MISSING_COUNT=$(echo "$MISSING" | grep -c . || true)
+              echo "STALE CI: ${MISSING_COUNT} trunk check(s) never ran on PR #${PR_NUMBER} head:"
+              echo "$MISSING" | sed 's/^/  MISSING: /'
+              gh label create "STALE CI" \
+                --repo "${{ github.repository }}" \
+                --description "PR head is missing CI checks present on trunk (dev)" \
+                --color "e4e669" 2>/dev/null || true
+              gh pr edit "$PR_NUMBER" \
+                --repo "${{ github.repository }}" \
+                --add-label "STALE CI" || echo "::warning::Failed to add STALE CI label to PR #${PR_NUMBER}"
+            else
+              echo "All ${TRUNK_COUNT} trunk checks present on PR #${PR_NUMBER} head -- clearing STALE CI label if set"
+              gh pr edit "$PR_NUMBER" \
+                --repo "${{ github.repository }}" \
+                --remove-label "STALE CI" 2>/dev/null || true
+            fi
+          done
