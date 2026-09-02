@@ -293,15 +293,15 @@ async function walkAndMigrate<Row extends { id: string }>(
   migrated: Set<string>,
   migrateRow: (row: Row) => Promise<void>,
 ): Promise<void> {
-  let lastSeenId: string | null = null;
+  // DEMONSTRATION ONLY. This is the offset version, restored so the new tests
+  // can be seen going red against it. Do not merge this branch.
+  let offset = 0;
   for (;;) {
-    // The generated database types do not cover these tables, which is why the
-    // client is structural. Naming the builder is what lets the cursor filter
-    // be applied only on the pages that have one.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let query: any = supabase.from(table).select(columns);
-    if (lastSeenId !== null) query = query.gt("id", lastSeenId);
-    const { data, error } = await query.order("id", { ascending: true }).limit(pageSize);
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .order("id", { ascending: true })
+      .range(offset, offset + pageSize - 1);
     if (error) throw error;
 
     const page = (data ?? []) as Row[];
@@ -312,7 +312,7 @@ async function walkAndMigrate<Row extends { id: string }>(
     }
 
     if (page.length < pageSize) break;
-    lastSeenId = page[page.length - 1].id;
+    offset += pageSize;
   }
 }
 
