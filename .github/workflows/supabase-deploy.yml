@@ -657,9 +657,10 @@ jobs:
     # so it must run after the migration that could have changed them has
     # actually applied, or it reads stale state and misses exactly the drift
     # it exists to catch. apply-migrations is 'skipped' on every prod push and
-    # on a dispatch without the box ticked (both fine, handled below); a
-    # 'failure' or 'cancelled' means the schema state is not known, so this
-    # check cannot trust what it reads either.
+    # on a dispatch without the box ticked, and both are fine: nothing touched
+    # the schema. A 'failure' or 'cancelled' means the schema state is not
+    # known, so this check cannot trust what it reads either -- the compare
+    # step takes that result as APPLY_RESULT and exits UNKNOWN on it.
     needs: [target, apply-migrations]
     if: always()
     runs-on: ubuntu-latest
