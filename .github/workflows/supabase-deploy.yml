@@ -1009,11 +1009,14 @@ jobs:
           # that a change with no restore path is founder gated, and a rule that no
           # mechanism enforces is prose.
           #
-          # WHAT IT ADDS. prevent_self_review is set on the prod environment, so the
-          # account that triggered a run cannot approve it. Requiring the founder to
-          # be the dispatcher therefore makes this path genuinely two party: the
-          # founder starts it, and because the starter cannot approve it the approval
-          # must come from a different named reviewer.
+          # WHAT IT ADDS. This relies on prevent_self_review being enabled on the prod
+          # environment, so that the account which triggered a run cannot approve it.
+          # This workflow holds permissions: contents: read and cannot query that
+          # environment setting, so it is not verified here, only relied on. Requiring
+          # the founder to be the dispatcher is what turns "some named reviewer
+          # approved it" into "a different person than the founder approved it",
+          # provided that setting holds. If it is ever turned off, this check alone no
+          # longer makes the path two party.
           #
           # SCOPE. This branch is only reached when the classification is IRREVERSIBLE
           # and the target is the prod project. The reversible path is untouched and
@@ -1056,12 +1059,18 @@ jobs:
             printf '%s\n' "$DETAIL"
             echo ""
             echo "This apply carried an explicit authority reference, so it proceeded. The"
-            echo "reference names what authorised it. What BOUND it: the founder dispatched"
-            echo "this run, the dispatcher cannot approve their own environment request, so"
-            echo "the approval came from a different named reviewer on \`supabase-prod\`, and"
-            echo "the actor allowlist was satisfied. A required-reviewer rule is satisfied by"
-            echo "any ONE of its reviewers, which is exactly why the founder-dispatch check"
-            echo "exists."
+            echo "reference names what authorised it."
+            echo ""
+            echo "This run VERIFIED: the dispatcher \`${ACTOR}\` and the triggering actor"
+            echo "\`${TRIGGERING_ACTOR}\` both match the founder, the authority reference was"
+            echo "present and well formed, and the actor allowlist was satisfied."
+            echo ""
+            echo "This run RELIES ON but does not read: \`prevent_self_review\` being enabled"
+            echo "on the \`supabase-prod\` environment, so the founder (as dispatcher) cannot"
+            echo "also be the approver. This workflow holds \`permissions: contents: read\`"
+            echo "and has no way to query that environment setting. A required-reviewer rule"
+            echo "is satisfied by any ONE of its reviewers, so the founder-dispatch check"
+            echo "only makes the approval a different named reviewer if that setting holds."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Apply pending DB migrations via Management API
