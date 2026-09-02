@@ -41,6 +41,16 @@ alter default privileges for role postgres in schema public
 -- PART 4: assert the END STATE, not the change. aclexplode over the
 -- catalogue, in the same style as PR #1091's Part 4, so a privilege nobody
 -- thought of is caught too and the failure names the offending object.
+--
+-- WHAT THIS BLOCK DOES NOT COVER, stated here so nobody reads it as continuous
+-- coverage. Everything below runs at APPLY time and only at apply time. It
+-- catches a rebuilt environment that never reached the target state, and a
+-- later migration that undoes this one, because both are followed by an apply
+-- of this file. It does NOT catch a Supabase platform migration overwriting our
+-- default-ACL row BETWEEN two of our applies: nothing of ours runs at that
+-- moment, so nothing of ours can notice. The continuous half is the
+-- object-level drift fingerprint, which folds these default ACLs and the two
+-- ownership counts into a comparison that runs on its own schedule.
 -- ---------------------------------------------------------------------------
 
 do $$
@@ -92,10 +102,16 @@ begin
     raise exception 'anon sequence/function sweep FAILED: default privileges for role postgres still grant anon: %', v_bad;
   end if;
 
-  -- A4. The precondition that makes leaving the supabase_admin default
-  -- alone safe: it must own zero relations and zero functions in public. If
-  -- this fires, that precondition no longer holds and the unreachable
-  -- default is reachable after all; do not just widen this assertion.
+  -- A4, standing assertion A. The precondition that makes leaving the
+  -- supabase_admin default alone safe: it must own zero relations and zero
+  -- functions in public. Those default-ACL rows cannot be changed by any role
+  -- we hold, and they cannot fire only because every relation and every
+  -- function in public is owned by postgres. That second half is the whole
+  -- compensating control and nothing else checks that it stays true. If this
+  -- fires, the precondition no longer holds: the unreachable default is
+  -- reachable after all, and the next object supabase_admin creates in public
+  -- arrives with a full write grant for anon. Do not widen this assertion to
+  -- make it pass.
   select string_agg(format('relation %s', c.relname), ', ' order by c.relname)
     into v_bad
     from pg_class c
@@ -104,7 +120,7 @@ begin
    where n.nspname = 'public'
      and r.rolname = 'supabase_admin';
   if v_bad is not null then
-    raise exception 'anon sequence/function sweep FAILED: supabase_admin owns object(s) in public, the untouched default is reachable: %', v_bad;
+    raise exception 'anon sequence/function sweep FAILED: supabase_admin owns relation(s) in schema public, so its still-open default ACL is reachable after all and a table it creates would arrive granting anon the full owner-shaped write set: %', v_bad;
   end if;
 
   select string_agg(format('function %s', p.proname), ', ' order by p.proname)
@@ -115,8 +131,52 @@ begin
    where n.nspname = 'public'
      and r.rolname = 'supabase_admin';
   if v_bad is not null then
-    raise exception 'anon sequence/function sweep FAILED: supabase_admin owns object(s) in public, the untouched default is reachable: %', v_bad;
+    raise exception 'anon sequence/function sweep FAILED: supabase_admin owns function(s) in schema public, so its still-open default ACL is reachable after all and a function it creates would arrive granting anon EXECUTE: %', v_bad;
   end if;
 
-  raise notice 'anon sequence/function sweep: end state verified. No sequence or function grant for anon in schema public, and the postgres default privilege no longer grants one.';
+  -- A5, standing assertion B. Our own default-ACL fix must still be the one in
+  -- force. Our row and a Supabase platform-written row are the same kind of
+  -- object, so a platform migration can overwrite ours and nothing else would
+  -- say so. This asserts the CONTENT of the postgres-owned default for all
+  -- three object types rather than the row count: objtype 'r' must read anon=r,
+  -- and objtypes 'S' and 'f' must not mention anon at all. A row that exists
+  -- with the wrong ACL fails here, and so does a row that has vanished, because
+  -- a vanished row means ours is no longer the one in force. It deliberately
+  -- restates A3's S and f half so that this reads as one complete statement of
+  -- the target state instead of two halves in different places.
+  select string_agg(format('%s:%s', d.defaclobjtype, a.privilege_type), ', ' order by d.defaclobjtype, a.privilege_type)
+    into v_bad
+    from pg_default_acl d
+    join pg_namespace n on n.oid = d.defaclnamespace
+    cross join lateral aclexplode(d.defaclacl) a
+    join pg_roles r on r.oid = a.grantee
+   where n.nspname = 'public'
+     and pg_get_userbyid(d.defaclrole) = 'postgres'
+     and r.rolname = 'anon'
+     and (d.defaclobjtype in ('S', 'f')
+          or (d.defaclobjtype = 'r' and a.privilege_type <> 'SELECT'));
+  if v_bad is not null then
+    raise exception 'anon sequence/function sweep FAILED: the postgres default privilege in schema public grants anon more than SELECT on tables, or grants it anything at all on sequences or functions. Our default ACL has been overwritten: %', v_bad;
+  end if;
+
+  -- The positive half of A5. The tables default must still carry anon=r. A
+  -- default ACL that is gone entirely is not a safe state to pass silently: it
+  -- means the row we wrote is not the one in force, and reads through the
+  -- anonymous role stop working on any table created after that point.
+  if not exists (
+       select 1
+         from pg_default_acl d
+         join pg_namespace n on n.oid = d.defaclnamespace
+         cross join lateral aclexplode(d.defaclacl) a
+         join pg_roles r on r.oid = a.grantee
+        where n.nspname = 'public'
+          and d.defaclobjtype = 'r'
+          and pg_get_userbyid(d.defaclrole) = 'postgres'
+          and r.rolname = 'anon'
+          and a.privilege_type = 'SELECT'
+     ) then
+    raise exception 'anon sequence/function sweep FAILED: the postgres default privilege for TABLES in schema public no longer grants anon SELECT. The row was either overwritten or removed, so the default ACL in force is not ours. Expected objtype r to read anon=r.';
+  end if;
+
+  raise notice 'anon sequence/function sweep: end state verified. No sequence or function grant for anon in schema public, the postgres default privilege no longer grants one, and the postgres default ACL still reads anon=r on tables and names anon nowhere for sequences or functions.';
 end $$;
