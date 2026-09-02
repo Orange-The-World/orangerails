@@ -22,6 +22,8 @@ import {
   RECOVERY_META_NOT_SAVED_MESSAGE,
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
+  SEAL_CHECK_FAILED_MESSAGE,
+  VAULT_OWN_SEAL,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -53,6 +55,7 @@ interface SelectChain {
     onRejected?: (reason: unknown) => unknown,
   ): Promise<unknown>;
   order(column: string, options?: { ascending?: boolean }): SelectChain;
+  neq(column: string, value: unknown): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
 }
 
@@ -117,7 +120,22 @@ function makeFakeClient(options: FakeOptions = {}) {
       if (call.options?.head) {
         const forced = options.countResult?.[call.table];
         if (forced) return { data: null, error: forced.error ?? null, count: forced.count ?? null };
-        return { data: null, error: null, count: stored.length };
+
+        // Honour .neq(column, value), which is how the seal check narrows the
+        // count to rows this rotation could not open.
+        //
+        // A fixture row that does not mention the column counts as MATCHING
+        // the value, not as differing from it. That is faithful rather than
+        // lenient: sealed_under is NOT NULL DEFAULT 'ort' in the schema, so a
+        // row that says nothing about its seal is a row that took the default.
+        const neqFilters = call.filters.filter((f) => f.column.startsWith("neq:"));
+        const counted = stored.filter((row) =>
+          neqFilters.every((f) => {
+            const held = (row as Record<string, unknown>)[f.column.slice(4)];
+            return held !== undefined && held !== f.value;
+          }),
+        );
+        return { data: null, error: null, count: counted.length };
       }
 
       const override = options.selectResult?.[call.table];
@@ -193,6 +211,10 @@ function makeFakeClient(options: FakeOptions = {}) {
                 column: "order",
                 value: [column, orderOptions?.ascending !== false],
               });
+              return chain;
+            },
+            neq(column: string, value: unknown) {
+              call.filters.push({ column: `neq:${column}`, value });
               return chain;
             },
             range(from: number, to: number) {
@@ -568,6 +590,92 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
       expect(index).toBeLessThan(metaIndex);
       expect(calls.find(isHeadCount)?.options).toEqual({ count: "exact", head: true });
     }
+  });
+});
+
+describe("vault recovery: refusing ciphertext the rotation cannot open", () => {
+  const mixedSeals = {
+    rows: {
+      connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+      encrypted_transactions: [
+        { id: "txn-1", encrypted_payload: "payload-1", sealed_under: "ort" },
+        { id: "txn-2", encrypted_payload: "payload-2", sealed_under: "opk" },
+      ],
+    },
+  };
+
+  it("refuses a mixed-seal table and rewrites NOTHING", async () => {
+    // txn-2 was sealed by a background writer to the subaccount's public
+    // delivery key. Only the browser's private key opens it; the MEK never
+    // does. Without this guard the loop hands it to migrateTransactionCiphertext
+    // and the throw arrives from inside the crypto, after txn-1 and every
+    // connection have already been rewritten under a MEK that is not stored
+    // anywhere yet, in a state the source documents as not retryable.
+    //
+    // "It throws" is therefore not the property under test. "Nothing moved" is.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient(mixedSeals);
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow("1 of your transactions");
+
+    // Every table, not just the transactions: the connections loop runs first,
+    // so a guard placed one line too low would leave those rewritten.
+    expect(calls.filter((c) => c.op === "update")).toEqual([]);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("stops before anything moves when the seal check cannot be read", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...mixedSeals,
+      countResult: { encrypted_transactions: { count: null } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(SEAL_CHECK_FAILED_MESSAGE);
+
+    expect(calls.filter((c) => c.op === "update")).toEqual([]);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("proceeds normally when every transaction carries the vault's own seal", async () => {
+    // The guard has to let the ordinary case through, or it is just an outage.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        encrypted_transactions: [
+          { id: "txn-1", encrypted_payload: "payload-1", sealed_under: VAULT_OWN_SEAL },
+          { id: "txn-2", encrypted_payload: "payload-2", sealed_under: VAULT_OWN_SEAL },
+        ],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys));
+
+    expect(calls.filter((c) => c.table === "encrypted_transactions" && c.op === "update").length)
+      .toBe(2);
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks the seal question before the first read of any row", async () => {
+    // Ordering is the whole guarantee. Assert it directly rather than inferring
+    // it from the fact that the happy path happened to pass.
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const sealCheck = calls.findIndex((c) =>
+      c.filters.some((f) => f.column === "neq:sealed_under" && f.value === VAULT_OWN_SEAL),
+    );
+    expect(sealCheck).toBe(0);
   });
 });
 
