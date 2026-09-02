@@ -172,6 +172,20 @@ ALTER TABLE public.user_vault_meta
 COMMENT ON COLUMN public.user_vault_meta.keyring_epoch IS
   'Generation counter for keyring_ciphertext, bound into the keyring AAD by the client so a keyring blob sealed under one generation cannot be presented as another. REQUIREMENT: it increases on EVERY re-seal of the keyring, not only on a data key rotation, which includes adding a generation, adding or removing a co-admin entry, and a PQC key change. Monotonic, not required to be contiguous. Enforced by trg_keyring_epoch_guard together with public.user_vault_keyring_watermark. OR-T0967, OR-T0796.';
 
+-- Stated, not inherited, for the same reason the watermark table's privileges are stated
+-- below. This column is writable on both projects today only by inheritance: prod carries a
+-- table wide arw for authenticated on user_vault_meta, and dev acquired a column ACL out of
+-- band alongside the column. A privilege that arrives by inheritance disappears the same way.
+-- 20260828163000 revokes the table wide grant and replaces it with a per column allow list
+-- that names only the columns existing at ITS version, so it does not and must not reach
+-- forward to this one. Version order is 20260828163000, then 20260831071500, then this file,
+-- so without this line the end state is a keyring_epoch that authenticated cannot write and
+-- every keyring seal and re-seal fails. SELECT is deliberately not named: after 20260828163000
+-- authenticated holds SELECT at table level on user_vault_meta, which already covers every
+-- column. OR-T1410.
+GRANT INSERT (keyring_epoch), UPDATE (keyring_epoch)
+  ON TABLE public.user_vault_meta TO authenticated;
+
 CREATE TABLE IF NOT EXISTS public.user_vault_keyring_watermark (
   user_id           uuid        PRIMARY KEY,
   max_keyring_epoch bigint      NOT NULL,
@@ -320,6 +334,18 @@ BEGIN
   IF v_type IS NULL THEN RAISE EXCEPTION 'FAIL: keyring_epoch was not created'; END IF;
   IF v_type <> 'bigint' THEN RAISE EXCEPTION 'FAIL: keyring_epoch must be bigint, got %', v_type; END IF;
   IF v_nullable <> 'NO' THEN RAISE EXCEPTION 'FAIL: keyring_epoch must be NOT NULL'; END IF;
+
+  -- The column's write privilege, asserted rather than assumed. HONEST LIMIT, written here so
+  -- it is not discovered later: has_column_privilege answers true for every column on a
+  -- cluster where authenticated still holds a table wide arw on user_vault_meta, which is
+  -- production today. So this check CANNOT go red on prod until 20260828163000 lands and
+  -- removes that table wide grant. It goes red on dev now, and it becomes a real guard on
+  -- prod the moment 20260828163000 is applied. That is the reason to have it, not a reason to
+  -- leave it out. OR-T1410.
+  IF NOT has_column_privilege('authenticated', 'public.user_vault_meta', 'keyring_epoch', 'INSERT')
+     OR NOT has_column_privilege('authenticated', 'public.user_vault_meta', 'keyring_epoch', 'UPDATE') THEN
+    RAISE EXCEPTION 'FAIL: authenticated must hold INSERT and UPDATE on public.user_vault_meta.keyring_epoch. Without it every keyring seal and re-seal fails once 20260828163000 removes the table wide grant on user_vault_meta (OR-T1410).';
+  END IF;
 
   SELECT pg_get_triggerdef(t.oid) INTO v_def FROM pg_trigger t
    WHERE t.tgrelid='public.user_vault_meta'::regclass AND t.tgname='trg_keyring_epoch_guard';
