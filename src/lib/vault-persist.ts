@@ -161,28 +161,24 @@ interface TableReconcile {
  * WHY COMPLETENESS IS DECIDED BY A SWEEP AND NOT BY COMPARING COUNTS. An
  * earlier version of this decided the rotation was complete when the exact row
  * count equalled the number of rows this run had written. One concurrent DELETE
- * of an already-migrated row defeats that comparison and opens a gap in the
- * same operation, because offset paging addresses rows by POSITION: removing a
- * row from a page already consumed shifts every later row one place toward the
- * start, so exactly one row falls between the window just read and the next
- * window and is never returned at all. The same delete also lowers the total by
- * one, and the deleted row's id stays in the migrated set because it was
- * written before it was removed. Those three effects cancel one for one, so the
- * counts agree and the skipped row is stranded under a key nothing stores any
- * more. Worked example at a page size of 500 over 1000 rows: read positions
- * 0..499, delete the eighth row, read positions 500..999 and receive the
- * original rows 501..999, because original row 500 has moved to position 499
- * inside the window already read. Migrated 999, counted 999, one row silently
- * lost for ever.
+ * of an already-migrated row defeats that comparison, and while the walk paged
+ * by offset it opened a gap in the same operation: removing a row from a page
+ * already consumed shifted every later row one place toward the start, so
+ * exactly one row fell between the window just read and the next window and was
+ * never returned at all. The delete also lowers the total by one, and the
+ * deleted row's id stays in the migrated set because it was written before it
+ * was removed. Those effects cancel one for one, so the counts agree and a
+ * skipped row is stranded under a key nothing stores any more.
  *
- * Keyset pagination on id removes that particular shift, but it does NOT make
- * the count comparison sound: one delete of a migrated row plus one insert
- * below the cursor cancel each other in the total just as neatly, and the
- * inserted row is still under the old MEK. So the test here is coverage, which
- * is a property of what this run actually reached: keep sweeping until a
- * COMPLETE walk of a table finds every row it returns already migrated. That
- * does not care WHY a row was missed, which is the only reason to trust it
- * against the next mechanism nobody has thought of.
+ * walkAndMigrate now addresses each page by key rather than by offset, so the
+ * shift half of that no longer happens at all. The count comparison is still
+ * not sound and is still not what decides here: one delete of a migrated row
+ * plus one insert below the cursor cancel each other in the total just as
+ * neatly, and the inserted row is still under the old MEK. So the test here is
+ * coverage, which is a property of what this run actually reached: keep
+ * sweeping until a COMPLETE walk of a table finds every row it returns already
+ * migrated. That does not care WHY a row was missed, which is the only reason
+ * to trust it against the next mechanism nobody has thought of.
  *
  * THE COST, stated because it is not free. A clean rotation now walks each
  * table twice. The second walk is what turns the first walk's completeness from
@@ -257,11 +253,33 @@ async function reconcileEveryRow(
  * Walk a table in ordered pages and hand every row not already migrated to
  * `migrateRow`.
  *
- * WHY THE ORDER CLAUSE IS LOAD BEARING. Postgres guarantees no row order
- * without ORDER BY, and the update inside this walk writes a new tuple version,
- * which can change the order a later scan returns. Without it a row can be
- * skipped between pages, which strands it under a key nothing stores any more,
- * or returned twice.
+ * WHY THE PAGE IS ADDRESSED BY KEY AND NOT BY OFFSET. `.range(offset, ...)`
+ * addresses rows by POSITION. Deleting a row from a window that has already
+ * been read shifts every later row one place toward the start, so exactly one
+ * row falls between the window just read and the next window and is never
+ * returned at all. Asking for `id > the last id of the previous page` addresses
+ * rows by IDENTITY instead: a row removed below the cursor moves nothing, and
+ * the row that would have been skipped is still returned.
+ *
+ * That shift is caught by the sweep in reconcileEveryRow when it happens during
+ * a migrating walk, because a later walk returns the row. It is NOT caught when
+ * it happens during the confirming sweep itself: the row is shifted out of that
+ * sweep's own window, the sweep migrates nothing, and the same delete lowers the
+ * exact count by one while the deleted row's id stays in the migrated set, so
+ * the pass settles. A sweep can only prove what it actually returned.
+ *
+ * WHAT THIS DOES NOT FIX, stated so it is not read as a replacement for the
+ * reconciliation. A row INSERTED below the cursor while this walk runs is still
+ * missed, by construction, whichever way the page is addressed. Completeness is
+ * decided by reconcileEveryRow sweeping until a walk finds nothing left to do,
+ * not here.
+ *
+ * WHY THE ORDER CLAUSE IS LOAD BEARING. It is what makes the cursor mean
+ * anything: `id > lastSeen` only walks the table once if rows arrive in
+ * ascending id order. Postgres guarantees no row order without ORDER BY, and
+ * the update inside this walk writes a new tuple version, which can change the
+ * order a later scan returns. Without it a row can be skipped, which strands it
+ * under a key nothing stores any more, or returned twice.
  *
  * WHY THE PAGE LENGTH ENDS THE WALK. A capped or empty read raises no error, so
  * the number of rows returned is the only honest signal that there is nothing
@@ -275,13 +293,15 @@ async function walkAndMigrate<Row extends { id: string }>(
   migrated: Set<string>,
   migrateRow: (row: Row) => Promise<void>,
 ): Promise<void> {
-  let offset = 0;
+  let lastSeenId: string | null = null;
   for (;;) {
-    const { data, error } = await supabase
-      .from(table)
-      .select(columns)
-      .order("id", { ascending: true })
-      .range(offset, offset + pageSize - 1);
+    // The generated database types do not cover these tables, which is why the
+    // client is structural. Naming the builder is what lets the cursor filter
+    // be applied only on the pages that have one.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let query: any = supabase.from(table).select(columns);
+    if (lastSeenId !== null) query = query.gt("id", lastSeenId);
+    const { data, error } = await query.order("id", { ascending: true }).limit(pageSize);
     if (error) throw error;
 
     const page = (data ?? []) as Row[];
@@ -292,7 +312,7 @@ async function walkAndMigrate<Row extends { id: string }>(
     }
 
     if (page.length < pageSize) break;
-    offset += pageSize;
+    lastSeenId = page[page.length - 1].id;
   }
 }
 
@@ -354,12 +374,13 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // WHAT PAGING CANNOT FIX ON ITS OWN, stated rather than hidden. A walk over a
   // stable order is still not immune to another session changing the table
   // while it runs. An INSERT below the cursor is missed and is written under the
-  // OLD MEK by construction. A DELETE from a page already read shifts every
-  // later row one place toward the start, so a row falls between two windows and
-  // is never returned at all. Keyset pagination on id removes the second of
-  // those and neither of the first, so it is not the fix either. Both are
-  // handled by reconcileEveryRow below, which drives the walks and keeps
-  // sweeping until a complete walk finds nothing left to migrate.
+  // OLD MEK by construction, whichever way the page is addressed. A DELETE from
+  // a page already read used to shift every later row one place toward the
+  // start, so a row fell between two windows and was never returned at all; the
+  // walk pages by key rather than by offset, which removes that one and only
+  // that one. The rest is handled by reconcileEveryRow below, which drives the
+  // walks and keeps sweeping until a complete walk finds nothing left to
+  // migrate.
   //
   // Distinct ids, not a running tally, and added only once the UPDATE has
   // returned the row it changed: a read that hands the same row back twice must
