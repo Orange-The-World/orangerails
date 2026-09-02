@@ -20,7 +20,7 @@
 -- privilege that is not written in attacl "would read as safe". The
 -- authenticated leg meets that standard. The anon leg did not.
 --
--- MEASURED, dev fzwmnzmtqidumdqjdddz, 2026-09-02, on this exact table. A
+-- MEASURED on the development database, 2026-09-02, on this exact table. A
 -- column level SELECT was granted to anon, then removed:
 --
 --   with the grant in place
