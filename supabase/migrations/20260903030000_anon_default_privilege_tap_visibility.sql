@@ -43,11 +43,12 @@
 -- a point in time cleanup rather than a durable state on this cluster.
 --
 -- IT IS LATENT TODAY, NOT LIVE, AND THIS FILE SAYS WHICH RATHER THAN ASSUMING.
--- Measured the same day: zero of the 52 tables in schema public are owned by
--- supabase_admin, and it owns no sequences or functions there either. The loop
--- below counts the objects each tap's owning role actually holds in the schema
--- and prints LATENT or LIVE accordingly, so the reader does not have to go and
--- check before knowing how much to care.
+-- Measured on the development cluster on 2026-09-02: schema public holds 52
+-- ordinary tables, 2 views and 2 sequences, and every one of them is owned by
+-- postgres, so supabase_admin owns none of them and owns no functions there
+-- either. The loop below counts the objects each tap's owning role actually
+-- holds in the schema and prints LATENT or LIVE accordingly, so the reader does
+-- not have to go and check before knowing how much to care.
 --
 -- NO MIGRATION CAN CLOSE IT, so do not add a statement that tries. ALTER DEFAULT
 -- PRIVILEGES FOR ROLE supabase_admin is permitted only to that role or a member
@@ -78,12 +79,48 @@
 -- invisible to it. Continuous comparison of this invariant belongs in the
 -- standing anonymous ACL invariant probe, not in a migration.
 --
--- ON THE PRODUCTION CLUSTER this is expected to be a clean no-op: the single row
--- reported there for schema public and object type r is owned by postgres, which
--- the applying role is a member of, so the loop finds nothing and raises
--- nothing. That production shape is a measurement made by another seat on a
--- cluster the author of this file cannot read, and it is recorded as theirs
--- rather than restated as a first hand reading.
+-- WHICH RELATION KINDS THE TABLES CLASS ACTUALLY COVERS, measured rather than
+-- assumed. Catalogue object type 'r' in pg_default_acl is the TABLES class, and
+-- TABLES is wider than ordinary tables. Probed on the development cluster,
+-- PostgreSQL 17.6, on 2026-09-02, in a scratch schema created, read and dropped
+-- in the same session: one ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO
+-- anon, then one object of each kind created under it. The resulting relacl
+-- carried anon=r on relkind r (ordinary table), p (partitioned table), v (view)
+-- AND m (materialized view). Relkind f (foreign table) could NOT be probed here
+-- because no foreign data wrapper is installed on this cluster; it is included
+-- in the count on the documented behaviour of the class, which is stated so it
+-- is not mistaken for something measured. Counting a kind that cannot exist here
+-- costs nothing; missing one that can is the defect this closes.
+--
+-- THAT WIDTH DECIDES THE WORD LATENT, which is why it is not cosmetic. Counting
+-- only relkinds r and p would report a role that owns nothing but views as
+-- owning zero, and the message would then say the tap produces nothing while it
+-- was in fact producing an anonymously readable view on every create. A false
+-- liveness label is worse than no label. Measured the same day: postgres owns 2
+-- views in schema public on this cluster, so the shape is real here.
+--
+-- THE PUBLIC GRANTEE IS A GRANTEE, NOT A MISSING ROW. aclexplode reports a grant
+-- to PUBLIC with grantee = 0, and oid 0 has no row in pg_roles, so an inner join
+-- to pg_roles drops it before any name filter can run. A default privilege
+-- granted to PUBLIC reaches the anonymous role by inheritance, so that join would
+-- have hidden a whole class of tap from the one file whose purpose is to make
+-- anon-reaching taps visible. The query below left joins and renders grantee 0 as
+-- the value 'PUBLIC', so it is a value the check tests rather than a row it never
+-- sees, and the warning text names the route rather than asserting the grant was
+-- direct. Measured on the development cluster on 2026-09-02: 23 default privilege
+-- entries in schema public, every one to a named role, ZERO to PUBLIC. The
+-- reviewer measured the same on the production cluster. Latent on both, which is
+-- the condition under which the branch matters, not a reason to leave it out.
+--
+-- ON THE PRODUCTION CLUSTER this is expected to be a clean no-op. Read there
+-- first hand by the reviewer of this change on 2026-09-02: every default
+-- privilege row in schema public on that cluster is owned by a role the applying
+-- role is a member of, so the scope predicate above excludes all of them and the
+-- loop reports nothing. The exact shape is recorded on the delivery ticket and
+-- deliberately not here, because a public repository is the wrong place to
+-- publish the privilege state of a production database. The author of this file
+-- cannot read that cluster, so this is the reviewer's reading and is not restated
+-- as a first hand one.
 --
 -- IDEMPOTENT AND SIDE EFFECT FREE. It reads catalogues and raises messages. It
 -- can be applied any number of times, against any state, in any order relative
@@ -94,25 +131,51 @@
 
 do $$
 declare
-  v_tap    record;
-  v_owned  bigint;
-  v_kind   text;
-  v_found  int := 0;
+  v_tap       record;
+  v_owned     bigint;
+  v_kind      text;
+  v_via       text;
+  v_found     int := 0;
+  v_closeable bigint := 0;
 begin
+  -- Count the taps this file deliberately does NOT report: the ones reaching the
+  -- anonymous role through an owning role the applying role IS a member of, and
+  -- which a migration could therefore close. They belong to the anonymous
+  -- privilege sweep, not here. But a check that reports zero without saying how
+  -- many rows it chose to skip is telling half the truth on the deploy log, and
+  -- that half truth is what would print on a cluster where every such tap is
+  -- closeable.
+  select count(*) into v_closeable
+    from (
+      select 1
+        from pg_default_acl d
+        join pg_namespace n on n.oid = d.defaclnamespace
+        cross join lateral aclexplode(d.defaclacl) a
+        left join pg_roles r on r.oid = a.grantee
+       where n.nspname = 'public'
+         and (case when a.grantee = 0 then 'PUBLIC' else r.rolname end)
+             in ('anon', 'PUBLIC')
+         and pg_has_role(current_user, pg_get_userbyid(d.defaclrole), 'MEMBER')
+       group by d.defaclrole, d.defaclobjtype,
+                (case when a.grantee = 0 then 'PUBLIC' else r.rolname end)
+    ) s;
+
   for v_tap in
     select pg_get_userbyid(d.defaclrole) as owner,
            d.defaclrole                  as owner_oid,
            d.defaclobjtype               as objtype,
+           case when a.grantee = 0 then 'PUBLIC' else r.rolname end as grantee,
            string_agg(a.privilege_type, ', ' order by a.privilege_type) as privs
       from pg_default_acl d
       join pg_namespace n on n.oid = d.defaclnamespace
       cross join lateral aclexplode(d.defaclacl) a
-      join pg_roles r on r.oid = a.grantee
+      left join pg_roles r on r.oid = a.grantee
      where n.nspname = 'public'
-       and r.rolname = 'anon'
+       and (case when a.grantee = 0 then 'PUBLIC' else r.rolname end)
+           in ('anon', 'PUBLIC')
        and not pg_has_role(current_user, pg_get_userbyid(d.defaclrole), 'MEMBER')
-     group by 1, 2, 3
-     order by 1, 3
+     group by 1, 2, 3, 4
+     order by 1, 3, 4
   loop
     -- Count what the owning role actually holds in schema public, so the message
     -- can say LATENT or LIVE instead of leaving the reader to guess. The three
@@ -120,13 +183,20 @@ begin
     -- and tables both live in pg_class but under different relkind values, and
     -- functions are not in pg_class at all.
     if v_tap.objtype = 'r' then
-      v_kind := 'table';
+      -- The TABLES class, not only ordinary tables. Relkinds r, p, v and m were
+      -- CONFIRMED by probe on this cluster to receive a TABLES default privilege
+      -- (see the header). Relkind f, a foreign table, is included on the
+      -- documented behaviour of the class and was not probed, because no foreign
+      -- data wrapper is installed here. Narrowing this back to ('r','p') would
+      -- make a role that owns only views report as owning zero and print LATENT
+      -- over a live tap.
+      v_kind := 'table, view or materialized view';
       select count(*) into v_owned
         from pg_class c
         join pg_namespace n on n.oid = c.relnamespace
        where n.nspname = 'public'
          and c.relowner = v_tap.owner_oid
-         and c.relkind in ('r', 'p');
+         and c.relkind in ('r', 'p', 'v', 'm', 'f');
     elsif v_tap.objtype = 'S' then
       v_kind := 'sequence';
       select count(*) into v_owned
@@ -151,23 +221,30 @@ begin
       v_owned := null;
     end if;
 
+    -- Say which route the grant takes. A tap addressed to PUBLIC reaches the
+    -- anonymous role by inheritance, and a message that called that a grant to
+    -- anon would be stating something the query did not establish.
+    v_via := case when v_tap.grantee = 'PUBLIC'
+                  then 'PUBLIC, which the anonymous role inherits from,'
+                  else 'the anonymous role' end;
+
     v_found := v_found + 1;
 
     if v_owned is null then
-      raise warning 'anon default privilege tap OPEN, liveness UNKNOWN: owning role % hands the anonymous role % on every new % it creates in schema public. This check does not know how to count objects of that catalogue type, so it cannot say whether the tap is producing anything today. No migration can close it: ALTER DEFAULT PRIVILEGES FOR ROLE % is permitted only to that role or a member of it, and the applying role % is not a member. Closing it is a platform request.',
-        v_tap.owner, v_tap.privs, v_kind, v_tap.owner, current_user;
+      raise warning 'anon default privilege tap OPEN, liveness UNKNOWN: owning role % hands % % on every new % it creates in schema public. This check does not know how to count objects of that catalogue type, so it cannot say whether the tap is producing anything today. No migration can close it: ALTER DEFAULT PRIVILEGES FOR ROLE % is permitted only to that role or a member of it, and the applying role % is not a member. Closing it is a platform request.',
+        v_tap.owner, v_via, v_tap.privs, v_kind, v_tap.owner, current_user;
     elsif v_owned = 0 then
-      raise warning 'anon default privilege tap OPEN and LATENT: owning role % hands the anonymous role % on every new % it creates in schema public. It owns 0 of them there today, so the tap produces nothing yet. No migration can close it: ALTER DEFAULT PRIVILEGES FOR ROLE % is permitted only to that role or a member of it, and the applying role % is not a member. Closing it is a platform request, and it becomes worth raising the moment this line reads LIVE.',
-        v_tap.owner, v_tap.privs, v_kind, v_tap.owner, current_user;
+      raise warning 'anon default privilege tap OPEN and LATENT: owning role % hands % % on every new % it creates in schema public. It owns 0 of them there today, so the tap produces nothing yet. No migration can close it: ALTER DEFAULT PRIVILEGES FOR ROLE % is permitted only to that role or a member of it, and the applying role % is not a member. Closing it is a platform request, and it becomes worth raising the moment this line reads LIVE.',
+        v_tap.owner, v_via, v_tap.privs, v_kind, v_tap.owner, current_user;
     else
-      raise warning 'anon default privilege tap OPEN and LIVE: owning role % hands the anonymous role % on every new % it creates in schema public, and it already owns % of them there. This is no longer latent, and row level security is the only thing still standing in front of those objects. No migration can close it: ALTER DEFAULT PRIVILEGES FOR ROLE % is permitted only to that role or a member of it, and the applying role % is not a member. Raise the platform request.',
-        v_tap.owner, v_tap.privs, v_kind, v_owned, v_tap.owner, current_user;
+      raise warning 'anon default privilege tap OPEN and LIVE: owning role % hands % % on every new % it creates in schema public, and it already owns % of them there. This is no longer latent, and row level security is the only thing still standing in front of those objects. No migration can close it: ALTER DEFAULT PRIVILEGES FOR ROLE % is permitted only to that role or a member of it, and the applying role % is not a member. Raise the platform request.',
+        v_tap.owner, v_via, v_tap.privs, v_kind, v_owned, v_tap.owner, current_user;
     end if;
   end loop;
 
   if v_found = 0 then
-    raise notice 'anon default privilege tap check: no default privilege in schema public grants the anonymous role anything through a tap the applying role (%) cannot narrow. Nothing to report.', current_user;
+    raise notice 'anon default privilege tap check: no default privilege in schema public reaches the anonymous role, directly or through PUBLIC, by way of a tap the applying role (%) cannot narrow. % further tap(s) DO reach it through owning roles this role IS a member of: those are closeable by a migration and are deliberately out of scope for this file, because deciding which of them to close belongs to the anonymous privilege sweep and not to a visibility check. Nothing to report AT THIS SCOPE is not the same fact as nothing granted.', current_user, v_closeable;
   else
-    raise notice 'anon default privilege tap check: % tap(s) reported above. This file deliberately changes no privilege; it exists so the condition appears on the deploy log instead of being assumed away.', v_found;
+    raise notice 'anon default privilege tap check: % tap(s) reported above, plus % closeable tap(s) left unreported by design, see the scope note in this file. This file deliberately changes no privilege; it exists so the condition appears on the deploy log instead of being assumed away.', v_found, v_closeable;
   end if;
 end $$;
