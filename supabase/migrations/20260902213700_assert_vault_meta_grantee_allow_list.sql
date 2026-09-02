@@ -327,16 +327,32 @@ BEGIN
        -- being looked up in pg_roles, where it has no row.
        WHERE acl.grantee_oid = 0
           OR (    acl.grantee_oid <> acl.owner_oid
+              -- An expected grantee, or a superuser, is fine at any level for
+              -- any privilege. A grantee missing from pg_roles entirely fails
+              -- this NOT EXISTS and is reported, which is the intended
+              -- direction: an orphaned ACL entry is not something to pass over.
               AND NOT EXISTS (
                     SELECT 1
                       FROM pg_roles r
                      WHERE r.oid = acl.grantee_oid
-                       AND (r.rolname = ANY (expected_grantees) OR r.rolsuper)))
+                       AND (r.rolname = ANY (expected_grantees) OR r.rolsuper))
+              -- The agent read role, and ONLY for SELECT, ONLY at COLUMN level,
+              -- ONLY on a listed pair. A table level privilege has col NULL and
+              -- fails the level test, so it is reported. Nothing here asks
+              -- whether the role exists, so its absence reports nothing.
+              AND NOT EXISTS (
+                    SELECT 1
+                      FROM pg_roles r
+                     WHERE r.oid = acl.grantee_oid
+                       AND r.rolname = agent_reader
+                       AND acl.level = 'COLUMN'
+                       AND acl.privilege_type = 'SELECT'
+                       AND (acl.obj || '.' || acl.col) = ANY (agent_reader_columns)))
     ) s;
 
   IF offenders IS NOT NULL THEN
     RAISE EXCEPTION
-      'a grantee outside the expected set holds a privilege on a sealed vault meta table: %', offenders;
+      'a privilege outside the allow list exists on a sealed vault meta table: %', offenders;
   END IF;
 END;
 $$;
