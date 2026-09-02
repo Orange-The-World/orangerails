@@ -307,10 +307,10 @@ function scrub(sql) {
               'question takes the irreversible branch, never the silent one',
           };
         }
-        const qualified = normalizeQualifiedName(named[1]);
+        const qualified = named[1].replace(/\s+/g, '');
         routines.push({
           name: qualified,
-          short: qualified.split('.').pop(),
+          short: qualified.split('.').pop().replace(/"/g, ''),
           body,
           bodyOffset: i + tag.length,
         });
