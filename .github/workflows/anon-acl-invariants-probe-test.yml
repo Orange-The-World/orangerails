@@ -406,6 +406,13 @@ jobs:
       # fingerprint from before a recovery. A fresh state file (never wrote a
       # CLEAN marker) still exercises the "no prior record" first-run path.
       # -----------------------------------------------------------------------
+      - name: "[firstrun] grant anon an unexpected UPDATE on waitlist"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log" "$RUNNER_TEMP/state-firstrun.txt"
+          psql -h localhost -U testuser -d testdb -c "GRANT UPDATE ON public.waitlist TO anon;"
+
       - name: "path 10 -- fresh state file, first-ever red -> pages (no prior record to compare)"
         env:
           ANON_ACL_PROBE_DSN_DEV: "postgres://testuser:testpass@localhost:5432/testdb"
@@ -413,13 +420,10 @@ jobs:
           ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
           ANON_ACL_PROBE_STATE_FILE: ${{ runner.temp }}/state-firstrun.txt
         run: |
-          rm -f "$RUNNER_TEMP/alert-calls.log" "$RUNNER_TEMP/state-firstrun.txt"
-          psql -h localhost -U testuser -d testdb -c "GRANT UPDATE ON public.waitlist TO anon;"
           set +e
           ./scripts/ops/anon-acl-invariants-probe.sh
           EXIT=$?
           set -e
-          psql -h localhost -U testuser -d testdb -c "REVOKE UPDATE ON public.waitlist FROM anon;"
           if [[ $EXIT -ne 1 ]]; then
             echo "ERROR: expected exit 1 (first-ever red, no prior state), got $EXIT" >&2
             exit 1
@@ -429,3 +433,10 @@ jobs:
             exit 1
           fi
           echo "confirmed: first-ever red pages with no prior state file"
+
+      - name: "[firstrun] revoke the UPDATE on waitlist"
+        if: always()
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "REVOKE UPDATE ON public.waitlist FROM anon;" || true
