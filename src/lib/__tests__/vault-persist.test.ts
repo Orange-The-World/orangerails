@@ -145,7 +145,21 @@ function makeFakeClient(options: FakeOptions = {}) {
       if (call.options?.head) {
         const forced = options.countResult?.[call.table];
         if (forced) return { data: null, error: forced.error ?? null, count: forced.count ?? null };
-        return { data: null, error: null, count: stored.length };
+
+        // A count can carry a filter, and the completeness read uses one: how
+        // many rows are NOT at this rotation's generation. A fake that counted
+        // the whole table regardless would answer the wrong question with a
+        // plausible number, which is the failure this check exists to remove.
+        const neqFilter = call.filters.find((f) => f.column === "neq");
+        const counted = neqFilter
+          ? stored.filter((row) => {
+              const [column, value] = neqFilter.value as [string, unknown];
+              const held =
+                (row as Record<string, unknown>)[column] ?? DATA_KEY_GENERATION_DEFAULT;
+              return held !== value;
+            })
+          : stored;
+        return { data: null, error: null, count: counted.length };
       }
 
       const override = options.selectResult?.[call.table];
