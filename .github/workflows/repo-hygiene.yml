@@ -48,6 +48,6 @@ jobs:
         # true: GitHub withholds the secret from forks, so a fork genuinely
         # cannot supply the list and stays the legitimate soft-skip.
         env:
-          OR_RESERVED_TERMS: ${{ secrets.OR_RESERVED_TERMS }}
+          OR_RESERVED_TERMS: ${{ secrets.OR_RESERVED_TERMS_TEMPORARY_PROOF_NOT_A_REAL_SECRET }}
           REQUIRE_RESERVED_TERMS: ${{ github.event.pull_request.head.repo.fork != true }}
         run: bash scripts/pre-publish-scan.sh
