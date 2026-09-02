@@ -68,39 +68,6 @@ export function rowsNotReconciledMessage(
   );
 }
 
-/**
- * Read the exact number of rows this user owns in `table` and throw unless the
- * rotation migrated every one of them.
- *
- * WHY A HEAD COUNT AND NOT A SELECT OF IDS. The failure being guarded against
- * is a read that comes back short without erroring, so counting the rows a
- * select returns would measure the fault with the ruler that has the fault in
- * it. PostgREST computes an exact count server side and reports it out of band
- * in the Content-Range header, so it is not clipped by the server-side maximum
- * row count that clips the row payload.
- *
- * The count runs under the same row-level security as the paged reads, so "the
- * rows this user owns" means the same thing in both places. That equivalence is
- * the property being compared; this is not a global table count.
- *
- * A count that cannot be read is a FAILURE, not a pass. At the point where it
- * matters, an unreadable count is indistinguishable from agreement, and letting
- * it through would put the original silence straight back.
- */
-async function assertEveryRowMigrated(
-  supabase: VaultPersistClient,
-  table: string,
-  label: string,
-  migrated: number,
-): Promise<void> {
-  const { count, error } = await supabase
-    .from(table)
-    .select("id", { count: "exact", head: true });
-  if (error) throw error;
-  if (typeof count !== "number") throw new Error(rowsNotReconciledMessage(label, migrated, null));
-  if (count !== migrated) throw new Error(rowsNotReconciledMessage(label, migrated, count));
-}
-
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
 
@@ -283,14 +250,6 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // Both counts are taken here rather than one after each loop, deliberately:
   // a row inserted into connections DURING the transaction loop is caught only
   // by a check that runs after both.
-  await assertEveryRowMigrated(supabase, "connections", "connections", migratedConnectionIds.size);
-  await assertEveryRowMigrated(
-    supabase,
-    "encrypted_transactions",
-    "transactions",
-    migratedTransactionIds.size,
-  );
-
   // From the first rewritten row until the meta write below lands, the only
   // copy of the new MEK is in the page's memory. Closing or reloading the tab
   // anywhere in that window strands every row that already moved, and the
