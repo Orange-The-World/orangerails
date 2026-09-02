@@ -561,12 +561,12 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     expect(metaIndex).toBeGreaterThan(-1);
 
     for (const table of ["connections", "encrypted_transactions"]) {
-      const index = calls.findIndex(
-        (c) => c.table === table && c.op === "select" && c.options?.head === true,
-      );
+      const isHeadCount = (c: RecordedCall) =>
+        c.table === table && c.op === "select" && c.options?.head === true;
+      const index = calls.findIndex(isHeadCount);
       expect(index).toBeGreaterThan(-1);
-      expect(calls[index].options).toEqual({ count: "exact", head: true });
       expect(index).toBeLessThan(metaIndex);
+      expect(calls.find(isHeadCount)?.options).toEqual({ count: "exact", head: true });
     }
   });
 });
