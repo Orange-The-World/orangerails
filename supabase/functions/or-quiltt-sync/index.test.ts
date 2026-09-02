@@ -17,8 +17,8 @@ import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, 
 // ── OR-T0256: shared chainable mock builder ───────────────────────────
 //
 // The hand-rolled Supabase mocks below only implement the query-builder
-// methods each test happens to call today. Twice (PR #698, PR #703) a
-// production change added a call the mock did not implement (a new .in()),
+// methods each test happens to call today. Twice already (see this
+// ticket's history) a production change added a call the mock did not implement (a new .in()),
 // and the failure surfaced as a TypeError in an UNRELATED, already-passing
 // test rather than anywhere near the real change.
 //
@@ -38,6 +38,14 @@ function chainable<T extends object>(target: T): T {
     get(obj, prop, receiver) {
       if (typeof prop === 'symbol') return Reflect.get(obj, prop, receiver);
       if (!(prop in obj)) {
+        // Never synthesize `.then`. If we did, an unfinished mock chain
+        // would become a thenable whose promise never settles, so
+        // `await chain.someUnimplementedCall()` would hang forever instead
+        // of either throwing (the old, loud failure mode) or resolving to
+        // the chain itself (plain-object await semantics, unaffected by
+        // this wrapper). undefined here keeps `await proxy` behaving like
+        // `await` on a normal, non-thenable object.
+        if (prop === 'then') return undefined;
         // Unimplemented chain method (e.g. a new .in() or .not()): swallow
         // the call and stay chainable instead of "X is not a function".
         return (..._args: unknown[]) => proxy;
