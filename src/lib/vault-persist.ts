@@ -69,8 +69,40 @@ export function rowsNotReconciledMessage(
 }
 
 /**
- * Read the exact number of rows this user owns in `table` and throw unless the
- * rotation migrated every one of them.
+ * Shown when a row UPDATE reported no error and yet changed no row.
+ *
+ * WHY THIS EXISTS AND WHY IT IS NOT COSMETIC. A PostgREST update that matches
+ * nothing, because row-level security refused it or because the row went away
+ * underneath us, comes back with no error at all. Counting those as migrated
+ * would make the reconciliation below compare a read against a read: on a run
+ * where every write is refused, the migrated total equals the table total, the
+ * reconciliation agrees, and the irreversible meta write proceeds having
+ * re-encrypted nothing. Asking each update for the row it changed is the only
+ * thing that makes the migrated number evidence of a landed write.
+ */
+export function rowNotWrittenMessage(label: string, rowId: string): string {
+  return (
+    `Vault recovery stopped before saving: a ${label} row (${rowId}) was not written. ` +
+    "Your stored vault keys were not changed. Do not close or reload this page, and contact " +
+    "support with this message."
+  );
+}
+
+/** Transactions are re-encrypted in pages of this size. */
+export const TRANSACTION_PAGE_SIZE = 500;
+
+/** Connections are re-encrypted in pages of this size. */
+export const CONNECTION_PAGE_SIZE = 500;
+
+/**
+ * How many times the reconciliation goes back to finish rows this run missed
+ * before it gives up. Bounded, so a table being written continuously by another
+ * session cannot keep this loop running for ever.
+ */
+export const RECONCILE_MAX_PASSES = 3;
+
+/**
+ * Read the exact number of rows this user owns in `table`.
  *
  * WHY A HEAD COUNT AND NOT A SELECT OF IDS. The failure being guarded against
  * is a read that comes back short without erroring, so counting the rows a
@@ -79,33 +111,135 @@ export function rowsNotReconciledMessage(
  * in the Content-Range header, so it is not clipped by the server-side maximum
  * row count that clips the row payload.
  *
- * The count runs under the same row-level security as the paged reads, so "the
- * rows this user owns" means the same thing in both places. That equivalence is
- * the property being compared; this is not a global table count.
+ * THE REQUIREMENT THIS READ HAS TO MEET. These tables are scoped by row-level
+ * security rather than by a column this code could filter on, so the count read
+ * and the paged reads have to carry the same filters as each other. If either
+ * side ever gains a filter the other does not have, the two sides stop
+ * measuring the same set and every comparison below becomes meaningless.
  *
  * A count that cannot be read is a FAILURE, not a pass. At the point where it
  * matters, an unreadable count is indistinguishable from agreement, and letting
  * it through would put the original silence straight back.
  */
-async function assertEveryRowMigrated(
+async function exactRowCount(
   supabase: VaultPersistClient,
   table: string,
   label: string,
   migrated: number,
-): Promise<void> {
+): Promise<number> {
   const { count, error } = await supabase
     .from(table)
     .select("id", { count: "exact", head: true });
   if (error) throw error;
   if (typeof count !== "number") throw new Error(rowsNotReconciledMessage(label, migrated, null));
-  if (count !== migrated) throw new Error(rowsNotReconciledMessage(label, migrated, count));
+  return count;
 }
 
-/** Transactions are re-encrypted in pages of this size. */
-export const TRANSACTION_PAGE_SIZE = 500;
+/** One table's share of the rotation, as the reconciliation needs to see it. */
+interface TableReconcile {
+  table: string;
+  label: string;
+  /** ids this run has PROVEN it rewrote */
+  migrated: Set<string>;
+  /** re-walk the table, migrating only the rows not already in `migrated` */
+  sweep: () => Promise<void>;
+}
 
-/** Connections are re-encrypted in pages of this size. */
-export const CONNECTION_PAGE_SIZE = 500;
+/**
+ * Make sure every row each table holds has been re-encrypted, FINISHING the
+ * ones this run missed rather than abandoning the ones it already wrote.
+ *
+ * WHY FINISHING AND NOT STOPPING. Between the first rewritten row and the meta
+ * write, the only copy of the new MEK is in this page's memory, so a row this
+ * run has already rewritten is readable only until the tab closes. Stopping is
+ * therefore not free: it gives up every row already written in order to save
+ * the rows that were missed. The missed rows are still under the old MEK and
+ * the old subkeys are still in memory, because clearMigrationKeys has not run,
+ * so they can simply be migrated too. That is strictly better than abandoning
+ * either set.
+ *
+ * WHY A TOTAL LOWER THAN THE MIGRATED COUNT IS NOT AN ERROR. A row this run did
+ * not reach pushes the total UP, never down. A total below the migrated count
+ * can only mean rows went away after being rewritten, by deletion or by leaving
+ * this user's row-level-security scope, and a row that is gone cannot be
+ * stranded. Treating it as a failure would abandon a completed rotation over
+ * one row deleted in another tab, for no protective value at all.
+ *
+ * WHAT HAPPENS IF IT NEVER CONVERGES. This is a real choice, not a default.
+ * After RECONCILE_MAX_PASSES sweeps, something is inserting rows about as fast
+ * as this loop migrates them. Both branches lose data, so the error names the
+ * arithmetic: stopping gives up the rows this run wrote, and continuing to the
+ * meta write would permanently discard the only key for the rows it did not.
+ * Stopping is chosen because it changes nothing that is stored, so the user
+ * still holds a vault that unlocks and everything still readable from storage
+ * stays readable, and because continuing would fail silently and be discovered
+ * months later by a user missing transactions. The real answer to this case is
+ * a resumable, per-row-keyed rotation that records which rows have moved. That
+ * does not exist yet and is not in scope here.
+ */
+async function reconcileEveryRow(
+  supabase: VaultPersistClient,
+  tables: TableReconcile[],
+): Promise<void> {
+  for (let pass = 0; ; pass++) {
+    const short: Array<{ entry: TableReconcile; total: number }> = [];
+    for (const entry of tables) {
+      const total = await exactRowCount(supabase, entry.table, entry.label, entry.migrated.size);
+      if (total > entry.migrated.size) short.push({ entry, total });
+    }
+    if (short.length === 0) return;
+
+    if (pass >= RECONCILE_MAX_PASSES) {
+      const { entry, total } = short[0];
+      throw new Error(rowsNotReconciledMessage(entry.label, entry.migrated.size, total));
+    }
+
+    for (const { entry } of short) await entry.sweep();
+  }
+}
+
+/**
+ * Walk a table in ordered pages and hand every row not already migrated to
+ * `migrateRow`.
+ *
+ * WHY THE ORDER CLAUSE IS LOAD BEARING. Postgres guarantees no row order
+ * without ORDER BY, and the update inside this walk writes a new tuple version,
+ * which can change the order a later scan returns. Without it a row can be
+ * skipped between pages, which strands it under a key nothing stores any more,
+ * or returned twice.
+ *
+ * WHY THE PAGE LENGTH ENDS THE WALK. A capped or empty read raises no error, so
+ * the number of rows returned is the only honest signal that there is nothing
+ * more to read.
+ */
+async function walkAndMigrate<Row extends { id: string }>(
+  supabase: VaultPersistClient,
+  table: string,
+  columns: string,
+  pageSize: number,
+  migrated: Set<string>,
+  migrateRow: (row: Row) => Promise<void>,
+): Promise<void> {
+  let offset = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .order("id", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw error;
+
+    const page = (data ?? []) as Row[];
+    if (page.length === 0) break;
+
+    for (const row of page) {
+      if (!migrated.has(row.id)) await migrateRow(row);
+    }
+
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+}
 
 export interface RotateVaultArgs {
   supabase: VaultPersistClient;
