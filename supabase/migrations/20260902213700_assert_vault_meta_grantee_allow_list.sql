@@ -46,10 +46,15 @@
 --   user_vault_meta      TABLE   postgres         8 privileges
 --   user_vault_meta      TABLE   service_role     6 privileges
 --   user_vault_meta      COLUMN  authenticated   34 privileges
+--   user_vault_meta      COLUMN  or_agent_reader 11 privileges
+--   customer_vault_meta  COLUMN  or_agent_reader 11 privileges
 --
--- Neither PUBLIC nor anon appears at either level on either table, and no other
--- role appears at all. The query is quoted at the end of this header so it can
--- be re-run on any project.
+-- Neither PUBLIC nor anon appears at either level on either table. The query is
+-- quoted at the end of this header so it can be re-run on any project.
+--
+-- or_agent_reader is the one grantee here that is NOT a member of the expected
+-- set. It is allowed conditionally, at column level only, and the section below
+-- says exactly what it may hold and why the distinction matters.
 --
 -- So the expected set is postgres, service_role and authenticated. Each is named
 -- because it is there today:
