@@ -11,10 +11,9 @@
 --
 -- public.connections holds server side operational values in the same row as
 -- the fields the browser renders. strike_webhook_secret is one of them: it is
--- the key an inbound Strike webhook is authenticated against. The signed in
--- owner of a connection row must be able neither to read it nor to write it.
--- Being able to CHOOSE it is as good as being able to read it, and is more
--- durable, because a value you set is one you keep across a rotation.
+-- the key an inbound Strike webhook is authenticated against. It is server side
+-- only: the authenticated role must hold neither read nor write on it. Both
+-- halves of that are required, and the read half alone is not sufficient.
 --
 -- Row level security cannot express that. A policy filters ROWS, not COLUMNS,
 -- so the requirement has to be enforced as a privilege.
