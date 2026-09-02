@@ -25,6 +25,7 @@ import {
   rowNotWrittenMessage,
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
+  COUNT_READ_ATTEMPTS,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -83,6 +84,15 @@ interface FakeOptions {
    * reconciliation has to treat as a failure rather than a pass.
    */
   countResult?: Record<string, QueryResult>;
+  /**
+   * Count results handed back in order, one per read, before falling through to
+   * the backing store's real length. countResult on its own can only model a
+   * count that fails identically for ever, which is the one case where giving
+   * up is right. A TRANSIENT failure is the dangerous one, because the count is
+   * read at the instant when throwing costs the user their vault, and it cannot
+   * be expressed without a queue.
+   */
+  countSequence?: Record<string, QueryResult[]>;
 }
 
 /**
@@ -160,6 +170,8 @@ function makeFakeClient(options: FakeOptions = {}) {
   // whatever a capped read happened to return, which is the property the
   // reconciliation depends on.
   function countResultFor(call: RecordedCall): QueryResult {
+    const queued = options.countSequence?.[call.table];
+    if (queued && queued.length > 0) return queued.shift() as QueryResult;
     const override = options.countResult?.[call.table];
     if (override) return override;
     return { data: null, count: (store[call.table] ?? []).length, error: null };
@@ -547,7 +559,10 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     });
 
     await expect(
-      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        sleep: async () => {},
+      }),
     ).rejects.toThrow(rowCountUnreadableMessage("connections"));
 
     expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
@@ -564,7 +579,10 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     });
 
     await expect(
-      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        sleep: async () => {},
+      }),
     ).rejects.toBeTruthy();
 
     expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
@@ -652,6 +670,89 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
 
     const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
     for (const call of countCalls) expect(calls.indexOf(call)).toBeLessThan(metaIndex);
+  });
+
+  it("retries a count that fails once, so a flaky read cannot strand a vault", async () => {
+    // The regression the retry exists to stop. The count runs after every
+    // ciphertext has been rewritten and before the meta write, so at that
+    // instant the only copy of the new MEK is in the page. Throwing on the
+    // first 502 turns a transient network error into permanent key loss for a
+    // user who then reloads, and before the reconciliation existed this
+    // recovery would simply have completed. The read is pure and idempotent.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      countSequence: {
+        connections: [{ data: null, count: null, error: { message: "502 bad gateway" } }],
+      },
+    });
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, clearMigrationKeys),
+      sleep: async () => {},
+    });
+
+    const countCalls = calls.filter((c) => c.op === "count" && c.table === "connections");
+    expect(countCalls.length).toBe(2);
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(true);
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up once the retries are exhausted, and still stops before the meta write", async () => {
+    // The other half of the same change. Retrying must not turn "I could not
+    // check" into a pass: a count that fails every time is a real failure.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      countResult: { connections: { data: null, count: null, error: { message: "still down" } } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow(rowCountUnreadableMessage("connections"));
+
+    expect(calls.filter((c) => c.op === "count").length).toBe(COUNT_READ_ATTEMPTS);
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("issues no further transaction update once one row in the page has failed", async () => {
+    // The page used to be a Promise.all over up to 500 concurrent updates. On a
+    // mid-page rejection the other in-flight updates kept running and kept
+    // WRITING after this function had already thrown, which is the one thing a
+    // fail-closed path must not do. Put the Promise.all back and this goes red.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      rows: {
+        encrypted_transactions: [
+          { id: "txn-1", encrypted_payload: "payload-1" },
+          { id: "txn-2", encrypted_payload: "payload-2" },
+          { id: "txn-3", encrypted_payload: "payload-3" },
+        ],
+      },
+    });
+    let seen = 0;
+    const args = {
+      ...rotateArgs(client, clearMigrationKeys),
+      migrateTransactionCiphertext: async (c: string) => {
+        seen += 1;
+        if (seen === 2) throw new Error("decrypt failed");
+        return `${c}-migrated`;
+      },
+    };
+
+    await expect(migrateAndPersistRotatedVault(args)).rejects.toThrow("decrypt failed");
+
+    const txnUpdates = calls.filter(
+      (c) => c.table === "encrypted_transactions" && c.op === "update",
+    );
+    expect(txnUpdates.length).toBe(1);
+    expect(txnUpdates[0].filters).toContainEqual({ column: "id", value: "txn-1" });
+    expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
 });
 
