@@ -147,6 +147,11 @@ export function forwardHeaders(src: Headers): Headers {
       lk === "cf-connecting-ip" ||
       lk.startsWith("cf-") ||
       lk === "x-forwarded-host" ||
+      // Caller-supplied and forgeable: never let either ride through, or a
+      // downstream function that falls back to reading them (rather than
+      // the trusted header below) would trust an attacker-chosen value.
+      lk === "x-forwarded-for" ||
+      lk === "x-real-ip" ||
       // Drop any caller-supplied value under our trusted header name so
       // it cannot ride through underneath the real one set below.
       lk === GATEWAY_VERIFIED_IP_HEADER
