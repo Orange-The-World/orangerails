@@ -58,11 +58,12 @@ Deno.test('an overflow manufactured with distinct xff: keys never evicts an alre
   reset();
   const now = 1_000_000;
 
-  // A real, identified caller has already made 59 requests this window: one
-  // more and they are throttled. This is the state a manufactured overflow
-  // must not be allowed to erase.
+  // A real, identified caller has already made RATE_MAX_PER_WINDOW (60)
+  // requests this window, right at the limit: one more and they are
+  // throttled, since the check is count > RATE_MAX_PER_WINDOW, not >=. This
+  // is the state a manufactured overflow must not be allowed to erase.
   const identified = 'cf:203.0.113.9';
-  for (let i = 0; i < 59; i++) {
+  for (let i = 0; i < RATE_MAX_PER_WINDOW; i++) {
     const retryAfter = rateLimitRetryAfter(identified, now);
     assertEquals(retryAfter, 0, `identified caller should not be throttled on request ${i + 1}`);
   }
