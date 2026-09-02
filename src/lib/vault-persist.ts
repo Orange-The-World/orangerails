@@ -575,7 +575,13 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     encrypted_label: string | null;
   }) => {
     const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
-    const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
+    // The generation goes in the SAME statement as the ciphertext. Never as a
+    // second write: a failure between the two would leave a row claiming to be
+    // under a key it is not under, which the count below would then believe.
+    const connUpdate: Record<string, unknown> = {
+      encrypted_credentials: newCreds,
+      data_key_generation: generation,
+    };
     if (conn.encrypted_label) {
       try {
         connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
@@ -620,7 +626,8 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
     const { data: txnWritten, error: txnErr } = await supabase
       .from("encrypted_transactions")
-      .update({ encrypted_payload: newPayload })
+      // Same statement, same reason as the connection update above.
+      .update({ encrypted_payload: newPayload, data_key_generation: generation })
       .eq("id", txn.id)
       .select("id");
     if (txnErr) throw txnErr;
@@ -661,7 +668,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // Both tables are reconciled together rather than one after each walk,
   // deliberately: a row inserted into connections DURING the transaction walk
   // is caught only by a check that runs after both.
-  await reconcileEveryRow(supabase, [
+  await reconcileEveryRow(supabase, generation, [
     {
       table: "connections",
       label: "connections",
