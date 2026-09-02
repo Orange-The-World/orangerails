@@ -1026,6 +1026,84 @@ jobs:
           fi
           echo "classifier refuses the irreversible class, passes the reversible one, and refuses an empty list."
 
+      # -----------------------------------------------------------------------
+      # OR-T1696. Proving the classifier CAN refuse (the step above) is not the
+      # same fact as knowing WHAT it refuses in this repository today. Those are
+      # different questions and only the second one tells us whether turning the
+      # gate on changes anybody's day.
+      #
+      # REPORT, NOT A GATE, and the distinction is load bearing. The migration
+      # tree already contains applied changes that drop tables and columns, so
+      # this sweep is EXPECTED to exit 2. Failing the job on that would turn
+      # every pull request red over history nobody can change, and a check that
+      # is red for everyone is a check that gets ignored.
+      #
+      # What DOES fail here: the classifier not running at all, and the sweep
+      # finding no files. A sweep that examined nothing is not a clean sweep,
+      # and the whole point of this classifier is that it never concludes
+      # REVERSIBLE from an absence.
+      # -----------------------------------------------------------------------
+      - name: Sweep every migration in the tree (report, not a gate)
+        run: |
+          # set +e first, same reason as the step above: this step reads exit
+          # codes deliberately and exit 2 here is the expected answer.
+          set +e
+          set -uo pipefail
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+
+          mapfile -t MIGS < <(find supabase/migrations -name '*.sql' -type f | sort)
+          if [ "${#MIGS[@]}" -eq 0 ]; then
+            echo "::error::no .sql files found under supabase/migrations. The sweep examined nothing, which is not the same fact as a tree with nothing to refuse. Fix the path rather than let this report green."
+            exit 1
+          fi
+          echo "=== classifying every migration in the tree (${#MIGS[@]} file(s)) ==="
+
+          OUT=$(node scripts/classify-migrations.mjs "${MIGS[@]}" 2>&1); RC=$?
+          echo "$OUT"
+          echo "exit code: $RC (2 is expected here: the tree holds applied drops)"
+
+          if [ "$RC" -eq 1 ]; then
+            echo "::error::the classifier could not run over the tree (exit 1). That is an UNKNOWN, not a clean sweep."
+            exit 1
+          fi
+
+          EXAMINED=$(echo "$OUT" | grep '^EXAMINED' || true)
+          if [ -z "$EXAMINED" ]; then
+            echo "::error::the sweep printed no EXAMINED line, so it reached no conclusion about the tree."
+            exit 1
+          fi
+
+          # Every file that is NOT REVERSIBLE, with the note, rule id and line
+          # the classifier reported for it. IRREVERSIBLE does not match
+          # ": REVERSIBLE" because of the space, so the filter keeps both of the
+          # refused classes and drops only the clean ones.
+          NOT_CLEAN=$(echo "$OUT" | awk '/^== /{keep = ($0 !~ /: REVERSIBLE$/)} keep')
+
+          {
+            echo ""
+            echo "### What the classifier says about the tree as it stands"
+            echo ""
+            echo "Command:"
+            echo ""
+            echo '```'
+            echo "node scripts/classify-migrations.mjs \$(find supabase/migrations -name '*.sql' -type f | sort)"
+            echo "$EXAMINED"
+            echo "exit code: ${RC} (2 expected: the tree holds applied drops)"
+            echo '```'
+            echo ""
+            echo "Every file that is not REVERSIBLE, verbatim:"
+            echo ""
+            echo '```'
+            if [ -n "$NOT_CLEAN" ]; then
+              echo "$NOT_CLEAN"
+            else
+              echo "(none: every file in the tree classifies REVERSIBLE)"
+            fi
+            echo '```'
+            echo ""
+            echo "This is a report. It does not gate anything, and the exit code above is not a failure."
+          } | tee -a "$DEMO" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish the demonstration to the pull request
         # The seats that review changes in this repo hold GitHub read tools and
         # no shell. An Actions log is not reachable from a review seat and the
