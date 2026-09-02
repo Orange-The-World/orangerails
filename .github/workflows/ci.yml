@@ -943,6 +943,13 @@ jobs:
 
       - name: Refuse a deliberately irreversible fixture, and show the red
         run: |
+          # `set +e` FIRST, and it is load bearing. A run step's default shell
+          # here is `bash -e`, and `set -uo pipefail` does not clear e. This
+          # step's entire purpose is to run a command that exits non-zero and
+          # then look at the code, so with errexit on it died at the first
+          # capture and reported a red with no reason attached (observed on run
+          # 33637547005). It still fails on purpose, at the end, via FAIL.
+          set +e
           set -uo pipefail
           FIX=scripts/fixtures/migration-classifier
 
@@ -1037,6 +1044,9 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           JOB_STATUS: ${{ job.status }}
         run: |
+          # See the note on errexit in the step above: the default shell is
+          # `bash -e` and this step reads exit codes deliberately.
+          set +e
           set -uo pipefail
           DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
           if [ ! -f "$DEMO" ]; then
