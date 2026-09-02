@@ -1,16 +1,15 @@
--- Stop an authenticated user reading their own connection's Strike webhook
--- signing secret.
+-- Column level SELECT grant for authenticated on public.connections.
 --
--- WHY THIS EXISTS
+-- THE REQUIREMENT
 --
--- public.connections has row level security enabled, and the policy "Direct
--- users can read connections via their subaccount" correctly limits a signed
--- in user to their OWN rows. It does not limit WHICH COLUMNS of those rows
--- they see, because SELECT was granted at table level and there were no
--- column level grants at all (pg_attribute.attacl was null on every column).
+-- public.connections holds server side operational values alongside the
+-- fields the browser renders. strike_webhook_secret is one of them: it is the
+-- shared secret used to authenticate inbound Strike webhooks, so it is server
+-- side only and the authenticated role must never hold SELECT on it.
 --
--- A row policy filters rows. It cannot filter columns. So no policy could
--- have closed this, and the fix has to be a privilege change.
+-- Row level security cannot express that. A policy filters ROWS, not COLUMNS,
+-- so the requirement has to be enforced as a privilege: a column level SELECT
+-- grant naming only what the client reads, in place of a table level one.
 --
 -- WHAT THIS DOES
 --
@@ -40,7 +39,7 @@
 --
 -- DELIBERATELY EXCLUDED
 --
---   strike_webhook_secret     the finding this migration closes
+--   strike_webhook_secret     server side only, see the requirement above
 --   encrypted_credentials     the client WRITES it on insert and never reads
 --   credentials_key_version   it back. INSERT is a separate privilege from
 --                             SELECT, so excluding both from SELECT does not
@@ -58,8 +57,8 @@
 -- A table level REVOKE also clears COLUMN level grants for that grantee, so
 -- the REVOKE has to come before the GRANT or the column grant is silently
 -- wiped. This table has no column grants today so nothing existing is lost,
--- but the order is written this way on purpose: it is the defect that was
--- found in an earlier column grant change on another table.
+-- but the order is written this way on purpose: getting it backwards is a
+-- silent failure, not an error, and it has been got backwards before.
 --
 -- PAIRED CLIENT CHANGE
 --
@@ -77,8 +76,9 @@
 --   GRANT SELECT ON public.connections TO authenticated;
 --   GRANT SELECT ON public.connections TO anon;
 --
--- Note the rollback restores the exposure. It is written down because a
--- rollback path has to exist, not because it is safe to use casually.
+-- The rollback widens the grant back to table level, so it drops the
+-- requirement stated at the top of this file. It is written down because a
+-- rollback path has to exist, not because it is a safe end state.
 
 REVOKE SELECT ON public.connections FROM anon;
 REVOKE SELECT ON public.connections FROM authenticated;
