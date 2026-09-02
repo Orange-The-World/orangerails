@@ -30,6 +30,11 @@ on:
 
 permissions:
   contents: read
+  # Declaring a permissions block sets every scope not named here to none.
+  # The environments endpoint is governed by the deployments scope, so
+  # contents alone can leave the live read refused (exit 3) for a reason that
+  # has nothing to do with the settings this workflow watches. Read only.
+  deployments: read
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -38,6 +43,7 @@ jobs:
   # skipped by an outage.
   # ---------------------------------------------------------------------------
   self-test:
+    name: The comparison goes red on every class of change
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -53,11 +59,21 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # The failure this exists to prevent is a check that could not look and
-  # printed OK anyway. So drive the real script at three real failures and
-  # assert each one exits with its own code. These call api.github.com for
-  # real: they are not fixtures, and they need no secret.
+  # printed OK anyway. So drive the real script at four real failures and
+  # assert each one exits with its own code.
+  #
+  # ONE JOB PER FAILURE MODE, deliberately. A single combined job reports one
+  # red named "failure-modes" and the reader has to open the run log to learn
+  # which of four assertions broke. The check name should carry that. This is
+  # the same principle the script itself is built on: "it did not work" is not
+  # a finding, "the 404 path exited 3" is.
+  #
+  # The first three call api.github.com for real. They are not fixtures and
+  # they need no secret.
   # ---------------------------------------------------------------------------
-  failure-modes:
+
+  refused-token-exits-3:
+    name: A refused token exits 3, not 0
     runs-on: ubuntu-latest
     needs: self-test
     steps:
@@ -69,7 +85,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: A refused token must exit 3, not 0
+      - name: Drive the real script at a token the API will refuse
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: this-is-not-a-valid-token
@@ -85,12 +101,25 @@ jobs:
             exit 1
           fi
 
+  missing-repository-exits-4:
+    name: A repository that does not exist exits 4, not 0
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       # Authenticated on purpose. Anonymous is a different failure and it is
       # not a stable one: from a shared runner IP api.github.com can answer
       # 403 rate-limit-exceeded, which this script correctly calls "refused"
-      # (exit 3), and the step would then fail for a reason that has nothing
+      # (exit 3), and the job would then fail for a reason that has nothing
       # to do with the repository being absent.
-      - name: A repository that does not exist must exit 4, not 0
+      - name: Drive the real script at a repository that is not there
         env:
           GITHUB_REPOSITORY: Orange-The-World/this-repository-does-not-exist-or-t1520
           GITHUB_TOKEN: ${{ github.token }}
@@ -106,7 +135,20 @@ jobs:
             exit 1
           fi
 
-      - name: An unreachable API must exit 5, not 0
+  unreachable-api-exits-5:
+    name: An unreachable API exits 5, not 0
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Point the real script at a port with nothing behind it
         env:
           GITHUB_API_URL: http://127.0.0.1:9
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -122,7 +164,24 @@ jobs:
             exit 1
           fi
 
-      - name: An empty allowlist variable must exit 5, not record an empty list
+  empty-allowlist-exits-5:
+    name: An empty allowlist variable exits 5, not an empty recording
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      # No network is required to reach this refusal any more. The script
+      # validates the recorded variables before it makes the environments
+      # request, so this assertion tests one thing rather than depending on
+      # an unrelated call having succeeded first.
+      - name: Blank the production allowlist variable
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -138,15 +197,18 @@ jobs:
             exit 1
           fi
 
-      - name: Say what was proven
-        run: echo "every unreadable answer exits with its own non-zero code; none of them can print as a pass"
-
   # ---------------------------------------------------------------------------
   # The live reading. Runs after the machinery has been proven able to fail.
   # ---------------------------------------------------------------------------
   read-and-compare:
+    name: Read the live settings and compare them to the reviewed baseline
     runs-on: ubuntu-latest
-    needs: [self-test, failure-modes]
+    needs:
+      - self-test
+      - refused-token-exits-3
+      - missing-repository-exits-4
+      - unreachable-api-exits-5
+      - empty-allowlist-exits-5
     # Variable values are not available to a pull request from a fork, so the
     # read would fail there for a reason that has nothing to do with this
     # repository's settings. An outside contributor should not be blocked by a
