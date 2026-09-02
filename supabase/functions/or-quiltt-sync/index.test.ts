@@ -14,6 +14,50 @@
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, upstreamCodeForErroredEvent } from './index.ts';
 
+// ── OR-T0256: shared chainable mock builder ───────────────────────────
+//
+// The hand-rolled Supabase mocks below only implement the query-builder
+// methods each test happens to call today. Twice (PR #698, PR #703) a
+// production change added a call the mock did not implement (a new .in()),
+// and the failure surfaced as a TypeError in an UNRELATED, already-passing
+// test rather than anywhere near the real change.
+//
+// chainable() wraps a mock object in a Proxy so any method NOT explicitly
+// defined returns the same live chain instead of throwing. Every method a
+// test DOES define still behaves exactly as written; this only changes
+// what happens for a chain call nobody anticipated. It also auto-wraps
+// whatever an existing method returns (recursively), so wrapping just the
+// outermost client is enough -- individual chain/ch objects nested inside
+// from() do not need to be touched.
+// deno-lint-ignore no-explicit-any
+function chainable<T extends object>(target: T): T {
+  // deno-lint-ignore no-explicit-any
+  let proxy: any;
+  // deno-lint-ignore no-explicit-any
+  const handler: ProxyHandler<any> = {
+    get(obj, prop, receiver) {
+      if (typeof prop === 'symbol') return Reflect.get(obj, prop, receiver);
+      if (!(prop in obj)) {
+        // Unimplemented chain method (e.g. a new .in() or .not()): swallow
+        // the call and stay chainable instead of "X is not a function".
+        return (..._args: unknown[]) => proxy;
+      }
+      const value = obj[prop];
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const result = value.apply(receiver, args);
+        // Never wrap a live Promise -- terminal calls must resolve untouched.
+        if (result && typeof result === 'object' && !(result instanceof Promise)) {
+          return chainable(result);
+        }
+        return result;
+      };
+    },
+  };
+  proxy = new Proxy(target as Record<string, unknown>, handler);
+  return proxy as T;
+}
+
 // ── fetchPendingBatch: batch query filter ─────────────────────────────
 //
 // This test is the regression guard for Auditor requirement 2.
@@ -24,7 +68,7 @@ import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, 
 Deno.test('fetchPendingBatch: filters processed_at AND opk_deferred_at as null', async () => {
   const isFilters: Array<[string, unknown]> = [];
 
-  const mockClient = {
+  const mockClient = chainable({
     from(_table: string) {
       const chain = {
         select(_cols: string) { return chain; },
@@ -39,7 +83,7 @@ Deno.test('fetchPendingBatch: filters processed_at AND opk_deferred_at as null',
       };
       return chain;
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   await fetchPendingBatch(mockClient as any, 20);
@@ -56,7 +100,7 @@ Deno.test('fetchPendingBatch: filters processed_at AND opk_deferred_at as null',
 // ── handleEvent: deferred return when opk_public is null ─────────────
 
 Deno.test('handleEvent: returns deferred when subaccount has no opk_public', async () => {
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -78,7 +122,7 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
       };
       return chain;
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-1',
@@ -106,7 +150,7 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
 Deno.test('handleEvent: dispatches errored event, reconciles connection to error, returns processed', async () => {
   let updateCalled = false;
 
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -137,7 +181,7 @@ Deno.test('handleEvent: dispatches errored event, reconciles connection to error
       };
       return chain;
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-err-1',
