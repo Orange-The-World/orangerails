@@ -118,6 +118,66 @@ jobs:
           fi
           echo "Self-test passed: 6 cases, all as expected."
 
+      - name: Self-test the promotion-body basis logic
+        run: |
+          set -euo pipefail
+
+          # Which ref the promotion pull request's body is built from
+          # (OR-T1470). A promotion whose head is dev describes itself with
+          # prod...dev, same as always. A promotion whose head is a
+          # release/* branch cut at a fixed sha must describe ITSELF with
+          # prod...<that head>, because dev keeps moving after the cut and
+          # prod...dev stops describing what is actually in the pull
+          # request the moment that happens.
+          body_basis() {
+            head_ref="$1"
+            if [ "${head_ref}" = "dev" ]; then
+              echo "dev"
+            else
+              echo "${head_ref}"
+            fi
+          }
+
+          # Whether the body needs the extra "commits on dev beyond this
+          # promotion's cut" line. Only when the basis is not dev itself:
+          # when the basis IS dev there is nothing beyond it left to call
+          # out, the main table already says everything.
+          reports_beyond_cut() {
+            head_ref="$1"
+            if [ "${head_ref}" = "dev" ]; then
+              echo "no"
+            else
+              echo "yes"
+            fi
+          }
+
+          fail=0
+          check() {
+            got_basis="$(body_basis "$2")"
+            got_extra="$(reports_beyond_cut "$2")"
+            if [ "${got_basis}" != "$3" ] || [ "${got_extra}" != "$4" ]; then
+              echo "::error::self-test '$1' expected basis='$3' extra='$4', got basis='${got_basis}' extra='${got_extra}'"
+              fail=1
+            else
+              echo "ok: $1 -> basis=${got_basis} extra=${got_extra}"
+            fi
+          }
+
+          # head=dev: body must be unchanged in behaviour from today.
+          check "head dev"                              "dev"        "dev"        "no"
+          # head=release/X, dev has moved past the cut: the PR's own numbers
+          # come from release/X, and the omission is reported separately.
+          check "head release/x, dev ahead of the cut"   "release/x"  "release/x"  "yes"
+          # head=release/X, identical to dev: still basis release/x (the
+          # PR's own compare), the extra line is still shown and reads 0.
+          check "head release/x, identical to dev"       "release/x"  "release/x"  "yes"
+
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::promotion-body basis self-test failed. The body would describe the wrong ref."
+            exit 1
+          fi
+          echo "Self-test passed: 3 cases, all as expected."
+
       - name: Compare prod and dev
         id: compare
         env:
