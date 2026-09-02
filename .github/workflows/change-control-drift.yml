@@ -119,9 +119,13 @@ jobs:
       # 403 rate-limit-exceeded, which this script correctly calls "refused"
       # (exit 3), and the job would then fail for a reason that has nothing
       # to do with the repository being absent.
+      # CHANGE_CONTROL_REPOSITORY, not GITHUB_REPOSITORY. The runner sets the
+      # GITHUB_ one itself and its value wins over this block, so overriding
+      # that name reaches nothing: this assertion then reads the real
+      # repository, succeeds, and exits 0 while claiming to test a 404.
       - name: Drive the real script at a repository that is not there
         env:
-          GITHUB_REPOSITORY: Orange-The-World/this-repository-does-not-exist-or-t1520
+          CHANGE_CONTROL_REPOSITORY: Orange-The-World/this-repository-does-not-exist-or-t1520
           GITHUB_TOKEN: ${{ github.token }}
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: placeholder
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
@@ -148,9 +152,12 @@ jobs:
         with:
           node-version: 24
 
+      # CHANGE_CONTROL_API_URL for the same reason as the job above: the
+      # runner owns GITHUB_API_URL, so setting that name here would leave the
+      # script talking to the real api.github.com and exiting 0.
       - name: Point the real script at a port with nothing behind it
         env:
-          GITHUB_API_URL: http://127.0.0.1:9
+          CHANGE_CONTROL_API_URL: http://127.0.0.1:9
           GITHUB_REPOSITORY: ${{ github.repository }}
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: placeholder
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
