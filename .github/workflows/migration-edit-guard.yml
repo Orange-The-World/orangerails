@@ -1,0 +1,180 @@
+name: Migration edit guard
+
+# Refuses a pull request that changes a migration that already exists on the base
+# branch, unless the pull request description says out loud that it means to.
+#
+# The gap this closes. The apply loop skips any migration whose version is already
+# recorded in the ledger, and the shadow scan compares the recorded name against
+# the file name in the tree. Between them they catch a rename and a
+# revert-and-re-add. Neither can catch a file edited IN PLACE: same version, same
+# name, different SQL. The loop skips it, the two names match, and the new SQL
+# never reaches a cluster that already applied the old SQL. Every check stays
+# green while the clusters quietly diverge.
+#
+# This check reads the diff and nothing else. It has no database access and needs
+# none. Asking a ledger would move the catch back to the apply path, which is the
+# expensive place to find it and the place where the failure mode is silence.
+#
+# It is deliberately clearable. Editing a migration that has not applied anywhere
+# is legitimate and common, so a blanket refusal would block correct work and
+# would be switched off within a week. Naming each file in the description turns
+# an edit nobody noticed into a decision somebody recorded.
+
+on:
+  pull_request:
+    # 'edited' is load bearing, not tidiness. It is what makes the acknowledgement
+    # re-run this check. Without it, adding the line to the description does
+    # nothing visible and the escape hatch reads as broken.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-edit-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check-migration-edits:
+    name: Migrations are added, not edited in place
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out with full history, because the base branch is needed
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove the guard can fail before trusting it to pass
+        run: |
+          set -uo pipefail
+
+          # Every case below runs the SAME script the real step runs. The point of
+          # keeping the logic in one file is that this cannot drift into testing a
+          # copy of the logic that no longer matches the one making the decision.
+          SCRIPT=scripts/check-migration-edits.sh
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::error::$SCRIPT is missing, so the guard cannot run at all."
+            exit 1
+          fi
+
+          cases=0
+          failures=0
+
+          run_case() {
+            local name="$1" want="$2" body="$3" input="$4"
+            local out rc
+            cases=$((cases + 1))
+            out="$(printf '%s' "$input" | PR_BODY="$body" bash "$SCRIPT" 2>&1)"
+            rc=$?
+            if [ "$rc" -ne "$want" ]; then
+              echo "SELF TEST FAIL: ${name}: expected exit ${want}, got ${rc}"
+              echo "$out" | sed 's/^/    /'
+              failures=$((failures + 1))
+              return
+            fi
+            echo "self test ok: ${name} (exit ${rc})"
+            LAST_OUT="$out"
+          }
+
+          M_OLD=$'M\tsupabase/migrations/20260101000000_first.sql'
+          M_TWO=$'M\tsupabase/migrations/20260202000000_second.sql'
+          A_NEW=$'A\tsupabase/migrations/20260303000000_third.sql'
+          D_OLD=$'D\tsupabase/migrations/20260101000000_first.sql'
+          M_SRC=$'M\tsrc/lib/thing.ts'
+          ACK_1="MIGRATION-EDIT-ACK: supabase/migrations/20260101000000_first.sql"
+
+          # 1. The case this must not break: adding a migration is the normal path.
+          run_case "an added migration passes" 0 "" "$A_NEW"
+          # 2. The case this exists for.
+          run_case "an edited migration is refused" 1 "" "$M_OLD"
+          # 3. The escape hatch clears it.
+          run_case "an acknowledged edit passes" 0 "$ACK_1" "$M_OLD"
+          # 4. The acknowledgement is per file, not a blanket switch.
+          run_case "an acknowledgement for a different file does not clear it" 1 \
+            "MIGRATION-EDIT-ACK: supabase/migrations/29991231000000_other.sql" "$M_OLD"
+          # 5. It stays out of the way of everything that is not a migration.
+          run_case "an edit outside the migration directory passes" 0 "" "$M_SRC"
+          # 6. Acknowledging one of two does not clear the other.
+          run_case "one acknowledgement does not cover two edits" 1 "$ACK_1" "${M_OLD}"$'\n'"${M_TWO}"
+          # 7. Deleting a migration is also not adding one.
+          run_case "a deleted migration is refused" 1 "" "$D_OLD"
+          # 8. It must never guess. Unparseable input is exit 2, which is not a pass.
+          run_case "input it cannot parse is exit 2, not a pass" 2 "" "this is not a name-status line"
+          # 9. An add alongside an edit is refused for the edit only.
+          run_case "an add alongside an edit is refused, naming only the edit" 1 "" "${A_NEW}"$'\n'"${M_OLD}"
+          if [ -n "${LAST_OUT-}" ]; then
+            if ! printf '%s' "$LAST_OUT" | grep -q "20260101000000_first.sql"; then
+              echo "SELF TEST FAIL: the refusal did not name the file that was edited"
+              failures=$((failures + 1))
+            fi
+            if printf '%s' "$LAST_OUT" | grep -q "20260303000000_third.sql"; then
+              echo "SELF TEST FAIL: the refusal named a file that was only added"
+              failures=$((failures + 1))
+            fi
+            if ! printf '%s' "$LAST_OUT" | grep -q "MIGRATION-EDIT-ACK:"; then
+              echo "SELF TEST FAIL: the refusal did not say how to clear it"
+              failures=$((failures + 1))
+            fi
+          fi
+
+          # A loop that finishes is not a loop that did the work. If a case did not
+          # run, this step must go red rather than report a clean sweep of nothing.
+          if [ "$cases" -ne 9 ]; then
+            echo "::error::expected 9 self test cases, ran ${cases}. Not trusting this run."
+            exit 1
+          fi
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::${failures} self test failure(s). The guard itself is broken, so its verdict on this pull request means nothing."
+            exit 1
+          fi
+          echo "Self test: ${cases} of ${cases} cases passed, red and green both proven."
+
+      - name: Refuse a migration that is changed rather than added
+        env:
+          # Passed through the environment, never interpolated into the script. A
+          # description is attacker controlled text on a public repository, and
+          # expanding it into a shell command would execute it.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Anything this step cannot do, it must say loudly. A guard that cannot
+          # read the diff and exits 0 anyway is worse than no guard, because it
+          # reads as a pass.
+          if ! git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}" >/dev/null; then
+            echo "::error::Could not resolve the base branch origin/${BASE_REF}, so no diff could be taken. Refusing rather than passing blind."
+            exit 1
+          fi
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "${HEAD_SHA}"
+          fi
+
+          # The merge base, not the base branch tip. Diffing against the tip would
+          # report commits that landed on the base branch after this one forked as
+          # if this pull request had made them, backwards.
+          MERGE_BASE="$(git merge-base "refs/remotes/origin/${BASE_REF}" "${HEAD_SHA}")"
+          echo "base branch ${BASE_REF}, merge base ${MERGE_BASE}, head ${HEAD_SHA}"
+
+          # --no-renames on purpose: it decomposes a rename into a delete and an
+          # add, so a renamed migration is caught by the delete and the path column
+          # never has to hold two paths.
+          git diff --no-renames --name-status "${MERGE_BASE}" "${HEAD_SHA}" > changed-paths.tsv
+          echo "changed paths in this pull request:"
+          sed 's/^/  /' changed-paths.tsv
+
+          set +e
+          bash scripts/check-migration-edits.sh < changed-paths.tsv | tee guard-output.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          {
+            echo "### Migration edit guard"
+            echo ""
+            echo '```'
+            cat guard-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$rc"
