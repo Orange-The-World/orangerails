@@ -282,6 +282,9 @@ answered here and traced at review against the implementation.
 - **(b) Server state** — every persisted blob is client-encrypted; the
   decryption key is HKDF-derived client-side (`'or-ldk-v1'`), never leaves the
   client. Server sees ciphertext + blind index only. No server-issued salt.
+  Includes the payment amount specifically (§3.5): it is inside the envelope,
+  not a column and not an index term. This is checked against the schema, not
+  only against the code.
 - **(c) Signing** — no signer or key material instantiated server-side at any
   point in the persistence path. All signing on-device.
 - **(d) Recovery** — full fund recovery from seed alone with Orange Rails infra
