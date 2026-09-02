@@ -85,9 +85,15 @@ jobs:
             exit 1
           fi
 
+      # Authenticated on purpose. Anonymous is a different failure and it is
+      # not a stable one: from a shared runner IP api.github.com can answer
+      # 403 rate-limit-exceeded, which this script correctly calls "refused"
+      # (exit 3), and the step would then fail for a reason that has nothing
+      # to do with the repository being absent.
       - name: A repository that does not exist must exit 4, not 0
         env:
           GITHUB_REPOSITORY: Orange-The-World/this-repository-does-not-exist-or-t1520
+          GITHUB_TOKEN: ${{ github.token }}
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: placeholder
           VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
         run: |
