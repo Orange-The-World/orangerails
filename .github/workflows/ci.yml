@@ -1097,7 +1097,7 @@ jobs:
             | . as $f
             | if ((($f.findings) // []) | length) == 0
               then "\($f.file) | \($f.verdict) | (no finding reported)"
-              else ($f.findings[] | "\($f.file) | \($f.verdict) | \(.id) | line \(.line)")
+              else ($f.findings[] | "\($f.file) | \($f.verdict) | \(.id) | line \(.line) | \(.snippet // "(no statement reported)")")
               end' "$JSON")
 
           # UNPARSEABLE is called out separately and FIRST. It is the rarest
@@ -1182,14 +1182,14 @@ jobs:
             exit 0
           fi
           printf '%s\n' "$IRR" > "${RUNNER_TEMP}/or-t1696-irr.txt"
-          split -C 1000 -d -a 2 "${RUNNER_TEMP}/or-t1696-irr.txt" "${RUNNER_TEMP}/or-t1696-part-"
+          split -C 5000 -d -a 2 "${RUNNER_TEMP}/or-t1696-irr.txt" "${RUNNER_TEMP}/or-t1696-part-"
           PART=0
           for P in "${RUNNER_TEMP}"/or-t1696-part-*; do
             PART=$((PART + 1))
             {
               echo "### IRREVERSIBLE in this tree, part ${PART} (OR-T1696)"
               echo ""
-              echo "One row per finding: file, rule id, reported line."
+              echo "One row per finding: file, rule id, reported line, and the statement the rule fired on. The statement is there so a reader can judge whether the refusal is right, which file and line alone do not allow."
               echo ""
               echo '```'
               cat "$P"
