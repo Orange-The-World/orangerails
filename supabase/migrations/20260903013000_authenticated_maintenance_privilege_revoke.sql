@@ -68,6 +68,13 @@
 -- oversight. Recording that here matters because a future reader comparing the
 -- two clusters will otherwise assume half the work is missing.
 --
+-- THAT PARAGRAPH IS NOW MEASURED RATHER THAN ASSERTED. Read live on 2026-09-02:
+-- that cluster reports server_version_num 170006, so the MAINTAIN token below
+-- parses there, and pg_default_acl for schema public and objtype r holds exactly
+-- ONE row, owned by postgres, granting the logged-in role arwd and nothing more.
+-- Both halves of the no-op claim therefore hold. Read it again before trusting
+-- it in a year: it is a fact about a cluster, not a property of this file.
+--
 -- WHAT IS DELIBERATELY NOT TOUCHED.
 --   SELECT, INSERT, UPDATE and DELETE for this role, which are load bearing on
 --   every client path. Widening the scope to them turns a change that alters no
@@ -272,12 +279,34 @@ do $$ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- PART 2: stop the tap. Without this, table 35 arrives with the same four
--- privileges and this whole file has to be written again. FOR ROLE postgres is
--- load bearing: default privileges are per owning role and this does nothing
--- for tables created by any other role. Only the four maintenance privileges
--- are named, so INSERT, SELECT, UPDATE and DELETE keep flowing to new tables
--- exactly as they do now.
+-- PART 2: narrow the tap this file is permitted to narrow. Without this, table
+-- 35 arrives with the same four privileges and this whole file has to be
+-- written again. FOR ROLE postgres is load bearing: default privileges are per
+-- owning role and this does nothing for tables created by any other role. Only
+-- the four maintenance privileges are named, so INSERT, SELECT, UPDATE and
+-- DELETE keep flowing to new tables exactly as they do now.
+--
+-- IT IS NOT THE ONLY TAP EVERYWHERE, AND SAYING SO IS THE POINT. Measured on
+-- 2026-09-02, pg_default_acl for schema public and objtype r. On the production
+-- cluster there is exactly one row, owned by postgres, so there this statement
+-- closes the only tap that exists. On the development cluster there are two:
+-- postgres, closed here, and supabase_admin, which hands the logged-in role all
+-- four maintenance privileges and which this file cannot touch.
+--
+-- WHY IT CANNOT TOUCH IT, measured rather than assumed. ALTER DEFAULT
+-- PRIVILEGES FOR ROLE supabase_admin is permitted only to supabase_admin or a
+-- member of it. select current_user, pg_has_role(current_user,
+-- 'supabase_admin', 'MEMBER') returns postgres and false on BOTH clusters, and
+-- postgres is not a superuser here. Do not add a statement that tries: it is
+-- refused and the refusal aborts the whole deploy. Closing that tap is a
+-- platform request, not a migration.
+--
+-- IT IS LATENT, NOT LIVE. Zero tables in schema public are owned by
+-- supabase_admin, so the second tap produces nothing today. Platform managed
+-- objects are the ones that arrive owned by that role, which is why it will not
+-- stay latent forever. B2 below raises a WARNING naming any tap it finds that
+-- this file cannot narrow, so the gap is visible on every apply instead of
+-- being assumed away.
 -- ---------------------------------------------------------------------------
 
 alter default privileges for role postgres in schema public
@@ -311,6 +340,7 @@ declare
   v_keep constant text[] := array['customers', 'connections', 'subaccounts', 'encrypted_transactions'];
   v_bad text;
   v_missing text;
+  v_tap record;
 begin
   -- B1. No table in schema public may leave the logged-in role holding any of
   -- the four maintenance privileges. Deliberately not narrowed to the list in
@@ -332,8 +362,25 @@ begin
   end if;
 
   -- B2. The default privilege must no longer hand the four out on new tables.
-  -- Scoped to the owning role this file narrowed, because that is the only one
-  -- it can narrow.
+  -- TWO QUESTIONS, TWO SEVERITIES, and the split is the whole point of this
+  -- block. Default privileges are per OWNING role, so there can be more than one
+  -- tap and this file can only narrow the one owned by postgres. An earlier form
+  -- of this check filtered on that same role, which meant it asserted the tap it
+  -- had just closed was closed and said nothing at all about any other. It passed
+  -- in silence while a second tap stood wide open. A tap nobody can close should
+  -- still be a tap nobody can miss.
+  --   B2a, the tap this file closed: it MUST be closed, so a leftover is an
+  --   exception and the apply stops.
+  --   B2b, every other owning role: this file cannot narrow it, so a finding is a
+  --   WARNING naming the role, and the apply continues. Failing here would abort
+  --   every deploy on a condition no migration is allowed to fix.
+  --
+  -- SCOPE, stated so the next reader does not think it was missed. Both halves
+  -- ask about the logged-in role only, matching the rest of this file. On the
+  -- development cluster the supabase_admin tap also hands the ANONYMOUS role all
+  -- four maintenance privileges plus INSERT, UPDATE and DELETE, measured
+  -- 2026-09-02. That is worse and it is a different concern with its own change,
+  -- named at the top of this file. It is recorded here rather than folded in.
   select string_agg(a.privilege_type, ', ' order by a.privilege_type)
     into v_bad
     from pg_default_acl d
@@ -348,6 +395,24 @@ begin
   if v_bad is not null then
     raise exception 'authenticated maintenance sweep FAILED: the default privilege for role postgres still grants the logged-in role: %', v_bad;
   end if;
+
+  for v_tap in
+    select pg_get_userbyid(d.defaclrole) as owner,
+           string_agg(a.privilege_type, ', ' order by a.privilege_type) as privs
+      from pg_default_acl d
+      join pg_namespace n on n.oid = d.defaclnamespace
+      cross join lateral aclexplode(d.defaclacl) a
+      join pg_roles r on r.oid = a.grantee
+     where n.nspname = 'public'
+       and d.defaclobjtype = 'r'
+       and pg_get_userbyid(d.defaclrole) <> 'postgres'
+       and r.rolname = 'authenticated'
+       and a.privilege_type in ('TRUNCATE', 'TRIGGER', 'REFERENCES', 'MAINTAIN')
+     group by 1
+     order by 1
+  loop
+    raise warning 'authenticated maintenance sweep: a default privilege tap this file CANNOT narrow is still open. Owning role %, still granting the logged-in role %. ALTER DEFAULT PRIVILEGES FOR ROLE % is permitted only to that role or a member of it, and the applying role is not a member, so no migration can close it. Latent while no table in schema public is owned by that role; closing it is a platform request.', v_tap.owner, v_tap.privs, v_tap.owner;
+  end loop;
 
   -- B3. THE ASSERTION THAT PROTECTS WHAT WAS DELIBERATELY KEPT. The four data
   -- privileges must still be present on a named sample of tables the client
