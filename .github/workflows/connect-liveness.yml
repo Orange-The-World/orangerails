@@ -1,0 +1,59 @@
+name: connect.orangerails.com liveness check
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/connect-liveness-check
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  liveness:
+    name: connect.orangerails.com liveness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check connect.orangerails.com is serving the real app
+        env:
+          # A stable, descriptive User-Agent. Requests from our own default
+          # HTTP clients get blocked by the zone's bot protection, while a
+          # plain descriptive UA passes, the same as any ordinary automated
+          # client. Kept as one constant so it can be changed without
+          # touching the check logic below.
+          USER_AGENT: "OrangeRailsHealthCheck/1.0 (+https://orangerails.com)"
+          TARGET_URL: "https://connect.orangerails.com"
+          # THIS IS A DELIBERATELY WRONG MARKER, used to prove the check can
+          # fail before it is trusted. It will be replaced with a string from
+          # the real app shell in a follow-up commit on this same branch.
+          MARKER: "this-string-does-not-appear-on-the-real-page-0001"
+        run: |
+          check() {
+            code="$(curl -sS -o /tmp/body.html -w '%{http_code}' -A "$USER_AGENT" "$TARGET_URL")"
+            echo "status=$code"
+            if [ "$code" != "200" ]; then
+              echo "FAIL: expected HTTP 200, got $code"
+              head -c 500 /tmp/body.html
+              return 1
+            fi
+            if ! grep -qF "$MARKER" /tmp/body.html; then
+              echo "FAIL: HTTP 200 but marker not found in body"
+              head -c 500 /tmp/body.html
+              return 1
+            fi
+            echo "OK: got 200 and marker present"
+            return 0
+          }
+          if check; then
+            exit 0
+          fi
+          echo "First attempt failed, retrying once after 10s..."
+          sleep 10
+          if check; then
+            exit 0
+          fi
+          echo "Second attempt failed. connect.orangerails.com is not serving the expected page."
+          exit 1
