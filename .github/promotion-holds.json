@@ -1,0 +1,7 @@
+[
+  {
+    "sha": "0fa8a425",
+    "ticket": "OR-T1310",
+    "note": "Test fixture, same entry as the real hold. This branch was cut from prod and does not contain this commit, so the guard must PASS here."
+  }
+]
