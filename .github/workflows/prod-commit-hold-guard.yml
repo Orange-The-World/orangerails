@@ -110,13 +110,12 @@ jobs:
             fi
           }
 
-          check "unparseable holds file"        "bad" ""                              "aaa1111bbb2222"        "block-unparseable"
-          check "empty holds list"              "ok"  ""                              "aaa1111bbb2222"        "allow-no-holds"
-          check "held sha not in range"         "ok"  "aaa1111 OR-T0001"               "bbb2222cccc3333"      "allow-clear"
-          check "held sha in range"             "ok"  "aaa1111 OR-T0001"               "aaa1111bbb2222cccc"  "block-held:aaa1111:OR-T0001"
-          check "held sha matches one of many"  "ok"  $'zzz9999 OR-T0002\naaa1111 OR-T0001' "bbb2222
-aaa1111ccc"                                                                                                    "block-held:aaa1111:OR-T0001"
-          check "prefix too short is refused"   "ok"  "aaa11 OR-T0001"                 "aaa1111bbb2222"        "block-short-prefix"
+          check "unparseable holds file" "bad" "" "$(printf 'aaa1111\nbbb2222')" "block-unparseable"
+          check "empty holds list" "ok" "" "$(printf 'aaa1111\nbbb2222')" "allow-no-holds"
+          check "held sha not in range" "ok" "aaa1111 OR-T0001" "bbb2222cccc3333" "allow-clear"
+          check "held sha in range" "ok" "aaa1111 OR-T0001" "aaa1111bbb2222cccc" "block-held:aaa1111:OR-T0001"
+          check "held sha matches one of many" "ok" "$(printf 'zzz9999 OR-T0002\naaa1111 OR-T0001')" "$(printf 'bbb2222\naaa1111ccc')" "block-held:aaa1111:OR-T0001"
+          check "prefix too short is refused" "ok" "aaa11 OR-T0001" "aaa1111bbb2222" "block-short-prefix"
 
           if [ "${fail}" -ne 0 ]; then
             echo "::error::decision logic self-test failed. The gate is broken, not passing."
