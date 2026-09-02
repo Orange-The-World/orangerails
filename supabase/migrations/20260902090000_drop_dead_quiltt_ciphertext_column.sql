@@ -16,6 +16,11 @@
 -- measured: the guard below runs BEFORE the drop and refuses if the column is
 -- populated in any row, rather than assuming the counts measured on 2026-09-02
 -- still hold.
+--
+-- Rollback: ALTER TABLE public.platforms ADD COLUMN quiltt_api_key_ciphertext
+-- text; This restores identical state, not merely a similarly named column:
+-- the guard above proves the column carried no data at the instant it was
+-- dropped, so there is nothing to lose and nothing to migrate back.
 
 do $$
 declare
