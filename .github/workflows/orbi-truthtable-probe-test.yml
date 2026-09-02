@@ -1,0 +1,371 @@
+name: ORBI truth-table probe exit-code tests
+
+# Runs on every pull request or push to dev that touches the truth-table
+# probes, the CI workflow itself, or the install doc. This is the acceptance
+# gate for OR-T1377: every exit-code path must be watched going red before
+# the ticket closes. See TRUTH_TABLE_FRESHNESS_AND_OWNERSHIP_CRON.md.
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - 'scripts/ops/orbi-truthtable-freshness-probe.sh'
+      - 'scripts/ops/orbi-ownership-drift-probe.sh'
+      - 'scripts/ops/orbi-probe-failed.sh'
+      - '.github/workflows/orbi-truthtable-probe-test.yml'
+      - 'TRUTH_TABLE_FRESHNESS_AND_OWNERSHIP_CRON.md'
+  push:
+    branches: [dev]
+    paths:
+      - 'scripts/ops/orbi-truthtable-freshness-probe.sh'
+      - 'scripts/ops/orbi-ownership-drift-probe.sh'
+      - 'scripts/ops/orbi-probe-failed.sh'
+      - '.github/workflows/orbi-truthtable-probe-test.yml'
+      - 'TRUTH_TABLE_FRESHNESS_AND_OWNERSHIP_CRON.md'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  orbi-truthtable-probe-test:
+    name: ORBI truth-table probe exit-code paths
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_USER: testuser
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      PGPASSWORD: testpass
+      DSN: postgres://testuser:testpass@localhost:5432/testdb
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Make scripts executable
+        run: |
+          chmod +x scripts/ops/orbi-truthtable-freshness-probe.sh
+          chmod +x scripts/ops/orbi-ownership-drift-probe.sh
+
+      # Same reasoning as orbi-probe-test.yml: the probes refuse to start
+      # unless ORBI_ALERT_SCRIPT points at an executable file, so every path
+      # not deliberately testing a misconfigured host needs a real alert
+      # target. This stub records the call so a page that would have been
+      # sent is visible in the job log rather than inferred.
+      - name: Create stub alert script
+        run: |
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'echo "stub-alert called with: $*"' \
+            'echo "$*" >> "${RUNNER_TEMP:?stub-alert needs RUNNER_TEMP}/alert-calls.log"' \
+            'exit 0' \
+            > "$RUNNER_TEMP/stub-alert.sh"
+          chmod +x "$RUNNER_TEMP/stub-alert.sh"
+
+      - name: Create the orbi_writer role
+        run: |
+          psql -h localhost -U testuser -d testdb -c "CREATE ROLE orbi_writer;"
+
+      # =========================================================================
+      # FRESHNESS PROBE
+      # =========================================================================
+
+      - name: "[freshness] seed a table with 60 rows, 1 minute apart, newest 1 minute old"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            DROP TABLE IF EXISTS public.tt_fresh;
+            CREATE TABLE public.tt_fresh (id serial primary key, fetched_at timestamptz);
+            ALTER TABLE public.tt_fresh OWNER TO orbi_writer;
+            ALTER TABLE public.tt_fresh ENABLE ROW LEVEL SECURITY;
+            INSERT INTO public.tt_fresh (fetched_at)
+              SELECT now() - interval '1 minute' - (n || ' minutes')::interval
+                FROM generate_series(0,59) AS n;
+          "
+
+      - name: "[freshness] path 1 -- fresh -> expect exit 0"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log" "$RUNNER_TEMP/freshness-state"
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          if [[ -e "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: fresh data paged someone: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0 (fresh table), alert script NOT invoked. State file: $(cat "$RUNNER_TEMP/freshness-state")"
+
+      - name: "[freshness] push the newest row back 5 hours (beyond the derived 4h floor)"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            UPDATE public.tt_fresh SET fetched_at = now() - interval '5 hours'
+             WHERE fetched_at = (SELECT max(fetched_at) FROM public.tt_fresh);
+          "
+
+      - name: "[freshness] path 2 -- stale -> expect exit 1 (RED, pasted evidence for OR-T1377)"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          echo "probe exited $EXIT"
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (stale), got $EXIT" >&2
+            exit 1
+          fi
+          if [[ ! -s "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: probe exited 1 but the alert script was never invoked" >&2
+            exit 1
+          fi
+          echo "confirmed RED: exit 1 (frozen table), alert invoked: $(cat "$RUNNER_TEMP/alert-calls.log")"
+
+      - name: "[freshness] seed a table whose fetched_at is NULL on every row"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            DROP TABLE IF EXISTS public.tt_fresh;
+            DROP TABLE IF EXISTS public.tt_null;
+            CREATE TABLE public.tt_null (id serial primary key, fetched_at timestamptz);
+            ALTER TABLE public.tt_null OWNER TO orbi_writer;
+            ALTER TABLE public.tt_null ENABLE ROW LEVEL SECURITY;
+            INSERT INTO public.tt_null (fetched_at) VALUES (NULL), (NULL);
+          "
+
+      - name: "[freshness] path 3 -- NULL last_success_at -> expect exit 1, never a pass (RED)"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log" "$RUNNER_TEMP/freshness-state"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (NULL means never succeeded), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed RED: exit 1 (all-NULL timestamp column read as never-succeeded, not as no-data-yet)"
+
+      - name: "[freshness] seed a table with only one distinct fetched_at value"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            DROP TABLE IF EXISTS public.tt_null;
+            DROP TABLE IF EXISTS public.tt_single;
+            CREATE TABLE public.tt_single (id serial primary key, fetched_at timestamptz);
+            ALTER TABLE public.tt_single OWNER TO orbi_writer;
+            ALTER TABLE public.tt_single ENABLE ROW LEVEL SECURITY;
+            INSERT INTO public.tt_single (fetched_at)
+              SELECT '2026-01-01 00:00:00+00'::timestamptz FROM generate_series(1,3);
+          "
+
+      - name: "[freshness] path 4 -- fewer than 2 distinct timestamps -> expect exit 2 (UNKNOWN, not a pass)"
+        run: |
+          rm -f "$RUNNER_TEMP/freshness-state"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (undecidable threshold), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (fewer than 2 distinct timestamps names the table, is not a pass)"
+
+      - name: "[freshness] seed two fresh tables to establish a 2-table baseline"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            DROP TABLE IF EXISTS public.tt_single;
+            DROP TABLE IF EXISTS public.tt_a;
+            DROP TABLE IF EXISTS public.tt_b;
+            CREATE TABLE public.tt_a (id serial primary key, fetched_at timestamptz);
+            CREATE TABLE public.tt_b (id serial primary key, fetched_at timestamptz);
+            ALTER TABLE public.tt_a OWNER TO orbi_writer;
+            ALTER TABLE public.tt_b OWNER TO orbi_writer;
+            ALTER TABLE public.tt_a ENABLE ROW LEVEL SECURITY;
+            ALTER TABLE public.tt_b ENABLE ROW LEVEL SECURITY;
+            INSERT INTO public.tt_a (fetched_at)
+              SELECT now() - interval '1 minute' - (n || ' minutes')::interval FROM generate_series(0,10) AS n;
+            INSERT INTO public.tt_b (fetched_at)
+              SELECT now() - interval '1 minute' - (n || ' minutes')::interval FROM generate_series(0,10) AS n;
+          "
+
+      - name: "[freshness] path 5a -- 2-table baseline -> expect exit 0, state file records 2"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log" "$RUNNER_TEMP/freshness-state"
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          STATE=$(cat "$RUNNER_TEMP/freshness-state")
+          if [[ "$STATE" != "2" ]]; then
+            echo "ERROR: expected baseline state 2, got '$STATE'" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0, baseline of 2 tables persisted"
+
+      - name: "[freshness] drop one of the two tables (simulates a table losing RLS or being removed)"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "DROP TABLE public.tt_b;"
+
+      - name: "[freshness] path 5b -- table count SHRANK 2 -> 1 -> expect exit 1 (RED)"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (shrinking table count), got $EXIT" >&2
+            exit 1
+          fi
+          if [[ ! -s "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: probe exited 1 but the alert script was never invoked" >&2
+            exit 1
+          fi
+          echo "confirmed RED: exit 1 (enumerated count shrank from 2 to 1), alert invoked: $(cat "$RUNNER_TEMP/alert-calls.log")"
+
+      - name: "[freshness] path 6 -- dead DSN -> expect exit 2"
+        run: |
+          set +e
+          ORBI_PROBE_DSN="postgres://nobody:wrong@unreachable-host:5432/db" \
+            ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (db unreachable), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (dead DSN)"
+
+      - name: "[freshness] path 7 -- alert script renamed/missing -> expect exit 2"
+        run: |
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/no-such-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (alert script missing), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (alert script renamed / not executable)"
+
+      # =========================================================================
+      # OWNERSHIP DRIFT PROBE
+      # =========================================================================
+
+      - name: "[ownership] seed a correctly-owned RLS table"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            DROP TABLE IF EXISTS public.tt_a;
+            DROP TABLE IF EXISTS public.tt_own;
+            CREATE TABLE public.tt_own (id serial primary key);
+            ALTER TABLE public.tt_own OWNER TO orbi_writer;
+            ALTER TABLE public.tt_own ENABLE ROW LEVEL SECURITY;
+          "
+
+      - name: "[ownership] path 1 -- correct owner -> expect exit 0"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ./scripts/ops/orbi-ownership-drift-probe.sh
+          if [[ -e "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: correctly-owned table paged someone: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0 (owner correct), alert script NOT invoked"
+
+      - name: "[ownership] drift the owner (mirrors the restore that caused OR-T1370)"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "ALTER TABLE public.tt_own OWNER TO testuser;"
+
+      - name: "[ownership] path 2 -- owner drifted -> expect exit 1 (RED, pasted evidence for OR-T1377)"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ./scripts/ops/orbi-ownership-drift-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (owner drift), got $EXIT" >&2
+            exit 1
+          fi
+          if [[ ! -s "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: probe exited 1 but the alert script was never invoked" >&2
+            exit 1
+          fi
+          BODY=$(cat "$RUNNER_TEMP/alert-calls.log")
+          case "$BODY" in
+            *tt_own*) ;;
+            *) echo "ERROR: alarm body does not name the drifted table: $BODY" >&2; exit 1 ;;
+          esac
+          echo "confirmed RED: exit 1 (owner drifted to testuser via ALTER TABLE OWNER TO), alert invoked: $BODY"
+
+      - name: "[ownership] restore owner, then force RLS on the owner"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            ALTER TABLE public.tt_own OWNER TO orbi_writer;
+            ALTER TABLE public.tt_own FORCE ROW LEVEL SECURITY;
+          "
+
+      - name: "[ownership] path 3 -- relforcerowsecurity true -> expect exit 1 (RED)"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ./scripts/ops/orbi-ownership-drift-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (forced RLS on owner), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed RED: exit 1 (relforcerowsecurity=true defeats RLS even under the correct owner), alert invoked: $(cat "$RUNNER_TEMP/alert-calls.log")"
+
+      - name: "[ownership] path 4 -- dead DSN -> expect exit 2"
+        run: |
+          set +e
+          ORBI_PROBE_DSN="postgres://nobody:wrong@unreachable-host:5432/db" \
+            ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ./scripts/ops/orbi-ownership-drift-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (db unreachable), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (dead DSN)"
+
+      - name: "[ownership] path 5 -- alert script renamed/missing -> expect exit 2"
+        run: |
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/no-such-alert.sh" \
+            ./scripts/ops/orbi-ownership-drift-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (alert script missing), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (alert script renamed / not executable)"
