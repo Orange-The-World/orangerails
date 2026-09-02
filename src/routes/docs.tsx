@@ -27,7 +27,7 @@ export const Route = createFileRoute("/docs")({
       { name: "twitter:title", content: "Developer documentation , OrangeRails" },
       { name: "twitter:description", content: "Quickstart, API reference, self-hosting, adapter SDK." },
       { name: "twitter:image", content: "/og-image.jpg" },
-      { rel: "canonical", href: "https://orangerails.com/docs" },
+      { rel: "canonical", href: "https://docs.orangerails.com" },
     ],
     scripts: [
       {
