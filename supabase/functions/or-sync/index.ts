@@ -51,7 +51,7 @@ import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/
 import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
-import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { wrapSentryHandler, reportError } from '../_shared/sentry.ts';
 import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
 import {
   getSinkAdapter,
@@ -62,7 +62,7 @@ import {
 import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
-import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
+import { drainStrikeQueue, SYSTEMIC_FAILURE_THRESHOLD } from '../_shared/providers/strike/queue.ts';
 import { computeWalletFingerprint } from '../_shared/account-fingerprint.ts';
 import { toByteaHex } from '../_shared/bytea.ts';
 import { readSyncCompleteness } from './_connection-result.ts';
@@ -1284,6 +1284,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // the poll was given, so "poll attributed by walletIds[0]" and the
           // guard here read off the same value.
           drainSubscriptionError = drain.subscriptionError ?? null;
+          if (drain.breakerTripped) {
+            // Systemic failure: N events failed for the same reason in one
+            // drain pass. Remaining events are retryable. Alert a human now.
+            // GlitchTip (pulse.orangerails.com) notifies the CTO seat.
+            const alertMsg =
+              `[or-sync] CIRCUIT_BREAKER_TRIPPED conn=${conn.id as string} ` +
+              `reason=${drain.tripReason ?? 'UNKNOWN'} threshold=${SYSTEMIC_FAILURE_THRESHOLD}; ` +
+              `events left retryable; manual investigation required`;
+            console.error(alertMsg);
+            void reportError(new Error(alertMsg), 'or-sync');
+          }
           newTxs = mergeStrikeTransactions(poll.transactions, drain.transactions, strikeWalletIds);
           // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.
