@@ -178,6 +178,42 @@ Superseded state needs no separate cleanup: an update to the same channel
 collides on the blind index and overwrites in place (§3.2), so there is no
 history pile to sweep.
 
+### 3.5 Payment records: the amount is sealed before it is written
+
+The mirror map (§2) and `seal.ts` both name payment records alongside
+channel-state backups, and no payment record path is implemented yet. When one
+is built, this is binding on it:
+
+> **The Lightning payment amount is sealed inside the envelope, client-side,
+> before it is written. It is never a column, never an index term, and never a
+> field the server can read. Same envelope and same key custody as the fields
+> already sealed on this surface: AES-256-GCM, fresh IV, client-derived key
+> (`'or-ldk-v1'`), no server-side decrypt path.**
+
+This is a settled requirement, not an open design question, and it is written
+here because the wiring PR is reviewed against this document.
+
+Three consequences, all checkable at review:
+
+- **No amount column.** A payment record row carries a blind index, a seal
+  version, the IV and the ciphertext, and nothing that describes value. If a
+  reviewer can name the column that holds the amount, the change is wrong.
+- **No amount in a blind index.** The blind index exists to locate a row, and a
+  deterministic index over a value is a value oracle. Index terms stay on the
+  stable identifiers, as they do for channel state (§3).
+- **No server-side amount arithmetic.** Sums, balances and totals are computed
+  client-side after unsealing. A server that can add two amounts can read them.
+
+The trade-off, stated rather than discovered later: sealing the amount means
+the server cannot sort, filter, aggregate or report on value. Any product
+surface that appears to need server-side totals is asking for the seal to be
+broken, and the answer is a client-side computation, not a cleartext column.
+
+What would make this wrong: nothing in the product. It is a customer-facing
+claim about what we can read, so it is not a performance trade to be revisited
+by an implementer. Changing it is a founder decision plus an Auditor pass, the
+same bar as any other change to the ZKA boundary.
+
 ## 4. Auth contract — `or-ldk-channel-state` edge function
 
 Enforced **before** the atomic SQL in §3 executes, so ownership can never land
