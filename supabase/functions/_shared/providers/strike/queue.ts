@@ -46,6 +46,13 @@ import { toByteaHex } from '../../bytea.ts';
 
 const DRAIN_BATCH = 100;
 
+// Number of consecutive identical-reason failures that trips the circuit
+// breaker and halts the drain. Three distinguishes a systemic failure (e.g.
+// all events failing AUTH_ERROR because the API key was revoked) from a
+// legitimately bad event cluster. Remaining events are left with
+// processed_at = NULL so the next sync retries them.
+export const SYSTEMIC_FAILURE_THRESHOLD = 3;
+
 /**
  * Map a Strike subscription-create failure to a distinct, actionable plaintext
  * marker stored in connections.encrypted_last_error. Pure and side-effect free
@@ -86,6 +93,21 @@ export function classifyDrainEventError(err: unknown): string {
   if (/\b429\b|rate.?limit/i.test(msg)) return 'RATE_LIMITED';
   if (/network|fetch|ECONNRESET|timeout/i.test(msg)) return 'NETWORK_ERROR';
   return 'PROVIDER_ERROR';
+}
+
+/**
+ * Return the first reason code that has reached or exceeded `threshold`
+ * in `reasonCounts`, or null if none have. Pure and side-effect-free so
+ * it is unit-tested without a live drain.
+ */
+export function detectSystemicFailure(
+  reasonCounts: Map<string, number>,
+  threshold: number,
+): string | null {
+  for (const [reason, count] of reasonCounts) {
+    if (count >= threshold) return reason;
+  }
+  return null;
 }
 
 export interface DrainConnection {
@@ -139,7 +161,7 @@ export async function drainStrikeQueue(args: {
    * receiverId || currency).
    */
   subaccountId: string;
-}): Promise<SyncResult & { subscriptionError?: string }> {
+}): Promise<SyncResult & { subscriptionError?: string; breakerTripped?: boolean; tripReason?: string }> {
   const creds = parseStrikeCredentials(args.credentials);
   const conn = args.connection;
 
@@ -211,6 +233,12 @@ export async function drainStrikeQueue(args: {
   // CTA rather than a silently stale connection. Only the first error is
   // captured; subsequent events continue (idempotent on retry).
   let firstDrainEventError: string | null = null;
+  // Circuit breaker state: reasonCounts tracks failures-by-reason this pass.
+  // Once any reason reaches SYSTEMIC_FAILURE_THRESHOLD the breaker trips:
+  // stop processing and return breakerTripped=true so the caller can alert.
+  const reasonCounts = new Map<string, number>();
+  let breakerTripped = false;
+  let tripReason: string | undefined;
 
   for (const ev of events) {
     try {
@@ -274,8 +302,20 @@ export async function drainStrikeQueue(args: {
       // encrypted_last_error; without this the connection looked healthy
       // while the drain silently discarded every event (DL-1505 Group B).
       console.error(`[strike-queue] event ${ev.id} (${ev.event_type} ${ev.entity_id}) failed:`, err);
+      const reason = classifyDrainEventError(err);
       if (!firstDrainEventError) {
-        firstDrainEventError = `STRIKE_DRAIN_EVENT_FAILED:${ev.event_type}:${classifyDrainEventError(err)}`;
+        firstDrainEventError = `STRIKE_DRAIN_EVENT_FAILED:${ev.event_type}:${reason}`;
+      }
+      reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+      const systemic = detectSystemicFailure(reasonCounts, SYSTEMIC_FAILURE_THRESHOLD);
+      if (systemic) {
+        breakerTripped = true;
+        tripReason = systemic;
+        console.error(
+          `[strike-queue] CIRCUIT BREAKER TRIPPED conn=${conn.id} reason=${systemic} ` +
+          `threshold=${SYSTEMIC_FAILURE_THRESHOLD}; halting drain, remaining events left retryable`,
+        );
+        break;
       }
     }
   }
@@ -299,6 +339,7 @@ export async function drainStrikeQueue(args: {
     // Surface the first drain-level event error to the caller so it can
     // write it to encrypted_last_error. Null when all events processed OK.
     ...(firstDrainEventError ? { subscriptionError: firstDrainEventError } : {}),
+    ...(breakerTripped ? { breakerTripped: true as const, tripReason } : {}),
   };
 }
 
