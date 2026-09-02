@@ -230,6 +230,17 @@ function makeFakeClient(options: FakeOptions = {}) {
     // asks for one explicitly through otherUpdate.
     if (options.otherUpdate) return options.otherUpdate;
     const idFilter = call.filters.find((f) => f.column === "id");
+
+    // And it WRITES. A row that is still in the store gets the update's values,
+    // so a read after it sees what the rotation actually stamped rather than
+    // the fixture it started from. A row that has gone (deleted by another
+    // session in one of the fixtures below) still reports as matched, exactly
+    // as before: whether a vanished row should count as written is a separate
+    // question and is not what this change is about.
+    const target = (store[call.table] ?? []).find(
+      (row) => (row as Record<string, unknown>).id === idFilter?.value,
+    );
+    if (target) Object.assign(target as Record<string, unknown>, call.values ?? {});
     return { data: [{ id: idFilter?.value }], error: null };
   }
 
