@@ -272,12 +272,29 @@ do $$ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- PART 2: stop the tap. Without this, table 35 arrives with the same four
--- privileges and this whole file has to be written again. FOR ROLE postgres is
--- load bearing: default privileges are per owning role and this does nothing
--- for tables created by any other role. Only the four maintenance privileges
--- are named, so INSERT, SELECT, UPDATE and DELETE keep flowing to new tables
--- exactly as they do now.
+-- PART 2: close ONE of the two default-privilege taps that hand the logged-in
+-- role these four privileges on every new table in schema public. Without
+-- this, table 35 arrives with the same four privileges under this tap and
+-- this whole file has to be written again. FOR ROLE postgres is load bearing:
+-- default privileges are per owning role, so this closes only the tap owned
+-- by postgres, the role that applies this migration and owns every table it
+-- touches. It does nothing for a table created by any OTHER role.
+--
+-- A SECOND TAP EXISTS AND THIS PART DOES NOT CLOSE IT. Measured on dev
+-- 2026-09-02: pg_default_acl for schema public, objtype r, grantee
+-- authenticated also carries a row under defaclrole = supabase_admin, listing
+-- the same four privileges. This file cannot close that one: the applying
+-- role is postgres, postgres holds no membership in supabase_admin, and
+-- Postgres refuses ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin outright
+-- (measured live inside an aborting probe: applying_role=postgres,
+-- is_member_of_supabase_admin=f, alter_for_supabase_admin_allowed=f,
+-- err=permission denied to change default privileges). B2 below asserts
+-- across BOTH taps by name, so the one this part cannot close stays visible
+-- instead of silently passing once B2 stopped filtering on defaclrole =
+-- 'postgres'.
+--
+-- Only the four maintenance privileges are named, so INSERT, SELECT, UPDATE
+-- and DELETE keep flowing to new tables exactly as they do now.
 -- ---------------------------------------------------------------------------
 
 alter default privileges for role postgres in schema public
@@ -311,6 +328,7 @@ declare
   v_keep constant text[] := array['customers', 'connections', 'subaccounts', 'encrypted_transactions'];
   v_bad text;
   v_missing text;
+  v_row record;
 begin
   -- B1. No table in schema public may leave the logged-in role holding any of
   -- the four maintenance privileges. Deliberately not narrowed to the list in
@@ -331,23 +349,54 @@ begin
     raise exception 'authenticated maintenance sweep FAILED: a table still grants the logged-in role a maintenance privilege, and TRUNCATE in particular is not filtered by row level security: %', v_bad;
   end if;
 
-  -- B2. The default privilege must no longer hand the four out on new tables.
-  -- Scoped to the owning role this file narrowed, because that is the only one
-  -- it can narrow.
-  select string_agg(a.privilege_type, ', ' order by a.privilege_type)
-    into v_bad
-    from pg_default_acl d
-    join pg_namespace n on n.oid = d.defaclnamespace
-    cross join lateral aclexplode(d.defaclacl) a
-    join pg_roles r on r.oid = a.grantee
-   where n.nspname = 'public'
-     and d.defaclobjtype = 'r'
-     and pg_get_userbyid(d.defaclrole) = 'postgres'
-     and r.rolname = 'authenticated'
-     and a.privilege_type in ('TRUNCATE', 'TRIGGER', 'REFERENCES', 'MAINTAIN');
-  if v_bad is not null then
-    raise exception 'authenticated maintenance sweep FAILED: the default privilege for role postgres still grants the logged-in role: %', v_bad;
-  end if;
+  -- B2. The default privilege must no longer hand the four out on new tables,
+  -- checked across EVERY defaclrole in schema public, not just postgres.
+  -- Filtering on defaclrole = 'postgres' alone made a second tap invisible: it
+  -- passed clean on a cluster that still had one open (OR-T1600). Two taps get
+  -- two different responses below, because only one of them is this file's to
+  -- close.
+  --
+  -- postgres is the applying role and owns every table this migration
+  -- touches, so a leftover grant under postgres is this file's own bug and
+  -- aborts the apply.
+  --
+  -- Any OTHER role's default ACL (supabase_admin, measured on dev 2026-09-02:
+  -- supabase_admin/r grants TRUNCATE, REFERENCES, TRIGGER, MAINTAIN to
+  -- authenticated in schema public) is a tap this file cannot close. Postgres
+  -- refuses ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin outright: probed
+  -- live inside a DO block whose closing RAISE aborted the transaction so
+  -- nothing was kept, applying_role=postgres, is_member_of_supabase_admin=f,
+  -- alter_for_supabase_admin_allowed=f, err=permission denied to change
+  -- default privileges. So this half REPORTS rather than aborts: RAISE
+  -- WARNING, deliberately not RAISE EXCEPTION and not RAISE NOTICE. EXCEPTION
+  -- would abort every future apply of this idempotent file on a cluster where
+  -- this tap is open today with no way for this migration to ever close it,
+  -- which blocks every deploy indefinitely for a fact this file cannot change.
+  -- NOTICE is easy to miss; a notice nobody reads is the same failure one
+  -- layer down. WARNING surfaces in the deploy log without aborting, and
+  -- matches the actual severity of a known, named, still-open gap.
+  --
+  -- Absence of a non-postgres row is the normal case (measured on prod
+  -- 2026-09-02: pg_default_acl for schema public carries exactly one
+  -- defaclrole, postgres, no supabase_admin row at all) and this loop then
+  -- finds nothing and raises nothing, on either branch.
+  for v_row in
+    select pg_get_userbyid(d.defaclrole) as role, a.privilege_type as priv
+      from pg_default_acl d
+      join pg_namespace n on n.oid = d.defaclnamespace
+      cross join lateral aclexplode(d.defaclacl) a
+      join pg_roles r on r.oid = a.grantee
+     where n.nspname = 'public'
+       and d.defaclobjtype = 'r'
+       and r.rolname = 'authenticated'
+       and a.privilege_type in ('TRUNCATE', 'TRIGGER', 'REFERENCES', 'MAINTAIN')
+  loop
+    if v_row.role = 'postgres' then
+      raise exception 'authenticated maintenance sweep FAILED: the default privilege for role postgres still grants the logged-in role %: this file was supposed to close this tap', v_row.priv;
+    else
+      raise warning 'authenticated maintenance sweep: default privilege for role % in schema public still grants the logged-in role %, and this migration cannot close it (ALTER DEFAULT PRIVILEGES FOR ROLE % is refused with permission denied to the applying role). A table created by % in public will arrive granting authenticated this privilege until a role holding % membership closes it.', v_row.role, v_row.priv, v_row.role, v_row.role, v_row.role;
+    end if;
+  end loop;
 
   -- B3. THE ASSERTION THAT PROTECTS WHAT WAS DELIBERATELY KEPT. The four data
   -- privileges must still be present on a named sample of tables the client
