@@ -13,7 +13,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { strikeSubscriptionErrorMarker, resolveInvoiceWallet } from './queue.ts';
+import { strikeSubscriptionErrorMarker, resolveInvoiceWallet, detectSystemicFailure } from './queue.ts';
 import { computeWalletFingerprint } from '../../account-fingerprint.ts';
 import { toByteaHex } from '../../bytea.ts';
 
