@@ -73,13 +73,13 @@ export const rateWindows = new Map<string, { windowStart: number; count: number 
  * blast radius from also reaching cf: callers.
  *
  * The structural fix in flight makes this question moot rather than
- * answering it: workers/api-gateway (PR #1025, OR-T1103) now captures the
- * genuine incoming cf-connecting-ip before stripping it and re-injects it
- * under x-gateway-verified-ip, a header only the gateway itself can set.
- * Once this function trusts that header (tracked as OR-T1116), a
- * gateway-routed request carries an edge-verified identity again and
- * neither branch above matters. Until #1025 merges and OR-T1116 lands, the
- * gap described here is live.
+ * answering it: workers/api-gateway (OR-T1103) now captures the genuine
+ * incoming cf-connecting-ip before stripping it and re-injects it under
+ * x-gateway-verified-ip, a header only the gateway itself can set. Once
+ * this function trusts that header (tracked as OR-T1116), a gateway-routed
+ * request carries an edge-verified identity again and neither branch above
+ * matters. Until OR-T1103 merges and OR-T1116 lands, the gap described here
+ * is live.
  *
  * KNOWN GAP, stated rather than hidden: a request that reaches this function
  * through workers/api-gateway has already lost cf-connecting-ip (stripped
