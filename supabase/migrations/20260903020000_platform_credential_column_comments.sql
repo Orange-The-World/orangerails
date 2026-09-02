@@ -174,12 +174,15 @@ BEGIN
       RAISE EXCEPTION 'public.%.% carries a comment this migration did not write: %', target.tbl, target.col, left(body, 80);
     END IF;
 
-    -- The specific lie this file exists to remove. If any of these
-    -- four columns still claims encryption at rest, the correction
-    -- did not take and a schema level reader is still being told
-    -- something untrue.
-    IF position('ncrypted at rest' IN body) > 0 THEN
-      RAISE EXCEPTION 'public.%.% still claims encryption at rest', target.tbl, target.col;
+    -- The specific text this file exists to remove, matched by the
+    -- old comment's own opening words rather than by the phrase
+    -- "encrypted at rest". That phrase appears in the REPLACEMENT
+    -- text too, where it is a denial and not a claim, so searching
+    -- for it would fail this migration on its own correct output.
+    -- The string below is present only in the comment being
+    -- replaced.
+    IF position('Optional per-platform Quiltt API key' IN body) > 0 THEN
+      RAISE EXCEPTION 'public.%.% still carries the old comment claiming encryption at rest, so the correction did not take', target.tbl, target.col;
     END IF;
 
     checked := checked + 1;
