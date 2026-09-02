@@ -31,7 +31,9 @@
 --   table wide   33 relations in public, 8 in client_platform, 1 in supabase_migrations
 --   column wide  20 relations in public, 204 column grants in total
 --   privileges   SELECT and nothing else, anywhere
---   secrets      zero columns matching the secret pattern below are readable
+--   secrets      zero columns matching the secret pattern below are readable, IN THE THREE
+--                SCHEMAS THIS FILE GRANTS. That is the whole scope of the claim. See the
+--                schema net note below for the surface it does not cover.
 --
 -- THE STATE MOVED WHILE IT WAS BEING MEASURED, which is the reason this file exists. Between
 -- 12:56 and 13:05 UTC the same day, 6 relations went from table wide to column scoped and 15
@@ -70,12 +72,48 @@
 -- on a project that has no such role yet, and this file then defines the role. Neither file
 -- depends on the other's position.
 --
--- SCHEMA net IS OUT OF SCOPE HERE, deliberately. Whatever any role reaches in that schema comes
--- from grants an extension made to PUBLIC, and a grant made to PUBLIC cannot be revoked from a
--- single role, so a role scoped migration cannot express anything about it. Changing it would be
--- a platform wide decision, not part of defining this role. The assertion below therefore does
--- not check schema net: an assertion that can only ever fail, on a state its own file has no
--- power to correct, is noise rather than a control. It is tracked separately.
+-- SCHEMA net IS OUT OF SCOPE HERE, deliberately, AND THIS IS WHAT THAT LEAVES OPEN. The reasoning
+-- below was already right; what was missing was saying plainly what is reachable, so that nobody
+-- reads the "no secret bearing column is readable" line above as a statement about the cluster.
+--
+-- WHAT IS REACHABLE. Two relations, both owned by supabase_admin, both carrying a grant to PUBLIC:
+--   net._http_response       columns id, status_code, content_type, headers jsonb, content text,
+--                            timed_out, error_msg, created. This is the response BODY and headers
+--                            of every outbound call the database makes. Measured on the
+--                            development project 2026-09-02: 792 rows, oldest 07:34Z, newest
+--                            13:33Z, so roughly six hours of retention.
+--   net.http_request_queue   columns id, method, url, headers jsonb, body bytea,
+--                            timeout_milliseconds. headers is where pg_net carries the
+--                            Authorization header of an outbound call. 0 rows when read, because
+--                            pg_net drains the queue: that makes it a timing window, not a store,
+--                            which is better but is not nothing.
+-- No header, body or content value was read to establish this and none needs to be. Counts and
+-- column types are enough, and reading one would put a live credential in a transcript.
+--
+-- THIS IS NOT SPECIFIC TO or_agent_reader. The grant is to PUBLIC, so anon, authenticated and
+-- service_role read those relations too, and each of them additionally holds explicit USAGE on
+-- schema net. or_agent_reader is simply the role that made it visible. Reachability in practice
+-- depends on being able to run arbitrary SQL: schema net is not in the PostgREST exposed schema
+-- list, so the publishable anon key does not reach it over the REST API.
+--
+-- WHY NO FILE CAN FIX IT, tested rather than assumed, on the development project:
+--   1. A grant made to PUBLIC cannot be revoked from one named role. PostgreSQL offers no per
+--      role deny, so no role scoped migration can express the narrow fix.
+--   2. REVOKE USAGE ON SCHEMA net FROM PUBLIC, run as postgres, RETURNS SUCCESS AND CHANGES
+--      NOTHING. Probed inside a rolled back transaction: has_table_privilege(or_agent_reader,
+--      net._http_response, SELECT) was true before and true after. The grantor is supabase_admin
+--      and PostgreSQL silently skips revoking a grant the current role did not issue. A silent
+--      no-op that reports success is exactly the shape of check this estate keeps getting wrong,
+--      so it is written down here rather than left for the next seat to be fooled by.
+--   3. Escalating to the grantor is refused: pg_has_role(postgres, supabase_admin, MEMBER) is
+--      false and SET ROLE supabase_admin fails with sqlstate 42501, permission denied.
+-- So the fix is a platform level action by supabase_admin, which no seat holds. Until that
+-- happens the exposure stands and is accepted knowingly, which is the only honest position
+-- available; it is not accepted by omission.
+--
+-- The assertion below therefore does not check schema net, and that remains correct: an assertion
+-- that can only ever fail, on a state its own file has no power to correct, is noise rather than a
+-- control. Tracked separately as the schema net exposure ticket, not folded into this file.
 --
 -- DEVELOPMENT ONLY. No production statement is run from this change. Promotion to production is a
 -- separate two party write and is deliberately not in this file.
