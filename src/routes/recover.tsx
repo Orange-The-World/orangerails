@@ -55,7 +55,14 @@ function RecoverPage() {
 
       const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
-        .select("vault_salt, vault_verifier_ciphertext, recovery_ciphertext")
+        // kem_secret_wrapped and sig_secret_wrapped are read here because they are
+        // wrapped under an HKDF subkey of the MEK, and the recovery below rotates
+        // the MEK. They are not data rows, so the migration never sees them: if
+        // they are not carried across in the same write, the only key that opens
+        // them is discarded and nothing ever regenerates them.
+        .select(
+          "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
+        )
         .eq("user_id", session.user.id)
         .single();
 
@@ -66,14 +73,22 @@ function RecoverPage() {
         );
       }
 
-      const { newEncMekCiphertext, newRecoveryCode: freshCode, newRecoveryCiphertext, newVerifierCiphertext } =
-        await recoverWithCode({
-          recoveryCode,
-          recoveryCiphertext: meta.recovery_ciphertext,
-          saltB64: meta.vault_salt,
-          verifierCiphertext: meta.vault_verifier_ciphertext,
-          newPassword,
-        });
+      const {
+        newEncMekCiphertext,
+        newRecoveryCode: freshCode,
+        newRecoveryCiphertext,
+        newVerifierCiphertext,
+        newKemSecretWrapped,
+        newSigSecretWrapped,
+      } = await recoverWithCode({
+        recoveryCode,
+        recoveryCiphertext: meta.recovery_ciphertext,
+        saltB64: meta.vault_salt,
+        verifierCiphertext: meta.vault_verifier_ciphertext,
+        newPassword,
+        kemSecretWrapped: meta.kem_secret_wrapped ?? null,
+        sigSecretWrapped: meta.sig_secret_wrapped ?? null,
+      });
 
       // Everything from here to the meta write lives in src/lib/vault-persist.ts.
       // It is the part that loses vaults when it is wrong, and while it sat
@@ -92,6 +107,8 @@ function RecoverPage() {
         newRecoveryCiphertext,
         newVerifierCiphertext,
         vaultKeyVersion: CURRENT_VAULT_KEY_VERSION,
+        newKemSecretWrapped,
+        newSigSecretWrapped,
         migrateCredentialsCiphertext,
         migrateTransactionCiphertext,
         clearMigrationKeys,

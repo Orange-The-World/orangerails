@@ -66,6 +66,18 @@ export interface RotateVaultArgs {
   newRecoveryCiphertext: string;
   newVerifierCiphertext: string;
   vaultKeyVersion: number;
+  /**
+   * kem_secret_wrapped and sig_secret_wrapped re-wrapped under the rotated MEK,
+   * as returned by recoverWithCode. Null when this vault has no PQC keys.
+   *
+   * These are not data rows, so the migration loop below never touches them,
+   * and they are wrapped under an HKDF subkey of the MEK exactly like the
+   * credentials and transactions subkeys. If they do not travel in the update
+   * that rotates the wrappers, the key that opens them ceases to exist and
+   * nothing regenerates them.
+   */
+  newKemSecretWrapped: string | null;
+  newSigSecretWrapped: string | null;
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
@@ -87,6 +99,8 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     newRecoveryCiphertext,
     newVerifierCiphertext,
     vaultKeyVersion,
+    newKemSecretWrapped,
+    newSigSecretWrapped,
     migrateCredentialsCiphertext,
     migrateTransactionCiphertext,
     clearMigrationKeys,
@@ -224,14 +238,28 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // error, so the row count is the only signal that it actually happened.
   // The compare-and-swap on recovery_ciphertext (read at the top of the submit)
   // makes a concurrent rotation fail loudly rather than be overwritten.
+  //
+  // The re-wrapped PQC secrets ride in this same statement. They are not data
+  // rows so nothing above migrated them, and they are wrapped under an
+  // MEK-derived subkey, so the rotation destroys them if they do not travel
+  // here. One statement also means there is no window in which the wrappers
+  // have rotated and the PQC secrets have not.
+  //
+  // Only written when present. Passing null through into the update would
+  // overwrite a real ciphertext with null if a caller ever failed to read the
+  // columns first, which is the same silent destruction this is fixing.
+  const rotatedMeta: Record<string, unknown> = {
+    enc_mek_ciphertext: newEncMekCiphertext,
+    recovery_ciphertext: newRecoveryCiphertext,
+    vault_verifier_ciphertext: newVerifierCiphertext,
+    vault_key_version: vaultKeyVersion,
+  };
+  if (newKemSecretWrapped !== null) rotatedMeta.kem_secret_wrapped = newKemSecretWrapped;
+  if (newSigSecretWrapped !== null) rotatedMeta.sig_secret_wrapped = newSigSecretWrapped;
+
   const { data: updatedRows, error: updateErr } = await supabase
     .from("user_vault_meta")
-    .update({
-      enc_mek_ciphertext: newEncMekCiphertext,
-      recovery_ciphertext: newRecoveryCiphertext,
-      vault_verifier_ciphertext: newVerifierCiphertext,
-      vault_key_version: vaultKeyVersion,
-    })
+    .update(rotatedMeta)
     .eq("user_id", userId)
     .eq("recovery_ciphertext", priorRecoveryCiphertext)
     .select("user_id");
