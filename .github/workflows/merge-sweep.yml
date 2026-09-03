@@ -197,13 +197,12 @@ jobs:
 
           # THIS ISSUE IS WORLD READABLE. It carries the change and the files that
           # matched, and nothing else. The per-rule rationale is deliberately not
-          # copied in: it is internal operating context sitting next to a link to a
-          # specific open change. What each pattern requires is in the rules file
-          # in this repository, for anyone who needs it.
-          body=$(printf '%s\n\n%s\n\n%s\n' \
+          # copied in, and this issue does not point at it either: it is internal
+          # operating context and it does not belong next to a link to a specific
+          # open change.
+          body=$(printf '%s\n\n%s\n' \
             "These changes are approved and green, but they touch files the ship rules classify as sensitive, so they are not merged automatically. Each entry lists the files that matched." \
-            "${escalated}" \
-            "_What each pattern is and what it requires is in \`.github/ship-rules.json\` in this repository._")
+            "${escalated}")
 
           if [ -n "$existing" ]; then
             gh issue edit "$existing" --repo "$R" --body "$body"
