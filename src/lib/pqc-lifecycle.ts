@@ -52,7 +52,10 @@ export interface SupabaseLike {
         column: string,
         value: string,
       ): {
-        maybeSingle(): Promise<{ data: { kem_public_key: string | null } | null; error: unknown }>;
+        maybeSingle(): Promise<{
+          data: { kem_public_key: string | null; sig_public_key: string | null } | null;
+          error: unknown;
+        }>;
       };
     };
     update(values: Record<string, unknown>): {
@@ -265,11 +268,27 @@ export type EnsurePqcKeypairsResult =
   | { generated: true; publicKeys: { kem: string; sig: string } };
 
 /**
- * If the user's row in user_vault_meta has no PQC public key yet,
+ * If the user's row in user_vault_meta is missing EITHER PQC public key,
  * generate both keypairs, encrypt the secret halves with an MEK-derived
  * subkey, and publish everything to user_vault_meta.
  *
- * Idempotent: a second call after the row is populated is a no-op.
+ * Idempotent: a second call after the row is fully populated is a no-op.
+ *
+ * BOTH columns are checked, not just kem_public_key (OR-T1977). A row can
+ * have one public key live and the other cleared, most concretely from a
+ * vault recovery where one PQC secret carried across the MEK rotation and
+ * the other did not (see vault-persist.ts, migrateAndPersistRotatedVault).
+ * Gating on kem_public_key alone would let such a row short-circuit forever:
+ * the missing sig key would never regenerate because nothing ever looked at
+ * it. Checking both is what makes this function repair that row on its own,
+ * rather than depending on every write path upstream staying careful.
+ *
+ * Regenerating discards whichever key WAS still live, because
+ * buildPqcKeyMaterial always produces a fresh pair together; there is no
+ * partial regeneration. That is a real cost, it is accepted, and it is the
+ * same cost either fix for OR-T1977 pays, just at a different moment: this
+ * gate pays it lazily, on the next unlock, instead of immediately at write
+ * time.
  *
  * Does not block unlock if the publish fails , the caller can retry or
  * surface the error. Errors from the Supabase client are returned via
@@ -282,14 +301,14 @@ export async function ensurePqcKeypairs(
 
   const existing = await supabase
     .from("user_vault_meta")
-    .select("kem_public_key")
+    .select("kem_public_key, sig_public_key")
     .eq("user_id", userId)
     .maybeSingle();
 
   if (existing.error) {
     throw existing.error;
   }
-  if (existing.data?.kem_public_key) {
+  if (existing.data?.kem_public_key && existing.data?.sig_public_key) {
     return { generated: false };
   }
 
