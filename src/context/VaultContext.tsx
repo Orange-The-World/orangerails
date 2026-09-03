@@ -60,7 +60,7 @@ import {
 } from "@/lib/crypto-fields";
 import {
   ensurePqcKeypairs as ensurePqcKeypairsImpl,
-  rewrapPqcSecretKey,
+  carryPqcSecretsAcrossRotation,
   type EnsurePqcKeypairsResult,
   type SupabaseLike as PqcSupabaseLike,
 } from "@/lib/pqc-lifecycle";
@@ -115,6 +115,19 @@ interface RecoveryResult {
   newKemSecretWrapped: string | null;
   /** The PQC signing secret key re-wrapped under the rotated MEK, or null. Same rule. */
   newSigSecretWrapped: string | null;
+  /**
+   * True when a stored PQC secret existed and could NOT be opened by the old
+   * wrap key, so that keypair is being discarded and a fresh one is generated
+   * on the next unlock.
+   *
+   * The recovery screen must state this to the user. Regenerating silently is
+   * not acceptable: the point of choosing recovery over lockout is that the user
+   * gets to know what they lost.
+   *
+   * False when there was simply nothing stored to carry. Nothing was lost then
+   * and saying otherwise would be a lie.
+   */
+  pqcKeysReplaced: boolean;
 }
 
 interface VaultContextValue {
@@ -555,21 +568,38 @@ export function VaultProvider({ children }: VaultProviderProps) {
       //    still populated and it short-circuits on that.
       //
       //    Done HERE, before the new envelopes are built and long before the
-      //    caller migrates a single row, so that a secret which will not unwrap
-      //    aborts the recovery while everything stored is still valid. Failing
-      //    at this point costs the user nothing. Failing after the migration
-      //    loop would leave rows under a MEK with no way back.
+      //    caller migrates a single row, so a failure at this point costs the
+      //    user nothing: every stored wrapper is still valid and the vault still
+      //    opens. The same failure after the migration loop would leave rows
+      //    under a MEK with no way back.
       //
       //    Null is expected, not an error: a vault with no PQC keys yet has
-      //    nothing to carry.
+      //    nothing to carry. Whichever key is carried as null has its PUBLIC key
+      //    cleared by the write, so ensurePqcKeypairs() regenerates a working
+      //    pair on the next unlock instead of short-circuiting forever on a
+      //    public key whose secret is gone.
+      //
+      //    A stored secret that will NOT open is also carried as null rather
+      //    than aborting. Aborting there was permanent, not cautious: the state
+      //    is static, so the same ciphertext and the same discarded MEK fail
+      //    again on every retry, and the recovery code is the user's last way
+      //    in.
+      //
+      //    Only an AES-GCM authentication tag failure counts as "will not
+      //    open". Every other failure throws out of here and aborts the
+      //    recovery, which is why this is awaited plainly and is deliberately
+      //    NOT wrapped in a catch: a transient failure read as a dead key would
+      //    discard a LIVE keypair, which is the destruction this whole path
+      //    exists to prevent.
       const oldPqcWrapKey = await derivePqcSecretWrapKey(oldMek, storedSalt);
       const newPqcWrapKey = await derivePqcSecretWrapKey(newMek, storedSalt);
-      const newKemSecretWrapped = kemSecretWrapped
-        ? await rewrapPqcSecretKey(oldPqcWrapKey, newPqcWrapKey, kemSecretWrapped)
-        : null;
-      const newSigSecretWrapped = sigSecretWrapped
-        ? await rewrapPqcSecretKey(oldPqcWrapKey, newPqcWrapKey, sigSecretWrapped)
-        : null;
+      const { newKemSecretWrapped, newSigSecretWrapped, pqcKeysReplaced } =
+        await carryPqcSecretsAcrossRotation({
+          oldWrapKey: oldPqcWrapKey,
+          newWrapKey: newPqcWrapKey,
+          kemSecretWrapped,
+          sigSecretWrapped,
+        });
 
       // 6. New verifier under the NEW MEK + same salt.
       //    Caller MUST persist this or unlock() fails on next page load.
@@ -600,6 +630,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
         newVerifierCiphertext,
         newKemSecretWrapped,
         newSigSecretWrapped,
+        pqcKeysReplaced,
       };
     },
     [],
