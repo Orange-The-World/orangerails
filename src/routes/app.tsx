@@ -1224,24 +1224,35 @@ function AppHome() {
                     }
                     setChangePwLoading(true);
                     try {
-                      const { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext } =
-                        await changeVaultPassword({
-                          currentPassword: changePwForm.current,
-                          newPassword: changePwForm.next,
-                          storedSaltB64: vaultSalt,
-                          storedEncMekCiphertext: vaultEncMekCiphertext,
-                          storedVerifierCiphertext: vaultVerifierCiphertext,
-                          keyVersion: vaultKeyVersion,
-                        });
+                      const {
+                        newEncMekCiphertext,
+                        newRecoveryCode,
+                        newRecoveryCiphertext,
+                        verifyPersistedEnvelopes,
+                      } = await changeVaultPassword({
+                        currentPassword: changePwForm.current,
+                        newPassword: changePwForm.next,
+                        storedSaltB64: vaultSalt,
+                        storedEncMekCiphertext: vaultEncMekCiphertext,
+                        storedVerifierCiphertext: vaultVerifierCiphertext,
+                        keyVersion: vaultKeyVersion,
+                      });
                       // Persist new wrapping to user_vault_meta. Same CAS guard, same
                       // conflict handling, same table: src/lib/vault-persist.ts is the
                       // single copy of this write, covered by its own tests.
+                      //
+                      // verifyPersisted is what makes the next line safe. The new
+                      // recovery code is shown immediately below, so this call has to
+                      // resolve only when the bytes the database RETURNED re-open the
+                      // vault, not merely when a row matched. The closure carries the
+                      // keys; nothing key-shaped passes through this component.
                       await persistRewrappedVaultMeta({
                         supabase: supabase as unknown as VaultPersistClient,
                         userId: userId as string,
                         priorEncMekCiphertext: vaultEncMekCiphertext,
                         newEncMekCiphertext,
                         newRecoveryCiphertext,
+                        verifyPersisted: verifyPersistedEnvelopes,
                       });
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
