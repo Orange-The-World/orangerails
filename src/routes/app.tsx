@@ -116,6 +116,17 @@ interface CoAdminRow {
   adminEmail?: string; // resolved client-side via pqc-lookup-user (best-effort)
 }
 
+/**
+ * One row of the list_coadmin_workspaces definer function: the workspaces this
+ * user is a co-admin of. Deliberately three columns and not the owner's whole
+ * user_vault_meta row, which also carries the owner's sealed signing keyring.
+ */
+interface CoAdminWorkspaceRow {
+  owner_user_id: string;
+  workspace_key_id: string;
+  sig_public_key: string;
+}
+
 interface WorkspaceOption {
   ownerUserId: string;
   ownerEmail: string;
@@ -309,62 +320,54 @@ function AppHome() {
         .eq("owner_user_id", session.user.id);
       const adminRows = (admins ?? []) as CoAdminRow[];
 
-      // Load workspaces where this user is a co-admin.
-      const { data: myAdminOf } = await supabase
-        .from("workspace_admins")
-        .select("owner_user_id")
-        .eq("admin_user_id", session.user.id);
+      // Load workspaces where this user is a co-admin. One definer RPC, so the
+      // client never reads another user's user_vault_meta row: a policy grants
+      // a whole ROW, and that row carries the owner's sealed signing keyring.
+      // The function returns exactly the three values this loop needs, and it
+      // already drops an owner with no workspace_key_id and an owner with no
+      // sig_public_key, which are the two cases this loop used to skip, so the
+      // fail closed behaviour is preserved rather than removed.
+      const { data: coadminRows } = await (supabase as any).rpc("list_coadmin_workspaces");
 
       const workspaces: WorkspaceOption[] = [];
-      if (myAdminOf && myAdminOf.length > 0) {
-        const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
-        for (const ownerId of ownerIds) {
-          const { data: ownerMeta } = await supabase
-            .from("user_vault_meta")
-            .select("workspace_key_id, sig_public_key")
-            .eq("user_id", ownerId)
-            .single();
-          if (!ownerMeta) continue;
-          const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
-          if (!ownerKeyId) continue;
-          // Owner's ML-DSA-65 public signing key, needed to verify the grant
-          // signature before decrypting. Fail closed: skip a workspace we cannot
-          // verify rather than surface one the co-admin cannot safely open.
-          const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
-          if (!ownerSigPubB64) continue;
-          // This used to be a maybeSingle() whose error was discarded, which
-          // meant TWO wrapped key rows arrived here as NO row: the workspace
-          // vanished from this co-admin's list with nothing shown to anybody,
-          // while the owner's list still showed the grant. Nothing enforces one
-          // row per recipient per workspace key, so that state is reachable.
-          // The three cases are now separate and only the genuinely absent one
-          // is silent.
-          const wdkRead = await readWrappedDataKey(
-            supabase as unknown as WrappedKeyClient,
-            ownerKeyId,
-          );
-          if (wdkRead.status === "ambiguous") {
-            setErr(DUPLICATE_WRAPPED_KEY_MESSAGE);
-            continue;
-          }
-          if (wdkRead.status === "error") {
-            setErr(formatError(wdkRead.error));
-            continue;
-          }
-          // No grant at all is ordinary: this user is in the owner's list but
-          // has not been given a key. Skipping it quietly is correct.
-          if (wdkRead.status === "none") continue;
-          const wdk = wdkRead.row;
-          workspaces.push({
-            ownerUserId: ownerId,
-            ownerEmail: ownerId, // resolved below
-            workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: wdk.wrapped_ciphertext,
-            grantSigB64: wdk.grant_sig ?? null,
-            ownerSigPubB64,
-            granteeUserId: session.user.id,
-          });
+      for (const row of (coadminRows ?? []) as CoAdminWorkspaceRow[]) {
+        const ownerId = row.owner_user_id;
+        const ownerKeyId = row.workspace_key_id;
+        // Owner's ML-DSA-65 public signing key, needed to verify the grant
+        // signature before decrypting.
+        const ownerSigPubB64 = row.sig_public_key;
+        // This used to be a maybeSingle() whose error was discarded, which
+        // meant TWO wrapped key rows arrived here as NO row: the workspace
+        // vanished from this co-admin's list with nothing shown to anybody,
+        // while the owner's list still showed the grant. Nothing enforces one
+        // row per recipient per workspace key, so that state is reachable.
+        // The three cases are now separate and only the genuinely absent one
+        // is silent.
+        const wdkRead = await readWrappedDataKey(
+          supabase as unknown as WrappedKeyClient,
+          ownerKeyId,
+        );
+        if (wdkRead.status === "ambiguous") {
+          setErr(DUPLICATE_WRAPPED_KEY_MESSAGE);
+          continue;
         }
+        if (wdkRead.status === "error") {
+          setErr(formatError(wdkRead.error));
+          continue;
+        }
+        // No grant at all is ordinary: this user is in the owner's list but
+        // has not been given a key. Skipping it quietly is correct.
+        if (wdkRead.status === "none") continue;
+        const wdk = wdkRead.row;
+        workspaces.push({
+          ownerUserId: ownerId,
+          ownerEmail: ownerId, // resolved below
+          workspaceKeyId: ownerKeyId,
+          wrappedCiphertextB64: wdk.wrapped_ciphertext,
+          grantSigB64: wdk.grant_sig ?? null,
+          ownerSigPubB64,
+          granteeUserId: session.user.id,
+        });
       }
 
       // Resolve emails for all connected users in one RPC call.
