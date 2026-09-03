@@ -231,7 +231,7 @@ jobs:
   deno-test:
     name: Test edge functions (Deno)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
@@ -254,6 +254,21 @@ jobs:
     # As with the ratchet job: making this check REQUIRED in the branch ruleset
     # is a FOUNDER DECISION and has deliberately NOT been done here. Nothing in
     # this change touches branch protection.
+    #
+    # OR-T1955: a database-level test (seed a row, read it back) needs
+    # something to connect to, and until now this job gave it nothing --
+    # the only Supabase credential anywhere in this repo's CI is
+    # SUPABASE_ACCESS_TOKEN, a Management API token, not a database key. The
+    # two steps below boot an EPHEMERAL LOCAL Supabase stack from this repo's
+    # own supabase/migrations, fresh on every run, and hand its URL and keys
+    # to the test step through env. No repository secret is added and no
+    # test points at the hosted dev or prod project: routing decision on
+    # OR-T1944 (CTO Rails, 2026-09-03) refused a service-role key as a repo
+    # secret because this repo is public and such a key bypasses row-level
+    # security entirely. Local is also the better test, not just the cheaper
+    # one: a fresh database per run means a red result means the code
+    # failed, not that a previous run's leftover row was still lying around.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -264,6 +279,68 @@ jobs:
           # Same pin and same reason as the typecheck job above: the Supabase
           # edge runtime is deno 2.1.4, so tests run on the runtime that ships.
           deno-version: v2.1.4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          # Same pin as supabase-deploy.yml's "Setup Supabase CLI" step, kept
+          # deliberately in sync. Bump both in the same PR.
+          version: 2.111.0
+
+      - name: Start local Supabase stack (ephemeral, from supabase/migrations)
+        id: local-stack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # `supabase start` boots Postgres, PostgREST and the edge runtime in
+          # Docker, using THIS branch's supabase/config.toml. It applies
+          # supabase/migrations to build the initial database, but does so
+          # from whatever base image the CLI ships; `supabase db reset` runs
+          # explicitly right after so THIS run's migration set is what is
+          # actually on disk, not a cached assumption. Both are real gates,
+          # not advisory: under set -euo pipefail either one failing exits
+          # this step non-zero and the job goes red, named below so the
+          # failing half is obvious in the log without opening the docker
+          # output.
+          if ! supabase start; then
+            echo "::error::supabase start failed -- the local Supabase stack (Postgres/PostgREST/edge runtime) did not boot. See the docker output above for which container failed."
+            exit 1
+          fi
+
+          if ! supabase db reset; then
+            echo "::error::supabase db reset failed -- supabase/migrations did not apply cleanly to the local stack. Fix the migration, do not skip this step."
+            exit 1
+          fi
+
+          # `-o env` prints KEY="VALUE" lines (API_URL, ANON_KEY,
+          # SERVICE_ROLE_KEY, DB_URL, ...). These are the CLI's own static
+          # local-only values, identical on every machine that runs
+          # `supabase start` -- not a secret, so no masking is needed and
+          # none is done.
+          STATUS_ENV=$(supabase status -o env) || {
+            echo "::error::supabase status failed -- cannot read the local stack's URL and keys, so the test step would run with nothing to connect to."
+            exit 1
+          }
+          eval "$STATUS_ENV"
+
+          if [ -z "${API_URL:-}" ] || [ -z "${SERVICE_ROLE_KEY:-}" ]; then
+            echo "::error::supabase status returned no API_URL or no SERVICE_ROLE_KEY -- the local stack env is incomplete, not just quiet."
+            exit 1
+          fi
+
+          # Masked outputs, not GITHUB_ENV: keeping them as this step's named
+          # outputs makes the wiring visible in the deno-test step's own env
+          # block below, the same pattern supabase-deploy.yml uses for its
+          # target project ref, rather than an implicit ambient variable.
+          {
+            echo "api_url=${API_URL}"
+            echo "anon_key=${ANON_KEY}"
+            echo "service_role_key=${SERVICE_ROLE_KEY}"
+            echo "db_url=${DB_URL}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Local Supabase stack is up: ${API_URL}"
 
       - name: deno test supabase/functions
         shell: bash
@@ -295,6 +372,17 @@ jobs:
           # dev raised 18 -> 19 by OR-T1203, which adds
           # supabase/functions/or-stealth-connection-create/envelope_replace.test.ts.
           DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '19' }}
+          # OR-T1955: the local stack's own URL and keys, read from the step
+          # above. These are the exact env var names the shipped code reads
+          # (Deno.env.get("SUPABASE_URL") / Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
+          # see e.g. supabase/functions/or-discover-wallets/index.ts), so a
+          # test that exercises that code path needs no separate wiring.
+          # Never hardcode these in a test file; read them from the
+          # environment the same way the shipped code does.
+          SUPABASE_URL: ${{ steps.local-stack.outputs.api_url }}
+          SUPABASE_ANON_KEY: ${{ steps.local-stack.outputs.anon_key }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ steps.local-stack.outputs.service_role_key }}
+          SUPABASE_DB_URL: ${{ steps.local-stack.outputs.db_url }}
         run: |
           set -euo pipefail
 
