@@ -39,6 +39,7 @@ import {
   wrapMekBytes,
   unwrapMekBytes,
   assertMekEnvelopeReopens,
+  buildRewrappedMekEnvelopes,
   generateRecoveryCode,
   deriveRecoveryKek,
   CURRENT_VAULT_KEY_VERSION,
@@ -583,14 +584,20 @@ export function VaultProvider({ children }: VaultProviderProps) {
 
       // 3. Re-wrap MEK with new KEK (same salt , all HKDF subkeys stay valid).
       const newKek = await deriveKek(newPassword, storedSalt);
-      const newEncMekCiphertext = await wrapMekBytes(mekRaw, newKek);
 
       // 4. Fresh recovery code , old one is invalidated.
       const newRecoveryCode = generateRecoveryCode();
       const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
-      const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
 
-      // 5. Let the caller prove what the DATABASE stored, not merely what we
+      // 5. Prove both new envelopes re-open BEFORE either is handed to the
+      //    caller that writes them. Storing the new pair discards the old pair,
+      //    and there is no server-side copy of the key, so an envelope that was
+      //    wrong when it was built is a permanent lockout once it lands. A
+      //    throw here writes nothing and leaves the old envelopes working.
+      const { encMekCiphertext: newEncMekCiphertext, recoveryCiphertext: newRecoveryCiphertext } =
+        await buildRewrappedMekEnvelopes({ mekRaw, newKek, newRecoveryKek });
+
+      // 6. Let the caller prove what the DATABASE stored, not merely what we
       //    sent it. Both wrappers go out in one UPDATE and the old pair is
       //    discarded, so a stored envelope that does not re-open is a permanent
       //    lockout with no server-side copy to restore from. The wrapping keys
@@ -615,7 +622,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
         );
       };
 
-      // 6. Keep vault unlocked with the same MEK in memory.
+      // 7. Keep vault unlocked with the same MEK in memory.
       mekRef.current = mek;
 
       return {
