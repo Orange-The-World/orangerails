@@ -84,7 +84,7 @@ interface PendingEvent {
   platform_id:   string | null;
   subaccount_id: string | null;
   attempts:      number;
-  received_at:   string;
+  received_at?:  string;
 }
 
 const _drainHandler = wrapSentryHandler(async (req: Request) => {
@@ -273,12 +273,14 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         // "waiting on the connections row"), so bound it with a loud,
         // non-destructive signal instead of a destructive one.
         await markDeferred(client, ev.event_id);
-        if (Date.now() - new Date(ev.received_at).getTime() > CONN_RACE_STALE_WARNING_MS) {
-          console.warn(
-            `[or-quiltt-sync] event ${ev.event_id}: still waiting on connections row ` +
-              `(DL-1414-C) after ${Math.floor((Date.now() - new Date(ev.received_at).getTime()) / 3_600_000)}h, ` +
-              `subaccount ${subaccount_id}`,
-          );
+        if (ev.received_at) {
+          const ageMs = Date.now() - new Date(ev.received_at).getTime();
+          if (ageMs > CONN_RACE_STALE_WARNING_MS) {
+            console.warn(
+              `[or-quiltt-sync] event ${ev.event_id}: still waiting on connections row ` +
+                `(DL-1414-C) after ${Math.floor(ageMs / 3_600_000)}h, subaccount ${subaccount_id}`,
+            );
+          }
         }
         skipped++;
       } else {
