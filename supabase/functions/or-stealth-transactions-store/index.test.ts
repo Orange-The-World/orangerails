@@ -25,6 +25,7 @@ import {
 import {
   boundCursorAdvance,
   deriveResponseCursor,
+  isContiguousScannedHeight,
   isSealedTx,
   isValidAppUserId,
 } from './index.ts';
