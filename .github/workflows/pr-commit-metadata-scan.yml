@@ -314,6 +314,36 @@ jobs:
           fi
           echo "Self-test 9 passed: an ordinary commit message does not match."
 
+          # Self-test 10: the commit counter must read an EMPTY log as zero.
+          # Zero is the value the refusal below fires on, so this is the proof
+          # that "I could not look" is loud rather than quietly green.
+          _ST10_FILE="$(mktemp)"
+          : > "$_ST10_FILE"
+          _st10_count=$(grep -cE '^[0-9a-f]{40} AUTHOR ' "$_ST10_FILE" || true)
+          rm -f "$_ST10_FILE"
+          if [ "$_st10_count" -ne 0 ]; then
+            echo "::error::Self-test 10 FAIL: the commit counter reported $_st10_count for an empty log. The empty-set refusal below could never fire."
+            exit 1
+          fi
+          echo "Self-test 10 passed: an empty commit set counts 0, which is what the refusal below fires on."
+
+          # Capture the log FIRST. Feeding git log into the loop through a
+          # process substitution hides two failures: a failing git log does not
+          # fail the script, because the status belongs to the substitution and
+          # not to the loop, and a range with no commits runs the loop zero
+          # times and reports a clean scan it never performed.
+          LOG_FILE="$(mktemp)"
+          if ! git log "$RANGE" --format='%H AUTHOR %an <%ae> COMMITTER %cn <%ce>%n%B%n--END--' > "$LOG_FILE"; then
+            echo "::error::git log failed for range $RANGE. This check could not look, so it fails rather than reporting a clean scan."
+            exit 1
+          fi
+          COMMIT_COUNT=$(grep -cE '^[0-9a-f]{40} AUTHOR ' "$LOG_FILE" || true)
+          if [ "$COMMIT_COUNT" -eq 0 ]; then
+            echo "::error::Range $RANGE produced ZERO commits. An empty set is not a clean scan: either the range is wrong or the history was not fetched. Refusing rather than passing."
+            exit 1
+          fi
+          echo "Commits in range: $COMMIT_COUNT"
+
           MATCHES=0
           CURRENT_SHA="(unknown)"
           while IFS= read -r line; do
@@ -358,11 +388,12 @@ jobs:
               echo "::error::Non-public reference in commit ${CURRENT_SHA}'s metadata. Add to .github/commit-metadata-cleared.txt with class 'cgnat', 'tailnet', or 'reserved' ('reserved' when the commit message quotes a term to describe its own removal). (Matched text withheld.)"
               MATCHES=$((MATCHES + 1))
             fi
-          done < <(git log $RANGE --format='%H AUTHOR %an <%ae> COMMITTER %cn <%ce>%n%B%n--END--')
+          done < "$LOG_FILE"
+          rm -f "$LOG_FILE"
 
           if [ "$MATCHES" -gt 0 ]; then
             echo "::error::PR metadata scan failed: $MATCHES line(s) carry non-public references. The merge is blocked."
             exit 1
           fi
-          echo "PR metadata scan clean: 0 lines carry non-public references in range $RANGE."
+          echo "PR metadata scan clean: 0 lines carry non-public references across $COMMIT_COUNT commit(s) in range $RANGE."
           echo "Scope note: structural classes and the reserved-term list only. Prose is not checked."
