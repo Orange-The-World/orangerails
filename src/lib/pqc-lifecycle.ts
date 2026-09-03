@@ -175,14 +175,19 @@ export async function ensurePqcKeypairs(
 
   const existing = await supabase
     .from("user_vault_meta")
-    .select("kem_public_key")
+    .select("kem_public_key, sig_public_key")
     .eq("user_id", userId)
     .maybeSingle();
 
   if (existing.error) {
     throw existing.error;
   }
-  if (existing.data?.kem_public_key) {
+  // Both must be present. buildPqcKeyMaterial always writes all four columns
+  // together, so a row with one public key populated and the other cleared
+  // (the mixed state a rotation that carries only one PQC secret can leave,
+  // see carryPqcSecretsAcrossRotation) is a keypair still waiting on its
+  // repair, not a keypair that already exists.
+  if (existing.data?.kem_public_key && existing.data?.sig_public_key) {
     return { generated: false };
   }
 
