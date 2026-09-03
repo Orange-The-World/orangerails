@@ -16,6 +16,15 @@
  * handed no files at all, it exits non-zero. Every caller must treat ANY
  * non-zero exit as "do not apply", never as "the check did not run".
  *
+ * THE SAME RULE APPLIED TO DYNAMIC SQL. A DO block that runs at apply time can
+ * assemble a statement at run time and hand it to EXECUTE. When the text being
+ * executed comes from a variable, the file does not say what will run, so the
+ * absence of a DROP in the file is not evidence that no DROP happens. That is
+ * refused (DYNAMIC EXECUTE). An EXECUTE whose statement IS written out in the
+ * file, as a literal or as format() with a literal template using only %I and
+ * %L, is read normally: those quote what they interpolate and cannot introduce
+ * a statement, so the rules below see the real SQL and judge it on its merits.
+ *
  * USAGE
  *   node scripts/classify-migrations.mjs FILE [FILE...]
  *   node scripts/classify-migrations.mjs --from-list <path>   one path per line
@@ -211,6 +220,135 @@ function statements(text) {
 }
 
 /**
+ * Index just past the closing quote of the single quoted literal starting at i,
+ * or -1 if the literal is never closed. Callers treat -1 as unreadable rather
+ * than skipping it, so a malformed quote can never widen what is allowed.
+ */
+function endOfLiteral(text, i) {
+  let j = i + 1;
+  while (j < text.length) {
+    if (text[j] === "'") {
+      if (text[j + 1] === "'") {
+        j += 2;
+        continue;
+      }
+      return j + 1;
+    }
+    j += 1;
+  }
+  return -1;
+}
+
+/** Split on a separator that is not inside a literal and not inside parentheses. */
+function splitTop(text, sep) {
+  const parts = [];
+  let depth = 0;
+  let start = 0;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "'") {
+      const end = endOfLiteral(text, i);
+      i = end === -1 ? text.length : end;
+      continue;
+    }
+    if (c === '(') {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (c === ')') {
+      if (depth > 0) depth -= 1;
+      i += 1;
+      continue;
+    }
+    if (depth === 0 && text.startsWith(sep, i)) {
+      parts.push(text.slice(start, i));
+      i += sep.length;
+      start = i;
+      continue;
+    }
+    i += 1;
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/** The EXECUTE argument itself: everything up to a top level USING or INTO. */
+function executeArgument(after) {
+  let depth = 0;
+  let i = 0;
+  while (i < after.length) {
+    const c = after[i];
+    if (c === "'") {
+      const end = endOfLiteral(after, i);
+      i = end === -1 ? after.length : end;
+      continue;
+    }
+    if (c === '(') {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (c === ')') {
+      if (depth === 0) break;
+      depth -= 1;
+      i += 1;
+      continue;
+    }
+    if (depth === 0 && /\s/.test(c) && /^\s+(USING|INTO)\b/i.test(after.slice(i))) break;
+    i += 1;
+  }
+  return after.slice(0, i);
+}
+
+/**
+ * Is one piece of an EXECUTE argument readable from the file?
+ *
+ * Readable means the SQL text is HERE, so the rules below can judge it:
+ *   'DROP TABLE t'                       a literal, read as written
+ *   format('CREATE INDEX %I ON t (a)', x) a literal template. %I and %L quote
+ *                                        what they interpolate, so an argument
+ *                                        cannot smuggle in a statement. %s
+ *                                        splices raw text and is NOT readable.
+ *   quote_ident(x)                       emits one quoted token, never a
+ *                                        statement
+ * Anything else, a bare variable most of all, is not readable: the statement
+ * that will run is decided at run time and is not in this file.
+ */
+function readablePiece(piece) {
+  const p = piece.trim();
+  if (p === '') return false;
+  if (p.startsWith("'")) return endOfLiteral(p, 0) === p.length;
+  if (/^(quote_ident|quote_literal|quote_nullable)\s*\([\s\S]*\)$/i.test(p)) return true;
+  const fmt = /^format\s*\(([\s\S]*)\)$/i.exec(p);
+  if (!fmt) return false;
+  const template = splitTop(fmt[1], ',')[0] ?? '';
+  if (!splitTop(template, '||').every(readablePiece)) return false;
+  return !/%(?![ILil%])/.test(template);
+}
+
+/**
+ * True when this statement runs SQL that cannot be read from the file.
+ *
+ * GRANT EXECUTE and REVOKE EXECUTE name a privilege on a function. They run
+ * nothing, so they are excluded: a gate that refuses every GRANT would fire on
+ * ordinary work and be routed around within a month.
+ */
+function executeIsUnreadable(flat) {
+  const re = /\bEXECUTE\b/gi;
+  let m = re.exec(flat);
+  while (m !== null) {
+    if (!/\b(GRANT|REVOKE)\b/i.test(flat.slice(0, m.index))) {
+      const arg = executeArgument(flat.slice(m.index + 'EXECUTE'.length));
+      if (!splitTop(arg, '||').every(readablePiece)) return true;
+    }
+    m = re.exec(flat);
+  }
+  return false;
+}
+
+/**
  * The irreversible classes. Each one is a change with NO restore path: running
  * it wrong costs the data, not a revert.
  *
@@ -284,6 +422,15 @@ const RULES = [
     why:
       'drops a column or a constraint. A dropped column takes its data with it, and a ' +
       'dropped constraint can be backing a uniqueness guarantee',
+  },
+  {
+    id: 'DYNAMIC EXECUTE',
+    test: (s) => executeIsUnreadable(s),
+    why:
+      'runs SQL that is assembled at run time. The statement it will execute is not in ' +
+      'this file, so whether it drops anything cannot be read here, and an absence of ' +
+      'findings is not evidence of safety. Write the statement out, or apply it under an ' +
+      'explicit authority',
   },
 ];
 
@@ -392,6 +539,12 @@ const EXPECTED = {
   '20990101000007_irreversible_drop_constraint.sql': { verdict: IRREVERSIBLE, id: 'ALTER TABLE DROP' },
   '20990101000008_unparseable_unterminated_dollar_quote.sql': { verdict: UNPARSEABLE, id: 'UNPARSEABLE' },
   '20990101000009_unparseable_no_statement.sql': { verdict: UNPARSEABLE, id: 'NO STATEMENT' },
+  '20990101000010_irreversible_dynamic_execute.sql': { verdict: IRREVERSIBLE, id: 'DYNAMIC EXECUTE' },
+  '20990101000011_reversible_dynamic_execute_format.sql': { verdict: REVERSIBLE, id: null },
+  '20990101000012_irreversible_execute_format_drop_constraint.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'ALTER TABLE DROP',
+  },
 };
 
 function selftest() {
