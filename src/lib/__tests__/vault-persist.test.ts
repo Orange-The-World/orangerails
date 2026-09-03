@@ -19,6 +19,7 @@ import {
   migrateAndPersistRotatedVault,
   persistRewrappedVaultMeta,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
+  PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
@@ -440,13 +441,37 @@ describe("vault recovery: the rotated meta write", () => {
 });
 
 describe("vault password change: the re-wrapped meta write", () => {
-  function rewrapArgs(client: VaultPersistClient) {
+  /**
+   * What the update RETURNS is now the point, not merely whether it matched a
+   * row, so the fake hands back the two envelope columns the source asks for.
+   */
+  const storedEnvelopes: QueryResult = {
+    data: [
+      {
+        enc_mek_ciphertext: "enc-mek-v1",
+        recovery_ciphertext: "recovery-ciphertext-v1",
+      },
+    ],
+    error: null,
+  };
+
+  type PersistedEnvelopes = { encMekCiphertext: string; recoveryCiphertext: string };
+
+  async function acceptEverything(): Promise<void> {
+    return undefined;
+  }
+
+  function rewrapArgs(
+    client: VaultPersistClient,
+    verifyPersisted: (persisted: PersistedEnvelopes) => Promise<void> = acceptEverything,
+  ) {
     return {
       supabase: client,
       userId: "user-1",
       priorEncMekCiphertext: "enc-mek-v0",
       newEncMekCiphertext: "enc-mek-v1",
       newRecoveryCiphertext: "recovery-ciphertext-v1",
+      verifyPersisted,
     };
   }
 
@@ -466,21 +491,21 @@ describe("vault password change: the re-wrapped meta write", () => {
     await expect(persistRewrappedVaultMeta(rewrapArgs(client))).rejects.toThrow("boom");
   });
 
-  it("resolves when the update matches a row", async () => {
-    const { client } = makeFakeClient({
-      metaUpdate: { data: [{ user_id: "user-1" }], error: null },
-    });
+  it("resolves when the stored envelopes re-open", async () => {
+    const { client } = makeFakeClient({ metaUpdate: storedEnvelopes });
 
     await expect(persistRewrappedVaultMeta(rewrapArgs(client))).resolves.toBeUndefined();
   });
 
-  it("asks for the updated rows back and guards on the prior wrapped MEK", async () => {
-    const { client, calls } = makeFakeClient();
+  it("asks the update for the stored envelopes back, and guards on the prior wrapped MEK", async () => {
+    const { client, calls } = makeFakeClient({ metaUpdate: storedEnvelopes });
 
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
-    expect(metaUpdate?.columns).toBe("user_id");
+    // user_id would only prove a row matched. The envelopes prove what that row
+    // now holds, which is what the recovery code shown next depends on.
+    expect(metaUpdate?.columns).toBe("enc_mek_ciphertext, recovery_ciphertext");
     expect(metaUpdate?.filters).toContainEqual({ column: "user_id", value: "user-1" });
     expect(metaUpdate?.filters).toContainEqual({
       column: "enc_mek_ciphertext",
@@ -489,10 +514,87 @@ describe("vault password change: the re-wrapped meta write", () => {
   });
 
   it("does not touch any table other than user_vault_meta", async () => {
-    const { client, calls } = makeFakeClient();
+    const { client, calls } = makeFakeClient({ metaUpdate: storedEnvelopes });
 
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     expect(calls.every((c) => c.table === "user_vault_meta")).toBe(true);
+  });
+
+  it("hands the verifier the bytes the DATABASE returned, not the ones it sent", async () => {
+    // The two differ here on purpose. Checking the strings we already hold
+    // proves nothing about what was stored, which is the whole defect.
+    const { client } = makeFakeClient({
+      metaUpdate: {
+        data: [
+          {
+            enc_mek_ciphertext: "enc-mek-as-stored",
+            recovery_ciphertext: "recovery-as-stored",
+          },
+        ],
+        error: null,
+      },
+    });
+    const seen: PersistedEnvelopes[] = [];
+
+    await persistRewrappedVaultMeta(
+      rewrapArgs(client, async (persisted) => {
+        seen.push(persisted);
+      }),
+    );
+
+    expect(seen).toEqual([
+      { encMekCiphertext: "enc-mek-as-stored", recoveryCiphertext: "recovery-as-stored" },
+    ]);
+  });
+
+  it("throws when a stored envelope does not re-open, so the recovery code is never shown", async () => {
+    const { client } = makeFakeClient({ metaUpdate: storedEnvelopes });
+
+    await expect(
+      persistRewrappedVaultMeta(
+        rewrapArgs(client, async () => {
+          throw new Error("The stored recovery code envelope could not be re-opened.");
+        }),
+      ),
+    ).rejects.toThrow(PASSWORD_CHANGE_NOT_PROVEN_MESSAGE);
+  });
+
+  it("keeps the underlying reason in the message it throws", async () => {
+    const { client } = makeFakeClient({ metaUpdate: storedEnvelopes });
+
+    await expect(
+      persistRewrappedVaultMeta(
+        rewrapArgs(client, async () => {
+          throw new Error("The stored password key envelope could not be re-opened.");
+        }),
+      ),
+    ).rejects.toThrow("The stored password key envelope could not be re-opened.");
+  });
+
+  it("throws when the row comes back without the columns it asked for", async () => {
+    // Not hypothetical: this update used to ask for user_id, so a client or a
+    // policy that returns the old shape must not read as a proven write.
+    const { client } = makeFakeClient({
+      metaUpdate: { data: [{ user_id: "user-1" }], error: null },
+    });
+
+    await expect(persistRewrappedVaultMeta(rewrapArgs(client))).rejects.toThrow(
+      PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
+    );
+  });
+
+  it("does not call the verifier at all when the update matched no row", async () => {
+    const { client } = makeFakeClient({ metaUpdate: { data: [], error: null } });
+    let calledTimes = 0;
+
+    await expect(
+      persistRewrappedVaultMeta(
+        rewrapArgs(client, async () => {
+          calledTimes += 1;
+        }),
+      ),
+    ).rejects.toThrow(PASSWORD_CHANGE_CONFLICT_MESSAGE);
+    expect(calledTimes).toBe(0);
   });
 });
