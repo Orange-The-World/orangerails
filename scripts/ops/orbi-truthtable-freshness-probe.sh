@@ -13,9 +13,11 @@
 #         enumerated table count shrank since the last run, AND the page
 #         was delivered
 #   2  -- ERROR: could not reach the database, a query failed, a table's
-#         threshold could not be derived, the alert script is unusable, or
-#         the page could not be delivered. Exit 1 always means someone was
-#         actually told; every other failure is 2.
+#         threshold could not be derived, a table's age could not be read as
+#         a number of seconds, the state file could not be read or written,
+#         the alert script is unusable, or the page could not be delivered.
+#         Exit 1 always means someone was actually told; every other failure
+#         is 2, and no path that could not reach a judgement may exit 0.
 #
 # Required env:
 #   ORBI_PROBE_DSN            postgres DSN (postgres://user:pass@host:port/db)
@@ -95,6 +97,17 @@ psql_run() {
   psql "$DSN" --no-password -t -A -F'|' --command "$1" 2>&1
 }
 
+# The shrink check is only as good as the baseline it compares against, and
+# this is the only place that baseline is written. An unwritable state file (a
+# unit installed without a writable StateDirectory, a full disk, a path typo)
+# means the count is never stored, so the shrink comparison can never fire on
+# any future run. Discarding that failure, which the success path used to do,
+# made a could-not-check print "OK ... all fresh" and exit 0. Callers turn a
+# false return into exit 2.
+persist_count() {
+  echo "$COUNT" > "$STATE_FILE" 2>/dev/null
+}
+
 # ---- validate env ---------------------------------------------------------
 
 if [[ -z "$DSN" ]]; then
@@ -133,12 +146,25 @@ fi
 # A table dropping out of the list (removed, or RLS switched off) must be
 # loud, otherwise the next silent freeze hides by leaving the list.
 
+# An ABSENT state file is the first run, and that is the only case where an
+# empty baseline is legitimate. A state file that EXISTS but cannot be read,
+# or that holds something other than a count, is a could-not-check: the old
+# `|| true` turned it into an empty string and made the comparison below a
+# silent no-op, so a truth table could leave the list unnoticed forever. That
+# is the same silence the probe exists to end, so it is exit 2 naming the file.
 PREV_COUNT=""
-if [[ -f "$STATE_FILE" ]]; then
-  PREV_COUNT=$(tr -d '[:space:]' < "$STATE_FILE" 2>/dev/null || true)
+if [[ -e "$STATE_FILE" ]]; then
+  if ! PREV_COUNT=$(tr -d '[:space:]' < "$STATE_FILE" 2>/dev/null); then
+    alarm ERROR "the freshness state file ${STATE_FILE} exists but could not be read; the shrink check cannot run (UNKNOWN, not a pass)"
+    exit 2
+  fi
+  if ! [[ "$PREV_COUNT" =~ ^[0-9]+$ ]]; then
+    alarm ERROR "the freshness state file ${STATE_FILE} holds '${PREV_COUNT}', which is not a table count; the shrink check cannot run (UNKNOWN, not a pass)"
+    exit 2
+  fi
 fi
 
-if [[ -n "$PREV_COUNT" && "$PREV_COUNT" =~ ^[0-9]+$ && "$COUNT" -lt "$PREV_COUNT" ]]; then
+if [[ -n "$PREV_COUNT" && "$COUNT" -lt "$PREV_COUNT" ]]; then
   if ! alarm ALARM "enumerated table count SHRANK from ${PREV_COUNT} to ${COUNT}: a truth table was dropped or lost row-level security"; then
     exit 2
   fi
@@ -199,6 +225,20 @@ for TABLE in "${TABLES[@]}"; do
     continue
   fi
 
+  # An age that is not a non-negative integer means this table cannot be
+  # classified at all. The concrete case is a NEGATIVE age: max(${COL}) is
+  # AHEAD of the database clock, which happens when a loader stamps from a
+  # fast clock or one upstream row carries a future timestamp. max() does not
+  # move once such a row is stored, so the table would read as fresh for as
+  # long as the timestamp stays in the future -- a single row stamped ten days
+  # ahead buys a dead loader ten days of "OK", which is precisely the silent
+  # freeze in OR-T1370. UNKNOWN is exit 2 naming the table, never a pass, the
+  # same way the distinct-count and p90 checks below already behave.
+  if ! [[ "$AGE" =~ ^[0-9]+$ ]]; then
+    alarm ERROR "${TABLE}: age of max(${COL}) is '${AGE}', not a non-negative number of seconds; the newest stored timestamp may be ahead of the database clock, so freshness cannot be judged (UNKNOWN, not a pass)"
+    exit 2
+  fi
+
   # Fewer than two distinct timestamps means the gap, and therefore the
   # threshold, cannot be derived. That is UNKNOWN, which is exit 2 naming the
   # table, never a pass.
@@ -220,7 +260,7 @@ for TABLE in "${TABLES[@]}"; do
     THRESHOLD=$MAX_THRESHOLD_SECONDS
   fi
 
-  if [[ "$AGE" =~ ^[0-9]+$ ]] && [[ "$AGE" -gt "$THRESHOLD" ]]; then
+  if [[ "$AGE" -gt "$THRESHOLD" ]]; then
     STALE+=("${TABLE}: ${COL} is ${AGE}s old (derived threshold ${THRESHOLD}s, p90 gap ${P90}s)")
   fi
 done
@@ -231,11 +271,21 @@ if [[ ${#STALE[@]} -gt 0 ]]; then
     exit 2
   fi
   # The enumeration itself was sound even though a table is stale; persist it
-  # so the shrink check next run compares against a real baseline.
-  echo "$COUNT" > "$STATE_FILE" 2>/dev/null || true
+  # so the shrink check next run compares against a real baseline. If that
+  # write fails, the page above has already gone out but the baseline is lost
+  # with it, so the run ends 2 rather than 1: the operator must fix the state
+  # file, and the frozen table is already named in the page they just got.
+  if ! persist_count; then
+    alarm ERROR "could not write the freshness state file ${STATE_FILE} after paging on ${#STALE[@]} frozen table(s); the table-count baseline was not persisted, so the shrink check cannot run"
+    exit 2
+  fi
   exit 1
 fi
 
-echo "$COUNT" > "$STATE_FILE"
+if ! persist_count; then
+  alarm ERROR "could not write the freshness state file ${STATE_FILE}; the table-count baseline was not persisted, so a shrinking table list would never be detected (UNKNOWN, not a pass)"
+  exit 2
+fi
+
 echo "[$PROBE] OK: ${COUNT} of ${COUNT} examined, all fresh"
 exit 0
