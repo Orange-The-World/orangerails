@@ -92,7 +92,7 @@ const UUID_LENGTH = 36;
  * 37-character value that is a UUID followed by "\n". The length check is
  * what makes this exact.
  */
-function isUuid(v: unknown): v is string {
+export function isUuid(v: unknown): v is string {
   return typeof v === 'string' && v.length === UUID_LENGTH && UUID_RE.test(v);
 }
 
