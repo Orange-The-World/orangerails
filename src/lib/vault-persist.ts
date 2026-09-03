@@ -47,6 +47,21 @@ export const RECOVERY_META_NOT_SAVED_MESSAGE =
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
+/**
+ * Shown when the password-change write matched a row but the bytes that came
+ * back from it do not re-open the vault.
+ *
+ * This is a different failure from the conflict above and needs a different
+ * sentence. By the time it can fire the update has already landed, so the
+ * stored envelopes are whatever the server now holds and neither the old nor
+ * the new password can be trusted to open them. Retrying is not the advice:
+ * the compare-and-swap would test against a value that is no longer there. The
+ * MEK is still in memory in this tab, which is why the message says not to
+ * close the page.
+ */
+export const PASSWORD_CHANGE_NOT_PROVEN_MESSAGE =
+  "Vault password change did not complete. The keys the server returned do not re-open your vault, so neither your old nor your new password can be relied on. Do not close or reload this page, and contact support with this message.";
+
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
 
@@ -261,6 +276,18 @@ export interface RewrapVaultArgs {
   priorEncMekCiphertext: string;
   newEncMekCiphertext: string;
   newRecoveryCiphertext: string;
+  /**
+   * Proves the bytes the database actually stored re-open to the same MEK.
+   *
+   * Supplied by changeVaultPassword, which closes over the new password KEK,
+   * the new recovery KEK and the raw MEK. Passing a function rather than the
+   * keys is what keeps key material out of this file and out of the route.
+   * It must throw if either stored envelope does not re-open.
+   */
+  verifyPersisted(persisted: {
+    encMekCiphertext: string;
+    recoveryCiphertext: string;
+  }): Promise<void>;
 }
 
 /**
@@ -278,8 +305,14 @@ export async function persistRewrappedVaultMeta(args: RewrapVaultArgs): Promise<
     priorEncMekCiphertext,
     newEncMekCiphertext,
     newRecoveryCiphertext,
+    verifyPersisted,
   } = args;
 
+  // The RETURNING on this update asks for the two envelopes rather than
+  // user_id. It is the same round trip either way, and the difference is what
+  // the answer can prove. user_id proved a row matched the compare-and-swap.
+  // The envelopes prove what that row now holds, which is the fact we actually
+  // need: both of the only two ways into this vault are in this one statement.
   const { error: saveErr, data: saveData } = await supabase
     .from("user_vault_meta")
     .update({
@@ -288,9 +321,32 @@ export async function persistRewrappedVaultMeta(args: RewrapVaultArgs): Promise<
     })
     .eq("user_id", userId)
     .eq("enc_mek_ciphertext", priorEncMekCiphertext)
-    .select("user_id");
+    .select("enc_mek_ciphertext, recovery_ciphertext");
   if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
   if (!saveData || (saveData as unknown[]).length === 0) {
     throw new Error(PASSWORD_CHANGE_CONFLICT_MESSAGE);
+  }
+
+  const stored = (saveData as Array<Record<string, unknown>>)[0];
+  const storedEncMek = stored?.enc_mek_ciphertext;
+  const storedRecovery = stored?.recovery_ciphertext;
+  if (typeof storedEncMek !== "string" || typeof storedRecovery !== "string") {
+    // A row came back without the columns we asked for. We cannot prove the
+    // write, so we do not claim it.
+    throw new Error(PASSWORD_CHANGE_NOT_PROVEN_MESSAGE);
+  }
+
+  try {
+    await verifyPersisted({
+      encMekCiphertext: storedEncMek,
+      recoveryCiphertext: storedRecovery,
+    });
+  } catch (cause) {
+    const detail = (cause as { message?: string })?.message;
+    throw new Error(
+      detail
+        ? `${PASSWORD_CHANGE_NOT_PROVEN_MESSAGE} (${detail})`
+        : PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
+    );
   }
 }
