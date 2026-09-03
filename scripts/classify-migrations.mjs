@@ -53,6 +53,59 @@ export const UNPARSEABLE = 'UNPARSEABLE';
 const ROUTINE_NAME =
   /\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\s+((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))*)/i;
 
+/**
+ * Split a schema qualified name into its parts, respecting quoted identifiers.
+ *
+ * The blanket whitespace strip this replaces normalised "public . fn" into
+ * public.fn as intended, and also normalised "drop helper" into "drophelper",
+ * an identifier that appears nowhere in the file (OR-T1666). Whitespace between
+ * the parts of a name is noise; whitespace inside a quoted identifier is the
+ * name.
+ */
+function qualifiedParts(raw) {
+  const parts = [];
+  let cur = '';
+  let i = 0;
+  while (i < raw.length) {
+    const c = raw[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < raw.length) {
+        if (raw[j] === '"') {
+          if (raw[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      cur += raw.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (c === '.') {
+      parts.push(cur.trim());
+      cur = '';
+      i += 1;
+      continue;
+    }
+    cur += c;
+    i += 1;
+  }
+  parts.push(cur.trim());
+  return parts.filter((p) => p.length > 0);
+}
+
+/** The text of an identifier: "MyFunc" is MyFunc, and "" inside it is one ". */
+function unquoteIdent(token) {
+  if (token.length >= 2 && token.startsWith('"') && token.endsWith('"')) {
+    return token.slice(1, -1).replace(/""/g, '"');
+  }
+  return token;
+}
+
 /** Escape a routine name so it can be dropped into a RegExp as a literal. */
 function escapeForRegExp(s) {
   return s.replace(/[^A-Za-z0-9_]/g, (c) => `\\${c}`);
@@ -77,7 +130,18 @@ function namesWithoutInvoking(flat) {
 
 /** Does anything in this statement list cause `routine` to run? */
 function isInvokedBy(sts, routine) {
-  const call = new RegExp(`(^|[^A-Za-z0-9_$])${escapeForRegExp(routine.short)}\\s*\\(`, 'i');
+  // OR-T1666. The scrubber KEEPS quoted identifiers, quotes and all, so a call
+  // written as "MyFunc"() never matched a pattern built from the bare name.
+  // Accept either spelling. The i flag leaves the quoted form case insensitive,
+  // which Postgres is not: the cost of that is scanning a body we did not have
+  // to scan, and over scanning costs a refusal a human clears in a minute while
+  // under scanning costs the data.
+  const bare = routine.short;
+  const quoted = `"${bare.replace(/"/g, '""')}"`;
+  const call = new RegExp(
+    `(^|[^A-Za-z0-9_$"])(?:${escapeForRegExp(quoted)}|${escapeForRegExp(bare)})\\s*\\(`,
+    'i',
+  );
   for (const st of sts) {
     const flat = st.text.replace(/\s+/g, ' ').trim();
     if (!call.test(flat)) continue;
@@ -242,10 +306,10 @@ function scrub(sql) {
               'question takes the irreversible branch, never the silent one',
           };
         }
-        const qualified = named[1].replace(/\s+/g, '');
+        const parts = qualifiedParts(named[1]);
         routines.push({
-          name: qualified,
-          short: qualified.split('.').pop().replace(/"/g, ''),
+          name: parts.join('.'),
+          short: unquoteIdent(parts[parts.length - 1]),
           body,
           bodyOffset: i + tag.length,
         });
@@ -561,9 +625,23 @@ const EXPECTED = {
   // a DROP TABLE in its body on purpose, so if the invocation analysis ever
   // starts over-reporting, this fixture goes red instead of the gate quietly
   // starting to refuse ordinary work.
-  '20990101000010_irreversible_routine_invoked_in_same_file.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE' },
+  //
+  // `line` is asserted wherever it is given. It pins the line the classifier
+  // reports TODAY, which for the first statement in a block is the line the
+  // block opens on, not the line of the offending statement: statements are
+  // split on semicolons, so `begin drop table t` is one statement and its first
+  // token is begin. That off by one predates the routine body work and exists
+  // on the DO block path too, so it is pinned here rather than fixed, and a
+  // later fix has to move a number a reviewer can see (OR-T1666).
+  '20990101000010_irreversible_routine_invoked_in_same_file.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE', line: 22 },
   '20990101000011_irreversible_routine_attached_as_trigger.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
   '20990101000012_reversible_routine_never_invoked.sql': { verdict: REVERSIBLE, id: null },
+  // OR-T1666. A quoted identifier must not hide a routine body. It did, twice
+  // over: the name normalisation stripped whitespace inside the quotes, and the
+  // call pattern was built from the unquoted name while the scrubbed text keeps
+  // the quotes.
+  '20990101000013_irreversible_routine_quoted_name_invoked.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE', line: 14 },
+  '20990101000014_irreversible_routine_quoted_name_with_space.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 14 },
 };
 
 function selftest() {
@@ -589,13 +667,22 @@ function selftest() {
     const ids = got.findings.map((f) => f.id);
     const verdictOk = got.verdict === want.verdict;
     const ruleOk = want.id === null ? ids.length === 0 : ids.includes(want.id);
-    if (verdictOk && ruleOk) {
-      console.log(`  ok   ${name}: ${got.verdict}${want.id ? ` [${want.id}]` : ''}`);
+    const lines = got.findings.map((f) => f.line);
+    const lineOk =
+      want.line === undefined ||
+      got.findings.some((f) => f.id === want.id && f.line === want.line);
+    if (verdictOk && ruleOk && lineOk) {
+      console.log(
+        `  ok   ${name}: ${got.verdict}${want.id ? ` [${want.id}]` : ''}` +
+          `${want.line === undefined ? '' : ` line ${want.line}`}`,
+      );
     } else {
       failures += 1;
       console.error(
-        `  FAIL ${name}: wanted ${want.verdict}${want.id ? ` [${want.id}]` : ' with no finding'}, ` +
-          `got ${got.verdict} [${ids.join(', ') || 'no finding'}]`,
+        `  FAIL ${name}: wanted ${want.verdict}${want.id ? ` [${want.id}]` : ' with no finding'}` +
+          `${want.line === undefined ? '' : ` at line ${want.line}`}, ` +
+          `got ${got.verdict} [${ids.join(', ') || 'no finding'}] at line(s) ` +
+          `${lines.join(', ') || 'none'}`,
       );
     }
   }
