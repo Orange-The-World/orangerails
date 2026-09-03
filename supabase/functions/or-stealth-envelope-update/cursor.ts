@@ -54,8 +54,21 @@ export function isAdvanceCursorError(
  * whatever bound the store applied in the same round, on syncs that found
  * transactions. On a zero-transaction sync there is no such cross-check
  * anywhere in the system. Closing that for real needs a source of truth
- * this function does not have today (an independent chain-height reference);
- * see OR-T1177 for the open decision on whether to build one.
+ * this function does not have today (an independent chain-height reference).
+ *
+ * THAT DECISION IS MADE. It is accepted, not deferred. OR-T1185 (CTO,
+ * 2026-08-31) REJECTED building a chain-height oracle for this path on two
+ * grounds. First, it bounds the wrong axis: an oracle can establish that a
+ * claimed height is PLAUSIBLE, never that it is TRUE, and the harm here comes
+ * from a plausible false claim, so the check would not catch the case it is
+ * being built for. Second, it puts an external availability dependency in
+ * front of a write that production depends on. The unbounded cursor write is
+ * ACCEPTED, and this comment is the record of why.
+ *
+ * Do not "fix" this by adding a bound assembled from values this function
+ * already has. Every such bound compares the client's number to itself, can
+ * never fail, and is worse than no check at all, because the next reader
+ * believes it.
  */
 export async function advanceCursor(
   client: SupabaseClient,
