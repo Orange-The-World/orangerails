@@ -219,6 +219,90 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # The self-test above proves the comparison goes red on every class of change,
+  # but it does that against a fixture written inside the script, and it never
+  # runs the --compare path the daily job actually calls. So the single promise
+  # this workflow makes, that a permissive change to the RECORDED values raises
+  # an alarm naming the old and the new value, was demonstrated on a stand-in.
+  #
+  # This job drives the real --compare at the real committed baseline. It copies
+  # the baseline, adds one identity to the production allowlist in the copy, and
+  # asserts exit 1 with both values named. The committed file is never touched:
+  # the mutation lives in the runner workspace and is thrown away with it.
+  #
+  # It also asserts that the untouched baseline compares clean, because a
+  # comparison that shouted at everything would pass the first assertion and be
+  # worth nothing.
+  # ---------------------------------------------------------------------------
+  baseline-change-exits-1:
+    name: A change to the reviewed baseline exits 1 and names old and new
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Add one identity to a COPY of the committed baseline and compare
+        run: |
+          set -uo pipefail
+
+          node -e '
+            const fs = require("fs");
+            const live = JSON.parse(fs.readFileSync("ops/change-control/baseline.json", "utf8"));
+            live.read_at = new Date().toISOString();
+            const key = "MIGRATION_APPLY_ALLOWED_ACTORS_PROD";
+            live.variables[key] = [...live.variables[key], "an-identity-nobody-reviewed"].sort();
+            fs.writeFileSync("injected-live.json", JSON.stringify(live, null, 2) + "\n");
+          '
+
+          STATUS=0
+          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json injected-live.json > drift.txt 2>&1 || STATUS=$?
+          cat drift.txt
+
+          if [ "${STATUS}" != "1" ]; then
+            echo "::error::an identity added to the production allowlist exited ${STATUS}, expected 1. This is the exact change that happened on 2026-08-24 and went unseen for seven days."
+            exit 1
+          fi
+          if ! grep -q 'an-identity-nobody-reviewed' drift.txt; then
+            echo "::error::the alarm fired but did not name the identity that was added. 'the settings changed' is not actionable."
+            exit 1
+          fi
+          if ! grep -q 'was:' drift.txt || ! grep -q 'now:' drift.txt; then
+            echo "::error::the alarm did not carry BOTH the old and the new value."
+            exit 1
+          fi
+
+          STATUS=0
+          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json ops/change-control/baseline.json > quiet.txt 2>&1 || STATUS=$?
+          cat quiet.txt
+          if [ "${STATUS}" != "0" ]; then
+            echo "::error::the committed baseline compared against itself exited ${STATUS}, expected 0. A check that reports drift every day teaches everyone to ignore it."
+            exit 1
+          fi
+
+          {
+            echo "## The alarm fires on a real change to the recorded values"
+            echo ""
+            echo "One identity was added to \`MIGRATION_APPLY_ALLOWED_ACTORS_PROD\` in a copy of"
+            echo "the committed baseline. The committed file was not modified."
+            echo ""
+            echo '```'
+            cat drift.txt
+            echo '```'
+            echo ""
+            echo "And the untouched baseline still compares clean:"
+            echo ""
+            echo '```'
+            cat quiet.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
   # The live reading. Runs after the machinery has been proven able to fail.
   # ---------------------------------------------------------------------------
   read-and-compare:
@@ -226,6 +310,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - self-test
+      - baseline-change-exits-1
       - refused-token-exits-3
       - missing-repository-exits-4
       - unreachable-api-exits-5
@@ -408,6 +493,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - self-test
+      - baseline-change-exits-1
       - refused-token-exits-3
       - missing-repository-exits-4
       - unreachable-api-exits-5
