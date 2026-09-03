@@ -86,14 +86,17 @@ function buildPorts(admin: ServiceClient): RedeemPorts {
       return typeof id === "string" ? id : null;
     },
 
-    async deleteShadowUser(userId: string): Promise<void> {
-      // Best effort. If this fails the row is an unbound auth user with no credential
-      // anyone holds, which is inert; it is still worth cleaning up and worth sweeping
-      // for later.
+    async deleteShadowUser(userId: string): Promise<boolean> {
+      // Best effort, and it REPORTS the result. deleteUser answers with an error object
+      // rather than throwing, so a port that only caught exceptions would treat a refused
+      // delete as a success and the orphan would never be marked. If this returns false the
+      // row is an unbound auth user that no credential anyone holds can reach, which is
+      // inert, but it is real and it is worth sweeping for.
       try {
-        await admin.auth.admin.deleteUser(userId);
+        const { error } = await admin.auth.admin.deleteUser(userId);
+        return !error;
       } catch {
-        /* ignore */
+        return false;
       }
     },
 
