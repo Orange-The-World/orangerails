@@ -43,8 +43,18 @@ export interface NormalizedTransaction {
   adapter: string;
   /** Direction relative to the connected account. */
   direction: 'in' | 'out';
-  /** Transaction kind. Will expand as more sources land. */
-  type: 'lightning' | 'onchain' | 'trade' | 'deposit' | 'withdrawal' | 'fee';
+  /**
+   * Transaction kind. Will expand as more sources land.
+   *
+   * `mining_earning` and `mining_payout` are the two mining-pool event types
+   * ratified in DL-1896 (see docs/Consumer-Integration-Guide.md, "Mining
+   * pool events: earnings and payouts"). A pool credits a miner's balance
+   * when a block is found (`mining_earning`, no txid) and later settles
+   * some of that balance on chain (`mining_payout`, txid required). They
+   * are never collapsed into one flagged event: a consumer that only sees
+   * payouts has no record of what was actually earned between them.
+   */
+  type: 'lightning' | 'onchain' | 'trade' | 'deposit' | 'withdrawal' | 'fee' | 'mining_earning' | 'mining_payout';
   /** BTC amount in satoshis when the source is denominated in BTC. */
   amount_sats?: number;
   /** Non-BTC amount when the source returns USD/EUR/etc. */
