@@ -393,7 +393,7 @@ src/connectors/ldk/
   index.ts           ← public surface (mirrors coinbase/index.ts shape)
   types.ts           ← SealedEnvelope, ChannelStateRecord, PersistOutcome
   derive.ts          ← deriveOrLdkKey (HKDF, info='or-ldk-v1')  [stub]
-  seal.ts            ← sealEnvelope/unsealEnvelope/blindIndex re-export plan  [stub]
+  seal.ts            ← sealEnvelope/unsealEnvelope + outpoint_bidx/payment_bidx index functions  [stub]
   persist.ts         ← persist-before-ack + watermark classification  [stub]
   persist.test.ts    ← watermark/idempotency classification tests  [real tests]
 supabase/functions/or-ldk-channel-state/
