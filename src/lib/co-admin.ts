@@ -47,7 +47,7 @@ import { HKDF_CONTEXTS, derivePqcSecretWrapKey } from "./key-derivation";
 import { base64ToBytes } from "./key-wrapping";
 import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } from "./pqc";
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
-import { signMemberGrant, verifyMemberGrant } from "./member-grant";
+import { signMemberGrant, verifyMemberGrant, type MemberGrant } from "./member-grant";
 
 // ------------------------------------------------------------------
 // Encoding helpers
