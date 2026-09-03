@@ -285,11 +285,26 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       console.error('[or-stealth-transactions-list] owner check failed:', ownerErr);
       return jsonResponse({ error: 'Failed to verify connection' }, 500, cors);
     }
+    // ONE answer for both "no such connection under this platform" and "it
+    // exists and is not yours": 404, with an identical body. The status must
+    // not tell a caller which of the two happened, because the informative
+    // version confirms that a connection_id the caller does not own is real.
+    // That matters in direct mode, where every user shares one platform id, so
+    // the ownership filter above does not separate them.
+    //
+    // or-source-wallet-lookup answers the same question the same way and says
+    // so in its header. Do not restore a distinct 403 here: it reads as
+    // friendlier to an integrator and it is the disclosure.
+    //
+    // The two cases stay distinguishable server-side, which is where knowing
+    // the difference is useful and costs nothing.
     if (!ownerRow) {
+      console.warn('[or-stealth-transactions-list] no connection for this platform');
       return jsonResponse({ error: 'Connection not found' }, 404, cors);
     }
     if ((ownerRow.app_user_id as string) !== body.app_user_id) {
-      return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
+      console.warn('[or-stealth-transactions-list] connection belongs to a different app_user_id');
+      return jsonResponse({ error: 'Connection not found' }, 404, cors);
     }
 
     // Count total rows for this connection. Returned on every page so the
