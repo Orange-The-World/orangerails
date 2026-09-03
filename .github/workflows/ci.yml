@@ -363,6 +363,42 @@ jobs:
       - name: Run vitest
         run: npx vitest run
 
+  vitest-api-gateway:
+    name: Unit tests (api-gateway worker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Why this job exists: the root vitest job above collects src/**/*.test.ts
+    # and tests/**/*.test.ts. The gateway is its own package under
+    # workers/api-gateway with its own vitest config and its own test
+    # directory, so NONE of its tests were collected by any job: they ran
+    # nowhere while CI reported green. That includes the tests asserting a
+    # caller cannot forge the trusted client-IP header, which are the only
+    # proof of that behaviour (OR-T1103).
+    #
+    # Runner note: same as the job above. npx vitest run is used rather than
+    # bun test because the suite uses vi.stubGlobal, which bun's runner does
+    # not implement. Dependencies are installed with bun to match the rest of
+    # this workflow. The install is NOT frozen because this package commits no
+    # lockfile; committing one is tracked separately (OR-T1103 follow-up).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # pinned: floating bun-version made CI non-reproducible (DL-0446).
+          # Update deliberately when bumping Bun.
+          bun-version: 1.3.14
+
+      - name: Install gateway dependencies
+        working-directory: workers/api-gateway
+        run: bun install
+
+      - name: Run gateway vitest
+        working-directory: workers/api-gateway
+        run: npx vitest run --config vitest.config.ts
+
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
