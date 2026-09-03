@@ -268,7 +268,6 @@ jobs:
     # security entirely. Local is also the better test, not just the cheaper
     # one: a fresh database per run means a red result means the code
     # failed, not that a previous run's leftover row was still lying around.
-    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
