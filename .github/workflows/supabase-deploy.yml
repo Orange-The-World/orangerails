@@ -1006,11 +1006,10 @@ jobs:
           || (github.event_name == 'workflow_dispatch' && inputs.apply_migrations) }}
     runs-on: ubuntu-latest
     # environment: binds this job to a GitHub Environment whose required-reviewer list
-    # is set in repo Settings -> Environments. prod dispatches bind to supabase-prod
-    # (configure required reviewers there); dev dispatches bind to supabase-dev (open
-    # for DBA applies). The environment name is resolved from the deploy job output so
-    # the right project is always protected. Add reviewers to supabase-prod in repo
-    # Settings -> Environments once this PR merges -- the job will pause for approval
+    # is set in repo Settings -> Environments. prod dispatches bind to supabase-prod,
+    # which has required reviewers configured; dev dispatches bind to supabase-dev
+    # (open for DBA applies). The environment name is resolved from the deploy job
+    # output so the right project is always protected: the job pauses for approval
     # before any steps run.
     environment: ${{ needs.target.outputs.environment_name }}
     permissions:
