@@ -359,6 +359,17 @@ jobs:
               echo "that the settings are unchanged. Read the step log: each failure has its"
               echo "own code and message (3 refused, 4 not found, 5 unusable)."
             } >> "$GITHUB_STEP_SUMMARY"
+            # An annotation as well as the step summary, and this is the whole
+            # point rather than a nicety. A step summary is returned by no API:
+            # it is readable by a person who opens this run and by nothing else.
+            # An annotation comes back from the check-runs API, so a component
+            # watching this workflow can tell "could not look" from "drift" from
+            # "clean" with no log access and no shell. Without this line, a run
+            # that could not read the settings looks, to anything automated,
+            # exactly like a run that found drift: red, and carrying nothing.
+            # A check that cannot look and reports nothing a machine can act on
+            # is the exact failure the rest of this file exists to refuse.
+            echo "::error::change-control settings could NOT be read (exit ${STATUS}), so NOTHING was compared. This is not a report that the settings are unchanged. 3 = the API refused the token, 4 = the repository was not found, 5 = the recorded values were unusable."
             exit 1
           fi
           echo "Read at $(date -u '+%Y-%m-%d %H:%M UTC'), which is $(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')."
@@ -388,7 +399,12 @@ jobs:
         run: |
           set -uo pipefail
           STATUS=0
-          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json || STATUS=$?
+          # Captured, not just printed, so the summary below and the annotation
+          # below both describe the SAME comparison. This used to run once here
+          # and a second time inside the summary block, and two runs that
+          # disagreed about what drifted would be worse than either one alone.
+          DIFF=$(node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json 2>&1) || STATUS=$?
+          printf '%s\n' "${DIFF}"
 
           if [ "${STATUS}" = "6" ]; then
             {
@@ -425,7 +441,7 @@ jobs:
               echo "turned off, admins allowed to bypass."
               echo ""
               echo '```'
-              node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json 2>&1 || true
+              printf '%s\n' "${DIFF}"
               echo '```'
               echo ""
               echo "If the change was intended, update the baseline in a pull request so the"
@@ -439,7 +455,20 @@ jobs:
               echo "a ticket or a citation. If it was not intended, that is an unreviewed"
               echo "change to who may touch production."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::production change-control settings differ from the committed baseline. See step summary."
+            # "See step summary" is an instruction nothing automated can follow,
+            # so the annotation carries the comparison itself. A workflow command
+            # is a single line: a literal newline would truncate this alert at
+            # the first one, and a truncated alert that looks complete is worse
+            # than no alert. Newlines therefore go out as %0A and a literal %
+            # as %25, which is the encoding the runner decodes on the way in.
+            ENCODED=$(printf '%s' "${DIFF}" | node -e '
+              let s = "";
+              process.stdin.on("data", d => s += d);
+              process.stdin.on("end", () => process.stdout.write(
+                s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")
+              ));
+            ')
+            echo "::error::production change-control settings differ from the committed baseline. Each line below names what moved, what it was, and what it is now.%0A${ENCODED}"
             exit 1
           fi
 
