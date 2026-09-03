@@ -554,6 +554,14 @@ const EXPECTED = {
     verdict: IRREVERSIBLE,
     id: 'ALTER TABLE DROP',
   },
+  // The word revoke appears only in a comment in this one, and the verb is
+  // built by concatenation so no static rule can match it. It classified
+  // REVERSIBLE while the GRANT and REVOKE exemption tested the whole statement
+  // prefix instead of the token immediately before EXECUTE.
+  '20990101000015_irreversible_dynamic_execute_after_revoke_comment.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'DYNAMIC EXECUTE',
+  },
 };
 
 function selftest() {
