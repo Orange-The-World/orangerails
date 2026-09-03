@@ -14,6 +14,10 @@ on:
       - 'scripts/ops/orbi-probe-failed.sh'
       - '.github/workflows/orbi-truthtable-probe-test.yml'
       - 'TRUTH_TABLE_FRESHNESS_AND_OWNERSHIP_CRON.md'
+      # The units carry the environment the probes read, including the state
+      # file path, so a unit-only change can alter probe behaviour. Without
+      # this the gate would not run on exactly that change.
+      - 'systemd/**'
   push:
     branches: [dev]
     paths:
@@ -22,6 +26,7 @@ on:
       - 'scripts/ops/orbi-probe-failed.sh'
       - '.github/workflows/orbi-truthtable-probe-test.yml'
       - 'TRUTH_TABLE_FRESHNESS_AND_OWNERSHIP_CRON.md'
+      - 'systemd/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -268,6 +273,113 @@ jobs:
             exit 1
           fi
           echo "confirmed: exit 2 (alert script renamed / not executable)"
+
+      # -------------------------------------------------------------------------
+      # Paths 8 to 11 cover the three defects found by the review of this PR
+      # (OR-T1455, OR-C0787). All three reached "OK ... all fresh" and exit 0:
+      # a table the probe could not classify, a baseline it could not read, and
+      # a baseline it could not write. None of them was reachable by the tests
+      # above, because every freshness seed here is now() minus an interval and
+      # no test ever made the state file unusable. Each is asserted red so it
+      # cannot come back unnoticed.
+      # -------------------------------------------------------------------------
+
+      - name: "[freshness] seed a table whose newest fetched_at is AHEAD of the database clock"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            DROP TABLE IF EXISTS public.tt_future;
+            CREATE TABLE public.tt_future (id serial primary key, fetched_at timestamptz);
+            ALTER TABLE public.tt_future OWNER TO orbi_writer;
+            ALTER TABLE public.tt_future ENABLE ROW LEVEL SECURITY;
+            INSERT INTO public.tt_future (fetched_at)
+              SELECT now() - (n || ' minutes')::interval FROM generate_series(1,10) AS n;
+            INSERT INTO public.tt_future (fetched_at) VALUES (now() + interval '10 days');
+          "
+
+      - name: "[freshness] path 8 -- newest timestamp ahead of the clock -> expect exit 2, never a pass (RED)"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log" "$RUNNER_TEMP/freshness-state"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (age ahead of the database clock is UNKNOWN), got $EXIT" >&2
+            exit 1
+          fi
+          BODY=$(cat "$RUNNER_TEMP/alert-calls.log")
+          case "$BODY" in
+            *tt_future*) ;;
+            *) echo "ERROR: the body does not name the unclassifiable table: $BODY" >&2; exit 1 ;;
+          esac
+          echo "confirmed RED: exit 2 -- one row stamped 10 days ahead no longer buys a dead loader 10 days of OK: $BODY"
+
+      - name: "[freshness] drop the future-stamped table"
+        run: |
+          psql -h localhost -U testuser -d testdb -c "DROP TABLE public.tt_future;"
+
+      - name: "[freshness] path 9 -- state file exists but is unreadable -> expect exit 2 (RED)"
+        run: |
+          if [[ $(id -u) -eq 0 ]]; then
+            echo "ERROR: running as root, so chmod 000 denies nothing and this path cannot be exercised; failing loudly rather than passing on an untested path" >&2
+            exit 1
+          fi
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          echo 1 > "$RUNNER_TEMP/freshness-state"
+          chmod 000 "$RUNNER_TEMP/freshness-state"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          chmod 644 "$RUNNER_TEMP/freshness-state"
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (unreadable baseline), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed RED: exit 2 -- an unreadable baseline no longer becomes an empty string that silently disables the shrink check: $(cat "$RUNNER_TEMP/alert-calls.log")"
+
+      - name: "[freshness] path 10 -- state file holds something that is not a count -> expect exit 2 (RED)"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          printf 'banana\n' > "$RUNNER_TEMP/freshness-state"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (corrupt baseline), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed RED: exit 2 -- a corrupt baseline names the file instead of quietly comparing against nothing: $(cat "$RUNNER_TEMP/alert-calls.log")"
+
+      - name: "[freshness] path 11 -- baseline cannot be WRITTEN on the OK path -> expect exit 2 (RED)"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          rm -rf "$RUNNER_TEMP/nostate"
+          mkdir -p "$RUNNER_TEMP/nostate"
+          chmod 500 "$RUNNER_TEMP/nostate"
+          set +e
+          ORBI_PROBE_DSN="$DSN" ORBI_ALERT_SCRIPT="$RUNNER_TEMP/stub-alert.sh" \
+            ORBI_FRESHNESS_STATE_FILE="$RUNNER_TEMP/nostate/freshness-state" \
+            ./scripts/ops/orbi-truthtable-freshness-probe.sh
+          EXIT=$?
+          set -e
+          chmod 700 "$RUNNER_TEMP/nostate"
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (baseline not persisted), got $EXIT" >&2
+            exit 1
+          fi
+          if [[ -e "$RUNNER_TEMP/nostate/freshness-state" ]]; then
+            echo "ERROR: the state file was written after all, so this test proved nothing about the unwritable path" >&2
+            exit 1
+          fi
+          echo "confirmed RED: exit 2 -- an unwritable baseline no longer prints OK and exits 0 while leaving the shrink check permanently unable to fire: $(cat "$RUNNER_TEMP/alert-calls.log")"
 
       # =========================================================================
       # OWNERSHIP DRIFT PROBE
