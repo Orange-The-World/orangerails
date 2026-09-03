@@ -598,6 +598,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
       //    NOT wrapped in a catch: a transient failure read as a dead key would
       //    discard a LIVE keypair, which is the destruction this whole path
       //    exists to prevent.
+      //
       //    oldMek and the authenticated salt go in alongside the wrap keys, and
       //    they are not decoration. "Dead" and "wrong key" are the same AES-GCM
       //    tag failure, so the carry proves the old wrap key really is the key
