@@ -1110,6 +1110,66 @@ describe('live fetchers', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  // OR-T1167, second half. All three of these passed before the block_hash
+  // check went in, which is why they are here. A truncated hash, an absent
+  // hash and an uppercase hash each produced a FilterRecord the caller could
+  // not tell from a good one.
+  it('liveFetchFilter rejects a sidecar whose block_hash is not 64 hex characters', async () => {
+    const gz = gzipSync(new Uint8Array([0x01, 0x02, 0x03]));
+
+    // Truncated. Before the check this became FilterRecord.blockHashHex
+    // verbatim and was stored on every transaction matched at this height.
+    const truncated = vi.fn(async (url: string) => {
+      if (url.endsWith('.gcs.gz')) {
+        return new Response(new Uint8Array(gz) as BodyInit, { status: 200 });
+      }
+      return jsonResponse({ block_hash: 'deadbeef', block_height: 700_001 });
+    });
+    vi.stubGlobal('fetch', truncated);
+    await expect(liveFetchFilter(700_001, 'https://stealth.example')).rejects.toThrow(
+      'carries no usable block_hash',
+    );
+    // Durable, so exactly one pair is fetched and not FILTER_FETCH_ATTEMPTS of
+    // them. Retrying a producer misconfiguration only makes it slower.
+    expect(truncated).toHaveBeenCalledTimes(2);
+
+    // Absent. This is the case that must never reach a stored record: with no
+    // hash, a row means "recorded before we captured hashes" and the reorg
+    // detector is required to skip it in silence.
+    const absent = vi.fn(async (url: string) => {
+      if (url.endsWith('.gcs.gz')) {
+        return new Response(new Uint8Array(gz) as BodyInit, { status: 200 });
+      }
+      return jsonResponse({ block_height: 700_002 });
+    });
+    vi.stubGlobal('fetch', absent);
+    await expect(liveFetchFilter(700_002, 'https://stealth.example')).rejects.toThrow(
+      'carries no usable block_hash',
+    );
+    expect(absent).toHaveBeenCalledTimes(2);
+  });
+
+  it('liveFetchFilter lower-cases the sidecar block_hash so the reorg check compares like with like', async () => {
+    // The stored hash is compared against the canonical hash at that height
+    // with a case-sensitive string equality. An uppercase producer would make
+    // every affected transaction compare unequal and be marked orphaned with
+    // no reorg having happened.
+    const filterPayload = new Uint8Array([0x0a, 0x0b]);
+    const gz = gzipSync(filterPayload);
+    const upper = '000000000000000000015C92FA872E387085585AC046E0935FDF9EED872F9297';
+
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('.gcs.gz')) {
+        return new Response(new Uint8Array(gz) as BodyInit, { status: 200 });
+      }
+      return jsonResponse({ block_hash: upper, block_height: 700_003 });
+    }));
+
+    const rec = await liveFetchFilter(700_003, 'https://stealth.example');
+    expect(rec.blockHashHex).toBe(upper.toLowerCase());
+    expect(Array.from(rec.filter)).toEqual(Array.from(filterPayload));
+  });
+
   it('liveFetchFilter rejects with a fetch-failure error on 404 from either resource', async () => {
     // A 404 from the filter CDN is a fetch failure, not "no data at this
     // height". liveFetchFilter must throw so the orchestrator cannot silently
