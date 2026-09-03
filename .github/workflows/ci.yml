@@ -963,7 +963,7 @@ jobs:
             echo "::error::the classifier exited $RC over fixtures that are all irreversible or unparseable. It must exit 2. A classifier that cannot refuse is not a gate."
             FAIL=1
           fi
-          for NEEDLE in "IRREVERSIBLE" "UNPARSEABLE" "DROP TABLE" "DELETE WITHOUT WHERE" "ALTER TABLE DROP" "line "; do
+          for NEEDLE in "IRREVERSIBLE" "UNPARSEABLE" "DROP TABLE" "DELETE WITHOUT WHERE" "ALTER TABLE DROP" "DYNAMIC EXECUTE" "line "; do
             if ! echo "$OUT" | grep -qF "$NEEDLE"; then
               echo "::error::the refusal did not mention '$NEEDLE'. The job log has to name the file, the line and the statement class, or nobody can act on it."
               FAIL=1
