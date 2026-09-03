@@ -1110,10 +1110,16 @@ describe('live fetchers', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  // OR-T1167, second half. All three of these passed before the block_hash
-  // check went in, which is why they are here. A truncated hash, an absent
-  // hash and an uppercase hash each produced a FilterRecord the caller could
-  // not tell from a good one.
+  // OR-T1167, second half. What each case did BEFORE the block_hash check
+  // existed, reading the previous version of fetchFilterPair: a truncated
+  // hash and an uppercase hash were both copied into
+  // FilterRecord.blockHashHex verbatim, and an absent hash produced a record
+  // whose blockHashHex was undefined. All three returned normally and the
+  // caller had no way to tell any of them from a good record.
+  //
+  // RED-BEFORE IS REASONED, NOT OBSERVED. This seat has no shell, so I could
+  // not run vitest against the parent commit and watch these three go red. I
+  // am stating that rather than implying a run nobody did.
   it('liveFetchFilter rejects a sidecar whose block_hash is not 64 hex characters', async () => {
     const gz = gzipSync(new Uint8Array([0x01, 0x02, 0x03]));
 
