@@ -1,13 +1,27 @@
 name: PR commit-metadata scan (pre-merge gate)
 
-# Scans every commit in a pull request targeting prod for non-public
-# references in commit metadata (author name/email, committer name/email,
-# commit message body) BEFORE the merge is allowed.
+# Scans every commit in EVERY pull request for non-public references in commit
+# metadata (author name/email, committer name/email, commit message body)
+# BEFORE the merge is allowed.
 #
 # This is the pre-merge companion to post-merge-hygiene.yml.  The post-merge
-# workflow fires after code is live and therefore cannot block a merge.  This
-# workflow runs as a required PR check so a promotion is rejected if any commit
-# in the PR range carries a non-public reference.
+# workflow fires on a push to a protected branch, which is after the content is
+# permanent and public, so it can report but it cannot prevent.  This workflow
+# runs as a PR check, so the merge is rejected if any commit in the PR range
+# carries a non-public reference.
+#
+# OR-T1685: this used to run on pull requests targeting prod only.  Almost
+# every pull request here targets dev, so on the ordinary path nothing read a
+# commit message before it merged.  That matters more than it would elsewhere
+# because our merge path writes a merge commit: every commit on the branch
+# becomes an ancestor of dev, survives deleting the branch, and is in every
+# clone permanently, on a public repository.
+#
+# WHAT THIS CANNOT DO, stated so nobody mistakes a green tick for more than it
+# is: it matches structural classes and a withheld reserved-term list.  Prose
+# is not a regex class.  An attack narrative, or a description of an unfixed
+# weakness written in ordinary sentences, will pass this check.  That remains a
+# review responsibility and no scanner here should be described as covering it.
 #
 # Two pattern sources (same as post-merge-hygiene.yml):
 #   - GENERIC_PATTERN: structural classes (tailnet hostnames, CGNAT CIDR),
@@ -20,8 +34,13 @@ name: PR commit-metadata scan (pre-merge gate)
 # focused on commit metadata only.
 
 on:
+  # DELIBERATELY UNFILTERED, the same reasoning repo-hygiene.yml records for
+  # the tree scan (DEV-0283): a pull request stacked on another feature branch
+  # ran none of the real checks and still read GREEN.  Commit metadata is a
+  # property of the commits, not of the branch they are aimed at, so the target
+  # branch says nothing about whether the metadata is clean.  Every pull
+  # request gets scanned.
   pull_request:
-    branches: [prod]
 
 # Least privilege: this job only reads the repo to inspect commit metadata.
 permissions:
@@ -44,7 +63,19 @@ jobs:
           # assigns. Bare ".local" is intentionally NOT here: it
           # false-positives on .env.local / *.local.json. The specific
           # internal *.local host is carried in the reserved-term list.
-          GENERIC_PATTERN: 'tail[a-z0-9]+\.ts\.net|\.tailnet\b|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          #
+          # OR-T1685 adds three more classes, each a SHAPE rather than a value,
+          # so this file still publishes nothing:
+          #   - a knowledge-base document link (any host, /doc/<slug>), which is
+          #     how an internal write-up gets cited in a message
+          #   - a chat permalink (/#narrow/...), which is a message-id citation
+          #     nobody outside can resolve
+          #   - a home directory path (/home/<user>/...), which names an
+          #     operator and a machine layout
+          # A match on one of these three fires the non-structural branch of the
+          # cleared-list check below, so a commit that legitimately has to name
+          # one is cleared with class 'reserved'.
+          GENERIC_PATTERN: 'tail[a-z0-9]+\.ts\.net|\.tailnet\b|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+|https?://[A-Za-z0-9.-]+/doc/[A-Za-z0-9_-]{6,}|/#narrow/|/home/[a-z][a-z0-9_-]*/'
           # Reserved-term pattern: sourced from a secret so this file never
           # stores them; empty when the secret is unset (generic half runs).
           RESERVED_PATTERN: ${{ secrets.OR_RESERVED_TERMS }}
@@ -245,6 +276,44 @@ jobs:
           fi
           echo "Self-test 5b passed: cleared SHA with 'reserved' class correctly exempts a reserved-term-only match."
 
+          # Self-test 6: a knowledge-base document link must match, and must
+          # survive doc-strip. This is the class a tree scan cannot see: the
+          # link is in the message, not in any file.
+          _ST6="body: write-up at https://kb.example-internal.test/doc/some-note-AbC123"
+          if ! echo "$_ST6" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 6 FAIL: PATTERN does not match a knowledge-base document link. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 6 passed: knowledge-base document link matches."
+
+          # Self-test 7: a chat permalink (a message-id citation) must match.
+          _ST7="body: agreed at https://chat.example-internal.test/#narrow/stream/7-general/topic/x/near/2467"
+          if ! echo "$_ST7" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 7 FAIL: PATTERN does not match a chat permalink. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 7 passed: chat permalink matches."
+
+          # Self-test 8: a home directory path must match.
+          _ST8="body: ran /home/exampleuser/scripts/thing.sh before merging"
+          if ! echo "$_ST8" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 8 FAIL: PATTERN does not match a home directory path. Scanner is broken."
+            exit 1
+          fi
+          echo "Self-test 8 passed: home directory path matches."
+
+          # Self-test 9 is NEGATIVE and it is the one that keeps this check
+          # alive. An ordinary commit message, including an ordinary public
+          # documentation link, must NOT match. A scanner that fires on
+          # everything gets switched off within a week, so a pattern that got
+          # too broad has to fail here rather than in everyone's pull request.
+          _ST9="Read the OHLC result key by shape (see https://docs.example.com/api/reference)"
+          if echo "$_ST9" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 9 FAIL: PATTERN matches an ordinary commit message. Scanner is too broad and would block every pull request."
+            exit 1
+          fi
+          echo "Self-test 9 passed: an ordinary commit message does not match."
+
           MATCHES=0
           CURRENT_SHA="(unknown)"
           while IFS= read -r line; do
@@ -296,3 +365,4 @@ jobs:
             exit 1
           fi
           echo "PR metadata scan clean: 0 lines carry non-public references in range $RANGE."
+          echo "Scope note: structural classes and the reserved-term list only. Prose is not checked."
