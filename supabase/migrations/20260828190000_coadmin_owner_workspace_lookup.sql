@@ -37,10 +37,21 @@
 -- row. A definer function returning the two fields is the only construction
 -- that narrows the co-admin read without breaking the owner read.
 --
--- BOTH RETURNED FIELDS ARE PUBLIC BY DESIGN. sig_public_key is a public
--- verification key, published so a grant signature can be checked. The
--- workspace key id is an opaque identifier that the admin already holds in
--- every wrapped key row addressed to them.
+-- WHAT THE TWO RETURNED FIELDS ARE, PRECISELY. sig_public_key is a public
+-- verification key, published so a grant signature can be checked.
+--
+-- The workspace key id is NOT public by design and must not be described that
+-- way. Every policy on public.wrapped_data_keys resolves who the owner is
+-- through user_vault_meta.workspace_key_id, so the value behaves as an
+-- authorisation subject and not as an inert identifier. It is disclosed HERE
+-- only to a caller that already holds a co-admin grant on that workspace, and
+-- that caller already holds the same value as data_key_id on every wrapped key
+-- row addressed to them, so this function discloses nothing the caller does
+-- not already have. It is not safe to publish more widely, to log, or to
+-- expose on a wider endpoint while it is the subject of those owner policies.
+-- The uniqueness and write once guards that stop a caller pointing their own
+-- row at a workspace key they do not own are in
+-- 20260828214500_user_vault_meta_workspace_key_write_once.sql.
 --
 -- THIS MIGRATION CHANGES NO EXISTING BEHAVIOUR, ON PURPOSE. It is step one of
 -- three. Nothing calls this function yet and the wide policy is untouched, so
@@ -73,7 +84,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.list_coadmin_workspaces() IS
-  'The two owner fields a co-admin needs to open a workspace: the workspace key id and the owner public signing key. Both are public by design. Definer, because row level security selects rows and not columns. Returns one row per workspace where the caller holds a co-admin grant and the owner has completed setup.';
+  'The two owner fields a co-admin needs to open a workspace: the workspace key id and the owner public signing key. The signing key is public by design. The workspace key id is not: it is the subject the wrapped_data_keys policies resolve the owner against, and it is disclosed here only to a caller that already holds a co-admin grant on that workspace and already holds the same value on its own wrapped key rows. Do not publish it more widely. Definer, because row level security selects rows and not columns. Returns one row per workspace where the caller holds a co-admin grant and the owner has completed setup.';
 
 REVOKE ALL ON FUNCTION public.list_coadmin_workspaces() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.list_coadmin_workspaces() TO authenticated;
@@ -135,8 +146,14 @@ BEGIN
     RAISE EXCEPTION 'authenticated cannot execute list_coadmin_workspaces';
   END IF;
 
-  -- 4. It must return the two public fields and nothing sealed. This reads the
-  --    declared result type rather than trusting the body above it.
+  -- 4. It must return the two intended fields and nothing sealed. This reads
+  --    the declared result type rather than trusting the body above it.
+  --    SCOPE, said plainly so nobody reads this for more than it is: it
+  --    constrains the SIGNATURE, not the projection. It proves that no sealed
+  --    column NAME appears in the declared result type. It does NOT prove the
+  --    body selects the columns its result names claim: a body returning
+  --    uvm.enc_mek_ciphertext AS sig_public_key would pass it. The body is
+  --    what a review has to read, and this check does not replace that.
   SELECT pg_get_function_result(fn_oid) INTO result_def;
   SELECT string_agg(c, ', ' ORDER BY c) INTO offenders
   FROM unnest(sealed_cols) AS c
