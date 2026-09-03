@@ -483,7 +483,7 @@ export async function handleEvent(
     // this row re-enters the batch on every tick until the connections row
     // appears. That tick cost is real but is not a reason to permanently
     // discard the event: bumping attempts toward MAX_ATTEMPTS on this path
-    // (commit 5418820c) undid PR #801's fix and started silently retiring
+    // (commit 5418820c) undid pull request 801's fix and started silently retiring
     // events whose connections row would have appeared eventually. The
     // caller logs a loud warning once the wait is abnormally long instead,
     // so this stays visible without being destructive.
