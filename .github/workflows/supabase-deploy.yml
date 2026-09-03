@@ -1000,14 +1000,15 @@ jobs:
           }
 
           # The guard must be able to go RED. Run it first over a synthetic
-          # tree covering all four cases and refuse to apply if any of them
+          # tree covering all five cases and refuse to apply if any of them
           # does not behave as expected. A check that cannot go red proves
           # nothing.
           OOO_TEST_DIR=$(mktemp -d); chmod 700 "$OOO_TEST_DIR"
           printf 'select 1;\n' > "$OOO_TEST_DIR/20990101000000_no_marker.sql"
           printf -- '-- OUT-OF-ORDER-OK: short\nselect 1;\n' > "$OOO_TEST_DIR/20990101000001_short_marker.sql"
           printf -- '-- OUT-OF-ORDER-OK: this file only re-grants columns already present on the live schema, nothing is lost\nselect 1;\n' > "$OOO_TEST_DIR/20990101000002_proper_marker.sql"
-          printf 'select 1;\n' > "$OOO_TEST_DIR/20990101000099_in_order.sql"
+          printf 'select 1;\n' > "$OOO_TEST_DIR/20990101000099_already_applied.sql"
+          printf 'select 1;\n' > "$OOO_TEST_DIR/20990101000100_pending_above_max.sql"
           OOO_TEST_APPLIED='20990101000099'
           OOO_TEST_MAX='20990101000099'
 
@@ -1026,13 +1027,18 @@ jobs:
             echo "::error::out-of-order guard self-test FAILED: the proper-marker case went RED, expected GREEN."
             exit 1
           fi
-          if ! ooo_guard "$OOO_TEST_MAX" "$OOO_TEST_APPLIED" '20990101000099_in_order.sql' "$OOO_TEST_DIR" >/dev/null 2>&1; then
+          if ! ooo_guard "$OOO_TEST_MAX" "$OOO_TEST_APPLIED" '20990101000099_already_applied.sql' "$OOO_TEST_DIR" >/dev/null 2>&1; then
             rm -rf "$OOO_TEST_DIR"
-            echo "::error::out-of-order guard self-test FAILED: the in-order case went RED, expected GREEN (silent, already applied)."
+            echo "::error::out-of-order guard self-test FAILED: the already-applied case went RED, expected GREEN (silent, skipped before the ordering check)."
+            exit 1
+          fi
+          if ! ooo_guard "$OOO_TEST_MAX" "$OOO_TEST_APPLIED" '20990101000100_pending_above_max.sql' "$OOO_TEST_DIR" >/dev/null 2>&1; then
+            rm -rf "$OOO_TEST_DIR"
+            echo "::error::out-of-order guard self-test FAILED: the pending-above-max case (the ordinary deploy path, no marker required) went RED, expected GREEN."
             exit 1
           fi
           rm -rf "$OOO_TEST_DIR"
-          echo "out-of-order guard self-test ok: RED on missing marker, RED on short reason, GREEN on proper marker, GREEN and silent on in-order."
+          echo "out-of-order guard self-test ok: RED on missing marker, RED on short reason, GREEN on proper marker, GREEN and silent on already-applied, GREEN and silent on pending-above-max."
 
           if ! ooo_guard "$MAX_APPLIED" "$APPLIED" "$TREE_FILES" "$MIG_DIR"; then
             echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more pending migration files sort below the highest already-applied version and carry no acknowledged OUT-OF-ORDER-OK marker (or a reason under 40 characters). Add a line '-- OUT-OF-ORDER-OK: <reason the file is safe to run against a database in a later state>' to each one naming why it is safe, or give it a new, unused version timestamp. NOTHING was applied on this run."
