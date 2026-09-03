@@ -288,6 +288,21 @@ enumeration:
   `seal_version`, `iv`, `ciphertext`, `created_at`, `updated_at`. Anything
   outside that list fails, whatever it is named and whatever it is said to hold.
   Widening the list is a change to this section, not a reviewer's call.
+- **`payment_bidx` is keyed on the payment hash.** It is pinned here the same
+  way the channel blind index is pinned on the funding outpoint in §3, and for
+  the same reason: a blind index is a grouping oracle over whatever it is
+  derived from, so "index terms stay on the stable identifiers" above is a
+  constraint and not a specification. A payment has several stable identifiers
+  and they do not have the same leak profile. Keyed on the destination node,
+  for instance, `payment_bidx` satisfies every consequence above, holds no
+  value and reveals no amount, and still sorts a user's rows into groups that
+  share a destination. Keyed on the payment hash it groups nothing beyond a
+  single payment: a payment hash is fixed for the life of one payment and is
+  not shared across payments, and because the index is computed under a key
+  derived from the user's own MEK (§2), two users paying the same invoice do
+  not produce the same term. Choosing a different term is a change to this
+  section rather than an implementer's call, and the disclosure below has to
+  change with it.
 
 Both of those requirements describe a table that does not exist yet, and neither
 one fires on a table that already does: a write to a surface that is already
@@ -300,11 +315,17 @@ of these two.
 is about **value**, and none of them is about **existence**. A payment record
 row on the allowed column set carries a `payment_bidx` and a `created_at`, so
 the server can count how many Lightning payments a user made and see when each
-row appeared, with every bullet above satisfied and every payload sealed. That
-is the same class of exposure §3.2 (3) records for per-channel update cadence,
-two subsections earlier in this document, and it is written here rather than
-left to be inferred from there. Bounded and accepted: no amount, fee, balance,
-counterparty or destination leaks. Reducing it further is a different design,
+row appeared, with every bullet above satisfied and every payload sealed. It can
+also see when two rows carry the same `payment_bidx`, which on the term pinned
+above means the same payment written twice, a retry or a re-send, and not two
+payments to the same party. It cannot group a user's rows by who was paid, and
+that is a property of the pinned term rather than of the bullets: a term stable
+across many payments would pass every bullet and group them anyway. That is the
+same class of exposure §3.2 (3) records for per-channel update cadence, two
+subsections earlier in this document, and it is written here rather than left to
+be inferred from there. Bounded and accepted, on that term: payment count,
+per-row timing and same-payment collisions are observable, and no amount, fee,
+balance, counterparty or destination leaks. Reducing it further is a different design,
 not a tightening of the bullets above: padding the table with decoy rows,
 batching writes so a row's arrival is not a payment's timing, or coarsening
 `created_at` to a window. None of those is proposed here, and each carries its
