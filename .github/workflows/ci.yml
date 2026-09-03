@@ -422,6 +422,12 @@ jobs:
           echo "Found ${FILE_COUNT} test file(s) (baseline: ${DENO_TEST_FILE_BASELINE})"
           deno test --no-check --allow-all supabase/functions/
 
+      - name: Stop local Supabase stack
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: supabase stop --no-backup
+
   vitest:
     name: Unit tests (vitest)
     runs-on: ubuntu-latest
