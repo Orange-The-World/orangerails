@@ -13,7 +13,15 @@
  *     The other two are not covered here, see the note below.
  */
 
-import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import {
+  assertEquals,
+  assert,
+  assertStrictEquals,
+} from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import {
+  boundCursorAdvance as sharedBoundCursorAdvance,
+  isContiguousScannedHeight as sharedIsContiguousScannedHeight,
+} from '../_shared/scan-cursor.ts';
 import {
   boundCursorAdvance,
   deriveResponseCursor,
@@ -304,5 +312,24 @@ Deno.test('deriveResponseCursor: the reported cursor carries the same bound as t
     deriveResponseCursor(100, 2, 150, undefined),
     150,
     'an explicit undefined selects the unbounded advance',
+  );
+});
+
+Deno.test('OR-T1914: the ceiling this function exports IS the shared one, not a copy', () => {
+  // Every other test in this file passes just as happily against a local copy of
+  // the helper pasted back in here, and a local copy is exactly how one column
+  // ended up with two contracts: this endpoint capped the cursor at the client
+  // contiguous height while or-stealth-envelope-update wrote the posted value
+  // straight through. Both now import from ../_shared/scan-cursor.ts, so the
+  // thing worth asserting is identity, not behaviour.
+  assertStrictEquals(
+    boundCursorAdvance,
+    sharedBoundCursorAdvance,
+    'boundCursorAdvance must be the shared contract helper',
+  );
+  assertStrictEquals(
+    isContiguousScannedHeight,
+    sharedIsContiguousScannedHeight,
+    'isContiguousScannedHeight must be the shared contract helper',
   );
 });
