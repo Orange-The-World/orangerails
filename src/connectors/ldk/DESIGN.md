@@ -285,6 +285,26 @@ column, so the allowed column set is never consulted. That limit is the reason
 the last consequence above is stated on its own rather than left to be read out
 of these two.
 
+**Metadata trade-off, on the same terms as §3.2 (3).** Every consequence above
+is about **value**, and none of them is about **existence**. A payment record
+row on the allowed column set carries a `payment_bidx` and a `created_at`, so
+the server can count how many Lightning payments a user made and see when each
+row appeared, with every bullet above satisfied and every payload sealed. That
+is the same class of exposure §3.2 (3) records for per-channel update cadence,
+two subsections earlier in this document, and it is written here rather than
+left to be inferred from there. Bounded and accepted: no amount, fee, balance,
+counterparty or destination leaks. Reducing it further is a different design,
+not a tightening of the bullets above: padding the table with decoy rows,
+batching writes so a row's arrival is not a payment's timing, or coarsening
+`created_at` to a window. None of those is proposed here, and each carries its
+own cost, so the exposure is accepted rather than engineered away. **This
+observable pattern is personal financial behavior metadata under GDPR / Law-25
+and must be disclosed in the privacy policy before any payment record path
+ships to users** (tracked with Compliance; not a blocker on this section or on
+the wiring PR). Nothing is observable today: per the paragraph above, no
+Lightning payment record exists, so this states what becomes observable the
+moment one is built.
+
 The trade-off, stated rather than discovered later: sealing the amount means
 the server cannot sort, filter, aggregate or report on value. Any product
 surface that appears to need server-side totals is asking for the seal to be
