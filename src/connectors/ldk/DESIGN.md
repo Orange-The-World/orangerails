@@ -205,9 +205,8 @@ exists anywhere in the system: billing surfaces do exist, for other purposes and
 under other sections, and the reuse consequence in the list below is what keeps
 a Lightning amount off them. The user-facing claim that we cannot read your
 financial data is therefore not contradicted by anything in the system as it
-stands. This
-section constrains work that has not been built yet. It is not a fix for a live
-exposure and should not be cited as evidence of one.
+stands. This section constrains work that has not been built yet. It is not a
+fix for a live exposure and should not be cited as evidence of one.
 
 **What that rests on, and how to re-check it.** The database objects were
 checked by querying the databases. They were not inferred from this repository,
