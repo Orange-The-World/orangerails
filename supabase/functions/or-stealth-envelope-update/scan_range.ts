@@ -76,8 +76,24 @@ export interface ScanRangeRequest {
  * call along with the bad one it is meant to catch. A bound that is actually
  * correct here needs a source of truth this module does not have: an
  * independent reference for how far the chain has really progressed. That is
- * a real, separate piece of infrastructure, not a one-line fix, and building
- * it is the open decision on OR-T1177.
+ * a real, separate piece of infrastructure, not a one-line fix.
+ *
+ * THAT DECISION IS MADE, on OR-T1185 (CTO, 2026-08-31), and this comment is
+ * the record of it. Building the chain-height reference was REJECTED: it
+ * bounds the wrong axis, because it can only establish that a claimed height
+ * is PLAUSIBLE and never that it is TRUE, and a plausible false claim is
+ * exactly the harm; and it would put an external availability dependency in
+ * front of a write production depends on. The unbounded coverage interval is
+ * ACCEPTED instead.
+ *
+ * THE ACCEPTANCE IS CONDITIONAL, and the condition is what makes it
+ * survivable rather than permanent: a user-triggered rescan must clear the
+ * stealth_scan_ranges rows as well as the cursor, so a false interval can be
+ * repaired instead of believed forever. That recovery path was broken when
+ * this was written and is tracked on OR-T1203. If OR-T1203 is reverted, or
+ * closed without a rescan that actually clears coverage, this acceptance no
+ * longer holds and this paragraph stops being true. Say so rather than
+ * leaving it standing.
  */
 export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | null {
   const from = req.from_height;
