@@ -257,11 +257,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       console.error('[or-stealth-transactions-store] owner check failed:', ownerErr);
       return jsonResponse({ error: 'Failed to verify connection' }, 500, cors);
     }
-    if (!ownerRow) {
+    // 404 for both "no such connection" and "belongs to someone else": the
+    // two are indistinguishable on purpose, so a caller cannot confirm a
+    // connection_id it does not own is real (OR-T1881, same fix #1213 landed
+    // on or-stealth-transactions-list).
+    if (!ownerRow || (ownerRow.app_user_id as string) !== body.app_user_id) {
       return jsonResponse({ error: 'Connection not found' }, 404, cors);
-    }
-    if ((ownerRow.app_user_id as string) !== body.app_user_id) {
-      return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
     // Stamp last_sync_attempt_at on entry so every sync attempt is recorded,
