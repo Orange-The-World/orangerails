@@ -153,20 +153,24 @@ Deno.test('DL-0608: or-stealth-transactions-store -- cuids pass isValidAppUserId
 // AND their max block_height exceeds the stored cursor. Never advance to
 // the client-supplied scan tip (body.last_block_scanned). See inline
 // comments in index.ts for the full rationale.
+//
+// The fourth argument, the height the client scanned contiguously, is
+// required. These cases are not about the OR-T1120 ceiling, so they pass a
+// value where it cannot bite, and say so rather than relying on a default.
 
 Deno.test('deriveResponseCursor: advances cursor when rows inserted and block exceeds stored', () => {
   assertEquals(
-    deriveResponseCursor(null, 3, 500),
+    deriveResponseCursor(null, 3, 500, 500),
     500,
     'null stored cursor with inserts advances to maxBlock',
   );
   assertEquals(
-    deriveResponseCursor(100, 2, 150),
+    deriveResponseCursor(100, 2, 150, 150),
     150,
     'advances past stored cursor when maxBlock is higher',
   );
   assertEquals(
-    deriveResponseCursor(0, 1, 1),
+    deriveResponseCursor(0, 1, 1, 1),
     1,
     'advances from block 0 to block 1',
   );
@@ -174,7 +178,7 @@ Deno.test('deriveResponseCursor: advances cursor when rows inserted and block ex
 
 Deno.test('deriveResponseCursor: returns null on fresh connection with no inserts', () => {
   assertEquals(
-    deriveResponseCursor(null, 0, -1),
+    deriveResponseCursor(null, 0, -1, 900_000),
     null,
     'fresh connection with zero inserts must return null, not -1',
   );
@@ -182,12 +186,12 @@ Deno.test('deriveResponseCursor: returns null on fresh connection with no insert
 
 Deno.test('deriveResponseCursor: preserves stored cursor when no rows inserted', () => {
   assertEquals(
-    deriveResponseCursor(100, 0, -1),
+    deriveResponseCursor(100, 0, -1, 900_000),
     100,
     'zero inserts keeps stored cursor unchanged',
   );
   assertEquals(
-    deriveResponseCursor(0, 0, -1),
+    deriveResponseCursor(0, 0, -1, 900_000),
     0,
     'zero inserts at cursor=0 still returns 0',
   );
@@ -195,12 +199,12 @@ Deno.test('deriveResponseCursor: preserves stored cursor when no rows inserted',
 
 Deno.test('deriveResponseCursor: does not advance when maxBlock does not exceed stored cursor', () => {
   assertEquals(
-    deriveResponseCursor(500, 3, 400),
+    deriveResponseCursor(500, 3, 400, 400),
     500,
     'lower maxBlock preserves cursor even with inserts',
   );
   assertEquals(
-    deriveResponseCursor(500, 3, 500),
+    deriveResponseCursor(500, 3, 500, 500),
     500,
     'equal maxBlock does not advance (strictly greater required)',
   );
@@ -212,12 +216,12 @@ Deno.test('deriveResponseCursor: client scan tip cannot move cursor without actu
   // were inserted (all dupes or empty batch), the cursor does not move
   // even when the caller claims they scanned to block 9999.
   assertEquals(
-    deriveResponseCursor(100, 0, 9999),
+    deriveResponseCursor(100, 0, 9999, 9999),
     100,
     'zero inserts: cursor stays at 100 regardless of maxBlock argument',
   );
   assertEquals(
-    deriveResponseCursor(null, 0, 9999),
+    deriveResponseCursor(null, 0, 9999, 9999),
     null,
     'zero inserts on fresh connection: cursor stays null regardless of maxBlock argument',
   );
@@ -292,9 +296,13 @@ Deno.test('deriveResponseCursor: the reported cursor carries the same bound as t
     900_002,
     'bound at or below the stored cursor: the cursor does not move at all',
   );
+  // The unbounded advance is still reachable, but only by asking for it. The
+  // parameter used to default to undefined, so a caller that merely forgot the
+  // argument got this same behaviour with nothing to show for it. Passing
+  // undefined here is that code path, chosen out loud where a reviewer sees it.
   assertEquals(
-    deriveResponseCursor(100, 2, 150),
+    deriveResponseCursor(100, 2, 150, undefined),
     150,
-    'three-argument calls keep their existing meaning',
+    'an explicit undefined selects the unbounded advance',
   );
 });

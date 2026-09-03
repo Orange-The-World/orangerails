@@ -2324,6 +2324,11 @@ describe('stealth sync , the abort gap and what may be uploaded (OR-T1120)', () 
     const filterA = new Uint8Array([0xb1]);
     const filterC = new Uint8Array([0xb3]);
 
+    // Every height the filter fetcher is asked for, in the order it is asked.
+    // Used below to prove the run really had something above the gap to trim,
+    // rather than passing because the extension pass found nothing up there.
+    const heightsAsked: number[] = [];
+
     const result = await runSync({
       envelope,
       orStealthKey,
@@ -2331,6 +2336,7 @@ describe('stealth sync , the abort gap and what may be uploaded (OR-T1120)', () 
       lastBlockScanned: 800_000,
       fetchTip: async () => 800_004 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
+        heightsAsked.push(h);
         if (h === 800_001) return { height: h, blockHashHex: hashHexA, filter: filterA };
         // A PERMANENT failure. opts.fetchFilter is the layer that retries, so a
         // throw here is exactly what the orchestrator sees once attempts are
@@ -2359,6 +2365,25 @@ describe('stealth sync , the abort gap and what may be uploaded (OR-T1120)', () 
 
     // The abort is real and not merely assumed: the run names the height that failed.
     expect(result.filterFetchError?.failedHeight).toBe(800_002);
+
+    // WHAT MAKES THIS CASE DISCRIMINATING, asserted rather than assumed.
+    //
+    // The assertions further down only fail on the parent commit if the run
+    // actually produced an extension-pass hit at 800_003. Two things have to
+    // hold for that, and neither is guaranteed by the fixture on its own:
+    //
+    // 1. The filter at 800_003 was read. The initial scan dispatches it
+    //    concurrently with the abort at 800_002, and the extension pass re-reads
+    //    it on a cache miss, so it should be asked for either way. If it were
+    //    never asked there would be no filter above the gap to match, the trim
+    //    would remove nothing, and every assertion below would hold on the
+    //    parent commit too.
+    expect(heightsAsked).toContain(800_003);
+    // 2. The rolling-window extension pass ran. It derives index 4, and index 4
+    //    is the only thing that can match 800_003 at all: the initial scan's
+    //    window stops at index 3. windowExhausted is set on entry to that loop,
+    //    so it is the honest signal that the pass happened.
+    expect(result.windowExhausted).toBe(true);
 
     // The cursor stops below the gap. This part was already correct.
     expect(result.lastBlockScanned).toBe(800_001);
