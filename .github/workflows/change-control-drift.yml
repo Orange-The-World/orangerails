@@ -22,6 +22,20 @@ on:
     # is a run that silently did not happen today.
     - cron: '17 11 * * *'
   workflow_dispatch:
+  # OR-T1738, and the CTO ruling on OR-T1746. workflow_dispatch is only offered
+  # once a workflow is on the default branch, so before this file merges there is
+  # no way to run the publish job at all, and the first baseline cannot be seeded
+  # from the workflow's own read. This second trigger is that way in, and it
+  # stays afterwards because every future re-baseline needs it too: no always-on
+  # seat here holds a workflow-dispatch tool, so without it a re-baseline always
+  # ends at a person at the Actions tab.
+  #
+  # ONE exact branch name, no glob and no second entry. The publish job below
+  # tests the ref as well as the event, so widening this list does not by itself
+  # widen where the elevated job can run.
+  push:
+    branches:
+      - 'ops/change-control-seed'
   pull_request:
     paths:
       - '.github/workflows/change-control-drift.yml'
@@ -220,7 +234,16 @@ jobs:
     # read would fail there for a reason that has nothing to do with this
     # repository's settings. An outside contributor should not be blocked by a
     # check about our own change control.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    #
+    # It also does not run on the ops/change-control-seed push. That exclusion
+    # is deliberate and it is NOT a pass. The seed push exists only to publish a
+    # reading, and that branch is cut from a commit a pull request is already
+    # evaluating, so this job would post a SECOND check-run under this same name
+    # on that same commit. Two runs with one name on one sha is how a merge gate
+    # gets read wrong. Drift is evaluated by the daily schedule, by the
+    # pull_request trigger and by a manual dispatch. Nothing about a seed push
+    # says the live settings match the baseline.
+    if: github.event_name != 'push' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -290,8 +313,9 @@ jobs:
               echo "is nothing to compare the reading above against. This is **not** a pass and"
               echo "**not** a drift."
               echo ""
-              echo "To seed it: run this workflow from the Actions tab (Run workflow). The"
-              echo "publish job writes the same reading to"
+              echo "To seed it, either push the branch \`ops/change-control-seed\` or run"
+              echo "this workflow from the Actions tab (Run workflow). Either one runs the"
+              echo "publish job, which writes the same reading to"
               echo "\`ops/change-control/live-reading.json\` on the"
               echo "\`ops/change-control-readings\` branch, where an ordinary repository file"
               echo "read returns it with no shell, no artifact download and no log access."
@@ -320,8 +344,10 @@ jobs:
               echo '```'
               echo ""
               echo "If the change was intended, update the baseline in a pull request so the"
-              echo "old and new values are reviewed rather than absorbed. Run this workflow"
-              echo "from the Actions tab first: the publish job puts the new reading in"
+              echo "old and new values are reviewed rather than absorbed. Get the new"
+              echo "reading first, by pushing \`ops/change-control-seed\` or by dispatching"
+              echo "this workflow from the Actions tab: the publish job puts the new"
+              echo "reading in"
               echo "\`ops/change-control/live-reading.json\` on the"
               echo "\`ops/change-control-readings\` branch, so the values that land in the"
               echo "baseline are copied from the workflow's own read and not from a message,"
@@ -351,13 +377,31 @@ jobs:
   # ones somebody looked at, and a diff is what "looked at" means.
   #
   # PERMISSION, deliberately narrow. contents: write is declared HERE, at job
-  # level, on a job that runs on workflow_dispatch and nothing else. The
-  # workflow-level block stays read only, so no scheduled run and no
+  # level. The workflow-level block stays read only, so no scheduled run and no
   # pull_request run, from a fork or otherwise, can reach a token that can
-  # write. A fork cannot dispatch a workflow: workflow_dispatch is available
-  # only to an identity with write access on a branch of this repository, and
-  # the branch this job pushes to is fixed in this file rather than taken from
-  # an input.
+  # write.
+  #
+  # TWO events can reach this job and only two: a manual workflow_dispatch, and
+  # a push to the single branch ops/change-control-seed. The condition below
+  # names both, and it tests the REF and not only the event, so if the trigger
+  # list at the top of this file is ever widened by a later hand this job still
+  # refuses to run anywhere else.
+  #
+  # A fork can reach neither. workflow_dispatch is offered only to an identity
+  # with write access on a branch of this repository, and a fork's pushes land
+  # on the fork, so they raise no push event here.
+  #
+  # THE HONEST BAR, said plainly rather than claimed away: what stands in front
+  # of this job is push access to this repository, not the shape of the trigger.
+  # A push event runs the workflow definition present in the pushed commit, so
+  # whoever can push to that branch controls this job's code for that run. That
+  # is already true of any same-repo pull_request run that declares its own
+  # permissions block, so the seed trigger adds no capability that push access
+  # did not already carry. What it adds is a way to reach it by accident rather
+  # than on purpose, and the blast radius of an accidental run is one JSON
+  # reading on a branch that carries nothing else.
+  #
+  # The branch and the path this job writes are literals below, never inputs.
   # ---------------------------------------------------------------------------
   publish-reading:
     name: Publish the live reading where a seat with no shell can read it
@@ -372,7 +416,7 @@ jobs:
     # no baseline is committed, which is the run where the reading is needed
     # most, so gating publication on it would make the seeding case the one case
     # that publishes nothing.
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/ops/change-control-seed'
     permissions:
       contents: write
       # A job-level block replaces the whole set rather than adding to it, so
