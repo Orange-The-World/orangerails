@@ -142,78 +142,86 @@ Deno.test('DL-0608: or-stealth-transactions-store -- cuids pass isValidAppUserId
   }
 });
 
-// ── deriveResponseCursor (DL-0419 trackMax-inside-guard) ──────────────
+// ── deriveResponseCursor (DL-0419 trackMax-inside-guard, DL-1188 zero-match) ──
 //
-// Semantics: advance the cursor only when new rows were actually inserted
-// AND their max block_height exceeds the stored cursor. Never advance to
-// the client-supplied scan tip (body.last_block_scanned). See inline
-// comments in index.ts for the full rationale.
+// Semantics (updated for DL-1188):
+//   inserted > 0: advance to maxBlockInserted only (not scanTip). Preserves the
+//                 DL-0419 guard: never jump past uncommitted items in the range.
+//   inserted === 0: advance to scanTip (body.last_block_scanned) so the same
+//                   empty range is not rescanned forever (DL-1188 fix). Safe:
+//                   no uncommitted items exist in the range.
+//   Forward-only in both paths: candidate must strictly exceed storedCursor.
 
-Deno.test('deriveResponseCursor: advances cursor when rows inserted and block exceeds stored', () => {
+Deno.test('deriveResponseCursor: advances to maxBlockInserted when rows inserted', () => {
   assertEquals(
-    deriveResponseCursor(null, 3, 500),
+    deriveResponseCursor(null, 3, 500, 600),
     500,
-    'null stored cursor with inserts advances to maxBlock',
+    'null stored cursor with inserts advances to maxBlockInserted, not scanTip',
   );
   assertEquals(
-    deriveResponseCursor(100, 2, 150),
+    deriveResponseCursor(100, 2, 150, 200),
     150,
-    'advances past stored cursor when maxBlock is higher',
+    'advances to maxBlockInserted (not scanTip) when rows landed',
   );
   assertEquals(
-    deriveResponseCursor(0, 1, 1),
+    deriveResponseCursor(0, 1, 1, 5),
     1,
-    'advances from block 0 to block 1',
+    'advances from block 0 to maxBlockInserted=1, not scanTip=5',
   );
 });
 
-Deno.test('deriveResponseCursor: returns null on fresh connection with no inserts', () => {
+Deno.test('deriveResponseCursor: zero-match scan advances cursor to scan tip (DL-1188)', () => {
+  // When zero rows are inserted (empty scan or all-duplicate batch), the cursor
+  // must advance to the scan tip so the same range is not rescanned forever.
   assertEquals(
-    deriveResponseCursor(null, 0, -1),
-    null,
-    'fresh connection with zero inserts must return null, not -1',
-  );
-});
-
-Deno.test('deriveResponseCursor: preserves stored cursor when no rows inserted', () => {
-  assertEquals(
-    deriveResponseCursor(100, 0, -1),
+    deriveResponseCursor(null, 0, -1, 100),
     100,
-    'zero inserts keeps stored cursor unchanged',
+    'fresh connection zero-match scan: advances to scan tip 100',
   );
   assertEquals(
-    deriveResponseCursor(0, 0, -1),
-    0,
-    'zero inserts at cursor=0 still returns 0',
-  );
-});
-
-Deno.test('deriveResponseCursor: does not advance when maxBlock does not exceed stored cursor', () => {
-  assertEquals(
-    deriveResponseCursor(500, 3, 400),
-    500,
-    'lower maxBlock preserves cursor even with inserts',
+    deriveResponseCursor(100, 0, -1, 200),
+    200,
+    'zero inserts with scan tip 200 advances past stored cursor 100',
   );
   assertEquals(
-    deriveResponseCursor(500, 3, 500),
-    500,
-    'equal maxBlock does not advance (strictly greater required)',
+    deriveResponseCursor(0, 0, -1, 50),
+    50,
+    'zero inserts at cursor=0 advances to scan tip 50',
   );
 });
 
-Deno.test('deriveResponseCursor: client scan tip cannot move cursor without actual inserts', () => {
-  // The DL-0015 bug was advancing the cursor unconditionally to
-  // body.last_block_scanned. This test confirms the guard: if no rows
-  // were inserted (all dupes or empty batch), the cursor does not move
-  // even when the caller claims they scanned to block 9999.
+Deno.test('deriveResponseCursor: forward-only guard applies to both inserted and zero-match paths', () => {
+  // inserted > 0 path: maxBlockInserted must exceed storedCursor.
   assertEquals(
-    deriveResponseCursor(100, 0, 9999),
-    100,
-    'zero inserts: cursor stays at 100 regardless of maxBlock argument',
+    deriveResponseCursor(500, 3, 400, 600),
+    500,
+    'lower maxBlockInserted preserves cursor even with inserts',
   );
   assertEquals(
-    deriveResponseCursor(null, 0, 9999),
-    null,
-    'zero inserts on fresh connection: cursor stays null regardless of maxBlock argument',
+    deriveResponseCursor(500, 3, 500, 600),
+    500,
+    'equal maxBlockInserted does not advance (strictly greater required)',
+  );
+  // inserted === 0 path: scanTip must exceed storedCursor.
+  assertEquals(
+    deriveResponseCursor(500, 0, -1, 400),
+    500,
+    'zero inserts: scan tip below stored cursor -- cursor stays',
+  );
+  assertEquals(
+    deriveResponseCursor(500, 0, -1, 500),
+    500,
+    'zero inserts: scan tip equal to stored cursor -- cursor stays',
+  );
+});
+
+Deno.test('deriveResponseCursor: inserted path uses maxBlockInserted not scanTip (DL-0419 guard)', () => {
+  // When rows are inserted, the cursor advances to maxBlockInserted only.
+  // Using scanTip when rows were inserted would be the DL-0015 bug: jumping
+  // past items in the scan range that were not committed by this batch.
+  assertEquals(
+    deriveResponseCursor(100, 5, 150, 9999),
+    150,
+    'inserted rows: advances to maxBlockInserted=150, not scanTip=9999',
   );
 });

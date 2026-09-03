@@ -14,14 +14,14 @@
  * learn nothing else from the value. It is stored and compared as an opaque
  * string; nothing here decodes it.
  *
- * Cursor semantics (DL-0419 trackMax-inside-guard):
- *   last_block_scanned on the stealth_connections row advances only when new
- *   rows are actually inserted, and only to max(block_height) of those rows.
- *   Advancing unconditionally to the client-supplied scan tip (body.last_block_scanned)
- *   is the DL-0015 bug applied to the sealed-tx path: the cursor jumps past
- *   items that were never committed, silently losing them on the next sync.
- *   or-stealth-envelope-update owns the scan-tip cursor (always called in step
- *   4 of the widget sync flow, after this function returns OK).
+ * Cursor semantics (DL-0419 trackMax-inside-guard, DL-1188 zero-match advance):
+ *   When rows are inserted: last_block_scanned advances to max(block_height) of
+ *   inserted rows only, not the scan tip. This preserves the DL-0419 guard:
+ *   never jump past uncommitted items in the scan range.
+ *   When zero rows are inserted (empty scan or all-duplicate batch): advances to
+ *   max(block_height) of the submitted batch (batchTip), not body.last_block_scanned.
+ *   Bounded to submitted data, not client-dictated. (DL-1188). Safe: no uncommitted
+ *   items exist in the range to lose.
  *
  * POST body:
  *   connection_id:        string (uuid)
@@ -114,21 +114,32 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
 }
 
 /**
- * Response cursor derivation (DL-0419). Returns the effective stored cursor
- * AFTER this call, derived only from stored state, never from the client scan
- * tip (body.last_block_scanned). Advances to maxBlockInserted only when new
- * rows landed and that height exceeds the stored cursor; otherwise returns the
- * stored cursor unchanged, which is null on a connection that has never
- * scanned. Mirrors the forward-only patch guard so the value returned to the
- * caller always equals the value persisted.
+ * Response cursor derivation (DL-0419, DL-1188). Returns the effective stored
+ * cursor AFTER this call, mirroring the forward-only patch guard so the value
+ * returned to the caller always equals the value persisted.
+ *
+ * When rows were inserted: advance to maxBlockInserted (the highest block that
+ * actually landed). Never advance to scanTip here -- that would be the DL-0015
+ * bug applied to the sealed-tx path, jumping past items scanned but not in
+ * this batch.
+ *
+ * When zero rows were inserted (empty scan or all-duplicate batch): advance to
+ * batchTip (max(block_height) of the submitted batch, NOT body.last_block_scanned).
+ * The range was fully scanned with no new outputs; staying at the old cursor
+ * causes infinite rescan (DL-1188). Safe: no uncommitted items exist in the range.
+ *
+ * Forward-only guard applies in both paths: candidate must strictly exceed
+ * storedCursor, or the cursor stays unchanged.
  */
 export function deriveResponseCursor(
   storedCursor: number | null,
   inserted: number,
   maxBlockInserted: number,
+  batchTip: number,
 ): number | null {
-  const advanced = inserted > 0 && maxBlockInserted > (storedCursor ?? -1);
-  return advanced ? maxBlockInserted : storedCursor;
+  const candidate = inserted > 0 ? maxBlockInserted : batchTip;
+  const prev = storedCursor ?? -1;
+  return candidate > prev ? candidate : storedCursor;
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -326,13 +337,20 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       }
     }
 
-    // Forward-only cursor guard (trackMax-inside-guard). Advance last_block_scanned
-    // only when new rows were inserted AND their max block_height exceeds the
-    // stored cursor. Always update last_sync_at so the connection shows activity.
+    // Forward-only cursor guard (DL-0419 trackMax-inside-guard, DL-1188 zero-match).
+    // When rows were inserted: advance to max(block_height) of inserted rows.
+    // When zero rows were inserted from a non-empty batch (all-duplicate): advance to
+    // max(block_height) of the submitted batch. This is server-validated and cannot
+    // be spoofed via the client-supplied body.last_block_scanned field.
+    // When the batch is empty (total === 0): batchTip = -1, no advance. Always update last_sync_at.
     const storedCursor = (ownerRow.last_block_scanned as number | null) ?? -1;
+    const batchTip = total > 0
+      ? Math.max(...(body.sealed_transactions as SealedTransactionInput[]).map(r => r.block_height as number))
+      : -1;
+    const cursorCandidate = inserted > 0 ? maxBlockInserted : batchTip;
     const cursorPatch: Record<string, unknown> = { last_sync_at: new Date().toISOString() };
-    if (inserted > 0 && maxBlockInserted > storedCursor) {
-      cursorPatch.last_block_scanned = maxBlockInserted;
+    if (cursorCandidate > storedCursor) {
+      cursorPatch.last_block_scanned = cursorCandidate;
     }
 
     const { error: updErr } = await ctx.serviceClient
@@ -353,6 +371,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       ownerRow.last_block_scanned as number | null,
       inserted,
       maxBlockInserted,
+      batchTip,
     );
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,
