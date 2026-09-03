@@ -220,10 +220,21 @@ a column that could hold a Lightning payment value, and report which projects
 were reached: a project that could not be reached is not a project that came
 back clean.
 
-Seven consequences, all checkable at review. Read this as the complete list as it
-stands: if a proposal satisfies every bullet and still lets the server learn the
+Seven consequences, all checkable at review. Read this as the complete list **for
+the LDK payment record surface** as it stands: if a proposal touches that surface,
+satisfies every bullet, and still lets the server learn a Lightning payment
 amount, that is a defect in this list, and the fix is an edit to this section on
-the bar set in the last paragraph, not a judgement made at review time.
+the bar set at the close of it (a founder decision plus an Auditor pass), not a
+judgement made at review time.
+
+That scope is deliberate and it cuts both ways. A cleartext amount that reaches
+the server by some **other** surface is out of this list's reach and is governed
+elsewhere, so a green walk of the seven bullets is a statement about the LDK
+payment record and not a clean bill of health for the product. What the list does
+bind wherever the row lands is the seventh consequence: a Lightning payment
+amount is never recorded on a pre-existing payment, billing or invoice surface,
+and reusing a table that already exists relaxes nothing. Narrowing the closedness
+claim is not licence to route a Lightning amount around it.
 
 - **No amount column.** A payment record row carries a blind index, a seal
   version, the IV and the ciphertext, and nothing that describes value. If a
