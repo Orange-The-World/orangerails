@@ -200,6 +200,11 @@ function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) 
     newRecoveryCiphertext: "recovery-ciphertext-v1",
     newVerifierCiphertext: "verifier-v1",
     vaultKeyVersion: 2,
+    // Null is the ordinary case: a vault with no PQC keys yet. The tests that
+    // assert the meta write matches the four columns exactly are what prove
+    // these are not sent as null, which would overwrite real ciphertext.
+    newKemSecretWrapped: null as string | null,
+    newSigSecretWrapped: null as string | null,
     migrateCredentialsCiphertext: async (c: string) => `${c}-migrated`,
     migrateTransactionCiphertext: async (c: string) => `${c}-migrated`,
     clearMigrationKeys,
@@ -289,6 +294,53 @@ describe("vault recovery: the rotated meta write", () => {
       vault_verifier_ciphertext: "verifier-v1",
       vault_key_version: 2,
     });
+  });
+
+  it("carries the re-wrapped PQC secrets in the SAME statement as the wrappers", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      newKemSecretWrapped: "kem-wrapped-v1",
+      newSigSecretWrapped: "sig-wrapped-v1",
+    });
+
+    // One statement, not two. A second write would leave a window in which the
+    // wrappers have rotated and the PQC secrets are still under the old MEK,
+    // and anything that interrupted that window would orphan them for good.
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(1);
+    expect(metaUpdates[0]?.values).toEqual({
+      enc_mek_ciphertext: "enc-mek-v1",
+      recovery_ciphertext: "recovery-ciphertext-v1",
+      vault_verifier_ciphertext: "verifier-v1",
+      vault_key_version: 2,
+      kem_secret_wrapped: "kem-wrapped-v1",
+      sig_secret_wrapped: "sig-wrapped-v1",
+    });
+  });
+
+  it("never writes null over a stored PQC secret", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    // Only one of the two is present, which is the shape that catches a naive
+    // spread: the absent one must be left out of the statement entirely rather
+    // than sent as null and clearing a column that may hold real ciphertext.
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      newKemSecretWrapped: "kem-wrapped-v1",
+      newSigSecretWrapped: null,
+    });
+
+    const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdate?.values).toEqual({
+      enc_mek_ciphertext: "enc-mek-v1",
+      recovery_ciphertext: "recovery-ciphertext-v1",
+      vault_verifier_ciphertext: "verifier-v1",
+      vault_key_version: 2,
+      kem_secret_wrapped: "kem-wrapped-v1",
+    });
+    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_secret_wrapped");
   });
 
   it("migrates every row BEFORE the meta write, never after", async () => {
