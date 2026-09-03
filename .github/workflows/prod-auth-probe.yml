@@ -64,7 +64,7 @@ jobs:
       # A domain we control, with no account behind this address. It is never
       # created, and the probe would fail loudly if it ever authenticated.
       PROBE_EMAIL: no-such-account.ci-probe@orangerails.com
-      FORCE_BAD_KEY: ${{ github.event.inputs.force_bad_key || 'false' }}
+      FORCE_BAD_KEY: 'true'
     steps:
       # Extraction and probe are ONE step on purpose: the key never crosses a
       # step boundary, so it is never written to GITHUB_OUTPUT or to any file.
