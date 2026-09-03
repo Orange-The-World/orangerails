@@ -336,7 +336,7 @@ function SignupPage() {
             onClick={() => navigate({ to: "/app" })}
             className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            I've saved it , enter the app
+            I've saved it, enter the app
           </button>
         </div>
       </div>
@@ -355,7 +355,7 @@ function SignupPage() {
           <p className="text-sm text-muted-foreground">
             {isResume
               ? "Your account is verified. Set your vault password to finish."
-              : "Zero-knowledge from day one. Your vault password never leaves this browser."}
+              : "Your vault password never leaves this browser. It locks your data here before anything reaches us."}
           </p>
         </div>
 
@@ -408,8 +408,8 @@ function SignupPage() {
               Vault password <span className="text-orange-500">*</span>
             </label>
             <p className="text-xs text-muted-foreground">
-              Separate from your account password. Encrypts all your data , we never see it and
-              cannot reset it.
+              Separate from your account password. It locks your data in this browser, and
+              we cannot reset it.
             </p>
 
             {/* Passphrase generator , shown first as the recommended path */}
