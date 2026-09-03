@@ -10,11 +10,32 @@
 -- before a fixed cutoff, and to record exactly how many we chose not to send.
 --
 -- ORDERING. This must run before the schedule exists, not merely before the
--- first tick. The apply runner walks supabase/migrations/*.sql in filename
--- order, one round trip per file, so version 20260824105000 is guaranteed to
--- run ahead of both 20260824110000 (the payload backfill) and 20260824120000
--- (the schedule). The ordering is therefore a property of the filenames rather
--- than of whoever runs the apply.
+-- first tick.
+--
+-- CORRECTION, 2026-08-27, DL-1596. The rest of this paragraph used to read:
+-- "The apply runner walks supabase/migrations/*.sql in filename order, one
+-- round trip per file, so version 20260824105000 is guaranteed to run ahead of
+-- both 20260824110000 (the payload backfill) and 20260824120000 (the
+-- schedule). The ordering is therefore a property of the filenames rather than
+-- of whoever runs the apply." THAT ARGUMENT IS FALSIFIED. Do not cite it as a
+-- control anywhere. Filename order orders the files inside ONE run. It cannot
+-- reorder across runs, and every environment we own is already partly applied.
+--
+-- It failed on this very pair. 20260824120000 merged first, in #844 and #846,
+-- and was applied. This file merged about forty minutes later in #850 carrying
+-- a LOWER version and was not. For that window the dispatcher schedule was live
+-- and the retirement this file performs had not run. Dev was unharmed only
+-- because webhook_delivery on dev held 0 rows, which is luck and not a control.
+--
+-- The control that now exists is the out-of-order gate in
+-- .github/workflows/supabase-deploy.yml. Before anything is applied it reads the
+-- ledger and refuses if a pending migration numbers below the highest version
+-- already applied on that target, naming the file and that version. Going ahead
+-- is a deliberate dispatch with allow_out_of_order ticked, not a retry.
+--
+-- If you write a migration whose safety depends on running before another one,
+-- its number is not what makes that happen. Say so in the header and make the
+-- dependency explicit in the SQL.
 --
 -- HOW A ROW IS RETIRED, and why not succeeded_at. Setting succeeded_at would
 -- record these as delivered. They were never sent, so every future count of

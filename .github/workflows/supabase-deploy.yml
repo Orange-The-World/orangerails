@@ -34,6 +34,11 @@ on:
         required: false
         default: false
         type: boolean
+      allow_out_of_order:
+        description: 'Apply even if a pending migration numbers BELOW the highest version already applied on this target (DL-1596). Off by default. Pushes can never turn this on.'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: pages-${{ github.ref }}
@@ -1078,6 +1083,137 @@ jobs:
             exit 1
           fi
           echo "Actor '$ACTOR' is on $VAR_NAME. Proceeding on $TARGET_ENV."
+
+      - name: Out-of-order migration gate (DL-1596)
+        # Filename order is a WITHIN-RUN property of the loop below. It is not a
+        # guarantee across runs, and every environment we own is already partly
+        # applied. So a file that merges late while numbering early runs after the
+        # migrations it was written to precede, silently, with a green run and a
+        # healthy looking ledger. This step is what makes that case visible and
+        # deliberate. It runs BEFORE the apply, so a refusal means nothing ran.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+          ALLOW_OUT_OF_ORDER: ${{ (github.event_name == 'workflow_dispatch' && inputs.allow_out_of_order) && 'true' || 'false' }}
+        run: |
+          set -uo pipefail
+
+          # UNKNOWN and CLEAN must never share a message. "I could not look" is a
+          # different fact from "I looked and it is fine", and reporting the first
+          # as the second is the failure this whole gate exists to prevent.
+          unknown () {
+            {
+              echo "## :grey_question: Migration ORDER state UNKNOWN on \`${SUPABASE_REF:-unresolved}\`"
+              echo ""
+              echo "$1"
+              echo ""
+              echo "This is **not** a report that the order is safe. The gate could not"
+              echo "read the ledger, so nothing has been applied by this run."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::out-of-order gate UNKNOWN on ${SUPABASE_REF:-unresolved}: $1"
+            exit 1
+          }
+
+          MIG_DIR="supabase/migrations"
+          if [ ! -d "$MIG_DIR" ]; then
+            echo "no migrations directory; nothing can be out of order"
+            exit 0
+          fi
+          [ -n "${SUPABASE_REF}" ] || unknown "The target job produced no supabase_ref output."
+
+          PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
+          trap 'rm -f "$PAYLOAD"' EXIT
+          jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
+
+          # --fail-with-body, not bare -sS: without it curl exits 0 on a 401 or 500,
+          # the error body parses as JSON, .[].version yields nothing, and an empty
+          # applied set makes every file look like a brand new migration with nothing
+          # to be out of order against. A stale token would then read as all clear.
+          RESPONSE=""
+          HTTP_OK=0
+          for attempt in 1 2 3; do
+            if RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$PAYLOAD"); then
+              HTTP_OK=1
+              break
+            fi
+            echo "ledger read attempt ${attempt}/3 did not return a success status"
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          # The body is never echoed: on an auth failure it is the one place a
+          # token shaped string could reach a public build log.
+          [ "$HTTP_OK" -eq 1 ] || unknown "The Supabase Management API did not return a success status after 3 attempts. Most often an expired or rotated SUPABASE_ACCESS_TOKEN, or the project being paused."
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            unknown "The ledger query returned a success status but not a JSON array of rows."
+          fi
+
+          APPLIED=$(echo "$RESPONSE" | jq -r '.[].version' | sort -u)
+          MAX_APPLIED=$(echo "$APPLIED" | sed '/^$/d' | tail -1)
+          if [ -z "$MAX_APPLIED" ]; then
+            echo "ledger is empty on ${SUPABASE_REF}: every migration is new, nothing can be out of order"
+            exit 0
+          fi
+
+          BACKWARDS=""
+          COUNT=0
+          for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
+            BASENAME=$(basename "$FILE")
+            VERSION="${BASENAME%%_*}"
+            if echo "$APPLIED" | grep -qx "$VERSION"; then
+              continue
+            fi
+            # Versions are fixed width timestamps, so a string compare is a
+            # numeric compare here and stays correct if one ever gains a suffix.
+            if [ "$VERSION" \< "$MAX_APPLIED" ]; then
+              echo "OUT OF ORDER on ${SUPABASE_REF}: ${BASENAME} numbers below ${MAX_APPLIED}"
+              BACKWARDS="${BACKWARDS}- \`${BASENAME}\`\n"
+              COUNT=$((COUNT + 1))
+            fi
+          done
+
+          echo "checked $(ls "$MIG_DIR"/*.sql 2>/dev/null | wc -l) migration file(s) against ${SUPABASE_REF}; highest applied version ${MAX_APPLIED}; ${COUNT} out of order"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No pending migration numbers below ${MAX_APPLIED}. Order is safe." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "${ALLOW_OUT_OF_ORDER}" = "true" ]; then
+            {
+              echo "## :warning: ${COUNT} out-of-order migration(s) being applied DELIBERATELY on \`${SUPABASE_REF}\`"
+              echo ""
+              echo "Highest version already applied: \`${MAX_APPLIED}\`"
+              echo ""
+              printf '%b' "${BACKWARDS}"
+              echo ""
+              echo "\`allow_out_of_order\` was ticked on this dispatch by \`${{ github.actor }}\`, so the apply proceeds."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::${COUNT} migration(s) number below ${MAX_APPLIED} on ${SUPABASE_REF} and are being applied deliberately (allow_out_of_order=true)."
+            exit 0
+          fi
+
+          {
+            echo "## :no_entry: ${COUNT} out-of-order migration(s) on \`${SUPABASE_REF}\` -- apply REFUSED"
+            echo ""
+            echo "Highest version already applied: \`${MAX_APPLIED}\`"
+            echo ""
+            printf '%b' "${BACKWARDS}"
+            echo ""
+            echo "Filename order only orders the files inside ONE run. Each of these numbers"
+            echo "below a version that has already run, so applying them now runs them after"
+            echo "migrations they were written to precede. **Nothing was applied.**"
+            echo ""
+            echo "Two ways forward, and both are decisions rather than retries:"
+            echo ""
+            echo "1. Renumber the file above \`${MAX_APPLIED}\` if its content is order sensitive."
+            echo "2. Re-run this workflow via workflow_dispatch with **allow_out_of_order** ticked,"
+            echo "   having decided the order is safe, and record why on the ticket."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::${COUNT} pending migration(s) number below the highest applied version ${MAX_APPLIED} on ${SUPABASE_REF}. Apply REFUSED (DL-1596). Dispatch with allow_out_of_order=true to override deliberately."
+          exit 1
 
       - name: Apply pending DB migrations via Management API
         # The Supabase CLI's db push requires a linked project + DB password we do not
