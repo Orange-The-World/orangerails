@@ -178,6 +178,89 @@ Superseded state needs no separate cleanup: an update to the same channel
 collides on the blind index and overwrites in place (§3.2), so there is no
 history pile to sweep.
 
+### 3.5 Payment records: the amount is sealed before it is written
+
+The mirror map (§2) and `seal.ts` both name payment records alongside
+channel-state backups, and no payment record path is implemented yet. When one
+is built, this is binding on it:
+
+> **The Lightning payment amount is sealed inside the envelope, client-side,
+> before it is written. It is never a column, never an index term, and never a
+> field the server can read. The same is true of every value that is a function
+> of the amount, including a routing fee, a bucket, a range, or any other
+> order-preserving encoding of it. Same envelope and same key custody as the
+> fields already sealed on this surface: AES-256-GCM, fresh IV, client-derived
+> key (`'or-ldk-v1'`), no server-side decrypt path.**
+
+This is a settled requirement, not an open design question, and it is written
+here because the wiring PR is reviewed against this document.
+
+**What is stored today: nothing.** No Lightning payment amount is stored
+anywhere in Orange Rails. There is no payment record type, table, column, view,
+function, RPC or edge function, and every seal and persist entry point on this
+surface throws `scaffold only`. The user-facing claim that we cannot read your
+financial data is therefore not contradicted by anything in the system as it
+stands. This section constrains work that has not been built yet. It is not a
+fix for a live exposure and should not be cited as evidence of one.
+
+Six consequences, all checkable at review. Read this as the complete list as it
+stands: if a proposal satisfies every bullet and still lets the server learn the
+amount, that is a defect in this list, and the fix is an edit to this section on
+the bar set in the last paragraph, not a judgement made at review time.
+
+- **No amount column.** A payment record row carries a blind index, a seal
+  version, the IV and the ciphertext, and nothing that describes value. If a
+  reviewer can name the column that holds the amount, the change is wrong.
+- **No fee column, and no other derived value in cleartext.** A routing fee is a
+  function of the amount, so a readable fee is an amount oracle: no amount
+  column plus a cleartext fee still tells the server roughly what was sent.
+  Every value derived from the amount, fee, total, balance and running sum
+  included, is sealed on exactly the same terms as the amount itself.
+- **No amount in a blind index.** The blind index exists to locate a row, and a
+  deterministic index over a value is a value oracle. Index terms stay on the
+  stable identifiers, as they do for channel state (§3).
+- **No bucket, no range, no order-preserving encoding.** A coarse bucket, a
+  magnitude band, or any encoding the server can compare or sort, is a value
+  oracle even though it is not the amount and describes no total. If the server
+  can put two payment records in value order from what it holds, the change is
+  wrong.
+- **Fixed-width serialization inside the envelope.** AES-256-GCM does not pad,
+  so ciphertext length is plaintext length. An amount serialized as decimal text
+  makes the sealed blob longer for a larger payment, and the server then reads
+  magnitude with no decrypt path at all. The amount is therefore serialized to a
+  fixed width, or the whole payment record is sealed as a fixed-size struct, so
+  that every payment record ciphertext is the same length whatever the value.
+  Until that holds, the claim in §6 (b) is true of the field and not of the
+  artifact.
+- **No server-side amount arithmetic.** Sums, balances and totals are computed
+  client-side after unsealing. A server that can add two amounts can read them.
+
+**How a reviewer checks this, without judgement.** Stated only as above, the
+check rests on what counts as describing value, and §3.3 is why that is not
+enough: `channel_state` and its unique index already exist in the dev database
+and the wiring PR ships zero DDL, so a reviewer holding the wiring PR can have
+no schema in the diff to check against. Two requirements turn the check into an
+enumeration:
+
+- **The payment record DDL arrives as a migration pull request in this
+  repository**, owned by the database steward, so the columns are in a diff a
+  reviewer can read. A payment record table that appears in a database without
+  one is itself the finding.
+- **The allowed column set is exactly** `user_id`, `payment_bidx`,
+  `seal_version`, `iv`, `ciphertext`, `created_at`, `updated_at`. Anything
+  outside that list fails, whatever it is named and whatever it is said to hold.
+  Widening the list is a change to this section, not a reviewer's call.
+
+The trade-off, stated rather than discovered later: sealing the amount means
+the server cannot sort, filter, aggregate or report on value. Any product
+surface that appears to need server-side totals is asking for the seal to be
+broken, and the answer is a client-side computation, not a cleartext column.
+
+What would make this wrong: nothing in the product. It is a customer-facing
+claim about what we can read, so it is not a performance trade to be revisited
+by an implementer. Changing it is a founder decision plus an Auditor pass, the
+same bar as any other change to the ZKA boundary.
+
 ## 4. Auth contract — `or-ldk-channel-state` edge function
 
 Enforced **before** the atomic SQL in §3 executes, so ownership can never land
@@ -246,6 +329,9 @@ answered here and traced at review against the implementation.
 - **(b) Server state** — every persisted blob is client-encrypted; the
   decryption key is HKDF-derived client-side (`'or-ldk-v1'`), never leaves the
   client. Server sees ciphertext + blind index only. No server-issued salt.
+  Includes the payment amount specifically (§3.5): it is inside the envelope,
+  not a column and not an index term. This is checked against the schema, not
+  only against the code.
 - **(c) Signing** — no signer or key material instantiated server-side at any
   point in the persistence path. All signing on-device.
 - **(d) Recovery** — full fund recovery from seed alone with Orange Rails infra
