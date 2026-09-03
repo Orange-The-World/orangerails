@@ -62,6 +62,22 @@ interface EnvelopeUpdateResponseBody {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Length of a canonical UUID in its hyphenated 8-4-4-4-12 form. */
+const UUID_LENGTH = 36;
+
+/**
+ * True only for a canonical UUID, and for nothing else.
+ *
+ * WHY THE LENGTH CHECK IS NOT REDUNDANT. JavaScript has no end-of-string
+ * anchor. Without the m flag, `$` matches at the end of the string OR
+ * immediately before a final newline, so the pattern above alone accepts a
+ * 37-character value that is a UUID followed by "\n". The length check is
+ * what makes this exact.
+ */
+export function isUuid(v: unknown): v is string {
+  return typeof v === 'string' && v.length === UUID_LENGTH && UUID_RE.test(v);
+}
+
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -87,7 +103,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const ctx = await authenticateRequestOrWidgetToken(req, body.widget_token);
     if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
-    if (!body.connection_id || !UUID_RE.test(body.connection_id)) {
+    if (!isUuid(body.connection_id)) {
       return jsonResponse({ error: 'connection_id (uuid) required' }, 400, cors);
     }
     if (!body.app_user_id || typeof body.app_user_id !== 'string') {
@@ -144,11 +160,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       console.error('[or-stealth-envelope-update] select failed:', selErr);
       return jsonResponse({ error: 'Failed to load stealth connection' }, 500, cors);
     }
-    if (!row) {
+    // 404 for both "no such connection" and "belongs to someone else": the
+    // two are indistinguishable on purpose, so a caller cannot confirm a
+    // connection_id it does not own is real (OR-T1881, same fix #1213 landed
+    // on or-stealth-transactions-list).
+    if (!row || (row.app_user_id as string) !== body.app_user_id) {
       return jsonResponse({ error: 'Connection not found' }, 404, cors);
-    }
-    if ((row.app_user_id as string) !== body.app_user_id) {
-      return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
     const cursorResult = await advanceCursor(
