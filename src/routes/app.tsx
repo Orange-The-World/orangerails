@@ -324,7 +324,17 @@ function AppHome() {
       // and it excludes an owner with no workspace_key_id and an owner with no
       // sig_public_key, which are the two cases the loop skipped with continue.
       // Fail closed is preserved by the function, not dropped here.
-      const { data: myAdminOf } = await supabase.rpc("list_coadmin_workspaces");
+      const { data: myAdminOf, error: myAdminOfErr } = await supabase.rpc(
+        "list_coadmin_workspaces",
+      );
+      if (myAdminOfErr) {
+        // A failed call must never look like "you are a co-admin of
+        // nothing". Destructure the error, log it, and surface a load
+        // failure distinct from an empty list rather than falling through
+        // silently the way this call used to.
+        console.error("Failed to load co-admin workspaces:", myAdminOfErr);
+        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
+      }
 
       const workspaces: WorkspaceOption[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
