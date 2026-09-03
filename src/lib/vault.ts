@@ -455,6 +455,47 @@ export async function assertMekEnvelopeReopens(
   }
 }
 
+/**
+ * Build the two envelopes a vault password change stores, and prove each one
+ * re-opens to the same MEK BEFORE either is handed to whatever will write it.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM THE CHECK ON THE WAY BACK, and why deleting
+ * either one as redundant would be wrong. They catch different faults:
+ *   - this one catches an envelope that was wrong the moment it was built, and
+ *     catches it while the previously stored pair is still intact, so throwing
+ *     here leaves the user exactly where they started;
+ *   - the caller's check on the bytes the database returned catches a write
+ *     that stored something other than what it was sent, which nothing on this
+ *     side of the wire can see.
+ * A password change discards the previous pair as soon as the new pair lands,
+ * and there is no server-side copy of the key by design, so an unusable
+ * envelope that reaches the write is a permanent lockout. Fail closed before
+ * the write rather than loudly after it.
+ *
+ * Returns both envelopes only if both re-open. Throws otherwise, having
+ * produced nothing the caller can write.
+ */
+export async function buildRewrappedMekEnvelopes(params: {
+  mekRaw: Uint8Array;
+  newKek: CryptoKey;
+  newRecoveryKek: CryptoKey;
+}): Promise<{ encMekCiphertext: string; recoveryCiphertext: string }> {
+  const { mekRaw, newKek, newRecoveryKek } = params;
+
+  const encMekCiphertext = await wrapMekBytes(mekRaw, newKek);
+  const recoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
+
+  await assertMekEnvelopeReopens("The new password key envelope", encMekCiphertext, newKek, mekRaw);
+  await assertMekEnvelopeReopens(
+    "The new recovery code envelope",
+    recoveryCiphertext,
+    newRecoveryKek,
+    mekRaw,
+  );
+
+  return { encMekCiphertext, recoveryCiphertext };
+}
+
 // ------------------------------------------------------------------
 // Recovery codes , 12-word offline backup for the MEK.
 // ------------------------------------------------------------------
