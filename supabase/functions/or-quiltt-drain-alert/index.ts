@@ -100,15 +100,23 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** Returns true if the message was sent successfully, false otherwise. */
-async function postZulipAlert(message: string): Promise<boolean> {
+/** Posts to Zulip. Returns {ok:true} on success, or {ok:false, error} naming the
+ *  cause (missing env var, HTTP status, or thrown message) so the caller can record
+ *  WHY a post failed, not just that it did. */
+async function postZulipAlert(message: string): Promise<{ ok: boolean; error?: string }> {
   const botEmail = Deno.env.get('ZULIP_BOT_EMAIL');
   const apiKey   = Deno.env.get('ZULIP_API_KEY');
   const apiUrl   = Deno.env.get('ZULIP_API_URL');
 
   if (!botEmail || !apiKey || !apiUrl) {
-    console.error('[or-quiltt-drain-alert] Zulip env vars missing; alert not posted to chat');
-    return false;
+    const missing = [
+      !botEmail ? 'ZULIP_BOT_EMAIL' : null,
+      !apiKey   ? 'ZULIP_API_KEY'   : null,
+      !apiUrl   ? 'ZULIP_API_URL'   : null,
+    ].filter((v): v is string => v !== null).join(', ');
+    const error = `missing env var(s): ${missing}`;
+    console.error(`[or-quiltt-drain-alert] Zulip env vars missing; alert not posted to chat (${error})`);
+    return { ok: false, error };
   }
 
   const credentials = btoa(`${botEmail}:${apiKey}`);
@@ -131,18 +139,40 @@ async function postZulipAlert(message: string): Promise<boolean> {
 
     if (!res.ok) {
       const text = await res.text();
-      console.error(
-        `[or-quiltt-drain-alert] Zulip post failed (${res.status}): ${text.slice(0, 200)}`,
-      );
-      return false;
+      const error = `HTTP ${res.status}: ${text.slice(0, 200)}`;
+      console.error(`[or-quiltt-drain-alert] Zulip post failed (${res.status}): ${text.slice(0, 200)}`);
+      return { ok: false, error };
     }
-    return true;
+    return { ok: true };
   } catch (err) {
-    console.error(
-      '[or-quiltt-drain-alert] Zulip post threw:',
-      err instanceof Error ? err.message : String(err),
-    );
-    return false;
+    const error = err instanceof Error ? err.message : String(err);
+    console.error('[or-quiltt-drain-alert] Zulip post threw:', error);
+    return { ok: false, error };
+  }
+}
+
+/** Records that a notification attempt happened, success or failure, so the
+ *  notifier's own health is queryable instead of vanishing into console.error on
+ *  failure (OR-T1135: a failed post left no durable record anywhere, which is why
+ *  ten days of silence went unnoticed). last_attempt_at is written on every call.
+ *  last_notified_at, which the cooldown above reads, is written ONLY on success,
+ *  so a failed attempt can never engage the cooldown and convert silence into
+ *  permanent silence. */
+async function recordAttemptState(
+  client: ReturnType<typeof createClient>,
+  checkedAt: string,
+  outcome: { ok: boolean; error?: string },
+): Promise<void> {
+  const row: Record<string, unknown> = { id: 1, last_attempt_at: checkedAt };
+  if (outcome.ok) {
+    row.last_notified_at = checkedAt;
+    row.last_error = null;
+  } else {
+    row.last_error = outcome.error ?? 'unknown error';
+  }
+  const { error } = await client.from('drain_alert_state').upsert(row);
+  if (error) {
+    console.error('[or-quiltt-drain-alert] failed to record attempt state:', error.message);
   }
 }
 
@@ -278,11 +308,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (alertFiring) {
     // Suppression: only post if we have never posted, or cooldown has elapsed.
     // Prevents ~144 posts/day (every 10 min) when alerts fire continuously.
-    const { data: stateRow } = await client
+    const { data: stateRow, error: stateReadErr } = await client
       .from('drain_alert_state')
       .select('last_notified_at')
       .eq('id', 1)
       .maybeSingle();
+
+    if (stateReadErr) {
+      console.error(
+        '[or-quiltt-drain-alert] failed to read drain_alert_state:',
+        stateReadErr.message,
+      );
+    }
 
     const lastNotifiedAt: string | null = stateRow?.last_notified_at ?? null;
     const cooldownMs   = SUPPRESSION_COOLDOWN_MINUTES * 60 * 1000;
@@ -332,14 +369,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         parts.join('\n') +
         `\n\nChecked at: ${checkedAt}`;
 
-      zulipPostSent = await postZulipAlert(message);
-
-      if (zulipPostSent) {
-        // Update suppression state so next run within cooldown is skipped.
-        await client
-          .from('drain_alert_state')
-          .upsert({ id: 1, last_notified_at: checkedAt });
-      }
+      // Record the ATTEMPT regardless of outcome (OR-T1135): a failed post
+      // must leave a row a query can find, and must NOT touch
+      // last_notified_at, since the cooldown above reads only that column.
+      const outcome = await postZulipAlert(message);
+      zulipPostSent = outcome.ok;
+      await recordAttemptState(client, checkedAt, outcome);
     }
   }
 
