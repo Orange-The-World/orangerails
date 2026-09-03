@@ -6,10 +6,17 @@ name: Deploy Supabase edge functions and migrations
 # with zero clicks, and it is there before the environment pause. `inputs` is null on a
 # push, so the push branch of this expression has to produce a real title rather than an
 # empty one or the literal string null.
+# A dispatch that carries NO reason must be LOUD, not blank: a run missing its
+# restore point has to look different from an ordinary run, because absence reading
+# as normal is the one shape a refusal cannot fire on.
+# github.event.inputs is used rather than the inputs context on purpose. Both are
+# valid for a workflow_dispatch, but the github context is unambiguously available at
+# workflow level, and an expression that fails to evaluate here produces exactly the
+# blank title this is meant to prevent.
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
-      && (inputs.reason != ''
-          && format('DISPATCH by {0}: {1}', github.actor, inputs.reason)
+      && (github.event.inputs.reason != ''
+          && format('DISPATCH by {0}: {1}', github.actor, github.event.inputs.reason)
           || format('DISPATCH by {0}: NO REASON GIVEN', github.actor))
       || format('push to {0} by {1}', github.ref_name, github.actor) }}
 
@@ -108,6 +115,11 @@ jobs:
       # moment it matters.
       # run-name carries the same value on one line and the UI truncates it. This is
       # what carries the whole block.
+      # THE LOAD-BEARING FACT: it is target having NO `environment:` binding of its own,
+      # and no `if:`, that makes this summary arrive BEFORE the pause. The needs edge
+      # alone does not do it. If a future change binds target to an environment, this
+      # carrier silently moves to after the approval it exists to inform and nothing
+      # here will fail to warn you.
       - name: Publish the restore point where the approver can read it
         env:
           # Read through env, never interpolated into the script body: a dispatch input
