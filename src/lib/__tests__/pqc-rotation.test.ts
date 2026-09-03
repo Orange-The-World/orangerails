@@ -196,6 +196,8 @@ describe("vault recovery: carrying both PQC secrets across the rotation", () => 
     const carried = await carryPqcSecretsAcrossRotation({
       oldWrapKey: before.wrapKey,
       newWrapKey: after.wrapKey,
+      oldMek: before.mek,
+      authenticatedSaltB64: saltB64,
       kemSecretWrapped: stored.kem_secret_wrapped,
       sigSecretWrapped: stored.sig_secret_wrapped,
     });
@@ -225,6 +227,8 @@ describe("vault recovery: carrying both PQC secrets across the rotation", () => 
     const carried = await carryPqcSecretsAcrossRotation({
       oldWrapKey: before.wrapKey,
       newWrapKey: after.wrapKey,
+      oldMek: before.mek,
+      authenticatedSaltB64: saltB64,
       kemSecretWrapped: deadKem,
       sigSecretWrapped: stored.sig_secret_wrapped,
     });
@@ -247,6 +251,8 @@ describe("vault recovery: carrying both PQC secrets across the rotation", () => 
     const carried = await carryPqcSecretsAcrossRotation({
       oldWrapKey: before.wrapKey,
       newWrapKey: after.wrapKey,
+      oldMek: before.mek,
+      authenticatedSaltB64: saltB64,
       kemSecretWrapped: null,
       sigSecretWrapped: null,
     });
@@ -271,7 +277,130 @@ describe("vault recovery: carrying both PQC secrets across the rotation", () => 
       carryPqcSecretsAcrossRotation({
         oldWrapKey: before.wrapKey,
         newWrapKey: after.wrapKey,
+        oldMek: before.mek,
+        authenticatedSaltB64: saltB64,
         kemSecretWrapped: "AAAA",
+        sigSecretWrapped: null,
+      }),
+    ).rejects.toBeTruthy();
+  });
+});
+
+describe("vault recovery: the old wrap key has to be the right key", () => {
+  it("throws instead of reporting dead when the old wrap key came from another salt", async () => {
+    // THE TEST THAT COULD NOT EXIST BEFORE. Every case above hands the wrap
+    // keys in directly, so a caller side salt mistake was invisible to this
+    // suite by construction, and the component that makes the real call has no
+    // test harness in this repo. The one line where the mistake would be made
+    // was the one line nothing exercised.
+    //
+    // The scenario is the one a salt rotation would produce: the secret really
+    // was sealed under the salt the caller names, and the wrap key handed in
+    // came from a different one. Both are the same AES-GCM tag failure from
+    // inside, so before the guard this returned pqcKeysReplaced: true and a
+    // null secret, and the recovery screen told the user that was expected.
+    const authenticatedSalt = generateVaultSalt();
+    const otherSalt = generateVaultSalt();
+
+    const mek = await importMekAsHkdf(generateMekBytes());
+    const realWrapKey = await derivePqcSecretWrapKey(mek, authenticatedSalt);
+    const wrongSaltWrapKey = await derivePqcSecretWrapKey(mek, otherSalt);
+    const after = await mekWithPqcWrapKey(authenticatedSalt);
+
+    // Sealed under the salt the caller names, which is what makes this a live
+    // keypair rather than a genuinely dead one.
+    const stored = await buildPqcKeyMaterial(realWrapKey);
+
+    // Asserting on the outcome, not on the message. A message match would keep
+    // passing if the throw later moved somewhere that no longer protects
+    // anything, which is the failure this whole file exists to prevent.
+    await expect(
+      carryPqcSecretsAcrossRotation({
+        oldWrapKey: wrongSaltWrapKey,
+        newWrapKey: after.wrapKey,
+        oldMek: mek,
+        authenticatedSaltB64: authenticatedSalt,
+        kemSecretWrapped: stored.kem_secret_wrapped,
+        sigSecretWrapped: stored.sig_secret_wrapped,
+      }),
+    ).rejects.toBeTruthy();
+
+    // And the secrets are untouched: still readable under the key they were
+    // really sealed with. Throwing is only safe because nothing was written.
+    expect(await unwrapPqcSecretKey(realWrapKey, stored.kem_secret_wrapped)).toBeTruthy();
+    expect(await unwrapPqcSecretKey(realWrapKey, stored.sig_secret_wrapped)).toBeTruthy();
+  });
+
+  it("checks the key even when there is nothing to carry", async () => {
+    // Pins the check as unconditional. A caller whose salt is wrong is wrong
+    // whether or not this particular vault holds PQC keys, and an empty vault
+    // is the cheapest place to find out. Without this case, a later "skip the
+    // check when there is nothing to do" optimisation would look free.
+    const authenticatedSalt = generateVaultSalt();
+    const otherSalt = generateVaultSalt();
+
+    const mek = await importMekAsHkdf(generateMekBytes());
+    const wrongSaltWrapKey = await derivePqcSecretWrapKey(mek, otherSalt);
+    const after = await mekWithPqcWrapKey(authenticatedSalt);
+
+    await expect(
+      carryPqcSecretsAcrossRotation({
+        oldWrapKey: wrongSaltWrapKey,
+        newWrapKey: after.wrapKey,
+        oldMek: mek,
+        authenticatedSaltB64: authenticatedSalt,
+        kemSecretWrapped: null,
+        sigSecretWrapped: null,
+      }),
+    ).rejects.toBeTruthy();
+  });
+
+  it("accepts the key the named salt really produces", async () => {
+    // The other half, without which the two cases above would also pass if the
+    // guard simply rejected everything. Same MEK, same salt, a key derived
+    // independently rather than the same object: the check has to pass on
+    // equality of the derived key, not on identity of the reference.
+    const saltB64 = generateVaultSalt();
+    const mek = await importMekAsHkdf(generateMekBytes());
+    const wrapKeyA = await derivePqcSecretWrapKey(mek, saltB64);
+    const wrapKeyB = await derivePqcSecretWrapKey(mek, saltB64);
+    const after = await mekWithPqcWrapKey(saltB64);
+
+    const stored = await buildPqcKeyMaterial(wrapKeyA);
+    const kemSecret = await unwrapPqcSecretKey(wrapKeyA, stored.kem_secret_wrapped);
+
+    const carried = await carryPqcSecretsAcrossRotation({
+      oldWrapKey: wrapKeyB,
+      newWrapKey: after.wrapKey,
+      oldMek: mek,
+      authenticatedSaltB64: saltB64,
+      kemSecretWrapped: stored.kem_secret_wrapped,
+      sigSecretWrapped: null,
+    });
+
+    expect(carried.pqcKeysReplaced).toBe(false);
+    expect(await unwrapPqcSecretKey(after.wrapKey, carried.newKemSecretWrapped as string)).toEqual(
+      kemSecret,
+    );
+  });
+
+  it("rejects a wrap key that is not derived from this MEK at all", async () => {
+    // Same salt, different MEK. The salt rotation is the failure I expect, but
+    // the guard is really about the key being the right key, and a swapped MEK
+    // is the same class of mistake with the same silent consequence.
+    const saltB64 = generateVaultSalt();
+    const mek = await importMekAsHkdf(generateMekBytes());
+    const otherMek = await importMekAsHkdf(generateMekBytes());
+    const otherMekWrapKey = await derivePqcSecretWrapKey(otherMek, saltB64);
+    const after = await mekWithPqcWrapKey(saltB64);
+
+    await expect(
+      carryPqcSecretsAcrossRotation({
+        oldWrapKey: otherMekWrapKey,
+        newWrapKey: after.wrapKey,
+        oldMek: mek,
+        authenticatedSaltB64: saltB64,
+        kemSecretWrapped: null,
         sigSecretWrapped: null,
       }),
     ).rejects.toBeTruthy();
