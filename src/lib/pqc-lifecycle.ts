@@ -113,30 +113,140 @@ export async function unwrapPqcSecretKey(
 }
 
 /**
+ * Why a re-wrap did not produce a new ciphertext.
+ *
+ * "dead" means one specific thing and nothing else: the AES-GCM authentication
+ * tag did not validate, so the ciphertext is genuinely not openable by the key
+ * it was handed. Every other failure is transient and is reported by throwing,
+ * because a transient failure treated as a dead key discards a LIVE keypair.
+ */
+export type RewrapPqcSecretResult =
+  | { status: "rewrapped"; secretWrapped: string }
+  | { status: "dead" };
+
+/**
+ * Is this error the AES-GCM authentication tag refusing to validate?
+ *
+ * WebCrypto reports a failed tag check as a DOMException named
+ * "OperationError", in browsers and in Node alike. Nothing else on the
+ * decryptString path reports itself that way: a base64 decode failure raises
+ * "InvalidCharacterError", a key that lacks the decrypt usage raises
+ * "InvalidAccessError", and the length guard raises a plain Error.
+ *
+ * The test is on the error NAME, never on its message. Message text is empty in
+ * browsers, differs between engines, and would silently stop matching the day
+ * an engine reworded it. A match that silently stops matching turns a dead
+ * secret back into a recovery that aborts forever with nothing to say why.
+ */
+export function isAuthenticationTagFailure(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "name" in err &&
+    (err as { name?: unknown }).name === "OperationError"
+  );
+}
+
+/**
  * Move an already-wrapped PQC secret key from one wrapping key to another.
  *
  * WHY THIS EXISTS. The wrap key here is derived from the MEK
  * (derivePqcSecretWrapKey), so anything that rotates the MEK must carry these
  * secrets across in the same operation or the only key that opens them is gone.
- * There is no way back from that: the vault row still holds a valid-looking
- * kem_public_key, so ensurePqcKeypairs() short-circuits and never regenerates,
- * and anything anyone encrypts to that public key afterwards is undecryptable
- * from the moment it is written.
+ * There is no way back from that on its own: the vault row still holds a
+ * valid-looking kem_public_key, so ensurePqcKeypairs() short-circuits and never
+ * regenerates, and anything anyone encrypts to that public key afterwards is
+ * undecryptable from the moment it is written. Clearing the public key when
+ * nothing was carried is what breaks that loop, and it is the caller's job.
  *
  * Decrypts and re-encrypts the stored base64 string as-is rather than round
  * tripping through bytes, so the encoding cannot drift here.
  *
- * Throws if the old wrap key does not open the ciphertext. A caller mid-rotation
- * must let that throw and abort: continuing would discard the old key while the
- * secret is still wrapped under it.
+ * THREE OUTCOMES, and keeping them apart is the point of this function.
+ *   rewrapped: the secret travelled. Store it.
+ *   dead:      the old wrap key does not open this ciphertext. Carry nothing
+ *              for this key AND clear the matching public key.
+ *   thrown:    anything else. Abort the recovery: we do not know the secret is
+ *              dead, and discarding a live keypair cannot be undone.
+ *
+ * Null is deliberately not one of them. Null already means "there was nothing
+ * to carry" further up this path.
+ *
+ * The re-encryption under the new key sits OUTSIDE the try on purpose. A
+ * failure there says nothing about whether the old ciphertext was readable, and
+ * catching it here would report a secret we had just opened successfully as
+ * dead.
  */
 export async function rewrapPqcSecretKey(
   oldWrapKey: CryptoKey,
   newWrapKey: CryptoKey,
   secretWrappedB64: string,
-): Promise<string> {
-  const secretBase64 = await decryptString(secretWrappedB64, oldWrapKey);
-  return encryptString(secretBase64, newWrapKey);
+): Promise<RewrapPqcSecretResult> {
+  let secretBase64: string;
+  try {
+    secretBase64 = await decryptString(secretWrappedB64, oldWrapKey);
+  } catch (err) {
+    if (isAuthenticationTagFailure(err)) return { status: "dead" };
+    throw err;
+  }
+  return { status: "rewrapped", secretWrapped: await encryptString(secretBase64, newWrapKey) };
+}
+
+/** What a rotation carried across, and whether anything was lost doing it. */
+export interface CarriedPqcSecrets {
+  /** Re-wrapped kem_secret_wrapped, or null when nothing was carried. */
+  newKemSecretWrapped: string | null;
+  /** Re-wrapped sig_secret_wrapped, or null when nothing was carried. */
+  newSigSecretWrapped: string | null;
+  /**
+   * True when a stored secret existed and could not be opened, so the keypair
+   * it belongs to is being discarded. This is what the recovery screen reads to
+   * tell the user what they lost instead of leaving them to find out.
+   *
+   * NOT set when there was simply nothing stored to carry: nothing was lost in
+   * that case and saying so would be a lie.
+   */
+  pqcKeysReplaced: boolean;
+}
+
+/**
+ * Carry both stored PQC secrets across an MEK rotation.
+ *
+ * Lives here rather than inline in the vault context so it can be driven with
+ * real key material and real AES-GCM by a unit test. The component that calls
+ * it has no test harness in this repo, and this is the branch where being wrong
+ * destroys keys silently rather than failing loudly.
+ *
+ * Throws on any transient failure, so a caller that simply awaits it aborts the
+ * recovery by default rather than by remembering to. A caller must NOT wrap
+ * this in a bare catch: that is exactly how a transient failure becomes a
+ * discarded live keypair.
+ */
+export async function carryPqcSecretsAcrossRotation(args: {
+  oldWrapKey: CryptoKey;
+  newWrapKey: CryptoKey;
+  kemSecretWrapped: string | null;
+  sigSecretWrapped: string | null;
+}): Promise<CarriedPqcSecrets> {
+  const { oldWrapKey, newWrapKey, kemSecretWrapped, sigSecretWrapped } = args;
+
+  let pqcKeysReplaced = false;
+
+  async function carry(secretWrappedB64: string | null): Promise<string | null> {
+    if (!secretWrappedB64) return null;
+    const result = await rewrapPqcSecretKey(oldWrapKey, newWrapKey, secretWrappedB64);
+    if (result.status === "rewrapped") return result.secretWrapped;
+    pqcKeysReplaced = true;
+    return null;
+  }
+
+  // Sequential on purpose. Both calls write pqcKeysReplaced, and concurrency
+  // buys nothing: two AES-GCM operations on a few hundred bytes are not what a
+  // recovery costs.
+  const newKemSecretWrapped = await carry(kemSecretWrapped);
+  const newSigSecretWrapped = await carry(sigSecretWrapped);
+
+  return { newKemSecretWrapped, newSigSecretWrapped, pqcKeysReplaced };
 }
 
 // ------------------------------------------------------------------
