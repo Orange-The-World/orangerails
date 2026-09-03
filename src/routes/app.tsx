@@ -1422,38 +1422,23 @@ function AppHome() {
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
           onSubmit={async ({ targetEmail, password }) => {
-            let result: { workspaceKeyId: string };
-            try {
-              result = await grantCoAdmin({
-                ownerUserId: userId,
-                ownerSaltB64: vaultSalt,
-                ownerPassword: password,
-                targetEmail,
-                existingKeyId: workspaceKeyId,
-                supabase: supabase as unknown as GrantSupabaseLike,
-              });
-            } catch (e) {
-              // CoAdminGrantIncompleteError means the list row landed and the
-              // wrapped key did not: refresh so the left-behind entry is
-              // visible now instead of only after a reload. Any other throw
-              // happened before the list write, so there is nothing new to
-              // show and no refresh to do.
-              //
-              // The refresh is best-effort and never replaces the error below:
-              // the grant failure is what the owner has to see, whether or not
-              // the refresh itself succeeds.
-              if (e instanceof CoAdminGrantIncompleteError) {
-                try {
-                  await refreshCoAdminList(userId);
-                } catch (refreshErr) {
-                  console.warn(
-                    "[OrangeRails] Co-admin list refresh after a failed grant also failed:",
-                    refreshErr,
-                  );
-                }
-              }
-              throw e;
-            }
+            const result = await grantCoAdminWithRefresh({
+              grant: () =>
+                grantCoAdmin({
+                  ownerUserId: userId,
+                  ownerSaltB64: vaultSalt,
+                  ownerPassword: password,
+                  targetEmail,
+                  existingKeyId: workspaceKeyId,
+                  supabase: supabase as unknown as GrantSupabaseLike,
+                }),
+              refreshList: () => refreshCoAdminList(userId),
+              onRefreshError: (refreshErr) =>
+                console.warn(
+                  "[OrangeRails] Co-admin list refresh after a failed grant also failed:",
+                  refreshErr,
+                ),
+            });
             void logSecurityEvent(supabase, userId, "coadmin_granted", { target_email: targetEmail });
             if (result.workspaceKeyId !== workspaceKeyId) {
               setWorkspaceKeyId(result.workspaceKeyId);
