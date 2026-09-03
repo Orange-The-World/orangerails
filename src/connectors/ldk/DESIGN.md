@@ -210,15 +210,39 @@ fix for a live exposure and should not be cited as evidence of one.
 
 **What that rests on, and how to re-check it.** The database objects were
 checked by querying the databases. They were not inferred from this repository,
-and a code search is not evidence for this claim in either direction. §3.3 is
-why that distinction is load-bearing rather than pedantic: `channel_state` and
-its unique index already exist in the database while the wiring PR ships zero
-DDL, so schema state runs ahead of the diff, and a document that says so cannot
-then make a schema claim out of the diff two sections later. To re-check this
-line, query `information_schema.columns` in the dev and production projects for
-a column that could hold a Lightning payment value, and report which projects
-were reached: a project that could not be reached is not a project that came
-back clean.
+and a code search is not evidence about a database object in either direction.
+§3.3 is why that distinction is load-bearing rather than pedantic:
+`channel_state` and its unique index already exist in the database while the
+wiring PR ships zero DDL, so schema state runs ahead of the diff, and a document
+that says so cannot then make a schema claim out of the diff two sections later.
+
+The claim above reaches over three kinds of object, and one query does not reach
+all three. Re-check it kind by kind, in both the dev and the production project,
+and report which projects were reached: a project that could not be reached is
+not a project that came back clean.
+
+- **Types, tables, views and their columns:** query `information_schema.columns`
+  for a column that could hold a Lightning payment value. A composite type
+  declares attributes rather than columns and does not appear there, so
+  `pg_type` joined to `pg_attribute` covers the `type` half of the sentence.
+- **Functions and RPCs:** query `information_schema.routines`, or `pg_proc`.
+  `information_schema.columns` does not list a function or an RPC at all, so a
+  columns-only sweep cannot confirm this part of the claim however clean it
+  comes back.
+- **Edge functions:** read the deployed function list for the project. An edge
+  function is not a database object, so no catalog query reaches it. That list
+  is an inventory of what is deployed rather than a search of this repository,
+  and this is the one kind here where the repository is on the evidence path at
+  all: the deployed list says which functions exist, and the source of a
+  function on that list says what it handles.
+
+**What the claim rests on today, so nobody has to reconstruct it.** In the dev
+project the sweep covered types, tables, columns, views, functions and RPCs. In
+the production project it covered columns only. Production functions, RPCs and
+edge functions have not been enumerated by anyone, so that part of the sentence
+above is carried by the dev result and by the fact that no payment record path
+is implemented, not by a production query. That is the thin spot in this claim,
+and closing it is the first thing the next re-check should do.
 
 Seven consequences, all checkable at review. Read this as the complete list **for
 the LDK payment record surface** as it stands: if a proposal touches that surface,
