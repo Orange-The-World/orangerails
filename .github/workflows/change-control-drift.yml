@@ -306,7 +306,16 @@ jobs:
   # The live reading. Runs after the machinery has been proven able to fail.
   # ---------------------------------------------------------------------------
   read-and-compare:
-    name: Read the live settings and compare them to the reviewed baseline
+    # OR-T1764. Named dynamically so the seed-push instance of this job, which
+    # always skips, can never share a check-run name with the pull_request or
+    # schedule instance that actually ran the comparison on the same commit.
+    # gh_checks on ref ops/change-control-seed showed exactly that collision
+    # before this fix: one run named "Read the live settings and compare them
+    # to the reviewed baseline" with conclusion failure (the real pull_request
+    # evaluation), a second with the identical name and conclusion skipped
+    # (this job, on the push). A skip is still a check-run; excluding it by
+    # event did not prevent the second one, it only changed its conclusion.
+    name: ${{ github.ref == 'refs/heads/ops/change-control-seed' && 'Read the live settings and compare them to the reviewed baseline (seed push, always skipped, see publish-reading)' || 'Read the live settings and compare them to the reviewed baseline' }}
     runs-on: ubuntu-latest
     needs:
       - self-test
@@ -321,14 +330,19 @@ jobs:
     # check about our own change control.
     #
     # It also does not run on the ops/change-control-seed push. That exclusion
-    # is deliberate and it is NOT a pass. The seed push exists only to publish a
-    # reading, and that branch is cut from a commit a pull request is already
-    # evaluating, so this job would post a SECOND check-run under this same name
-    # on that same commit. Two runs with one name on one sha is how a merge gate
-    # gets read wrong. Drift is evaluated by the daily schedule, by the
-    # pull_request trigger and by a manual dispatch. Nothing about a seed push
-    # says the live settings match the baseline.
-    if: github.event_name != 'push' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    # is deliberate and it is NOT a pass, and it is tested by REF rather than
+    # by event class on purpose: publish-reading below is pinned to this same
+    # ref (CTO condition 2, OR-T1746), so if the push trigger list at the top
+    # of this file is ever widened, a push to the new branch must still run
+    # this comparison. Excluding the whole push event class would have left
+    # drift silently uncompared on that new branch, which is the failure
+    # condition 2 exists to stop, on the job that actually detects drift.
+    # Drift is evaluated by the daily schedule, by the pull_request trigger
+    # and by a manual dispatch. Nothing about a seed push says the live
+    # settings match the baseline; the seed push exists only to publish a
+    # reading, and that branch is cut from a commit a pull request is
+    # routinely already evaluating.
+    if: github.ref != 'refs/heads/ops/change-control-seed' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - name: Checkout
         uses: actions/checkout@v7
