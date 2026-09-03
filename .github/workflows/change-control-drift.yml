@@ -320,8 +320,13 @@ jobs:
               echo '```'
               echo ""
               echo "If the change was intended, update the baseline in a pull request so the"
-              echo "old and new values are reviewed rather than absorbed. If it was not, that"
-              echo "is an unreviewed change to who may touch production."
+              echo "old and new values are reviewed rather than absorbed. Run this workflow"
+              echo "from the Actions tab first: the publish job puts the new reading in"
+              echo "\`ops/change-control/live-reading.json\` on the"
+              echo "\`ops/change-control-readings\` branch, so the values that land in the"
+              echo "baseline are copied from the workflow's own read and not from a message,"
+              echo "a ticket or a citation. If it was not intended, that is an unreviewed"
+              echo "change to who may touch production."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::production change-control settings differ from the committed baseline. See step summary."
             exit 1
