@@ -17,7 +17,7 @@
  * Cursor semantics (DL-0419 trackMax-inside-guard):
  *   last_block_scanned on the stealth_connections row advances only when new
  *   rows are actually inserted, and only to max(block_height) of those rows.
- *   Advancing unconditionally to the client-supplied scan tip (body.last_block_scanned)
+ *   Advancing unconditionally to the client-supplied height (body.last_block_scanned)
  *   is the DL-0015 bug applied to the sealed-tx path: the cursor jumps past
  *   items that were never committed, silently losing them on the next sync.
  *   or-stealth-envelope-update writes the same column in step 4 of the widget
@@ -45,8 +45,8 @@
  * Response:
  *   { connection_id, inserted, total, skipped_duplicates, last_block_scanned }
  *   last_block_scanned in the response is the effective stored cursor after the
- *   call (null when the connection has never scanned), never the client-supplied
- *   scan tip.
+ *   call (null when the connection has never scanned), never the height the
+ *   client supplied.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
