@@ -116,9 +116,20 @@ function lineAt(text, offset) {
  *   DO $$ BEGIN ... DROP TABLE t; ... END $$;
  *       The body DOES execute at apply time. Kept, and scanned.
  *
- *   anything else, or a dollar quote with no closing tag
- *       We cannot say which of the two it is, so it is UNPARSEABLE, which this
- *       script treats as irreversible.
+ *   $tag$...$tag$ used anywhere else (a plain string constant)
+ *       Dollar quoting is just an alternate way to write a string literal;
+ *       CREATE FUNCTION ... AS and DO are the only two forms above that give
+ *       it special meaning. Most often this is an ARGUMENT, for example the
+ *       scheduled statement passed to cron.schedule(name, schedule, $tag$...
+ *       $tag$). It is not routed around (OR-T1705): the contents are scanned
+ *       under the exact same rules as ordinary SQL below, because a value
+ *       handed to something like cron.schedule keeps running on its own
+ *       schedule with nobody reviewing it again, so a TRUNCATE hiding inside
+ *       the literal is refused on purpose.
+ *
+ *   a dollar quote with no closing tag
+ *       Genuinely unparseable: the file itself is broken. UNPARSEABLE, which
+ *       this script treats as irreversible.
  */
 function scrub(sql) {
   const out = [];
@@ -255,11 +266,21 @@ function scrub(sql) {
         for (const c of body) out.push(c);
         blank(tag);
       } else {
-        return {
-          error:
-            `dollar quoted block ${tag} is neither a routine body nor a DO block, ` +
-            'so whether its contents execute at apply time cannot be determined from the file',
-        };
+        // OR-T1705. Syntactically this IS just a string constant (dollar
+        // quoting has no other meaning outside the two forms above), most
+        // often an argument such as the scheduled statement passed to
+        // cron.schedule. A value like that keeps running on its own schedule
+        // with nobody reviewing it again, so it is not waved through: its
+        // contents are scanned under the same rules as everything else,
+        // exactly like a DO block, instead of being refused unread.
+        notes.push(
+          `dollar quoted block ${tag} is a string literal argument, not a routine body or a ` +
+            'DO block: for example the scheduled statement passed to cron.schedule. Its ' +
+            'contents were scanned under the same rules as ordinary SQL',
+        );
+        blank(tag);
+        for (const c of body) out.push(c);
+        blank(tag);
       }
       i = end;
       continue;
@@ -564,6 +585,17 @@ const EXPECTED = {
   '20990101000010_irreversible_routine_invoked_in_same_file.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE' },
   '20990101000011_irreversible_routine_attached_as_trigger.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
   '20990101000012_reversible_routine_never_invoked.sql': { verdict: REVERSIBLE, id: null },
+  // OR-T1705. A dollar quoted block in ARGUMENT position (the cron.schedule
+  // pattern) is a plain string constant, not a routine body and not a DO
+  // block. These two assert both directions: a scheduled statement that is
+  // harmless classifies REVERSIBLE, and one that carries a refused class
+  // classifies IRREVERSIBLE naming that rule, instead of either one coming
+  // back UNPARSEABLE for the whole file.
+  // Numbered 000015 and 000016, not 000013 and 000014: those two ordinals are
+  // taken by the OR-T1708 line on srdev-a/or-t1695-quoted-invocation-and-line-
+  // assertions, which this line merges with later (OR-T1716).
+  '20990101000015_reversible_dollar_quoted_argument.sql': { verdict: REVERSIBLE, id: null },
+  '20990101000016_irreversible_dollar_quoted_argument.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
 };
 
 function selftest() {
