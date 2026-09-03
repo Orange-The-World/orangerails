@@ -29,8 +29,20 @@ export interface ConnectionRow {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Length of a canonical UUID in its hyphenated 8-4-4-4-12 form. */
+export const UUID_LENGTH = 36;
+
+/**
+ * True only for a canonical UUID, and for nothing else.
+ *
+ * WHY THE LENGTH CHECK IS NOT REDUNDANT. JavaScript has no end-of-string
+ * anchor. Without the m flag, `$` matches at the end of the string OR
+ * immediately before a final newline, so the pattern above alone accepts a
+ * 37-character value that is a UUID followed by "\n". The length check is
+ * what makes this exact.
+ */
 export function isValidUuid(v: unknown): v is string {
-  return typeof v === 'string' && UUID_RE.test(v);
+  return typeof v === 'string' && v.length === UUID_LENGTH && UUID_RE.test(v);
 }
 
 /**

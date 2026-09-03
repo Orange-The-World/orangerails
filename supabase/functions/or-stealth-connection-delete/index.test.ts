@@ -2,7 +2,7 @@
  * Test: isUuid rejects a trailing newline (OR-T1881).
  *
  * Run with:
- *   deno test --no-check --allow-all supabase/functions/or-stealth-transactions-store/index.test.ts
+ *   deno test --no-check --allow-all supabase/functions/or-stealth-connection-delete/index.test.ts
  *
  * Without the m flag, `$` matches at the end of the string OR immediately
  * before a final newline, so the bare regex accepts a UUID followed by
