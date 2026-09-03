@@ -43,32 +43,54 @@ export interface ScanRangeRequest {
   from_height?: number;
 }
 
+/** Why buildScanRangeArgs declined to build RPC args, named so a caller can log it. */
+export type ScanRangeSkipReason =
+  | 'malformed'
+  | 'range_exceeds_last_block_scanned';
+
+export type ScanRangeDecision =
+  | { ok: true; args: ScanRangeRpcArgs }
+  | { ok: false; reason: ScanRangeSkipReason };
+
 /**
  * Decide whether this request records a scan range, and build the RPC payload.
  *
- * Returns null when the caller supplied no usable from_height, which is the
- * documented opt-out: those callers get cursor-only behaviour (DL-1478).
+ * Returns { ok: false } for two DIFFERENT reasons, named so the caller can
+ * log which one fired instead of collapsing both into a silent no-op:
+ *   'malformed'                          from_height missing, not an
+ *                                         integer, or negative. This is the
+ *                                         documented opt-out: those callers
+ *                                         get cursor-only behaviour (DL-1478).
+ *   'range_exceeds_last_block_scanned'   a well-formed from_height that is
+ *                                         above last_block_scanned.
+ * Neither case is recorded: no row is written for either. The caller must
+ * not treat { ok: false } as "nothing to report".
  *
  * p_app_user_id is req.app_user_id, the caller identity, never a value read
  * back from stealth_connections.
  */
-export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | null {
+export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeDecision {
   const from = req.from_height;
   if (
     from === undefined ||
     typeof from !== 'number' ||
     !Number.isInteger(from) ||
-    from < 0 ||
-    from > req.last_block_scanned
+    from < 0
   ) {
-    return null;
+    return { ok: false, reason: 'malformed' };
+  }
+  if (from > req.last_block_scanned) {
+    return { ok: false, reason: 'range_exceeds_last_block_scanned' };
   }
 
   return {
-    p_connection_id: req.connection_id,
-    p_from_height: from,
-    p_to_height: req.last_block_scanned,
-    p_app_user_id: req.app_user_id,
+    ok: true,
+    args: {
+      p_connection_id: req.connection_id,
+      p_from_height: from,
+      p_to_height: req.last_block_scanned,
+      p_app_user_id: req.app_user_id,
+    },
   };
 }
 
@@ -80,13 +102,28 @@ export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | nu
  * range must not fail the caller's sync (DL-1478). Note that an ownership
  * rejection from the database lands here as a logged error, which is the
  * correct outcome: nothing is written.
+ *
+ * A declined range (ok: false) is ALSO logged, naming the reason
+ * (buildScanRangeArgs' ScanRangeSkipReason), so a hole in the coverage table
+ * can later be told apart from "this range was never scanned" versus "this
+ * range was scanned and the record was declined", and why.
  */
 // deno-lint-ignore no-explicit-any
 export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<void> {
-  const args = buildScanRangeArgs(req);
-  if (args === null) return;
+  const decision = buildScanRangeArgs(req);
+  if (!decision.ok) {
+    console.error(
+      `[or-stealth-envelope-update] scan range not recorded (${decision.reason}):`,
+      {
+        connection_id: req.connection_id,
+        from_height: req.from_height,
+        last_block_scanned: req.last_block_scanned,
+      },
+    );
+    return;
+  }
 
-  const { error } = await client.rpc('record_stealth_scan_range', args);
+  const { error } = await client.rpc('record_stealth_scan_range', decision.args);
   if (error) {
     console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', error);
   }
