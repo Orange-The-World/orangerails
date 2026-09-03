@@ -134,7 +134,8 @@ jobs:
             echo "Target project: ${{ steps.t.outputs.supabase_ref }} (environment ${{ steps.t.outputs.environment_name }})"
             echo "Event: ${{ github.event_name }} on ${{ github.ref_name }}"
             echo "Dispatching actor: ${{ github.actor }}"
-            echo "Run created (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "This summary was written at (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "(that is when this step ran, not when the run was created; the two differ by queue time)"
             echo ""
             if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
               echo "Apply migrations requested: ${APPLY_MIGRATIONS:-false}"
@@ -154,6 +155,128 @@ jobs:
               echo "A push can never turn apply_migrations on."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # OR-T1801. The step above makes a MISSING reason loud. It does nothing about a
+      # reason that is present and worthless, which is the likelier failure: "x", or
+      # "redeploy", or yesterday's reason pasted forward, all produce a summary that is
+      # structurally identical to a correct one, so an approver cannot tell them apart.
+      #
+      # The predicate is written to a file HERE, proven able to refuse and able to pass
+      # against synthetic reasons, and then reused verbatim by the guard step below. A
+      # checker re-typed in the step that uses it is a checker nobody proved. This runs
+      # on every run of this workflow, pushes included, so the guard cannot rot into
+      # something that only ever says yes.
+      #
+      # It tests SHAPE, not wording, on purpose. The refusal sentence carried inside the
+      # reason input will be reworded, and a guard matching that sentence would quietly
+      # stop firing when it was. The floor is a timestamp a machine can parse, an explicit
+      # UTC marker, and enough text to be a restore point rather than a word.
+      - name: "Self-test: prove the restore point check can refuse and can pass"
+        run: |
+          set -uo pipefail
+          CHECK="${RUNNER_TEMP}/restore-point-check.sh"
+          cat > "$CHECK" <<'SH'
+          #!/usr/bin/env bash
+          # Reads a candidate reason on stdin.
+          # exit 0: it carries a restore point. exit 1: it does not, and why is on stderr.
+          REASON=$(cat)
+          COLLAPSED=$(printf '%s' "$REASON" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+          MIN_CHARS=40
+          if [ "${#COLLAPSED}" -lt "$MIN_CHARS" ]; then
+            echo "the reason is ${#COLLAPSED} characters long; a restore point needs at least ${MIN_CHARS}" >&2
+            exit 1
+          fi
+          STAMP=$(printf '%s' "$COLLAPSED" | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?' | head -n 1)
+          if [ -z "$STAMP" ]; then
+            echo "no timestamp shaped like YYYY-MM-DDTHH:MM appears anywhere in the reason" >&2
+            exit 1
+          fi
+          if ! date -u -d "$STAMP" >/dev/null 2>&1; then
+            echo "the timestamp '${STAMP}' is not a real date and time" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$COLLAPSED" | grep -Eq '(UTC|utc|[0-9]Z|\+00:?00)'; then
+            echo "the reason names no timezone; write the restore point in UTC (a trailing Z, the word UTC, or +00:00)" >&2
+            exit 1
+          fi
+          exit 0
+          SH
+          chmod +x "$CHECK"
+
+          refuses () {
+            if printf '%s' "$2" | bash "$CHECK" 2>/dev/null; then
+              echo "::error::self-test failed: ${1} was accepted as a restore point"
+              exit 1
+            fi
+            echo "refused, correctly: ${1}"
+          }
+
+          accepts () {
+            if ! printf '%s' "$2" | bash "$CHECK"; then
+              echo "::error::self-test failed: ${1} was refused, and it does carry a restore point"
+              exit 1
+            fi
+            echo "accepted, correctly: ${1}"
+          }
+
+          refuses "an empty reason" ""
+          refuses "a one word reason" "redeploy"
+          refuses "a long reason carrying no timestamp at all" "re-running this because the earlier deploy was cancelled by a merge train and the assets never shipped"
+          refuses "a timestamp with no timezone on it" "newest completed backup 2026-09-03 10:47, catalogue read 2026-09-03 11:05, 41 migrations, forward only"
+          refuses "a timestamp that is not a real date and time" "newest completed backup 2026-13-45T99:99Z, catalogue read 2026-13-45T99:99Z UTC, forward only, no undo"
+          accepts "the shape a prod dispatch is asked to carry" "APPROVE ONLY IF THE CLOCK NOW READS BEFORE 2026-09-03T16:47 UTC. LATER THAN THAT, REJECT. 41 migrations, forward only, no undo. Newest COMPLETED backup 2026-09-03T10:47Z, catalogue read 2026-09-03T11:05Z."
+          accepts "the same shape said in completely different words" "no undo on this batch. the restore point is the backup at 2026-09-03T10:47:00+00:00, catalogue read 2026-09-03T11:05:00+00:00."
+
+          echo "the restore point check refused 5 worthless reasons and accepted 2 good ones"
+
+      # OR-T1801. This refusal fires HERE, in target, and not in apply-migrations, for the
+      # same reason the summary above lives here: target has no environment binding of its
+      # own, so it runs BEFORE the supabase-prod pause. A refusal evaluated inside the
+      # paused job would be evaluated after the approval it exists to prevent.
+      # apply_migrations false is untouched: a redeploy writes to no database and needs no
+      # restore point. A push is untouched too, because a push cannot set this input.
+      - name: Refuse an apply whose reason carries no restore point
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_migrations }}
+        env:
+          # Read through env, never interpolated into the script body, for the same reason
+          # as the step above: a dispatch input is attacker-controlled text.
+          RUN_REASON: ${{ inputs.reason }}
+        run: |
+          set -uo pipefail
+          CHECK="${RUNNER_TEMP}/restore-point-check.sh"
+          if [ ! -x "$CHECK" ]; then
+            echo "::error::the restore point checker is missing, so this apply was never checked. Refusing rather than assuming."
+            exit 1
+          fi
+
+          if WHY=$(printf '%s' "${RUN_REASON}" | bash "$CHECK" 2>&1); then
+            echo "The reason input carries a restore point. Continuing to the environment pause."
+            exit 0
+          fi
+
+          {
+            echo ""
+            echo "## :no_entry: Refused before the pause: this apply carries no restore point"
+            echo ""
+            echo "apply_migrations is ON and the reason input does not carry a restore point an"
+            echo "approver could check a backup age against: ${WHY}."
+            echo ""
+            echo "Nothing was applied and nothing was deployed on this run."
+            echo ""
+            echo "Dispatch again with a reason naming, in UTC, the newest COMPLETED backup on the"
+            echo "target project and when that catalogue was read. The shape:"
+            echo ""
+            echo '```text'
+            echo "APPROVE ONLY IF THE CLOCK NOW READS BEFORE 2026-09-03T16:47 UTC. LATER THAN THAT, REJECT."
+            echo "41 migrations, forward only, no undo. Newest COMPLETED backup 2026-09-03T10:47Z,"
+            echo "catalogue read 2026-09-03T11:05Z."
+            echo '```'
+            echo ""
+            echo "The check is on shape, not on wording: a timestamp a machine can parse, an"
+            echo "explicit UTC marker, and more than 40 characters. Reword the sentence freely."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::apply_migrations is on and the reason input carries no restore point: ${WHY}. Nothing applied, nothing deployed."
+          exit 1
 
   deploy:
     needs: [target, check-pending-migrations, check-rls-policy-baseline]
