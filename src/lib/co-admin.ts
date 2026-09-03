@@ -266,6 +266,7 @@ interface CoAdminDeleteBuilder {
 /** Result returned by grantCoAdmin. */
 export interface GrantResult {
   workspaceKeyId: string;
+  alreadyGranted: boolean;
 }
 
 /** Subkeys returned by loadAdminSubkeysDirect for use in encrypt/decrypt. */
@@ -347,10 +348,18 @@ export async function persistCoAdminGrant(params: {
   workspaceKeyId: string;
   wrappedCiphertextB64: string;
   grantSig: string;
+  ownerSigPubB64: string;
   supabase: CoAdminSupabaseLike;
-}): Promise<void> {
-  const { ownerUserId, targetUserId, workspaceKeyId, wrappedCiphertextB64, grantSig, supabase } =
-    params;
+}): Promise<{ alreadyGranted: boolean }> {
+  const {
+    ownerUserId,
+    targetUserId,
+    workspaceKeyId,
+    wrappedCiphertextB64,
+    grantSig,
+    ownerSigPubB64,
+    supabase,
+  } = params;
 
   // The record of who holds access. Deliberately first.
   const { error: adminErr } = await supabase.from("workspace_admins").insert({
@@ -370,6 +379,50 @@ export async function persistCoAdminGrant(params: {
     grant_sig: grantSig,
   });
   if (wdkErr) {
+    // A duplicate key row is not automatically success: KEM encapsulation is
+    // randomised and the owner's signing key can rotate, so an existing row
+    // is not proof it verifies for THIS attempt, only checking it is. Read
+    // the row back and verify it against the current owner signing key
+    // before reporting anything other than the incomplete-grant error.
+    if (isUniqueViolation(wdkErr)) {
+      const { data: existing, error: readErr } = await supabase
+        .from("wrapped_data_keys")
+        .select("wrapped_ciphertext, grant_sig")
+        .eq("data_key_id", workspaceKeyId)
+        .eq("recipient_user_id", targetUserId)
+        .single();
+      const existingRow = existing as
+        | { wrapped_ciphertext?: unknown; grant_sig?: unknown }
+        | null;
+      const existingCiphertext =
+        typeof existingRow?.wrapped_ciphertext === "string" ? existingRow.wrapped_ciphertext : "";
+      const existingSig =
+        typeof existingRow?.grant_sig === "string" ? existingRow.grant_sig : "";
+      const verified =
+        !readErr &&
+        existingCiphertext.length > 0 &&
+        existingSig.length > 0 &&
+        (await verifyMemberGrant(
+          ownerSigPubB64,
+          {
+            memberUserId: targetUserId,
+            workspaceKeyId,
+            wrappedMekCiphertextB64: existingCiphertext,
+          },
+          existingSig,
+        ));
+      if (verified) {
+        // This person already has valid access. Report it as its own
+        // outcome, distinct from both "nothing happened" and "granted just
+        // now": swallowing it into a plain success would hide that no new
+        // write occurred, and throwing the incomplete-grant error would lie
+        // about a grant that is in fact complete.
+        return { alreadyGranted: true };
+      }
+      // Falls through: the row is there but does not verify for this
+      // recipient under the current owner signing key, so it cannot be
+      // trusted as this grant's outcome.
+    }
     throw new CoAdminGrantIncompleteError(
       "This co-admin was added to your list, but the key that gives them access was not stored, " +
         "so they cannot open any of your data. They are shown in your list on purpose, so the " +
@@ -377,6 +430,7 @@ export async function persistCoAdminGrant(params: {
         `or remove them from your list. (${errorText(wdkErr)})`,
     );
   }
+  return { alreadyGranted: false };
 }
 
 /**
@@ -399,12 +453,13 @@ export async function grantCoAdmin(params: {
   ownerSaltB64: string;
   ownerPassword: string;
   ownerSigSecretWrapped: string;
+  ownerSigPubB64: string;
   targetUserId: string;
   targetKemPubB64: string;
   existingKeyId: string | null;
   supabase: CoAdminSupabaseLike;
 }): Promise<GrantResult> {
-  const { ownerUserId, ownerSaltB64, ownerPassword, ownerSigSecretWrapped, targetUserId, targetKemPubB64, supabase } =
+  const { ownerUserId, ownerSaltB64, ownerPassword, ownerSigSecretWrapped, ownerSigPubB64, targetUserId, targetKemPubB64, supabase } =
     params;
 
   // Step a , derive raw MEK bytes from the re-confirmed password.
@@ -495,16 +550,17 @@ export async function grantCoAdmin(params: {
   // key second, so a stop between them leaves the evidence rather than the
   // access. persistCoAdminGrant is the only path by which this module writes a
   // grant, and its docstring is where that rule is argued.
-  await persistCoAdminGrant({
+  const { alreadyGranted } = await persistCoAdminGrant({
     ownerUserId,
     targetUserId,
     workspaceKeyId,
     wrappedCiphertextB64: wrappedCt,
     grantSig,
+    ownerSigPubB64,
     supabase,
   });
 
-  return { workspaceKeyId };
+  return { workspaceKeyId, alreadyGranted };
 }
 
 // ------------------------------------------------------------------
