@@ -4,10 +4,12 @@
  * WHY THIS IS A SEPARATE FILE FROM index.ts
  * index.ts is wiring: it builds the service_role client and starts Deno.serve. Everything
  * that decides an outcome lives here, so the sequence is testable with no network, no
- * database and no deployed function, and so a reader can check the two properties this
+ * database and no deployed function, and so a reader can check the three properties this
  * endpoint is judged on by reading one short file:
  *   1. exactly one MUTATING rpc is ever called, named by a constant declared here
  *   2. every rejection returns the same status and the same bytes
+ *   3. a shadow user is never left behind by a binding that did not happen, and when one
+ *      cannot be cleaned up, that fact is recorded
  *
  * WHAT THIS ENDPOINT IS, said honestly and on purpose. It is a PUBLIC endpoint. The
  * gateway JWT check is off (supabase/config.toml) because the invitee has no session at
@@ -48,8 +50,15 @@ export interface RedeemPorts {
   peekInvitation(token: string): Promise<string | null>;
   /** Creates the shadow auth.users row this redemption will bind. Returns its id, or null. */
   createShadowUser(): Promise<string | null>;
-  /** Best effort compensation when the binding fails after the shadow user was created. */
-  deleteShadowUser(userId: string): Promise<void>;
+  /**
+   * Best effort compensation when the binding fails after the shadow user was created.
+   *
+   * Returns TRUE only when the user is actually gone. False, or a throw, means an orphan
+   * remains and the caller must say so. This deliberately does not return void: the admin
+   * delete answers with an error object rather than throwing, so a port that swallowed
+   * everything would report a failed delete as a success and the orphan would go unrecorded.
+   */
+  deleteShadowUser(userId: string): Promise<boolean>;
   /** The single mutating call. True only when the agent member was actually activated. */
   completeInvitation(input: RedeemRequest & { shadowUserId: string }): Promise<boolean>;
   /** Stage marker only. NEVER receives caller input. See STAGES below. */
@@ -65,12 +74,19 @@ export interface RedeemPorts {
  * so no error message from the rpc path is logged or re-thrown. The cost is real, we lose
  * the upstream reason for an infrastructure failure, and the stage marker plus the function
  * invocation timestamp is what we accept instead.
+ *
+ * orphan:delete-failed is the one marker that is not about the caller at all. It means a
+ * shadow auth user was minted, the binding did not happen, and we could not remove it, so
+ * an unbound row is sitting in auth.users. It carries no id, because the vocabulary stays
+ * fixed; an orphan is found by sweeping for users with user_metadata.kind "agent-shadow"
+ * and an agents.invalid address that no agent_members row references.
  */
 export type Stage =
   | "reject:shape"
   | "reject:peek"
   | "reject:shadow-user"
   | "reject:complete"
+  | "orphan:delete-failed"
   | "ok";
 
 export interface RedeemOutcome {
@@ -123,6 +139,23 @@ export function parseRedeemBody(raw: string): RedeemRequest | null {
 }
 
 /**
+ * Remove a shadow user we minted but did not bind, and say so if we could not.
+ *
+ * A throw from the port is treated exactly as a refusal. There is nothing further to try
+ * and nothing safe to log about it, so the marker is all we get, and it is enough: it turns
+ * an invisible leak into a countable one.
+ */
+async function discardShadowUser(ports: RedeemPorts, userId: string): Promise<void> {
+  let gone = false;
+  try {
+    gone = await ports.deleteShadowUser(userId);
+  } catch {
+    gone = false;
+  }
+  if (!gone) ports.note("orphan:delete-failed");
+}
+
+/**
  * The sequence.
  *
  * ORDER IS LOAD BEARING. peek is read only and runs FIRST, so a caller with a wrong,
@@ -130,10 +163,14 @@ export function parseRedeemBody(raw: string): RedeemRequest | null {
  * first would hand anyone on the internet an unbounded way to fill auth.users with orphan
  * rows, which is a worse endpoint than the one we are replacing.
  *
- * If the binding fails after the shadow user exists, the user is deleted again. The only
- * way to leak an orphan is for the worker to die between those two steps, which is why the
- * address is random rather than derived from the agent member: a derived address would be
- * permanently occupied by that orphan and would brick every later retry for that agent.
+ * ONCE THE SHADOW USER EXISTS, EVERY WAY OUT OF THIS FUNCTION DELETES IT AGAIN unless the
+ * binding actually happened. That includes the binding THROWING rather than returning
+ * false: a throw is the same outcome to the caller and must not be a way to skip the
+ * compensation. Two orphans can still survive, and both are recorded rather than silent:
+ * the worker dying between the two steps, and a delete that itself fails, which emits
+ * orphan:delete-failed. That is also why the address is random rather than derived from the
+ * agent member: a derived address would be permanently occupied by an orphan and would
+ * brick every later retry for that agent.
  */
 export async function redeem(
   request: RedeemRequest | null,
@@ -158,10 +195,19 @@ export async function redeem(
     return failure;
   }
 
-  const bound = await ports.completeInvitation({ ...request, shadowUserId });
+  let bound = false;
+  try {
+    bound = await ports.completeInvitation({ ...request, shadowUserId });
+  } catch {
+    // Nothing is logged: a thrown value from the rpc path may carry the token. The stage
+    // marker below is the whole record, and it is the same one a plain refusal emits,
+    // because the two are indistinguishable to the caller by design.
+    bound = false;
+  }
+
   if (!bound) {
     ports.note("reject:complete");
-    await ports.deleteShadowUser(shadowUserId);
+    await discardShadowUser(ports, shadowUserId);
     return failure;
   }
 
