@@ -68,13 +68,19 @@ export interface RotateVaultArgs {
   vaultKeyVersion: number;
   /**
    * kem_secret_wrapped and sig_secret_wrapped re-wrapped under the rotated MEK,
-   * as returned by recoverWithCode. Null when this vault has no PQC keys.
+   * as returned by recoverWithCode.
    *
    * These are not data rows, so the migration loop below never touches them,
    * and they are wrapped under an HKDF subkey of the MEK exactly like the
    * credentials and transactions subkeys. If they do not travel in the update
    * that rotates the wrappers, the key that opens them ceases to exist and
    * nothing regenerates them.
+   *
+   * NULL IS AN INSTRUCTION, not just an absence. It means "nothing was carried
+   * for this key", and the write below answers it by CLEARING the matching
+   * public key in the same statement, so the next unlock regenerates a working
+   * pair instead of short-circuiting forever on a public key whose secret is
+   * gone. Pass null only when nothing was genuinely carried.
    */
   newKemSecretWrapped: string | null;
   newSigSecretWrapped: string | null;
