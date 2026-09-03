@@ -334,12 +334,21 @@ function readablePiece(piece) {
  * GRANT EXECUTE and REVOKE EXECUTE name a privilege on a function. They run
  * nothing, so they are excluded: a gate that refuses every GRANT would fire on
  * ordinary work and be routed around within a month.
+ *
+ * The exemption is anchored to the token IMMEDIATELY before EXECUTE, and that
+ * anchoring is the control, not a detail of it. Testing the whole prefix of the
+ * statement instead means one occurrence of the word GRANT or REVOKE anywhere
+ * earlier, in a comment as easily as in code, switches this check off for every
+ * EXECUTE after it. Comments in this repo's security migrations say REVOKE
+ * constantly, so that is reachable with ordinary text, and it fails in the
+ * direction that costs data: REVERSIBLE on a file that drops a table at apply
+ * time.
  */
 function executeIsUnreadable(flat) {
   const re = /\bEXECUTE\b/gi;
   let m = re.exec(flat);
   while (m !== null) {
-    if (!/\b(GRANT|REVOKE)\b/i.test(flat.slice(0, m.index))) {
+    if (!/\b(GRANT|REVOKE)\s+$/i.test(flat.slice(0, m.index))) {
       const arg = executeArgument(flat.slice(m.index + 'EXECUTE'.length));
       if (!splitTop(arg, '||').every(readablePiece)) return true;
     }
