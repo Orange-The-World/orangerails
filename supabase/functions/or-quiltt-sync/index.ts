@@ -263,8 +263,8 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         // this is an expected-to-eventually-resolve wait, not a failure, and
         // bumping attempts toward MAX_ATTEMPTS silently and permanently
         // discards the event once the count is exhausted (OR-T1902). This
-        // restores PR #801's fix: a later commit (5418820c) added bumpAttempts
-        // back to bound the tick cost below, which undid #801 and started
+        // restores pull request 801's fix: a later commit (5418820c) added
+        // bumpAttempts back to bound the tick cost below, which undid it and started
         // burning real customer events again within hours of cron running.
         //
         // The tick-cost concern that motivated bumpAttempts is real (this row
