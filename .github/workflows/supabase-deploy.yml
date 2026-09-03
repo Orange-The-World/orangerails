@@ -15,7 +15,7 @@ on:
         default: false
         type: boolean
       irreversible_approval_ref:
-        description: 'ONLY for a prod apply that contains an irreversible change (a drop, a truncate, an unbounded delete, a column type change). The founder decision or ticket reference that authorises it, e.g. DEC-0281 or OR-T1518. Leave empty for every ordinary apply.'
+        description: 'ONLY for a prod apply that contains an irreversible change (a drop, a truncate, an unbounded delete, a column type change). The founder decision or ticket reference that authorises THIS change, in the form DEC-nnnn, DL-nnnn or OR-Tnnnn with the real number. Those three forms are placeholders and are refused exactly as written. Leave empty for every ordinary apply.'
         required: false
         default: ''
         type: string
@@ -978,16 +978,24 @@ jobs:
               echo "travel the same path as a GRANT."
               echo ""
               echo "To apply this deliberately: re-dispatch with \`irreversible_approval_ref\` set to"
-              echo "the founder decision or ticket that authorises it (for example \`DEC-0281\` or"
-              echo "\`OR-T1518\`). The reference is written into this log, so the authority the apply"
-              echo "ran on can be read back later."
+              echo "the founder decision or ticket that authorises THIS change, in the form"
+              echo "\`DEC-nnnn\`, \`DL-nnnn\` or \`OR-Tnnnn\` with the real number. Those three forms are"
+              echo "placeholders and are refused exactly as written, so a pasted example cannot"
+              echo "become a reference that authorises nothing. The value is written into this log,"
+              echo "so the authority the apply ran on can be read back later."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::IRREVERSIBLE change(s) in the pending set for ${SUPABASE_REF} and no authority reference was given. NOTHING was applied. See the step summary for the file, line and statement class."
             exit 1
           fi
 
-          if ! echo "${APPROVAL_REF}" | grep -qE '^(DEC|DL|OR-T)-[0-9]{3,6}$'; then
-            echo "::error::irreversible_approval_ref '${APPROVAL_REF}' is not a decision or ticket reference (expected DEC-0000, DL-0000 or OR-T0000). Refusing to apply. A reference nobody can look up afterwards is not a record of an authority, and a malformed one must never fall through to an apply."
+          # A decision id carries the hyphen (DEC-0281, DL-1336). A ticket id does
+          # NOT: it is OR-T1518, never OR-T-1518. The first version of this pattern
+          # required a hyphen after every prefix, so it accepted a shape nothing
+          # here uses and refused every real ticket id. A gate that turns away the
+          # correct value gets worked around, and the message it printed sent the
+          # operator looking for the wrong shape.
+          if ! echo "${APPROVAL_REF}" | grep -qE '^(DEC-|DL-|OR-T)[0-9]{3,6}$'; then
+            echo "::error::irreversible_approval_ref '${APPROVAL_REF}' is not a decision or ticket reference (expected DEC-nnnn, DL-nnnn or OR-Tnnnn, with the real number in place of nnnn). Refusing to apply. A reference nobody can look up afterwards is not a record of an authority, and a malformed one must never fall through to an apply."
             exit 1
           fi
 
