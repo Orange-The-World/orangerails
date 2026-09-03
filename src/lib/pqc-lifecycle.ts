@@ -52,7 +52,10 @@ export interface SupabaseLike {
         column: string,
         value: string,
       ): {
-        maybeSingle(): Promise<{ data: { kem_public_key: string | null } | null; error: unknown }>;
+        maybeSingle(): Promise<{
+          data: { kem_public_key: string | null; sig_public_key: string | null } | null;
+          error: unknown;
+        }>;
       };
     };
     update(values: Record<string, unknown>): {
