@@ -323,3 +323,158 @@ jobs:
           fi
 
           echo "No drift: the live settings match ops/change-control/baseline.json."
+
+  # ---------------------------------------------------------------------------
+  # OR-T1738. Every publication route the job above has is closed to a seat with
+  # no shell: the step summary and the job log both need an authenticated
+  # collaborator token, and the artifact is listable but not downloadable. So
+  # the reading can be seen by a person and by no always-on seat here, and the
+  # comparison step's own instruction, "copy the JSON printed above", cannot be
+  # followed by the seats that have to follow it. That is not a first-run
+  # inconvenience: the same route is needed every time an allowlist change is
+  # intended and the baseline has to be re-reviewed.
+  #
+  # This job writes the same reading to a file in this repository, on a branch
+  # that carries nothing else, so an ordinary file read at that ref returns it.
+  # It does NOT write the baseline: ops/change-control/baseline.json still lands
+  # through a reviewed pull request, because the first recorded values must be
+  # ones somebody looked at, and a diff is what "looked at" means.
+  #
+  # PERMISSION, deliberately narrow. contents: write is declared HERE, at job
+  # level, on a job that runs on workflow_dispatch and nothing else. The
+  # workflow-level block stays read only, so no scheduled run and no
+  # pull_request run, from a fork or otherwise, can reach a token that can
+  # write. A fork cannot dispatch a workflow: workflow_dispatch is available
+  # only to an identity with write access on a branch of this repository, and
+  # the branch this job pushes to is fixed in this file rather than taken from
+  # an input.
+  # ---------------------------------------------------------------------------
+  publish-reading:
+    name: Publish the live reading where a seat with no shell can read it
+    runs-on: ubuntu-latest
+    needs:
+      - self-test
+      - refused-token-exits-3
+      - missing-repository-exits-4
+      - unreachable-api-exits-5
+      - empty-allowlist-exits-5
+    # Deliberately NOT `needs: read-and-compare`. That job is red precisely when
+    # no baseline is committed, which is the run where the reading is needed
+    # most, so gating publication on it would make the seeding case the one case
+    # that publishes nothing.
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+      # A job-level block replaces the whole set rather than adding to it, so
+      # deployments: read has to be restated here or the environments read fails
+      # with exit 3 for a reason that has nothing to do with change control.
+      deployments: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Read the live settings
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_DEV }}
+        run: |
+          set -uo pipefail
+          STATUS=0
+          node scripts/change-control-settings.mjs --read live.json || STATUS=$?
+          if [ "${STATUS}" != "0" ]; then
+            echo "::error::the live read did not complete (exit ${STATUS}), so nothing is published. 3 refused, 4 not found, 5 unusable. Publishing a partial reading would be worse than publishing none, because it would then look like the live values."
+            exit 1
+          fi
+
+      # Committed through the contents API rather than a git push, so the run
+      # never has a checkout of the readings branch and cannot carry anything
+      # else onto it. The only path this job writes is the one named below.
+      - name: Commit the reading to the readings branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          API="${GITHUB_API_URL:-https://api.github.com}"
+          BRANCH='ops/change-control-readings'
+          TARGET='ops/change-control/live-reading.json'
+
+          # Prints the HTTP status on stdout and leaves the body in resp.json.
+          # The token is passed as a header and never echoed.
+          req() {
+            if [ -n "${3:-}" ]; then
+              curl -sS -o resp.json -w '%{http_code}' -X "$1" \
+                -H "authorization: Bearer ${GITHUB_TOKEN}" \
+                -H 'accept: application/vnd.github+json' \
+                --data @"$3" "$2"
+            else
+              curl -sS -o resp.json -w '%{http_code}' -X "$1" \
+                -H "authorization: Bearer ${GITHUB_TOKEN}" \
+                -H 'accept: application/vnd.github+json' "$2"
+            fi
+          }
+
+          CODE=$(req GET "${API}/repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}")
+          if [ "${CODE}" = "404" ]; then
+            printf '{"ref":"refs/heads/%s","sha":"%s"}' "${BRANCH}" "${GITHUB_SHA}" > newref.json
+            CODE=$(req POST "${API}/repos/${GITHUB_REPOSITORY}/git/refs" newref.json)
+            if [ "${CODE}" != "201" ]; then
+              echo "::error::could not create ${BRANCH} (HTTP ${CODE}); the reading was NOT published. $(cat resp.json)"
+              exit 3
+            fi
+            echo "created ${BRANCH} at ${GITHUB_SHA}"
+          elif [ "${CODE}" != "200" ]; then
+            echo "::error::could not read ${BRANCH} (HTTP ${CODE}); the reading was NOT published. This is 'I could not publish', not 'nothing changed'. $(cat resp.json)"
+            exit 3
+          fi
+
+          SHA=''
+          CODE=$(req GET "${API}/repos/${GITHUB_REPOSITORY}/contents/${TARGET}?ref=${BRANCH}")
+          if [ "${CODE}" = "200" ]; then
+            SHA=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("resp.json","utf8")).sha)')
+          elif [ "${CODE}" != "404" ]; then
+            echo "::error::could not read ${TARGET} on ${BRANCH} (HTTP ${CODE}); the reading was NOT published. $(cat resp.json)"
+            exit 3
+          fi
+
+          node -e '
+            const fs = require("fs");
+            const body = { message: process.argv[1], content: process.argv[2], branch: process.argv[3] };
+            if (process.argv[4]) { body.sha = process.argv[4]; }
+            fs.writeFileSync("put.json", JSON.stringify(body));
+          ' "change-control: live reading at $(date -u '+%Y-%m-%d %H:%M UTC') (run ${GITHUB_RUN_ID})" "$(base64 -w0 live.json)" "${BRANCH}" "${SHA}"
+
+          CODE=$(req PUT "${API}/repos/${GITHUB_REPOSITORY}/contents/${TARGET}" put.json)
+          if [ "${CODE}" != "200" ] && [ "${CODE}" != "201" ]; then
+            echo "::error::could not write ${TARGET} on ${BRANCH} (HTTP ${CODE}); the reading was NOT published. $(cat resp.json)"
+            exit 3
+          fi
+          echo "published ${TARGET} on ${BRANCH} (HTTP ${CODE})"
+
+      - name: Say where the reading is, and what to do with it
+        run: |
+          {
+            echo "## The reading is published"
+            echo ""
+            echo "Branch \`ops/change-control-readings\`, file"
+            echo "\`ops/change-control/live-reading.json\`. It carries the values and the"
+            echo "\`read_at\` timestamp they were read at, so a stale reading is"
+            echo "distinguishable from a fresh one without opening this run."
+            echo ""
+            echo "A seat holding only an ordinary repository file read gets it with:"
+            echo ""
+            echo '```'
+            echo "gh_get_file(repo='${{ github.repository }}', path='ops/change-control/live-reading.json', ref='ops/change-control-readings')"
+            echo '```'
+            echo ""
+            echo "To seed or re-baseline: read that file, commit its values into"
+            echo "\`ops/change-control/baseline.json\` on a feature branch, and open a pull"
+            echo "request. This workflow never writes the baseline itself, so the first"
+            echo "recorded values are always ones somebody reviewed in a diff."
+          } >> "$GITHUB_STEP_SUMMARY"
