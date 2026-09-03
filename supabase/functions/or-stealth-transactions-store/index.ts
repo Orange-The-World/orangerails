@@ -80,6 +80,22 @@ interface TransactionsStoreResponseBody {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** Length of a canonical UUID in its hyphenated 8-4-4-4-12 form. */
+const UUID_LENGTH = 36;
+
+/**
+ * True only for a canonical UUID, and for nothing else.
+ *
+ * WHY THE LENGTH CHECK IS NOT REDUNDANT. JavaScript has no end-of-string
+ * anchor. Without the m flag, `$` matches at the end of the string OR
+ * immediately before a final newline, so the pattern above alone accepts a
+ * 37-character value that is a UUID followed by "\n". The length check is
+ * what makes this exact.
+ */
+function isUuid(v: unknown): v is string {
+  return typeof v === 'string' && v.length === UUID_LENGTH && UUID_RE.test(v);
+}
+
 // The blind index is the hex of an HMAC-SHA-256, so it is exactly 64 lowercase
 // hex chars. Checking the shape here keeps a malformed client from writing a
 // value the dedup constraint would treat as a distinct transaction forever.
@@ -157,7 +173,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
     // ── Validate ──────────────────────────────────────────────────────
-    if (!body.connection_id || !UUID_RE.test(body.connection_id)) {
+    if (!isUuid(body.connection_id)) {
       return jsonResponse({ error: 'connection_id (uuid) required' }, 400, cors);
     }
     // app_user_id is an opaque host-application identifier stored in a TEXT
