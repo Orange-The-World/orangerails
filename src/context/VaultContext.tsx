@@ -38,6 +38,7 @@ import {
   deriveKek,
   wrapMekBytes,
   unwrapMekBytes,
+  assertMekEnvelopeReopens,
   generateRecoveryCode,
   deriveRecoveryKek,
   CURRENT_VAULT_KEY_VERSION,
@@ -290,6 +291,11 @@ interface VaultContextValue {
    *
    * Caller must persist newEncMekCiphertext + newRecoveryCiphertext to
    * user_vault_meta and show newRecoveryCode to the user exactly once.
+   *
+   * verifyPersistedEnvelopes must be handed to the persist call as its
+   * verifyPersisted argument. It closes over the key material needed to prove
+   * the bytes the database actually stored still open this vault, so the
+   * caller never has to hold a key to check that.
    */
   changeVaultPassword(params: {
     currentPassword: string;
@@ -302,6 +308,10 @@ interface VaultContextValue {
     newEncMekCiphertext: string;
     newRecoveryCode: string;
     newRecoveryCiphertext: string;
+    verifyPersistedEnvelopes(persisted: {
+      encMekCiphertext: string;
+      recoveryCiphertext: string;
+    }): Promise<void>;
   }>;
 }
 
@@ -580,10 +590,40 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
       const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
 
-      // 5. Keep vault unlocked with the same MEK in memory.
+      // 5. Let the caller prove what the DATABASE stored, not merely what we
+      //    sent it. Both wrappers go out in one UPDATE and the old pair is
+      //    discarded, so a stored envelope that does not re-open is a permanent
+      //    lockout with no server-side copy to restore from. The wrapping keys
+      //    stay in this closure, so the route that does the write never handles
+      //    key material. Nothing new is derived here: these are the keys that
+      //    are already in scope.
+      const verifyPersistedEnvelopes = async (persisted: {
+        encMekCiphertext: string;
+        recoveryCiphertext: string;
+      }): Promise<void> => {
+        await assertMekEnvelopeReopens(
+          "The stored password key envelope",
+          persisted.encMekCiphertext,
+          newKek,
+          mekRaw,
+        );
+        await assertMekEnvelopeReopens(
+          "The stored recovery code envelope",
+          persisted.recoveryCiphertext,
+          newRecoveryKek,
+          mekRaw,
+        );
+      };
+
+      // 6. Keep vault unlocked with the same MEK in memory.
       mekRef.current = mek;
 
-      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext };
+      return {
+        newEncMekCiphertext,
+        newRecoveryCode,
+        newRecoveryCiphertext,
+        verifyPersistedEnvelopes,
+      };
     },
     [],
   );
