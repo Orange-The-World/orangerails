@@ -325,8 +325,8 @@ same class of exposure §3.2 (3) records for per-channel update cadence, two
 subsections earlier in this document, and it is written here rather than left to
 be inferred from there. Bounded and accepted, on that term: payment count,
 per-row timing and same-payment collisions are observable, and no amount, fee,
-balance, counterparty or destination leaks. Reducing it further is a different design,
-not a tightening of the bullets above: padding the table with decoy rows,
+balance, counterparty or destination leaks. Reducing it further is a different
+design, not a tightening of the bullets above: padding the table with decoy rows,
 batching writes so a row's arrival is not a payment's timing, or coarsening
 `created_at` to a window. None of those is proposed here, and each carries its
 own cost, so the exposure is accepted rather than engineered away. **This
