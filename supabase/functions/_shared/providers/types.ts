@@ -79,6 +79,31 @@ export interface NormalizedTransaction {
    * receiverId from the invoice. Not persisted in v0; reserved for PR 2.
    */
   receiverId?: string | null;
+  /**
+   * On-chain transaction id. Required on `mining_payout` (that is what
+   * settled it), absent on `mining_earning` (no bitcoin has moved yet).
+   * Part of the `(txid, vout)` dedup join key from DL-1896.
+   */
+  txid?: string;
+  /**
+   * Output index within `txid` that paid this wallet. Required on
+   * `mining_payout` by the DL-1896 contract. Left undefined by a provider
+   * that cannot determine it; a consumer must not assume 0.
+   */
+  vout?: number;
+  /**
+   * True when a `mining_payout` came straight from the block's coinbase
+   * transaction rather than a pool hot wallet. Carry the provider's own
+   * flag through unchanged, never infer it.
+   */
+  from_coinbase?: boolean;
+  /**
+   * Which transport of this adapter produced the row, shaped
+   * `<adapter-slug>.<transport>.v<version>` (e.g. `ocean.api.v1`). `adapter`
+   * alone says which provider; this says which of that provider's paths did,
+   * for a provider with more than one (DL-1519, DL-1896).
+   */
+  source_tag?: string;
 }
 
 export interface DiscoveredWallet {
