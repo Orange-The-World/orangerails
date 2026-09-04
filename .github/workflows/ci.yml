@@ -83,6 +83,26 @@ jobs:
         # EXECUTE. Needs nothing but node, so it is unconditional.
         run: node scripts/check-anon-acl-snapshot.mjs --selftest
 
+      - name: Plaintext credential grant self-test
+        # Same principle as the anon RPC self-test above: the parser IS the control, so it runs
+        # before the check itself. This one carries more weight than usual, because the parser
+        # deliberately reads INSIDE DO blocks and EXECUTE format() strings, which is where every
+        # grant in this repository's scoping migrations actually lives. A parser that stopped
+        # doing that would report green over migrations it never read.
+        run: node scripts/check-plaintext-credential-grants.mjs --selftest
+
+      - name: Plaintext credential grant check
+        # A real gate, no continue-on-error. Replays the migrations in order and fails if anon,
+        # authenticated or PUBLIC is left holding any column applicable privilege on
+        # platforms.webhook_secret, platforms.quiltt_api_key, platforms.quiltt_api_key_ciphertext
+        # or apps.client_secret, by a column grant or by a table wide GRANT. This is the standing
+        # assertion the accepted risk on those columns names as its condition: before this, the
+        # only assertions lived inside two migrations, and no job here stands up a Postgres or
+        # applies migrations, so they ran once and never again. Source scan only: a grant typed
+        # straight into a SQL console, or inherited from schema default privileges, is not visible
+        # here. See the script header for that boundary in full.
+        run: node scripts/check-plaintext-credential-grants.mjs
+
       - name: Build
         run: bun run build
 
