@@ -72,6 +72,13 @@ const MAX_LIMIT = 1000;
  * PostgREST filter STRING, so a value carrying `,` `.` `(` or `)` would be
  * parsed as filter syntax rather than as data. Hex admits none of those
  * characters. Do not loosen this to a generic string check.
+ *
+ * JavaScript's `$` matches end-of-string OR immediately before a trailing
+ * newline, so this pattern alone admits a 65-character value: 64 hex
+ * characters plus "\n". That extra byte is not `,` `.` `(` or `)`, so it
+ * cannot break out of the filter expression, but it is not hex either, and
+ * this regex on its own does not guarantee "exactly 64 hex characters".
+ * Every caller MUST pair this test with an explicit `.length === 64` check.
  */
 const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
 
@@ -190,7 +197,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
     // Validate required fields.
-    if (!body.connection_id || !UUID_RE.test(body.connection_id)) {
+    if (
+      !body.connection_id ||
+      body.connection_id.length !== 36 ||
+      !UUID_RE.test(body.connection_id)
+    ) {
       return jsonResponse({ error: 'connection_id (uuid) required' }, 400, cors);
     }
     if (!body.app_user_id || typeof body.app_user_id !== 'string') {
@@ -252,6 +263,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (
       hasTxid &&
       (typeof body.before_txid_blind_index_hex !== 'string' ||
+        body.before_txid_blind_index_hex.length !== 64 ||
         !BLIND_INDEX_HEX_RE.test(body.before_txid_blind_index_hex))
     ) {
       return jsonResponse(
