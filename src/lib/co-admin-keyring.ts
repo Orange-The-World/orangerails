@@ -244,12 +244,27 @@ function aadBytes(binding: CoAdminBinding): Uint8Array {
   if (typeof binding.grantId !== "string" || binding.grantId.length === 0) {
     throw new Error("Co-admin keyring binding requires a grant id.");
   }
-  // JSON.stringify on an array of strings is unambiguous for any input: the
-  // encoder escapes every embedded quote and backslash, so the tuple always
-  // parses back to the exact three strings that produced it. A fixed
-  // delimiter like "prefix|owner|grant" cannot make that guarantee, because
-  // the delimiter character can appear inside either field and move the
-  // split point, letting two different bindings produce the same bytes.
+  // JSON.stringify on an array of strings is unambiguous for any input, on
+  // two properties working together.
+  //
+  // First, the delimiter: the encoder escapes every embedded quote and
+  // backslash, so the tuple always parses back to the exact three strings
+  // that produced it. A fixed delimiter like "prefix|owner|grant" cannot
+  // make that guarantee, because the delimiter character can appear inside
+  // either field and move the split point, letting two different bindings
+  // produce the same bytes.
+  //
+  // Second, surrogates: the AAD is not this JSON string itself, it is
+  // TextEncoder().encode() of it, and TextEncoder replaces any UNPAIRED
+  // surrogate (a lone code unit in U+D800-U+DFFF with no partner) with
+  // U+FFFD before encoding. If two bindings differed only in a lone
+  // surrogate, TextEncoder alone could make them collide. What actually
+  // prevents that is well-formed JSON.stringify (ES2019, present in every
+  // runtime this ships on): it escapes an unpaired surrogate as the six
+  // ASCII characters \udNNN, so TextEncoder never sees a raw surrogate to
+  // replace. Pinned by test: "a lone surrogate in one binding does not
+  // collide with a lone surrogate in another", in
+  // co-admin-keyring.test.ts.
   return new TextEncoder().encode(
     JSON.stringify([AAD_PREFIX, binding.ownerUserId, binding.grantId]),
   );
