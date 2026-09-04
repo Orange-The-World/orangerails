@@ -169,13 +169,16 @@ export function isAuthenticationTagFailure(err: unknown): boolean {
  *   thrown:    anything else. Abort the recovery: we do not know the secret is
  *              dead, and discarding a live keypair cannot be undone.
  *
- * THE "dead" READING IS ONLY SOUND IF THE CALLER PROVED THE KEY. A tag failure
- * says THIS key did not open THIS ciphertext. It says the secret is dead only
- * when the key handed in is provably the key the secret was wrapped under, and
- * nothing in here can establish that: this function sees two opaque CryptoKeys
- * and a string. The proof happens in assertPqcWrapKeyMatchesSalt(), which
- * carryPqcSecretsAcrossRotation() runs before any secret is touched. Call this
- * function directly and you are asserting that proof yourself.
+ * THE "dead" READING IS ONLY SOUND IF THIS KEY IS THE KEY THE SECRET WAS
+ * WRAPPED UNDER. A tag failure says THIS key did not open THIS ciphertext, and
+ * nothing in here can tell that apart from a secret that is genuinely dead:
+ * this function sees two opaque CryptoKeys and a string.
+ * carryPqcSecretsAcrossRotation() runs assertPqcWrapKeyMatchesSalt() before any
+ * secret is touched, which NARROWS that gap and does not close it. That check
+ * proves the handed key matches the salt the caller names. It does not prove
+ * the handed key is the one this ciphertext was wrapped under. Read the HONEST
+ * LIMIT note on that function before you rely on "dead", and call this function
+ * directly only if you are asserting the whole of that yourself.
  *
  * Null is deliberately not one of them. Null already means "there was nothing
  * to carry" further up this path.
@@ -322,14 +325,33 @@ const PQC_WRAP_KEY_PROBE = "orangerails-pqc-wrap-key-probe-v1";
  * the expected key and opened with the key that was handed in. Same key, same
  * plaintext back. Different key, the tag fails.
  *
- * HONEST LIMIT. This proves the handed key matches the salt the caller NAMES. It
- * cannot prove the caller named the right salt, because a caller that derives
- * from salt B and also names salt B is self consistent and wrong. What makes the
- * named salt trustworthy is separate and lives at the call site: recoverWithCode
- * only reaches this point after deriveVerifierKey(oldMek, storedSalt) has opened
- * the stored verifier, which a wrong salt could not have done. So the value this
- * adds is against the mistake people actually make, deriving from one salt while
- * the authenticated salt is another, not against a caller determined to lie.
+ * HONEST LIMIT, and it is narrower than the name suggests. This proves ONE
+ * thing: that the handed key is what derivePqcSecretWrapKey(mek, saltB64)
+ * produces. That is a self consistency check on the caller. It does NOT prove
+ * that the handed key opens the STORED ciphertext, and only that second
+ * proposition separates "this secret is dead" from "this key is wrong".
+ *
+ * So it catches a caller that derives from one salt while naming another, which
+ * is the mistake people actually make. It does NOT catch a stored secret that
+ * was wrapped under a derivation this code no longer reproduces: a rotation
+ * that carries the other ciphertexts across and leaves these two behind, a
+ * change to the HKDF context string, or a secret written by an older client. In
+ * each of those the probe passes, the rewrap tag fails, and the keypair is
+ * discarded as though the secret were dead.
+ *
+ * A better probe cannot close that. Opening the stored ciphertext IS the
+ * rewrap: if it opens, nothing was dead, and if it does not, the tag failure is
+ * the same observation either way. Closing it needs either a derivation
+ * identifier stored alongside the wrapped secret, or a dead path that a tag
+ * failure alone cannot authorise. Neither is here yet, and both are tracked
+ * separately. Do not read this function as covering them.
+ *
+ * It also cannot prove the caller named the right salt, because a caller that
+ * derives from salt B and also names salt B is self consistent and wrong. What
+ * makes the named salt trustworthy is separate and lives at the call site:
+ * recoverWithCode only reaches this point after deriveVerifierKey(oldMek,
+ * storedSalt) has opened the stored verifier, which a wrong salt could not have
+ * done.
  */
 export async function assertPqcWrapKeyMatchesSalt(args: {
   wrapKey: CryptoKey;
