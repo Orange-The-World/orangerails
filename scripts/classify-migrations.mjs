@@ -533,6 +533,50 @@ function executeIsUnreadable(flat) {
 }
 
 /**
+ * Does the TRUNCATE at `matchIndex` in `s` actually empty a table, or is it
+ * just the name of a privilege in a GRANT or REVOKE?
+ *
+ * GRANT TRUNCATE and REVOKE TRUNCATE name the privilege; they do not empty
+ * anything. The exemption is anchored to the token IMMEDIATELY before
+ * TRUNCATE, the same way executeIsUnreadable anchors its own GRANT/REVOKE
+ * exemption above. Testing the whole statement instead (the previous
+ * behaviour) let a real TRUNCATE hide behind an unrelated REVOKE anywhere
+ * earlier in the same statement, reachable once a single EXECUTE literal can
+ * carry more than one real SQL statement (OR-T1709 stopped blanking the
+ * semicolons that used to split them apart). See OR-T2188.
+ */
+function truncateIsPrivilegeName(s, matchIndex) {
+  return /\b(GRANT|REVOKE)\s+$/i.test(s.slice(0, matchIndex));
+}
+
+/**
+ * Does the DELETE FROM ending at `afterIndex` in `s` carry its own WHERE
+ * clause?
+ *
+ * The previous rule asked "does WHERE appear ANYWHERE in this statement",
+ * which is only safe when a statement really is one DELETE. Once a DO block's
+ * EXECUTE literal can carry `DELETE FROM a; UPDATE b SET x = 1 WHERE y = 2` as
+ * one flattened piece (OR-T1709 blanks the literal's own semicolons so it is
+ * not split), a WHERE that belongs to a LATER statement excused an
+ * unqualified DELETE it has nothing to do with. This reads forward from the
+ * DELETE FROM only as far as the next statement-starting keyword, the same
+ * "read no further than the next real boundary" anchoring executeArgument
+ * already uses for USING/INTO, so a WHERE past that boundary belongs to
+ * someone else's statement and does not count. See OR-T2188.
+ */
+const STATEMENT_START =
+  /\b(SELECT|INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|DO|WITH|BEGIN|COMMIT|ROLLBACK|VACUUM|ANALYZE|COPY|CALL)\b/i;
+
+function deleteHasOwnWhere(s, afterIndex) {
+  const rest = s.slice(afterIndex);
+  const whereMatch = /\bWHERE\b/i.exec(rest);
+  if (!whereMatch) return false;
+  const boundaryMatch = STATEMENT_START.exec(rest);
+  if (boundaryMatch && boundaryMatch.index < whereMatch.index) return false;
+  return true;
+}
+
+/**
  * The irreversible classes. Each one is a change with NO restore path: running
  * it wrong costs the data, not a revert.
  *
@@ -563,15 +607,33 @@ const RULES = [
   },
   {
     id: 'TRUNCATE',
-    // GRANT TRUNCATE and REVOKE TRUNCATE name the privilege, they do not empty
-    // anything. A statement that grants or revokes cannot also truncate, so the
-    // exclusion cannot hide a real TRUNCATE behind a GRANT.
-    test: (s) => /\bTRUNCATE\b/i.test(s) && !/\b(GRANT|REVOKE)\b/i.test(s),
+    // Anchored to the token immediately before each TRUNCATE occurrence (see
+    // truncateIsPrivilegeName above), not to whether GRANT or REVOKE appear
+    // anywhere in the statement.
+    test: (s) => {
+      const re = /\bTRUNCATE\b/gi;
+      let m = re.exec(s);
+      while (m !== null) {
+        if (!truncateIsPrivilegeName(s, m.index)) return true;
+        m = re.exec(s);
+      }
+      return false;
+    },
     why: 'empties a table with no restore path',
   },
   {
     id: 'DELETE WITHOUT WHERE',
-    test: (s) => /\bDELETE\s+FROM\b/i.test(s) && !/\bWHERE\b/i.test(s),
+    // Checked per DELETE FROM occurrence (see deleteHasOwnWhere above), not by
+    // whether WHERE appears anywhere in the statement.
+    test: (s) => {
+      const re = /\bDELETE\s+FROM\b/gi;
+      let m = re.exec(s);
+      while (m !== null) {
+        if (!deleteHasOwnWhere(s, m.index + m[0].length)) return true;
+        m = re.exec(s);
+      }
+      return false;
+    },
     why: 'deletes every row in the table: a DELETE with no WHERE clause',
   },
   {
@@ -758,6 +820,20 @@ const EXPECTED = {
   '20990101000018_irreversible_do_block_execute_literal_drop_table.sql': {
     verdict: IRREVERSIBLE,
     id: 'DROP TABLE',
+  },
+  // OR-T2188. A REVOKE and a TRUNCATE folded into one EXECUTE literal by the
+  // semicolon blanking OR-T1709 added: the TRUNCATE rule must not read the
+  // earlier REVOKE as exempting it.
+  '20990101000019_irreversible_truncate_after_revoke_in_execute_literal.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'TRUNCATE',
+  },
+  // OR-T2188. An unqualified DELETE followed, in the same literal, by an
+  // unrelated statement's WHERE: the DELETE WITHOUT WHERE rule must not read
+  // that later WHERE as covering it.
+  '20990101000020_irreversible_delete_without_where_before_later_where.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'DELETE WITHOUT WHERE',
   },
 };
 
