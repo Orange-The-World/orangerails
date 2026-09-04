@@ -1146,11 +1146,7 @@ jobs:
             if [ "$COMPARE" = "ran" ] && [ "$MOVED_COUNT" = "0" ]; then
               echo "No file in this tree changes verdict between the two classifier versions. Said out loud rather than implied by silence, because zero is the result that makes the change safe to promote and it has to be said to count."
             elif [ "$COMPARE" = "ran" ]; then
-              echo "One row per file whose verdict moved, previous verdict then current. A file moving IRREVERSIBLE to REVERSIBLE is the one to read hardest: that is the direction that costs data if the new reading is wrong."
-              echo ""
-              echo '```'
-              printf '%s\n' "$MOVED"
-              echo '```'
+              echo "The ${MOVED_COUNT} moved verdicts follow in numbered comments, split so that no row is cut. A file moving IRREVERSIBLE to REVERSIBLE is the one to read hardest: that is the direction that costs data if the new reading is wrong."
             fi
             echo ""
             echo "Every file in this tree that is NOT REVERSIBLE at this commit:"
