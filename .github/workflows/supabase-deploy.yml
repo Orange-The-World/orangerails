@@ -1338,3 +1338,139 @@ jobs:
 
           echo
           echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
+
+  schema-invariants:
+    needs: [target, apply-migrations]
+    # DEV-0395, out of DEV-0384 item 2. A migration can only police the schema
+    # at its own apply time. This job polices nothing of its own: it re-reads
+    # three design rules off the LIVE schema after the migrations in this commit
+    # have applied, so a LATER migration that quietly breaks one is caught on
+    # the merge that carries it rather than at some future audit.
+    #
+    # `if: always()` for the same reason the drift check uses it: apply-migrations
+    # is SKIPPED on every prod push, and a skipped dependency would otherwise
+    # cancel this job. A skipped check-run renders NEUTRAL, not red, so a run
+    # that never looked at the schema would read exactly like a run that found it
+    # clean.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Assert the wrapped_data_keys design rules against the live schema
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+          APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+        run: |
+          set -uo pipefail
+
+          CHECK_SQL="supabase/checks/wrapped_data_keys_invariants.sql"
+
+          # One helper for every "we could not find out" exit. UNKNOWN and BROKEN
+          # are different facts and must never share a message: the first means
+          # go and look, the second means a design rule is already gone.
+          unknown () {
+            {
+              echo "## :grey_question: wrapped_data_keys invariants UNKNOWN on \`${SUPABASE_REF:-unresolved}\`"
+              echo ""
+              echo "$1"
+              echo ""
+              echo "This is **not** a report that the design rules hold, and **not** a"
+              echo "report that they are broken. The check could not determine the state."
+              echo "Re-run it, or run \`${CHECK_SQL}\` by hand against that project."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::wrapped_data_keys invariants UNKNOWN on ${SUPABASE_REF:-unresolved}: $1"
+            exit 1
+          }
+
+          if [ ! -f "$CHECK_SQL" ]; then
+            unknown "${CHECK_SQL} is not in the checkout, so nothing was asserted."
+          fi
+          if [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "cancelled" ]; then
+            unknown "apply-migrations ended '${APPLY_RESULT}'. Some migrations may have applied and some not, so the schema this would read is not a state anyone has established."
+          fi
+          if [ -z "${SUPABASE_REF}" ]; then
+            unknown "The target job produced no supabase_ref output."
+          fi
+
+          PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
+          trap 'rm -f "$PAYLOAD"' EXIT
+          # --rawfile, so the SQL that runs here is byte for byte the SQL a human
+          # runs by hand out of the same file. No second copy to drift.
+          jq -n --rawfile q "$CHECK_SQL" '{query:$q}' > "$PAYLOAD"
+
+          # --fail-with-body, not bare -sS. Without it curl exits 0 on a 401, 403
+          # or 500, the error body parses as valid JSON, and the row count check
+          # below is then the only thing between us and a confident wrong answer.
+          RESPONSE=""
+          HTTP_OK=0
+          for attempt in 1 2 3; do
+            if RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$PAYLOAD"); then
+              HTTP_OK=1
+              break
+            fi
+            echo "invariant query attempt ${attempt}/3 did not return a success status"
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          # The response body is never echoed. On an auth failure it is the only
+          # place a token-shaped string could surface in a public build log.
+          if [ "$HTTP_OK" -ne 1 ]; then
+            unknown "The Supabase Management API did not return a success status after 3 attempts. Most often an expired or rotated SUPABASE_ACCESS_TOKEN, or the project being paused."
+          fi
+
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            unknown "The invariant query returned a success status but not a JSON array of rows."
+          fi
+
+          # THE CHECK ON THE CHECK. The query is written to return one row per
+          # invariant, always. A query that matched nothing returns zero rows,
+          # and zero rows reads exactly like a clean pass, so any count but four
+          # is an unknown rather than a result.
+          ROWS=$(echo "$RESPONSE" | jq -r 'length' 2>/dev/null || echo "")
+          if [ "${ROWS:-none}" != "4" ]; then
+            unknown "The invariant query returned ${ROWS:-no} row(s), not the 4 it must always return."
+          fi
+          for N in table_present no_content_inspection no_algorithm_coupling one_complete_presence_rule; do
+            if ! echo "$RESPONSE" | jq -e --arg n "$N" 'any(.[]; .name == $n)' >/dev/null 2>&1; then
+              unknown "The invariant query returned 4 rows but did not report on '${N}'."
+            fi
+          done
+
+          echo "$RESPONSE" | jq -r '.[] | "\(.status)  \(.name)  \(.detail)"'
+
+          {
+            echo "## wrapped_data_keys design invariants on \`${SUPABASE_REF}\`"
+            echo ""
+            echo "| result | invariant | detail |"
+            echo "| --- | --- | --- |"
+            echo "$RESPONSE" | jq -r '.[] | "| \(.status) | `\(.name)` | \(.detail) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          BAD=$(echo "$RESPONSE" | jq -r '[.[] | select(.status == "FAIL" or .status == "UNKNOWN")] | length' 2>/dev/null || echo "")
+          if [ -z "${BAD}" ]; then
+            unknown "Could not count the failing invariants in a response that had already parsed as 4 rows."
+          fi
+          if [ "${BAD}" != "0" ]; then
+            {
+              echo ""
+              echo ":no_entry: **${BAD} design rule(s) on \`public.wrapped_data_keys\` are broken.**"
+              echo ""
+              echo "The grant ciphertext columns are opaque: never parsed, never length pinned."
+              echo "Row shape is never tied to the algorithm string, so a v3 recipient can still"
+              echo "consume a v2 grant. See DEV-0395 and migration 20260828234000."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::${BAD} wrapped_data_keys design rule(s) broken on ${SUPABASE_REF}. See the job summary for which, and what the offending constraint says."
+            exit 1
+          fi
+
+          SKIPPED=$(echo "$RESPONSE" | jq -r '[.[] | select(.status == "SKIP")] | length' 2>/dev/null || echo "")
+          SKIPPED="${SKIPPED:-0}"
+          echo "wrapped_data_keys design invariants on ${SUPABASE_REF}: $((4 - SKIPPED)) asserted, ${SKIPPED} not applicable on this project."
