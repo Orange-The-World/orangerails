@@ -342,13 +342,29 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         parts.join('\n') +
         `\n\nChecked at: ${checkedAt}`;
 
-      zulipPostSent = await postZulipAlert(message);
+      const postResult = await postZulipAlert(message);
+      zulipPostSent = postResult.sent;
 
-      if (zulipPostSent) {
-        // Update suppression state so next run within cooldown is skipped.
-        await client
-          .from('drain_alert_state')
-          .upsert({ id: 1, last_notified_at: checkedAt });
+      // Record the ATTEMPT regardless of outcome, so a dead notifier leaves a
+      // trace any SQL query can find (OR-T1135, following a failure that went
+      // undetected for ten days with nothing but a console.error to show for it).
+      // last_notified_at is the cooldown key and is only set on success, same
+      // as before this change: a failed attempt must not engage the cooldown,
+      // or a dead notifier turns a one-time miss into permanent silence.
+      const { error: stateWriteErr } = await client
+        .from('drain_alert_state')
+        .upsert({
+          id:              1,
+          last_attempt_at: checkedAt,
+          last_error:      postResult.error ?? null,
+          ...(postResult.sent ? { last_notified_at: checkedAt } : {}),
+        });
+
+      if (stateWriteErr) {
+        console.error(
+          '[or-quiltt-drain-alert] failed to record drain_alert_state attempt:',
+          stateWriteErr.message,
+        );
       }
     }
   }
