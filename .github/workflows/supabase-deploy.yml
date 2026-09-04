@@ -1485,7 +1485,7 @@ jobs:
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/2099010100000X_notanumber.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/209901010000091_toowide.sql"
-          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000006_below_allowlisted.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000001_below_allowlisted.sql"
 
           if out_of_order_scan "$ST_APPLIED" '20990101000002_below_unmarked.sql' "$ST_DIR" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
