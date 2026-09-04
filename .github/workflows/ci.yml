@@ -886,3 +886,189 @@ jobs:
             connect-compat-verdict.json
           retention-days: 14
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # OR-T1518. The prod migration apply now classifies what it is about to run and
+  # hard stops on the irreversible class. This job is the proof that the
+  # classifier CAN refuse.
+  #
+  # It is not a formality. A check that has only ever been seen going green is
+  # indistinguishable from a check that cannot go red, and that is the shape of
+  # nearly every silent success defect found in this estate: a filter that
+  # dropped its input, a probe that could not run, a loop over an empty list
+  # exiting 0. So this job runs the real CLI over fixtures on disk and asserts
+  # BOTH directions, because a classifier that refuses everything is just as
+  # useless as one that refuses nothing.
+  #
+  # No Bun, no secrets, no database, no network. A checkout and the Node already
+  # on the runner.
+  # ---------------------------------------------------------------------------
+  migration-reversibility-classifier:
+    name: Migration classifier (proven able to refuse)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Needed to work out whether this pull request touches the classifier,
+          # which decides whether the demonstration is worth commenting.
+          fetch-depth: 0
+
+      - name: Self test, both directions
+        # Asserts every fixture against its expected verdict AND its expected
+        # rule, so a rule that fires for the wrong reason is caught too. Also
+        # asserts that an empty input list is refused rather than read as clean.
+        run: |
+          set -uo pipefail
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+          {
+            echo "## Migration classifier (OR-T1518)"
+            echo ""
+            echo "### Self test: does the classifier agree with every fixture, both ways"
+            echo ""
+            echo '```'
+          } > "$DEMO"
+          node scripts/classify-migrations.mjs --selftest 2>&1 | tee -a "$DEMO"
+          RC=${PIPESTATUS[0]}
+          {
+            echo '```'
+            echo ""
+            echo "exit code: \`${RC}\` (want 0)"
+          } >> "$DEMO"
+          exit "$RC"
+
+      - name: Refuse a deliberately irreversible fixture, and show the red
+        run: |
+          # `set +e` FIRST, and it is load bearing. A run step's default shell
+          # here is `bash -e`, and `set -uo pipefail` does not clear e. This
+          # step's entire purpose is to run a command that exits non-zero and
+          # then look at the code, so with errexit on it died at the first
+          # capture and reported a red with no reason attached (observed on run
+          # 33637547005). It still fails on purpose, at the end, via FAIL.
+          set +e
+          set -uo pipefail
+          FIX=scripts/fixtures/migration-classifier
+
+          echo "=== running the real classifier over the irreversible and unparseable fixtures ==="
+          OUT=$(node "scripts/classify-migrations.mjs" "$FIX"/*irreversible*.sql "$FIX"/*unparseable*.sql 2>&1); RC=$?
+          echo "$OUT"
+          echo "exit code: $RC"
+
+          FAIL=0
+          if [ "$RC" -ne 2 ]; then
+            echo "::error::the classifier exited $RC over fixtures that are all irreversible or unparseable. It must exit 2. A classifier that cannot refuse is not a gate."
+            FAIL=1
+          fi
+          for NEEDLE in "IRREVERSIBLE" "UNPARSEABLE" "DROP TABLE" "DELETE WITHOUT WHERE" "ALTER TABLE DROP" "DYNAMIC EXECUTE" "line "; do
+            if ! echo "$OUT" | grep -qF "$NEEDLE"; then
+              echo "::error::the refusal did not mention '$NEEDLE'. The job log has to name the file, the line and the statement class, or nobody can act on it."
+              FAIL=1
+            fi
+          done
+
+          echo
+          echo "=== the reversible fixture must still pass, with no friction ==="
+          OK_OUT=$(node "scripts/classify-migrations.mjs" "$FIX"/*reversible_everything_allowed.sql 2>&1); OK_RC=$?
+          echo "$OK_OUT"
+          echo "exit code: $OK_RC"
+          if [ "$OK_RC" -ne 0 ]; then
+            echo "::error::the classifier refused the reversible fixture. Every statement in it has a restore path. A gate that refuses ordinary work gets routed around, so this is a defect in the classifier, not in the fixture."
+            FAIL=1
+          fi
+          if ! echo "$OK_OUT" | grep -qF "1 REVERSIBLE, 0 IRREVERSIBLE, 0 UNPARSEABLE"; then
+            echo "::error::the reversible fixture did not report a clean count line."
+            FAIL=1
+          fi
+
+          echo
+          echo "=== an empty file list must be refused, never read as clean ==="
+          EMPTY_OUT=$(node "scripts/classify-migrations.mjs" 2>&1); EMPTY_RC=$?
+          echo "$EMPTY_OUT"
+          echo "exit code: $EMPTY_RC"
+          if [ "$EMPTY_RC" -eq 0 ]; then
+            echo "::error::the classifier exited 0 when handed no files. Concluding REVERSIBLE from an absence is the exact failure this gate exists to prevent."
+            FAIL=1
+          fi
+
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+          {
+            echo ""
+            echo "### Proven able to refuse"
+            echo ""
+            echo "Exit codes observed: irreversible fixtures \`$RC\` (want 2), reversible fixture \`$OK_RC\` (want 0), empty file list \`$EMPTY_RC\` (want non-zero)."
+            echo ""
+            echo "The refusal, verbatim:"
+            echo ""
+            echo '```'
+            echo "$OUT"
+            echo '```'
+            echo ""
+            echo "The reversible fixture, verbatim:"
+            echo ""
+            echo '```'
+            echo "$OK_OUT"
+            echo '```'
+            echo ""
+            echo "An empty file list, verbatim:"
+            echo ""
+            echo '```'
+            echo "$EMPTY_OUT"
+            echo '```'
+          } >> "$DEMO"
+          cat "$DEMO" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAIL" -ne 0 ]; then
+            exit 1
+          fi
+          echo "classifier refuses the irreversible class, passes the reversible one, and refuses an empty list."
+
+      - name: Publish the demonstration to the pull request
+        # The seats that review changes in this repo hold GitHub read tools and
+        # no shell. An Actions log is not reachable from a review seat and the
+        # API refuses it without a token, so a refusal that exists only in a log
+        # is a refusal nobody reviewing this change can read. This puts the
+        # verbatim output where every reviewer already is.
+        #
+        # Deliberately quiet on ordinary pull requests: it comments only when
+        # the job failed, or when this pull request actually touches the
+        # classifier, its fixtures, or the two workflows. A check that comments
+        # on every PR gets muted, and a muted check is not a check.
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          # See the note on errexit in the step above: the default shell is
+          # `bash -e` and this step reads exit codes deliberately.
+          set +e
+          set -uo pipefail
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+          if [ ! -f "$DEMO" ]; then
+            echo "no demonstration file was written, so there is nothing to publish. This is not a pass."
+            exit 0
+          fi
+
+          TOUCHED=$(git diff --name-only "origin/${BASE_REF}...HEAD" -- \
+            scripts/classify-migrations.mjs \
+            scripts/fixtures/migration-classifier \
+            .github/workflows/supabase-deploy.yml \
+            .github/workflows/ci.yml 2>/dev/null || true)
+
+          if [ "$JOB_STATUS" = "success" ] && [ -z "$TOUCHED" ]; then
+            echo "this pull request does not touch the classifier and the demonstration passed; not commenting."
+            exit 0
+          fi
+
+          {
+            echo ""
+            echo "---"
+            echo "Job status: \`${JOB_STATUS}\`. Posted by the migration classifier job because this pull request touches it, or because it failed."
+          } >> "$DEMO"
+
+          gh pr comment "$PR_NUMBER" --body-file "$DEMO"

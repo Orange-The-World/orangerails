@@ -34,6 +34,11 @@ on:
         required: false
         default: false
         type: boolean
+      irreversible_approval_ref:
+        description: 'ONLY for a prod apply that contains an irreversible change (a drop, a truncate, an unbounded delete, a column type change). The founder decision or ticket reference that authorises THIS change, in the form DEC-nnnn, DL-nnnn or OR-Tnnnn with the real number. Those three forms are placeholders and are refused exactly as written. Leave empty for every ordinary apply.'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: pages-${{ github.ref }}
@@ -1079,6 +1084,229 @@ jobs:
           fi
           echo "Actor '$ACTOR' is on $VAR_NAME. Proceeding on $TARGET_ENV."
 
+      - name: Classify the pending set, and hard stop on the irreversible class
+        # OR-T1518. Runs BEFORE any apply, over the exact set of files this run
+        # would apply, resolved here from this step's own read of the ledger.
+        #
+        # WHAT IT DECIDES. One thing only: whether each pending migration has a
+        # restore path. A reversible change that is wrong costs a revert. An
+        # irreversible one that is wrong costs the data. Correctness is review's
+        # job, not this step's.
+        #
+        # WHY DEV IS NOT BLOCKED. dev applies on merge, and that is what keeps
+        # the prod batch small enough that anyone can read it. Putting a refusal
+        # in front of the dev apply would rebuild the 37-migration backlog this
+        # workflow was rewritten to prevent, and the fast path is what this org
+        # has been starved of. On dev this step reports and stands aside.
+        #
+        # UNPARSEABLE IS IRREVERSIBLE, and so is every other thing this step
+        # could not find out. That inversion is the whole ticket: an absence
+        # must never render as the same green as a clean answer.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+          TARGET_ENV: ${{ needs.target.outputs.environment_name }}
+          APPROVAL_REF: ${{ inputs.irreversible_approval_ref }}
+        run: |
+          # `set +e` FIRST, and it is load bearing. A run step's default shell
+          # is `bash -e`, and `set -uo pipefail` does not clear e. This step
+          # runs the classifier and then READS its exit code, so with errexit
+          # still on it would die the moment the classifier said "irreversible":
+          # no step summary, no file, no line, no statement class, and on the
+          # dev target a blocked apply where the design says report and stand
+          # aside. Observed on CI run 33637547005, where the equivalent step
+          # exited at its first non-zero capture and printed nothing.
+          set +e
+          set -uo pipefail
+
+          MANIFEST="${RUNNER_TEMP}/or-t1518-pending.txt"
+          COUNTFILE="${RUNNER_TEMP}/or-t1518-pending.count"
+          CLASS_JSON="${RUNNER_TEMP}/or-t1518-classification.json"
+          MIG_DIR="supabase/migrations"
+
+          # Every "I could not find out" path lands here. On prod it stops the
+          # apply. On dev it is loud, records the set as UNKNOWN so the apply
+          # step cannot mistake it for a completed comparison, and stands aside.
+          halt () {
+            echo "::error::CLASSIFICATION COULD NOT COMPLETE on ${SUPABASE_REF:-unresolved}: $1"
+            if [ "${TARGET_ENV}" = "supabase-prod" ]; then
+              {
+                echo "## :no_entry: Migration classification could not complete on \`${SUPABASE_REF:-unresolved}\`"
+                echo ""
+                echo "$1"
+                echo ""
+                echo "**Nothing was applied.** This is not a report that the pending set is"
+                echo "irreversible, and not a report that it is clean. The question could not be"
+                echo "answered, and an unanswered question takes the irreversible branch."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            : > "$MANIFEST"
+            echo "unknown" > "$COUNTFILE"
+            echo "::warning::${TARGET_ENV} is not the prod target, so this is reported and not blocked. The apply proceeds and its count comparison will report UNKNOWN rather than passed."
+            exit 0
+          }
+
+          [ -n "${SUPABASE_REF}" ] || halt "the target job produced no supabase_ref output, so the project this run would write to is not known."
+          [ -d "$MIG_DIR" ] || halt "there is no ${MIG_DIR} directory in this checkout, so the set of migrations this run would apply cannot be computed."
+          command -v node >/dev/null 2>&1 || halt "node is not available on this runner, so the classifier could not run at all."
+          [ -f scripts/classify-migrations.mjs ] || halt "scripts/classify-migrations.mjs is missing from this checkout."
+
+          # The classifier must be shown able to refuse before its silence is
+          # worth anything. This is the same discipline as the shadow-scan self
+          # test below: a check that has only ever been seen green is
+          # indistinguishable from a check that cannot go red.
+          if ! node scripts/classify-migrations.mjs --selftest; then
+            halt "the classifier failed its own self test, so its verdict on the real files cannot be trusted."
+          fi
+
+          # Same ledger read, and the same hardening, as the apply step. Bare
+          # curl exits 0 on a 401 or a 500, the error body parses as JSON, the
+          # version list comes back empty, and EVERY file on disk then looks
+          # pending. Here that would over-report rather than under-report, but
+          # UNKNOWN and EMPTY are still different facts and must not share a path.
+          PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
+          trap 'rm -f "$PAYLOAD"' EXIT
+          jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
+
+          RESPONSE=""
+          HTTP_OK=0
+          for attempt in 1 2 3; do
+            if RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$PAYLOAD"); then
+              HTTP_OK=1
+              break
+            fi
+            echo "ledger query attempt ${attempt}/3 did not return a success status"
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          # The response body is deliberately never echoed: on an auth failure it
+          # is the one place a token-shaped string could reach a public log.
+          [ "$HTTP_OK" -eq 1 ] || halt "the Supabase Management API did not return a success status for the migration ledger after 3 attempts, so which migrations are already applied is UNKNOWN and the pending set cannot be computed."
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            halt "the migration ledger query returned a success status but not a JSON array of rows, so the applied set is UNKNOWN."
+          fi
+          APPLIED=$(echo "$RESPONSE" | jq -r '.[].version' | sort -u)
+
+          : > "$MANIFEST"
+          PENDING=0
+          for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
+            BASENAME=$(basename "$FILE")
+            VERSION="${BASENAME%%_*}"
+            if [ -n "$APPLIED" ] && echo "$APPLIED" | grep -qx "$VERSION"; then
+              continue
+            fi
+            echo "$FILE" >> "$MANIFEST"
+            PENDING=$((PENDING + 1))
+          done
+          echo "$PENDING" > "$COUNTFILE"
+
+          echo "PENDING SET on ${SUPABASE_REF}: ${PENDING} file(s) this run would apply."
+          cat "$MANIFEST" || true
+          echo
+
+          if [ "$PENDING" -eq 0 ]; then
+            # NOT a pass, and not read as one. Zero pending is recorded as the
+            # fact it is; the apply step recomputes the set from its own ledger
+            # read and aborts if it disagrees with this zero. A pending set this
+            # step could not COMPUTE goes through halt() above instead, which is
+            # the case the ticket means by "an empty file list": empty because we
+            # could not look is a refusal, empty because nothing is pending is
+            # arithmetic.
+            echo "nothing is pending, so there is nothing to classify. The apply step recomputes this set independently and aborts if it finds anything to run."
+            exit 0
+          fi
+
+          node scripts/classify-migrations.mjs --from-list "$MANIFEST" --json "$CLASS_JSON"
+          RC=$?
+
+          # A check that cannot say "6 of 6" cannot say anything.
+          EXAMINED=$(jq -r '.examined // "none"' "$CLASS_JSON" 2>/dev/null || echo "none")
+          echo "COUNT CHECK: the classifier examined ${EXAMINED} file(s); this run would apply ${PENDING}."
+          if [ "$EXAMINED" != "$PENDING" ]; then
+            halt "the classifier examined ${EXAMINED} file(s) but ${PENDING} would be applied. A verdict that does not cover every file this run would run is not a verdict."
+          fi
+
+          if [ "$RC" -eq 0 ]; then
+            echo "VERDICT: every pending migration is REVERSIBLE (${EXAMINED} of ${PENDING} examined). Proceeding exactly as before."
+            {
+              echo "## :check: Migration classification on \`${SUPABASE_REF}\`: all reversible"
+              echo ""
+              echo "${EXAMINED} of ${PENDING} pending file(s) examined, all REVERSIBLE. No added friction."
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "${APPROVAL_REF}" ]; then
+              echo "::notice::an irreversible-change approval reference (${APPROVAL_REF}) was supplied, but nothing in this set is irreversible. It was not used."
+            fi
+            exit 0
+          fi
+
+          DETAIL=$(jq -r '.files[] | select(.verdict != "REVERSIBLE") | "- `\(.file)` is \(.verdict): " + (((.findings // []) | map("line \(.line) [\(.id)] \(.why)")) | join("; "))' "$CLASS_JSON" 2>/dev/null)
+          [ -n "$DETAIL" ] || DETAIL="- (the classifier exited ${RC} and its JSON report could not be read, which is itself the irreversible branch)"
+
+          if [ "${TARGET_ENV}" != "supabase-prod" ]; then
+            echo "::warning::this set contains irreversible change(s). On ${TARGET_ENV} that is reported, not blocked: dev applies on merge so a bad migration breaks dev in front of whoever wrote it, which is the cheapest place for it to break."
+            printf '%s\n' "$DETAIL"
+            {
+              echo "## :warning: Irreversible change(s) in this set, on \`${SUPABASE_REF}\` (dev): reported, not blocked"
+              echo ""
+              printf '%s\n' "$DETAIL"
+              echo ""
+              echo "The same set would be REFUSED on the prod target without an authority reference."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ -z "${APPROVAL_REF}" ]; then
+            {
+              echo "## :no_entry: Irreversible change(s) refused on \`${SUPABASE_REF}\`"
+              echo ""
+              echo "**Nothing was applied.**"
+              echo ""
+              printf '%s\n' "$DETAIL"
+              echo ""
+              echo "A reversible change has a restore path, so a wrong one costs a revert. These"
+              echo "have none, so a wrong one costs the data. That is why this class does not"
+              echo "travel the same path as a GRANT."
+              echo ""
+              echo "To apply this deliberately: re-dispatch with \`irreversible_approval_ref\` set to"
+              echo "the founder decision or ticket that authorises THIS change, in the form"
+              echo "\`DEC-nnnn\`, \`DL-nnnn\` or \`OR-Tnnnn\` with the real number. Those three forms are"
+              echo "placeholders and are refused exactly as written, so a pasted example cannot"
+              echo "become a reference that authorises nothing. The value is written into this log,"
+              echo "so the authority the apply ran on can be read back later."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::IRREVERSIBLE change(s) in the pending set for ${SUPABASE_REF} and no authority reference was given. NOTHING was applied. See the step summary for the file, line and statement class."
+            exit 1
+          fi
+
+          # A decision id carries the hyphen (DEC-0281, DL-1336). A ticket id does
+          # NOT: it is OR-T1518, never OR-T-1518. The first version of this pattern
+          # required a hyphen after every prefix, so it accepted a shape nothing
+          # here uses and refused every real ticket id. A gate that turns away the
+          # correct value gets worked around, and the message it printed sent the
+          # operator looking for the wrong shape.
+          if ! echo "${APPROVAL_REF}" | grep -qE '^(DEC-|DL-|OR-T)[0-9]{3,6}$'; then
+            echo "::error::irreversible_approval_ref '${APPROVAL_REF}' is not a decision or ticket reference (expected DEC-nnnn, DL-nnnn or OR-Tnnnn, with the real number in place of nnnn). Refusing to apply. A reference nobody can look up afterwards is not a record of an authority, and a malformed one must never fall through to an apply."
+            exit 1
+          fi
+
+          echo "::warning::OVERRIDE IN USE on ${SUPABASE_REF}: irreversible change(s) are being applied under authority ${APPROVAL_REF}."
+          printf '%s\n' "$DETAIL"
+          {
+            echo "## :warning: Irreversible change(s) applied under authority \`${APPROVAL_REF}\`"
+            echo ""
+            printf '%s\n' "$DETAIL"
+            echo ""
+            echo "This apply carried an explicit authority reference, so it proceeded. The"
+            echo "reference names what authorised it; the two required reviewers on the"
+            echo "\`supabase-prod\` environment and the actor allowlist are what bound it."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Apply pending DB migrations via Management API
         # The Supabase CLI's db push requires a linked project + DB password we do not
         # have in CI. The Management API SQL endpoint
@@ -1230,6 +1458,61 @@ jobs:
             exit 1
           fi
           rm -f "$LEDGER_MAP"
+          echo
+
+          # -------------------------------------------------------------------
+          # OR-T1518. COUNT CHECK against what the classifier actually examined.
+          #
+          # The classification step wrote down the exact set of files it read.
+          # This step now recomputes that set from its OWN read of the ledger and
+          # refuses to apply if the two disagree, on count or on names. Two reads
+          # seconds apart can genuinely differ: another dispatch lands between
+          # them, or the checkouts are not the same. A gate that gave an honest
+          # verdict on a different set than the one being applied is worse than
+          # no gate, because it reads as a passed check.
+          # -------------------------------------------------------------------
+          MANIFEST="${RUNNER_TEMP}/or-t1518-pending.txt"
+          COUNTFILE="${RUNNER_TEMP}/or-t1518-pending.count"
+
+          APPLY_LIST=$(mktemp); chmod 600 "$APPLY_LIST"
+          for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
+            B=$(basename "$FILE")
+            V="${B%%_*}"
+            if echo "$APPLIED" | grep -qx "$V"; then
+              continue
+            fi
+            echo "$FILE" >> "$APPLY_LIST"
+          done
+          APPLY_N=$(wc -l < "$APPLY_LIST" | tr -d ' ')
+
+          if [ ! -f "$COUNTFILE" ] || [ ! -f "$MANIFEST" ]; then
+            rm -f "$APPLY_LIST"
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the classification step left no record of what it examined, so nothing here knows whether this set was ever classified. NOTHING was applied."
+            exit 1
+          fi
+
+          CLASS_N=$(cat "$COUNTFILE")
+          if [ "$CLASS_N" = "unknown" ]; then
+            # Reachable on dev only. On prod the classification step exits 1 and
+            # this step never runs. Said out loud, because "I could not compare"
+            # must never render the same as "I compared and they matched".
+            echo "::warning::COUNT CHECK UNKNOWN: the classifier could not compute the pending set on this target, so the ${APPLY_N} file(s) below were NOT compared against a classified set. This is not a passed check."
+          elif [ "$CLASS_N" != "$APPLY_N" ]; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the classifier examined ${CLASS_N} file(s) and this step would apply ${APPLY_N}. The verdict does not cover what is about to run. NOTHING was applied. Re-run so both reads see the same ledger."
+            echo "-- classified --"; cat "$MANIFEST"
+            echo "-- would apply --"; cat "$APPLY_LIST"
+            rm -f "$APPLY_LIST"
+            exit 1
+          elif ! diff -q <(sort "$MANIFEST") <(sort "$APPLY_LIST") >/dev/null 2>&1; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the classifier examined ${CLASS_N} file(s) and this step would apply the same NUMBER of different files. NOTHING was applied."
+            echo "-- classified --"; cat "$MANIFEST"
+            echo "-- would apply --"; cat "$APPLY_LIST"
+            rm -f "$APPLY_LIST"
+            exit 1
+          else
+            echo "COUNT CHECK: ${APPLY_N} of ${CLASS_N} classified file(s) match, by name. Applying exactly what was classified."
+          fi
+          rm -f "$APPLY_LIST"
           echo
 
           # For each migration file, apply if not in the applied set
