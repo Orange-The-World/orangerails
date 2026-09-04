@@ -305,6 +305,94 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
+  # OR-T1804, out of OR-T1794. ops/change-control/README.md quotes
+  # MIGRATION_APPLY_ALLOWED_ACTORS_PROD next to the reason it is on the
+  # production allowlist. baseline.json and that quote could previously drift
+  # apart with no signal at all: nothing stopped either file being edited
+  # alone. This is a plain file comparison, no API and no token, so it runs on
+  # any pull request that touches either file.
+  #
+  # Same discipline as every other job here: prove it can fail before trusting
+  # that it does not, on copies, never on the committed files.
+  # ---------------------------------------------------------------------------
+  readme-annotation-drift-self-test:
+    name: A README/baseline mismatch is proven to go red, and a missing quote is proven distinct from a match
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Prove a value mismatch exits 1 and names both values
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/cc-mismatch
+          cp ops/change-control/baseline.json /tmp/cc-mismatch/baseline.json
+          cp ops/change-control/README.md /tmp/cc-mismatch/README.md
+          node -e '
+            const fs = require("fs");
+            const p = "/tmp/cc-mismatch/baseline.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            j.variables.MIGRATION_APPLY_ALLOWED_ACTORS_PROD = ["a-mutated-value-for-the-self-test"];
+            fs.writeFileSync(p, JSON.stringify(j, null, 2));
+          '
+          STATUS=0
+          CHANGE_CONTROL_BASELINE_PATH=/tmp/cc-mismatch/baseline.json \
+          CHANGE_CONTROL_README_PATH=/tmp/cc-mismatch/README.md \
+            node scripts/check-readme-annotation.mjs > mismatch.txt 2>&1 || STATUS=$?
+          cat mismatch.txt
+          if [ "${STATUS}" != "1" ]; then
+            echo "::error::a value mismatch exited ${STATUS}, expected 1."
+            exit 1
+          fi
+          if ! grep -q 'a-mutated-value-for-the-self-test' mismatch.txt; then
+            echo "::error::the mismatch output did not name the new value."
+            exit 1
+          fi
+
+      - name: Prove a missing quoted block exits 3, distinct from a match
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/cc-missing
+          cp ops/change-control/baseline.json /tmp/cc-missing/baseline.json
+          printf 'no json block here\n' > /tmp/cc-missing/README.md
+          STATUS=0
+          CHANGE_CONTROL_BASELINE_PATH=/tmp/cc-missing/baseline.json \
+          CHANGE_CONTROL_README_PATH=/tmp/cc-missing/README.md \
+            node scripts/check-readme-annotation.mjs > missing.txt 2>&1 || STATUS=$?
+          cat missing.txt
+          if [ "${STATUS}" != "3" ]; then
+            echo "::error::a missing quoted block exited ${STATUS}, expected 3. Missing must never read as matching."
+            exit 1
+          fi
+
+      - name: Prove the committed files, unmutated, actually match today
+        run: node scripts/check-readme-annotation.mjs
+
+  readme-annotation-drift:
+    name: The baseline and its recorded reason must not drift apart
+    runs-on: ubuntu-latest
+    needs:
+      - self-test
+      - readme-annotation-drift-self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Compare MIGRATION_APPLY_ALLOWED_ACTORS_PROD in baseline.json against the quoted block in README.md
+        run: node scripts/check-readme-annotation.mjs
+
+  # ---------------------------------------------------------------------------
   # The live reading. Runs after the machinery has been proven able to fail.
   # ---------------------------------------------------------------------------
   read-and-compare:
