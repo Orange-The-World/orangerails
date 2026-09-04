@@ -339,11 +339,13 @@ export async function assertPqcWrapKeyMatchesSalt(args: {
   const { wrapKey, mek, saltB64 } = args;
 
   const expected = await derivePqcSecretWrapKey(mek, saltB64);
+  const probeCiphertext = await encryptString(PQC_WRAP_KEY_PROBE, expected);
 
   let opened: string;
   try {
-    opened = await decryptString(await encryptString(PQC_WRAP_KEY_PROBE, expected), wrapKey);
-  } catch {
+    opened = await decryptString(probeCiphertext, wrapKey);
+  } catch (err) {
+    if (!isAuthenticationTagFailure(err)) throw err;
     throw new Error(
       "PQC wrap key does not match the vault salt it was said to come from. Refusing to " +
         "carry the PQC secrets: under a mismatched key every stored secret looks dead, and " +
