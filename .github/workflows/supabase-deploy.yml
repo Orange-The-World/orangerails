@@ -1232,6 +1232,85 @@ jobs:
           rm -f "$LEDGER_MAP"
           echo
 
+          # -------------------------------------------------------------------
+          # OR-T0419. ORDER SCAN, before anything is applied.
+          #
+          # This loop walks the tree in FILENAME order, so within one run a lower
+          # version always runs before a higher one. Across runs it cannot: a file
+          # that merges later while numbering earlier is applied after everything
+          # that numbers above it, because those were already applied on an
+          # earlier run and are skipped here. On any database that is already
+          # partly applied, which is every environment we own, "the filename
+          # guarantees I run first" is not a property the apply path can provide.
+          #
+          # Dev, 2026-08-24: 20260824120000_schedule_or_webhook_dispatch.sql
+          # merged first and applied; 20260824105000_mark_pre_cutoff_webhook_
+          # backlog_dead.sql merged about forty minutes later with a LOWER version
+          # and had not. The second file's header states it must run before the
+          # schedule exists. The schedule was live and its safety migration had
+          # never run. Nothing broke only because the table held zero rows.
+          #
+          # So a backwards-numbered file HALTS the apply and names itself. The
+          # remedy is the same as for a shadow: give it a new, unused timestamp,
+          # which makes the ordering true rather than assumed.
+          #
+          # UNKNOWN is not a pass. A version this cannot compare (non-numeric, or
+          # a different width from the ledger's, where lexicographic order stops
+          # meaning chronological order) is reported and refused, not skipped.
+          # -------------------------------------------------------------------
+          order_scan () {
+            local applied="$1" files="$2"
+            local max_applied base version behind=0 unknown=0 total=0
+            max_applied=$(printf '%s\n' "$applied" | grep -E '^[0-9]+$' | sort | tail -1)
+            if [ -z "$max_applied" ]; then
+              echo "ORDER SCAN: the ledger carries no numeric version, so there is nothing for a file to number below."
+              return 0
+            fi
+            while IFS= read -r base; do
+              [ -n "$base" ] || continue
+              version="${base%%_*}"
+              if printf '%s\n' "$applied" | grep -qx "$version"; then
+                continue
+              fi
+              total=$((total + 1))
+              if ! printf '%s' "$version" | grep -qE '^[0-9]+$' || [ "${#version}" -ne "${#max_applied}" ]; then
+                unknown=$((unknown + 1))
+                echo "  ? UNCOMPARABLE: ${base} -- version '${version}' cannot be ordered against the highest applied version ${max_applied}. Same-width numeric timestamps are what makes filename order mean chronological order."
+                continue
+              fi
+              if [[ "$version" < "$max_applied" ]]; then
+                behind=$((behind + 1))
+                echo "  x OUT OF ORDER: ${base} -- version ${version} numbers BELOW ${max_applied}, which is already applied. This file will run AFTER migrations it numbers before, whatever its header assumes."
+              fi
+            done <<< "$files"
+            echo "ORDER SCAN: highest applied version ${max_applied}, ${total} unapplied file(s) examined, ${behind} numbered below it, ${unknown} uncomparable."
+            [ "$behind" -eq 0 ] && [ "$unknown" -eq 0 ]
+          }
+
+          # The scan must be able to go RED, and it is the REAL function that is
+          # exercised here, not a restatement of it. A second copy of the rule
+          # would pass for ever while the rule itself was edited away.
+          OS_APPLIED=$(printf '%s\n' '20990101000000' '20990101000002')
+          if order_scan "$OS_APPLIED" '20990101000001_backwards.sql' >/dev/null 2>&1; then
+            echo "::error::order-scan self-test FAILED: the detector did not fire on a file numbered BELOW the highest applied version. Refusing to apply, because a check that cannot go red proves nothing."
+            exit 1
+          fi
+          if ! order_scan "$OS_APPLIED" '20990101000003_forwards.sql' >/dev/null 2>&1; then
+            echo "::error::order-scan self-test FAILED: the detector fired on a normally ordered file. Refusing to apply, because a check that is red on everything will be switched off."
+            exit 1
+          fi
+          if order_scan "$OS_APPLIED" '2099010100000X_notanumber.sql' >/dev/null 2>&1; then
+            echo "::error::order-scan self-test FAILED: a version it could not compare was reported as fine. I-could-not-check must never read as clean."
+            exit 1
+          fi
+          echo "order-scan self-test ok: red on a backwards-numbered file, red on an uncomparable version, green on a forward one."
+
+          if [ -n "$TREE_FILES" ] && ! order_scan "$APPLIED" "$TREE_FILES"; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more unapplied migration files number BELOW a version that is already applied, so they would run after migrations they number before. NOTHING was applied on this run. Rename each file above to a new, unused timestamp higher than the highest applied version named in the scan, and push again. Do not switch this check off: filename order is a within-run property and cannot be a cross-run guarantee (OR-T0419)."
+            exit 1
+          fi
+          echo
+
           # For each migration file, apply if not in the applied set
           APPLIED_COUNT=0
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
