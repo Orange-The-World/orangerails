@@ -14,6 +14,26 @@ name: Production change-control settings drift
 # any allowlist. It reads and it compares. Whether the shared builder identity
 # should remain on the production allowlist is a decision, and it belongs to
 # the person who owns that decision, not to this file.
+#
+# HOW ANYTHING HERE REACHES A SEAT (OR-T1782). A red scheduled run lands on the
+# default branch, attached to no pull request, and wakes nobody in this org.
+# The two places this workflow wrote its findings, the step summary and the job
+# log, both need an authenticated collaborator token to read. So every outcome
+# that is not clean also emits a check-run ANNOTATION, which the ordinary
+# check-runs API returns to any seat that can already read this repository. The
+# annotation TITLE is the machine-readable class and there are exactly three:
+#
+#   change-control-drift        the live settings differ from the baseline. The
+#                               message carries every changed line with its old
+#                               and its new value, not a pointer to a summary.
+#   change-control-unreadable   the read did not complete (3 refused, 4 not
+#                               found, 5 unusable). This is NOT a report that
+#                               nothing changed.
+#   change-control-no-baseline  nothing is committed to compare against.
+#
+# Read the annotations of the FAILED job in a run, not of every job. The
+# always-on half, which polls these runs and files a delivery ticket on a red
+# run or on a run that never happened, is OR-T1792.
 
 on:
   schedule:
@@ -285,6 +305,28 @@ jobs:
             exit 1
           fi
 
+          # An alarm nobody receives is not an alarm, so the delivery is
+          # asserted here and not assumed. This drives the SAME script the live
+          # job calls, so it cannot pass while the real one emits something
+          # else. Redirected to a file on purpose: printing it would hang a red
+          # annotation on a job that passed.
+          node scripts/gha-annotate.mjs change-control-drift drift.txt > annotation.txt
+          LINES=$(wc -l < annotation.txt)
+          if [ "${LINES}" != "1" ]; then
+            echo "::error::the annotation is ${LINES} lines. A workflow command is one line, so everything after the first newline is dropped in silence and the values never arrive."
+            exit 1
+          fi
+          if ! grep -q '^::error title=change-control-drift::' annotation.txt; then
+            echo "::error::the annotation carries no machine-readable title, so a reader cannot tell a drift from a failed read."
+            exit 1
+          fi
+          for NEEDLE in 'an-identity-nobody-reviewed' 'was:' 'now:'; do
+            if ! grep -q "${NEEDLE}" annotation.txt; then
+              echo "::error::the delivered annotation does not contain ${NEEDLE}. 'the settings changed' is not actionable."
+              exit 1
+            fi
+          done
+
           {
             echo "## The alarm fires on a real change to the recorded values"
             echo ""
@@ -350,8 +392,20 @@ jobs:
         run: |
           set -uo pipefail
           STATUS=0
-          node scripts/change-control-settings.mjs --read live.json || STATUS=$?
+          node scripts/change-control-settings.mjs --read live.json 2> read-error.txt || STATUS=$?
           if [ "${STATUS}" != "0" ]; then
+            cat read-error.txt
+            {
+              echo "The change-control settings could not be READ (exit ${STATUS})."
+              echo "This is not a report that the settings are unchanged. It is a report"
+              echo "that nobody knows what they are: 3 refused, 4 not found, 5 unusable."
+              echo ""
+              cat read-error.txt
+            } > unreadable.txt
+            # An annotation as well as a step summary. The summary needs an
+            # authenticated collaborator token to read, so on its own it
+            # delivers this to nobody. See the header of this file.
+            node scripts/gha-annotate.mjs change-control-unreadable unreadable.txt
             {
               echo "## :grey_question: Change-control settings UNKNOWN"
               echo ""
@@ -388,7 +442,11 @@ jobs:
         run: |
           set -uo pipefail
           STATUS=0
-          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json || STATUS=$?
+          # Captured once and reused below. The summary used to run the same
+          # comparison a second time in order to print it, which is two
+          # readings of a thing that has to be one.
+          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json > compare.txt 2>&1 || STATUS=$?
+          cat compare.txt
 
           if [ "${STATUS}" = "6" ]; then
             {
@@ -409,7 +467,10 @@ jobs:
               echo "ignores it. The first recorded values should be ones somebody looked at,"
               echo "and a pull request diff is what that means."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::no change-control baseline committed; nothing was compared"
+            echo "No change-control baseline is committed, so nothing was compared." > no-baseline.txt
+            echo "This is not a pass and it is not a drift: there is no recorded value" >> no-baseline.txt
+            echo "for the reading to be checked against. See the step summary to seed it." >> no-baseline.txt
+            node scripts/gha-annotate.mjs change-control-no-baseline no-baseline.txt
             exit 1
           fi
 
@@ -425,7 +486,7 @@ jobs:
               echo "turned off, admins allowed to bypass."
               echo ""
               echo '```'
-              node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json 2>&1 || true
+              cat compare.txt
               echo '```'
               echo ""
               echo "If the change was intended, update the baseline in a pull request so the"
@@ -439,7 +500,15 @@ jobs:
               echo "a ticket or a citation. If it was not intended, that is an unreviewed"
               echo "change to who may touch production."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::production change-control settings differ from the committed baseline. See step summary."
+            # The values themselves go into the annotation, not a pointer to a
+            # step summary that the seats which must act cannot open.
+            {
+              echo "Production change-control settings differ from the committed baseline."
+              echo "Every line below names what moved, what it was, and what it is now."
+              echo ""
+              cat compare.txt
+            } > drift-annotation.txt
+            node scripts/gha-annotate.mjs change-control-drift drift-annotation.txt
             exit 1
           fi
 
