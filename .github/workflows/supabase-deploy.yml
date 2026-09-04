@@ -1130,7 +1130,7 @@ jobs:
           # coverage.
           # -------------------------------------------------------------------
           ledger_shape_ok () {
-            printf '%s' "$1" | jq -e 'type == "array"' >/dev/null 2>&1
+            printf '%s' "$1" | jq -e 'type == "array" and (length == 0 or (.[0] | type == "object" and has("version")))' >/dev/null 2>&1
           }
 
           # refuses <fn> <payload> is true when <fn> REJECTS the payload. It is a
@@ -1150,6 +1150,14 @@ jobs:
           fi
           if ! ledger_shape_ok '[]'; then
             echo "::error::ledger shape self-test FAILED: an empty JSON array was refused. An empty ledger is a legitimate answer on a fresh project and must be readable as zero applied versions."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '[{"foo":1}]'; then
+            echo "::error::ledger shape self-test FAILED: a JSON array whose elements carry no version key was accepted as a ledger. .[].version over that yields nulls, APPLIED comes back empty, and every file in the tree is treated as unapplied."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '[1,2,3]'; then
+            echo "::error::ledger shape self-test FAILED: a JSON array of non-object elements was accepted as a ledger."
             LEDGER_ST_FAIL=1
           fi
           if ! refuses ledger_shape_ok '{"message":"Unauthorized"}'; then
@@ -1176,7 +1184,7 @@ jobs:
             echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the ledger response shape rule does not behave as required, so the applied-version set cannot be trusted even if the query succeeds. NOTHING was applied."
             exit 1
           fi
-          echo "ledger shape self-test ok: array accepted, empty array accepted, object refused, error body refused, non-JSON refused, empty body refused, and the negative assertions shown able to fire."
+          echo "ledger shape self-test ok: array accepted, empty array accepted, array-without-version refused, non-object-array-elements refused, object refused, error body refused, non-JSON refused, empty body refused, and the negative assertions shown able to fire."
 
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
