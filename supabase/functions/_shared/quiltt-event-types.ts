@@ -75,9 +75,27 @@ export const HANDLED_QUILTT_EVENT_TYPE_PREFIXES: readonly string[] = [
  * balance.created and profile.ready are the two that decide whether this alarm
  * is usable: 692 of the last 825 events between them. We act on neither today,
  * because balances are refreshed on the connection.synced.successful path.
- * Whether balance.created should itself trigger a pull is a genuine question
- * and it is tracked on its own ticket. It is not a reason for this alarm to
- * fire 600 times a week while that question is open.
+ *
+ * balance.created IS redundant with that refresh (OR-T2173, confirmed
+ * 2026-09-04). The DBA's prod census (OR-T2148, read off prod 2026-09-04
+ * 10:48 UTC) counted 6,141 balance.created against 891 successful syncs all
+ * time, a ratio of 6.89 per sync, and 597 against 95 over the last 7 days, a
+ * ratio of 6.28 per sync. A near-constant ratio across both windows is what
+ * "the sync emits one of these per account" looks like, not what an
+ * independent balance-change notification looks like, so acting on it would
+ * re-pull a balance we just pulled. There is no feature ticket to act on
+ * balance.created.
+ *
+ * The refresh it defers to is NOT unconditional. The same census counted
+ * connection.synced.successful retiring 227 of its 855 events all time, 26.5
+ * percent, so this justification is true by design and about 73 percent true
+ * in practice. Whether a retired row means the refresh ran and only the inbox
+ * row was closed out, or means the refresh never ran, is open and is being
+ * measured on OR-T2215; do not read "redundant with the refresh" as "the
+ * refresh is guaranteed to have happened".
+ *
+ * It is not a reason for this alarm to fire 600 times a week while that is
+ * measured.
  *
  * account.created and connection.created are ordinary and have never carried an
  * error, but neither has arrived since 2026-08-21. That is worth knowing and it
