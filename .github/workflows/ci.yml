@@ -90,6 +90,12 @@ jobs:
     name: Typecheck edge functions (Deno)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Explicit permissions: the PR-comment step below needs pull-requests:
+    # write, which is not implied and would otherwise inherit the repo's
+    # default token scope (possibly read-only).
+    permissions:
+      contents: read
+      pull-requests: write
     # Why this job exists: until 2026-07-26 CI never looked at supabase/functions
     # at all. `bun run lint` carries continue-on-error (see the note on it above)
     # and `bun run build` only builds the Vite frontend, so every one of the 37
@@ -218,6 +224,51 @@ jobs:
 
           if [ "$ERRORS" -lt "$DENO_CHECK_BASELINE" ]; then
             echo "::notice::Error count dropped to ${ERRORS}. Lower DENO_CHECK_BASELINE to ${ERRORS} in .github/workflows/ci.yml in this PR so the ratchet holds the ground you just took."
+          fi
+
+      # The only way this job's diagnostic TEXT leaves the runner. gh_checks
+      # (or any pass/fail-only view) cannot show it, and the interactive log
+      # viewer needs a signed-in browser session, so a failure here was
+      # previously undiagnosable by any tool-only seat. deno-check.log was
+      # already written by the step above into RUNNER_TEMP, which is shared
+      # across steps in this job, so no artifact upload/download is needed.
+      - name: Report new type errors as a PR comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          PR="${{ github.event.pull_request.number }}"
+          if [ -z "$PR" ] || [ "$PR" = "0" ]; then
+            echo "Not a PR run -- skipping comment"
+            exit 0
+          fi
+          LOG="$RUNNER_TEMP/deno-check.log"
+          if [ -f "$LOG" ]; then
+            BY_CLASS=$(grep -oE 'TS[0-9]+ \[ERROR\]' "$LOG" | sort | uniq -c | sort -rn || true)
+            LINES=$(grep -B1 -A4 '\[ERROR\]' "$LOG" | head -160 || true)
+          else
+            BY_CLASS="(deno-check.log not found -- the job likely failed before the check ran)"
+            LINES=""
+          fi
+          {
+            echo "**CI: Typecheck edge functions (Deno) -- new type errors (run ${{ github.run_id }})**"
+            echo ""
+            echo "By error class:"
+            printf '\`\`\`\n'
+            echo "${BY_CLASS}"
+            printf '\`\`\`\n'
+            echo ""
+            echo "First diagnostics (deno check output only, no credentials or row content):"
+            printf '\`\`\`\n'
+            echo "${LINES}"
+            printf '\`\`\`\n'
+          } > /tmp/pr-body.md
+          cat /tmp/pr-body.md
+          cat /tmp/pr-body.md >> "$GITHUB_STEP_SUMMARY"
+          if ! gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr-body.md; then
+            echo "::error::gh pr comment was refused. Token scope or API. The diagnostics printed above are the same text that would have been posted."
+            exit 1
           fi
 
       - name: Upload deno.lock
