@@ -52,6 +52,7 @@ interface SelectChain {
   ): Promise<unknown>;
   order(column: string, options?: { ascending?: boolean }): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
+  eq(column: string, value: unknown): SelectChain;
 }
 
 interface FakeOptions {
