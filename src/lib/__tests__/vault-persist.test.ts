@@ -356,6 +356,62 @@ describe("vault recovery: the rotated meta write", () => {
     expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_secret_wrapped");
   });
 
+  it("refuses to rotate, before touching any row, if a stored KEM secret has no replacement", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: "stored-kem-wrapped", sig_secret_wrapped: null },
+        ],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(/stored PQC KEM secret/);
+
+    // The whole point: nothing irreversible ran. No row was re-encrypted, the
+    // meta write never happened, and the old key material was not cleared.
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("refuses to rotate, before touching any row, if a stored signature secret has no replacement", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: "stored-sig-wrapped" },
+        ],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(/stored PQC signature secret/);
+
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("rotates cleanly when the vault genuinely has no stored PQC secrets", async () => {
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [{ user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: null }],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    ).resolves.toBeUndefined();
+  });
+
   it("migrates every row BEFORE the meta write, never after", async () => {
     const { client, calls } = makeFakeClient({
       rows: {
