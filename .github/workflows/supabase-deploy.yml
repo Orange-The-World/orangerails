@@ -1212,7 +1212,9 @@ jobs:
           # A success status is still not a usable answer until the shape is
           # right. Only a JSON array of rows can be trusted to mean "these are
           # the versions that are applied"; anything else is UNKNOWN, not zero.
-          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          # This calls the SAME ledger_shape_ok the self-test above ran over
+          # synthetic payloads, so what was demonstrated is what runs (OR-T2141).
+          if ! ledger_shape_ok "$RESPONSE"; then
             echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger query returned a success status but not a JSON array of rows. The applied-version set is UNKNOWN, so NOTHING was applied."
             exit 1
           fi
