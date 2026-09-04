@@ -1566,7 +1566,7 @@ jobs:
             exit 1
           fi
           rm -rf "$ST_DIR"
-          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, red on an applied set holding no numeric version at all (OR-T2152), silent on a marked older file, silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147)."
+          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, red on an applied set holding no numeric version at all (OR-T2152), silent on a marked older file, silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147), red on a non-matching synthetic allowlist (OR-T2170)."
 
           # The guard reads the ledger response already read above. NOT a
           # second API call: a second read could disagree with the set the loop
