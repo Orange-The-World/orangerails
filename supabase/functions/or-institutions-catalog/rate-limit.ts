@@ -72,21 +72,27 @@ export const rateWindows = new Map<string, { windowStart: number; count: number 
  * with every other gateway-routed caller; the namespace only keeps that
  * blast radius from also reaching cf: callers.
  *
- * The structural fix in flight makes this question moot rather than
- * answering it: workers/api-gateway (OR-T1103) now captures the genuine
- * incoming cf-connecting-ip before stripping it and re-injects it under
- * x-gateway-verified-ip, a header only the gateway itself can set. Once
- * this function trusts that header (tracked as OR-T1116), a gateway-routed
- * request carries an edge-verified identity again and neither branch above
- * matters. Until OR-T1103 merges and OR-T1116 lands, the gap described here
- * is live.
+ * OR-T1103 (merged) makes this question moot rather than answering it:
+ * workers/api-gateway now captures the genuine incoming cf-connecting-ip
+ * before stripping it and re-injects it under x-gateway-verified-ip, a
+ * header only the gateway itself can set (any caller-supplied value under
+ * that name is dropped by the gateway's own strip loop first, so it cannot
+ * be forged). This function now trusts that header (OR-T1116): it is
+ * checked immediately after cf-connecting-ip, ahead of the xff: fallback
+ * below, so a gateway-routed request carries an edge-verified identity
+ * again and neither branch above applies to it any more.
  *
- * KNOWN GAP, stated rather than hidden: a request that reaches this function
- * through workers/api-gateway has already lost cf-connecting-ip (stripped
- * there). With no x-forwarded-for either, clientIdOrNull returns null and
- * the request is not throttled at all (fail-open, see below). With an
- * x-forwarded-for present, the request lands in an xff: bucket whose real
- * behaviour is exactly the open question above.
+ * CLOSED (OR-T1116), previously KNOWN GAP: a request that reaches this
+ * function through workers/api-gateway loses cf-connecting-ip (stripped
+ * there) but now carries x-gateway-verified-ip instead, set by the gateway
+ * from that same edge-verified value. clientIdOrNull reads it second, so a
+ * gateway-routed caller lands in a real gw: bucket rather than the null or
+ * xff: outcome this paragraph used to describe. The gateway also strips
+ * any x-forwarded-for a caller sent before forwarding (workers/api-gateway
+ * forwardHeaders, read at its dev head), so a gateway-routed request
+ * should never reach the xff: fallback in practice. What follows describes
+ * the DIRECT-call path only, i.e. a caller reaching this function without
+ * going through the gateway.
  *
  * UNMEASURED, and until now written here as though it were established: that
  * a direct call bypassing the gateway still carries a genuine
@@ -117,17 +123,20 @@ export const rateWindows = new Map<string, { windowStart: number; count: number 
 export function clientIdOrNull(req: Request): string | null {
   const edgeSet = (req.headers.get('cf-connecting-ip') ?? '').trim();
   if (edgeSet) return `cf:${edgeSet}`;
+  const gatewayVerified = (req.headers.get('x-gateway-verified-ip') ?? '').trim();
+  if (gatewayVerified) return `gw:${gatewayVerified}`;
   const forwarded = req.headers.get('x-forwarded-for') ?? '';
   const hops = forwarded.split(',').map((hop) => hop.trim()).filter((hop) => hop.length > 0);
   return hops.length > 0 ? `xff:${hops[hops.length - 1]}` : null;
 }
 
 // The headers worth reporting on when a caller could not be identified.
-// x-real-ip and x-gateway-verified-ip are listed even though clientIdOrNull
-// reads neither: x-real-ip is caller-controlled and must never become an
-// identity (OR-C0493), and x-gateway-verified-ip is the header the gateway work
-// will introduce. Knowing whether they were on the request is exactly what
-// tells us where an unidentified call came from.
+// x-real-ip is listed even though clientIdOrNull never reads it: it is
+// caller-controlled and must never become an identity (OR-C0493).
+// x-gateway-verified-ip IS read now (OR-T1116), second after
+// cf-connecting-ip; it stays in this list so the log line for a genuinely
+// unidentified request still shows whether it was present, empty or
+// absent alongside the other candidates.
 const IDENTITY_HEADERS = [
   'cf-connecting-ip',
   'x-forwarded-for',
