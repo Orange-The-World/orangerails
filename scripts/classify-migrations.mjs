@@ -68,7 +68,10 @@ export const UNPARSEABLE = 'UNPARSEABLE';
  *       when somebody later calls the function. Blanked, and noted.
  *
  *   DO $$ BEGIN ... DROP TABLE t; ... END $$;
- *       The body DOES execute at apply time. Kept, and scanned.
+ *       The body DOES execute at apply time, so it is scanned. It goes through
+ *       scrubDoBody rather than through this function, because the two want
+ *       opposite things from a string literal. See that function's own comment:
+ *       the difference is deliberate and it is load bearing.
  *
  *   anything else, or a dollar quote with no closing tag
  *       We cannot say which of the two it is, so it is UNPARSEABLE, which this
@@ -183,8 +186,20 @@ function scrub(sql) {
         notes.push('a routine body was skipped: it does not execute when the migration is applied');
         blank(sql.slice(i, end));
       } else if (/(^|;)\s*DO\b/i.test(fragment)) {
+        // OR-T1709. The body executes at apply time, so it is scanned. It is
+        // scanned by scrubDoBody and NOT by this function: a comment inside a
+        // DO body is not executable SQL and must be blanked like any other
+        // comment, while a string literal inside a DO body usually IS the
+        // statement EXECUTE is about to run and must be kept. This copied the
+        // body through character for character, which left comments in the
+        // scanned text and let one of them supply the token that exempts the
+        // next EXECUTE from the dynamic-SQL check.
+        const inner = scrubDoBody(body);
+        if (inner.error) {
+          return { error: `a DO block body could not be read: ${inner.error}` };
+        }
         blank(tag);
-        for (const c of body) out.push(c);
+        for (const c of inner.text) out.push(c);
         blank(tag);
       } else {
         return {
@@ -202,6 +217,166 @@ function scrub(sql) {
   }
 
   return { text: out.join(''), notes };
+}
+
+/**
+ * Scrub the body of a DO block. This is a DIFFERENT scrub from the one above,
+ * on purpose, and the difference is the whole point of OR-T1709.
+ *
+ * A DO body executes when the migration is applied, so it has to be scanned.
+ * But it is also the one place in a migration where a string literal is usually
+ * not data: it is the statement EXECUTE is about to run, and it is the only
+ * readable copy of that statement anywhere in the file. The two scrubs
+ * therefore want opposite things:
+ *
+ *   comments            BLANKED. A comment never executes, here or anywhere.
+ *                       Leaving them in let a comment be read as code in both
+ *                       directions. Prose mentioning DROP TABLE refused a clean
+ *                       file, and a comment whose last word was GRANT or REVOKE
+ *                       satisfied the exemption in executeIsUnreadable for the
+ *                       EXECUTE on the next line, because that anchor ends in
+ *                       \s and \s matches a newline.
+ *
+ *   string literals     KEPT, character for character, because they carry the
+ *                       dynamic SQL. Blanking them would flatten
+ *                       EXECUTE 'drop table t' to EXECUTE, no rule would match,
+ *                       and the file would read as clean while it drops a table.
+ *                       Only a semicolon INSIDE a literal is blanked, so a
+ *                       literal cannot split a statement it merely mentions.
+ *
+ *   quoted identifiers  Kept, same as at the top level, semicolons aside.
+ *
+ *   dollar quoted text  Treated as another way of writing a literal: kept, with
+ *                       its semicolons blanked. An unterminated one is an error,
+ *                       never silence.
+ *
+ * THE TRADE, stated rather than hidden. A literal that really is prose, such as
+ * a RAISE NOTICE explaining why nothing was truncated, is now scanned as if it
+ * were SQL and can refuse a file that is perfectly fine. That is the safe
+ * direction and it is accepted deliberately. The opposite trade lets a real
+ * DROP through, and this script never concludes REVERSIBLE from an absence.
+ *
+ * Length preserving on every branch: one character out for every character in,
+ * newlines kept as newlines. That is what lets the caller fold the result back
+ * at the same offset and still report real line numbers.
+ */
+function scrubDoBody(sql) {
+  const out = [];
+  const n = sql.length;
+  let i = 0;
+
+  const blank = (s) => {
+    for (const c of s) out.push(c === '\n' ? '\n' : ' ');
+  };
+
+  // Kept as written, except that a semicolon inside it must not be able to end
+  // a statement: the text is quoted, so the semicolon is content, not a
+  // separator.
+  const keepButNeverSplit = (s) => {
+    for (const c of s) out.push(c === ';' ? ' ' : c);
+  };
+
+  while (i < n) {
+    const two = sql.slice(i, i + 2);
+
+    if (two === '--') {
+      let j = sql.indexOf('\n', i);
+      if (j === -1) j = n;
+      blank(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (two === '/*') {
+      let depth = 0;
+      let j = i;
+      while (j < n) {
+        if (sql.slice(j, j + 2) === '/*') {
+          depth += 1;
+          j += 2;
+          continue;
+        }
+        if (sql.slice(j, j + 2) === '*/') {
+          depth -= 1;
+          j += 2;
+          if (depth === 0) break;
+          continue;
+        }
+        j += 1;
+      }
+      if (depth !== 0) {
+        return { error: 'unterminated block comment inside a DO block body' };
+      }
+      blank(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (sql[i] === "'") {
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (sql[j] === "'") {
+          if (sql[j + 1] === "'") {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!closed) {
+        return { error: 'unterminated single quoted string literal inside a DO block body' };
+      }
+      keepButNeverSplit(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (sql[i] === '"') {
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (sql[j] === '"') {
+          if (sql[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!closed) {
+        return { error: 'unterminated quoted identifier inside a DO block body' };
+      }
+      keepButNeverSplit(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    const dq = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
+    if (dq) {
+      const tag = dq[0];
+      const close = sql.indexOf(tag, i + tag.length);
+      if (close === -1) {
+        return {
+          error: `unterminated dollar quoted block opened with ${tag} inside a DO block body`,
+        };
+      }
+      keepButNeverSplit(sql.slice(i, close + tag.length));
+      i = close + tag.length;
+      continue;
+    }
+
+    out.push(sql[i]);
+    i += 1;
+  }
+
+  return { text: out.join('') };
 }
 
 /** Split scrubbed SQL into statements, keeping each one's offset in the file. */
