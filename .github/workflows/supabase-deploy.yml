@@ -1259,8 +1259,8 @@ jobs:
           # as a decision when none was made.
           #
           # OR-T0419 / OR-T2139. This guard and the "order scan" built in
-          # parallel on PR #1263 were the same control at the same anchor and
-          # they disagreed on the escape hatch: this one refuses unless
+          # parallel under OR-T0419 were the same control at the same anchor
+          # and they disagreed on the escape hatch: this one refuses unless
           # acknowledged, that one refused outright. Two blocks would have made
           # the acknowledged path unreachable and left no in-band way to apply
           # an older file at all. There is ONE guard here and it keeps the
