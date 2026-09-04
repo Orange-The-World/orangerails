@@ -1110,6 +1110,73 @@ jobs:
           # target project. On a prod dispatch that target is the production
           # database. So an unreadable ledger must ABORT, never proceed: the
           # applied set is UNKNOWN, and UNKNOWN is not the same fact as empty.
+          # -------------------------------------------------------------------
+          # OR-T2141. THE LEDGER SHAPE RULE, IN ONE PLACE, PROVEN BEFORE IT IS
+          # RELIED ON.
+          #
+          # The rule below decides whether a success status may be read as "these
+          # are the applied versions". It lives in ONE function because the real
+          # path and the self-test must call the same code: a second copy is a
+          # rule that can drift, and then the thing demonstrated is not the thing
+          # that runs. Same standard as the shadow-scan and order-guard
+          # self-tests further down in this step.
+          #
+          # WHAT THIS COVERS AND WHAT IT DOES NOT. It proves the SHAPE branch: a
+          # 2xx body that is not a JSON array of rows aborts instead of being
+          # read as an empty ledger. It does NOT exercise the curl branch
+          # (--fail-with-body, retry exhaustion). That branch is reviewed and not
+          # demonstrated, and it is written down that way rather than counted as
+          # coverage.
+          # -------------------------------------------------------------------
+          ledger_shape_ok () {
+            printf '%s' "$1" | jq -e 'type == "array"' >/dev/null 2>&1
+          }
+
+          # refuses <fn> <payload> is true when <fn> REJECTS the payload. It is a
+          # helper rather than an inline negation so the block below can prove its
+          # own negative assertions are able to fire.
+          refuses () { ! "$1" "$2"; }
+
+          # A rule that accepts everything, used ONLY to prove the must-be-red
+          # assertions are live. If refuses cannot tell this apart from the real
+          # rule, every negative line below is decorative and proves nothing.
+          ledger_shape_always_ok () { return 0; }
+
+          LEDGER_ST_FAIL=0
+          if ! ledger_shape_ok '[{"version":"20260822031500","name":"x"}]'; then
+            echo "::error::ledger shape self-test FAILED: a JSON array of rows was refused, so a healthy ledger response would abort the apply."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! ledger_shape_ok '[]'; then
+            echo "::error::ledger shape self-test FAILED: an empty JSON array was refused. An empty ledger is a legitimate answer on a fresh project and must be readable as zero applied versions."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '{"message":"Unauthorized"}'; then
+            echo "::error::ledger shape self-test FAILED: a JSON object was accepted as a ledger. That is the exact defect this guard exists for: .[].version over an object yields nothing, APPLIED comes back empty, and every file in the tree is treated as unapplied."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '{"error":{"code":500,"message":"internal error"}}'; then
+            echo "::error::ledger shape self-test FAILED: an API error body was accepted as a ledger."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok 'not json at all'; then
+            echo "::error::ledger shape self-test FAILED: a body that is not JSON was accepted as a ledger."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok ''; then
+            echo "::error::ledger shape self-test FAILED: an empty body was accepted as a ledger."
+            LEDGER_ST_FAIL=1
+          fi
+          if refuses ledger_shape_always_ok '{"message":"Unauthorized"}'; then
+            echo "::error::ledger shape self-test HARNESS FAILED: a rule that accepts everything was reported as refusing an object, so the must-be-red assertions above cannot fire and prove nothing."
+            LEDGER_ST_FAIL=1
+          fi
+          if [ "$LEDGER_ST_FAIL" -ne 0 ]; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the ledger response shape rule does not behave as required, so the applied-version set cannot be trusted even if the query succeeds. NOTHING was applied."
+            exit 1
+          fi
+          echo "ledger shape self-test ok: array accepted, empty array accepted, object refused, error body refused, non-JSON refused, empty body refused, and the negative assertions shown able to fire."
+
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
           jq -n '{query:"SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
