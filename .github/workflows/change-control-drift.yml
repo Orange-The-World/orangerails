@@ -40,7 +40,9 @@ on:
     paths:
       - '.github/workflows/change-control-drift.yml'
       - 'scripts/change-control-settings.mjs'
+      - 'scripts/check-readme-annotation.mjs'
       - 'ops/change-control/baseline.json'
+      - 'ops/change-control/README.md'
 
 permissions:
   contents: read
