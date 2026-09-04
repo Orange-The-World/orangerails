@@ -1,67 +1,11 @@
 {
     "rules": [
         {
-            "ask": null,
-            "org": null,
-            "why": "Tests only. They can fail the build but cannot change what customers see.",
-            "risk": "low",
-            "pattern": "(\\.(test|spec)\\.[jt]sx?$|(^|/)(tests?|__tests__)/)"
-        },
-        {
-            "ask": null,
-            "org": null,
-            "why": "Documentation only. No runtime behaviour changes.",
-            "risk": "low",
-            "pattern": "(^|/)(docs|README)"
-        },
-        {
-            "ask": null,
-            "org": null,
-            "why": "Documentation only. No runtime behaviour changes.",
-            "risk": "low",
-            "pattern": "\\.(md|mdx|txt)$"
-        },
-        {
-            "ask": "Does this put a real secret anywhere it can be read?",
-            "org": null,
-            "why": "Secrets and credentials. A leaked key is not revertible -- it has to be rotated everywhere it was ever used.",
-            "risk": "high",
-            "pattern": "(\\.env|secrets?|credential|\\.pem$|\\.key$)"
-        },
-        {
-            "ask": "Can this change let someone in who should not get in, or lock out someone who should?",
-            "org": null,
-            "why": "Authentication. A change here can let the wrong person in, or lock real customers out.",
-            "risk": "high",
-            "pattern": "(^|/)(auth|session|login|token)"
-        },
-        {
-            "ask": "What exactly gets deleted, and can it be restored if this is wrong?",
-            "org": null,
-            "why": "Destructive operations. Data that gets removed may not be recoverable.",
-            "risk": "high",
-            "pattern": "(^|/)(delete|drop|truncate|purge)"
-        },
-        {
-            "ask": "Will this actually reach production, or does it need its own redeploy?",
-            "org": null,
-            "why": "Edge functions. They deploy on a SEPARATE path from the frontend, so a change here can look shipped while production still runs the old code.",
-            "risk": "high",
-            "pattern": "(^|/)supabase/functions/"
-        },
-        {
             "ask": "Does this migration have a unique version number, and is it safe to apply on top of the 29 already pending?",
             "org": null,
-            "why": "Database migrations. 29 unapplied migrations already block every promotion, and duplicate version numbers are the hard blocker -- a bad one cannot simply be reverted.",
+            "why": "Database migrations. 29 unapplied migrations already block every promotion, and duplicate version numbers are the hard blocker -- a bad one cannot simply be reverted. PATTERN BROADENED 2026-08-27: was (^|/)supabase/migrations/, which matched Orange Way and Orange Rails but NOT Let's Waggle, whose migrations live at server/migrations/ - so Waggle migration PRs carried no risk class and no required reviewers. The new pattern is the exact DB equivalent of the merge guard in github_mcp.py:682 (any /migrations/ path), so the database rule and the code gate now classify the same set of files. Verified against server/, supabase/ and root layouts, and against the decoys migrations-helper/ and migrations.md, which correctly do NOT match.",
             "risk": "high",
-            "pattern": "(^|/)supabase/migrations/"
-        },
-        {
-            "ask": "Can this move, hold or lose real money?",
-            "org": null,
-            "why": "Real money. lightning.bitbooks.com handles real funds and the founder has ruled that nothing there gets blocked or deleted.",
-            "risk": "high",
-            "pattern": "(lightning|btcpay|invoice|payment|payout|refund)"
+            "pattern": "(^|/)migrations/"
         },
         {
             "ask": "Does this change let any company see another company's rows?",
@@ -71,18 +15,81 @@
             "pattern": "(rls|row_level_security|policy|policies)"
         },
         {
+            "ask": "Can this change let someone in who should not get in, or lock out someone who should?",
+            "org": null,
+            "why": "Authentication. A change here can let the wrong person in, or lock real customers out.",
+            "risk": "high",
+            "pattern": "(^|/)(auth|session|login|token)"
+        },
+        {
             "ask": "Does this store any address, txid or wallet-identifying value, or change how a key or salt is derived?",
             "org": null,
             "why": "Stealth sync and key derivation. Zero-knowledge is the product promise -- if a wallet-identifying value gets stored or a salt rotates wrongly, customer data is orphaned or exposed.",
             "risk": "high",
-            "pattern": "(stealth|kdf|derive|seed|xpub|wallet)"
+            "pattern": "(stealth|kdf|deriv|seed|xpub|wallet)"
+        },
+        {
+            "ask": "Can this move, hold or lose real money?",
+            "org": null,
+            "why": "Real money. lightning.bitbooks.com handles real funds and the founder has ruled that nothing there gets blocked or deleted.",
+            "risk": "high",
+            "pattern": "(lightning|btcpay|invoice|payment|payout|refund)"
         },
         {
             "ask": "Does this weaken or bypass any existing check?",
             "org": null,
-            "why": "CI and shipping workflows. A workflow can switch off every other gate, including this one, so a change here is a change to the rules themselves. Dependency version bumps inside a workflow are exempt -- they cannot weaken a gate.",
+            "why": "CI and shipping workflows, and everything else under .github/. A change here is a change to the gates themselves, so it is reviewed at the high tier. Covers action configs, CODEOWNERS, ship-rules.json and issue templates, not only workflow YAML. There is no dependency-bump exemption.",
             "risk": "high",
-            "pattern": "^\\.github/workflows/.*\\.ya?ml$"
+            "pattern": "^\\.github/"
+        },
+        {
+            "ask": "Will this actually reach production, or does it need its own redeploy?",
+            "org": null,
+            "why": "Edge functions. They deploy on a SEPARATE path from the frontend, so a change here can look shipped while production still runs the old code.",
+            "risk": "high",
+            "pattern": "(^|/)supabase/functions/"
+        },
+        {
+            "ask": "Does this put a real secret anywhere it can be read?",
+            "org": null,
+            "why": "Secrets and credentials. A leaked key is not revertible -- it has to be rotated everywhere it was ever used.",
+            "risk": "high",
+            "pattern": "(\\.env|secrets?|credential|\\.pem$|\\.key$)"
+        },
+        {
+            "ask": "What exactly gets deleted, and can it be restored if this is wrong?",
+            "org": null,
+            "why": "Destructive operations. Data that gets removed may not be recoverable.",
+            "risk": "high",
+            "pattern": "(^|/)(delete|drop|truncate|purge)"
+        },
+        {
+            "ask": null,
+            "org": null,
+            "why": "Documentation only. No runtime behaviour changes.",
+            "risk": "low",
+            "pattern": "\\.(md|mdx|txt)$"
+        },
+        {
+            "ask": null,
+            "org": null,
+            "why": "Documentation only. No runtime behaviour changes.",
+            "risk": "low",
+            "pattern": "(^|/)(docs|README)([./]|$)"
+        },
+        {
+            "ask": null,
+            "org": null,
+            "why": "Tests only. They can fail the build but cannot change what customers see.",
+            "risk": "low",
+            "pattern": "(\\.(test|spec)\\.[jt]sx?$|(^|/)(tests?|__tests__)/)"
+        },
+        {
+            "ask": "Does this change how a key, salt or wrapper is derived, stored or rotated, and can existing customers still unlock data encrypted before it?",
+            "org": "orangerails",
+            "why": "Client-side zero-knowledge crypto (Orange Rails). Every key, wrapper and envelope that makes the product promise true lives behind these terms. Fleet rule 4 does not reach them: its stealth term names a different feature, and kdf appears in the file CONTENT, not in any path in this repo.",
+            "risk": "high",
+            "pattern": "(vault|deriv|kdf|hkdf|key-wrap|keyring|pqc|co-admin|rekey)"
         }
     ],
     "generated_from": "delivery-db table ship_rules -- edit the table, not this file"
