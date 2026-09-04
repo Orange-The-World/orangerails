@@ -11,16 +11,23 @@
  * msg 916, Auditor msg 920).
  */
 
-// VERBATIM persistence spec (Developer msg 921 / DESIGN.md §3).
+// VERBATIM persistence spec (Developer msg 921 / DESIGN.md §3.2), corrected
+// against the live dev table (OR-T1721): composite ON CONFLICT, user_id bound
+// from the verified JWT (never the request body, per §4.1), and the envelope
+// written as the three columns the table actually has (seal_version,
+// sealed_iv, sealed_ct) rather than a single sealed_blob column that does not
+// exist. There is also no updated_at column on this table, so the ON CONFLICT
+// UPDATE only touches the columns that changed.
 // The `WHERE ... < EXCLUDED.update_id` lives INSIDE the ON CONFLICT, so the
 // compare-and-set is one atomic op with the row lock held for the whole upsert.
 export const UPSERT_CHANNEL_STATE_SQL = `
-INSERT INTO channel_state (outpoint_bidx, update_id, sealed_blob)
-VALUES (:bidx, :new_id, :blob)
-ON CONFLICT (outpoint_bidx) DO UPDATE
-  SET update_id = EXCLUDED.update_id,
-      sealed_blob = EXCLUDED.sealed_blob,
-      updated_at  = now()
+INSERT INTO channel_state (user_id, outpoint_bidx, update_id, seal_version, sealed_iv, sealed_ct)
+VALUES (:user_id, :bidx, :new_id, :seal_version, :sealed_iv, :sealed_ct)
+ON CONFLICT (user_id, outpoint_bidx) DO UPDATE
+  SET update_id    = EXCLUDED.update_id,
+      seal_version = EXCLUDED.seal_version,
+      sealed_iv    = EXCLUDED.sealed_iv,
+      sealed_ct    = EXCLUDED.sealed_ct
   WHERE channel_state.update_id < EXCLUDED.update_id
 RETURNING update_id;
 `;
