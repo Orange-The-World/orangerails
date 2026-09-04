@@ -45,6 +45,10 @@ concurrency:
   # an empty redeploy commit was pushed. Queue serially instead.
   cancel-in-progress: false
 
+# OR-T2214: no behavior change. This comment exists only to create a new
+# commit on this branch so GitHub recomputes mergeable_state against the
+# current tip of dev, after a manual comparison found this branch's only
+# diff from dev to be additive (the OR-T2152 order-guard change itself).
 jobs:
   # ---------------------------------------------------------------------------
   # DL-1640 / DL-1470 / DL-1655, 2026-08-26. Founder: "why the drift why not done
