@@ -83,6 +83,15 @@ jobs:
         # EXECUTE. Needs nothing but node, so it is unconditional.
         run: node scripts/check-anon-acl-snapshot.mjs --selftest
 
+      - name: Account-deletion cascade runner self-test
+        # The assertion this runner drives needs a real database with the auth
+        # schema on it, so it runs in the supabase-deploy workflow on a push to
+        # dev, not here. What runs here is its classifier, which decides
+        # whether a failure is reported as a failure, an unknown, or not at
+        # all. That part needs nothing but node, and it is the part a change to
+        # this script is most likely to break silently.
+        run: node scripts/check-account-deletion-cascade.mjs --selftest
+
       - name: Build
         run: bun run build
 

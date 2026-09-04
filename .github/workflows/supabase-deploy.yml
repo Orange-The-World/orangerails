@@ -1338,3 +1338,43 @@ jobs:
 
           echo
           echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
+
+  account-deletion-cascade:
+    name: Account deletion clears vault meta (DEV-0323)
+    needs: [target, apply-migrations]
+    # A push to dev ONLY.
+    #
+    # This check writes a fixture (dev holds no auth.users rows, so there is
+    # nothing to delete unless the test seeds one) and rolls it back with a
+    # deliberate raise. That rollback is not a licence to run it against
+    # production, so prod is excluded here AND refused by name inside the
+    # script. Two independent gates, because this one is worth getting wrong
+    # zero times.
+    #
+    # needs: apply-migrations, so it reads the schema this push just produced
+    # rather than the one that was there before it. If the apply fails this job
+    # is skipped, which is correct: the schema state is unknown and
+    # check-pending-migrations already says so.
+    if: ${{ github.event_name == 'push' && github.ref_name == 'dev' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Self-test the runner
+        # The classifier IS the control. Runs first so a broken parser fails as
+        # a broken parser rather than as a silent pass over the assertion.
+        run: node scripts/check-account-deletion-cascade.mjs --selftest
+
+      - name: Assert account removal clears the vault meta rows
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+        run: node scripts/check-account-deletion-cascade.mjs
