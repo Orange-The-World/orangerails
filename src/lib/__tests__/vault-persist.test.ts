@@ -96,12 +96,20 @@ function makeFakeClient(options: FakeOptions = {}) {
       if (override) return override;
       const stored = store[call.table] ?? [];
 
+      // Honour a plain equality filter, e.g. .eq("user_id", userId). Anything
+      // that is not the special "order" or "range" markers is treated as a
+      // column-equals-value filter on the stored rows.
+      let view = stored.slice();
+      for (const f of call.filters) {
+        if (f.column === "order" || f.column === "range") continue;
+        view = view.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
+      }
+
       // Honour .order(column). A query that asked for an order gets a
       // deterministic view. One that did not gets the store in whatever
       // physical order it currently holds, which is exactly the latitude the
       // real database has, and is what lets the reordering tests below fail.
       const orderFilter = call.filters.find((f) => f.column === "order");
-      const view = stored.slice();
       if (orderFilter) {
         const [column, ascending] = orderFilter.value as [string, boolean];
         view.sort((a, b) => {
