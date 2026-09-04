@@ -54,6 +54,37 @@ Deno.test('a type nobody decided about is unknown', () => {
   assertEquals(isKnownQuilttEventType('connection.synced'), false);
 });
 
+Deno.test('every type production actually sends is silent, except the one we want loud', () => {
+  // All eleven distinct event types quiltt_webhook_inbox has ever received,
+  // from the census on OR-T2148 (8,403 rows since 2026-06-11, read off
+  // production 2026-09-04). The comment on each is its count in the last 7
+  // days, which is what decides whether this alarm is believable or muted.
+  const ordinary = [
+    'balance.created', //                           597
+    'profile.ready', //                              95
+    'connection.synced.successful', //               95
+    'connection.synced.errored.repairable', //       35
+    'profile.created', //                             1
+    'account.created', //                             0, last seen 2026-08-21
+    'connection.created', //                          0, last seen 2026-08-21
+    'connection.synced.successful.historical', //     0
+    'connection.synced.successful.initial', //        0
+    'connection.synced.errored.provider', //          0
+    'account.verified', //                            0, never arrived at all
+  ];
+
+  for (const eventType of ordinary) {
+    assertEquals(
+      isKnownQuilttEventType(eventType),
+      true,
+      `${eventType} arrives on production and must not alarm`,
+    );
+  }
+
+  // The eleventh, and the only one in the census this alarm should fire on.
+  assertEquals(isKnownQuilttEventType('profile.deleted'), false);
+});
+
 Deno.test('an unknown type produces one greppable line and one capture, carrying type and id only', () => {
   const { sink, out } = recorder();
 
