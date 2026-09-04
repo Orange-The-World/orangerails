@@ -256,7 +256,35 @@ describe("co-admin keyring, seal and open", () => {
       collidingA,
     );
 
+    // Positive control: this MUST open under the binding it was actually
+    // sealed with, or a rejection on collidingB below would prove nothing
+    // about collision resistance, only that opening never works at all.
+    const opened = await openCoAdminKeyring(sealed, cak, collidingA);
+    expect(opened).toBeDefined();
+
     await expect(openCoAdminKeyring(sealed, cak, collidingB)).rejects.toThrow();
+  });
+
+  test("a lone surrogate in one binding does not collide with a lone surrogate in another", async () => {
+    // TextEncoder replaces an UNPAIRED surrogate with U+FFFD, so if
+    // JSON.stringify passed one through raw, two bindings differing only in
+    // a lone surrogate could produce identical AAD bytes. Well-formed
+    // JSON.stringify (ES2019) escapes an unpaired surrogate as the six
+    // ASCII characters \udNNN instead, so this must stay two distinct
+    // bindings. If this test ever goes red on some future runtime, the AAD
+    // binding argument in aadBytes is void.
+    const owner = ownerKeyringWithSecrets();
+    const cak = generateCoAdminKey();
+    const highSurrogate: CoAdminBinding = { ownerUserId: "\uD800", grantId: GRANT_ID };
+    const lowSurrogate: CoAdminBinding = { ownerUserId: "\uDFFF", grantId: GRANT_ID };
+
+    const sealed = await sealCoAdminKeyring(
+      projectKeyringForCoAdmin(owner),
+      cak,
+      highSurrogate,
+    );
+
+    await expect(openCoAdminKeyring(sealed, cak, lowSurrogate)).rejects.toThrow();
   });
 });
 
