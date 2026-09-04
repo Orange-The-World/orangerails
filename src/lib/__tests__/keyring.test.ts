@@ -320,7 +320,8 @@ describe("keyring , the epoch is canonicalised exactly once", () => {
   });
 
   test("refuses an epoch past the safe integer range rather than rounding it", () => {
-    // 2^53, where a JS number and the exact decimal string stop agreeing.
+    // 2^53 + 1, the first integer a JS number cannot hold exactly, so this is
+    // where the number shape and the exact decimal string stop agreeing.
     expect(() => canonicalKeyringEpoch("9007199254740993")).toThrow(/safe integer range/i);
   });
 });
