@@ -100,15 +100,28 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** Returns true if the message was sent successfully, false otherwise. */
-async function postZulipAlert(message: string): Promise<boolean> {
+interface ZulipPostResult {
+  sent: boolean;
+  /** Short reason for a failure. Undefined when sent is true. */
+  error?: string;
+}
+
+/** Attempts to post to Zulip. Never throws: every failure path returns a reason
+ *  short enough to store in drain_alert_state.last_error. */
+async function postZulipAlert(message: string): Promise<ZulipPostResult> {
   const botEmail = Deno.env.get('ZULIP_BOT_EMAIL');
   const apiKey   = Deno.env.get('ZULIP_API_KEY');
   const apiUrl   = Deno.env.get('ZULIP_API_URL');
 
   if (!botEmail || !apiKey || !apiUrl) {
-    console.error('[or-quiltt-drain-alert] Zulip env vars missing; alert not posted to chat');
-    return false;
+    const missing = [
+      !botEmail ? 'ZULIP_BOT_EMAIL' : null,
+      !apiKey   ? 'ZULIP_API_KEY'   : null,
+      !apiUrl   ? 'ZULIP_API_URL'   : null,
+    ].filter((v): v is string => v !== null).join(', ');
+    const error = `missing env var(s): ${missing}`;
+    console.error(`[or-quiltt-drain-alert] Zulip env vars missing; alert not posted to chat (${error})`);
+    return { sent: false, error };
   }
 
   const credentials = btoa(`${botEmail}:${apiKey}`);
@@ -131,18 +144,15 @@ async function postZulipAlert(message: string): Promise<boolean> {
 
     if (!res.ok) {
       const text = await res.text();
-      console.error(
-        `[or-quiltt-drain-alert] Zulip post failed (${res.status}): ${text.slice(0, 200)}`,
-      );
-      return false;
+      const error = `HTTP ${res.status}: ${text.slice(0, 200)}`;
+      console.error(`[or-quiltt-drain-alert] Zulip post failed (${res.status}): ${text.slice(0, 200)}`);
+      return { sent: false, error };
     }
-    return true;
+    return { sent: true };
   } catch (err) {
-    console.error(
-      '[or-quiltt-drain-alert] Zulip post threw:',
-      err instanceof Error ? err.message : String(err),
-    );
-    return false;
+    const error = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    console.error('[or-quiltt-drain-alert] Zulip post threw:', error);
+    return { sent: false, error };
   }
 }
 
