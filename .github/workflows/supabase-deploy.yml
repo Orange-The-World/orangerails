@@ -455,8 +455,8 @@ jobs:
           # A success status is still not a usable answer until the shape is
           # right. Only an array of rows can be trusted to mean "these are the
           # versions that are applied"; anything else is an unknown, not a zero.
-          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
-            unknown "The migration query returned a success status but not a JSON array of rows."
+          if ! echo "$RESPONSE" | jq -e 'type == "array" and (length == 0 or all(.[]; has("version")))' >/dev/null 2>&1; then
+            unknown "The migration query returned a success status but not a JSON array of rows carrying a version key."
           fi
           APPLIED=$(echo "$RESPONSE" | jq -r '.[].version' | sort -u)
 
@@ -1145,8 +1145,8 @@ jobs:
           # A success status is still not a usable answer until the shape is
           # right. Only a JSON array of rows can be trusted to mean "these are
           # the versions that are applied"; anything else is UNKNOWN, not zero.
-          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
-            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger query returned a success status but not a JSON array of rows. The applied-version set is UNKNOWN, so NOTHING was applied."
+          if ! echo "$RESPONSE" | jq -e 'type == "array" and (length == 0 or all(.[]; has("version")))' >/dev/null 2>&1; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger query returned a success status but not a JSON array of rows carrying a version key. The applied-version set is UNKNOWN, so NOTHING was applied."
             exit 1
           fi
 
