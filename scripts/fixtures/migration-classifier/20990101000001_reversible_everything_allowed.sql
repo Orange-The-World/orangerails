@@ -27,6 +27,7 @@ create index if not exists or_fixture_widget_label_idx
   on public.or_fixture_widget (label);
 
 grant select on public.or_fixture_widget to authenticated;
+grant truncate on public.or_fixture_widget to authenticated;
 revoke truncate, trigger on public.or_fixture_widget from authenticated;
 
 insert into public.or_fixture_widget (label)
