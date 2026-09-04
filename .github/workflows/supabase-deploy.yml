@@ -1233,7 +1233,7 @@ jobs:
           echo
 
           # -------------------------------------------------------------------
-          # OR-T1481 / OR-T1431. OUT-OF-ORDER GUARD, before anything is applied.
+          # OR-T1481 / OR-T1431 / OR-T0419. ORDER GUARD, before anything is applied.
           #
           # The loop below selects pending files by pure set difference against
           # the ledger: a file runs if its version is not already in APPLIED.
@@ -1257,27 +1257,71 @@ jobs:
           # non-empty. An empty marker is refused on purpose: a token people
           # paste in without thinking is worse than no token, because it reads
           # as a decision when none was made.
+          #
+          # OR-T0419 / OR-T2139. This guard and the "order scan" built in
+          # parallel on PR #1263 were the same control at the same anchor and
+          # they disagreed on the escape hatch: this one refuses unless
+          # acknowledged, that one refused outright. Two blocks would have made
+          # the acknowledged path unreachable and left no in-band way to apply
+          # an older file at all. There is ONE guard here and it keeps the
+          # acknowledged path. Three properties from the order scan are folded
+          # in because they are strictly better:
+          #
+          #   1. UNCOMPARABLE IS FATAL. A version with a non-numeric prefix was
+          #      named and then skipped, folded into neither count, so it
+          #      escaped the ordering check entirely. It now aborts. "I could
+          #      not check" must never read as "I checked and it was fine".
+          #   2. SAME WIDTH. A numeric version of a different width from the
+          #      ledger's is uncomparable too: lexicographic order stops meaning
+          #      chronological order the moment the widths differ.
+          #   3. The already-applied skip lives INSIDE the function, so a
+          #      self-test can cover it (OR-T2134). It is the most damaging line
+          #      here to lose: if a version already in the ledger ever stops
+          #      being recognised, every historical file reads as pending, most
+          #      of them number below the max, and the apply halts for ever on
+          #      BOTH environments.
+          #
+          # Dev, 2026-08-24, the case that started OR-T0419:
+          # 20260824120000_schedule_or_webhook_dispatch.sql merged first and
+          # applied; 20260824105000_mark_pre_cutoff_webhook_backlog_dead.sql
+          # merged about forty minutes later with a LOWER version and had not.
+          # The second file's header states it must run before the schedule
+          # exists. The schedule was live and its safety migration had never
+          # run. Nothing broke only because the table held zero rows.
           # -------------------------------------------------------------------
           out_of_order_scan () {
-            local max="$1" files="$2" dir="$3"
-            local base version reason below=0 unmarked=0
+            local applied="$1" files="$2" dir="$3"
+            local max base version reason below=0 unmarked=0 unknown=0 skipped=0 examined=0
+            # The highest applied version comes from the SAME set this function
+            # is filtering with, so the guard can never judge one read of the
+            # ledger while the apply loop runs against another.
+            max=$(printf '%s\n' "$applied" | grep -E '^[0-9]+$' | sort | tail -1 || true)
             while IFS= read -r base; do
               [ -n "$base" ] || continue
               version="${base%%_*}"
-              # A non-numeric prefix cannot be ordered against the ledger. It is
-              # named and then skipped, and it is never folded into either
-              # count: "I could not check" is not the same fact as "I checked
-              # and it was fine".
-              case "$version" in
-                ''|*[!0-9]*)
-                  echo "  ? NOT COMPARABLE: ${base} has no numeric version prefix, so it cannot be ordered against the ledger."
-                  continue
-                  ;;
-              esac
+              # Already in the ledger, so it is not pending and the loop below
+              # will skip it. This is the SAME expression that loop uses, which
+              # is what makes the guard judge exactly the set that will run: it
+              # cannot pass a file the loop would apply, nor fire on one the
+              # loop would skip.
+              if printf '%s\n' "$applied" | grep -qx "$version"; then
+                skipped=$((skipped + 1))
+                continue
+              fi
+              examined=$((examined + 1))
               # An empty max means an empty ledger: nothing has been applied, so
-              # nothing can be out of order.
+              # nothing can be out of order and nothing can be uncomparable.
               [ -n "$max" ] || continue
-              [ "$version" -lt "$max" ] || continue
+              # A version this cannot compare is FATAL, not skipped. Two ways it
+              # happens: a non-numeric prefix, and a numeric prefix of a
+              # different width from the ledger's, where lexicographic order
+              # stops meaning chronological order (OR-T0419).
+              if ! printf '%s' "$version" | grep -qE '^[0-9]+$' || [ "${#version}" -ne "${#max}" ]; then
+                unknown=$((unknown + 1))
+                echo "  ? UNCOMPARABLE: ${base} -- version '${version}' cannot be ordered against the highest applied version ${max}. Same-width numeric timestamps are what makes filename order mean chronological order."
+                continue
+              fi
+              [[ "$version" < "$max" ]] || continue
               below=$((below + 1))
               # The first marker line decides. If its reason is empty the file
               # is refused rather than reading on for a better one further down:
@@ -1291,65 +1335,78 @@ jobs:
                 echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <reason>' line, at column one, with a non-empty reason."
               fi
             done <<< "$files"
-            echo "OUT-OF-ORDER SCAN: ${below} pending file(s) sort below the highest applied version (${max:-none applied}), ${unmarked} of them unacknowledged."
-            [ "$unmarked" -eq 0 ]
+            echo "ORDER SCAN: highest applied version ${max:-none applied}, ${skipped} already-applied file(s) skipped, ${examined} unapplied file(s) examined, ${below} numbered below it, ${unmarked} of those unacknowledged, ${unknown} uncomparable."
+            [ "$unmarked" -eq 0 ] && [ "$unknown" -eq 0 ]
           }
 
-          # The guard must be able to go RED, and to stay silent for both of the
-          # reasons it should. Same standard as the shadow-scan self-test above:
-          # run the detector over synthetic files with known answers and refuse
-          # to apply if it does not behave every way. A check nobody has watched
-          # fail proves nothing, and this repo has been bitten by exactly that.
+          # The guard must be able to go RED, and to stay silent for every
+          # reason it should. Same standard as the shadow-scan self-test above:
+          # run the REAL function over synthetic files with known answers and
+          # refuse to apply if it does not behave every way. A second copy of
+          # the rule would pass for ever while the rule itself was edited away.
+          # A check nobody has watched fail proves nothing, and this repo has
+          # been bitten by exactly that.
           ST_DIR=$(mktemp -d)
-          ST_MAX="20990101000005"
+          ST_APPLIED=$(printf '%s\n' '20990101000000' '20990101000005')
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000000_already_applied.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000002_below_unmarked.sql"
           printf '%s\n' '-- OUT-OF-ORDER-OK: synthetic self-test, a branch cut before the merge' 'select 1;' > "${ST_DIR}/20990101000003_below_marked.sql"
           printf '%s\n' '-- OUT-OF-ORDER-OK:' 'select 1;' > "${ST_DIR}/20990101000004_below_empty_marker.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/2099010100000X_notanumber.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/209901010000091_toowide.sql"
 
-          if out_of_order_scan "$ST_MAX" '20990101000002_below_unmarked.sql' "$ST_DIR" >/dev/null 2>&1; then
+          if out_of_order_scan "$ST_APPLIED" '20990101000002_below_unmarked.sql' "$ST_DIR" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
-            echo "::error::out-of-order self-test FAILED: the guard stayed silent on a pending file numbered BELOW the ledger max carrying no marker. Refusing to apply, because a check that cannot go red proves nothing."
+            echo "::error::order self-test FAILED: the guard stayed silent on a pending file numbered BELOW the ledger max carrying no marker. Refusing to apply, because a check that cannot go red proves nothing."
             exit 1
           fi
-          if out_of_order_scan "$ST_MAX" '20990101000004_below_empty_marker.sql' "$ST_DIR" >/dev/null 2>&1; then
+          if out_of_order_scan "$ST_APPLIED" '20990101000004_below_empty_marker.sql' "$ST_DIR" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
-            echo "::error::out-of-order self-test FAILED: the guard accepted an OUT-OF-ORDER-OK marker with nothing after the colon. Refusing to apply: an empty marker is a token pasted in with no decision behind it."
+            echo "::error::order self-test FAILED: the guard accepted an OUT-OF-ORDER-OK marker with nothing after the colon. Refusing to apply: an empty marker is a token pasted in with no decision behind it."
             exit 1
           fi
-          if ! out_of_order_scan "$ST_MAX" '20990101000003_below_marked.sql' "$ST_DIR" >/dev/null 2>&1; then
+          if out_of_order_scan "$ST_APPLIED" '2099010100000X_notanumber.sql' "$ST_DIR" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
-            echo "::error::out-of-order self-test FAILED: the guard fired on an older file that carries a valid OUT-OF-ORDER-OK marker with a reason. Refusing to apply."
+            echo "::error::order self-test FAILED: a version with no numeric prefix was reported as fine. I-could-not-check must never read as clean."
             exit 1
           fi
-          if ! out_of_order_scan "$ST_MAX" '20990101000009_in_order.sql' "$ST_DIR" >/dev/null 2>&1; then
+          if out_of_order_scan "$ST_APPLIED" '209901010000091_toowide.sql' "$ST_DIR" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
-            echo "::error::out-of-order self-test FAILED: the guard fired on a file numbered ABOVE the ledger max. Refusing to apply."
+            echo "::error::order self-test FAILED: a version of a different width from the ledger's was compared as though lexicographic order meant chronological order. Refusing to apply."
+            exit 1
+          fi
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000003_below_marked.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard fired on an older file that carries a valid OUT-OF-ORDER-OK marker with a reason. Refusing to apply."
+            exit 1
+          fi
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000009_in_order.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard fired on a file numbered ABOVE the ledger max. Refusing to apply."
+            exit 1
+          fi
+          # OR-T2134. The already-applied skip is the most damaging line in this
+          # function to lose, and until now nothing exercised it. 20990101000000
+          # is in the applied set AND numbers below the max, so it would be
+          # counted as behind, unacknowledged, the moment the skip stopped
+          # recognising a version the ledger already carries.
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000000_already_applied.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: a version already present in the applied set was not skipped, so a migration the apply loop will never run was judged as pending. Refusing to apply."
             exit 1
           fi
           rm -rf "$ST_DIR"
-          echo "out-of-order self-test ok: red on an unmarked older file, red on an empty marker, silent on a marked older file, silent on an in-order file."
+          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, silent on a marked older file, silent on an in-order file, silent on a file already in the applied set."
 
-          # MAX_APPLIED comes from the ledger response already read above. NOT a
+          # The guard reads the ledger response already read above. NOT a
           # second API call: a second read could disagree with the set the loop
           # below actually applies against, and then the guard would be judging
-          # a different database than the one being written to.
-          MAX_APPLIED=$(echo "$APPLIED" | grep -E '^[0-9]+$' | sort | tail -1 || true)
-
-          # Pending means in the tree and not in the ledger, selected exactly
-          # the way the apply loop selects it, so the guard cannot pass a file
-          # the loop would run or fire on one it would skip.
-          PENDING_FILES=""
-          while IFS= read -r BASE; do
-            [ -n "$BASE" ] || continue
-            V="${BASE%%_*}"
-            if ! echo "$APPLIED" | grep -qx "$V"; then
-              PENDING_FILES="${PENDING_FILES}${BASE}"$'\n'
-            fi
-          done <<< "$TREE_FILES"
-
-          if ! out_of_order_scan "$MAX_APPLIED" "$PENDING_FILES" "$MIG_DIR"; then
-            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more pending migration files are numbered BELOW the highest version already applied (${MAX_APPLIED}) and do not say so. They would run against a database that is already past them, where an absolute REVOKE, a DROP IF EXISTS or an UPDATE can silently undo later work. Either renumber the file to an unused timestamp above ${MAX_APPLIED}, or add a '-- OUT-OF-ORDER-OK: <reason>' line to it if applying it late really is correct. NOTHING was applied on this run."
+          # a different database than the one being written to. It does its own
+          # already-applied skip, with the same expression that loop uses, so
+          # the two cannot select different files.
+          if [ -n "$TREE_FILES" ] && ! out_of_order_scan "$APPLIED" "$TREE_FILES" "$MIG_DIR"; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the order guard refused this run and NOTHING was applied. Two different things cause this and they have DIFFERENT remedies. (1) A pending file numbered BELOW the highest applied version named in the scan above, carrying no acknowledgement. It would run against a database already past it, where an absolute REVOKE, a DROP IF EXISTS or an UPDATE whose WHERE clause a later migration changed can silently undo later work. If that file has NEVER been applied in ANY environment, give it a new unused timestamp above the highest applied version. If it is ALREADY APPLIED somewhere else, DO NOT rename it: renaming changes its version, the environment that already ran it no longer finds that version in its ledger, and it applies the file a SECOND time, which is safe only if the migration is idempotent and nothing in this repo requires or checks that. For that case add a line at column one reading -- OUT-OF-ORDER-OK: followed by why applying it late is correct here. (2) A version the guard could not compare, listed above as UNCOMPARABLE. Give the file the same-width numeric timestamp prefix every other migration uses; I-could-not-check is never treated as clean. Do not switch this check off: filename order is a within-run property and cannot be a cross-run guarantee (OR-T0419, OR-T1481)."
             exit 1
           fi
           echo
