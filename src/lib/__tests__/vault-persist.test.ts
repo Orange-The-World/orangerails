@@ -174,6 +174,10 @@ function makeFakeClient(options: FakeOptions = {}) {
               call.filters.push({ column: "range", value: [from, to] });
               return Promise.resolve(resultFor(call));
             },
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
+            },
           };
           return chain;
         },
