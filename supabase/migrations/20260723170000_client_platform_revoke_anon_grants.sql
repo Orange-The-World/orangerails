@@ -97,7 +97,17 @@ REVOKE EXECUTE ON FUNCTION client_platform.has_role(uuid, text) FROM anon, PUBLI
 --    Removing all four grants ensures a future permissive policy on this table cannot
 --    turn them live without a migration and review. Placed here (file 4) per CTO ruling;
 --    file 5 does not duplicate it.
-REVOKE ALL ON public.data_keys FROM anon;
+--    GUARDED: this file predates 20260727000000, which is the migration that actually
+--    creates public.data_keys. On envs where this file already ran, data_keys either
+--    already existed (no-op change in behavior) or the REVOKE below simply never had a
+--    target. On a from-scratch replay in filename order, data_keys does not exist yet at
+--    this point, so skip rather than 42P01. See OR-T2231.
+DO $$
+BEGIN
+  IF to_regclass('public.data_keys') IS NOT NULL THEN
+    EXECUTE 'REVOKE ALL ON public.data_keys FROM anon';
+  END IF;
+END $$;
 
 -- 6. Prove it, in this transaction, or abort.
 --    (a) covers all 7 tables step 2 must close, each named. The schema holds 8
@@ -130,12 +140,16 @@ BEGIN
     RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.organizations';
   END IF;
 
-  -- (c) step 5: all four anon grants on public.data_keys are gone
-  IF has_table_privilege('anon', 'public.data_keys', 'SELECT')
-     OR has_table_privilege('anon', 'public.data_keys', 'INSERT')
-     OR has_table_privilege('anon', 'public.data_keys', 'UPDATE')
-     OR has_table_privilege('anon', 'public.data_keys', 'DELETE') THEN
-    RAISE EXCEPTION 'FAIL: anon still holds privileges on public.data_keys';
+  -- (c) step 5: all four anon grants on public.data_keys are gone.
+  --     Guarded the same way step 5 is: skip on a from-scratch replay where data_keys
+  --     does not exist yet at this point (created later by 20260727000000). See OR-T2231.
+  IF to_regclass('public.data_keys') IS NOT NULL THEN
+    IF has_table_privilege('anon', 'public.data_keys', 'SELECT')
+       OR has_table_privilege('anon', 'public.data_keys', 'INSERT')
+       OR has_table_privilege('anon', 'public.data_keys', 'UPDATE')
+       OR has_table_privilege('anon', 'public.data_keys', 'DELETE') THEN
+      RAISE EXCEPTION 'FAIL: anon still holds privileges on public.data_keys';
+    END IF;
   END IF;
 
   -- (b) nothing broke
