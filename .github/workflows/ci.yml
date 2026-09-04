@@ -292,18 +292,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          # `supabase start` boots Postgres, PostgREST and the edge runtime in
-          # Docker, using THIS branch's supabase/config.toml. It applies
-          # supabase/migrations to build the initial database, but does so
-          # from whatever base image the CLI ships; `supabase db reset` runs
-          # explicitly right after so THIS run's migration set is what is
-          # actually on disk, not a cached assumption. Both are real gates,
-          # not advisory: under set -euo pipefail either one failing exits
-          # this step non-zero and the job goes red, named below so the
-          # failing half is obvious in the log without opening the docker
-          # output.
-          if ! supabase start; then
-            echo "::error::supabase start failed -- the local Supabase stack (Postgres/PostgREST/edge runtime) did not boot. See the docker output above for which container failed."
+          # `supabase start` boots Postgres, PostgREST and GoTrue in Docker,
+          # using THIS branch's supabase/config.toml. Edge-runtime, inbucket
+          # and imgproxy are excluded: the database-level drain tests (OR-T0545)
+          # need Postgres and PostgREST only, and the full stack was failing to
+          # boot in CI. It applies supabase/migrations to build the initial
+          # database, but does so from whatever base image the CLI ships;
+          # `supabase db reset` runs explicitly right after so THIS run's
+          # migration set is what is actually on disk, not a cached assumption.
+          # Both are real gates, not advisory: under set -euo pipefail either
+          # one failing exits this step non-zero and the job goes red, named
+          # below so the failing half is obvious in the log without opening the
+          # docker output.
+          if ! supabase start --exclude edge-runtime,inbucket,imgproxy; then
+            echo "::error::supabase start failed -- the local Supabase stack (Postgres/PostgREST) did not boot. See the docker output above for which container failed."
             exit 1
           fi
 
