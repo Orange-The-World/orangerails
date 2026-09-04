@@ -163,14 +163,13 @@ async function recordAttemptState(
   checkedAt: string,
   outcome: { ok: boolean; error?: string },
 ): Promise<void> {
-  const row: Record<string, unknown> = { id: 1, last_attempt_at: checkedAt };
-  if (outcome.ok) {
-    row.last_notified_at = checkedAt;
-    row.last_error = null;
-  } else {
-    row.last_error = outcome.error ?? 'unknown error';
-  }
-  const { error } = await client.from('drain_alert_state').upsert(row);
+  const { error } = outcome.ok
+    ? await client
+        .from('drain_alert_state')
+        .upsert({ id: 1, last_attempt_at: checkedAt, last_notified_at: checkedAt, last_error: null })
+    : await client
+        .from('drain_alert_state')
+        .upsert({ id: 1, last_attempt_at: checkedAt, last_error: outcome.error ?? 'unknown error' });
   if (error) {
     console.error('[or-quiltt-drain-alert] failed to record attempt state:', error.message);
   }
