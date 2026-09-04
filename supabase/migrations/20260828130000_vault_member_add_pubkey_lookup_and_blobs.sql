@@ -39,6 +39,17 @@
 -- anon and authenticated on any new table by default, and grants EXECUTE to
 -- PUBLIC on any new function by default.
 
+-- ALL OR NOTHING. Everything below runs in one transaction so a failure
+-- anywhere, including in the ASSERT block at the end, leaves the database
+-- exactly as it was and the migration can simply be run again. Without this,
+-- a failure after CREATE TABLE would leave vault_blobs behind while the
+-- version went unrecorded, and the next run would abort on "relation already
+-- exists" with nothing but manual cleanup as the way forward. IF NOT EXISTS
+-- was the other option and is weaker: it would accept a half-built table from
+-- an earlier failed run whatever shape it had.
+
+BEGIN;
+
 -- 1. Proven-unlock marker ---------------------------------------------------
 
 ALTER TABLE public.customer_vault_meta
@@ -73,10 +84,21 @@ ALTER TABLE public.vault_blobs ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.vault_blobs FROM PUBLIC;
 REVOKE ALL ON TABLE public.vault_blobs FROM anon;
 REVOKE ALL ON TABLE public.vault_blobs FROM authenticated;
--- No GRANT line and no permissive policy: nothing reads or writes this
--- table yet. RLS enabled, zero policies, zero direct grants is default-deny
--- for every role that is not the table owner, the correct starting posture
--- for a table only a future SECURITY DEFINER RPC will touch.
+-- No GRANT line and no permissive policy: nothing reads or writes this table
+-- yet. The three REVOKEs above are what matter, because pg_default_acl on
+-- this project grants every table privilege to anon and authenticated on any
+-- new table in schema public. After them, PUBLIC, anon and authenticated hold
+-- nothing, and with RLS enabled and zero policies there is no client path in.
+--
+-- WHAT THIS IS NOT: it is not default-deny for every role that is not the
+-- table owner. service_role inherits table DML from that same pg_default_acl,
+-- this file does not revoke it, and service_role carries BYPASSRLS, so
+-- service_role can read and write vault_blobs from the moment it is created.
+-- That is the project's settled posture and it is left alone here on purpose,
+-- but it is written down rather than implied: whoever builds the vault-read,
+-- vault-write and re-seal RPCs on this table needs the real model of who can
+-- already touch it. The ASSERT block below proves what anon and authenticated
+-- hold and deliberately claims nothing about service_role.
 
 -- 3. lookup_vault_pubkey ------------------------------------------------------
 
@@ -152,3 +174,5 @@ BEGIN
   ASSERT has_function_privilege('authenticated', 'public.lookup_vault_pubkey(uuid,uuid)', 'EXECUTE') = true,
     'authenticated must hold EXECUTE on lookup_vault_pubkey, granted explicitly above';
 END $$;
+
+COMMIT;
