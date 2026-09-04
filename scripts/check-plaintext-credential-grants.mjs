@@ -278,8 +278,11 @@ export function parseStatement(stmt) {
   const kw = /\b(GRANT|REVOKE)\b/i.exec(stmt);
   if (!kw) return null;
   const kind = kw[1].toUpperCase();
-  let rest = stmt.slice(kw.index + kw[0].length);
-  if (kind === "REVOKE") rest = rest.replace(/^\s*GRANT\s+OPTION\s+FOR\b/i, " ");
+  const rest = stmt.slice(kw.index + kw[0].length);
+  // REVOKE GRANT OPTION FOR takes away the ability to pass a privilege on. The privilege itself
+  // stays exactly where it was, so for this gate the statement changes nothing and the finding
+  // it would otherwise have cleared must stand.
+  if (kind === "REVOKE" && /^\s*GRANT\s+OPTION\s+FOR\b/i.test(rest)) return null;
 
   const onAt = indexOfKeyword(rest, "ON");
   if (onAt === -1) return null;
