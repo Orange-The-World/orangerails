@@ -1378,7 +1378,7 @@ jobs:
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/2099010100000X_notanumber.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/209901010000091_toowide.sql"
-          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000006_below_allowlisted.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000001_below_allowlisted.sql"
 
           if out_of_order_scan "$ST_APPLIED" '20990101000002_below_unmarked.sql' "$ST_DIR" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
@@ -1424,13 +1424,27 @@ jobs:
           # silent: this is the earn-it-once path the allowlist exists for,
           # tested with a synthetic allowlist passed as the 4th arg so the
           # real OUT_OF_ORDER_ALLOWLIST is never touched by the self-test.
-          if ! out_of_order_scan "$ST_APPLIED" '20990101000006_below_allowlisted.sql' "$ST_DIR" '20990101000006' >/dev/null 2>&1; then
+          # OR-T2170: the fixture version here MUST sort below ST_APPLIED's
+          # max (20990101000005), or it never reaches the allowlist branch
+          # at all and passes for the wrong reason. That is exactly what
+          # 20990101000006 did before this fix: 6 is not below 5, so it took
+          # the in-order short-circuit and the allowlist check was never run.
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000001_below_allowlisted.sql' "$ST_DIR" '20990101000001' >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
             echo "::error::order self-test FAILED: the guard fired on a file whose version is on the allowlist, which needs no marker. Refusing to apply."
             exit 1
           fi
+          # OR-T2170: prove the case above can actually fail. Pass a
+          # synthetic allowlist that does NOT contain this file's version:
+          # with no matching entry and no marker, the guard must report it
+          # unmarked (non-silent), or this test can never go red.
+          if out_of_order_scan "$ST_APPLIED" '20990101000001_below_allowlisted.sql' "$ST_DIR" '99999999999999' >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard stayed silent on a file whose version is NOT on the synthetic allowlist passed in, so the allowlist-branch self-test cannot fail and proves nothing."
+            exit 1
+          fi
           rm -rf "$ST_DIR"
-          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, silent on a marked older file, silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147)."
+          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, silent on a marked older file, silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147), red on a non-matching synthetic allowlist (OR-T2170)."
 
           # The guard reads the ledger response already read above. NOT a
           # second API call: a second read could disagree with the set the loop
