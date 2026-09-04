@@ -1232,6 +1232,128 @@ jobs:
           rm -f "$LEDGER_MAP"
           echo
 
+          # -------------------------------------------------------------------
+          # OR-T1481 / OR-T1431. OUT-OF-ORDER GUARD, before anything is applied.
+          #
+          # The loop below selects pending files by pure set difference against
+          # the ledger: a file runs if its version is not already in APPLIED.
+          # Nothing compares it against the HIGHEST applied version. Version
+          # order is a total order only WITHIN one apply run and says nothing
+          # across runs, so a file numbered below everything already applied
+          # still runs the first time it appears, against a database that is
+          # already past it. An absolute REVOKE, a DROP IF EXISTS, or an UPDATE
+          # whose WHERE clause a later migration changed all succeed and quietly
+          # undo later work. An allow-list assertion cannot catch that, because
+          # it only fires on a privilege that IS present.
+          #
+          # Refuse unless acknowledged. Applying an older file is sometimes
+          # right (a branch cut before a merge), so refusing outright would
+          # block legitimate work, and a warning in a log nobody reads is not a
+          # control. The file itself must carry, on a line of its own:
+          #
+          #   -- OUT-OF-ORDER-OK: <reason>
+          #
+          # The line has to start at column one and the reason has to be
+          # non-empty. An empty marker is refused on purpose: a token people
+          # paste in without thinking is worse than no token, because it reads
+          # as a decision when none was made.
+          # -------------------------------------------------------------------
+          out_of_order_scan () {
+            local max="$1" files="$2" dir="$3"
+            local base version reason below=0 unmarked=0
+            while IFS= read -r base; do
+              [ -n "$base" ] || continue
+              version="${base%%_*}"
+              # A non-numeric prefix cannot be ordered against the ledger. It is
+              # named and then skipped, and it is never folded into either
+              # count: "I could not check" is not the same fact as "I checked
+              # and it was fine".
+              case "$version" in
+                ''|*[!0-9]*)
+                  echo "  ? NOT COMPARABLE: ${base} has no numeric version prefix, so it cannot be ordered against the ledger."
+                  continue
+                  ;;
+              esac
+              # An empty max means an empty ledger: nothing has been applied, so
+              # nothing can be out of order.
+              [ -n "$max" ] || continue
+              [ "$version" -lt "$max" ] || continue
+              below=$((below + 1))
+              # The first marker line decides. If its reason is empty the file
+              # is refused rather than reading on for a better one further down:
+              # what a reader sees first must be what counts.
+              reason=$(sed -n 's/^--[[:space:]]*OUT-OF-ORDER-OK:[[:space:]]*//p' "${dir}/${base}" 2>/dev/null | head -1 || true)
+              reason="${reason%"${reason##*[![:space:]]}"}"
+              if [ -n "$reason" ]; then
+                echo "  ~ OUT-OF-ORDER, acknowledged: ${base} (version ${version}) sorts below the highest applied version ${max}: ${reason}"
+              else
+                unmarked=$((unmarked + 1))
+                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <reason>' line, at column one, with a non-empty reason."
+              fi
+            done <<< "$files"
+            echo "OUT-OF-ORDER SCAN: ${below} pending file(s) sort below the highest applied version (${max:-none applied}), ${unmarked} of them unacknowledged."
+            [ "$unmarked" -eq 0 ]
+          }
+
+          # The guard must be able to go RED, and to stay silent for both of the
+          # reasons it should. Same standard as the shadow-scan self-test above:
+          # run the detector over synthetic files with known answers and refuse
+          # to apply if it does not behave every way. A check nobody has watched
+          # fail proves nothing, and this repo has been bitten by exactly that.
+          ST_DIR=$(mktemp -d)
+          ST_MAX="20990101000005"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000002_below_unmarked.sql"
+          printf '%s\n' '-- OUT-OF-ORDER-OK: synthetic self-test, a branch cut before the merge' 'select 1;' > "${ST_DIR}/20990101000003_below_marked.sql"
+          printf '%s\n' '-- OUT-OF-ORDER-OK:' 'select 1;' > "${ST_DIR}/20990101000004_below_empty_marker.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
+
+          if out_of_order_scan "$ST_MAX" '20990101000002_below_unmarked.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::out-of-order self-test FAILED: the guard stayed silent on a pending file numbered BELOW the ledger max carrying no marker. Refusing to apply, because a check that cannot go red proves nothing."
+            exit 1
+          fi
+          if out_of_order_scan "$ST_MAX" '20990101000004_below_empty_marker.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::out-of-order self-test FAILED: the guard accepted an OUT-OF-ORDER-OK marker with nothing after the colon. Refusing to apply: an empty marker is a token pasted in with no decision behind it."
+            exit 1
+          fi
+          if ! out_of_order_scan "$ST_MAX" '20990101000003_below_marked.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::out-of-order self-test FAILED: the guard fired on an older file that carries a valid OUT-OF-ORDER-OK marker with a reason. Refusing to apply."
+            exit 1
+          fi
+          if ! out_of_order_scan "$ST_MAX" '20990101000009_in_order.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::out-of-order self-test FAILED: the guard fired on a file numbered ABOVE the ledger max. Refusing to apply."
+            exit 1
+          fi
+          rm -rf "$ST_DIR"
+          echo "out-of-order self-test ok: red on an unmarked older file, red on an empty marker, silent on a marked older file, silent on an in-order file."
+
+          # MAX_APPLIED comes from the ledger response already read above. NOT a
+          # second API call: a second read could disagree with the set the loop
+          # below actually applies against, and then the guard would be judging
+          # a different database than the one being written to.
+          MAX_APPLIED=$(echo "$APPLIED" | grep -E '^[0-9]+$' | sort | tail -1 || true)
+
+          # Pending means in the tree and not in the ledger, selected exactly
+          # the way the apply loop selects it, so the guard cannot pass a file
+          # the loop would run or fire on one it would skip.
+          PENDING_FILES=""
+          while IFS= read -r BASE; do
+            [ -n "$BASE" ] || continue
+            V="${BASE%%_*}"
+            if ! echo "$APPLIED" | grep -qx "$V"; then
+              PENDING_FILES="${PENDING_FILES}${BASE}"$'\n'
+            fi
+          done <<< "$TREE_FILES"
+
+          if ! out_of_order_scan "$MAX_APPLIED" "$PENDING_FILES" "$MIG_DIR"; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more pending migration files are numbered BELOW the highest version already applied (${MAX_APPLIED}) and do not say so. They would run against a database that is already past them, where an absolute REVOKE, a DROP IF EXISTS or an UPDATE can silently undo later work. Either renumber the file to an unused timestamp above ${MAX_APPLIED}, or add a '-- OUT-OF-ORDER-OK: <reason>' line to it if applying it late really is correct. NOTHING was applied on this run."
+            exit 1
+          fi
+          echo
+
           # For each migration file, apply if not in the applied set
           APPLIED_COUNT=0
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
