@@ -1,0 +1,141 @@
+name: Crypto surface coverage
+
+# OR-T2210. ship_rules classifies a changed file by matching a regex against
+# its PATH (.github/workflows/merge-sweep.yml, still on a separate branch as
+# of 2026-09-04, not yet on dev). What makes a file part of the client-side
+# zero-knowledge crypto surface is what it IMPORTS, and those two only agree
+# by naming convention. When a new file disagrees, the classifier does not
+# raise a question, it assigns the ordinary low tier, and the change ships
+# with no Auditor pass. Every miss found so far (OR-T2149, OR-T2207) was a
+# human reading code. This job is what replaces noticing with a red check.
+#
+# WHAT THIS DOES. Starting from the crypto seed files, it finds every file
+# that imports a seed, directly or transitively through another file already
+# found (the REVERSE import graph: who depends on the seed, not what the
+# seed depends on). Every file found must match at least one ACTIVE
+# high-risk ship_rules pattern for org=orangerails or the fleet (org null).
+# A file on the crypto surface with no such match fails the job, naming the
+# file, instead of silently classifying low.
+#
+# WHAT THIS DOES NOT DO. It does not assign risk itself and it does not
+# replace ship_rules: it only refuses to stay silent when ship_rules' path
+# match cannot be trusted for a file that demonstrably touches the crypto
+# surface. It is not a widening of ship_rules terms (the treadmill OR-T2210
+# was filed to end) and it does not escalate whole route files by substring
+# (src/routes/connect.tsx and src/routes/app.tsx mix crypto and non-crypto
+# code; a substring escalation there would over-escalate the rest of the
+# file, which OR-T2207 explicitly declined to do).
+#
+# MATCHING METHOD. Import specifiers are matched by BASENAME via grep, not by
+# arithmetically resolving relative (`../`) or aliased (`@/`) paths. A wrong
+# path resolution fails SILENTLY: a real importer is quietly dropped from the
+# set and the gap this job exists to close reappears invisibly. A basename
+# match can only ever OVER-include (a same-named file in an unrelated
+# directory), which sends a file to human review instead of past it, same
+# safe-failure-direction call already made for this classifier on OR-T2149.
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - '.github/ship-rules.json'
+      - '.github/workflows/crypto-surface-coverage.yml'
+
+jobs:
+  crypto-surface-coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Walk the crypto import surface and check ship_rules coverage
+        run: |
+          set -euo pipefail
+
+          # .github/ship-rules.json is generated from the ship_rules table
+          # (DL-0544). CI has no network route to that database, so the
+          # exported file is how the rules cross the boundary. Missing file
+          # is a red check, never a silent pass: the same rule merge-sweep.yml
+          # itself already applies to its own use of this file.
+          RULES_FILE=".github/ship-rules.json"
+          if [ ! -f "$RULES_FILE" ]; then
+            echo "::error::${RULES_FILE} is missing. Cannot check crypto surface coverage with no exported ship_rules. Failing closed rather than passing with nothing checked."
+            exit 1
+          fi
+
+          HIGH_PATTERNS=$(jq -r '.[] | select(.active == true) | select(.risk == "high") | select(.org == null or .org == "orangerails") | .pattern' "$RULES_FILE")
+          if [ -z "$HIGH_PATTERNS" ]; then
+            echo "::error::No active high-risk ship_rules pattern found for org=orangerails or fleet-wide (org null) in ${RULES_FILE}. Failing closed: a crypto-surface check with nothing to check against is not a check."
+            exit 1
+          fi
+
+          # Seeds: the crypto primitives everything else on this surface
+          # reaches through. vault.ts and key-derivation.ts named by the
+          # ticket; crypto-fields.ts added because OR-T2207 found the same
+          # gap on it (blind index + credential/transaction encryption).
+          SEED_FILES="src/lib/vault.ts src/lib/key-derivation.ts src/lib/crypto-fields.ts"
+          for s in $SEED_FILES; do
+            if [ ! -f "$s" ]; then
+              echo "::error::Seed file ${s} does not exist. The seed list is stale and this check cannot trust its own starting point. Failing closed."
+              exit 1
+            fi
+          done
+
+          FOUND_FILE=$(mktemp)
+          FRONTIER_FILE=$(mktemp)
+          printf '%s\n' $SEED_FILES > "$FOUND_FILE"
+          cp "$FOUND_FILE" "$FRONTIER_FILE"
+
+          # BFS, capped at 10 hops so a cycle or a bug cannot loop forever.
+          # State lives in FILES, not shell variables, on purpose: a `while
+          # read | while read` pipeline runs the inner loop in a subshell,
+          # so a variable set inside it is invisible outside it, but a file
+          # write is a real side effect that survives the subshell. That is
+          # what makes this loop's accumulation correct rather than a no-op.
+          for hop in 1 2 3 4 5 6 7 8 9 10; do
+            NEXT_FILE=$(mktemp)
+            : > "$NEXT_FILE"
+            while IFS= read -r seed; do
+              [ -n "$seed" ] || continue
+              name=$(basename "$seed" | sed -E 's/\.(ts|tsx)$//')
+              grep -rlE "from ['\"][^'\"]*/${name}(\.tsx?)?['\"]" src --include='*.ts' --include='*.tsx' 2>/dev/null | while IFS= read -r importer; do
+                if ! grep -qxF "$importer" "$FOUND_FILE"; then
+                  echo "$importer" >> "$NEXT_FILE"
+                  echo "$importer" >> "$FOUND_FILE"
+                fi
+              done
+            done < "$FRONTIER_FILE"
+            [ -s "$NEXT_FILE" ] || break
+            FRONTIER_FILE="$NEXT_FILE"
+          done
+
+          TOTAL=$(sort -u "$FOUND_FILE" | grep -c . || true)
+          echo "crypto surface: ${TOTAL} file(s) reachable from ${SEED_FILES}"
+
+          VIOLATIONS=""
+          VIOLATION_COUNT=0
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            MATCHED=0
+            while IFS= read -r pat; do
+              [ -n "$pat" ] || continue
+              if printf '%s' "$f" | grep -qEi "$pat"; then
+                MATCHED=1
+                break
+              fi
+            done <<< "$HIGH_PATTERNS"
+            if [ "$MATCHED" -eq 0 ]; then
+              VIOLATIONS="${VIOLATIONS}  - ${f}\n"
+              VIOLATION_COUNT=$((VIOLATION_COUNT + 1))
+            fi
+          done < <(sort -u "$FOUND_FILE")
+
+          if [ "$VIOLATION_COUNT" -gt 0 ]; then
+            echo "::error::${VIOLATION_COUNT} file(s) import the crypto seeds (directly or transitively) but match no active high-risk ship_rules pattern, so a change to them ships as ordinary low risk with no Auditor pass:"
+            printf '%b' "$VIOLATIONS"
+            echo "Fix: add or widen an org=orangerails high-risk ship_rules row so its pattern matches these paths (see OR-T2210 on the delivery board for the decided shape), then re-export .github/ship-rules.json. Do not silence this check by removing a file from the seed list."
+            exit 1
+          fi
+
+          echo "crypto surface coverage ok: all ${TOTAL} file(s) reachable from the crypto seeds match an active high-risk ship_rules pattern."
