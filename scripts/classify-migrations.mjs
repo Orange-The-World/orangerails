@@ -562,6 +562,28 @@ const EXPECTED = {
     verdict: IRREVERSIBLE,
     id: 'DYNAMIC EXECUTE',
   },
+  // OR-T1709, the two directions of reading a DO block body.
+  //
+  // 16 is the false positive: a comment inside the body mentions DROP TABLE and
+  // nothing in the body is irreversible, so the file must classify REVERSIBLE.
+  // 17 is the false negative, and it is the one that costs data: the comment
+  // ends in the word revoke, which is exactly the token that exempts the next
+  // EXECUTE from the dynamic-SQL check, and the verb is concatenated so no
+  // static rule can catch it.
+  // 18 is the control on the fix for both: a literal inside a DO body is the
+  // statement EXECUTE will run, so it must stay readable.
+  '20990101000016_reversible_do_block_comment_names_drop_table.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+  },
+  '20990101000017_irreversible_do_block_comment_ends_in_revoke.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'DYNAMIC EXECUTE',
+  },
+  '20990101000018_irreversible_do_block_execute_literal_drop_table.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'DROP TABLE',
+  },
 };
 
 function selftest() {
