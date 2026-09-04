@@ -1026,6 +1026,145 @@ jobs:
           fi
           echo "classifier refuses the irreversible class, passes the reversible one, and refuses an empty list."
 
+      # -----------------------------------------------------------------------
+      # OR-T2046 / OR-T1709. The step above proves the classifier CAN refuse.
+      # That is not the same fact as knowing WHAT it refuses in this repository
+      # today, and it says nothing about what the DO-block rescrub MOVED.
+      #
+      # REPORT, NOT A GATE, and the distinction is load bearing. This tree
+      # already holds applied migrations that drop tables and columns, so the
+      # sweep is EXPECTED to exit 2. Failing the job on that would turn every
+      # pull request red over history nobody can change, and a check that is red
+      # for everyone is a check that gets ignored.
+      #
+      # What DOES fail here: the classifier not running at all, and a sweep that
+      # found no files. "I could not check" must never read as clean.
+      #
+      # The comparison runs the classifier as it stood for the previously
+      # published sweep, pinned to release/or-t1696-classifier-tree-sweep, over
+      # the SAME tree. If that ref cannot be read the step says COMPARISON NOT
+      # RUN in as many words rather than reporting no movement.
+      # -----------------------------------------------------------------------
+      - name: Sweep the tree and report what the rescrub moved (OR-T2046)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PREV_REF: release/or-t1696-classifier-tree-sweep
+        run: |
+          # set +e first: this step reads exit codes deliberately and exit 2
+          # from the classifier is the expected answer over this tree.
+          set +e
+          set -uo pipefail
+
+          HEAD_JSON="${RUNNER_TEMP}/or-t2046-head.json"
+          PREV_JSON="${RUNNER_TEMP}/or-t2046-prev.json"
+          PREV_SCRIPT="${RUNNER_TEMP}/classify-migrations.prev.mjs"
+          MD="${RUNNER_TEMP}/or-t2046-sweep.md"
+
+          mapfile -t MIGS < <(find supabase/migrations -name '*.sql' -type f | sort)
+          if [ "${#MIGS[@]}" -eq 0 ]; then
+            echo "::error::no .sql files found under supabase/migrations. A sweep that examined nothing is not a clean sweep, and this classifier exists precisely so that nothing concludes REVERSIBLE from an absence."
+            exit 1
+          fi
+          echo "=== classifying every migration in the tree (${#MIGS[@]} file(s)) ==="
+
+          OUT=$(node scripts/classify-migrations.mjs "${MIGS[@]}" --json "$HEAD_JSON" 2>&1); RC=$?
+          echo "$OUT"
+          echo "exit code: $RC (2 is expected here: the tree holds applied drops)"
+          if [ "$RC" -eq 1 ] || [ ! -s "$HEAD_JSON" ]; then
+            echo "::error::the classifier could not run over this tree (exit ${RC}). That is an UNKNOWN, not a clean sweep."
+            exit 1
+          fi
+
+          EXAMINED=$(echo "$OUT" | grep '^EXAMINED' || true)
+          if [ -z "$EXAMINED" ]; then
+            echo "::error::the sweep printed no EXAMINED line, so it reached no conclusion about the tree."
+            exit 1
+          fi
+
+          NOT_CLEAN=$(jq -r '
+            .files[]
+            | select(.verdict != "REVERSIBLE")
+            | . as $f
+            | if ((($f.findings) // []) | length) == 0
+              then "\($f.file) | \($f.verdict) | (no finding reported)"
+              else ($f.findings[] | "\($f.file) | \($f.verdict) | \(.id) | line \(.line)")
+              end' "$HEAD_JSON")
+
+          COMPARE="not-run"
+          MOVED=""
+          MOVED_COUNT="unknown"
+          PREV_EXAMINED=""
+
+          git fetch --depth=1 origin "$PREV_REF" >/dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "::warning::COMPARISON NOT RUN: could not fetch origin/${PREV_REF}, so the previous classifier could not be read. This is an UNKNOWN, not a report of no movement."
+          else
+            git show "FETCH_HEAD:scripts/classify-migrations.mjs" > "$PREV_SCRIPT" 2>/dev/null
+            if [ $? -ne 0 ] || [ ! -s "$PREV_SCRIPT" ]; then
+              echo "::warning::COMPARISON NOT RUN: ${PREV_REF} carries no scripts/classify-migrations.mjs, so there is no before to compare with."
+            else
+              POUT=$(node "$PREV_SCRIPT" "${MIGS[@]}" --json "$PREV_JSON" 2>&1); PRC=$?
+              PREV_EXAMINED=$(echo "$POUT" | grep '^EXAMINED' || true)
+              if [ "$PRC" -eq 1 ] || [ ! -s "$PREV_JSON" ] || [ -z "$PREV_EXAMINED" ]; then
+                echo "::warning::COMPARISON NOT RUN: the previous classifier could not run over this tree (exit ${PRC}). That is an UNKNOWN, not a clean comparison."
+                echo "$POUT" | tail -20
+              else
+                COMPARE="ran"
+                MOVED=$(jq -rn --slurpfile p "$PREV_JSON" --slurpfile h "$HEAD_JSON" '
+                  ($p[0].files | map({key: .file, value: .verdict}) | from_entries) as $before
+                  | $h[0].files[]
+                  | select(($before[.file] // "ABSENT") != .verdict)
+                  | "\(.file) | \($before[.file] // "ABSENT") -> \(.verdict)"')
+                if [ -n "$MOVED" ]; then
+                  MOVED_COUNT=$(printf '%s\n' "$MOVED" | wc -l | tr -d ' ')
+                else
+                  MOVED_COUNT=0
+                fi
+              fi
+            fi
+          fi
+
+          {
+            echo "## Tree sweep on the live classifier (OR-T2046, closing OR-T1709)"
+            echo ""
+            echo "A REPORT, not a gate. Nothing here blocks this pull request. Exit 2 is the expected answer: this tree holds applied migrations that drop tables and columns."
+            echo ""
+            echo '```'
+            echo "node scripts/classify-migrations.mjs \$(find supabase/migrations -name '*.sql' -type f | sort)"
+            echo "head (this commit): ${EXAMINED}"
+            echo "exit code: ${RC}"
+            if [ "$COMPARE" = "ran" ]; then
+              echo "previous (${PREV_REF}): ${PREV_EXAMINED}"
+              echo "files whose verdict moves: ${MOVED_COUNT}"
+            else
+              echo "previous (${PREV_REF}): COMPARISON NOT RUN. Read the warnings in this job. This is an UNKNOWN, not a report of no movement."
+            fi
+            echo '```'
+            echo ""
+            if [ "$COMPARE" = "ran" ] && [ "$MOVED_COUNT" = "0" ]; then
+              echo "No file in this tree changes verdict between the two classifier versions. Said out loud rather than implied by silence, because zero is the result that makes the change safe to promote and it has to be said to count."
+            elif [ "$COMPARE" = "ran" ]; then
+              echo "One row per file whose verdict moved, previous verdict then current. A file moving IRREVERSIBLE to REVERSIBLE is the one to read hardest: that is the direction that costs data if the new reading is wrong."
+              echo ""
+              echo '```'
+              printf '%s\n' "$MOVED"
+              echo '```'
+            fi
+            echo ""
+            echo "Every file in this tree that is NOT REVERSIBLE at this commit:"
+            echo ""
+            echo '```'
+            if [ -n "$NOT_CLEAN" ]; then printf '%s\n' "$NOT_CLEAN"; else echo "(none)"; fi
+            echo '```'
+          } > "$MD"
+
+          cat "$MD" >> "$GITHUB_STEP_SUMMARY"
+
+          gh pr comment "$PR_NUMBER" --body-file "$MD" \
+            || echo "::warning::the sweep comment was refused. The identical text is in this run's job summary and in the log above, so the evidence is not lost."
+
       - name: Publish the demonstration to the pull request
         # The seats that review changes in this repo hold GitHub read tools and
         # no shell. An Actions log is not reachable from a review seat and the
