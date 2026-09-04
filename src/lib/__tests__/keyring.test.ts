@@ -12,6 +12,7 @@
 import { describe, expect, test } from "vitest";
 import {
   addDataKeyGeneration,
+  canonicalKeyringEpoch,
   dataKeyAt,
   dataKeyFor,
   decodeKeyring,
@@ -36,7 +37,7 @@ import {
 
 const BINDING: KeyringBinding = {
   userId: "11111111-2222-3333-4444-555555555555",
-  vaultKeyVersion: 3,
+  keyringEpoch: 3,
 };
 
 async function freshMek() {
@@ -110,13 +111,29 @@ describe("keyring , wrap and unwrap", () => {
     ).rejects.toThrow();
   });
 
-  test("the blob cannot be replayed onto another vault key version", async () => {
+  test("the blob cannot be opened once the row's epoch has moved past it", async () => {
     const mek = await freshMek();
     const salt = generateVaultSalt();
     const blob = await wrapKeyring(generateVaultKeyring(), mek, salt, BINDING);
 
+    // The brick case this binding exists to make loud. The row's epoch moved
+    // and the ciphertext did not. The database now refuses that write, and if
+    // it ever happened anyway the unwrap throws rather than handing back keys
+    // that do not belong to this generation of the row.
     await expect(
-      unwrapKeyring(blob, mek, salt, { ...BINDING, vaultKeyVersion: 4 }),
+      unwrapKeyring(blob, mek, salt, { ...BINDING, keyringEpoch: BINDING.keyringEpoch + 1 }),
+    ).rejects.toThrow();
+  });
+
+  test("an older epoch cannot open a blob sealed under a newer one", async () => {
+    const mek = await freshMek();
+    const salt = generateVaultSalt();
+    const blob = await wrapKeyring(generateVaultKeyring(), mek, salt, BINDING);
+
+    // The rollback direction, and the reason the epoch is in the AAD at all:
+    // restoring a stale epoch alongside a current blob does not open it.
+    await expect(
+      unwrapKeyring(blob, mek, salt, { ...BINDING, keyringEpoch: BINDING.keyringEpoch - 1 }),
     ).rejects.toThrow();
   });
 
@@ -138,11 +155,11 @@ describe("keyring , wrap and unwrap", () => {
     const kr = generateVaultKeyring();
 
     await expect(
-      wrapKeyring(kr, mek, salt, { userId: "", vaultKeyVersion: 3 }),
+      wrapKeyring(kr, mek, salt, { userId: "", keyringEpoch: 3 }),
     ).rejects.toThrow(/user id/i);
     await expect(
-      wrapKeyring(kr, mek, salt, { userId: BINDING.userId, vaultKeyVersion: 0 }),
-    ).rejects.toThrow(/vault key version/i);
+      wrapKeyring(kr, mek, salt, { userId: BINDING.userId, keyringEpoch: 0 }),
+    ).rejects.toThrow(/keyring epoch/i);
   });
 });
 
@@ -206,20 +223,37 @@ describe("keyring , the property v3 exists for", () => {
     expect(rotated.keyring.sigSecretB64).toBe(sigSecretB64);
   });
 
-  test("after rotation the old MEK no longer opens the new blob", async () => {
+  test("rotation seals under the next epoch, and only that MEK and epoch open it", async () => {
     const salt = generateVaultSalt();
     const oldMek = await freshMek();
+    const newMek = await freshMek();
     const blob = await wrapKeyring(generateVaultKeyring(), oldMek, salt, BINDING);
 
     const rotated = await rewrapKeyringUnderNewMek({
       ciphertextB64: blob,
       oldMek,
-      newMek: await freshMek(),
+      newMek,
       saltB64: salt,
       binding: BINDING,
     });
 
-    await expect(unwrapKeyring(rotated.ciphertextB64, oldMek, salt, BINDING)).rejects.toThrow();
+    // Sealed under the NEXT epoch, because the database refuses a ciphertext
+    // write that leaves keyring_epoch where it was. Sealing under the epoch
+    // that was read would produce a write that can never be persisted.
+    expect(rotated.keyringEpoch).toBe(BINDING.keyringEpoch + 1);
+    const after: KeyringBinding = {
+      userId: BINDING.userId,
+      keyringEpoch: rotated.keyringEpoch,
+    };
+
+    await expect(unwrapKeyring(rotated.ciphertextB64, newMek, salt, after)).resolves.toBeTruthy();
+
+    // One variable at a time, so each failure has exactly one cause. Wrong
+    // MEK at the right epoch:
+    await expect(unwrapKeyring(rotated.ciphertextB64, oldMek, salt, after)).rejects.toThrow();
+
+    // Right MEK at the old epoch:
+    await expect(unwrapKeyring(rotated.ciphertextB64, newMek, salt, BINDING)).rejects.toThrow();
   });
 
   test("a rotation that throws leaves the stored blob exactly as it was", async () => {
@@ -240,6 +274,54 @@ describe("keyring , the property v3 exists for", () => {
 
     // The value the caller still holds is untouched and still opens.
     await expect(unwrapKeyring(blob, oldMek, salt, BINDING)).resolves.toBeTruthy();
+  });
+});
+
+describe("keyring , the epoch is canonicalised exactly once", () => {
+  test("the same epoch as a number and as a decimal string open the same blob", async () => {
+    const mek = await freshMek();
+    const salt = generateVaultSalt();
+    const kr = generateVaultKeyring();
+
+    // keyring_epoch is a bigint in Postgres, so one driver may hand it back as
+    // a number and another as a string. If those two produced different AAD
+    // bytes, a client library upgrade would brick every vault it touched, and
+    // it would look like data loss rather than like a version change.
+    const blob = await wrapKeyring(kr, mek, salt, { userId: BINDING.userId, keyringEpoch: 7 });
+    const asString: KeyringBinding = {
+      userId: BINDING.userId,
+      keyringEpoch: "7" as unknown as number,
+    };
+    await expect(unwrapKeyring(blob, mek, salt, asString)).resolves.toEqual(kr);
+  });
+
+  test("accepts canonical decimal in either shape", () => {
+    expect(canonicalKeyringEpoch(1)).toBe("1");
+    expect(canonicalKeyringEpoch(42)).toBe("42");
+    expect(canonicalKeyringEpoch("42")).toBe("42");
+  });
+
+  test("refuses anything that is not canonical decimal rather than coercing it", () => {
+    expect(() => canonicalKeyringEpoch("007")).toThrow(/canonical decimal/i);
+    expect(() => canonicalKeyringEpoch("+7")).toThrow(/canonical decimal/i);
+    expect(() => canonicalKeyringEpoch("7e2")).toThrow(/canonical decimal/i);
+    expect(() => canonicalKeyringEpoch("1_000")).toThrow(/canonical decimal/i);
+    expect(() => canonicalKeyringEpoch(" 7")).toThrow(/canonical decimal/i);
+    expect(() => canonicalKeyringEpoch("")).toThrow(/canonical decimal/i);
+    expect(() => canonicalKeyringEpoch("0")).toThrow(/canonical decimal/i);
+
+    expect(() => canonicalKeyringEpoch(0)).toThrow(/positive integer/i);
+    expect(() => canonicalKeyringEpoch(-1)).toThrow(/positive integer/i);
+    expect(() => canonicalKeyringEpoch(1.5)).toThrow(/positive integer/i);
+
+    expect(() => canonicalKeyringEpoch(null)).toThrow(/number or a decimal string/i);
+    expect(() => canonicalKeyringEpoch(undefined)).toThrow(/number or a decimal string/i);
+    expect(() => canonicalKeyringEpoch({})).toThrow(/number or a decimal string/i);
+  });
+
+  test("refuses an epoch past the safe integer range rather than rounding it", () => {
+    // 2^53, where a JS number and the exact decimal string stop agreeing.
+    expect(() => canonicalKeyringEpoch("9007199254740993")).toThrow(/safe integer range/i);
   });
 });
 
