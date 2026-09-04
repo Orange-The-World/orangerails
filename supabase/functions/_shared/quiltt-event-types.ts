@@ -32,13 +32,19 @@
  * belongs here once somebody has said what we do about it. Adding one is a
  * single line and it means "we looked at this and chose".
  *
- * HONEST LIMIT, stated rather than hidden: the list was built from our own code
- * (the two dispatch branches, and the types the or-quiltt-sync header has
- * documented as deliberate no-ops since phase 1), not from a census of what
- * production has actually received, which the seat that wrote it cannot read. If
- * a benign type that arrives often is missing, the first week is noisy and the
- * fix is one line here. That is the safe direction to be wrong in: nothing is
- * dropped either way, and a type nobody decided about is visible rather than not.
+ * BUILT FROM OUR CODE, THEN CLOSED AGAINST PRODUCTION. The list started from
+ * our own code: the two dispatch branches, plus the types the or-quiltt-sync
+ * header has documented as deliberate no-ops since phase 1. That version would
+ * have alarmed on 84 percent of an ordinary week, because four routine types
+ * arrive that our code never mentions anywhere. The census on OR-T2148 (read
+ * off production by the DBA on 2026-09-04 from quiltt_webhook_inbox, 8,403 rows
+ * since 2026-06-11) named all eleven types that have ever arrived, and the list
+ * below now covers ten of them. The eleventh is profile.deleted, which is the
+ * one we want loud. Measured against the last 7 days of that census: 825 events
+ * arrived and this alarm would have fired on 2.
+ *
+ * Nothing is dropped either way. The only thing at stake in getting the list
+ * right is whether the alarm stays believable enough not to be muted.
  */
 
 /**
@@ -58,17 +64,42 @@ export const HANDLED_QUILTT_EVENT_TYPE_PREFIXES: readonly string[] = [
 ];
 
 /**
- * Prefixes we knowingly do nothing about. These are the no-ops the
- * or-quiltt-sync module header has named since phase 1. Being here means the
- * no-op is a decision; being absent means nobody has made one yet.
+ * Prefixes we knowingly do nothing about. Being here means the no-op is a
+ * decision; being absent means nobody has made one yet.
+ *
+ * profile.created and account.verified are the no-ops the or-quiltt-sync module
+ * header has named since phase 1. The other four were added on 2026-09-04 from
+ * the production census (see the header): they arrive, we do nothing with them,
+ * and until that census nobody had written down that we had chosen to.
+ *
+ * balance.created and profile.ready are the two that decide whether this alarm
+ * is usable: 692 of the last 825 events between them. We act on neither today,
+ * because balances are refreshed on the connection.synced.successful path.
+ * Whether balance.created should itself trigger a pull is a genuine question
+ * and it is tracked on its own ticket. It is not a reason for this alarm to
+ * fire 600 times a week while that question is open.
+ *
+ * account.created and connection.created are ordinary and have never carried an
+ * error, but neither has arrived since 2026-08-21. That is worth knowing and it
+ * is not this alarm's job to say so: an alarm on a type that STOPS arriving is
+ * a different check from one on a type nobody decided about.
+ *
+ * account.verified has never arrived at all: 0 rows in 8,403 across nearly
+ * three months. It stays because it is a decision somebody recorded, not
+ * because traffic confirms it.
  *
  * profile.deleted is deliberately NOT here. Whether a deletion signal obliges
  * us to act is an open question, and until it is answered the event must stay
- * loud.
+ * loud. It is 2 events on production, both of which failed routing 25 times and
+ * retired with nobody noticing, which is the case this alarm exists for.
  */
 export const IGNORED_QUILTT_EVENT_TYPE_PREFIXES: readonly string[] = [
   'profile.created',
+  'profile.ready',
   'account.verified',
+  'account.created',
+  'connection.created',
+  'balance.created',
 ];
 
 export const KNOWN_QUILTT_EVENT_TYPE_PREFIXES: readonly string[] = [
