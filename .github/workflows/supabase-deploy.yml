@@ -1289,9 +1289,25 @@ jobs:
           # exists. The schedule was live and its safety migration had never
           # run. Nothing broke only because the table held zero rows.
           # -------------------------------------------------------------------
+          # OR-T2147. ONE-TIME allowlist: the 29 versions already merged and
+          # applied on dev before this guard existed, that sort at or below
+          # prod's applied maximum and carry no in-file OUT-OF-ORDER-OK marker.
+          # Without this the guard aborts the very next prod promotion on all
+          # 29 and stays aborted, because none of them can retroactively earn
+          # a marker for a question the guard did not exist to ask when they
+          # were written. This is an explicit list of version strings, not a
+          # date cutoff and not a wildcard: an amnesty that can silently grow
+          # is a hole. Captured 2026-09-04 from the OR-T1431 ruling note (dba,
+          # 2026-09-04 10:37 UTC), reproducible as a set difference between
+          # dev's and prod's supabase_migrations.schema_migrations filtered to
+          # <= prod's applied max at capture time (20260822031500). Anything
+          # merged after this list was written is not covered and must carry
+          # its own marker like every other file.
+          OUT_OF_ORDER_ALLOWLIST="20260713120001 20260716120001 20260717123000 20260721120000 20260722000001 20260722130000 20260722140000 20260723120000 20260723210000 20260724180000 20260730000000 20260730120000 20260730120001 20260730200000 20260802120000 20260803000000 20260803120000 20260803140000 20260803160000 20260803190000 20260804000000 20260804000001 20260804090000 20260804140000 20260806100000 20260809130000 20260815000001 20260817230000 20260819120000"
+
           out_of_order_scan () {
-            local applied="$1" files="$2" dir="$3"
-            local max base version reason below=0 unmarked=0 unknown=0 skipped=0 examined=0
+            local applied="$1" files="$2" dir="$3" allowlist="${4:-$OUT_OF_ORDER_ALLOWLIST}"
+            local max base version reason below=0 unmarked=0 allowlisted=0 unknown=0 skipped=0 examined=0
             # The highest applied version comes from the SAME set this function
             # is filtering with, so the guard can never judge one read of the
             # ledger while the apply loop runs against another.
@@ -1323,6 +1339,13 @@ jobs:
               fi
               [[ "$version" < "$max" ]] || continue
               below=$((below + 1))
+              # OR-T2147. Checked BEFORE the marker read, so a pre-guard file
+              # with no marker at all still passes, silently, exactly once.
+              if printf '%s\n' $allowlist | grep -qx "$version"; then
+                allowlisted=$((allowlisted + 1))
+                echo "  ~ OUT-OF-ORDER, allowlisted (OR-T2147, one-time amnesty for pre-guard merges): ${base} (version ${version}) sorts below ${max}."
+                continue
+              fi
               # The first marker line decides. If its reason is empty the file
               # is refused rather than reading on for a better one further down:
               # what a reader sees first must be what counts.
@@ -1332,10 +1355,10 @@ jobs:
                 echo "  ~ OUT-OF-ORDER, acknowledged: ${base} (version ${version}) sorts below the highest applied version ${max}: ${reason}"
               else
                 unmarked=$((unmarked + 1))
-                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <reason>' line, at column one, with a non-empty reason."
+                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <reason>' line, at column one, with a non-empty reason, and is not on the OR-T2147 allowlist."
               fi
             done <<< "$files"
-            echo "ORDER SCAN: highest applied version ${max:-none applied}, ${skipped} already-applied file(s) skipped, ${examined} unapplied file(s) examined, ${below} numbered below it, ${unmarked} of those unacknowledged, ${unknown} uncomparable."
+            echo "ORDER SCAN: highest applied version ${max:-none applied}, ${skipped} already-applied file(s) skipped, ${examined} unapplied file(s) examined, ${below} numbered below it, ${allowlisted} allowlisted (OR-T2147), ${unmarked} of the rest unacknowledged, ${unknown} uncomparable."
             [ "$unmarked" -eq 0 ] && [ "$unknown" -eq 0 ]
           }
 
@@ -1355,6 +1378,7 @@ jobs:
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/2099010100000X_notanumber.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/209901010000091_toowide.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000006_below_allowlisted.sql"
 
           if out_of_order_scan "$ST_APPLIED" '20990101000002_below_unmarked.sql' "$ST_DIR" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
@@ -1396,8 +1420,17 @@ jobs:
             echo "::error::order self-test FAILED: a version already present in the applied set was not skipped, so a migration the apply loop will never run was judged as pending. Refusing to apply."
             exit 1
           fi
+          # OR-T2147. An allowlisted version with NO marker at all must be
+          # silent: this is the earn-it-once path the allowlist exists for,
+          # tested with a synthetic allowlist passed as the 4th arg so the
+          # real OUT_OF_ORDER_ALLOWLIST is never touched by the self-test.
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000006_below_allowlisted.sql' "$ST_DIR" '20990101000006' >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard fired on a file whose version is on the allowlist, which needs no marker. Refusing to apply."
+            exit 1
+          fi
           rm -rf "$ST_DIR"
-          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, silent on a marked older file, silent on an in-order file, silent on a file already in the applied set."
+          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, silent on a marked older file, silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147)."
 
           # The guard reads the ledger response already read above. NOT a
           # second API call: a second read could disagree with the set the loop
