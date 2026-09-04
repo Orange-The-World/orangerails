@@ -21,13 +21,13 @@
 #                        missing, or not executable.
 #
 # Optional env:
-#   STALE_THRESHOLD_MINUTES   integer, default 10
+#   STALE_THRESHOLD_MINUTES   integer, default 90
 
 set -uo pipefail
 
 PROBE="orbi-staleness-probe"
 DSN="${ORBI_PROBE_DSN:-${DATABASE_URL:-}}"
-THRESHOLD="${STALE_THRESHOLD_MINUTES:-10}"
+THRESHOLD="${STALE_THRESHOLD_MINUTES:-90}"
 ALERT_SCRIPT="${ORBI_ALERT_SCRIPT:-}"
 
 # The alert script must be usable BEFORE anything else runs. A probe that can
@@ -65,7 +65,7 @@ fi
 
 # ---- query ------------------------------------------------------------------
 
-PSQL_OUT=$(psql "$DSN" --no-password -t -A \
+PSQL_OUT=$(psql "$DSN" --no-password -t -A --connect-timeout=10 \
   --command "SELECT EXTRACT(EPOCH FROM (now() - bucket_ts))::bigint \
              FROM public.exchange_rates \
              WHERE source_currency = 'BTC' \
