@@ -28,7 +28,8 @@
  *
  * ## What is bound to what
  *
- * The sealed blob's AAD is the owner user id and the grant id. That is what
+ * The sealed blob's AAD is a fixed version prefix, the owner user id and the
+ * grant id, encoded together as one JSON tuple. That is what
  * makes one grant's blob useless in another grant's row: the unseal fails
  * authentication rather than returning the wrong keys. It is also why this
  * blob does not carry its own signature. The signature covers the wrapped
@@ -244,12 +245,26 @@ function aadBytes(binding: CoAdminBinding): Uint8Array {
   if (typeof binding.grantId !== "string" || binding.grantId.length === 0) {
     throw new Error("Co-admin keyring binding requires a grant id.");
   }
-  // JSON.stringify on an array of strings is unambiguous for any input: the
-  // encoder escapes every embedded quote and backslash, so the tuple always
-  // parses back to the exact three strings that produced it. A fixed
-  // delimiter like "prefix|owner|grant" cannot make that guarantee, because
-  // the delimiter character can appear inside either field and move the
-  // split point, letting two different bindings produce the same bytes.
+  // Two properties make this tuple injective, and BOTH are load bearing.
+  //
+  // 1. JSON.stringify escapes every embedded quote and backslash, so the
+  //    tuple always parses back to the exact three strings that produced it.
+  //    A fixed delimiter like "prefix|owner|grant" cannot make that
+  //    guarantee, because the delimiter character can appear inside either
+  //    field and move the split point, letting two different bindings
+  //    produce the same bytes.
+  //
+  // 2. JSON.stringify is well formed (ES2019): it emits an unpaired
+  //    surrogate as the six ASCII characters of its escape rather than
+  //    passing it through raw. That is the property this really rests on,
+  //    because the AAD is not this string, it is the UTF-8 encoding of it on
+  //    the next line, and TextEncoder replaces an unpaired surrogate with
+  //    U+FFFD. Without well formed stringify, an owner id of one lone
+  //    surrogate and an owner id of a different lone surrogate would encode
+  //    to identical bytes, with no quote and no delimiter anywhere in either
+  //    input: a collision of exactly the class this construction exists to
+  //    close. The surrogate test in co-admin-keyring.test.ts pins it, so a
+  //    runtime without the property fails CI instead of shipping.
   return new TextEncoder().encode(
     JSON.stringify([AAD_PREFIX, binding.ownerUserId, binding.grantId]),
   );
