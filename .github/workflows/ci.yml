@@ -1161,6 +1161,33 @@ jobs:
           gh pr comment "$PR_NUMBER" --body-file "$MD" \
             || echo "::warning::the sweep comment was refused. The identical text is in this run's job summary and in the log above, so the evidence is not lost."
 
+          # The moved rows go in their own numbered comments, split on line
+          # boundaries. This is not cosmetic. The read tools the review seats
+          # here hold truncate a long comment body with NO marker saying so, so
+          # a list cut in the middle of a row reads as a complete list. That is
+          # the same shape of failure this classifier exists to refuse: an
+          # absence that reads as an answer.
+          if [ -z "$MOVED" ]; then
+            exit 0
+          fi
+          printf '%s\n' "$MOVED" > "${RUNNER_TEMP}/or-t2046-moved.txt"
+          split -C 1200 -d -a 2 "${RUNNER_TEMP}/or-t2046-moved.txt" "${RUNNER_TEMP}/or-t2046-part-"
+          PART=0
+          for P in "${RUNNER_TEMP}"/or-t2046-part-*; do
+            PART=$((PART + 1))
+            {
+              echo "### Verdicts that moved, part ${PART} (OR-T2046)"
+              echo ""
+              echo "One row per file: file, then previous verdict and current verdict."
+              echo ""
+              echo '```'
+              cat "$P"
+              echo '```'
+            } > "${P}.md"
+            gh pr comment "$PR_NUMBER" --body-file "${P}.md" \
+              || echo "::warning::part ${PART} of the moved list was refused. It is in this run's job summary."
+          done
+
       - name: Publish the demonstration to the pull request
         # The seats that review changes in this repo hold GitHub read tools and
         # no shell. An Actions log is not reachable from a review seat and the
