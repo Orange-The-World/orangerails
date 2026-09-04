@@ -60,6 +60,7 @@ on:
     paths:
       - '.github/workflows/change-control-drift.yml'
       - 'scripts/change-control-settings.mjs'
+      - 'scripts/gha-annotate.mjs'
       - 'ops/change-control/baseline.json'
 
 permissions:
@@ -392,9 +393,12 @@ jobs:
         run: |
           set -uo pipefail
           STATUS=0
+          # Captured rather than left on the terminal so its text can travel in
+          # the annotation below, then printed either way: a warning on a read
+          # that SUCCEEDED must not vanish just because we redirected it.
           node scripts/change-control-settings.mjs --read live.json 2> read-error.txt || STATUS=$?
+          cat read-error.txt
           if [ "${STATUS}" != "0" ]; then
-            cat read-error.txt
             {
               echo "The change-control settings could not be READ (exit ${STATUS})."
               echo "This is not a report that the settings are unchanged. It is a report"
