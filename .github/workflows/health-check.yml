@@ -25,7 +25,7 @@ jobs:
       # id of the loading splash element in index.html that the real app
       # shell always contains. If the splash element is renamed or removed,
       # update this value in the same PR.
-      EXPECTED_MARKER: 'DOES-NOT-MATCH-TEMP-RED-PROOF'
+      EXPECTED_MARKER: 'id="or-splash"'
     steps:
       - name: Check connect.orangerails.com (with one retry)
         shell: bash
