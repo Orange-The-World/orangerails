@@ -499,7 +499,14 @@ function AppHome() {
 
       const { data: conns, error: connErr } = await supabase
         .from("connections")
-        .select("*")
+        // Named columns, not "*". authenticated holds a column level SELECT
+        // grant on this table so that strike_webhook_secret stays
+        // server side, and PostgREST expands "*" into a whole row read that
+        // the grant refuses. subaccount_id is here for the .eq below:
+        // Postgres needs SELECT on a column used in a WHERE clause.
+        .select(
+          "id, subaccount_id, provider_type, status, encrypted_label, encrypted_last_error, last_sync_at, created_at",
+        )
         .eq("subaccount_id", targetSubaccountId)
         .order("created_at", { ascending: false });
       if (connErr) throw connErr;
