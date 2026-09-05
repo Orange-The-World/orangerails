@@ -195,10 +195,11 @@ function main() {
   violations.sort();
 
   if (violations.length > 0) {
-    console.error(`crypto-surface-coverage: ${violations.length} file(s) reachable from the crypto primitives are NOT matched by any active high-risk ship_rules pattern:`);
-    for (const v of violations) console.error(`  - ${v}`);
-    console.error('');
-    console.error('Fix: either widen/add a ship_rules high pattern to cover it (a database change, see OR-T2086 for who holds write), or narrow the surface by moving the crypto calls out of this file into one already covered. This check does not decide which; a human does.');
+    console.error(`::error::crypto-surface-coverage: ${violations.length} file(s) reachable from the crypto primitives are NOT matched by any active high-risk ship_rules pattern.`);
+    for (const v of violations) {
+      console.error(`::error file=${v}::${v} is reachable from a crypto primitive (see CRYPTO_PRIMITIVES) but no active high-risk ship_rules pattern matches its path.`);
+    }
+    console.error('::error::Fix: either widen/add a ship_rules high pattern to cover it (a database change, see OR-T2086 for who holds write), or narrow the surface by moving the crypto calls out of this file into one already covered. This check does not decide which; a human does.');
     process.exit(1);
   }
 
