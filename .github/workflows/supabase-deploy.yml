@@ -297,6 +297,16 @@ jobs:
             fi
           fi
 
+          # Functions that belong only to ORBI's own Supabase project are
+          # deployed by a separate workflow (orbi-prod-deploy-v1-rate.yml)
+          # and must never ship to this project from here, on any path
+          # above (full deploy, shared-dir redeploy, or a targeted deploy
+          # of the function itself).
+          ORBI_ONLY_FUNCS="v1-rate"
+          for orbi_func in $ORBI_ONLY_FUNCS; do
+            DEPLOY_FUNCS=$(echo "$DEPLOY_FUNCS" | grep -v "^${orbi_func}\$" || true)
+          done
+
           if [ -z "$DEPLOY_FUNCS" ]; then
             echo "No edge functions changed; skipping deploy"
             exit 0
