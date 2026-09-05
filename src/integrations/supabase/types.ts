@@ -1048,6 +1048,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      allocate_workspace_key: { Args: never; Returns: string }
       cleanup_expired_widget_sessions: { Args: never; Returns: number }
       create_or_access_token: { Args: { app_slug: string }; Returns: string }
       get_coadmin_emails: {
@@ -1059,6 +1060,14 @@ export type Database = {
       }
       get_or_create_direct_subaccount: { Args: never; Returns: string }
       is_staff: { Args: never; Returns: boolean }
+      list_coadmin_workspaces: {
+        Args: never
+        Returns: {
+          owner_user_id: string
+          sig_public_key: string
+          workspace_key_id: string
+        }[]
+      }
       list_or_access_tokens: {
         Args: never
         Returns: {

@@ -20,6 +20,56 @@ name: prod pr source guard
 # cleaned up.
 #
 # The rule: prod is written to by promoting dev, and by nothing else.
+#
+# WHY A release/* HEAD IS ALSO ACCEPTED (OR-T0990), and why that does not put a
+# hole in the rule above.
+#
+# The promotion pull request's head used to be the dev branch itself, and dev
+# moves. The prod ruleset requires the last push to be approved, so every merge
+# into dev voided the promotion's approval even when that merge had nothing to
+# do with the promotion. The standing promotion collected six non-author
+# approvals and promoted zero times. Freezing dev instead was tried and held for
+# 2 minutes 56 seconds. The fix is to stop the reviewed artifact moving: the
+# release branch is cut by hand at a fixed sha, and the promotion is opened from
+# that branch instead of from dev.
+#
+# So a head matching release/* is accepted WHEN, AND ONLY WHEN, its head sha is
+# an ancestor of dev. A branch whose sha is an ancestor of dev contains only
+# commits that are already on dev, so merging it into prod creates no prod-only
+# commit and cannot start the loop above. The gate gets STRONGER, not weaker:
+# before, it trusted a branch NAME; now it asks the commit graph, and a rename
+# cannot spoof ancestry.
+#
+# HOW THE ANCESTRY STEP WAS PROVEN ABLE TO FAIL, and how to prove it again.
+# The self-test step below covers the pure decision logic in both directions,
+# but it cannot cover the ancestry lookup, because that is an API call. So the
+# lookup was pointed at a real branch and watched to refuse: a release/* branch
+# carrying a commit that was not on dev was opened into prod, the compare
+# returned "ahead", and this job failed with the ancestry message rather than
+# the wrong-branch message. To repeat it: cut a release/* branch, add any commit
+# that is not on dev, open it into prod, and watch this check go red. Then close
+# the pull request. If it ever goes green in that state, the lookup has stopped
+# looking and every promotion it has waved through since is unproven.
+#
+# ONE IMPLEMENTATION OF THE DECISION, INVOKED TWICE (OR-T1098).
+# The decision lives in scripts/prod-source-verdict.sh and nowhere else. Both
+# the self-test step and the enforcing step below call that one script. Before
+# OR-T1098 each step carried its own copy of the same logic: they were
+# textually independent, nothing compared them, and adding an accepted head
+# pattern to one and not the other left the self-test passing 12 of 12 while
+# this check went green having proved nothing about the code that decided.
+#
+# That is why the job now checks the repository out. Note what that means when
+# a pull request into prod cannot be merged cleanly: the merge ref does not
+# exist, the checkout fails, and this job goes RED. It fails closed, which is
+# the correct direction, and such a pull request is unmergeable anyway.
+#
+# THE JOB NAME BELOW NO LONGER DESCRIBES THE WHOLE BEHAVIOUR, ON PURPOSE.
+# "prod pull requests must come from dev" is the required-check context name in
+# the prod ruleset. Renaming it would leave the ruleset waiting for a check that
+# never reports, and every future promotion would deadlock with nothing pointing
+# at the cause. It stays byte-identical. Read it as "must come from dev, or from
+# a branch that dev already contains".
 
 on:
   pull_request:
@@ -36,56 +86,69 @@ jobs:
     name: prod pull requests must come from dev
     runs-on: ubuntu-latest
     steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
       - name: Self-test the decision logic
         run: |
           set -euo pipefail
 
-          # The same function the real check uses, exercised against the four
-          # cases that matter before it is trusted with a verdict. A gate that
-          # has never been shown to fail is not known to work.
-          verdict() {
-            head_ref="$1"
-            labels="$2"
-
-            if [ "${head_ref}" = "dev" ]; then
-              echo "allow-promotion"
-              return
-            fi
-
-            if printf '%s' "${labels}" | jq -e 'any(. == "prod-hotfix")' >/dev/null; then
-              echo "allow-hotfix"
-              return
-            fi
-
-            echo "block"
-          }
+          # Exercises scripts/prod-source-verdict.sh, which is the SAME file the
+          # enforcing step below calls. Not a copy of it, the same file. A gate
+          # that has never been shown to fail is not known to work, and a
+          # self-test of a second implementation shows nothing about the first.
+          #
+          # Ancestry is passed IN as an argument rather than looked up by the
+          # script. That keeps the script pure string-and-label logic, so it
+          # runs with no network and no token, and it is the reason the ancestry
+          # lookup lives in the step below: an API call cannot be unit-tested
+          # inside a pure function, so it is not pretended otherwise.
+          VERDICT_SH="${GITHUB_WORKSPACE}/scripts/prod-source-verdict.sh"
+          if [ ! -f "${VERDICT_SH}" ]; then
+            echo "::error::scripts/prod-source-verdict.sh is missing from this checkout. The decision this gate makes is not here, so nothing can be enforced. Blocked."
+            exit 1
+          fi
 
           fail=0
           check() {
-            got="$(verdict "$2" "$3")"
-            if [ "${got}" != "$4" ]; then
-              echo "::error::self-test '$1' expected '$4', got '${got}'"
+            got="$(bash "${VERDICT_SH}" "$2" "$3" "$4")"
+            if [ "${got}" != "$5" ]; then
+              echo "::error::self-test '$1' expected '$5', got '${got}'"
               fail=1
             else
               echo "ok: $1 -> ${got}"
             fi
           }
 
-          check "the promotion PR"            "dev"                    '[]'                          "allow-promotion"
-          check "an ordinary fix branch"      "fix/some-bug"           '[]'                          "block"
-          check "a hand-promote branch"       "promote/dl-0421-to-prod" '[]'                         "block"
-          check "a labelled emergency hotfix" "fix/urgent"             '["prod-hotfix"]'             "allow-hotfix"
-          check "an unrelated label"          "fix/urgent"             '["documentation"]'           "block"
+          check "the promotion PR"                "dev"                     '[]'                ""          "allow-promotion"
+          check "an ordinary fix branch"          "fix/some-bug"            '[]'                ""          "block"
+          check "a hand-promote branch"           "promote/dl-0421-to-prod" '[]'                ""          "block"
+          check "a labelled emergency hotfix"     "fix/urgent"              '["prod-hotfix"]'   ""          "allow-hotfix"
+          check "an unrelated label"              "fix/urgent"              '["documentation"]' ""          "block"
+          check "a release branch behind dev"     "release/2026-08-31"      '[]'                "behind"    "allow-release"
+          check "a release branch equal to dev"   "release/2026-08-31"      '[]'                "identical" "allow-release"
+          check "a release branch ahead of dev"   "release/rogue"           '[]'                "ahead"     "block-ancestry"
+          check "a release branch diverged"       "release/rogue"           '[]'                "diverged"  "block-ancestry"
+          check "a release branch, lookup failed" "release/2026-08-31"      '[]'                ""          "block-ancestry"
+          check "merely NAMED like a release"     "release-2026-08-31"      '[]'                "behind"    "block"
+          check "a nested release branch"         "release/or-t0990/cut-1"  '[]'                "behind"    "allow-release"
 
           if [ "${fail}" -ne 0 ]; then
             echo "::error::decision logic self-test failed. The gate is broken, not passing."
             exit 1
           fi
-          echo "Self-test passed: 5 cases, all as expected."
+          echo "Self-test passed: 12 cases, all as expected."
 
       - name: Check this pull request's source branch
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          # The HEAD sha, deliberately, not the merge sha. The merge sha is a
+          # commit GitHub synthesised by merging this head into prod. It sits on
+          # no branch, so asking whether it is an ancestor of dev would answer
+          # no for every pull request, including the correct ones.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
@@ -93,6 +156,7 @@ jobs:
 
           echo "base: ${BASE_REF}"
           echo "head: ${HEAD_REF}"
+          echo "head sha: ${HEAD_SHA}"
           echo "labels: ${LABELS}"
 
           if [ "${BASE_REF}" != "prod" ]; then
@@ -100,29 +164,98 @@ jobs:
             exit 0
           fi
 
-          if [ "${HEAD_REF}" = "dev" ]; then
-            echo "This is the promotion PR. Allowed."
-            exit 0
-          fi
+          # Gather the one input the decision needs that cannot be read off a
+          # string: does dev already contain this exact sha? One API call: no
+          # clone, no git. The job holds contents: read and that is all a
+          # compare needs. Only asked for a release/* head, because that is the
+          # only head the decision uses it for.
+          #
+          # GATHERING IS ALL THIS DOES. The decision itself is made once, below,
+          # by the same script the self-test step exercised.
+          ANCESTRY=""
+          case "${HEAD_REF}" in
+            release/*)
+              echo ""
+              echo "release branch head. Asking whether dev already contains this sha..."
+              echo "Query: compare dev...${HEAD_SHA}"
 
-          if printf '%s' "${LABELS}" | jq -e 'any(. == "prod-hotfix")' >/dev/null; then
-            echo "::warning::Emergency hotfix straight to prod, allowed by the 'prod-hotfix' label."
-            echo "::warning::This creates a commit that exists only on prod. Back-merge prod into dev the SAME DAY, or the promotion PR will conflict and the cherry-pick loop starts again."
-            exit 0
-          fi
+              # FAIL CLOSED, and note what that means here: every way this call
+              # can go wrong (a 404, a rate limit, a network error, an error
+              # body carrying no .status) leaves ANCESTRY empty or unmatched,
+              # and only "behind" or "identical" pass. A check that reports "I
+              # could not look" as a pass is the defect this repository keeps
+              # finding, and this is not another one.
+              ANCESTRY="$(gh api "repos/${GH_REPO}/compare/dev...${HEAD_SHA}" --jq .status || true)"
+              echo "compare status: '${ANCESTRY:-<none>}'"
+              ;;
+          esac
 
-          echo "::error::A pull request into prod must come from dev. This one comes from '${HEAD_REF}'."
+          VERDICT="$(bash "${GITHUB_WORKSPACE}/scripts/prod-source-verdict.sh" "${HEAD_REF}" "${LABELS}" "${ANCESTRY}")"
           echo ""
-          echo "Why this is blocked:"
-          echo "  Merging this would create a commit that exists only on prod. That is what"
-          echo "  makes the promotion PR conflict, which is what forces the next fix to be"
-          echo "  cherry-picked onto prod, which deepens the conflict again."
+          echo "verdict: ${VERDICT}"
           echo ""
-          echo "What to do instead:"
-          echo "  1. Open this against dev. It reaches prod with the next promotion."
-          echo "  2. If the content is ALREADY in dev, this PR is a hand-promotion. Close it:"
-          echo "     the promotion PR carries it, and merging it here only adds divergence."
-          echo "  3. If prod is genuinely broken right now and cannot wait for a promotion,"
-          echo "     add the 'prod-hotfix' label. That is deliberate, visible and auditable,"
-          echo "     and it obliges you to back-merge prod into dev the same day."
-          exit 1
+
+          case "${VERDICT}" in
+            allow-promotion)
+              echo "This is the promotion PR. Allowed."
+              exit 0
+              ;;
+
+            allow-hotfix)
+              echo "::warning::Emergency hotfix straight to prod, allowed by the 'prod-hotfix' label."
+              echo "::warning::This creates a commit that exists only on prod. Back-merge prod into dev the SAME DAY, or the promotion PR will conflict and the cherry-pick loop starts again."
+              exit 0
+              ;;
+
+            allow-release)
+              echo "Allowed. Every commit on '${HEAD_REF}' is already on dev, so merging"
+              echo "this into prod cannot create a commit that exists only on prod, which"
+              echo "is the thing this gate exists to prevent."
+              exit 0
+              ;;
+
+            block-ancestry)
+              echo "::error::Could not confirm that '${HEAD_REF}' is contained in dev. compare dev...${HEAD_SHA} returned '${ANCESTRY:-nothing}', and only 'behind' or 'identical' are accepted. Blocked."
+              echo ""
+              echo "Read this as a DIFFERENT failure from 'your branch is not dev'. The"
+              echo "branch name is fine. What is missing is proof that dev already contains"
+              echo "this exact sha."
+              echo ""
+              echo "What the answers mean:"
+              echo "  ahead / diverged  The branch carries commits that are not on dev."
+              echo "                    Merge them into dev first, then re-cut the release"
+              echo "                    branch at a sha that is on dev. A promotion promotes"
+              echo "                    what dev already has, and nothing else."
+              echo "  nothing / empty   The compare call itself failed: an API error, a rate"
+              echo "                    limit, or a sha this repository cannot see. Nothing"
+              echo "                    is wrong with the branch. Re-run the check. This"
+              echo "                    blocks on purpose rather than guessing."
+              exit 1
+              ;;
+
+            block)
+              echo "::error::A pull request into prod must come from dev, or from a release/* branch that dev already contains. This one comes from '${HEAD_REF}'."
+              echo ""
+              echo "Why this is blocked:"
+              echo "  Merging this would create a commit that exists only on prod. That is what"
+              echo "  makes the promotion PR conflict, which is what forces the next fix to be"
+              echo "  cherry-picked onto prod, which deepens the conflict again."
+              echo ""
+              echo "What to do instead:"
+              echo "  1. Open this against dev. It reaches prod with the next promotion."
+              echo "  2. If the content is ALREADY in dev, this PR is a hand-promotion. Close it:"
+              echo "     the promotion PR carries it, and merging it here only adds divergence."
+              echo "  3. If you are promoting, cut a 'release/<name>' branch at a sha that is"
+              echo "     already on dev and open the promotion from that. It is accepted because"
+              echo "     dev contains it, and unlike dev itself it does not move under review."
+              echo "  4. If prod is genuinely broken right now and cannot wait for a promotion,"
+              echo "     add the 'prod-hotfix' label. That is deliberate, visible and auditable,"
+              echo "     and it obliges you to back-merge prod into dev the same day."
+              exit 1
+              ;;
+
+            *)
+              echo "::error::The decision script returned '${VERDICT}', which is not a verdict this job knows how to act on. Blocked: a gate that does not understand its own answer must not wave anything through."
+              exit 1
+              ;;
+          esac
