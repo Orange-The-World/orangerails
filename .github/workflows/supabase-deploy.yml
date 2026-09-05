@@ -882,14 +882,24 @@ jobs:
   # means an intentional RLS edit must update the baseline in the SAME PR, so
   # the diff is reviewed rather than silently absorbed.
   #
-  # SCOPE, stated so a green check is not read as more than it is: this
-  # compares the POLICY SET. It does not assert that row level security is
-  # switched ON, because pg_policies carries no relrowsecurity column and
-  # lists a table's policies whether or not RLS is enabled. Disabling RLS on
-  # a table changes not one byte of this baseline. That gap is tracked
-  # separately (OR-T1601) and is not closed here.
+  # SCOPE, stated so a green check is not read as more than it is: this job
+  # compares TWO things now, each against its own baseline for the resolved
+  # cluster (dev vs prod each carry their own pair of files):
+  #   - the POLICY SET: schemaname, tablename, policyname, cmd, permissive,
+  #     roles, and a hash of the USING/WITH CHECK expressions.
+  #   - RLS ENABLEMENT (OR-T1601): relrowsecurity, relforcerowsecurity, and
+  #     the live policy count, for every base table in schema public,
+  #     whether or not it carries any policy. `alter table ... disable row
+  #     level security` changes not one byte of the policy baseline above,
+  #     because pg_policies lists a table's policies whether or not RLS is
+  #     switched on for that table -- this second baseline is what actually
+  #     pins the enable bit.
+  # What this still does not do: assert WHO can reach a table once RLS is
+  # confirmed on (that is the grant, and the anon-EXECUTE check above covers
+  # function grants, not table grants), and it does not evaluate whether a
+  # policy's own logic is correct, only whether it changed.
   #
-  # Self-test runs first, against synthetic rows, and proves the diff can go
+  # Self-test runs first, against synthetic rows, and proves each diff can go
   # both red and green before the live comparison is trusted -- the same
   # discipline apply-migrations' own self-test uses. A script that can only
   # ever report "clean" is worse than no script.
