@@ -112,8 +112,83 @@ jobs:
             exit 1
           fi
 
+      # OR-T1772. This step lives in `target` ON PURPOSE. apply-migrations declares
+      # target in `needs`, so this summary is written BEFORE the environment pause.
+      # Do not move it into apply-migrations: that job is paused while the approver is
+      # looking at the run, so its summary would be written after the approval it was
+      # meant to inform. It would look correct in review and be useless at the only
+      # moment it matters.
+      # run-name carries the same value on one line and the UI truncates it. This is
+      # what carries the whole block.
+      # THE LOAD-BEARING FACT: it is target having NO `environment:` binding of its own,
+      # and no `if:`, that makes this summary arrive BEFORE the pause. The needs edge
+      # alone does not do it. If a future change binds target to an environment, this
+      # carrier silently moves to after the approval it exists to inform and nothing
+      # here will fail to warn you.
+      # OR-T1801. A missing reason already fails loud, below. A PRESENT but
+      # worthless one ("x", "redeploy", yesterday's reason pasted forward) was
+      # unguarded: nothing checked it named an actual restore point, so the
+      # step summary looked identical whether the reason was real or junk.
+      # This must run BEFORE the environment pause, same reasoning as the
+      # summary step below: an approver at the pause needs the refusal to
+      # have already fired, not to discover it after clicking approve.
+      # Checked on SHAPE (a parseable date/time), never on exact wording, so
+      # this does not silently stop firing the next time the message is
+      # reworded. A redeploy (apply_migrations false) needs no restore point
+      # and is untouched.
+      - name: Refuse an apply-migrations dispatch with no restore point in its reason
+        if: github.event_name == 'workflow_dispatch' && inputs.apply_migrations == true
+        env:
+          RUN_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          # A restore point is a UTC-shaped date, optionally with a time, so
+          # this looks for that shape rather than an exact sentence:
+          # 2026-09-04 or 2026-09-04T00:00 or 2026-09-04T00:00:00Z all count.
+          CANDIDATE="$(printf '%s' "${RUN_REASON}" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?Z?)?' | head -n1 || true)"
+          if [ -z "${CANDIDATE}" ] || ! date -u -d "${CANDIDATE}" >/dev/null 2>&1 || [ "${#RUN_REASON}" -lt 20 ]; then
+            echo "::error title=No restore point in the reason::apply_migrations is true but the reason input carries no parseable UTC timestamp. A restore point is the backup age an approver checks this dispatch against, and 'x', 'redeploy', or a reason pasted forward from a previous run all look identical to a real one without this check. State the restore point you are relying on, for example: 'restore point 2026-09-04T00:00:00Z, redeploying after a cancelled run.'"
+            exit 1
+          fi
+          echo "Reason carries a parseable restore point (${CANDIDATE}) and is ${#RUN_REASON} character(s) long. Proceeding."
+
+      - name: Publish the restore point where the approver can read it
+        env:
+          # Read through env, never interpolated into the script body: a dispatch input
+          # is attacker-controlled text and ${{ }} substitution happens before the shell
+          # parses the line.
+          RUN_REASON: ${{ inputs.reason }}
+          APPLY_MIGRATIONS: ${{ inputs.apply_migrations }}
+        run: |
+          {
+            echo "## Restore point for the approver"
+            echo ""
+            echo "Target project: ${{ steps.t.outputs.supabase_ref }} (environment ${{ steps.t.outputs.environment_name }})"
+            echo "Event: ${{ github.event_name }} on ${{ github.ref_name }}"
+            echo "Dispatching actor: ${{ github.actor }}"
+            echo "This step ran (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo ""
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "Apply migrations requested: ${APPLY_MIGRATIONS:-false}"
+              echo ""
+              if [ -n "${RUN_REASON}" ]; then
+                echo "Reason input, verbatim:"
+                echo ""
+                echo '```text'
+                printf '%s\n' "${RUN_REASON}"
+                echo '```'
+              else
+                echo "NO REASON WAS GIVEN, so there is no restore point on this run."
+                echo "An approver has nothing here to check a backup age against and should reject."
+              fi
+            else
+              echo "This run is a push, not a dispatch, so there is no reason input and no restore point was supplied."
+              echo "A push can never turn apply_migrations on."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   deploy:
-    needs: [target, check-pending-migrations]
+    needs: [target, check-pending-migrations, check-rls-policy-baseline]
     runs-on: ubuntu-latest
     permissions:
       contents: read
