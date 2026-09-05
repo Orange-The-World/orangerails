@@ -150,18 +150,13 @@ export async function drainStrikeQueue(args: {
     // safely under the limit while still 192 bits of entropy.
     const secret = generateHexSecret(24);
     const webhookUrl = `${args.webhookBaseUrl}?conn=${conn.id}`;
+    let sub: { id: string };
     try {
-      const sub = await strikeCreateSubscription(creds, {
+      sub = await strikeCreateSubscription(creds, {
         webhookUrl,
         secret,
         eventTypes: STRIKE_DEFAULT_EVENT_TYPES,
       });
-      const { error } = await args.serviceClient
-        .from('connections')
-        .update({ strike_subscription_id: sub.id, strike_webhook_secret: secret })
-        .eq('id', conn.id);
-      if (error) throw error;
-      console.log(`[strike-queue] registered subscription ${sub.id} for connection ${conn.id}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Map the failure to an actionable marker on EVERY subscription-failure
@@ -186,6 +181,37 @@ export async function drainStrikeQueue(args: {
           `[strike-queue] subscription registration failed for ${conn.id} -> ${marker}: ${message.slice(0, 200)}`,
         );
       }
+      return { transactions: [], next_cursor: conn.last_sync_cursor, subscriptionError: marker };
+    }
+
+    // Strike already accepted this subscription. From here on a failure only
+    // means WE lost track of it, not that it does not exist: create-then-store
+    // is not atomic (OR-T2248). If the store below fails, sub.id was never
+    // recorded, so our code can never find it again to delete it: it is now
+    // orphaned on Strike's side, live and signing with a secret we do not
+    // store. The next drain retries the same create-then-store step, which
+    // can orphan another one on top of it. orangeway/sp-1 already found and
+    // manually cleaned up 8 such orphans in production (note on OR-T0386,
+    // 2026-09-05 03:07 UTC). A real fix needs a write-intent record persisted
+    // BEFORE the Strike call, which is a schema change (OR-T2248 direction
+    // (a)) and out of scope here. This is the minimum useful step (OR-T2248
+    // direction (c)): a distinct log line naming the orphaned subscription id
+    // and connection id, so a future sweep can find and delete it without the
+    // customer's key.
+    try {
+      const { error } = await args.serviceClient
+        .from('connections')
+        .update({ strike_subscription_id: sub.id, strike_webhook_secret: secret })
+        .eq('id', conn.id);
+      if (error) throw error;
+      console.log(`[strike-queue] registered subscription ${sub.id} for connection ${conn.id}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const marker = strikeSubscriptionErrorMarker(message);
+      console.error(
+        `[strike-queue] ORPHAN RISK: created Strike subscription ${sub.id} for connection ${conn.id} ` +
+        `but failed to store it, so this id can never be deleted by our code: ${message.slice(0, 200)}`,
+      );
       return { transactions: [], next_cursor: conn.last_sync_cursor, subscriptionError: marker };
     }
   }
