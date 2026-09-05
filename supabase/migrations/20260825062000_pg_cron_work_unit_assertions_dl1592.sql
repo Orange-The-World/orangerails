@@ -170,3 +170,90 @@ BEGIN
   END IF;
 END;
 $$;
+
+-- ============================================================
+-- Grants (DL-1661). service_role only.
+--
+-- Creating a function in the public schema on this project is not a neutral
+-- act: the schema carries a default ACL (pg_default_acl, objtype f, grantor
+-- postgres) that issues a PER-ROLE EXECUTE grant to anon and to authenticated
+-- at CREATE FUNCTION time. As first written this file set no grants at all, so
+-- all five assertions above landed callable by the anonymous role. They report
+-- internal backlog depth and nothing outside the database should invoke them.
+--
+-- The revoke NAMES the roles. REVOKE ... FROM PUBLIC does not remove a grant
+-- made directly to a named role, so the FROM PUBLIC spelling would run clean
+-- and change nothing. The pg_cron jobs that call these run as postgres, which
+-- is the owner and is unaffected either way.
+-- ============================================================
+DO $grants$
+DECLARE
+  v_sig  text;
+  v_sigs text[] := ARRAY[
+    'public.assert_cleanup_quiltt_inbox_payloads()',
+    'public.assert_cleanup_expired_widget_sessions()',
+    'public.assert_or_quiltt_sync_drain()',
+    'public.assert_or_quiltt_drain_alert()',
+    'public.assert_or_webhook_dispatch_drain()'
+  ];
+  v_hit int := 0;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    RAISE NOTICE 'Supabase API roles absent on this database, nothing to revoke';
+    RETURN;
+  END IF;
+
+  FOREACH v_sig IN ARRAY v_sigs LOOP
+    IF to_regprocedure(v_sig) IS NULL THEN
+      RAISE EXCEPTION 'FAIL: % does not exist after this migration created it', v_sig;
+    END IF;
+    EXECUTE format(
+      'REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, anon, authenticated', v_sig);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', v_sig);
+    v_hit := v_hit + 1;
+  END LOOP;
+
+  RAISE NOTICE 'locked down % assertion function(s)', v_hit;
+END
+$grants$;
+
+-- Post-condition, per function. The revoke above is the statement; this is the
+-- evidence. A migration that reports success while leaving one of these open to
+-- anon is the exact failure this block exists to make impossible.
+DO $verify$
+DECLARE
+  v_sig  text;
+  v_oid  oid;
+  v_open text[] := ARRAY[]::text[];
+  v_sigs text[] := ARRAY[
+    'public.assert_cleanup_quiltt_inbox_payloads()',
+    'public.assert_cleanup_expired_widget_sessions()',
+    'public.assert_or_quiltt_sync_drain()',
+    'public.assert_or_quiltt_drain_alert()',
+    'public.assert_or_webhook_dispatch_drain()'
+  ];
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    RETURN;
+  END IF;
+
+  FOREACH v_sig IN ARRAY v_sigs LOOP
+    v_oid := to_regprocedure(v_sig);
+    IF v_oid IS NULL THEN
+      RAISE EXCEPTION 'FAIL: % does not exist', v_sig;
+    END IF;
+    IF has_function_privilege('anon', v_oid, 'EXECUTE')
+       OR has_function_privilege('authenticated', v_oid, 'EXECUTE') THEN
+      v_open := v_open || v_sig;
+    END IF;
+    IF NOT has_function_privilege('service_role', v_oid, 'EXECUTE') THEN
+      RAISE EXCEPTION 'FAIL: service_role cannot execute %', v_sig;
+    END IF;
+  END LOOP;
+
+  IF array_length(v_open, 1) IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: anon or authenticated still holds EXECUTE on: %',
+      array_to_string(v_open, ', ');
+  END IF;
+END
+$verify$;

@@ -121,6 +121,68 @@ COMMENT ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text) IS
   'the owner against itself and the check could never fail. '
   'DL-1478, DL-1597.';
 
--- Grants unchanged from PR #842: service_role only.
-REVOKE ALL ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text) FROM PUBLIC;
-GRANT  EXECUTE ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text) TO service_role;
+-- Grants: service_role only.
+--
+-- DL-1661: the roles have to be NAMED. This block used to read
+--
+--   REVOKE ALL ON FUNCTION ... FROM PUBLIC;
+--   GRANT  EXECUTE ON FUNCTION ... TO service_role;
+--
+-- which reads as service-role-only and is not. The public schema carries a
+-- default ACL (pg_default_acl, objtype f, grantor postgres) that issues a
+-- PER-ROLE EXECUTE grant to anon and to authenticated at CREATE FUNCTION time.
+-- A revoke against the PUBLIC pseudo-role cannot remove a grant made directly
+-- to a named role, so the revoke above succeeded and changed nothing that
+-- mattered. Because the DROP + CREATE above makes a NEW object, the default
+-- ACL re-grants on every apply.
+--
+-- Measured on the dev project 2026-08-26, applying this file as first written:
+--   BEFORE  record_stealth_scan_range(uuid,int,int)       {postgres,service_role}
+--   AFTER   record_stealth_scan_range(uuid,int,int,text)  {postgres,anon,authenticated,service_role}
+-- That is this file undoing the revoke 20260822031500 had landed.
+--
+-- Guarded on the roles existing so a replay on a plain Postgres (no Supabase
+-- API roles) skips rather than erroring on an unknown role name.
+DO $grants$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE EXECUTE ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text)
+      FROM PUBLIC, anon, authenticated;
+    GRANT  EXECUTE ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text)
+      TO service_role;
+  ELSE
+    REVOKE EXECUTE ON FUNCTION public.record_stealth_scan_range(uuid, int, int, text)
+      FROM PUBLIC;
+    RAISE NOTICE 'Supabase API roles absent on this database, revoked from PUBLIC only';
+  END IF;
+END
+$grants$;
+
+-- Post-condition. The statement above is not the evidence; this is. A
+-- migration that reports success while leaving the function executable by anon
+-- is the failure this block exists to make impossible.
+DO $verify$
+DECLARE
+  v_oid oid := to_regprocedure('public.record_stealth_scan_range(uuid,int,int,text)');
+BEGIN
+  IF v_oid IS NULL THEN
+    RAISE EXCEPTION 'FAIL: record_stealth_scan_range(uuid,int,int,text) does not exist after this migration created it';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    RETURN;
+  END IF;
+
+  IF has_function_privilege('anon', v_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: anon still holds EXECUTE on record_stealth_scan_range(uuid,int,int,text)';
+  END IF;
+
+  IF has_function_privilege('authenticated', v_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: authenticated still holds EXECUTE on record_stealth_scan_range(uuid,int,int,text)';
+  END IF;
+
+  IF NOT has_function_privilege('service_role', v_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'FAIL: service_role lost EXECUTE on record_stealth_scan_range(uuid,int,int,text)';
+  END IF;
+END
+$verify$;

@@ -18,7 +18,7 @@
     "or-connection-delete": "platform-api-key",
     "or-connection-list": "platform-api-key",
     "or-discover-wallets": "platform-api-key",
-    "or-institutions-catalog": "platform-api-key",
+    "or-institutions-catalog": "none",
     "or-link-complete": "platform-api-key",
     "or-link-mint-token": "platform-api-key",
     "or-platform-bootstrap": "platform-api-key",

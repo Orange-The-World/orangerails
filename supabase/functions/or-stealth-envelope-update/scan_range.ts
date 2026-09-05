@@ -24,6 +24,8 @@
  * mode scopes the connection read by platform_id.
  */
 
+import { reportError } from '../_shared/sentry.ts';
+
 /** Exact argument list for the record_stealth_scan_range RPC (4-arg form). */
 export interface ScanRangeRpcArgs {
   p_connection_id: string;
@@ -81,13 +83,68 @@ export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | nu
  * rejection from the database lands here as a logged error, which is the
  * correct outcome: nothing is written.
  */
+export interface ScanRangeResult {
+  /** False when the request carried no from_height, so the RPC was never called. */
+  attempted: boolean;
+  /** True when the RPC returned no error. */
+  recorded: boolean;
+  /**
+   * True when the RPC returned the guard's own P0001 ownership rejection.
+   * This is an expected outcome, not a failure: the range legitimately does
+   * not belong to this connection under the identity the guard resolved.
+   */
+  skippedOwnership?: boolean;
+  /** Present only for an error that is NOT the ownership rejection. */
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+const OWNERSHIP_REJECTION_PREFIX = 'record_stealth_scan_range: caller ';
+const OWNERSHIP_REJECTION_SUBSTRING = 'does not own connection';
+
 // deno-lint-ignore no-explicit-any
-export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<void> {
+export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<ScanRangeResult> {
   const args = buildScanRangeArgs(req);
-  if (args === null) return;
+  if (args === null) return { attempted: false, recorded: false };
 
   const { error } = await client.rpc('record_stealth_scan_range', args);
-  if (error) {
-    console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', error);
+  if (!error) return { attempted: true, recorded: true };
+
+  const isOwnershipRejection =
+    error.code === 'P0001' &&
+    typeof error.message === 'string' &&
+    error.message.startsWith(OWNERSHIP_REJECTION_PREFIX) &&
+    error.message.includes(OWNERSHIP_REJECTION_SUBSTRING);
+
+  if (isOwnershipRejection) {
+    console.info(
+      '[or-stealth-envelope-update] record_stealth_scan_range: ownership rejection, range not recorded',
+    );
+    return { attempted: true, recorded: false, skippedOwnership: true };
   }
+
+  // Anything else (PGRST202 = function missing or wrong signature, 42501 =
+  // permission denied, or any other code) is NOT the expected guard outcome.
+  // Swallowing it the same way is exactly what let a broken RPC read as a
+  // healthy sync. Log the code itself, since the message alone does not tell
+  // a human which of those it was, and also push it through the same
+  // GlitchTip channel every other handler in this function uses (OR-T0925),
+  // since a log line nobody is watching is exactly how OR-T0903 ran on
+  // production failing every call with nothing noticing. Deliberately NOT
+  // called for the ownership rejection above: that is expected traffic, and
+  // reporting it would alert on every legitimate rejection.
+  console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', {
+    code: error.code,
+    message: error.message,
+  });
+  void reportError(
+    new Error(`record_stealth_scan_range failed (code=${error.code}): ${error.message ?? String(error)}`),
+    'or-stealth-envelope-update',
+  );
+  return {
+    attempted: true,
+    recorded: false,
+    errorCode: error.code,
+    errorMessage: error.message,
+  };
 }

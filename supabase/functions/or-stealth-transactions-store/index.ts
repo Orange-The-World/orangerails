@@ -17,23 +17,36 @@
  * Cursor semantics (DL-0419 trackMax-inside-guard):
  *   last_block_scanned on the stealth_connections row advances only when new
  *   rows are actually inserted, and only to max(block_height) of those rows.
- *   Advancing unconditionally to the client-supplied scan tip (body.last_block_scanned)
+ *   Advancing unconditionally to the client-supplied height (body.last_block_scanned)
  *   is the DL-0015 bug applied to the sealed-tx path: the cursor jumps past
  *   items that were never committed, silently losing them on the next sync.
- *   or-stealth-envelope-update owns the scan-tip cursor (always called in step
- *   4 of the widget sync flow, after this function returns OK).
+ *   or-stealth-envelope-update writes the same column in step 4 of the widget
+ *   sync flow, after this function returns OK. It is NOT a scan-tip endpoint:
+ *   its last_block_scanned carries the same meaning as ours, the last height
+ *   the caller read contiguously. Both functions import that contract from
+ *   ../_shared/scan-cursor.ts (OR-T1914).
+ *
+ *   OR-T1120: max(block_height) of the inserted rows is a real height, but it
+ *   is not evidence that every height BELOW it was read. The client's
+ *   rolling-window extension pass can match a block above the point where a
+ *   filter fetch aborted, so a transaction can land at a height sitting above a
+ *   gap nobody scanned. The advance is therefore ALSO bounded above by
+ *   body.last_block_scanned, the last height the client read contiguously. That
+ *   value is a ceiling only: it can hold the cursor back, never push it forward,
+ *   so the forward-only guard above still holds against a client that lies.
  *
  * POST body:
  *   connection_id:        string (uuid)
  *   app_user_id:          string (opaque host-app user id, not necessarily a uuid)
  *   sealed_transactions:  SealedTransactionInput[]
- *   last_block_scanned:   number (kept for backward compat, not used for cursor)
+ *   last_block_scanned:   number (the last height the client scanned CONTIGUOUSLY;
+ *                         a CEILING on the cursor advance, never used to raise it)
  *
  * Response:
  *   { connection_id, inserted, total, skipped_duplicates, last_block_scanned }
  *   last_block_scanned in the response is the effective stored cursor after the
- *   call (null when the connection has never scanned), never the client-supplied
- *   scan tip.
+ *   call (null when the connection has never scanned), never the height the
+ *   client supplied.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
@@ -44,6 +57,14 @@ import {
   getCallerPlatformId,
 } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+// The cursor contract, and the ceiling that enforces it, live in one shared
+// module so that the two endpoints writing last_block_scanned cannot document
+// it in opposite directions again (OR-T1914). Re-exported below so this
+// function's import surface is unchanged.
+import {
+  boundCursorAdvance,
+  isContiguousScannedHeight,
+} from '../_shared/scan-cursor.ts';
 
 interface SealedTransactionInput {
   version: 1;
@@ -114,21 +135,45 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
 }
 
 /**
+ * The cursor contract and its ceiling are defined once, in
+ * ../_shared/scan-cursor.ts, and imported above. They are re-exported here
+ * because callers and tests have always imported them from this module, and
+ * because moving a definition should not be able to quietly change what an
+ * endpoint exports.
+ *
+ * boundCursorAdvance's first argument is named candidateHeight there. On this
+ * endpoint the candidate is max(block_height) of the rows that actually landed;
+ * on or-stealth-envelope-update it is the height the caller posted.
+ */
+export { boundCursorAdvance, isContiguousScannedHeight };
+
+/**
  * Response cursor derivation (DL-0419). Returns the effective stored cursor
- * AFTER this call, derived only from stored state, never from the client scan
- * tip (body.last_block_scanned). Advances to maxBlockInserted only when new
- * rows landed and that height exceeds the stored cursor; otherwise returns the
- * stored cursor unchanged, which is null on a connection that has never
- * scanned. Mirrors the forward-only patch guard so the value returned to the
- * caller always equals the value persisted.
+ * AFTER this call, derived only from stored state, never raised by the client
+ * scan tip (body.last_block_scanned). Advances only when new rows landed and
+ * the bounded height exceeds the stored cursor; otherwise returns the stored
+ * cursor unchanged, which is null on a connection that has never scanned.
+ * Mirrors the forward-only patch guard, INCLUDING the OR-T1120 ceiling, so the
+ * value returned to the caller always equals the value persisted. A caller told
+ * the cursor reached a height the database never stored would resume from the
+ * wrong place.
+ *
+ * clientContiguousScanned is REQUIRED and deliberately has no default. It used
+ * to default to undefined, which fails isContiguousScannedHeight, so a caller
+ * that simply forgot the argument got the old unbounded behaviour with no type
+ * error and no failing test -- in a function whose entire job is to mirror the
+ * persist path. Unbounded is still reachable by passing undefined explicitly,
+ * which is a decision a reviewer can see rather than an omission nobody can.
  */
 export function deriveResponseCursor(
   storedCursor: number | null,
   inserted: number,
   maxBlockInserted: number,
+  clientContiguousScanned: unknown,
 ): number | null {
-  const advanced = inserted > 0 && maxBlockInserted > (storedCursor ?? -1);
-  return advanced ? maxBlockInserted : storedCursor;
+  const candidate = boundCursorAdvance(maxBlockInserted, clientContiguousScanned);
+  const advanced = inserted > 0 && candidate > (storedCursor ?? -1);
+  return advanced ? candidate : storedCursor;
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -318,21 +363,34 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         }
         inserted = fresh.length;
         // trackMax-inside-guard: compute max block_height only for the rows that
-        // actually landed. Advancing to body.last_block_scanned (the scan tip)
-        // would move the watermark past blocks this call never committed, silently
-        // losing events that settle later. The scan-tip cursor lives in
-        // or-stealth-envelope-update (step 4 of the widget sync flow).
+        // actually landed. This endpoint never raises the cursor to
+        // body.last_block_scanned, because on the store path that would move the
+        // watermark past blocks this call never committed, silently losing
+        // events that settle later.
+        // This is a CANDIDATE height, not the final cursor: boundCursorAdvance
+        // below caps it at the last height the client scanned contiguously.
+        // or-stealth-envelope-update writes this same column in step 4 of the
+        // widget sync flow. That one does advance to the height the caller
+        // reports, because it has no committed rows to derive a height from, and
+        // it is held to the same contiguity contract as this function:
+        // ../_shared/scan-cursor.ts, imported by both. Do not read the sentence
+        // above as "the sibling is the safe place to send a chain tip" -- it is
+        // not, and reading it that way is the defect OR-T1914 fixed.
         maxBlockInserted = Math.max(...fresh.map((r) => r.block_height as number));
       }
     }
 
     // Forward-only cursor guard (trackMax-inside-guard). Advance last_block_scanned
-    // only when new rows were inserted AND their max block_height exceeds the
-    // stored cursor. Always update last_sync_at so the connection shows activity.
+    // only when new rows were inserted AND the advance height exceeds the stored
+    // cursor. Always update last_sync_at so the connection shows activity.
+    // OR-T1120: the advance height is max(block_height) of the inserted rows
+    // CAPPED at the last height the client scanned contiguously, so the cursor
+    // can never step over a gap the client never read.
     const storedCursor = (ownerRow.last_block_scanned as number | null) ?? -1;
+    const cursorAdvanceTo = boundCursorAdvance(maxBlockInserted, body.last_block_scanned);
     const cursorPatch: Record<string, unknown> = { last_sync_at: new Date().toISOString() };
-    if (inserted > 0 && maxBlockInserted > storedCursor) {
-      cursorPatch.last_block_scanned = maxBlockInserted;
+    if (inserted > 0 && cursorAdvanceTo > storedCursor) {
+      cursorPatch.last_block_scanned = cursorAdvanceTo;
     }
 
     const { error: updErr } = await ctx.serviceClient
@@ -353,6 +411,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       ownerRow.last_block_scanned as number | null,
       inserted,
       maxBlockInserted,
+      body.last_block_scanned,
     );
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,

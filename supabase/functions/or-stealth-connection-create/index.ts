@@ -43,6 +43,10 @@ import {
   getCallerPlatformId,
 } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import {
+  applyEnvelopeReplacement,
+  isEnvelopeReplacementError,
+} from './envelope_replace.ts';
 
 interface CreateRequestBody {
   app_slug?: string;
@@ -208,20 +212,23 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         // submitted sealed envelope. A user re-adding to correct the
         // wallet birthday saw the correction never take effect. Save the
         // new envelope so a re-add actually updates what's stored.
-        await ctx.serviceClient
-          .from('stealth_connections')
-          .update({
+        //
+        // The replacement also clears everything that would otherwise make
+        // the next sync skip the blocks the user just asked us to re-read:
+        // the cursor AND the recorded scan coverage. See envelope_replace.ts
+        // for why the cursor alone stopped being enough, and for the order
+        // the two writes happen in.
+        const replaced = await applyEnvelopeReplacement(
+          ctx.serviceClient,
+          existing.id as string,
+          {
             sealed_envelope: body.sealed_envelope,
             wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
-            // A replaced envelope may carry a new (possibly earlier)
-            // wallet birthday. The next sync starts from
-            // max(birthday_height, last_block_scanned + 1), so the old
-            // cursor would swallow the deeper rescan the user just asked
-            // for. Reset it alongside the envelope.
-            last_block_scanned: null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', existing.id as string);
+          },
+        );
+        if (isEnvelopeReplacementError(replaced)) {
+          return jsonResponse({ error: replaced.error }, replaced.status, cors);
+        }
         const resp: CreateResponseBody = {
           connection_id: existing.id as string,
           already_existed: true,
@@ -271,17 +278,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         if (raceRow) {
           // Same reasoning as the primary dedup path above: save the
           // newly submitted envelope rather than silently keeping
-          // whichever one won the race.
-          await ctx.serviceClient
-            .from('stealth_connections')
-            .update({
+          // whichever one won the race, and clear the same scan state.
+          const replaced = await applyEnvelopeReplacement(
+            ctx.serviceClient,
+            raceRow.id as string,
+            {
               sealed_envelope: body.sealed_envelope,
               wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
-              // Same cursor reset as the primary path above.
-              last_block_scanned: null,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('id', raceRow.id as string);
+            },
+          );
+          if (isEnvelopeReplacementError(replaced)) {
+            return jsonResponse({ error: replaced.error }, replaced.status, cors);
+          }
           const resp: CreateResponseBody = {
             connection_id: raceRow.id as string,
             already_existed: true,
