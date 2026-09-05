@@ -43,10 +43,25 @@ jobs:
         # it enumerates zero files: a run that checked nothing is not a run that passed.
         run: node scripts/check-migration-versions.mjs
 
+      - name: Migration dependency self-test
+        # The parser IS the control, so it is tested here rather than trusted. Runs before the
+        # check itself so a broken comparison fails as a broken comparison, not as a silent
+        # pass over every migration.
+        run: node scripts/check-migration-requires.mjs --selftest
+
+      - name: "Migration dependency check (-- Requires: headers)"
+        # A real gate, no continue-on-error. A migration can declare, on a line of its own,
+        # "-- Requires: <version>", naming a migration version it depends on and does not
+        # itself create. This fails the pull request when the named version has no matching
+        # file in this tree yet -- most often because the prerequisite pull request has not
+        # merged. It says nothing about a dependency nobody declared (OR-T1176): a declared
+        # header enforces what an author states, it does not discover what an author forgot.
+        run: node scripts/check-migration-requires.mjs
+
       - name: Migration order self-test
         # Same reasoning as the uniqueness self-test above and for the same reason it runs
         # first: a broken comparison must fail as a broken comparison rather than as a silent
-        # pass. Its thirteen cases exercise both directions, including the ordinary in-order
+        # pass. Its eighteen cases exercise both directions, including the ordinary in-order
         # file with no marker, which is the path every normal migration takes.
         run: node scripts/check-migration-order.mjs --selftest
 
@@ -60,8 +75,10 @@ jobs:
         # approved and CLEAN while carrying a file that makes the apply job refuse the WHOLE
         # run the moment it lands: apply-migrations fails, check-pending-migrations fails,
         # deploy is skipped, and every unrelated change queued behind it stops with them.
-        # On 2026-09-05 dev spent most of the day in that state and sixteen open pull
-        # requests were queued to do it again. Nothing told any of their authors.
+        # On 2026-09-05 dev spent most of the day in that state, and the set of open pull
+        # requests queued to do it again grew from sixteen to twenty six inside one hour
+        # without a single author touching anything, because the bar is the highest applied
+        # version and it rises every time any migration merges. Nothing told any of them.
         #
         # The escape hatch is the same OUT-OF-ORDER-OK line the deploy guard reads, so an
         # author who satisfies this satisfies that one too.
@@ -415,7 +432,12 @@ jobs:
           # supabase/functions/or-stealth-connection-create/envelope_replace.test.ts.
           # dev raised 19 -> 20 by OR-T2110, which adds
           # supabase/functions/_shared/quiltt-event-types.test.ts.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '20' }}
+          # dev raised 20 -> 21 by OR-T1721, which adds
+          # supabase/functions/or-ldk-channel-state/index.test.ts. Both this
+          # branch and dev independently claimed the 19 -> 20 slot; dev landed
+          # first, so this one is 20 -> 21 and the two entries chain rather
+          # than replace each other.
+          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '21' }}
         run: |
           set -euo pipefail
 

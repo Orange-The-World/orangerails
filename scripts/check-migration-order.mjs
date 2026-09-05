@@ -40,6 +40,16 @@
  * "does this file number below something that is already merged", which is a fact about the
  * tree, and it stays true whether or not the ledger has caught up yet.
  *
+ * THE ONE DIRECTION IN WHICH THE TREE MAXIMUM CAN READ LOW, named because a reader will
+ * otherwise have to work it out. The paragraph above covers the tree running AHEAD of the
+ * ledger, which makes this check stricter. The reverse needs a file to leave the tree while
+ * staying in the ledger: not renumbered, actually DELETED. If the single highest applied
+ * migration file were deleted outright, the tree maximum would read below the true applied
+ * maximum, and a new file numbered between the two would pass here while still being out of
+ * order on the ledger. Nobody deletes an applied migration, so this is remote rather than
+ * impossible, and the deploy guard still catches it on the push. It is written down because
+ * an unnamed gap in a control is indistinguishable from one nobody thought of.
+ *
  * THE ESCAPE HATCH IS THE SAME ONE THE DEPLOY GUARD USES, deliberately, so an author who
  * satisfies one satisfies the other. A file may number below the maximum if it carries
  *
@@ -118,6 +128,38 @@ export function markerReason(contents) {
     if (match) return match[1].trim() || null;
   }
   return null;
+}
+
+/**
+ * The migration basenames this branch ADDS, as a set difference of two trees rather than a
+ * diff.
+ *
+ * WHY NOT `git diff --diff-filter=A`. That was the first implementation and it had a silent
+ * hole, found by peer review before this shipped and then reproduced against git 2.43.0. Git
+ * detects renames by default, so a migration RENAMED inside a pull request is reported as
+ * type R and never as type A. `--diff-filter=A` therefore returns nothing for it. Renaming a
+ * migration to an EARLIER number is precisely the move this check exists to catch, and it was
+ * the one shape that could walk straight past it.
+ *
+ * A set difference of basenames cannot have that hole, because it never asks git to classify
+ * anything. A rename appears as one name gone and one name arrived, and the arrived name is
+ * what the apply job will read. That is the question being asked, so ask it directly.
+ *
+ * Comparing basenames rather than paths is deliberate too: the apply job keys on the
+ * basename, so a file moved between directories under the same name is not a new migration to
+ * it and must not be one here.
+ */
+export function addedMigrations(basePaths, headPaths) {
+  const baseNames = new Set(basePaths.map((p) => p.split("/").pop()));
+  const seen = new Set();
+  const added = [];
+  for (const path of headPaths) {
+    const name = path.split("/").pop();
+    if (baseNames.has(name) || seen.has(name)) continue;
+    seen.add(name);
+    added.push(name);
+  }
+  return added;
 }
 
 /**
@@ -289,8 +331,55 @@ const CASES = [
   },
 ];
 
+/**
+ * Cases for addedMigrations. Separate from CASES because they exercise the tree comparison
+ * rather than the ordering decision, and the rename one is here because peer review found
+ * that exact bypass in the first implementation.
+ */
+const ADDED_CASES = [
+  {
+    name: "an ordinary new file is added",
+    base: ["supabase/migrations/20260101000000_a.sql"],
+    head: ["supabase/migrations/20260101000000_a.sql", "supabase/migrations/20260202000000_b.sql"],
+    expect: ["20260202000000_b.sql"],
+  },
+  {
+    name: "a file renamed DOWN to an earlier number counts as added under its new name",
+    base: ["supabase/migrations/20260999000000_thing.sql"],
+    head: ["supabase/migrations/20260101000000_thing.sql"],
+    expect: ["20260101000000_thing.sql"],
+  },
+  {
+    name: "an unchanged tree adds nothing",
+    base: ["supabase/migrations/20260101000000_a.sql"],
+    head: ["supabase/migrations/20260101000000_a.sql"],
+    expect: [],
+  },
+  {
+    name: "a file MOVED between directories under the same name is not a new migration",
+    base: ["supabase/migrations/20260101000000_a.sql"],
+    head: ["supabase/migrations/archive/20260101000000_a.sql"],
+    expect: [],
+  },
+  {
+    name: "a deleted file does not become an addition",
+    base: ["supabase/migrations/20260101000000_a.sql", "supabase/migrations/20260202000000_b.sql"],
+    head: ["supabase/migrations/20260101000000_a.sql"],
+    expect: [],
+  },
+];
+
 function selftest() {
   let failed = 0;
+  for (const testCase of ADDED_CASES) {
+    const actual = addedMigrations(testCase.base, testCase.head);
+    if (actual.join(",") !== testCase.expect.join(",")) {
+      failed += 1;
+      console.error(
+        "  FAIL " + testCase.name + ": expected [" + testCase.expect.join(", ") + "], got [" +
+        actual.join(", ") + "]");
+    }
+  }
   for (const testCase of CASES) {
     const { errors, refusals, acknowledged, compared } =
       verdict(testCase.added, testCase.baseMax, files(testCase.contents));
@@ -310,12 +399,15 @@ function selftest() {
 
   if (failed) {
     console.error(
-      "migration order self-test FAILED: " + failed + " assertion(s) over " + CASES.length +
-      " case(s).");
+      "migration order self-test FAILED: " + failed + " assertion(s) over " +
+      (CASES.length + ADDED_CASES.length) + " case(s).");
     process.exit(1);
   }
   console.log(
-    "migration order self-test OK: " + CASES.length + " cases pass. The comparison was watched " +
+    "migration order self-test OK: " + (CASES.length + ADDED_CASES.length) +
+    " cases pass. The set difference was watched treating a file renamed DOWN to an earlier " +
+    "number as an addition under its new name, which is the shape a rename-aware diff hides. " +
+    "The comparison was watched " +
     "passing an ordinary in-order file with no marker, refusing a late file with no marker, " +
     "refusing an empty reason, refusing a second marker line after an empty first one, " +
     "refusing an indented marker, accepting a proper marker and an allowlisted version, and " +
@@ -345,11 +437,12 @@ if (process.argv.includes("--selftest")) {
   }
   const base = baseArg.slice("--base=".length);
 
-  let addedPaths;
+  let headPaths;
   let basePaths;
   try {
-    addedPaths = git(["diff", "--name-only", "--diff-filter=A", base + "...HEAD", "--", MIGRATIONS_DIR])
-      .split("\n").filter(Boolean);
+    // Two trees, no diff. See addedMigrations for why a diff is the wrong instrument here.
+    headPaths = git(["ls-tree", "-r", "--name-only", "HEAD", MIGRATIONS_DIR])
+      .split("\n").filter((p) => p.endsWith(".sql"));
     basePaths = git(["ls-tree", "-r", "--name-only", base, MIGRATIONS_DIR])
       .split("\n").filter((p) => p.endsWith(".sql"));
   } catch (err) {
@@ -359,7 +452,7 @@ if (process.argv.includes("--selftest")) {
     process.exit(1);
   }
 
-  const added = addedPaths.filter((p) => p.endsWith(".sql")).map((p) => p.split("/").pop());
+  const added = addedMigrations(basePaths, headPaths);
   const baseVersions = basePaths
     .map((p) => extractVersion(p.split("/").pop()))
     .filter((v) => /^[0-9]{14}$/.test(v))
