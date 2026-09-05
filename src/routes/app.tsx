@@ -10,6 +10,7 @@ import {
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
+import { classifyRead } from "@/lib/read-outcome";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
@@ -260,11 +261,14 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
-      const { data: meta } = await (supabase as any)
+      const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
         .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
+      if (classifyRead(meta, metaErr) === "error") {
+        console.warn(`Failed to load vault meta: ${formatError(metaErr)}`);
+      }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
@@ -303,10 +307,13 @@ function AppHome() {
       }
 
       // Load list of users this person has granted co-admin to.
-      const { data: admins } = await supabase
+      const { data: admins, error: adminsErr } = await supabase
         .from("workspace_admins")
         .select("id, admin_user_id, added_at")
         .eq("owner_user_id", session.user.id);
+      if (classifyRead(admins, adminsErr) === "error") {
+        console.warn(`Failed to load co-admin list: ${formatError(adminsErr)}`);
+      }
       const adminRows = (admins ?? []) as CoAdminRow[];
 
       // Load workspaces where this user is a co-admin.
@@ -327,11 +334,14 @@ function AppHome() {
       const { data: myAdminOf, error: myAdminOfErr } = await supabase.rpc(
         "list_coadmin_workspaces",
       );
-      if (myAdminOfErr) {
-        // A failed call must never look like "you are a co-admin of
-        // nothing". Destructure the error, log it, and surface a load
-        // failure distinct from an empty list rather than falling through
-        // silently the way this call used to.
+      // classifyRead separates the three outcomes this call really has, which
+      // is what dev now does for every read on this page (OR-T1768). "empty"
+      // is the ordinary case of administering nothing and stays silent; only
+      // "error" is surfaced. A failed call must never look like "you are a
+      // co-admin of nothing", so unlike the other reads on this page it is
+      // loud: setErr as well as the log, because an empty list here is
+      // indistinguishable to the user from a real answer.
+      if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
         console.error("Failed to load co-admin workspaces:", myAdminOfErr);
         setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
       }

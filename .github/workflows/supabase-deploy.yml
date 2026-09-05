@@ -1,5 +1,25 @@
 name: Deploy Supabase edge functions and migrations
 
+# OR-T1772. The approver at the supabase-prod pause needs the restore point BEFORE
+# they click, and nothing in this file carried it. run-name is evaluated when the run
+# is created, so it is in the run title in the run list and at the top of the run page
+# with zero clicks, and it is there before the environment pause. `inputs` is null on a
+# push, so the push branch of this expression has to produce a real title rather than an
+# empty one or the literal string null.
+# A dispatch that carries NO reason must be LOUD, not blank: a run missing its
+# restore point has to look different from an ordinary run, because absence reading
+# as normal is the one shape a refusal cannot fire on.
+# github.event.inputs is used rather than the inputs context on purpose. Both are
+# valid for a workflow_dispatch, but the github context is unambiguously available at
+# workflow level, and an expression that fails to evaluate here produces exactly the
+# blank title this is meant to prevent.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+      && (github.event.inputs.reason != ''
+          && format('DISPATCH by {0}: {1}', github.actor, github.event.inputs.reason)
+          || format('DISPATCH by {0}: NO REASON GIVEN', github.actor))
+      || format('push to {0} by {1}', github.ref_name, github.actor) }}
+
 on:
   push:
     branches: [dev, prod]
@@ -86,6 +106,204 @@ jobs:
             echo "::error::Supabase deploys only run from 'prod' or 'dev' branches; got '${{ github.ref_name }}'"
             exit 1
           fi
+
+      # OR-T1772. This step lives in `target` ON PURPOSE. apply-migrations declares
+      # target in `needs`, so this summary is written BEFORE the environment pause.
+      # Do not move it into apply-migrations: that job is paused while the approver is
+      # looking at the run, so its summary would be written after the approval it was
+      # meant to inform. It would look correct in review and be useless at the only
+      # moment it matters.
+      # run-name carries the same value on one line and the UI truncates it. This is
+      # what carries the whole block.
+      # THE LOAD-BEARING FACT: it is target having NO `environment:` binding of its own,
+      # and no `if:`, that makes this summary arrive BEFORE the pause. The needs edge
+      # alone does not do it. If a future change binds target to an environment, this
+      # carrier silently moves to after the approval it exists to inform and nothing
+      # here will fail to warn you.
+      # OR-T1801. A missing reason already fails loud, below. A PRESENT but
+      # worthless one ("x", "redeploy", yesterday's reason pasted forward) was
+      # unguarded: nothing checked it named an actual restore point, so the
+      # step summary looked identical whether the reason was real or junk.
+      # This must run BEFORE the environment pause, same reasoning as the
+      # summary step below: an approver at the pause needs the refusal to
+      # have already fired, not to discover it after clicking approve.
+      # Checked on SHAPE (a parseable date/time), never on exact wording, so
+      # this does not silently stop firing the next time the message is
+      # reworded. A redeploy (apply_migrations false) needs no restore point
+      # and is untouched.
+      - name: Refuse an apply-migrations dispatch with no restore point in its reason
+        if: github.event_name == 'workflow_dispatch' && inputs.apply_migrations == true
+        env:
+          RUN_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          # A restore point is a UTC-shaped date, optionally with a time, so
+          # this looks for that shape rather than an exact sentence:
+          # 2026-09-04 or 2026-09-04T00:00 or 2026-09-04T00:00:00Z all count.
+          CANDIDATE="$(printf '%s' "${RUN_REASON}" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?Z?)?' | head -n1 || true)"
+          if [ -z "${CANDIDATE}" ] || ! date -u -d "${CANDIDATE}" >/dev/null 2>&1 || [ "${#RUN_REASON}" -lt 20 ]; then
+            echo "::error title=No restore point in the reason::apply_migrations is true but the reason input carries no parseable UTC timestamp. A restore point is the backup age an approver checks this dispatch against, and 'x', 'redeploy', or a reason pasted forward from a previous run all look identical to a real one without this check. State the restore point you are relying on, for example: 'restore point 2026-09-04T00:00:00Z, redeploying after a cancelled run.'"
+            exit 1
+          fi
+          echo "Reason carries a parseable restore point (${CANDIDATE}) and is ${#RUN_REASON} character(s) long. Proceeding."
+
+      - name: Publish the restore point where the approver can read it
+        env:
+          # Read through env, never interpolated into the script body: a dispatch input
+          # is attacker-controlled text and ${{ }} substitution happens before the shell
+          # parses the line.
+          RUN_REASON: ${{ inputs.reason }}
+          APPLY_MIGRATIONS: ${{ inputs.apply_migrations }}
+        run: |
+          {
+            echo "## Restore point for the approver"
+            echo ""
+            echo "Target project: ${{ steps.t.outputs.supabase_ref }} (environment ${{ steps.t.outputs.environment_name }})"
+            echo "Event: ${{ github.event_name }} on ${{ github.ref_name }}"
+            echo "Dispatching actor: ${{ github.actor }}"
+            echo "This summary was written at (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "(that is when this step ran, not when the run was created; the two differ by queue time)"
+            echo ""
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "Apply migrations requested: ${APPLY_MIGRATIONS:-false}"
+              echo ""
+              if [ -n "${RUN_REASON}" ]; then
+                echo "Reason input, verbatim:"
+                echo ""
+                echo '```text'
+                printf '%s\n' "${RUN_REASON}"
+                echo '```'
+              else
+                echo "NO REASON WAS GIVEN, so there is no restore point on this run."
+                echo "An approver has nothing here to check a backup age against and should reject."
+              fi
+            else
+              echo "This run is a push, not a dispatch, so there is no reason input and no restore point was supplied."
+              echo "A push can never turn apply_migrations on."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # OR-T1801. The step above makes a MISSING reason loud. It does nothing about a
+      # reason that is present and worthless, which is the likelier failure: "x", or
+      # "redeploy", or yesterday's reason pasted forward, all produce a summary that is
+      # structurally identical to a correct one, so an approver cannot tell them apart.
+      #
+      # The predicate is written to a file HERE, proven able to refuse and able to pass
+      # against synthetic reasons, and then reused verbatim by the guard step below. A
+      # checker re-typed in the step that uses it is a checker nobody proved. This runs
+      # on every run of this workflow, pushes included, so the guard cannot rot into
+      # something that only ever says yes.
+      #
+      # It tests SHAPE, not wording, on purpose. The refusal sentence carried inside the
+      # reason input will be reworded, and a guard matching that sentence would quietly
+      # stop firing when it was. The floor is a timestamp a machine can parse, an explicit
+      # UTC marker, and enough text to be a restore point rather than a word.
+      - name: "Self-test: prove the restore point check can refuse and can pass"
+        run: |
+          set -uo pipefail
+          CHECK="${RUNNER_TEMP}/restore-point-check.sh"
+          cat > "$CHECK" <<'SH'
+          #!/usr/bin/env bash
+          # Reads a candidate reason on stdin.
+          # exit 0: it carries a restore point. exit 1: it does not, and why is on stderr.
+          REASON=$(cat)
+          COLLAPSED=$(printf '%s' "$REASON" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+          MIN_CHARS=40
+          if [ "${#COLLAPSED}" -lt "$MIN_CHARS" ]; then
+            echo "the reason is ${#COLLAPSED} characters long; a restore point needs at least ${MIN_CHARS}" >&2
+            exit 1
+          fi
+          STAMP=$(printf '%s' "$COLLAPSED" | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?' | head -n 1)
+          if [ -z "$STAMP" ]; then
+            echo "no timestamp shaped like YYYY-MM-DDTHH:MM appears anywhere in the reason" >&2
+            exit 1
+          fi
+          if ! date -u -d "$STAMP" >/dev/null 2>&1; then
+            echo "the timestamp '${STAMP}' is not a real date and time" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$COLLAPSED" | grep -Eq '(UTC|utc|[0-9]Z|\+00:?00)'; then
+            echo "the reason names no timezone; write the restore point in UTC (a trailing Z, the word UTC, or +00:00)" >&2
+            exit 1
+          fi
+          exit 0
+          SH
+          chmod +x "$CHECK"
+
+          refuses () {
+            if printf '%s' "$2" | bash "$CHECK" 2>/dev/null; then
+              echo "::error::self-test failed: ${1} was accepted as a restore point"
+              exit 1
+            fi
+            echo "refused, correctly: ${1}"
+          }
+
+          accepts () {
+            if ! printf '%s' "$2" | bash "$CHECK"; then
+              echo "::error::self-test failed: ${1} was refused, and it does carry a restore point"
+              exit 1
+            fi
+            echo "accepted, correctly: ${1}"
+          }
+
+          refuses "an empty reason" ""
+          refuses "a one word reason" "redeploy"
+          refuses "a long reason carrying no timestamp at all" "re-running this because the earlier deploy was cancelled by a merge train and the assets never shipped"
+          refuses "a timestamp with no timezone on it" "newest completed backup 2026-09-03 10:47, catalogue read 2026-09-03 11:05, 41 migrations, forward only"
+          refuses "a timestamp that is not a real date and time" "newest completed backup 2026-13-45T99:99Z, catalogue read 2026-13-45T99:99Z UTC, forward only, no undo"
+          accepts "the shape a prod dispatch is asked to carry" "APPROVE ONLY IF THE CLOCK NOW READS BEFORE 2026-09-03T16:47 UTC. LATER THAN THAT, REJECT. 41 migrations, forward only, no undo. Newest COMPLETED backup 2026-09-03T10:47Z, catalogue read 2026-09-03T11:05Z."
+          accepts "the same shape said in completely different words" "no undo on this batch. the restore point is the backup at 2026-09-03T10:47:00+00:00, catalogue read 2026-09-03T11:05:00+00:00."
+
+          echo "the restore point check refused 5 worthless reasons and accepted 2 good ones"
+
+      # OR-T1801. This refusal fires HERE, in target, and not in apply-migrations, for the
+      # same reason the summary above lives here: target has no environment binding of its
+      # own, so it runs BEFORE the supabase-prod pause. A refusal evaluated inside the
+      # paused job would be evaluated after the approval it exists to prevent.
+      # apply_migrations false is untouched: a redeploy writes to no database and needs no
+      # restore point. A push is untouched too, because a push cannot set this input.
+      - name: Refuse an apply whose reason carries no restore point
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_migrations }}
+        env:
+          # Read through env, never interpolated into the script body, for the same reason
+          # as the step above: a dispatch input is attacker-controlled text.
+          RUN_REASON: ${{ inputs.reason }}
+        run: |
+          set -uo pipefail
+          CHECK="${RUNNER_TEMP}/restore-point-check.sh"
+          if [ ! -x "$CHECK" ]; then
+            echo "::error::the restore point checker is missing, so this apply was never checked. Refusing rather than assuming."
+            exit 1
+          fi
+
+          if WHY=$(printf '%s' "${RUN_REASON}" | bash "$CHECK" 2>&1); then
+            echo "The reason input carries a restore point. Continuing to the environment pause."
+            exit 0
+          fi
+
+          {
+            echo ""
+            echo "## :no_entry: Refused before the pause: this apply carries no restore point"
+            echo ""
+            echo "apply_migrations is ON and the reason input does not carry a restore point an"
+            echo "approver could check a backup age against: ${WHY}."
+            echo ""
+            echo "Nothing was applied and nothing was deployed on this run."
+            echo ""
+            echo "Dispatch again with a reason naming, in UTC, the newest COMPLETED backup on the"
+            echo "target project and when that catalogue was read. The shape:"
+            echo ""
+            echo '```text'
+            echo "APPROVE ONLY IF THE CLOCK NOW READS BEFORE 2026-09-03T16:47 UTC. LATER THAN THAT, REJECT."
+            echo "41 migrations, forward only, no undo. Newest COMPLETED backup 2026-09-03T10:47Z,"
+            echo "catalogue read 2026-09-03T11:05Z."
+            echo '```'
+            echo ""
+            echo "The check is on shape, not on wording: a timestamp a machine can parse, an"
+            echo "explicit UTC marker, and more than 40 characters. Reword the sentence freely."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::apply_migrations is on and the reason input carries no restore point: ${WHY}. Nothing applied, nothing deployed."
+          exit 1
 
   deploy:
     needs: [target, check-pending-migrations, check-rls-policy-baseline]
@@ -378,7 +596,17 @@ jobs:
               break
             fi
             echo "migration query attempt ${attempt}/3 did not return a success status"
-            [ "$attempt" -lt 3 ] && sleep 10
+            # An `if`, not `[ "$attempt" -lt 3 ] && sleep 10`. GitHub Actions
+            # invokes every plain `run:` block as `bash -e` by default, whether
+            # or not the script also declares its own `set`; this step's
+            # `set -uo pipefail` above adds -u and pipefail, it does not clear
+            # -e. An AND-list left dangling at the end of a loop is how a
+            # different job's retry (the migration classifier, CI run
+            # 33637547005) silently died mid-attempt with no summary written
+            # (OR-T1536). This `if` cannot fail the same way.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
           done
           # The response body is not echoed. On an auth failure it is the only
           # place a token-shaped string could surface in a public build log.
@@ -546,7 +774,14 @@ jobs:
               break
             fi
             echo "anon-EXECUTE query attempt ${attempt}/3 did not return a success status"
-            [ "$attempt" -lt 3 ] && sleep 10
+            # An `if`, not `[ "$attempt" -lt 3 ] && sleep 10`. Same reasoning as
+            # check-pending-migrations above: this step's `set -uo pipefail`
+            # does not clear the `-e` GitHub Actions already applies by default,
+            # so a bare AND-list here can exit the step before the `unknown`
+            # call right after this loop (OR-T1536).
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
           done
           # Response body not echoed on failure -- the one place a
           # token-shaped string could reach a public build log.
@@ -1042,6 +1277,74 @@ jobs:
           # target project. On a prod dispatch that target is the production
           # database. So an unreadable ledger must ABORT, never proceed: the
           # applied set is UNKNOWN, and UNKNOWN is not the same fact as empty.
+
+          # -------------------------------------------------------------------
+          # OR-T2141. THE LEDGER SHAPE RULE, IN ONE PLACE, PROVEN BEFORE IT IS
+          # RELIED ON.
+          #
+          # The rule below decides whether a success status may be read as "these
+          # are the applied versions". It lives in ONE function because the real
+          # path and the self-test must call the same code: a second copy is a
+          # rule that can drift, and then the thing demonstrated is not the thing
+          # that runs. Same standard as the shadow-scan and order-guard
+          # self-tests further down in this step.
+          #
+          # WHAT THIS COVERS AND WHAT IT DOES NOT. It proves the SHAPE branch: a
+          # 2xx body that is not a JSON array of rows aborts instead of being
+          # read as an empty ledger. It does NOT exercise the curl branch
+          # (--fail-with-body, retry exhaustion). That branch is reviewed and not
+          # demonstrated, and it is written down that way rather than counted as
+          # coverage.
+          # -------------------------------------------------------------------
+          ledger_shape_ok () {
+            printf '%s' "$1" | jq -e 'type == "array"' >/dev/null 2>&1
+          }
+
+          # refuses <fn> <payload> is true when <fn> REJECTS the payload. It is a
+          # helper rather than an inline negation so the block below can prove its
+          # own negative assertions are able to fire.
+          refuses () { ! "$1" "$2"; }
+
+          # A rule that accepts everything, used ONLY to prove the must-be-red
+          # assertions are live. If refuses cannot tell this apart from the real
+          # rule, every negative line below is decorative and proves nothing.
+          ledger_shape_always_ok () { return 0; }
+
+          LEDGER_ST_FAIL=0
+          if ! ledger_shape_ok '[{"version":"20260822031500","name":"x"}]'; then
+            echo "::error::ledger shape self-test FAILED: a JSON array of rows was refused, so a healthy ledger response would abort the apply."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! ledger_shape_ok '[]'; then
+            echo "::error::ledger shape self-test FAILED: an empty JSON array was refused. An empty ledger is a legitimate answer on a fresh project and must be readable as zero applied versions."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '{"message":"Unauthorized"}'; then
+            echo "::error::ledger shape self-test FAILED: a JSON object was accepted as a ledger. That is the exact defect this guard exists for: .[].version over an object yields nothing, APPLIED comes back empty, and every file in the tree is treated as unapplied."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '{"error":{"code":500,"message":"internal error"}}'; then
+            echo "::error::ledger shape self-test FAILED: an API error body was accepted as a ledger."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok 'not json at all'; then
+            echo "::error::ledger shape self-test FAILED: a body that is not JSON was accepted as a ledger."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok ''; then
+            echo "::error::ledger shape self-test FAILED: an empty body was accepted as a ledger."
+            LEDGER_ST_FAIL=1
+          fi
+          if refuses ledger_shape_always_ok '{"message":"Unauthorized"}'; then
+            echo "::error::ledger shape self-test HARNESS FAILED: a rule that accepts everything was reported as refusing an object, so the must-be-red assertions above cannot fire and prove nothing."
+            LEDGER_ST_FAIL=1
+          fi
+          if [ "$LEDGER_ST_FAIL" -ne 0 ]; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the ledger response shape rule does not behave as required, so the applied-version set cannot be trusted even if the query succeeds. NOTHING was applied."
+            exit 1
+          fi
+          echo "ledger shape self-test ok: array accepted, empty array accepted, object refused, error body refused, non-JSON refused, empty body refused, and the negative assertions shown able to fire."
+
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
           jq -n '{query:"SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
@@ -1058,9 +1361,12 @@ jobs:
               break
             fi
             echo "ledger query attempt ${attempt}/3 did not return a success status"
-            # An `if`, not `[ "$attempt" -lt 3 ] && sleep 10`. This step runs
-            # under `set -e` (the drift step does not), and on the third attempt
-            # that AND-list evaluates false and would exit the step by itself.
+            # An `if`, not `[ "$attempt" -lt 3 ] && sleep 10`. This step
+            # declares `set -euo pipefail`, so -e is explicit here, but the
+            # drift step (check-pending-migrations) is under -e too: GitHub
+            # Actions runs every plain `run:` block as `bash -e` by default,
+            # and that step's `set -uo pipefail` does not clear it. Both steps
+            # now use this `if` shape for the same reason (OR-T1536).
             if [ "$attempt" -lt 3 ]; then
               sleep 10
             fi
@@ -1077,7 +1383,9 @@ jobs:
           # A success status is still not a usable answer until the shape is
           # right. Only a JSON array of rows can be trusted to mean "these are
           # the versions that are applied"; anything else is UNKNOWN, not zero.
-          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          # This calls the SAME ledger_shape_ok the self-test above ran over
+          # synthetic payloads, so what was demonstrated is what runs (OR-T2141).
+          if ! ledger_shape_ok "$RESPONSE"; then
             echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger query returned a success status but not a JSON array of rows. The applied-version set is UNKNOWN, so NOTHING was applied."
             exit 1
           fi
@@ -1164,6 +1472,285 @@ jobs:
           rm -f "$LEDGER_MAP"
           echo
 
+          # -------------------------------------------------------------------
+          # OR-T1481 / OR-T1431 / OR-T0419. ORDER GUARD, before anything is applied.
+          #
+          # The loop below selects pending files by pure set difference against
+          # the ledger: a file runs if its version is not already in APPLIED.
+          # Nothing compares it against the HIGHEST applied version. Version
+          # order is a total order only WITHIN one apply run and says nothing
+          # across runs, so a file numbered below everything already applied
+          # still runs the first time it appears, against a database that is
+          # already past it. An absolute REVOKE, a DROP IF EXISTS, or an UPDATE
+          # whose WHERE clause a later migration changed all succeed and quietly
+          # undo later work. An allow-list assertion cannot catch that, because
+          # it only fires on a privilege that IS present.
+          #
+          # Refuse unless acknowledged. Applying an older file is sometimes
+          # right (a branch cut before a merge), so refusing outright would
+          # block legitimate work, and a warning in a log nobody reads is not a
+          # control. The file itself must carry, on a line of its own:
+          #
+          #   -- OUT-OF-ORDER-OK: <reason>
+          #
+          # The line has to start at column one and the reason has to be
+          # non-empty. An empty marker is refused on purpose: a token people
+          # paste in without thinking is worse than no token, because it reads
+          # as a decision when none was made.
+          #
+          # OR-T0419 / OR-T2139. This guard and the "order scan" built in
+          # parallel under OR-T0419 were the same control at the same anchor
+          # and they disagreed on the escape hatch: this one refuses unless
+          # acknowledged, that one refused outright. Two blocks would have made
+          # the acknowledged path unreachable and left no in-band way to apply
+          # an older file at all. There is ONE guard here and it keeps the
+          # acknowledged path. Three properties from the order scan are folded
+          # in because they are strictly better:
+          #
+          #   1. UNCOMPARABLE IS FATAL. A version with a non-numeric prefix was
+          #      named and then skipped, folded into neither count, so it
+          #      escaped the ordering check entirely. It now aborts. "I could
+          #      not check" must never read as "I checked and it was fine".
+          #   2. SAME WIDTH. A numeric version of a different width from the
+          #      ledger's is uncomparable too: lexicographic order stops meaning
+          #      chronological order the moment the widths differ.
+          #   3. The already-applied skip lives INSIDE the function, so a
+          #      self-test can cover it (OR-T2134). It is the most damaging line
+          #      here to lose: if a version already in the ledger ever stops
+          #      being recognised, every historical file reads as pending, most
+          #      of them number below the max, and the apply halts for ever on
+          #      BOTH environments.
+          #
+          # Dev, 2026-08-24, the case that started OR-T0419:
+          # 20260824120000_schedule_or_webhook_dispatch.sql merged first and
+          # applied; 20260824105000_mark_pre_cutoff_webhook_backlog_dead.sql
+          # merged about forty minutes later with a LOWER version and had not.
+          # The second file's header states it must run before the schedule
+          # exists. The schedule was live and its safety migration had never
+          # run. Nothing broke only because the table held zero rows.
+          # -------------------------------------------------------------------
+          # OR-T2147. ONE-TIME allowlist: the 29 versions already merged and
+          # applied on dev before this guard existed, that sort at or below
+          # prod's applied maximum and carry no in-file OUT-OF-ORDER-OK marker.
+          # Without this the guard aborts the very next prod promotion on all
+          # 29 and stays aborted, because none of them can retroactively earn
+          # a marker for a question the guard did not exist to ask when they
+          # were written. This is an explicit list of version strings, not a
+          # date cutoff and not a wildcard: an amnesty that can silently grow
+          # is a hole. Captured 2026-09-04 from the OR-T1431 ruling note (dba,
+          # 2026-09-04 10:37 UTC), reproducible as a set difference between
+          # dev's and prod's supabase_migrations.schema_migrations filtered to
+          # <= prod's applied max at capture time (20260822031500). Anything
+          # merged after this list was written is not covered and must carry
+          # its own marker like every other file.
+          OUT_OF_ORDER_ALLOWLIST="20260713120001 20260716120001 20260717123000 20260721120000 20260722000001 20260722130000 20260722140000 20260723120000 20260723210000 20260724180000 20260730000000 20260730120000 20260730120001 20260730200000 20260802120000 20260803000000 20260803120000 20260803140000 20260803160000 20260803190000 20260804000000 20260804000001 20260804090000 20260804140000 20260806100000 20260809130000 20260815000001 20260817230000 20260819120000"
+
+          out_of_order_scan () {
+            local applied="$1" files="$2" dir="$3" allowlist="${4:-$OUT_OF_ORDER_ALLOWLIST}"
+            local max base version reason below=0 unmarked=0 allowlisted=0 unknown=0 skipped=0 examined=0
+            local applied_rows=0 max_label
+            # The highest applied version comes from the SAME set this function
+            # is filtering with, so the guard can never judge one read of the
+            # ledger while the apply loop runs against another.
+            max=$(printf '%s\n' "$applied" | grep -E '^[0-9]+$' | sort | tail -1 || true)
+            # OR-T2152. max is the maximum of the applied set FILTERED to
+            # numeric versions, so an empty max has TWO causes and they are not
+            # the same fact: an empty ledger, or a ledger holding rows of which
+            # not one is numeric. Count the rows themselves, unfiltered, so the
+            # two can be told apart below. Without this the second case passed
+            # every pending file with no comparison at all while reporting
+            # "none applied", which is I-could-not-check reading as I-checked-
+            # and-it-was-fine, inside the guard written to end exactly that.
+            applied_rows=$(printf '%s\n' "$applied" | grep -c '[^[:space:]]' || true)
+            while IFS= read -r base; do
+              [ -n "$base" ] || continue
+              version="${base%%_*}"
+              # Already in the ledger, so it is not pending and the loop below
+              # will skip it. This is the SAME expression that loop uses, which
+              # is what makes the guard judge exactly the set that will run: it
+              # cannot pass a file the loop would apply, nor fire on one the
+              # loop would skip.
+              #
+              # OR-T2152. That identity is the property, not the flags. grep -qx
+              # treats the version as a regular expression rather than a fixed
+              # string; both sites do, so they agree. If either is ever changed
+              # to grep -Fqx, BOTH must change in the same edit, or the guard
+              # starts judging a different set of files than the loop applies.
+              if printf '%s\n' "$applied" | grep -qx "$version"; then
+                skipped=$((skipped + 1))
+                continue
+              fi
+              examined=$((examined + 1))
+              # An empty max is benign ONLY when the ledger is genuinely empty:
+              # nothing has been applied, so nothing can be out of order. When
+              # the ledger HAS rows and not one of them is numeric there is no
+              # version to order against, the comparison below cannot be made at
+              # all, and that is UNCOMPARABLE and therefore fatal, never a pass
+              # (OR-T2152).
+              if [ -z "$max" ]; then
+                if [ "$applied_rows" -eq 0 ]; then
+                  continue
+                fi
+                unknown=$((unknown + 1))
+                echo "  ? UNCOMPARABLE: ${base} -- the ledger holds ${applied_rows} applied version(s) and not one of them is numeric, so there is no highest applied version to order against."
+                continue
+              fi
+              # A version this cannot compare is FATAL, not skipped. Two ways it
+              # happens: a non-numeric prefix, and a numeric prefix of a
+              # different width from the ledger's, where lexicographic order
+              # stops meaning chronological order (OR-T0419).
+              if ! printf '%s' "$version" | grep -qE '^[0-9]+$' || [ "${#version}" -ne "${#max}" ]; then
+                unknown=$((unknown + 1))
+                echo "  ? UNCOMPARABLE: ${base} -- version '${version}' cannot be ordered against the highest applied version ${max}. Same-width numeric timestamps are what makes filename order mean chronological order."
+                continue
+              fi
+              [[ "$version" < "$max" ]] || continue
+              below=$((below + 1))
+              # OR-T2147. Checked BEFORE the marker read, so a pre-guard file
+              # with no marker at all still passes, silently, exactly once.
+              if printf '%s\n' $allowlist | grep -qx "$version"; then
+                allowlisted=$((allowlisted + 1))
+                echo "  ~ OUT-OF-ORDER, allowlisted (OR-T2147, one-time amnesty for pre-guard merges): ${base} (version ${version}) sorts below ${max}."
+                continue
+              fi
+              # The first marker line decides. If its reason is empty the file
+              # is refused rather than reading on for a better one further down:
+              # what a reader sees first must be what counts.
+              reason=$(sed -n 's/^--[[:space:]]*OUT-OF-ORDER-OK:[[:space:]]*//p' "${dir}/${base}" 2>/dev/null | head -1 || true)
+              reason="${reason%"${reason##*[![:space:]]}"}"
+              if [ -n "$reason" ]; then
+                echo "  ~ OUT-OF-ORDER, acknowledged: ${base} (version ${version}) sorts below the highest applied version ${max}: ${reason}"
+              else
+                unmarked=$((unmarked + 1))
+                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <reason>' line, at column one, with a non-empty reason, and is not on the OR-T2147 allowlist."
+              fi
+            done <<< "$files"
+            # OR-T2152. Say WHICH of the two empty-max cases this run was. A
+            # ledger with rows but no numeric version must not print "none
+            # applied": that reads as a clean empty database when it is in fact
+            # a state this guard cannot order anything against.
+            if [ -n "$max" ]; then
+              max_label="$max"
+            elif [ "$applied_rows" -eq 0 ]; then
+              max_label="none applied"
+            else
+              max_label="none comparable (${applied_rows} applied version(s), not one numeric)"
+            fi
+            echo "ORDER SCAN: highest applied version ${max_label}, ${skipped} already-applied file(s) skipped, ${examined} unapplied file(s) examined, ${below} numbered below it, ${allowlisted} allowlisted (OR-T2147), ${unmarked} of the rest unacknowledged, ${unknown} uncomparable."
+            [ "$unmarked" -eq 0 ] && [ "$unknown" -eq 0 ]
+          }
+
+          # The guard must be able to go RED, and to stay silent for every
+          # reason it should. Same standard as the shadow-scan self-test above:
+          # run the REAL function over synthetic files with known answers and
+          # refuse to apply if it does not behave every way. A second copy of
+          # the rule would pass for ever while the rule itself was edited away.
+          # A check nobody has watched fail proves nothing, and this repo has
+          # been bitten by exactly that.
+          ST_DIR=$(mktemp -d)
+          ST_APPLIED=$(printf '%s\n' '20990101000000' '20990101000005')
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000000_already_applied.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000002_below_unmarked.sql"
+          printf '%s\n' '-- OUT-OF-ORDER-OK: synthetic self-test, a branch cut before the merge' 'select 1;' > "${ST_DIR}/20990101000003_below_marked.sql"
+          printf '%s\n' '-- OUT-OF-ORDER-OK:' 'select 1;' > "${ST_DIR}/20990101000004_below_empty_marker.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/2099010100000X_notanumber.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/209901010000091_toowide.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000001_below_allowlisted.sql"
+
+          if out_of_order_scan "$ST_APPLIED" '20990101000002_below_unmarked.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard stayed silent on a pending file numbered BELOW the ledger max carrying no marker. Refusing to apply, because a check that cannot go red proves nothing."
+            exit 1
+          fi
+          if out_of_order_scan "$ST_APPLIED" '20990101000004_below_empty_marker.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard accepted an OUT-OF-ORDER-OK marker with nothing after the colon. Refusing to apply: an empty marker is a token pasted in with no decision behind it."
+            exit 1
+          fi
+          if out_of_order_scan "$ST_APPLIED" '2099010100000X_notanumber.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: a version with no numeric prefix was reported as fine. I-could-not-check must never read as clean."
+            exit 1
+          fi
+          if out_of_order_scan "$ST_APPLIED" '209901010000091_toowide.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: a version of a different width from the ledger's was compared as though lexicographic order meant chronological order. Refusing to apply."
+            exit 1
+          fi
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000003_below_marked.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard fired on an older file that carries a valid OUT-OF-ORDER-OK marker with a reason. Refusing to apply."
+            exit 1
+          fi
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000009_in_order.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard fired on a file numbered ABOVE the ledger max. Refusing to apply."
+            exit 1
+          fi
+          # OR-T2134. The already-applied skip is the most damaging line in this
+          # function to lose, and until now nothing exercised it. 20990101000000
+          # is in the applied set AND numbers below the max, so it would be
+          # counted as behind, unacknowledged, the moment the skip stopped
+          # recognising a version the ledger already carries.
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000000_already_applied.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: a version already present in the applied set was not skipped, so a migration the apply loop will never run was judged as pending. Refusing to apply."
+            exit 1
+          fi
+          # OR-T2147. An allowlisted version with NO marker at all must be
+          # silent: this is the earn-it-once path the allowlist exists for,
+          # tested with a synthetic allowlist passed as the 4th arg so the
+          # real OUT_OF_ORDER_ALLOWLIST is never touched by the self-test.
+          # OR-T2170: the fixture version here MUST sort below ST_APPLIED's
+          # max (20990101000005), or it never reaches the allowlist branch
+          # at all and passes for the wrong reason. That is exactly what
+          # 20990101000006 did before this fix: 6 is not below 5, so it took
+          # the in-order short-circuit and the allowlist check was never run.
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000001_below_allowlisted.sql' "$ST_DIR" '20990101000001' >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard fired on a file whose version is on the allowlist, which needs no marker. Refusing to apply."
+            exit 1
+          fi
+          # OR-T2170: prove the case above can actually fail. Pass a
+          # synthetic allowlist that does NOT contain this file's version:
+          # with no matching entry and no marker, the guard must report it
+          # unmarked (non-silent), or this test can never go red.
+          if out_of_order_scan "$ST_APPLIED" '20990101000001_below_allowlisted.sql' "$ST_DIR" '99999999999999' >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard stayed silent on a file whose version is NOT on the synthetic allowlist passed in, so the allowlist-branch self-test cannot fail and proves nothing."
+            exit 1
+          fi
+          # OR-T2152. A ledger holding rows of which NOT ONE is numeric leaves
+          # the highest applied version empty, and an empty maximum used to pass
+          # every pending file with no comparison at all. Neither environment
+          # can reach that state today (dev 164 applied versions, prod 102, all
+          # 14-digit numeric, read 2026-09-04), but a project restored from
+          # nothing that applies one non-numeric filename lands there and the
+          # guard is blind on it from then on. The synthetic applied set here is
+          # non-numeric and the pending file is IN ORDER, so the only thing that
+          # can make this go red is the missing comparison.
+          ST_APPLIED_NONNUMERIC=$(printf '%s\n' 'baseline' 'seed_from_restore')
+          if out_of_order_scan "$ST_APPLIED_NONNUMERIC" '20990101000009_in_order.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the applied set held versions of which none was numeric, so there was no highest applied version to order against, and the guard passed a pending file anyway. Refusing to apply: I-could-not-check must never read as clean."
+            exit 1
+          fi
+          rm -rf "$ST_DIR"
+          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, red on an applied set holding no numeric version at all (OR-T2152), silent on a marked older file, silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147), red on a non-matching synthetic allowlist (OR-T2170)."
+
+          # The guard reads the ledger response already read above. NOT a
+          # second API call: a second read could disagree with the set the loop
+          # below actually applies against, and then the guard would be judging
+          # a different database than the one being written to. It does its own
+          # already-applied skip, with the same expression that loop uses, so
+          # the two cannot select different files.
+          if [ -n "$TREE_FILES" ] && ! out_of_order_scan "$APPLIED" "$TREE_FILES" "$MIG_DIR"; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the order guard refused this run and NOTHING was applied. Two different things cause this and they have DIFFERENT remedies. (1) A pending file numbered BELOW the highest applied version named in the scan above, carrying no acknowledgement. It would run against a database already past it, where an absolute REVOKE, a DROP IF EXISTS or an UPDATE whose WHERE clause a later migration changed can silently undo later work. If that file has NEVER been applied in ANY environment, give it a new unused timestamp above the highest applied version. If it is ALREADY APPLIED somewhere else, DO NOT rename it: renaming changes its version, the environment that already ran it no longer finds that version in its ledger, and it applies the file a SECOND time, which is safe only if the migration is idempotent and nothing in this repo requires or checks that. For that case add a line at column one reading -- OUT-OF-ORDER-OK: followed by why applying it late is correct here. (2) A version the guard could not compare, listed above as UNCOMPARABLE. Give the file the same-width numeric timestamp prefix every other migration uses; I-could-not-check is never treated as clean. Do not switch this check off: filename order is a within-run property and cannot be a cross-run guarantee (OR-T0419, OR-T1481)."
+            exit 1
+          fi
+          echo
+
           # For each migration file, apply if not in the applied set
           APPLIED_COUNT=0
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
@@ -1184,7 +1771,7 @@ jobs:
             rm -f "$SQL_PAYLOAD"
 
             if [[ ! "$CODE" =~ ^2 ]]; then
-              echo "  x FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
+              echo "  x FAILED (HTTP $CODE) applying ${BASENAME}. The response body is not printed here: this repo is public and Actions logs are world readable."
               rm -f /tmp/mig.resp
               exit 1
             fi
@@ -1270,3 +1857,141 @@ jobs:
 
           echo
           echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
+
+  # ---------------------------------------------------------------------------
+  # DEV-0212, 2026-08-28. WHY THIS JOB EXISTS.
+  #
+  # supabase-deploy.yml failed on 8 consecutive runs on dev, from 2026-08-27
+  # 00:55 UTC to 2026-08-28 00:07 UTC, about 23 hours. On every one of those runs
+  # check-pending-migrations exited 1 and the deploy job was SKIPPED, by design,
+  # so no edge function shipped to the dev project for a day across 8 merges.
+  # Nothing raised a hand: no alert, no issue, no message. It was found only
+  # because someone ran the checks on dev out of caution.
+  #
+  # The failure class is structurally invisible from a pull request:
+  # apply-migrations and check-pending-migrations run ONLY on the push to the
+  # branch, never on the PR, because the apply needs the real project. So no PR
+  # gate can predict it, and check-pending-migrations is deliberately NOT a
+  # required check, so a red branch never blocks the next merge. Seven more
+  # merges landed on top of the first failure.
+  #
+  # IT MUST BE ABLE TO GO RED ITSELF. Every gh call below is checked and every
+  # failure exits non-zero with an ::error:: annotation. There is deliberately no
+  # `|| true` anywhere in it: a notifier that swallows its own errors is exactly
+  # the silent-success shape it was written to end.
+  #
+  # KNOWN LIMIT, stated rather than hidden: this job lives inside the run it
+  # reports on, so it cannot fire if the whole run is cancelled before it starts,
+  # or if this file fails to parse. It covers job failure and a skipped deploy,
+  # which is the failure that actually happened.
+  # ---------------------------------------------------------------------------
+  notify:
+    needs: [target, apply-migrations, check-pending-migrations, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open, update or close the deploy-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          R_TARGET: ${{ needs.target.result }}
+          R_APPLY: ${{ needs['apply-migrations'].result }}
+          R_GATE: ${{ needs['check-pending-migrations'].result }}
+          R_DEPLOY: ${{ needs.deploy.result }}
+        run: |
+          set -uo pipefail
+
+          # What counts as a failure worth waking someone for:
+          #   any job failed or was cancelled -> the run did not do its work
+          #   deploy skipped                  -> nothing shipped. deploy carries no
+          #                                      `if:` of its own, so it can only be
+          #                                      skipped when target or the migration
+          #                                      gate refused it.
+          # A deploy that ran and found no changed functions is a SUCCESS and is
+          # deliberately not reported.
+          REASONS=""
+          for PAIR in "target:${R_TARGET}" "apply-migrations:${R_APPLY}" "check-pending-migrations:${R_GATE}" "deploy:${R_DEPLOY}"; do
+            JOB="${PAIR%%:*}"
+            RES="${PAIR##*:}"
+            case "$RES" in
+              failure|cancelled) REASONS="${REASONS}- \`${JOB}\` ended **${RES}**"$'\n' ;;
+            esac
+          done
+          if [ "${R_DEPLOY}" = "skipped" ]; then
+            REASONS="${REASONS}- \`deploy\` was **skipped**, so no edge function shipped to this branch's Supabase project."$'\n'
+          fi
+
+          TITLE="CI: Supabase deploy is failing on ${BRANCH}"
+
+          if ! OPEN_NUM=$(gh issue list --repo "$REPO" --state open --limit 100 \
+                --json number,title \
+                --jq "map(select(.title == \"${TITLE}\")) | .[0].number // empty"); then
+            echo "::error::could not list issues on ${REPO}; the deploy-failure notifier cannot report."
+            exit 1
+          fi
+
+          if [ -z "$REASONS" ]; then
+            echo "Every job succeeded on ${BRANCH}."
+            if [ -n "$OPEN_NUM" ]; then
+              RECOVERED="Recovered on \`${BRANCH}\` at \`${SHA}\`. Every job in this run succeeded and the deploy ran. ${RUN_URL}"
+              if ! gh issue comment "$OPEN_NUM" --repo "$REPO" --body "$RECOVERED"; then
+                echo "::error::could not comment on issue #${OPEN_NUM}."
+                exit 1
+              fi
+              if ! gh issue close "$OPEN_NUM" --repo "$REPO"; then
+                echo "::error::could not close issue #${OPEN_NUM}."
+                exit 1
+              fi
+              echo "Closed #${OPEN_NUM} on recovery." >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+
+          {
+            echo "## Deploy did NOT ship on \`${BRANCH}\`"
+            echo ""
+            printf '%s' "$REASONS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          BODY=$(printf '%s\n' \
+            "The Supabase deploy workflow did not ship on \`${BRANCH}\`." \
+            "" \
+            "Commit: \`${SHA}\`" \
+            "Run: ${RUN_URL}" \
+            "" \
+            "What went wrong:" \
+            "" \
+            "${REASONS}" \
+            "This issue is opened by the workflow itself on the first failed run and" \
+            "closed by the first run that recovers." \
+            "" \
+            "While it is open, assume edge functions on this branch's Supabase project" \
+            "are BEHIND the branch. The deploy ships only the functions changed since" \
+            "the previous push, so a later green run does not backfill the pushes that" \
+            "were skipped while this was red.")
+
+          if [ -n "$OPEN_NUM" ]; then
+            if ! gh issue comment "$OPEN_NUM" --repo "$REPO" --body "$BODY"; then
+              echo "::error::could not comment on issue #${OPEN_NUM}; the failure is NOT reported."
+              exit 1
+            fi
+            echo "Updated #${OPEN_NUM}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            if ! NEW=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY"); then
+              echo "::error::could not open an issue on ${REPO}; the failure is NOT reported."
+              exit 1
+            fi
+            echo "Opened ${NEW}." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Exit non-zero on purpose. A green notify job sitting under a red run
+          # reads as "something handled it"; it did not, the deploy still has not
+          # shipped.
+          echo "::error::deploy did not ship on ${BRANCH}; see the tracking issue."
+          exit 1
