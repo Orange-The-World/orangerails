@@ -332,8 +332,11 @@ export function parseCredentials(
   let parsed: unknown;
   try {
     parsed = JSON.parse(credentialsJson);
-  } catch (err) {
-    throw new Error(`[${adapter.slug}] credentials JSON parse failed: ${err instanceof Error ? err.message : String(err)}`);
+  } catch {
+    // Fixed message by requirement (DEV-0274). The input here is decrypted
+    // material, so the underlying exception is deliberately discarded rather
+    // than composed into the message. Keep this shape if you touch it.
+    throw new Error(`[${adapter.slug}] credentials are not valid JSON`);
   }
   if (!parsed || typeof parsed !== 'object') {
     throw new Error(`[${adapter.slug}] credentials must be an object`);
