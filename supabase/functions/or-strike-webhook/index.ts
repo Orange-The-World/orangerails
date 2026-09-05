@@ -74,7 +74,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     const { data: conn, error: lookupErr } = await client
       .from('connections')
-      .select('id, strike_webhook_secret, provider_type')
+      .select('id, strike_webhook_secret, provider_type, strike_bad_sig_count')
       .eq('id', connId)
       .maybeSingle();
 
@@ -92,7 +92,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const expected = await computeHmacHex(conn.strike_webhook_secret, body);
     if (!timingSafeEqual(expected, sig)) {
       console.warn('[or-strike-webhook] bad-sig 401: conn=%s sig_len=%s expected_len=%s', connId, sig.length, expected.length);
+      await recordBadSig(client, connId, conn.strike_bad_sig_count ?? 0);
       return new Response('bad signature', { status: 401 });
+    }
+    // A correctly verified delivery proves the stored secret is still
+    // right, so any run of prior failures no longer means anything.
+    if (conn.strike_bad_sig_count) {
+      await clearBadSig(client, connId);
     }
 
     let event: StrikeWebhookEvent;
@@ -156,4 +162,52 @@ function timingSafeEqual(a: string, b: string): boolean {
     r |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
   return r === 0;
+}
+
+// ─── Subscription reconcile (OR-T0386) ────────────────────────────────────
+//
+// A stored subscription id does not mean it still verifies: the secret on
+// the connection row can drift from the secret Strike actually signs with,
+// and the registration path in queue.ts only ever fires once (when there is
+// no subscription id yet). These two helpers are how a connection recovers:
+// count consecutive bad-sig failures, and once they cross the threshold,
+// flag the connection so the next user-initiated sync deletes the stale
+// Strike subscription and registers a fresh one with a new secret.
+//
+// Both are best-effort. A failure here must never change the 401 the caller
+// (Strike) gets, so every error is caught and logged, never thrown.
+const STRIKE_BAD_SIG_THRESHOLD = 3;
+
+async function recordBadSig(
+  client: ReturnType<typeof createClient>,
+  connId: string,
+  currentCount: number,
+): Promise<void> {
+  const next = currentCount + 1;
+  try {
+    if (next >= STRIKE_BAD_SIG_THRESHOLD) {
+      await client
+        .from('connections')
+        .update({ strike_bad_sig_count: 0, strike_needs_resubscribe: true })
+        .eq('id', connId);
+      console.warn(
+        `[or-strike-webhook] conn=${connId} crossed bad-sig threshold (${STRIKE_BAD_SIG_THRESHOLD}), flagged for resubscribe`,
+      );
+    } else {
+      await client
+        .from('connections')
+        .update({ strike_bad_sig_count: next })
+        .eq('id', connId);
+    }
+  } catch (err) {
+    console.error('[or-strike-webhook] recordBadSig failed:', err);
+  }
+}
+
+async function clearBadSig(client: ReturnType<typeof createClient>, connId: string): Promise<void> {
+  try {
+    await client.from('connections').update({ strike_bad_sig_count: 0 }).eq('id', connId);
+  } catch (err) {
+    console.error('[or-strike-webhook] clearBadSig failed:', err);
+  }
 }
