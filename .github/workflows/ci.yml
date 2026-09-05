@@ -304,7 +304,7 @@ jobs:
           # one failing exits this step non-zero and the job goes red, named
           # below so the failing half is obvious in the log without opening the
           # docker output.
-          if ! supabase start --exclude edge-runtime,inbucket,imgproxy; then
+          if ! supabase start --exclude edge-runtime,mailpit,imgproxy; then
             echo "::error::supabase start failed -- the local Supabase stack (Postgres/PostgREST) did not boot. See the docker output above for which container failed."
             exit 1
           fi
