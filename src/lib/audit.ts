@@ -26,7 +26,7 @@ export async function logSecurityEvent(
   userId: string,
   event: SecurityEventType,
   metadata?: Record<string, unknown>,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const { error } = await (supabase as SupabaseClient)
       .from("vault_security_events")
@@ -35,8 +35,11 @@ export async function logSecurityEvent(
       // Supabase returns HTTP errors in the response object, not as thrown
       // exceptions, so a bare catch would miss RLS rejections.
       console.warn("[VaultSecurityAudit] Insert rejected:", event, error);
+      return false;
     }
+    return true;
   } catch (err) {
     console.warn("[VaultSecurityAudit] Failed to write event:", event, err);
+    return false;
   }
 }
