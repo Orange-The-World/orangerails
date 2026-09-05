@@ -1204,3 +1204,105 @@ Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending'
     "the legacy fallback must stay error-only: it may be resolving a different connection than the one that succeeded, and promoting pending there is not reversible by the consumer",
   );
 });
+
+// ── OR-T1249: reconcileConnectionError must not treat 'none' as a format ────
+//
+// reconcileConnectionError reads platforms.sink_format directly instead of
+// going through resolveSinkFormatForPlatform, so the resolver's 'none'
+// handling does not cover it. Before the fix, a platform explicitly
+// configured to have no sink (sink_format = 'none') would still get
+// sinkMode = true here, because 'none' is a non-empty string, and this
+// worker would write a plaintext encrypted_last_error onto a connection on
+// a platform that was told it has no sink.
+
+function makeReconcileErrorClient(
+  sinkFormat: string | null | undefined,
+  platformsError?: string,
+) {
+  let connectionsFromCalls = 0;
+  const capturedPatches: Record<string, unknown>[] = [];
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      if (table === 'platforms') {
+        // deno-lint-ignore no-explicit-any
+        const chain: any = {
+          select(_c: string) { return chain; },
+          eq(_c: string, _v: unknown) { return chain; },
+          maybeSingle() {
+            if (platformsError) {
+              return Promise.resolve({ data: null, error: { message: platformsError } });
+            }
+            return Promise.resolve({ data: { sink_format: sinkFormat }, error: null });
+          },
+        };
+        return chain;
+      }
+      if (table === 'connections') {
+        connectionsFromCalls++;
+        if (connectionsFromCalls === 1) {
+          // The exact quiltt_connection_id match lookup.
+          // deno-lint-ignore no-explicit-any
+          const chain: any = {
+            select(_c: string) { return chain; },
+            eq(_c: string, _v: unknown) { return chain; },
+            maybeSingle() { return Promise.resolve({ data: { id: 'conn-1' }, error: null }); },
+          };
+          return chain;
+        }
+        // The status update.
+        return {
+          update(patch: Record<string, unknown>) {
+            capturedPatches.push(patch);
+            return { eq: (_c: string, _v: unknown) => Promise.resolve({ error: null }) };
+          },
+        };
+      }
+      throw new Error(`unexpected table in reconcileConnectionError test: ${table}`);
+    },
+  };
+  return { client, capturedPatches };
+}
+
+Deno.test('OR-T1249: reconcileConnectionError records no cause when sink_format is the none sentinel', async () => {
+  const { client, capturedPatches } = makeReconcileErrorClient('none');
+  const ev = {
+    event_id:    'evt-none-1',
+    event_type:  'connection.synced.errored.repairable',
+    payload:     { record: { id: 'quiltt-conn-1' } },
+    platform_id: 'plat-1',
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const err = await reconcileConnectionError(client as any, ev as any, 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(capturedPatches.length, 1, 'exactly one status update must be issued');
+  assertEquals(
+    Object.hasOwn(capturedPatches[0], 'encrypted_last_error'),
+    false,
+    'a platform explicitly configured to have no sink must not get a cause written',
+  );
+});
+
+Deno.test('OR-T1249: reconcileConnectionError still records a cause for a real sink platform', async () => {
+  const { client, capturedPatches } = makeReconcileErrorClient('bitbooks-v2');
+  const ev = {
+    event_id:    'evt-sink-1',
+    event_type:  'connection.synced.errored.repairable',
+    payload:     { record: { id: 'quiltt-conn-1' } },
+    platform_id: 'plat-1',
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const err = await reconcileConnectionError(client as any, ev as any, 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(capturedPatches.length, 1);
+  assertEquals(
+    typeof capturedPatches[0].encrypted_last_error === 'string' &&
+      (capturedPatches[0].encrypted_last_error as string).length > 0,
+    true,
+    'a registered sink platform must still get the cause recorded, unaffected by the sentinel handling',
+  );
+});
