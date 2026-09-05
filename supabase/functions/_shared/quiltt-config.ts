@@ -152,5 +152,14 @@ export async function resolveSinkFormatForPlatform(
     throw new Error(`platforms.sink_format lookup failed: ${error.message}`);
   }
 
-  return data?.sink_format ?? bodyFormatFallback ?? null;
+  // 'none' is the explicit no-sink sentinel (OR-T1208): a platform that has
+  // deliberately opted out of sink delivery, as opposed to one that has
+  // simply never been configured (NULL). or-sync's sink-mode test treats any
+  // non-empty string as a format to look up, so the sentinel must resolve to
+  // null here, before it ever reaches that check, or a stored 'none' 400s
+  // with "Unknown format: none" instead of falling through to the
+  // legacy/direct path the platform actually wants.
+  const stored = data?.sink_format === 'none' ? null : data?.sink_format;
+
+  return stored ?? bodyFormatFallback ?? null;
 }
