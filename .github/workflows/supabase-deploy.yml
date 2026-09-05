@@ -447,6 +447,18 @@ jobs:
             fi
           fi
 
+          # OR-T2485 / OR-T0830 (CTO RETIRE decision, 2026-08-28): v1-rate is retired on
+          # OR-prod (lcdicq). Its real serving deployment is orbi-prod (sqcventmypowhbaceufy),
+          # reached through workers/api-gateway (target:"orbi"); this lcdicq copy has never
+          # served a real request (0 rows in orbi_api_keys and orbi_usage_log) and answers 503
+          # before it ever reaches a rate lookup. Filtered out of every deploy path on prod so a
+          # future force-push or full redeploy cannot silently resurrect it once its Edge
+          # Function deployment is deleted. Dev is untouched: this decision covers the OR-prod
+          # mirror only.
+          if [ "${{ github.ref_name }}" = "prod" ]; then
+            DEPLOY_FUNCS=$(echo "$DEPLOY_FUNCS" | grep -v '^v1-rate$' || true)
+          fi
+
           if [ -z "$DEPLOY_FUNCS" ]; then
             echo "No edge functions changed; skipping deploy"
             exit 0
