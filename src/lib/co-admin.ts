@@ -48,6 +48,7 @@ import { base64ToBytes } from "./key-wrapping";
 import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } from "./pqc";
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
 import { signMemberGrant, verifyMemberGrant } from "./member-grant";
+import { formatError } from "./format-error";
 
 // ------------------------------------------------------------------
 // Encoding helpers
@@ -57,22 +58,6 @@ function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary);
-}
-
-/**
- * Pull the human-readable text out of a Supabase error.
- *
- * These errors are objects, and interpolating one straight into a template
- * literal yields "[object Object]". GrantCoAdminDialog renders whatever message
- * this module throws directly to the owner, so the Postgres message is the part
- * that has to survive.
- */
-function errorText(err: unknown): string {
-  if (err && typeof err === "object" && "message" in err) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === "string" && message.length > 0) return message;
-  }
-  return String(err);
 }
 
 // ------------------------------------------------------------------
@@ -358,7 +343,7 @@ export async function persistCoAdminGrant(params: {
     admin_user_id: targetUserId,
   });
   if (adminErr && !isUniqueViolation(adminErr)) {
-    throw new Error(`Failed to insert workspace_admins: ${errorText(adminErr)}`);
+    throw new Error(`Failed to insert workspace_admins: ${formatError(adminErr)}`);
   }
 
   // The wrapped key. THIS is the write that grants access.
@@ -374,7 +359,7 @@ export async function persistCoAdminGrant(params: {
       "This co-admin was added to your list, but the key that gives them access was not stored, " +
         "so they cannot open any of your data. They are shown in your list on purpose, so the " +
         "attempt is visible rather than silent. Reload the page, then either try granting again " +
-        `or remove them from your list. (${errorText(wdkErr)})`,
+        `or remove them from your list. (${formatError(wdkErr)})`,
     );
   }
 }
@@ -456,7 +441,7 @@ export async function grantCoAdmin(params: {
   if (!workspaceKeyId) {
     const { data: allocated, error: allocErr } = await supabase.rpc("allocate_workspace_key");
     if (allocErr) {
-      throw new Error(`Failed to allocate workspace_key_id: ${errorText(allocErr)}`);
+      throw new Error(`Failed to allocate workspace_key_id: ${formatError(allocErr)}`);
     }
     if (typeof allocated !== "string" || allocated.length === 0) {
       throw new Error(
@@ -652,7 +637,7 @@ export async function revokeCoAdmin(params: {
   )
     .eq("recipient_user_id", adminUserId)
     .select("recipient_user_id");
-  if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${wdkErr}`);
+  if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${formatError(wdkErr)}`);
 
   if ((removedKeys ?? []).length === 0) {
     // Nothing was removed and nothing complained, which on its own is not
@@ -669,7 +654,7 @@ export async function revokeCoAdmin(params: {
 
     if (readErr) {
       throw new CoAdminRevocationIncompleteError(
-        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${readErr})`,
+        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${formatError(readErr)})`,
         false,
       );
     }
@@ -701,7 +686,7 @@ export async function revokeCoAdmin(params: {
   if (adminErr) {
     // Say which half landed. The stored key IS gone here, and an owner told
     // only that something failed would reasonably assume the opposite.
-    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${adminErr})`, true);
+    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${formatError(adminErr)})`, true);
   }
 
   if ((removedAdmins ?? []).length === 0) {
@@ -772,7 +757,7 @@ export async function clearCoAdminListEntry(params: {
   )
     .eq("admin_user_id", adminUserId)
     .select("admin_user_id");
-  if (error) throw new Error(`Failed to remove this co-admin from your list: ${error}`);
+  if (error) throw new Error(`Failed to remove this co-admin from your list: ${formatError(error)}`);
 
   if ((removed ?? []).length === 0) {
     throw new Error(
