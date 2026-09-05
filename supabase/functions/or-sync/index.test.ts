@@ -20,8 +20,63 @@
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { mergeStrikeTransactions, batchHttpStatus, throwOnDbError, handleConnectionError, redactedUpstreamDetail } from './index.ts';
+import {
+  mergeStrikeTransactions,
+  batchHttpStatus,
+  throwOnDbError,
+  handleConnectionError,
+  redactedUpstreamDetail,
+  shouldApplySinkFormatEnforcement,
+  wouldEnableSinkMode,
+} from './index.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
+
+// ── sink_format enforcement guard (OR-T1183) ──────────────────────────
+//
+// THE DEFECT this pins: platforms.sink_format is meant to OVERRIDE a
+// caller-sent format. Before this guard, `if (enforceSinkFormat)` fired
+// with no regard to what the caller sent, so a platform-mode caller that
+// sent NO format at all (platforms.sink_format set, body.format absent)
+// was flipped into sink mode it never asked for. That is CREATING a mode,
+// not overriding a request -- the comment on the block promises the
+// latter and the old code did the former.
+//
+// This test is RED against the pre-fix code (`if (enforceSinkFormat)
+// resolvedFormat = serverFormat` with no bodyFormat check): it would
+// return true here, when the caller sent no format at all, the correct
+// answer is false. GREEN after the guard lands.
+// Not run against the pre-fix code in this session (this seat has no
+// shell / deno runtime); verified by reading the pre-fix diff instead.
+
+Deno.test('shouldApplySinkFormatEnforcement: caller sent no format -> never enforce, even with the flag on', () => {
+  assertEquals(shouldApplySinkFormatEnforcement(true, undefined), false);
+  assertEquals(shouldApplySinkFormatEnforcement(true, null), false);
+  assertEquals(shouldApplySinkFormatEnforcement(true, ''), false);
+});
+
+Deno.test('shouldApplySinkFormatEnforcement: caller sent a format and the flag is on -> enforce', () => {
+  assertEquals(shouldApplySinkFormatEnforcement(true, 'bitbooks-v2'), true);
+});
+
+Deno.test('shouldApplySinkFormatEnforcement: flag off -> never enforce regardless of what the caller sent', () => {
+  assertEquals(shouldApplySinkFormatEnforcement(false, 'bitbooks-v2'), false);
+  assertEquals(shouldApplySinkFormatEnforcement(false, undefined), false);
+});
+
+Deno.test('wouldEnableSinkMode: body empty, platform has a sink_format -> true (the mode-change case)', () => {
+  assertEquals(wouldEnableSinkMode(undefined, 'orangeway-me'), true);
+  assertEquals(wouldEnableSinkMode(null, 'orangeway-me'), true);
+  assertEquals(wouldEnableSinkMode('', 'orangeway-me'), true);
+});
+
+Deno.test('wouldEnableSinkMode: body already carries a format -> false (override, not a mode change)', () => {
+  assertEquals(wouldEnableSinkMode('bitbooks-v2', 'orangeway-me'), false);
+});
+
+Deno.test('wouldEnableSinkMode: platform has no sink_format -> false, nothing to enable', () => {
+  assertEquals(wouldEnableSinkMode(undefined, null), false);
+  assertEquals(wouldEnableSinkMode(undefined, undefined), false);
+});
 
 const WALLET_A = 'wallet-aaaa';
 const WALLET_B = 'wallet-bbbb';
