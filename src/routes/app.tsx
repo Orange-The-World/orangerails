@@ -6,6 +6,7 @@ import { useVault } from "@/context/VaultContext";
 import type { GrantSupabaseLike } from "@/context/VaultContext";
 import {
   clearCoAdminListEntry,
+  CoAdminGrantIncompleteError,
   CoAdminRevocationIncompleteError,
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
@@ -952,6 +953,33 @@ function AppHome() {
     }
   }
 
+  /**
+   * Re-read the co-admin list with resolved emails.
+   *
+   * Used after both a successful grant and an incomplete one (OR-T1262): a
+   * grant that stops after writing workspace_admins but before
+   * wrapped_data_keys still adds the row, so the list must be refreshed
+   * either way or the owner cannot see, or act on, the entry the
+   * incomplete-grant error tells them about.
+   */
+  async function reloadCoAdminList() {
+    if (!userId) return;
+    const { data: admins } = await supabase
+      .from("workspace_admins")
+      .select("id, admin_user_id, added_at")
+      .eq("owner_user_id", userId);
+    const freshRows = (admins ?? []) as CoAdminRow[];
+    const freshIds = freshRows.map((r) => r.admin_user_id);
+    const emailMap = new Map<string, string>();
+    if (freshIds.length > 0) {
+      const { data: emailRows } = await supabase.rpc("get_coadmin_emails", { user_ids: freshIds });
+      for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
+        emailMap.set(row.user_id, row.email);
+      }
+    }
+    setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
+  }
+
   async function handleSignOut() {
     lock();
     await supabase.auth.signOut();
@@ -1408,34 +1436,34 @@ function AppHome() {
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
           onSubmit={async ({ targetEmail, password }) => {
-            const result = await grantCoAdmin({
-              ownerUserId: userId,
-              ownerSaltB64: vaultSalt,
-              ownerPassword: password,
-              targetEmail,
-              existingKeyId: workspaceKeyId,
-              supabase: supabase as unknown as GrantSupabaseLike,
-            });
-            void logSecurityEvent(supabase, userId, "coadmin_granted", { target_email: targetEmail });
-            if (result.workspaceKeyId !== workspaceKeyId) {
-              setWorkspaceKeyId(result.workspaceKeyId);
-            }
-            // Reload co-admin list with resolved emails.
-            const { data: admins } = await supabase
-              .from("workspace_admins")
-              .select("id, admin_user_id, added_at")
-              .eq("owner_user_id", userId);
-            const freshRows = (admins ?? []) as CoAdminRow[];
-            const freshIds = freshRows.map((r) => r.admin_user_id);
-            const emailMap = new Map<string, string>();
-            if (freshIds.length > 0) {
-              const { data: emailRows } = await supabase.rpc("get_coadmin_emails", { user_ids: freshIds });
-              for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
-                emailMap.set(row.user_id, row.email);
+            try {
+              const result = await grantCoAdmin({
+                ownerUserId: userId,
+                ownerSaltB64: vaultSalt,
+                ownerPassword: password,
+                targetEmail,
+                existingKeyId: workspaceKeyId,
+                supabase: supabase as unknown as GrantSupabaseLike,
+              });
+              void logSecurityEvent(supabase, userId, "coadmin_granted", { target_email: targetEmail });
+              if (result.workspaceKeyId !== workspaceKeyId) {
+                setWorkspaceKeyId(result.workspaceKeyId);
               }
+              await reloadCoAdminList();
+              setNotice("Co-admin added. They'll see your data on their next unlock.");
+            } catch (e) {
+              if (e instanceof CoAdminGrantIncompleteError) {
+                // The list row was written even though the key was not. Refresh
+                // now, at the moment this half-written state is created, so the
+                // entry and its Revoke button actually exist for the owner to
+                // act on, matching the treatment confirmRevokeCoAdmin already
+                // gives the equivalent incomplete-revoke case. The dialog
+                // itself still shows e.message and stays open (handleSubmit's
+                // own catch), so re-throw rather than swallow it here.
+                await reloadCoAdminList();
+              }
+              throw e;
             }
-            setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
-            setNotice("Co-admin added. They'll see your data on their next unlock.");
           }}
         />
       )}
