@@ -21,7 +21,6 @@ ticket OR-T1539.
 2. Create `/etc/orbi/vault-meta-grantee-axis-probe.env` (root-only, 0600)
    defining:
    ```
-   ANON_ACL_PROBE... # not used here; see below for this probe's own names
    GRANTEE_AXIS_PROBE_DSN_DEV=postgres://...fzwmnzmtqidumdqjdddz...
    GRANTEE_AXIS_PROBE_DSN_PROD=postgres://...lcdicqalreskibdfxkzb...
    ORBI_ALERT_SCRIPT=/usr/local/bin/orbi-alert.sh
