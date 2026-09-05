@@ -125,8 +125,16 @@ export interface KeyringBinding {
    * user_vault_meta.keyring_epoch for this row. Strictly increasing, never
    * reused, and only ever changed in the same statement that rewrites the
    * ciphertext it is bound to.
+   *
+   * number | string, not number alone: keyring_epoch is a Postgres bigint,
+   * and a client library may hand it back as either shape. Both are
+   * normalized to the same canonical decimal string by
+   * canonicalKeyringEpoch before they reach the AAD, so accepting either
+   * here makes passing the driver's raw value the easy path instead of
+   * forcing a caller into Number(value), which is the silent coercion
+   * canonicalKeyringEpoch exists to prevent.
    */
-  keyringEpoch: number;
+  keyringEpoch: number | string;
 }
 
 // ------------------------------------------------------------------
