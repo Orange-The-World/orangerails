@@ -146,12 +146,16 @@ BEGIN
     RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.organizations';
   END IF;
 
-  -- (c) step 5: all four anon grants on public.data_keys are gone
-  IF has_table_privilege('anon', 'public.data_keys', 'SELECT')
-     OR has_table_privilege('anon', 'public.data_keys', 'INSERT')
-     OR has_table_privilege('anon', 'public.data_keys', 'UPDATE')
-     OR has_table_privilege('anon', 'public.data_keys', 'DELETE') THEN
-    RAISE EXCEPTION 'FAIL: anon still holds privileges on public.data_keys';
+  -- (c) step 5: all four anon grants on public.data_keys are gone. Guarded the same
+  --     way as the REVOKE above: only checked when the table exists on this database,
+  --     so a from-scratch replay before 20260727000000 does not 42P01 here either.
+  IF to_regclass('public.data_keys') IS NOT NULL THEN
+    IF has_table_privilege('anon', 'public.data_keys', 'SELECT')
+       OR has_table_privilege('anon', 'public.data_keys', 'INSERT')
+       OR has_table_privilege('anon', 'public.data_keys', 'UPDATE')
+       OR has_table_privilege('anon', 'public.data_keys', 'DELETE') THEN
+      RAISE EXCEPTION 'FAIL: anon still holds privileges on public.data_keys';
+    END IF;
   END IF;
 
   -- (b) nothing broke
