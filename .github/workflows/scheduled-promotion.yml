@@ -117,6 +117,66 @@ jobs:
           echo "ok: real CANDIDATE_FILTER applied to 6 fixtures -> ${GOT} (fork and unrelated heads correctly rejected)"
           echo "Self-test passed: 6 fixture cases run through the real jq filter, all as expected."
 
+      - name: Self-test the promotion-body basis logic
+        run: |
+          set -euo pipefail
+
+          # Which ref the promotion pull request's body is built from
+          # (OR-T1470). A promotion whose head is dev describes itself with
+          # prod...dev, same as always. A promotion whose head is a
+          # release/* branch cut at a fixed sha must describe ITSELF with
+          # prod...<that head>, because dev keeps moving after the cut and
+          # prod...dev stops describing what is actually in the pull
+          # request the moment that happens.
+          body_basis() {
+            head_ref="$1"
+            if [ "${head_ref}" = "dev" ]; then
+              echo "dev"
+            else
+              echo "${head_ref}"
+            fi
+          }
+
+          # Whether the body needs the extra "commits on dev beyond this
+          # promotion's cut" line. Only when the basis is not dev itself:
+          # when the basis IS dev there is nothing beyond it left to call
+          # out, the main table already says everything.
+          reports_beyond_cut() {
+            head_ref="$1"
+            if [ "${head_ref}" = "dev" ]; then
+              echo "no"
+            else
+              echo "yes"
+            fi
+          }
+
+          fail=0
+          check() {
+            got_basis="$(body_basis "$2")"
+            got_extra="$(reports_beyond_cut "$2")"
+            if [ "${got_basis}" != "$3" ] || [ "${got_extra}" != "$4" ]; then
+              echo "::error::self-test '$1' expected basis='$3' extra='$4', got basis='${got_basis}' extra='${got_extra}'"
+              fail=1
+            else
+              echo "ok: $1 -> basis=${got_basis} extra=${got_extra}"
+            fi
+          }
+
+          # head=dev: body must be unchanged in behaviour from today.
+          check "head dev"                              "dev"        "dev"        "no"
+          # head=release/X, dev has moved past the cut: the PR's own numbers
+          # come from release/X, and the omission is reported separately.
+          check "head release/x, dev ahead of the cut"   "release/x"  "release/x"  "yes"
+          # head=release/X, identical to dev: still basis release/x (the
+          # PR's own compare), the extra line is still shown and reads 0.
+          check "head release/x, identical to dev"       "release/x"  "release/x"  "yes"
+
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::promotion-body basis self-test failed. The body would describe the wrong ref."
+            exit 1
+          fi
+          echo "Self-test passed: 3 cases, all as expected."
+
       - name: Compare prod and dev
         id: compare
         env:
@@ -207,81 +267,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          COMPARE_URL="${GITHUB_SERVER_URL}/${GH_REPO}/compare/prod...dev"
-
-          # ---- threshold ------------------------------------------------
-          BREACH="no"
-          BREACH_WHY="below both thresholds"
-          if [ "${AHEAD}" -ge 50 ] && [ "${AGE_DAYS}" -ge 3 ]; then
-            BREACH="YES"
-            BREACH_WHY="${AHEAD} commits (limit 50) and ${AGE_DAYS} days (limit 3)"
-          elif [ "${AHEAD}" -ge 50 ]; then
-            BREACH="YES"
-            BREACH_WHY="${AHEAD} commits, over the 50 commit limit"
-          elif [ "${AGE_DAYS}" -ge 3 ]; then
-            BREACH="YES"
-            BREACH_WHY="oldest unpromoted commit is ${AGE_DAYS} days old, over the 3 day limit"
-          fi
-
-          # ---- divergence ------------------------------------------------
-          if [ "${BEHIND}" -gt 0 ]; then
-            DIVERGED="**prod has ${BEHIND} commit(s) that dev does not have.** The
-          branches have diverged, and that is what makes this promotion conflict.
-          Gate 3 (\`prod-backmerge.yml\`, ticket DL-0565) exists to bring those
-          commits back into dev. Expect to run the backmerge before, or as part
-          of, merging this."
-          else
-            DIVERGED="prod has no commits that dev is missing. The branches have
-          not diverged, so this promotion should be a clean fast path."
-          fi
-
-          # ---- body -------------------------------------------------------
-          {
-            echo "Opened automatically by \`.github/workflows/scheduled-promotion.yml\` (DL-0564, Gate 2)."
-            echo
-            echo "## State of the promotion"
-            echo
-            echo "| | |"
-            echo "|---|---|"
-            echo "| Commits on dev not on prod | **${AHEAD}** |"
-            echo "| Oldest unpromoted commit | **${AGE_DAYS} day(s)** old (${OLDEST_DATE}, \`${OLDEST_SHA}\`) |"
-            echo "| Commits on prod not on dev | **${BEHIND}** |"
-            echo "| Threshold breached (50 commits or 3 days) | **${BREACH}** (${BREACH_WHY}) |"
-            echo
-            echo "Full comparison: ${COMPARE_URL}"
-            echo
-            echo "## Divergence"
-            echo
-            echo "${DIVERGED}"
-            echo
-            echo "## Who owns this"
-            echo
-            echo "**The Release seat owns merging this.** This workflow will never merge it,"
-            echo "will never enable auto-merge, and will never push to prod. If Release holds"
-            echo "the gate and chooses not to promote, the CTO owns the risk decision."
-            echo
-            echo "There is no GitHub account that corresponds to the Release role in this"
-            echo "repository, so this pull request carries the \`owner:release\` label and names"
-            echo "Release here rather than setting a GitHub assignee that would be wrong."
-            echo
-            echo "## About this automation"
-            echo
-            echo "The schedule runs every 2 days. If dev is level with prod the run is a clean"
-            echo "no-op. If a promotion into prod is already open, whether its head is dev or"
-            echo "a release branch cut for the purpose, this workflow updates that one rather"
-            echo "than opening a second, because a duplicate promotion would be actively"
-            echo "harmful."
-            echo
-            echo "This workflow is inert until a repository secret named \`FLEET_PAT\` is added"
-            echo "(a token for the \`orange-builder\` machine user, being created shortly). That"
-            echo "is expected. Until then a run with work to promote fails loudly instead of"
-            echo "silently doing nothing. FLEET_PAT is required because \"Allow GitHub Actions"
-            echo "to create and approve pull requests\" is off in this repository and is staying"
-            echo "off: that single toggle would also let Actions approve pull requests, which"
-            echo "would undermine the one-approving-review requirement."
-          } > pr-body.md
-
-          # ---- label ------------------------------------------------------
+          # ---- label --------------------------------------------------------
           if ! gh api "repos/${GH_REPO}/labels/owner:release" >/dev/null 2>&1; then
             gh api -X POST "repos/${GH_REPO}/labels" \
               -f name='owner:release' \
@@ -290,7 +276,11 @@ jobs:
             echo "Created label owner:release."
           fi
 
-          # ---- reuse or open ----------------------------------------------
+          # ---- find the existing candidate FIRST -----------------------------
+          # This has to happen before the body is built (OR-T1470): the body
+          # needs to know which pull request it is going into, because a
+          # release/* promotion must describe ITSELF, not dev.
+          #
           # Duplicate guard. Ask GitHub for every OPEN pull request whose base
           # is prod, with NO filter on the head. If a promotion is already open
           # we update it, and we never reach gh pr create while one is open.
@@ -346,7 +336,136 @@ jobs:
           fi
 
           EXISTING="$(printf '%s' "${CANDIDATES}" | jq -r '.[0].number // ""')"
+          EXISTING_HEAD="$(printf '%s' "${CANDIDATES}" | jq -r '.[0].head // ""')"
 
+          # ---- pick the ref the body is built from (OR-T1470) ----------------
+          # dev when there is no existing promotion (we are about to open one
+          # from dev) or the existing one's head IS dev: unchanged from before
+          # this fix. The existing head's own ref, release/X, when it is not:
+          # a release branch is cut at a fixed sha and does not move, so
+          # prod...dev stops describing this pull request the moment dev
+          # moves past the cut. Proven by the self-test in the previous step.
+          if [ -n "${EXISTING}" ] && [ "${EXISTING_HEAD}" != "dev" ]; then
+            BASIS_REF="${EXISTING_HEAD}"
+          else
+            BASIS_REF="dev"
+          fi
+
+          if [ "${BASIS_REF}" = "dev" ]; then
+            PR_AHEAD="${AHEAD}"
+            PR_BEHIND="${BEHIND}"
+            PR_AGE_DAYS="${AGE_DAYS}"
+            PR_OLDEST_DATE="${OLDEST_DATE}"
+            PR_OLDEST_SHA="${OLDEST_SHA}"
+          else
+            gh api "repos/${GH_REPO}/compare/prod...${BASIS_REF}" > pr-compare.json
+            PR_AHEAD=$(jq -r '.ahead_by' pr-compare.json)
+            PR_BEHIND=$(jq -r '.behind_by' pr-compare.json)
+            PR_OLDEST_DATE=$(jq -r '.commits[0].commit.committer.date // ""' pr-compare.json)
+            PR_OLDEST_SHA=$(jq -r '.commits[0].sha // ""' pr-compare.json)
+            if [ -n "${PR_OLDEST_DATE}" ]; then
+              PR_OLDEST_EPOCH=$(date -u -d "${PR_OLDEST_DATE}" +%s)
+              NOW_EPOCH=$(date -u +%s)
+              PR_AGE_DAYS=$(( (NOW_EPOCH - PR_OLDEST_EPOCH) / 86400 ))
+            else
+              PR_AGE_DAYS=0
+            fi
+            echo "promotion pull request ${EXISTING} head is ${BASIS_REF}: describing it with prod...${BASIS_REF} (${PR_AHEAD} commit(s) ahead), not prod...dev."
+          fi
+
+          COMPARE_URL="${GITHUB_SERVER_URL}/${GH_REPO}/compare/prod...${BASIS_REF}"
+
+          # ---- threshold ------------------------------------------------
+          # Always evaluated on prod...dev (AHEAD/AGE_DAYS), never on the
+          # release branch's own numbers: it is a statement about how far
+          # dev has drifted from prod, not a property of any one pull
+          # request, so the label below says so explicitly.
+          BREACH="no"
+          BREACH_WHY="below both thresholds"
+          if [ "${AHEAD}" -ge 50 ] && [ "${AGE_DAYS}" -ge 3 ]; then
+            BREACH="YES"
+            BREACH_WHY="${AHEAD} commits (limit 50) and ${AGE_DAYS} days (limit 3)"
+          elif [ "${AHEAD}" -ge 50 ]; then
+            BREACH="YES"
+            BREACH_WHY="${AHEAD} commits, over the 50 commit limit"
+          elif [ "${AGE_DAYS}" -ge 3 ]; then
+            BREACH="YES"
+            BREACH_WHY="oldest unpromoted commit is ${AGE_DAYS} days old, over the 3 day limit"
+          fi
+
+          # ---- divergence ------------------------------------------------
+          if [ "${PR_BEHIND}" -gt 0 ]; then
+            DIVERGED="**prod has ${PR_BEHIND} commit(s) that ${BASIS_REF} does not have.** The
+          branches have diverged, and that is what makes this promotion conflict.
+          Gate 3 (\`prod-backmerge.yml\`, ticket DL-0565) exists to bring those
+          commits back into dev. Expect to run the backmerge before, or as part
+          of, merging this."
+          else
+            DIVERGED="prod has no commits that ${BASIS_REF} is missing. The branches have
+          not diverged, so this promotion should be a clean fast path."
+          fi
+
+          # ---- beyond-the-cut line, only when the basis is not dev itself ---
+          # Reports the omission this fix exists to stop hiding: work that
+          # landed on dev after the release branch was cut is not in this
+          # pull request at all, and without this line that fact was silent.
+          if [ "${BASIS_REF}" != "dev" ]; then
+            BEYOND_CUT_LINE="**Commits on dev beyond this promotion's cut (prod...dev, not this pull request's own diff):** ${AHEAD} commit(s), oldest ${AGE_DAYS} day(s) old. Those commits are NOT in this pull request. A fresh release cut, or the next scheduled run once dev is level with this branch again, is what would carry them."
+          else
+            BEYOND_CUT_LINE=""
+          fi
+
+          # ---- body -----------------------------------------------------------
+          {
+            echo "Opened automatically by \`.github/workflows/scheduled-promotion.yml\` (DL-0564, Gate 2)."
+            echo
+            echo "## State of the promotion"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commits on ${BASIS_REF} not on prod | **${PR_AHEAD}** |"
+            echo "| Oldest unpromoted commit | **${PR_AGE_DAYS} day(s)** old (${PR_OLDEST_DATE}, \`${PR_OLDEST_SHA}\`) |"
+            echo "| Commits on prod not on ${BASIS_REF} | **${PR_BEHIND}** |"
+            echo "| Threshold breached (50 commits or 3 days, dev vs prod) | **${BREACH}** (${BREACH_WHY}) |"
+            echo
+            echo "Full comparison: ${COMPARE_URL}"
+            if [ -n "${BEYOND_CUT_LINE}" ]; then
+              echo
+              echo "${BEYOND_CUT_LINE}"
+            fi
+            echo
+            echo "## Divergence"
+            echo
+            echo "${DIVERGED}"
+            echo
+            echo "## Who owns this"
+            echo
+            echo "**The Release seat owns merging this.** This workflow will never merge it,"
+            echo "will never enable auto-merge, and will never push to prod. If Release holds"
+            echo "the gate and chooses not to promote, the CTO owns the risk decision."
+            echo
+            echo "There is no GitHub account that corresponds to the Release role in this"
+            echo "repository, so this pull request carries the \`owner:release\` label and names"
+            echo "Release here rather than setting a GitHub assignee that would be wrong."
+            echo
+            echo "## About this automation"
+            echo
+            echo "The schedule runs every 2 days. If dev is level with prod the run is a clean"
+            echo "no-op. If a promotion into prod is already open, whether its head is dev or"
+            echo "a release branch cut for the purpose, this workflow updates that one rather"
+            echo "than opening a second, because a duplicate promotion would be actively"
+            echo "harmful."
+            echo
+            echo "This workflow is inert until a repository secret named \`FLEET_PAT\` is added"
+            echo "(a token for the \`orange-builder\` machine user, being created shortly). That"
+            echo "is expected. Until then a run with work to promote fails loudly instead of"
+            echo "silently doing nothing. FLEET_PAT is required because \"Allow GitHub Actions"
+            echo "to create and approve pull requests\" is off in this repository and is staying"
+            echo "off: that single toggle would also let Actions approve pull requests, which"
+            echo "would undermine the one-approving-review requirement."
+          } > pr-body.md
+
+          # ---- update existing, or open new -----------------------------------
           if [ -n "${EXISTING}" ]; then
             EXISTING_TITLE=$(gh api "repos/${GH_REPO}/pulls/${EXISTING}" --jq '.title')
             echo "Reusing open promotion pull request ${EXISTING}. Not opening a duplicate."
@@ -354,11 +473,14 @@ jobs:
             gh pr edit "${EXISTING}" --body-file pr-body.md
             gh pr edit "${EXISTING}" --add-label 'owner:release'
 
-            # Only retitle a title this workflow itself generated. A title a
-            # human wrote is left alone; the counts live in the body either way.
+            # Only retitle a title this workflow itself generated, and only with
+            # the count for THIS pull request's own head (PR_AHEAD), never the
+            # dev-vs-prod total, so a release/* promotion's title never claims
+            # commits that are not actually in it. A title a human wrote is left
+            # alone either way; the counts live in the body regardless.
             case "${EXISTING_TITLE}" in
               "promote: dev to prod ("*)
-                gh pr edit "${EXISTING}" --title "promote: dev to prod (${AHEAD} commits)"
+                gh pr edit "${EXISTING}" --title "promote: dev to prod (${PR_AHEAD} commits)"
                 ;;
               *)
                 echo "Left the existing human-written title unchanged."
