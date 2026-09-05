@@ -43,7 +43,7 @@ jobs:
         # pass over every migration.
         run: node scripts/check-migration-requires.mjs --selftest
 
-      - name: Migration dependency check (-- Requires: headers)
+      - name: "Migration dependency check (-- Requires: headers)"
         # A real gate, no continue-on-error. A migration can declare, on a line of its own,
         # "-- Requires: <version>", naming a migration version it depends on and does not
         # itself create. This fails the pull request when the named version has no matching
