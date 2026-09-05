@@ -65,7 +65,7 @@ function RecoverPage() {
         // they are not carried across in the same write, the only key that opens
         // them is discarded and nothing ever regenerates them.
         .select(
-          "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
+          "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped, workspace_key_id",
         )
         .eq("user_id", session.user.id)
         .single();
@@ -117,6 +117,7 @@ function RecoverPage() {
         migrateCredentialsCiphertext,
         migrateTransactionCiphertext,
         clearMigrationKeys,
+        workspaceKeyId: meta.workspace_key_id ?? null,
       });
 
       void logSecurityEvent(supabase, session.user.id, "vault_recover");
