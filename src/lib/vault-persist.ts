@@ -81,6 +81,24 @@ export interface RotateVaultArgs {
   newRecoveryCiphertext: string;
   newVerifierCiphertext: string;
   vaultKeyVersion: number;
+  /**
+   * kem_secret_wrapped and sig_secret_wrapped re-wrapped under the rotated MEK,
+   * as returned by recoverWithCode.
+   *
+   * These are not data rows, so the migration loop below never touches them,
+   * and they are wrapped under an HKDF subkey of the MEK exactly like the
+   * credentials and transactions subkeys. If they do not travel in the update
+   * that rotates the wrappers, the key that opens them ceases to exist and
+   * nothing regenerates them.
+   *
+   * NULL IS AN INSTRUCTION, not just an absence. It means "nothing was carried
+   * for this key", and the write below answers it by CLEARING the matching
+   * public key in the same statement, so the next unlock regenerates a working
+   * pair instead of short-circuiting forever on a public key whose secret is
+   * gone. Pass null only when nothing was genuinely carried.
+   */
+  newKemSecretWrapped: string | null;
+  newSigSecretWrapped: string | null;
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
@@ -102,6 +120,8 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     newRecoveryCiphertext,
     newVerifierCiphertext,
     vaultKeyVersion,
+    newKemSecretWrapped,
+    newSigSecretWrapped,
     migrateCredentialsCiphertext,
     migrateTransactionCiphertext,
     clearMigrationKeys,
@@ -239,14 +259,69 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // error, so the row count is the only signal that it actually happened.
   // The compare-and-swap on recovery_ciphertext (read at the top of the submit)
   // makes a concurrent rotation fail loudly rather than be overwritten.
+  //
+  // The re-wrapped PQC secrets ride in this same statement. They are not data
+  // rows so nothing above migrated them, and they are wrapped under an
+  // MEK-derived subkey, so the rotation destroys them if they do not travel
+  // here. One statement also means there is no window in which the wrappers
+  // have rotated and the PQC secrets have not.
+  //
+  // A secret is only written when present. Passing null through into the update
+  // would overwrite a real ciphertext with null if a caller ever failed to read
+  // the columns first, which is the same silent destruction this is fixing.
+  //
+  // AND WHEN NOTHING WAS CARRIED, THE MATCHING PUBLIC KEY IS CLEARED. That is
+  // the invariant this write exists to hold: a rotation that completes without
+  // carrying a PQC secret across must not leave the public key behind.
+  //
+  // Leaving it behind is what makes the loss permanent rather than temporary.
+  // ensurePqcKeypairs() short-circuits on a populated kem_public_key, so the row
+  // keeps a public key whose secret is wrapped under a MEK that no longer
+  // exists, and everything encrypted to it from then on is unreadable from the
+  // moment it is written. Clearing it lets the next unlock regenerate a working
+  // pair.
+  //
+  // Two different situations arrive here and both need the same treatment.
+  //
+  //   1. The stored secret existed and would not open. It is already dead.
+  //
+  //   2. The secret column was null when the recovery READ the row, and another
+  //      session created a keypair while the migration loop above was running.
+  //      The old password still unlocks throughout that loop, deliberately,
+  //      because meta is written last, so another tab loading the app is enough
+  //      to backfill a keypair under the OLD MEK. This write then omits the
+  //      secret column, because it was null at read time, and the
+  //      compare-and-swap does not catch it, because nothing in that backfill
+  //      touches recovery_ciphertext.
+  //
+  // In case 2 this clears a public key a legitimate concurrent write just made.
+  // That is deliberate and it is correct: that keypair's secret is wrapped under
+  // the MEK this recovery is discarding, so it is already dead as well.
+  //
+  // A dead kem_secret_wrapped is deliberately left in place rather than nulled.
+  // It is unreadable either way, and ensurePqcKeypairs() overwrites all four
+  // columns when it regenerates on the next unlock. Nothing consumes a secret
+  // without its public key.
+  const rotatedMeta: Record<string, unknown> = {
+    enc_mek_ciphertext: newEncMekCiphertext,
+    recovery_ciphertext: newRecoveryCiphertext,
+    vault_verifier_ciphertext: newVerifierCiphertext,
+    vault_key_version: vaultKeyVersion,
+  };
+  if (newKemSecretWrapped !== null) {
+    rotatedMeta.kem_secret_wrapped = newKemSecretWrapped;
+  } else {
+    rotatedMeta.kem_public_key = null;
+  }
+  if (newSigSecretWrapped !== null) {
+    rotatedMeta.sig_secret_wrapped = newSigSecretWrapped;
+  } else {
+    rotatedMeta.sig_public_key = null;
+  }
+
   const { data: updatedRows, error: updateErr } = await supabase
     .from("user_vault_meta")
-    .update({
-      enc_mek_ciphertext: newEncMekCiphertext,
-      recovery_ciphertext: newRecoveryCiphertext,
-      vault_verifier_ciphertext: newVerifierCiphertext,
-      vault_key_version: vaultKeyVersion,
-    })
+    .update(rotatedMeta)
     .eq("user_id", userId)
     .eq("recovery_ciphertext", priorRecoveryCiphertext)
     .select("user_id");

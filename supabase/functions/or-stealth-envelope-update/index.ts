@@ -5,21 +5,39 @@
  *
  * Called by the widget in step 4 of the sync flow (sync.tsx lines 286-337),
  * after or-stealth-transactions-store has stored any new sealed transactions.
- * or-stealth-transactions-store advances last_block_scanned only to the max
- * block_height of rows it actually committed; this function advances it to the
- * true scan tip (the chain tip at the time runSync finished), so syncs that
- * found zero matching transactions still move the window forward and the next
- * sync does not rescan the same range.
+ * That function advances last_block_scanned only to the max block_height of
+ * rows it actually committed, so a sync that found zero matching transactions
+ * would never move the window forward. This one advances the cursor to the
+ * height the caller reports having scanned, which is why the widget calls it on
+ * every sync and not only on syncs that stored something.
+ *
+ * WHAT THE REPORTED HEIGHT MEANS, and where that is decided. Not here: the
+ * contract for this column is defined once, in ../_shared/scan-cursor.ts, and
+ * both endpoints that write it import from there. In short, last_block_scanned
+ * is the last height the CALLER SCANNED CONTIGUOUSLY. It is not a chain tip.
+ * Until OR-T1914 this header called it exactly that, while the sibling endpoint
+ * capped the same column at the contiguous height, so one column carried two
+ * opposite contracts and the weaker one won.
  *
  * POST body:
- *   connection_id:      string (uuid)
- *   app_user_id:        string
- *   last_block_scanned: number (non-negative integer, the scan tip)
+ *   connection_id:            string (uuid)
+ *   app_user_id:              string
+ *   last_block_scanned:       number (non-negative integer, the last height
+ *                             scanned CONTIGUOUSLY, not a chain tip)
+ *   from_height:              number, optional (see below)
+ *   contiguous_block_scanned: number, optional. For a caller that distinguishes
+ *                             its scan tip from the point it actually read to:
+ *                             the cursor is then capped at the lower of the two.
+ *                             A caller whose last_block_scanned is already the
+ *                             contiguous height gains nothing by repeating it.
+ *                             The value is a ceiling only, so it can hold the
+ *                             cursor back and can never push it forward.
  *
  * Response:
  *   { connection_id, last_block_scanned }
  *   last_block_scanned reflects the stored cursor after the call. It may be
- *   higher than the supplied value when a concurrent call already advanced it.
+ *   higher than the supplied value when a concurrent call already advanced it,
+ *   and lower when the contiguity ceiling applied.
  *   The forward-only guarantee is enforced atomically by the UPDATE itself
  *   (conditional WHERE on the row, not application-level read-then-compare).
  */
@@ -39,6 +57,20 @@ interface EnvelopeUpdateRequestBody {
   connection_id?: string;
   app_user_id?: string;
   last_block_scanned?: number;
+  /**
+   * Optional contiguity ceiling (OR-T1914). The last height the caller read
+   * WITHOUT a gap. When present, the cursor advances to at most
+   * min(last_block_scanned, contiguous_block_scanned).
+   *
+   * It exists because a rolling-window extension pass can match a transaction
+   * above the height where a filter fetch aborted, so a caller can legitimately
+   * hold two different numbers. Sending the higher one as the cursor makes the
+   * next sync resume above a range nobody read, and a payment inside that range
+   * is then lost silently. A caller that holds only one number sends only
+   * last_block_scanned, which the contract already requires to be the
+   * contiguous height.
+   */
+  contiguous_block_scanned?: number;
   /**
    * Inclusive start of the block range just scanned. When present alongside
    * last_block_scanned (the to_height), the handler calls
@@ -105,6 +137,21 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         cors,
       );
     }
+    // A malformed ceiling is rejected rather than ignored. Falling through would
+    // treat "I sent a ceiling and got it wrong" as "I sent no ceiling", which is
+    // the unbounded path, and the caller would never learn its guard was dropped.
+    if (
+      body.contiguous_block_scanned !== undefined &&
+      (typeof body.contiguous_block_scanned !== 'number' ||
+        !Number.isInteger(body.contiguous_block_scanned) ||
+        body.contiguous_block_scanned < 0)
+    ) {
+      return jsonResponse(
+        { error: 'contiguous_block_scanned must be a non-negative integer when present' },
+        400,
+        cors,
+      );
+    }
 
     // Direct mode: the authenticated user must own this connection.
     // Platform mode: trust the caller's app_user_id (platform has its own
@@ -156,11 +203,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       callerPlatformId,
       body.connection_id,
       body.last_block_scanned,
+      body.contiguous_block_scanned,
     );
     if (isAdvanceCursorError(cursorResult)) {
       return jsonResponse({ error: cursorResult.error }, cursorResult.status, cors);
     }
     const effectiveCursor = cursorResult.effectiveCursor;
+    // The height this call was allowed to claim, after the contiguity ceiling
+    // (OR-T1914). Equal to body.last_block_scanned whenever no ceiling was sent
+    // or the ceiling was not lower.
+    const boundedHeight = cursorResult.boundedHeight;
 
     // Record the scan range when the caller supplies from_height (DL-1478).
     //
@@ -175,7 +227,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     await recordScanRange(ctx.serviceClient, {
       connection_id:      body.connection_id,
       app_user_id:        body.app_user_id,
-      last_block_scanned: body.last_block_scanned,
+      // The BOUNDED height, not the posted one. A range recorded as
+      // [from_height, posted] while the cursor was only allowed to reach the
+      // lower bounded height would be read back by the resume path as coverage
+      // for blocks nobody scanned, which is the same silent loss the ceiling
+      // exists to prevent, written into a different table.
+      last_block_scanned: boundedHeight,
       from_height:        body.from_height,
     });
 
