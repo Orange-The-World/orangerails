@@ -23,6 +23,18 @@
  * ceiling. What it can do is refuse to let a second number raise the cursor,
  * and that is what this does.
  *
+ * THE FENCE (OR-T2457). The forward-only guard below is `last_block_scanned
+ * IS NULL OR last_block_scanned < boundedHeight`, and applyEnvelopeReplacement
+ * sets last_block_scanned to NULL on every reset, so on its own that guard
+ * treats a just-reset connection exactly like a brand new one: anything may
+ * write. A write queued before the reset, from a sync of the OLD envelope,
+ * used to sail through and put the pre-reset height back, silently
+ * defeating the rescan the reset exists to trigger. scanGeneration closes
+ * that: it is REQUIRED, not optional like the ceiling above, because unlike
+ * a caller lying about its own scan tip, a caller with no fresh generation
+ * is indistinguishable from one carrying a stale one, and accepting that
+ * silently is the exact defect this closes.
+ *
  * Exported so unit tests can exercise the cursor cases without driving the full
  * HTTP handler:
  *   1. Forward advance: bounded height > stored -> UPDATE fires -> returns it.
