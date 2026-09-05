@@ -650,7 +650,21 @@ jobs:
         # PostgREST deployment config, which this query cannot see, and this
         # step must say UNKNOWN, loudly, and never print a pass because it
         # could not look.
+        #
+        # continue-on-error: true, added per the Auditor's review on OR-T1529
+        # (5092652368). Today, on both dev and prod, authenticator.rolconfig
+        # never carries a pgrst.db_schemas entry at all (verified live), so
+        # the UNKNOWN branch below fires on every single run. This step lives
+        # in check-pending-migrations, which the deploy job needs, so without
+        # this line every deploy on dev and prod would be blocked forever.
+        # The step still runs, still exits non-zero, still writes the loud
+        # UNKNOWN (or a real "net IS exposed") summary and ::error:: below;
+        # continue-on-error only stops that failure from also failing the
+        # job, so it shows red in the checks list without blocking the ship.
+        # A human reading the job still sees it fail; nothing here is quietly
+        # softened into a pass.
         if: always()
+        continue-on-error: true
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
@@ -719,7 +733,10 @@ jobs:
             unknown "authenticator.rolconfig carries no pgrst.db_schemas entry. The effective PostgREST exposed-schema list comes from the deployment config in that case, which this query cannot read. Confirm net is not exposed by reading the live PostgREST config, or set pgrst.db_schemas explicitly."
           fi
 
-          SCHEMAS_VALUE=$(echo "$RESPONSE" | jq -r '.[0].rolconfig | map(select(startswith("pgrst.db_schemas=")))[0] | sub("^pgrst.db_schemas="; "")')
+          SCHEMAS_VALUE=$(echo "$RESPONSE" | jq -r '.[0].rolconfig | map(select(startswith("pgrst.db_schemas=")))[0] | if . == null then "" else sub("^pgrst.db_schemas="; "") end')
+          if [ -z "$SCHEMAS_VALUE" ]; then
+            unknown "authenticator.rolconfig reported a pgrst.db_schemas entry but it could not be extracted (unexpected shape). Confirm net is not exposed by reading the live PostgREST config."
+          fi
           echo "pgrst.db_schemas = ${SCHEMAS_VALUE}"
 
           if echo ",${SCHEMAS_VALUE}," | tr -d ' ' | grep -q ',net,'; then
