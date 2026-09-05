@@ -504,6 +504,20 @@ function readablePiece(piece) {
 }
 
 /**
+ * A run of privilege names, comma separated, each optionally followed by a
+ * parenthesised column list (`SELECT (a, b)`), and nothing else. Used to spot
+ * a guarded word (TRUNCATE, EXECUTE) sitting inside a GRANT/REVOKE privilege
+ * list when it is NOT the first privilege named: Postgres privilege lists are
+ * comma separated and the order is arbitrary, so `GRANT SELECT, TRUNCATE ...`
+ * names a privilege exactly as much as `GRANT TRUNCATE ...` does. Anchored
+ * the same way the single-word check it replaces was anchored: nothing here
+ * accepts arbitrary text between GRANT/REVOKE and the guarded word, only more
+ * privilege names, so OR-T2188's anchoring is not reopened.
+ */
+const PRIVILEGE_LIST_PREFIX =
+  /\b(?:GRANT|REVOKE)\s+(?:[A-Za-z]+(?:\s*\([^()]*\))?\s*,\s*)*$/i;
+
+/**
  * True when this statement runs SQL that cannot be read from the file.
  *
  * GRANT EXECUTE and REVOKE EXECUTE name a privilege on a function. They run
@@ -517,13 +531,16 @@ function readablePiece(piece) {
  * EXECUTE after it. Comments in this repo's security migrations say REVOKE
  * constantly, so that is reachable with ordinary text, and it fails in the
  * direction that costs data: REVERSIBLE on a file that drops a table at apply
- * time.
+ * time. The anchor accepts a privilege LIST before EXECUTE (see
+ * PRIVILEGE_LIST_PREFIX), not only the bare word, so `GRANT USAGE, EXECUTE ...`
+ * is recognised as a privilege grant the same as `GRANT EXECUTE ...` is
+ * (OR-T2212).
  */
 function executeIsUnreadable(flat) {
   const re = /\bEXECUTE\b/gi;
   let m = re.exec(flat);
   while (m !== null) {
-    if (!/\b(GRANT|REVOKE)\s+$/i.test(flat.slice(0, m.index))) {
+    if (!PRIVILEGE_LIST_PREFIX.test(flat.slice(0, m.index))) {
       const arg = executeArgument(flat.slice(m.index + 'EXECUTE'.length));
       if (!splitTop(arg, '||').every(readablePiece)) return true;
     }
@@ -544,9 +561,14 @@ function executeIsUnreadable(flat) {
  * earlier in the same statement, reachable once a single EXECUTE literal can
  * carry more than one real SQL statement (OR-T1709 stopped blanking the
  * semicolons that used to split them apart). See OR-T2188.
+ *
+ * The anchor accepts a privilege LIST before TRUNCATE (see
+ * PRIVILEGE_LIST_PREFIX), not only the bare word: privilege lists are comma
+ * separated and the order is arbitrary, so `GRANT SELECT, TRUNCATE ...` names
+ * a privilege exactly as much as `GRANT TRUNCATE ...` does (OR-T2212).
  */
 function truncateIsPrivilegeName(s, matchIndex) {
-  return /\b(GRANT|REVOKE)\s+$/i.test(s.slice(0, matchIndex));
+  return PRIVILEGE_LIST_PREFIX.test(s.slice(0, matchIndex));
 }
 
 /**
@@ -563,12 +585,56 @@ function truncateIsPrivilegeName(s, matchIndex) {
  * "read no further than the next real boundary" anchoring executeArgument
  * already uses for USING/INTO, so a WHERE past that boundary belongs to
  * someone else's statement and does not count. See OR-T2188.
+ *
+ * The scan for that boundary keyword skips over parenthesised text (see
+ * maskNested below), because SELECT is itself a statement-start keyword and a
+ * `DELETE FROM t USING (SELECT ...) WHERE ...` has its own WHERE sitting
+ * after a parenthesised SELECT that must not be read as the boundary
+ * (OR-T2212).
  */
 const STATEMENT_START =
   /\b(SELECT|INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|DO|WITH|BEGIN|COMMIT|ROLLBACK|VACUUM|ANALYZE|COPY|CALL)\b/i;
 
+/**
+ * `text` with everything inside parentheses, and inside string literals,
+ * replaced by spaces, character for character, so offsets into the result
+ * still line up with `text`. Lets deleteHasOwnWhere regex-match a
+ * statement-start keyword that is only meaningful at the top level, without a
+ * keyword sitting inside a subquery being mistaken for one.
+ */
+function maskNested(text) {
+  const out = [];
+  let depth = 0;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "'") {
+      const end = endOfLiteral(text, i);
+      const stop = end === -1 ? text.length : end;
+      out.push(' '.repeat(stop - i));
+      i = stop;
+      continue;
+    }
+    if (c === '(') {
+      depth += 1;
+      out.push(' ');
+      i += 1;
+      continue;
+    }
+    if (c === ')') {
+      depth = Math.max(0, depth - 1);
+      out.push(' ');
+      i += 1;
+      continue;
+    }
+    out.push(depth === 0 ? c : ' ');
+    i += 1;
+  }
+  return out.join('');
+}
+
 function deleteHasOwnWhere(s, afterIndex) {
-  const rest = s.slice(afterIndex);
+  const rest = maskNested(s.slice(afterIndex));
   const whereMatch = /\bWHERE\b/i.exec(rest);
   if (!whereMatch) return false;
   const boundaryMatch = STATEMENT_START.exec(rest);
@@ -834,6 +900,22 @@ const EXPECTED = {
   '20990101000020_irreversible_delete_without_where_before_later_where.sql': {
     verdict: IRREVERSIBLE,
     id: 'DELETE WITHOUT WHERE',
+  },
+  // OR-T2212, defect 1: TRUNCATE and EXECUTE named as a privilege inside a
+  // privilege list where they are not the first privilege, so the anchor must
+  // accept a privilege LIST, not just the bare word immediately after
+  // GRANT/REVOKE.
+  '20990101000021_reversible_truncate_and_execute_privilege_list_ordering.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+  },
+  // OR-T2212, defect 2: a DELETE's own WHERE sits after a parenthesised
+  // SELECT in a USING clause. SELECT is a statement-start keyword, so the
+  // boundary scan must skip parenthesised text or it reads the subquery's
+  // SELECT as the boundary and misses the WHERE that follows it.
+  '20990101000022_reversible_delete_using_subquery_has_own_where.sql': {
+    verdict: REVERSIBLE,
+    id: null,
   },
 };
 
