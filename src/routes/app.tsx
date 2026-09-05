@@ -335,6 +335,14 @@ function AppHome() {
             .eq("user_id", ownerId)
             .single();
           if (classifyRead(ownerMeta, ownerMetaErr) === "error") {
+            // A genuine failure (RLS refusal, dropped connection, renamed
+            // column), not the ordinary "not a co-admin of this workspace
+            // yet" case. That used to be console-only, so it presented
+            // exactly like an absent workspace. Surface it the same way the
+            // wrapped-key read below already does.
+            setErr(
+              `Could not load a workspace you administer: ${formatError(ownerMetaErr)}`,
+            );
             console.warn(
               `Failed to load vault meta for workspace owner ${ownerId}, skipping this workspace: ${formatError(ownerMetaErr)}`,
             );
