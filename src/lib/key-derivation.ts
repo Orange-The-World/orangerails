@@ -56,16 +56,26 @@ export type HkdfContext = (typeof HKDF_CONTEXTS)[keyof typeof HKDF_CONTEXTS];
  * Derive a 256-bit subkey from the MEK using HKDF with a distinct context.
  *
  * The returned CryptoKey is imported as AES-256-GCM, usable for encrypt/decrypt.
- * The raw bytes are never extracted back out into JavaScript.
  *
- * @param mek       MEK as produced by deriveMEK() in vault.ts.
- * @param context   One of HKDF_CONTEXTS.
- * @param saltB64   The user's vault salt (same salt used for Argon2id). Base64.
+ * EXTRACTABLE BY DEFAULT, and that default is load bearing. The credentials and
+ * transactions subkeys are exported once as raw bytes for the sync handoff
+ * (exportCredentialsKeyForSync and exportTransactionsKeyForSync in
+ * VaultContext), so they cannot be imported non-extractable. Every other subkey
+ * should pass { extractable: false }: a key that is only ever used locally has
+ * nothing to gain from being exportable, and AES-GCM encrypt and decrypt work
+ * exactly the same either way.
+ *
+ * @param mek              MEK as produced by deriveMEK() in vault.ts.
+ * @param context          One of HKDF_CONTEXTS.
+ * @param saltB64          The user's vault salt (same salt used for Argon2id). Base64.
+ * @param opts.extractable false imports the key so its raw bytes can never be
+ *                         read back into JavaScript. Defaults to true.
  */
 export async function deriveSubkey(
   mek: CryptoKey,
   context: HkdfContext,
   saltB64: string,
+  { extractable = true }: { extractable?: boolean } = {},
 ): Promise<CryptoKey> {
   const saltBytes = base64ToBytes(saltB64);
   const infoBytes = new TextEncoder().encode(context);
@@ -82,7 +92,7 @@ export async function deriveSubkey(
     256,
   );
 
-  return importAesKey(rawBits);
+  return extractable ? importAesKey(rawBits) : importAesKeyNonExtractable(rawBits);
 }
 
 /**
@@ -102,13 +112,27 @@ export async function deriveTransactionsKey(mek: CryptoKey, saltB64: string): Pr
 /**
  * Convenience: derive the subkey used to wrap PQC secret keys at rest.
  *
- * Extractable so the same AES-256-GCM CryptoKey can be handed to
- * encryptString/decryptString in src/lib/vault.ts. The wrapped
- * output lives in user_vault_meta.kem_secret_wrapped and
+ * The wrapped output lives in user_vault_meta.kem_secret_wrapped and
  * user_vault_meta.sig_secret_wrapped.
+ *
+ * NON-EXTRACTABLE, and it is worth saying why, because this function used to
+ * claim the opposite was required. Every consumer of this key reaches it
+ * through encryptString or decryptString in src/lib/vault.ts, and those two
+ * call crypto.subtle.encrypt and crypto.subtle.decrypt and nothing else, so a
+ * key imported with encrypt and decrypt usages is all they need. Nothing on
+ * this path exports the key: the wrap and unwrap helpers in pqc-lifecycle.ts,
+ * the grant and consume paths in co-admin.ts, and the rotation path in
+ * VaultContext all pass the CryptoKey itself. Making it non-extractable costs
+ * nothing here and removes one way the bytes that open both PQC secret keys
+ * could be read back into JavaScript.
+ *
+ * The derived bytes are unchanged, so secrets wrapped before this change still
+ * open: only the import flag differs.
  */
 export async function derivePqcSecretWrapKey(mek: CryptoKey, saltB64: string): Promise<CryptoKey> {
-  return deriveSubkey(mek, HKDF_CONTEXTS.ORANGERAILS_PQC_SECRET_WRAP_V1, saltB64);
+  return deriveSubkey(mek, HKDF_CONTEXTS.ORANGERAILS_PQC_SECRET_WRAP_V1, saltB64, {
+    extractable: false,
+  });
 }
 
 /**
