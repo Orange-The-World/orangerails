@@ -19,6 +19,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history, because the migration ORDER check below compares this branch
+          # against the base branch and a depth-1 checkout has no base to compare against.
+          # It refuses rather than passing when the base is unreachable, so a shallow
+          # checkout here would turn a real gate into a red build, not a silent one.
+          fetch-depth: 0
 
       - name: Migration version self-test
         # First, and before the toolchain, deliberately. This needs nothing but the node the
@@ -36,6 +42,33 @@ jobs:
         # apply has already run, so on a pull request nothing was looking. It fails hard when
         # it enumerates zero files: a run that checked nothing is not a run that passed.
         run: node scripts/check-migration-versions.mjs
+
+      - name: Migration order self-test
+        # Same reasoning as the uniqueness self-test above and for the same reason it runs
+        # first: a broken comparison must fail as a broken comparison rather than as a silent
+        # pass. Its thirteen cases exercise both directions, including the ordinary in-order
+        # file with no marker, which is the path every normal migration takes.
+        run: node scripts/check-migration-order.mjs --selftest
+
+      - name: Migration order check
+        # A real gate, no continue-on-error, and it only has anything to say on a pull
+        # request that adds a migration.
+        #
+        # WHY IT IS HERE AND NOT ONLY IN THE DEPLOY WORKFLOW. supabase-deploy.yml already
+        # refuses an out-of-order migration, and it does it well. It runs on a push to dev
+        # and prod. It never runs on a pull request. So a pull request can be green,
+        # approved and CLEAN while carrying a file that makes the apply job refuse the WHOLE
+        # run the moment it lands: apply-migrations fails, check-pending-migrations fails,
+        # deploy is skipped, and every unrelated change queued behind it stops with them.
+        # On 2026-09-05 dev spent most of the day in that state and sixteen open pull
+        # requests were queued to do it again. Nothing told any of their authors.
+        #
+        # The escape hatch is the same OUT-OF-ORDER-OK line the deploy guard reads, so an
+        # author who satisfies this satisfies that one too.
+        if: github.event_name == 'pull_request'
+        run: |
+          node scripts/check-migration-order.mjs \
+            --base="origin/${{ github.event.pull_request.base.ref }}"
 
       # The project is managed with Bun (bun.lock, bunfig.toml).
       - name: Setup Bun
