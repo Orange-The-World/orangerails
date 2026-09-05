@@ -228,6 +228,27 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
       const supabaseUrl =
         (import.meta.env.VITE_SUPABASE_URL as string | undefined) ||
         "https://fzwmnzmtqidumdqjdddz.supabase.co";
+      // Tell the opener a write is STARTING, and which one, before it starts.
+      // If the popup is closed during the write, the success postMessage below
+      // can never run (keepalive delivers the request, it does not keep this JS
+      // context alive), so this is the opener's only record that an attempt
+      // exists at all. It is paired with OR_QUILTT_POPUP_CLOSED_WHILE_SUBMITTING
+      // on unload.
+      if (window.opener) {
+        try {
+          window.opener.postMessage(
+            {
+              type: "OR_QUILTT_LINK_SUBMITTED",
+              platformSlug: params.platform_slug,
+              appUserId: params.app_user_id,
+              widgetToken: params.widget_token,
+            },
+            "*",
+          );
+        } catch {
+          // opener may be cross-origin in some embeddings; swallow silently.
+        }
+      }
       const resp = await fetch(`${supabaseUrl}/functions/v1/or-quiltt-link-complete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -293,21 +314,40 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   //
   // Three cases on unload:
   //   "done"       -- clean auto-close after OR_QUILTT_LINK_COMPLETE was sent; no message needed.
-  //   "completing" -- keepalive fetch is in flight; it will complete and send OR_QUILTT_LINK_COMPLETE
-  //                   even after the popup closes. Sending CLOSED_INCOMPLETE here would be wrong.
+  //   "completing" -- the write is in flight. keepalive: true makes the browser DELIVER the request
+  //                   after unload, but it does NOT keep this JavaScript context alive: the awaited
+  //                   promise never resumes, so the success postMessage above can never run. The
+  //                   server write may well have succeeded, so staying silent here is the worst
+  //                   outcome. We send OR_QUILTT_POPUP_CLOSED_WHILE_SUBMITTING and the opener
+  //                   reconciles by READING state, not by re-POSTing (the widget_token is claimed
+  //                   atomically and is single use, so a second POST is guaranteed to be refused).
   //   anything else -- genuine abandonment or error; opener cannot distinguish from silent failure,
   //                   so we send OR_QUILTT_POPUP_CLOSED_INCOMPLETE.
   useEffect(() => {
     function onPageHide() {
-      if (phase !== "done" && phase !== "completing" && window.opener) {
-        try {
+      if (phase === "done" || !window.opener) return;
+      try {
+        if (phase === "completing") {
+          // A write was in flight when the popup went away. Different fact from
+          // abandonment, and deliberately a different message type: this one
+          // means "go and reconcile", the other means "nothing was attempted".
+          window.opener.postMessage(
+            {
+              type: "OR_QUILTT_POPUP_CLOSED_WHILE_SUBMITTING",
+              platformSlug: params.platform_slug,
+              appUserId: params.app_user_id,
+              widgetToken: params.widget_token,
+            },
+            "*",
+          );
+        } else {
           window.opener.postMessage(
             { type: "OR_QUILTT_POPUP_CLOSED_INCOMPLETE" },
             "*",
           );
-        } catch {
-          // opener may be cross-origin in some embeddings; swallow silently.
         }
+      } catch {
+        // opener may be cross-origin in some embeddings; swallow silently.
       }
     }
     window.addEventListener("pagehide", onPageHide);
