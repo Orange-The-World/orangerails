@@ -1198,7 +1198,19 @@ jobs:
             echo "::error::ledger shape self-test FAILED: a JSON array of rows was refused, so a healthy ledger response would abort the apply."
             LEDGER_ST_FAIL=1
           fi
-
+          if ! ledger_shape_ok '[]'; then
+            echo "::error::ledger shape self-test FAILED: an empty JSON array was refused. An empty ledger is a legitimate answer on a fresh project and must be readable as zero applied versions."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '[{"foo":1}]'; then
+            echo "::error::ledger shape self-test FAILED: an array of objects with no version key was accepted as a ledger (OR-T2190). That is the exact defect this guard exists for: .[].version over a versionless row yields null, APPLIED comes back empty, and every file in the tree is treated as unapplied."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '[1,2,3]'; then
+            echo "::error::ledger shape self-test FAILED: an array of non-object elements was accepted as a ledger (OR-T2190)."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '{"message":"Unauthorized"}'; then
             echo "::error::ledger shape self-test FAILED: a JSON object was accepted as a ledger. That is the exact defect this guard exists for: .[].version over an object yields nothing, APPLIED comes back empty, and every file in the tree is treated as unapplied."
             LEDGER_ST_FAIL=1
           fi
