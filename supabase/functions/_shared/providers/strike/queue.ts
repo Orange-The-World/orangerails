@@ -175,11 +175,13 @@ export async function drainStrikeQueue(args: {
       // single connection-row write.
       const marker = strikeSubscriptionErrorMarker(message);
       if (marker === 'STRIKE_SCOPE_MISSING_partner.webhooks.manage') {
+        // Platform-side failure. Customer-facing copy for this marker is
+        // locked in the shared error catalog: platform error framing, no key
+        // rotation or scope instruction for the customer.
         console.error(
-          `[strike-queue] connection ${conn.id} key is missing the ` +
-          `partner.webhooks.manage scope; webhooks cannot be registered. ` +
-          `Customer must regenerate the key from the API Key section on dashboard.strike.me ` +
-          `with that scope enabled. Detail: ${message.slice(0, 200)}`,
+          `[strike-queue] connection ${conn.id}: Strike webhook subscription ` +
+          `could not be registered (platform-side issue, not the customer's ` +
+          `key or settings). Detail: ${message.slice(0, 200)}`,
         );
       } else {
         console.error(
