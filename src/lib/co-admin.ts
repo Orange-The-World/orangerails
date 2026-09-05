@@ -373,9 +373,53 @@ export async function persistCoAdminGrant(params: {
     throw new CoAdminGrantIncompleteError(
       "This co-admin was added to your list, but the key that gives them access was not stored, " +
         "so they cannot open any of your data. They are shown in your list on purpose, so the " +
-        "attempt is visible rather than silent. Reload the page, then either try granting again " +
-        `or remove them from your list. (${errorText(wdkErr)})`,
+        "attempt is visible rather than silent. Either try granting again or remove them from " +
+        `your list. (${errorText(wdkErr)})`,
     );
+  }
+}
+
+/**
+ * Run a grant, and refresh the caller's co-admin list if and only if the
+ * grant left a real workspace_admins row behind that the caller cannot yet
+ * see.
+ *
+ * WHY THIS EXISTS. persistCoAdminGrant writes the list row before the
+ * wrapped key on purpose (see its docstring), so a failure after that point
+ * throws CoAdminGrantIncompleteError with a real, unseen row sitting in
+ * workspace_admins. GrantCoAdminDialog's onSubmit needs to re-read the list
+ * in that one case, so the caller sees the entry without reloading the page,
+ * and needs to do nothing extra in every other case, because nothing new was
+ * written. This function is that branch, pulled out of the dialog's React
+ * closure so it can be pinned with fakes instead of a full render.
+ *
+ * THE REFRESH IS BEST-EFFORT. Its own failure is swallowed via `onRefreshError`
+ * rather than thrown, because the grant error is the one the caller has to
+ * see: losing it to a refresh failure would tell the owner nothing went wrong
+ * when something did.
+ *
+ * WHAT IS DELIBERATELY NOT DONE HERE. On success this does not call
+ * `refreshList`: the caller already knows to re-read its list after a
+ * successful grant, and folding that in would make the "only refresh when
+ * something was left behind" rule harder to see at the call site.
+ */
+export async function grantCoAdminWithRefresh<T>(params: {
+  grant: () => Promise<T>;
+  refreshList: () => Promise<void>;
+  onRefreshError?: (err: unknown) => void;
+}): Promise<T> {
+  const { grant, refreshList, onRefreshError } = params;
+  try {
+    return await grant();
+  } catch (err) {
+    if (err instanceof CoAdminGrantIncompleteError) {
+      try {
+        await refreshList();
+      } catch (refreshErr) {
+        onRefreshError?.(refreshErr);
+      }
+    }
+    throw err;
   }
 }
 

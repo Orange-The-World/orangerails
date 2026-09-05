@@ -7,6 +7,7 @@ import type { GrantSupabaseLike } from "@/context/VaultContext";
 import {
   clearCoAdminListEntry,
   CoAdminRevocationIncompleteError,
+  grantCoAdminWithRefresh,
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
@@ -937,6 +938,34 @@ function AppHome() {
     }
   }
 
+  /**
+   * Re-read workspace_admins and resolve emails, then update coAdmins state.
+   *
+   * Shared by the grant success path and the grant-failure path in
+   * GrantCoAdminDialog's onSubmit below. A failed grant can still have
+   * written the workspace_admins row (see CoAdminGrantIncompleteError in
+   * src/lib/co-admin.ts): the list row is written before the wrapped key on
+   * purpose, so a stop between the two leaves the evidence visible. This is
+   * how that left-behind entry shows up on the screen the owner is already
+   * looking at, instead of only after they reload.
+   */
+  async function refreshCoAdminList(ownerId: string) {
+    const { data: admins } = await supabase
+      .from("workspace_admins")
+      .select("id, admin_user_id, added_at")
+      .eq("owner_user_id", ownerId);
+    const freshRows = (admins ?? []) as CoAdminRow[];
+    const freshIds = freshRows.map((r) => r.admin_user_id);
+    const emailMap = new Map<string, string>();
+    if (freshIds.length > 0) {
+      const { data: emailRows } = await supabase.rpc("get_coadmin_emails", { user_ids: freshIds });
+      for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
+        emailMap.set(row.user_id, row.email);
+      }
+    }
+    setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
+  }
+
   async function handleSignOut() {
     lock();
     await supabase.auth.signOut();
@@ -1393,33 +1422,28 @@ function AppHome() {
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
           onSubmit={async ({ targetEmail, password }) => {
-            const result = await grantCoAdmin({
-              ownerUserId: userId,
-              ownerSaltB64: vaultSalt,
-              ownerPassword: password,
-              targetEmail,
-              existingKeyId: workspaceKeyId,
-              supabase: supabase as unknown as GrantSupabaseLike,
+            const result = await grantCoAdminWithRefresh({
+              grant: () =>
+                grantCoAdmin({
+                  ownerUserId: userId,
+                  ownerSaltB64: vaultSalt,
+                  ownerPassword: password,
+                  targetEmail,
+                  existingKeyId: workspaceKeyId,
+                  supabase: supabase as unknown as GrantSupabaseLike,
+                }),
+              refreshList: () => refreshCoAdminList(userId),
+              onRefreshError: (refreshErr) =>
+                console.warn(
+                  "[OrangeRails] Co-admin list refresh after a failed grant also failed:",
+                  refreshErr,
+                ),
             });
             void logSecurityEvent(supabase, userId, "coadmin_granted", { target_email: targetEmail });
             if (result.workspaceKeyId !== workspaceKeyId) {
               setWorkspaceKeyId(result.workspaceKeyId);
             }
-            // Reload co-admin list with resolved emails.
-            const { data: admins } = await supabase
-              .from("workspace_admins")
-              .select("id, admin_user_id, added_at")
-              .eq("owner_user_id", userId);
-            const freshRows = (admins ?? []) as CoAdminRow[];
-            const freshIds = freshRows.map((r) => r.admin_user_id);
-            const emailMap = new Map<string, string>();
-            if (freshIds.length > 0) {
-              const { data: emailRows } = await supabase.rpc("get_coadmin_emails", { user_ids: freshIds });
-              for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
-                emailMap.set(row.user_id, row.email);
-              }
-            }
-            setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
+            await refreshCoAdminList(userId);
             setNotice("Co-admin added. They'll see your data on their next unlock.");
           }}
         />
