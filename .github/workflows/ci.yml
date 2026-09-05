@@ -73,6 +73,24 @@ jobs:
         # the script header for that boundary in full.
         run: node scripts/check-anon-rpc-grants.mjs
 
+      - name: Credential column grant self-test
+        # Same reasoning as the step above: the parser IS the control. This one has more to
+        # get wrong, because the migrations it reads run their GRANT and REVOKE inside DO
+        # blocks as EXECUTE format(...), so a parser that skips dollar quoted bodies reports
+        # green over a file it never read.
+        run: node scripts/check-credential-column-grants.mjs --selftest
+
+      - name: Credential column grant check
+        # A real gate, no continue-on-error. Replays the migrations in order and fails if anon,
+        # authenticated or PUBLIC is left holding any privilege on a server side credential
+        # column of public.platforms or public.apps, whether by a column grant or by a table
+        # wide GRANT that covers every column at once. Two migrations assert this end state
+        # already, but a migration is applied once and never runs again, and nothing in this
+        # workflow replays migrations against a database, so those assertions cannot keep
+        # watching. Source scan only: a grant typed straight into a SQL console never reaches a
+        # migration and is not visible here. See the script header for that boundary in full.
+        run: node scripts/check-credential-column-grants.mjs
+
       - name: Anon ACL snapshot self-test
         # The other half of the same control, and the half that reads a real database rather
         # than our SQL. No credential lives in CI, so the check itself runs against a catalog
