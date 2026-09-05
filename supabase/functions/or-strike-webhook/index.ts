@@ -34,6 +34,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
+import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const CONN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -178,8 +179,17 @@ function timingSafeEqual(a: string, b: string): boolean {
 // (Strike) gets, so every error is caught and logged, never thrown.
 const STRIKE_BAD_SIG_THRESHOLD = 3;
 
+// The client parameter is typed SupabaseClient, not ReturnType<typeof
+// createClient>. Those are not the same type. createClient(url, key) with no
+// explicit Database argument returns SupabaseClient<any, "public", ...>, while
+// ReturnType<typeof createClient> resolves the generic DEFAULTS instead and
+// yields a schema of never. Under never, .rpc() types its args parameter as
+// undefined and .update() types its payload as never, so the two calls below
+// could not be written at all. Bare SupabaseClient is what _shared/
+// connection-state.ts and _shared/quiltt-config.ts already use for exactly
+// this, so this follows the convention rather than inventing one.
 async function recordBadSig(
-  client: ReturnType<typeof createClient>,
+  client: SupabaseClient,
   connId: string,
 ): Promise<void> {
   // strike_bump_bad_sig does the read and the write as one UPDATE, so two
@@ -203,7 +213,7 @@ async function recordBadSig(
   }
 }
 
-async function clearBadSig(client: ReturnType<typeof createClient>, connId: string): Promise<void> {
+async function clearBadSig(client: SupabaseClient, connId: string): Promise<void> {
   try {
     await client.from('connections').update({ strike_bad_sig_count: 0 }).eq('id', connId);
   } catch (err) {
