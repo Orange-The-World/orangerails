@@ -53,15 +53,13 @@ export interface SyncCompletedInput {
    */
   syncedCount: number;
   /**
-   * Upstream provider, when the emitting path knows it.
+   * Upstream provider that triggered this sync, e.g. 'quiltt', 'strike', 'blink'.
    *
-   * Deliberately flat-only: it is NOT copied into `data`, because `data` is
-   * contractually the SDK's declared type and adding an undeclared field
-   * there would make the published types wrong. A consumer that needs it can
-   * read it off the top level, where it has always been. Whether it should be
-   * promoted into the SDK type is a separate decision, tracked on DL-1565.
+   * Required. Placed inside `data` (and mirrored at the top level for
+   * backwards compat with flat-field receivers) per the CTO ruling on DL-1565.
+   * Corresponds to `SyncCompletedEvent['data']['provider']` in the SDK types.
    */
-  provider?: string;
+  provider: string;
   /** Override for tests. Production callers should omit it. */
   ts?: string;
 }
@@ -82,13 +80,15 @@ export function buildSyncCompletedPayload(
     subaccount_id: input.subaccountId,
     connection_id: input.connectionId,
     synced_count: input.syncedCount,
+    provider: input.provider,
     ts,
   };
 
   return {
     // Legacy flat shape. Read by receivers written before the SDK.
+    // provider is kept here for backwards compat; canonical source is data.provider.
     event: SYNC_COMPLETED,
-    ...(input.provider ? { provider: input.provider } : {}),
+    provider: input.provider,
     ...data,
     // Canonical shape. Read by @orangerails/webhooks constructEvent().
     type: SYNC_COMPLETED,
