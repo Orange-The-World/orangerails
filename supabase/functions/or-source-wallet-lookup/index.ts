@@ -51,7 +51,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (!body.source_wallet_id || typeof body.source_wallet_id !== 'string') {
       return jsonResponse({ error: 'source_wallet_id required' }, 400, cors);
     }
-    if (!UUID_RE.test(body.source_wallet_id)) {
+    if (body.source_wallet_id.length !== 36 || !UUID_RE.test(body.source_wallet_id)) {
       return jsonResponse({ error: 'source_wallet_id must be a UUID' }, 400, cors);
     }
 
