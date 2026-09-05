@@ -61,15 +61,26 @@ interface DecryptedSourceWallet {
   label?: string | null;
 }
 
+/**
+ * The columns of public.connections this client is allowed to read.
+ *
+ * authenticated holds a COLUMN level SELECT grant on this table, not a table
+ * level one, so that a signed in user cannot read their own connection's
+ * strike_webhook_secret. See the migration
+ * 20260902040000_connections_column_level_select.sql for the full column set
+ * and the reasoning. Adding a field here means adding it to that grant too,
+ * or the list query starts failing with a permission error.
+ *
+ * subaccount_id is deliberately absent: it is in the SELECT list of the query
+ * below only because Postgres requires SELECT privilege on a column used in a
+ * WHERE clause, and nothing in this client reads its value.
+ */
 interface Connection {
   id: string;
   provider_type: string;
   encrypted_label: string | null;
-  encrypted_credentials: string;
-  credentials_key_version: number;
   status: "pending" | "active" | "error" | "disconnected" | "partial";
   last_sync_at: string | null;
-  last_sync_cursor: string | null;
   encrypted_last_error: string | null;
   created_at: string;
   // Derived client-side after decryption. Never stored in the DB row.
