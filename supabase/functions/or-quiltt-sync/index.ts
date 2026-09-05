@@ -554,6 +554,11 @@ export async function handleEvent(
   let after: string | null = null;
   let pages = 0;
   let newRows = 0;
+  // Writes this function could not land. Kept separate from newRows on purpose:
+  // how much arrived and how much was refused are two different questions and
+  // must never be answerable by the same number.
+  let failedRows = 0;
+  let firstInsertError: string | null = null;
   let budgetExhausted = false;
   const eventStartMs = Date.now();
 
@@ -669,6 +674,19 @@ export async function handleEvent(
           { onConflict: 'connection_id,external_id', ignoreDuplicates: true },
         );
       if (insert.error) {
+        // A refused write is not a row we did not have to make. This used to be
+        // logged and then dropped: the loop carried on, the event returned
+        // 'processed', the inbox row was consumed with last_error NULL, and the
+        // only trace of the lost transaction was a log line. Of every exit in
+        // this function that ends without writing a row, this is the only one
+        // that leaves NOTHING in the database, so it cannot be counted after
+        // the fact and a total write failure looks exactly like having nothing
+        // to write.
+        //
+        // Counted here and turned into an error after the walk (see below), so
+        // the event stays in the inbox and retries.
+        failedRows++;
+        if (firstInsertError === null) firstInsertError = insert.error.message;
         console.error(`[or-quiltt-sync] tx insert failed (${tx.id}):`, insert.error.message);
       } else {
         newRows++;
@@ -685,6 +703,28 @@ export async function handleEvent(
       // full pull.
       budgetExhausted = true;
     }
+  }
+
+  // A refused write ends the event as an ERROR, and it does so BEFORE the two
+  // status updates below. Two reasons, and the second is the one that bites.
+  //
+  // First, an event whose rows did not land must retry rather than be consumed.
+  // The upsert is idempotent on (connection_id, external_id) with
+  // ignoreDuplicates, so the retry re-writes nothing it already wrote.
+  //
+  // Second, the !budgetExhausted branch below sets the connection to 'active'
+  // on the reasoning that the pull completed in full and the data is complete.
+  // Running that after a refused write publishes a claim that is untrue, and
+  // the connection then reads as healthy to everything downstream of it.
+  //
+  // redactProviderError is deliberately not applied: this text is our own
+  // database's message, not a provider's, and it is the whole diagnostic value
+  // of the change. It is still length-capped, because last_error is a column
+  // and not a log.
+  if (failedRows > 0) {
+    return `encrypted_transactions write refused for ${failedRows} of ` +
+      `${failedRows + newRows} transaction(s); first error: ` +
+      `${String(firstInsertError).slice(0, 300)}`;
   }
 
   if (budgetExhausted) {
