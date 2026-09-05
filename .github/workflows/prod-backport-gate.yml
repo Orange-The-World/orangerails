@@ -21,10 +21,13 @@ name: prod backport gate
 # prod that dev does not have, and dev is 73 commits ahead of prod with the
 # oldest unpromoted commit 11 days old. The loop is smaller, not gone.
 #
-# NOTE: this check is deliberately NOT a required status check yet. See the pull
-# request that introduced it for why (a pull_request workflow only runs if the
-# file exists on the PR's head branch, so branches cut before this landed would
-# block forever with no error visible anywhere).
+# NOTE: this check IS a required status check on prod today (branch ruleset
+# 20252464 lists "prod PR must have a matching backport to dev" as a required
+# context). Because a pull_request workflow only runs if the file exists on the
+# PR's head branch, a prod pull request opened from a branch that predates this
+# file will produce no check-run for that context at all, and GitHub will block
+# it indefinitely with nothing red visible anywhere. The fix is to rebase or
+# merge such a branch onto a ref that carries this file before opening the PR.
 
 on:
   pull_request:
