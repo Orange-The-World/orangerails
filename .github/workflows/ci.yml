@@ -552,7 +552,58 @@ jobs:
             echo "PLAYWRIGHT_BASE_URL=https://dev.orangerails.com" >> "$GITHUB_ENV"
           fi
 
+      - name: "SCRATCH TEST (DL-2298, not for merge): force readiness gate timeout"
+        # Temporary, this scratch branch only. Forces BASE_URL to a host that
+        # answers but serves no JS bundle, and shortens MAX_ATTEMPTS, so the
+        # DL-1014 readiness gate actually reaches its timeout branch at
+        # least once. Do not merge this step to dev.
+        run: |
+          set -euo pipefail
+          BASE_URL="https://example.com"
+          INTERVAL=2
+          MAX_ATTEMPTS=3
+          attempt=0
+          last_ct="(none)"
+
+          echo "Readiness gate (DL-1014) SCRATCH TEST: polling JS bundle at ${BASE_URL}"
+
+          while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
+            attempt=$(( attempt + 1 ))
+            echo "Attempt ${attempt}/${MAX_ATTEMPTS} ..."
+
+            html=$(curl -sf --max-time 10 "${BASE_URL}/" 2>/dev/null || true)
+
+            bundle_path=$(printf '%s' "$html" \
+              | grep -oE 'src="(/assets/[^"]+\.js)"' \
+              | head -1 \
+              | sed 's/src="//;s/"//') || true
+
+            if [ -n "$bundle_path" ]; then
+              bundle_url="${BASE_URL}${bundle_path}"
+              ct=$(curl -sI --max-time 10 "${bundle_url}" 2>/dev/null \
+                    | grep -i '^content-type:' | head -1 | tr -d '\r\n' || true)
+              last_ct="${ct:-empty}"
+              echo "  bundle: ${bundle_path}"
+              echo "  content-type: ${last_ct}"
+              if printf '%s' "$ct" | grep -qi 'application/javascript'; then
+                echo "Readiness gate PASSED after ${attempt} attempt(s). content-type: ${ct}"
+                exit 0
+              fi
+              echo "  Not ready yet (expected application/javascript, got '${last_ct}')."
+            else
+              echo "  No JS bundle path found in HTML -- CF Pages may still be initializing."
+            fi
+
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then sleep "$INTERVAL"; fi
+          done
+
+          echo "::error::Readiness gate TIMED OUT after ${MAX_ATTEMPTS} attempt(s) \
+          ($((MAX_ATTEMPTS * INTERVAL))s). Last content-type: ${last_ct}. \
+          The deployment is not serving the JS bundle. Aborting."
+          exit 1
+
       - name: Run Playwright
+        if: false
         env:
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
           ACCOUNT_A: ${{ secrets.ACCOUNT_A }}
