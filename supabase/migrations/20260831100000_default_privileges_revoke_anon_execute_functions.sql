@@ -4,6 +4,33 @@
 -- so a newly created function does not arrive with anon EXECUTE already on it.
 --
 -- ============================================================================
+-- OUT OF ORDER, AND WHY THAT IS SAFE FOR THIS PARTICULAR FILE
+-- ============================================================================
+-- OUT-OF-ORDER-OK: ALTER DEFAULT PRIVILEGES is forward looking only and this file touches no existing object, so applying it late is identical to applying it on time (OR-T1027).
+--
+-- The evidence for that one line, so a reviewer does not have to take it:
+--
+-- Version 20260831100000 is BELOW dev's highest applied ledger version, which
+-- was 20260904150000 when this marker was written, and it is not on the
+-- OUT_OF_ORDER_ALLOWLIST in .github/workflows/supabase-deploy.yml. Without this
+-- marker the guard refuses the WHOLE apply run, not just this file, which is
+-- the outage OR-T2256 was opened for. The marker is the route the DBA chose for
+-- that class of file; renumbering was explicitly rejected.
+--
+-- Why late application is a no-op rather than a risk: the only statement in this
+-- file is ALTER DEFAULT PRIVILEGES, which by definition affects objects created
+-- AFTER it runs and never an object that already exists. There is therefore no
+-- migration that could have run in between and be undone by this one, and no
+-- ordering relationship to any other file. The verification block re-reads
+-- pg_default_acl and RAISES on a wrong end state on every path, including the
+-- already correct path, so a late run still asserts rather than assumes.
+--
+-- Written by orangeway/sp-1, who is not the DBA. If the DBA disagrees with this
+-- assessment, remove these lines: the effect is that the migration stops being
+-- mergeable until it is renumbered or allowlisted, not that anything unsafe
+-- reaches a database.
+--
+-- ============================================================================
 -- WHY THIS FILE EXISTS
 -- ============================================================================
 -- Every earlier fix in this family (20260721120000, 20260723190000,
@@ -46,6 +73,28 @@
 -- the vault trigger functions, so this file deliberately re-grants nothing and
 -- revokes nothing on an existing object. Those are separate blast radii and
 -- mixing them into one file is how a small change becomes an incident.
+--
+-- ============================================================================
+-- THIS COVERS FUNCTIONS ONLY. TABLES AND SEQUENCES ARE NOT TOUCHED.
+-- ============================================================================
+-- Read this before reading a green run here as the default privilege problem
+-- being closed. It is not. This file changes exactly one rule: default
+-- privileges for FUNCTIONS in schema public, which is defaclobjtype 'f'.
+--
+-- The same mechanism also carries default privilege rules for TABLES ('r') and
+-- SEQUENCES ('S') in schema public, and on the production project those rules
+-- also hand anon access on every newly created object of those types. That is a
+-- materially larger blast radius than the function case fixed here: a table
+-- arrives readable, where a function only arrives callable.
+--
+-- Those two are deliberately NOT in this file, for the same reason the existing
+-- object ACLs are not: a table or sequence default privilege change can take
+-- read access away from a path that is currently working, so it needs its own
+-- measurement, its own review and its own rollback, and mixing it in here is how
+-- a small change becomes an incident. They are tracked separately.
+--
+-- So the correct reading of a green run of this migration is narrow: a function
+-- created after it no longer arrives with anon EXECUTE. Nothing else changed.
 --
 -- ============================================================================
 -- WHY "FOR ROLE postgres" IS WRITTEN OUT
