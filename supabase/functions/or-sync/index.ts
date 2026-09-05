@@ -349,12 +349,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     let connQuery = ctx.serviceClient
       .from('connections')
-      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at, strike_subscription_id')
+      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at, strike_subscription_id, strike_needs_resubscribe')
       .eq('subaccount_id', subaccountId)
       .neq('status', 'disconnected');
     if (connection_ids?.length) connQuery = connQuery.in('id', connection_ids);
 
-    const { data: connections, error: connErr } = await connQuery;
+    // Cast breaks the supabase-js literal-string union that the select string
+    // produces: adding strike_needs_resubscribe made the union deep enough to
+    // cause TS7022 circular implicit-any on Quiltt variables (resp, json,
+    // pageInfo ...) in the same for-loop scope. Explicit element type here
+    // gives conn a simple type that does not cascade into downstream inference.
+    const { data: connections, error: connErr } = (await connQuery) as unknown as {
+      data: Array<{
+        id: string; provider_type: string; encrypted_credentials: string | null;
+        last_sync_cursor: string | null; created_at: string;
+        strike_subscription_id: string | null; strike_needs_resubscribe: boolean | null;
+      }> | null;
+      error: unknown;
+    };
     if (connErr) throw connErr;
     if (!connections?.length) {
       // When the caller requested specific IDs and none resolved to a regular
@@ -523,7 +535,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       correlation_id?: string;
       message?: string;
       detail?: string;
-      action?: string;
+      action?: string | null;
       help_url?: string | null;
       skip_reason?: string;
       partial?: boolean;
@@ -1271,6 +1283,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               id: conn.id as string,
               strike_subscription_id: (conn as { strike_subscription_id?: string | null }).strike_subscription_id ?? null,
               last_sync_cursor: conn.last_sync_cursor ?? null,
+              needs_resubscribe: (conn as { strike_needs_resubscribe?: boolean | null }).strike_needs_resubscribe ?? false,
             },
             credentials,
             subaccountId: subaccountId as string,
