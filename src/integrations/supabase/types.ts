@@ -1060,6 +1060,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      allocate_workspace_key: { Args: never; Returns: string }
       cleanup_expired_widget_sessions: { Args: never; Returns: number }
       create_or_access_token: { Args: { app_slug: string }; Returns: string }
       get_coadmin_emails: {
