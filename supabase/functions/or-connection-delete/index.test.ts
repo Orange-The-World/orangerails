@@ -14,7 +14,15 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { tryDeleteStealthConnection } from './index.ts';
+import { tryDeleteStealthConnection, importAesKey } from './index.ts';
+
+const TEST_KEY_B64 = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)));
+
+Deno.test('importAesKey grants decrypt only, not encrypt (OR-T0723)', async () => {
+  const key = await importAesKey(TEST_KEY_B64);
+  assertEquals(key.extractable, false);
+  assertEquals([...key.usages], ['decrypt']);
+});
 
 const SUBACCOUNT_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const CONNECTION_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
