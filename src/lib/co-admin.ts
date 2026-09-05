@@ -13,6 +13,24 @@
  *   5. Insert workspace_admins, then wrapped_data_keys. That order is not
  *      interchangeable; see persistCoAdminGrant for why.
  *
+ * ## A GRANT IS FROZEN AT THE MOMENT IT IS MADE. Read this before relying on one.
+ *   The blob holds HKDF subkeys of the OWNER's MEK, captured at step 2 and
+ *   never touched again. It is not a stable property of the workspace.
+ *
+ *   A vault recovery mints a fresh random MEK and rewrites every connection
+ *   and transaction row under the new subkeys. Nothing rewrites the blob. So
+ *   after a recovery every existing grant carries subkeys that open nothing.
+ *
+ *   That failure lands at the wrong layer and makes no noise. The recipient's
+ *   unwrap SUCCEEDS, two perfectly well formed AES-GCM keys are imported, and
+ *   only the decrypts fail. Neither the owner nor the recipient is told the
+ *   grant is dead, and emergency access is exactly the feature whose value is
+ *   that it works on the day it is needed. Re-granting fixes it completely.
+ *
+ *   Changing the vault password does NOT do this. That path re-wraps the same
+ *   MEK under a new KEK rather than rotating it, so the subkeys stay correct.
+ *   Recovery is the only path that rotates.
+ *
  * ## Consume flow (admin side, post-unlock)
  *   1. Fetch wrapped_data_keys row for the owner's workspace_key_id.
  *   2. Unwrap with the admin's own PQC secret key (see unwrapBlob64).
