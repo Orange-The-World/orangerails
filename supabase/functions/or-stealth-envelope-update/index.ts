@@ -90,6 +90,14 @@ interface EnvelopeUpdateRequestBody {
 interface EnvelopeUpdateResponseBody {
   connection_id: string;
   last_block_scanned: number;
+  /**
+   * Present only when the caller supplied from_height and the
+   * record_stealth_scan_range write was rejected by the database. Its
+   * absence means either no range was attempted or the write succeeded.
+   * The cursor advance above already happened and is not affected: this is
+   * purely an observability signal (OR-T0925), not a failure of the request.
+   */
+  scan_range_warning?: string;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -224,7 +232,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // identity, token-pinned above (direct: equals ctx.userId, widget:
     // enforceWidgetAppUser, platform: scoped by platform_id on the row read).
     // DL-1597.
-    await recordScanRange(ctx.serviceClient, {
+    const scanRangeOutcome = await recordScanRange(ctx.serviceClient, {
       connection_id:      body.connection_id,
       app_user_id:        body.app_user_id,
       // The BOUNDED height, not the posted one. A range recorded as
@@ -240,6 +248,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       connection_id: body.connection_id,
       last_block_scanned: effectiveCursor,
     };
+    if (scanRangeOutcome.attempted && !scanRangeOutcome.ok) {
+      resp.scan_range_warning = scanRangeOutcome.message;
+    }
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-envelope-update] fatal:', err);

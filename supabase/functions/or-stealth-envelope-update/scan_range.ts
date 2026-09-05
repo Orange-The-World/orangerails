@@ -72,22 +72,37 @@ export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | nu
   };
 }
 
+/** Outcome of a recordScanRange call, so a caller can tell "not attempted",
+ * "written" and "attempted but rejected by the database" apart. */
+export type ScanRangeOutcome =
+  | { attempted: false }
+  | { attempted: true; ok: true }
+  | { attempted: true; ok: false; message: string };
+
 /**
  * Record the scan range for this request, if it carries one.
  *
- * Failure is logged and swallowed by design: the cursor write that precedes
+ * The write itself stays best-effort by design: the cursor write that precedes
  * this is the safe fallback while range recording is rolled out, so a rejected
- * range must not fail the caller's sync (DL-1478). Note that an ownership
- * rejection from the database lands here as a logged error, which is the
- * correct outcome: nothing is written.
+ * range must not fail the caller's sync (DL-1478). What changed (OR-T0925) is
+ * that the outcome is no longer swallowed after the console.error, it is
+ * returned, so the caller can surface it (a response field, a metric, a
+ * warning) instead of the failure being visible only in a log line. Note that
+ * an ownership rejection from the database lands here as ok:false, which is
+ * the correct outcome: nothing is written, and now the caller can tell.
  */
 // deno-lint-ignore no-explicit-any
-export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<void> {
+export async function recordScanRange(
+  client: any,
+  req: ScanRangeRequest,
+): Promise<ScanRangeOutcome> {
   const args = buildScanRangeArgs(req);
-  if (args === null) return;
+  if (args === null) return { attempted: false };
 
   const { error } = await client.rpc('record_stealth_scan_range', args);
   if (error) {
     console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', error);
+    return { attempted: true, ok: false, message: String(error.message ?? error) };
   }
+  return { attempted: true, ok: true };
 }
