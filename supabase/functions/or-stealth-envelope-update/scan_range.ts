@@ -44,29 +44,44 @@ export interface ScanRangeRequest {
 }
 
 /**
+ * True when from_height itself cannot be used: missing, not a number, not an
+ * integer, or negative. Deliberately does NOT check it against
+ * last_block_scanned -- that is a separate, well-formed-but-out-of-range
+ * rejection (see buildScanRangeArgs below), and recordScanRange logs the two
+ * causes distinctly because they mean different things to someone debugging a
+ * coverage gap (OR-T1953).
+ */
+export function isMalformedFromHeight(from: unknown): boolean {
+  return (
+    from === undefined ||
+    typeof from !== 'number' ||
+    !Number.isInteger(from) ||
+    from < 0
+  );
+}
+
+/**
  * Decide whether this request records a scan range, and build the RPC payload.
  *
  * Returns null when the caller supplied no usable from_height, which is the
- * documented opt-out: those callers get cursor-only behaviour (DL-1478).
+ * documented opt-out: those callers get cursor-only behaviour (DL-1478). A
+ * null return means the range is NOT recorded at all: not deferred, not
+ * retried, simply skipped. recordScanRange logs which of the two rejection
+ * causes applied (malformed from_height, or a well-formed from_height that
+ * exceeds last_block_scanned) so that a later coverage gap can be explained
+ * (OR-T1953).
  *
  * p_app_user_id is req.app_user_id, the caller identity, never a value read
  * back from stealth_connections.
  */
 export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | null {
   const from = req.from_height;
-  if (
-    from === undefined ||
-    typeof from !== 'number' ||
-    !Number.isInteger(from) ||
-    from < 0 ||
-    from > req.last_block_scanned
-  ) {
-    return null;
-  }
+  if (isMalformedFromHeight(from)) return null;
+  if ((from as number) > req.last_block_scanned) return null;
 
   return {
     p_connection_id: req.connection_id,
-    p_from_height: from,
+    p_from_height: from as number,
     p_to_height: req.last_block_scanned,
     p_app_user_id: req.app_user_id,
   };
@@ -80,11 +95,33 @@ export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | nu
  * range must not fail the caller's sync (DL-1478). Note that an ownership
  * rejection from the database lands here as a logged error, which is the
  * correct outcome: nothing is written.
+ *
+ * When buildScanRangeArgs returns null the range is not recorded at all, and
+ * this now logs which of the two causes applied (OR-T1953): a malformed
+ * from_height (missing, non-integer, or negative), or a well-formed
+ * from_height that exceeds last_block_scanned. Before this, that case logged
+ * nothing, so a coverage hole could not be told apart from a range that was
+ * never scanned in the first place.
  */
 // deno-lint-ignore no-explicit-any
 export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<void> {
   const args = buildScanRangeArgs(req);
-  if (args === null) return;
+  if (args === null) {
+    if (isMalformedFromHeight(req.from_height)) {
+      console.warn(
+        '[or-stealth-envelope-update] scan range not recorded: from_height is malformed (missing, non-integer, or negative):',
+        req.from_height,
+      );
+    } else {
+      console.warn(
+        '[or-stealth-envelope-update] scan range not recorded: from_height exceeds last_block_scanned:',
+        req.from_height,
+        '>',
+        req.last_block_scanned,
+      );
+    }
+    return;
+  }
 
   const { error } = await client.rpc('record_stealth_scan_range', args);
   if (error) {

@@ -192,3 +192,67 @@ Deno.test('records at the boundary: from_height 0 is a genesis-start scan, not a
   assertEquals(args?.p_from_height, 0);
   assertEquals(args?.p_app_user_id, CALLER);
 });
+
+Deno.test('logs a distinct line for a malformed from_height, and issues no RPC (OR-T1953)', async () => {
+  let called = false;
+  const client = {
+    rpc() {
+      called = true;
+      return Promise.resolve({ error: null });
+    },
+  };
+
+  const messages: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    messages.push(args);
+  };
+  try {
+    await recordScanRange(client, {
+      connection_id: CONN_ID,
+      app_user_id: CALLER,
+      last_block_scanned: 900_100,
+      from_height: -1,
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assertEquals(called, false);
+  assertEquals(messages.length, 1);
+  const [firstArg] = messages[0];
+  assertEquals(typeof firstArg, 'string');
+  assertEquals((firstArg as string).includes('malformed'), true);
+});
+
+Deno.test('logs a distinct line for from_height exceeding last_block_scanned, and issues no RPC (OR-T1953)', async () => {
+  let called = false;
+  const client = {
+    rpc() {
+      called = true;
+      return Promise.resolve({ error: null });
+    },
+  };
+
+  const messages: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    messages.push(args);
+  };
+  try {
+    await recordScanRange(client, {
+      connection_id: CONN_ID,
+      app_user_id: CALLER,
+      last_block_scanned: 900_000,
+      from_height: 900_001,
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assertEquals(called, false);
+  assertEquals(messages.length, 1);
+  const [firstArg] = messages[0];
+  assertEquals(typeof firstArg, 'string');
+  assertEquals((firstArg as string).includes('exceeds last_block_scanned'), true);
+});
