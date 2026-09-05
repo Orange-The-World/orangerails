@@ -233,6 +233,35 @@ Deno.test('no map row and no payload profile id is not a profile id', () => {
   });
 });
 
+Deno.test('a legacy NULL row is used when no other connection has ever been seen', () => {
+  // The genuine single-connection-never-migrated case: exactly one bank has
+  // ever synced here, so the NULL row is unambiguously its row.
+  const d = chooseFallbackConnection({ id: 'conn-row-1' }, false);
+
+  assertEquals(d, { kind: 'legacy', id: 'conn-row-1' });
+});
+
+Deno.test('a legacy NULL row is refused once a second connection is already live (OR-T2475)', () => {
+  // The repro from OR-T2475: a NULL-id row exists (connection A), and a
+  // SECOND, already-established Quiltt connection (B) has an event for this
+  // event's connectionId. Collapsing B onto A's row is the Mercury+TD
+  // pattern the fallback comment in index.ts already names as the thing to
+  // avoid, and it must not happen just because A's row was never backfilled.
+  const d = chooseFallbackConnection({ id: 'conn-row-1' }, true);
+
+  assertEquals(d, { kind: 'ambiguous' });
+});
+
+Deno.test('no legacy row at all is reported as missing, not ambiguous', () => {
+  // Distinguishes "no row exists yet" (DL-1414-C: or-link-complete has not
+  // created it yet, tolerated by retrying) from "a row exists but belongs to
+  // someone else" (OR-T2475: must not be reused). Only the second case
+  // should ever create a new row.
+  const d = chooseFallbackConnection(null, true);
+
+  assertEquals(d, { kind: 'missing' });
+});
+
 Deno.test('redactProviderId keeps the type and drops the identity', () => {
   // Synthetic. Never put a real provider id here: this repo is public.
   assertEquals(redactProviderId('p_EXAMPLE000000000000000'), 'p_[redacted]');
