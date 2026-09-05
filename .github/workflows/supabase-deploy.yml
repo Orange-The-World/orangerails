@@ -1886,7 +1886,7 @@ jobs:
   # which is the failure that actually happened.
   # ---------------------------------------------------------------------------
   notify:
-    needs: [target, apply-migrations, check-pending-migrations, deploy]
+    needs: [target, apply-migrations, check-pending-migrations, check-rls-policy-baseline, deploy]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -1903,6 +1903,7 @@ jobs:
           R_TARGET: ${{ needs.target.result }}
           R_APPLY: ${{ needs['apply-migrations'].result }}
           R_GATE: ${{ needs['check-pending-migrations'].result }}
+          R_RLS: ${{ needs['check-rls-policy-baseline'].result }}
           R_DEPLOY: ${{ needs.deploy.result }}
         run: |
           set -uo pipefail
@@ -1916,7 +1917,7 @@ jobs:
           # A deploy that ran and found no changed functions is a SUCCESS and is
           # deliberately not reported.
           REASONS=""
-          for PAIR in "target:${R_TARGET}" "apply-migrations:${R_APPLY}" "check-pending-migrations:${R_GATE}" "deploy:${R_DEPLOY}"; do
+          for PAIR in "target:${R_TARGET}" "apply-migrations:${R_APPLY}" "check-pending-migrations:${R_GATE}" "check-rls-policy-baseline:${R_RLS}" "deploy:${R_DEPLOY}"; do
             JOB="${PAIR%%:*}"
             RES="${PAIR##*:}"
             case "$RES" in
