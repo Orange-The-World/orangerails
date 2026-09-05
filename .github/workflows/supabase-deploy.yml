@@ -1102,6 +1102,17 @@ jobs:
   # It needs nothing but a checkout: no database, no secrets, no environment, no
   # output from target. That is why there was never a reason for it to run late,
   # and why it can gate the apply without slowing anything down.
+  #
+  # OR-T1166. This job used to reimplement the comparison inline in shell, a
+  # second copy of the same decision ci.yml's pull-request gate already makes
+  # with scripts/check-migration-versions.mjs. Two copies of "what counts as a
+  # duplicate version" can drift, and here they did: this job treated a missing
+  # supabase/migrations directory, and a directory with zero .sql files, as a
+  # PASS, while the shared script (per its own header comment) treats both as a
+  # hard FAILURE, because a check that examined nothing has proved nothing. This
+  # job now calls the one implementation, self-test first, so a broken
+  # comparison fails as a broken comparison rather than as a silent pass over
+  # every migration on a real deploy.
   # ---------------------------------------------------------------------------
   check-duplicate-migrations:
     runs-on: ubuntu-latest
@@ -1111,40 +1122,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Migration version self-test
+        run: node scripts/check-migration-versions.mjs --selftest
+
       - name: Refuse two migration files sharing a version prefix
-        run: |
-          set -uo pipefail
-
-          MIG_DIR="supabase/migrations"
-          if [ ! -d "$MIG_DIR" ]; then
-            echo "no migrations directory; nothing to compare"
-            exit 0
-          fi
-
-          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
-          if [ -n "$DUPES" ]; then
-            {
-              echo "## :rotating_light: Duplicate migration version(s)"
-              echo ""
-              for V in $DUPES; do
-                echo "\`${V}\` is used by more than one file:"
-                echo ""
-                ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
-                echo ""
-              done
-              echo "\`supabase_migrations.schema_migrations\` stores one row per"
-              echo "version, so at most one of these can ever be tracked and the"
-              echo "rest are reported as applied whether they ran or not. Rename"
-              echo "the later file to an unused timestamp."
-              echo ""
-              echo "apply-migrations needs this job, so nothing has been applied"
-              echo "on this run. Rename the file and push again."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- refusing to apply; one of these files would be recorded and the rest treated as applied without running."
-            exit 1
-          fi
-
-          echo "no duplicate migration version(s) in $MIG_DIR"
+        run: node scripts/check-migration-versions.mjs
 
   apply-migrations:
     # needs check-duplicate-migrations, not just target. A colliding pair of
