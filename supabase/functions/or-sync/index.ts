@@ -770,7 +770,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 }
                 const jsonDirect = await respDirect.json();
                 if (jsonDirect?.errors) {
-                  console.error('[or-sync] Quiltt direct GraphQL errors:', JSON.stringify(jsonDirect.errors).slice(0, 300));
+                  const rawQuilttErr = JSON.stringify(jsonDirect.errors);
+                  const quilttErrClass = 'QuilttDirectGraphQLError';
+                  const quilttErrCode = classifyUpstreamError(rawQuilttErr, quilttErrClass);
+                  const quilttCorrelationId = randomCorrelationId();
+                  const quilttFp = await errorFingerprint(rawQuilttErr, quilttErrClass);
+                  console.error(`[or-sync] Quiltt direct GraphQL errors code=${quilttErrCode} class=${quilttErrClass} fp=${quilttFp} cid=${quilttCorrelationId}${upstreamDetailSuffix(quilttErrCode, rawQuilttErr)}`);
                   break;
                 }
                 const txsDirect = (jsonDirect?.data?.transactions?.nodes ?? []) as Array<{
@@ -1454,7 +1459,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse({ synced: results.reduce((s, r) => s + (r.synced ?? 0), 0), connections: results }, batchHttpStatus(results), cors);
 
   } catch (err) {
-    console.error('[or-sync] fatal:', err);
+    const rawFatalErr = err instanceof Error ? err.message : String(err);
+    const fatalErrClass = errorClassName(err);
+    const fatalErrCode = classifyUpstreamError(rawFatalErr, fatalErrClass);
+    const fatalCorrelationId = randomCorrelationId();
+    const fatalFp = await errorFingerprint(rawFatalErr, fatalErrClass);
+    console.error(`[or-sync] fatal code=${fatalErrCode} class=${fatalErrClass} fp=${fatalFp} cid=${fatalCorrelationId}${upstreamDetailSuffix(fatalErrCode, rawFatalErr)}`);
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-sync'));
