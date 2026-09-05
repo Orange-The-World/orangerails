@@ -22,13 +22,29 @@
  * stealth_scan_ranges, keyed by connection_id, written only by
  * record_stealth_scan_range().
  *
- * ORDER MATTERS AND IS DELIBERATE. Coverage goes first, the connection row
- * second. If the coverage delete succeeds and the row update then fails, the
- * connection keeps its old envelope and rescans from its old birthday: slower
- * than it needed to be, and correct. The other order fails the other way, with
- * a new envelope and uncleared coverage, which is exactly the silent
- * no-rescan this module exists to remove. When only one of the two can land,
- * land the one whose failure the user can see.
+ * ORDER MATTERS, AND THE INVARIANT IS WHAT TO HOLD ONTO, NOT THE ORDERING:
+ * a lost (null) cursor can never cause a skip, a lost coverage row can. So
+ * the cursor is cleared first, coverage second, and the new envelope last.
+ *
+ * scanStartHeight() in src/stealth/lib/ranges.ts consults the coverage map
+ * before it ever looks at the cursor: whenever a recorded range covers the
+ * birthday, the cursor arm is never evaluated. An intact coverage row is
+ * therefore always safe to leave behind no matter what the cursor says, and
+ * a null cursor is always safe to leave behind no matter what coverage says.
+ * The one state that is NOT safe is a stale, non-null cursor sitting past
+ * the birthday with the coverage that justified it gone: that reads as
+ * "already scanned to here" with nothing left to contradict it, and the scan
+ * silently skips the gap forever.
+ *
+ * So for each point this function can fail at:
+ *   - fails clearing the cursor: nothing else has changed yet.
+ *   - fails clearing coverage: the cursor is already null, and the OLD
+ *     coverage is still intact and still correct for the OLD envelope, so
+ *     the next sync resumes off it exactly as it always would. No skip.
+ *   - fails writing the new envelope: cursor null, coverage gone, old
+ *     envelope in place, so the next sync falls through to the cursor arm
+ *     and rescans from the OLD birthday. Slower than necessary, still
+ *     correct.
  *
  * BOTH FAILURES ARE REPORTED. A half applied reset that answers 200 tells the
  * user their wallet is being rescanned when it is not, and that silence is
@@ -76,7 +92,28 @@ export async function applyEnvelopeReplacement(
   connectionId: string,
   fields: EnvelopeReplacementFields,
 ): Promise<EnvelopeReplacementResult> {
-  // 1. Coverage first. See ORDER MATTERS above.
+  // 1. Clear the cursor first. See the invariant in the module comment: a
+  //    lost (null) cursor can never cause a skip.
+  const { error: cursorErr } = await client
+    .from('stealth_connections')
+    .update({
+      last_block_scanned: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', connectionId);
+
+  if (cursorErr) {
+    console.error('[applyEnvelopeReplacement] cursor clear failed:', cursorErr);
+    return {
+      ok: false,
+      error: 'Failed to clear the scan cursor for the replaced envelope',
+      status: 500,
+    };
+  }
+
+  // 2. Coverage rows. The cursor is already null, so if this fails the
+  //    connection is left with intact, correct-for-the-OLD-envelope coverage
+  //    and no cursor: safe, see the module comment.
   const { error: coverageErr } = await client
     .from('stealth_scan_ranges')
     .delete()
@@ -91,17 +128,13 @@ export async function applyEnvelopeReplacement(
     };
   }
 
-  // 2. The connection row. last_block_scanned is reset alongside the envelope
-  //    for the same reason the coverage is: on its own it no longer decides
-  //    where the scan starts, but it is still the arm that answers for a
-  //    connection with no coverage at all, and both arms must agree that this
-  //    connection has read nothing since the new birthday.
+  // 3. The new envelope and birthday, last, once both arms already agree
+  //    this connection has read nothing since the birthday.
   const { error: updateErr } = await client
     .from('stealth_connections')
     .update({
       sealed_envelope: fields.sealed_envelope,
       wallet_birthday_plaintext: fields.wallet_birthday_plaintext,
-      last_block_scanned: null,
       updated_at: new Date().toISOString(),
     })
     .eq('id', connectionId);
