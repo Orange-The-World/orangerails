@@ -27,7 +27,7 @@
 #       or_agent_reader. A role granted MEMBERSHIP in one of these creates NO
 #       ACL entry and is invisible to G1, so a member outside the per-cluster
 #       expected set is reported directly. Expected sets differ by cluster
-#       (measured on OR-T1539, 2026-09-02, re-verified 2026-09-05): dev has
+#       (measured on OR-T1539, 2026-09-02; checked again 2026-09-05): dev has
 #       authenticator and postgres as members of service_role, plus postgres
 #       as a member of or_agent_reader (granted twice, by two different
 #       grantors, harmless but real); prod additionally carries
