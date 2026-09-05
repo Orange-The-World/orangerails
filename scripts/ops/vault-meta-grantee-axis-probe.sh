@@ -3,8 +3,8 @@
 #
 # Standing hourly check of who holds ANY privilege on the two sealed vault
 # meta tables (public.user_vault_meta, public.customer_vault_meta), on BOTH
-# Supabase clusters. Built for OR-T1539, out of the challenge on PR #1101
-# (OR-C0820, 2026-09-02).
+# Supabase clusters. Built for OR-T1539, out of the challenge tracked as
+# OR-C0820 (2026-09-02).
 #
 # WHY THIS EXISTS
 # supabase/migrations/20260902213700_assert_vault_meta_grantee_allow_list.sql
