@@ -1001,11 +1001,10 @@ jobs:
     runs-on: ubuntu-latest
     # environment: binds this job to a GitHub Environment whose required-reviewer list
     # is set in repo Settings -> Environments. prod dispatches bind to supabase-prod
-    # (configure required reviewers there); dev dispatches bind to supabase-dev (open
-    # for DBA applies). The environment name is resolved from the deploy job output so
-    # the right project is always protected. Add reviewers to supabase-prod in repo
-    # Settings -> Environments once this PR merges -- the job will pause for approval
-    # before any steps run.
+    # (required reviewer configured: MorningRevolution, confirmed 2026-08-23); dev
+    # dispatches bind to supabase-dev (open for DBA applies). The environment name is
+    # resolved from the deploy job output so the right project is always protected,
+    # and a prod dispatch pauses for that reviewer's approval before any steps run.
     environment: ${{ needs.target.outputs.environment_name }}
     permissions:
       contents: read
@@ -1023,10 +1022,22 @@ jobs:
         # human bottleneck that produced the 37-migration backlog. This never loosens
         # prod: prod cannot be reached by a push, so prod always takes the branch below.
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        # Fallback gate. The primary gate is meant to be the required-reviewer list on
-        # the GitHub Environment this job binds to; until reviewers are configured on
-        # supabase-prod, this step is the only thing standing in front of the prod
-        # database, so it must not be looser than the prod path deserves.
+        # WHAT THIS GATE CAN AND CANNOT DO. It answers "is this login allowed to apply
+        # on this target", and nothing finer. Every seat in this org with github-write
+        # acts through ONE shared builder login, so github.actor is the same string
+        # whichever seat dispatched. This gate therefore separates the builder fleet
+        # from every other login (the reviewing identity and any outside collaborator
+        # are refused) but it CANNOT tell one seat from another, and no allowlist can
+        # while the login is shared.
+        #
+        # The control that discriminates a person is the required-reviewer list on the
+        # supabase-prod GitHub Environment, which is configured (reviewer:
+        # MorningRevolution, confirmed 2026-08-23). The two-party property on a prod
+        # apply comes from that pause, not from this step.
+        #
+        # Keep this gate anyway: it fails closed when the variable is unset, it has no
+        # dev-to-prod inheritance, and it is what stops a login outside the fleet from
+        # reaching the prod database at all.
         #
         # ONE allowlist per target, resolved from the environment the deploy job
         # computed. There is deliberately NO fallback from prod to dev: a single shared
