@@ -317,36 +317,46 @@ function AppHome() {
       const adminRows = (admins ?? []) as CoAdminRow[];
 
       // Load workspaces where this user is a co-admin.
-      const { data: myAdminOf, error: myAdminOfErr } = await supabase
-        .from("workspace_admins")
-        .select("owner_user_id")
-        .eq("admin_user_id", session.user.id);
+      //
+      // ONE RPC, deliberately, instead of selecting from workspace_admins and
+      // then reading the owner's user_vault_meta row once per owner. A policy
+      // grants a ROW, never a column, so that shape handed this co-admin every
+      // column of the owner's row, including sig_secret_wrapped: the owner's
+      // ML-DSA signing secret. Sealed under the owner's master key, so not
+      // readable, and nothing was broken by it. It goes anyway, because the
+      // whole point of the projection is that an admin never holds that
+      // material in any form.
+      //
+      // list_coadmin_workspaces returns the same three values the loop built,
+      // and it excludes an owner with no workspace_key_id and an owner with no
+      // sig_public_key, which are the two cases the loop skipped with continue.
+      // Fail closed is preserved by the function, not dropped here.
+      const { data: myAdminOf, error: myAdminOfErr } = await supabase.rpc(
+        "list_coadmin_workspaces",
+      );
+      // classifyRead separates the three outcomes this call really has, which
+      // is what dev now does for every read on this page (OR-T1768). "empty"
+      // is the ordinary case of administering nothing and stays silent; only
+      // "error" is surfaced. A failed call must never look like "you are a
+      // co-admin of nothing", so unlike the other reads on this page it is
+      // loud: setErr as well as the log, because an empty list here is
+      // indistinguishable to the user from a real answer.
       if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
-        console.warn(`Failed to load workspaces you administer: ${formatError(myAdminOfErr)}`);
+        console.error("Failed to load co-admin workspaces:", myAdminOfErr);
+        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
       }
 
       const workspaces: WorkspaceOption[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
-        const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
-        for (const ownerId of ownerIds) {
-          const { data: ownerMeta, error: ownerMetaErr } = await supabase
-            .from("user_vault_meta")
-            .select("workspace_key_id, sig_public_key")
-            .eq("user_id", ownerId)
-            .single();
-          if (classifyRead(ownerMeta, ownerMetaErr) === "error") {
-            console.warn(
-              `Failed to load vault meta for workspace owner ${ownerId}, skipping this workspace: ${formatError(ownerMetaErr)}`,
-            );
-          }
-          if (!ownerMeta) continue;
-          const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
-          if (!ownerKeyId) continue;
+        for (const ownerRow of myAdminOf) {
+          const ownerId = ownerRow.owner_user_id;
+          const ownerKeyId = ownerRow.workspace_key_id;
           // Owner's ML-DSA-65 public signing key, needed to verify the grant
-          // signature before decrypting. Fail closed: skip a workspace we cannot
-          // verify rather than surface one the co-admin cannot safely open.
-          const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
-          if (!ownerSigPubB64) continue;
+          // signature before decrypting. Fail closed: a workspace we cannot
+          // verify is never surfaced to the co-admin. The function already
+          // excludes an owner missing either value, so there is nothing left to
+          // skip at this point.
+          const ownerSigPubB64 = ownerRow.sig_public_key;
           // This used to be a maybeSingle() whose error was discarded, which
           // meant TWO wrapped key rows arrived here as NO row: the workspace
           // vanished from this co-admin's list with nothing shown to anybody,
