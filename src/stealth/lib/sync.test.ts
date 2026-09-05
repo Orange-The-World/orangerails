@@ -506,6 +506,32 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     ).rejects.toThrow(/out of range/);
   });
 
+  it('rejects when birthdayHeight is NaN (does not silently produce a NaN scan window)', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'birthday-nan',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: Number.NaN,
+        lastBlockScanned: null,
+        fetchTip: async () => 800_000,
+        fetchFilter: async () => { throw new Error('must not reach filter fetch'); },
+        fetchBlock: async () => { throw new Error('must not reach block fetch'); },
+        matcher: { matchAny: () => false },
+      }),
+    ).rejects.toThrow(/out of range/);
+  });
+
   it('rejects when fetchBlock rejects, does not silently advance lastBlockScanned (DL-0629)', async () => {
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
