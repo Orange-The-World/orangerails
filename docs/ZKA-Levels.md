@@ -96,7 +96,7 @@ content is never one of them. Each claim below is checkable against the migratio
 2. **Dedup identity.** The bank path uses `external_id`, plaintext, commented in source as
    the provider's transaction id and unavoidable for dedup, enforced by
    `UNIQUE (connection_id, external_id)`. The stealth path does better:
-   `txid_blind_index_b64` is a keyed HMAC that lets the server dedup without learning the
+   `txid_blind_index_hex` is a keyed HMAC that lets the server dedup without learning the
    txid, and `blind_index_b64` does the same for xpubs. Where a client-held key exists we
    dedup with no plaintext leak. The bank path cannot, because there the engine holds the
    master key and has only the provider's id to match on. Blind indexing is the pattern for

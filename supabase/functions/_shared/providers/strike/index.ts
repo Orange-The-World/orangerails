@@ -438,6 +438,7 @@ export function normalizeInvoice(
     status: invoice.state,
     timestamp: new Date(ts).toISOString(),
     source_wallet_id: accountId,
+    receiverId: invoice.receiverId ?? null,
     ...packAmount(amount, invoice.amount?.currency || 'USD'),
   };
 }
@@ -768,7 +769,29 @@ async function syncByWallets(
     if (iso && iso > maxSeen) maxSeen = iso;
   };
 
+  // Upstream reachability, so a pass that lost a source cannot be reported as
+  // a healthy one. Every catch below used to swallow its error and this
+  // function returned {transactions, next_cursor} as though everything had
+  // replied. A connection whose key was revoked therefore reported a
+  // successful sync with zero transactions, and nothing anywhere recorded why.
+  const deniedSources: string[] = [];
+  const failedSources: string[] = [];
+  let sourcesAttempted = 0;
+
+  const noteFailure = (source: string, scopeHint: string, err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (isScopeMissing(err)) {
+      if (!deniedSources.includes(source)) deniedSources.push(source);
+      console.warn(`[strike] ${source} scope missing, skipping. Add ${scopeHint}. ${msg.slice(0, 200)}`);
+    } else {
+      console.warn(`[strike] ${source} fetch failed: ${msg.slice(0, 200)}`);
+    }
+    if (!failedSources.includes(source)) failedSources.push(source);
+  };
+
   // 1) Invoices , per-state (CF blocks compound `or`)
+  sourcesAttempted++;
+  let invoiceStatesFailed = 0;
   for (const state of STATES_TO_SYNC) {
     try {
       const batch = await fetchInvoicesByState(creds, state, cursor);
@@ -780,12 +803,21 @@ async function syncByWallets(
         }
       }
     } catch (err) {
+      invoiceStatesFailed++;
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[strike] invoice ${state} fetch failed (will continue with other resources): ${msg.slice(0, 200)}`);
+      if (isScopeMissing(err) && !deniedSources.includes('invoices')) {
+        deniedSources.push('invoices');
+      }
     }
+  }
+  // Any failed state means the invoice history for this pass is incomplete.
+  if (invoiceStatesFailed > 0 && !failedSources.includes('invoices')) {
+    failedSources.push('invoices');
   }
 
   // 2) Lightning receives (static receive-request endpoints)
+  sourcesAttempted++;
   try {
     const params = new URLSearchParams();
     const receives = await paginateNewestFirst<StrikeReceive>(
@@ -799,12 +831,11 @@ async function syncByWallets(
       }
     }
   } catch (err) {
-    if (isScopeMissing(err)) {
-      console.warn('[strike] receive-request scope missing , skipping. Add partner.receive-request.read.');
-    }
+    noteFailure('receives', 'partner.receive-request.read', err);
   }
 
   // 3) Deposits (fiat onramp)
+  sourcesAttempted++;
   try {
     const params = new URLSearchParams();
     const deposits = await paginateNewestFirst<StrikeDeposit>(
@@ -818,12 +849,11 @@ async function syncByWallets(
       }
     }
   } catch (err) {
-    if (isScopeMissing(err)) {
-      console.warn('[strike] deposit scope missing , skipping. Add partner.deposit.read.');
-    }
+    noteFailure('deposits', 'partner.deposit.read', err);
   }
 
   // 4) Payouts (fiat offramp)
+  sourcesAttempted++;
   try {
     const params = new URLSearchParams();
     const payouts = await paginateNewestFirst<StrikePayout>(
@@ -837,12 +867,11 @@ async function syncByWallets(
       }
     }
   } catch (err) {
-    if (isScopeMissing(err)) {
-      console.warn('[strike] payout scope missing , skipping. Add partner.payout.read.');
-    }
+    noteFailure('payouts', 'partner.payout.read', err);
   }
 
   // 5) Currency exchange quotes (internal swaps)
+  sourcesAttempted++;
   try {
     const params = new URLSearchParams();
     const quotes = await paginateNewestFirst<StrikeCurrencyExchangeQuote>(
@@ -856,13 +885,21 @@ async function syncByWallets(
       }
     }
   } catch (err) {
-    if (isScopeMissing(err)) {
-      console.warn('[strike] currency-exchange-quote scope missing , skipping. Add partner.currency-exchange-quote.read.');
-    }
+    noteFailure('exchanges', 'partner.currency-exchange-quote.read', err);
   }
 
   // Outgoing Lightning payments have NO list endpoint on Strike's API.
   // They arrive via webhooks only (drainStrikeQueue handles payment.* events).
+
+  // Every source refused or errored, so this pass learned nothing. Returning
+  // an empty success here is what let a broken connection display "Synced"
+  // with no transactions and no error. or-sync catches this and writes
+  // status='error' with a stored marker instead.
+  if (sourcesAttempted > 0 && failedSources.length === sourcesAttempted) {
+    throw new Error(
+      `strike sync failed: every upstream source was unreachable (${failedSources.join(', ')})`,
+    );
+  }
 
   // Sort newest first for consistent persistence order.
   transactions.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
@@ -870,6 +907,8 @@ async function syncByWallets(
   return {
     transactions,
     next_cursor: maxSeen || null,
+    ...(failedSources.length > 0 ? { partial: true } : {}),
+    ...(deniedSources.length > 0 ? { denied_sources: deniedSources } : {}),
   };
 }
 
@@ -889,6 +928,7 @@ export const strikeAdapter: ProviderAdapter = {
   description: 'Lightning + USD',
   category: 'lightning_wallet',
   tags: ['lightning', 'us', 'eu', 'fiat-on-ramp', 'custodial'],
+  custody: 'custodial',
   popularity: 88,
   multiWallet: true,
   credentialFields: [

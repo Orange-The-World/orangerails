@@ -1,16 +1,19 @@
 /**
- * or-sync-key-register — register a subaccount's OPK (delivery key).
+ * or-sync-key-register: register a subaccount's OPK (delivery key).
  *
  * Called by an integrator backend (platform mode) when their user opts
- * in to background sync. The browser derives the X25519 keypair from
- * the user's vault password, posts the public half to the integrator
- * backend, which forwards it here. We persist it on the subaccount row;
- * from that moment on, or-quiltt-sync (and any future background writer)
- * can seal new transactions under this key.
+ * in to background sync. In the BitBooks platform integration, the
+ * browser derives the X25519 keypair from the integrator's master key
+ * held behind the vault (not from the vault password), and posts the
+ * public half to the integrator backend, which forwards it here. We
+ * persist it on the subaccount row; from that moment on, or-quiltt-sync
+ * (and any future background writer) can seal new transactions under
+ * this key.
  *
- * The private half (OSK) never touches OR. Lost vault password = lost
- * ability to unseal OPK-sealed rows, same threat model as every other
- * vault-derived key in the system.
+ * OR receives only an opaque X25519 public key and derives nothing from
+ * it. The private half (OSK) never touches OR.
+ *
+ * This derivation applies to the BitBooks platform integration only.
  *
  * Auth: X-Platform-API-Key (platform mode only).
  *
@@ -39,7 +42,7 @@
  * race. This matches the upsert pattern or-link-complete uses today.
  */
 
-import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, isAuthError } from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
@@ -211,7 +214,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       old_opk_alg:     prior.opk_alg,
       new_opk_alg:     body.opk_alg,
       rotation_reason: body.rotation_reason ?? null,
-      request_ip:      req.headers.get('cf-connecting-ip') ?? req.headers.get('x-forwarded-for') ?? null,
+      // Client IP for the audit trail, most trustworthy source first.
+      //   1. cf-connecting-ip: written at Cloudflare's own edge on a DIRECT
+      //      call, and a caller cannot forge it there.
+      //   2. x-gateway-verified-ip: set only by workers/api-gateway, which
+      //      captures the edge-verified IP and overwrites any caller-supplied
+      //      value under that name before proxying. That same gateway strips
+      //      cf-connecting-ip and x-forwarded-for, so without this line the
+      //      column is null for every gateway-routed caller (OR-T1103, #1025).
+      //      It is SECOND on purpose: nothing sets it on a direct call, so a
+      //      direct caller can send whatever it likes under that name, and
+      //      reading it first would let a caller replace a trustworthy value
+      //      with one it chose.
+      //   3. x-forwarded-for: caller-supplied, kept only as the pre-existing
+      //      last resort. A hint, not proof of origin.
+      request_ip:      req.headers.get('cf-connecting-ip')
+        ?? req.headers.get('x-gateway-verified-ip')
+        ?? req.headers.get('x-forwarded-for')
+        ?? null,
     });
     if (auditInsert.error) {
       console.error(

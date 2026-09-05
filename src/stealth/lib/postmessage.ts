@@ -49,7 +49,51 @@
  */
 
 export const STEALTH_PROTOCOL_VERSION = 1 as const;
+
+/**
+ * The full set of protocol versions this widget build accepts at INIT and
+ * advertises in READY. Membership, not equality, is the compatibility rule:
+ * an INIT whose protocol_version is anywhere in this set is accepted, and an
+ * app can read this set off READY to pick a version both sides speak with no
+ * app deploy. STEALTH_PROTOCOL_VERSION stays the current preferred version.
+ *
+ * This PR ships the mechanism only. The set stays [1] here; a version is
+ * added to it only in the release that actually bumps the protocol, per the
+ * 90 day deprecation window documented in docs/Stealth-Sync.md.
+ */
+export const STEALTH_SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
+
+/**
+ * Union of every version this widget build accepts. Derived from
+ * STEALTH_SUPPORTED_PROTOCOL_VERSIONS so that adding a version to the array
+ * widens this type automatically, with no second place to edit.
+ */
+export type StealthProtocolVersion = (typeof STEALTH_SUPPORTED_PROTOCOL_VERSIONS)[number];
+
 export const STEALTH_HKDF_INFO = 'or-stealth-v1' as const;
+
+/**
+ * Default gap limit used when OR_STEALTH_INIT omits the field.
+ *
+ * Raised to 250 based on benchmark run 30698208747 (bench/gcs-match-cost*,
+ * benches/gcs_match_cost.mjs). All three sweep points passed the 5ms/block
+ * veto on fixed-window cost:
+ *   gap_limit=20    median=0.757ms  p95=1.803ms  PASS
+ *   gap_limit=250   median=1.080ms  p95=2.241ms  PASS
+ *   gap_limit=1000  median=1.965ms  p95=3.127ms  PASS
+ *
+ * Cost curve is GCS decode dominated, not script-count dominated.
+ * 50x more scripts (80 to 1000) costs only 2.19x more per block.
+ *
+ * The old default of 20 caused silent address-window exhaustion for
+ * Sparrow wallets using address indices beyond gap 20 (the Marina/Fedi
+ * escalation). See issue #357.
+ *
+ * Rolling-window (K-pass, #398) cost is not yet measured by this harness.
+ * If that measurement changes the picture, raise a follow-up against this
+ * constant.
+ */
+export const DEFAULT_GAP_LIMIT = 250 as const;
 
 /** Path the Stealth Sync widget is mounted at. See src/routes/connect/stealth.tsx. */
 export const STEALTH_WIDGET_PATH = '/connect/stealth' as const;
@@ -89,7 +133,7 @@ export interface StealthInitWidgetMessage {
   type: 'OR_STEALTH_INIT';
   /** Absent or 'widget' both resolve to widget mode. */
   seal_mode?: 'widget';
-  protocol_version: typeof STEALTH_PROTOCOL_VERSION;
+  protocol_version: StealthProtocolVersion;
   app_slug: 'v2' | 'v3' | 'ow' | string;
   app_user_id: string;
   mode: StealthMode;
@@ -122,6 +166,21 @@ export interface StealthInitWidgetMessage {
    * never a key that can unseal anything.
    */
   access_token?: string;
+  /**
+   * Auth mode C (widget token). The short-lived session id the host app's
+   * backend minted via or-link-mint-token before opening the widget. Sent in
+   * the POST BODY, not as a header.
+   *
+   * For a host app whose users have no OrangeRails account there is no
+   * Supabase JWT to put in mode B, and mode A needs a backend proxy the app
+   * may not have. This is the credential that path already holds, and the
+   * same one or-discover-wallets and or-link-complete already accept.
+   *
+   * Ignored when `proxy_base_url` is set: the proxy attaches the platform key
+   * server-side, which outranks it. Like `access_token`, this is an access
+   * credential for OR's API and can unseal nothing.
+   */
+  widget_token?: string;
   /** Optional: when true, the widget skips uploading sealed transactions
    *  to OR's `or-stealth-transactions-store` endpoint. Used by consumer
    *  apps that hold their own source-of-truth copy and do not need OR's
@@ -129,6 +188,33 @@ export interface StealthInitWidgetMessage {
    *  at OR (required for cross-device sync); only the per-tx records
    *  are skipped. */
   skip_transaction_upload?: boolean;
+  /**
+   * Optional address gap limit (integer, 1-1000). When present, seeds the
+   * gap-limit field in the add-route form (the user can still override it).
+   * When absent the widget uses DEFAULT_GAP_LIMIT.
+   *
+   * Out-of-range values (non-integer, < 1, or > 1000) are rejected at INIT
+   * with code INVALID_GAP_LIMIT and a descriptive message rather than silently clamped.
+   *
+   * This affects only connections created after the INIT. Existing sealed
+   * connections retain the gap_limit baked into their envelope at add-time;
+   * a changed default cannot reach into a sealed envelope.
+   */
+  gap_limit?: number;
+  /**
+   * Delivery acknowledgement gate (DL-0807). Only honoured when
+   * skip_transaction_upload is also true.
+   *
+   * When set, the widget posts SYNC_COMPLETE with pending_delivery_ack: true
+   * BEFORE advancing the sync cursor. The consuming app must then post
+   * OR_STEALTH_DELIVERY_ACK to confirm it saved the sealed transactions. Only
+   * after that ack does the widget write the cursor via
+   * or-stealth-envelope-update. If the ack does not arrive within 30 seconds,
+   * the widget fires OR_STEALTH_ERROR with code DELIVERY_ACK_MISSING
+   * (retryable: true) and leaves the cursor unchanged so the next sync
+   * re-scans safely.
+   */
+  require_delivery_ack?: boolean;
 }
 
 /**
@@ -152,7 +238,7 @@ export interface StealthInitAppMessage {
   type: 'OR_STEALTH_INIT';
   /** Required discriminant for app mode. */
   seal_mode: 'app';
-  protocol_version: typeof STEALTH_PROTOCOL_VERSION;
+  protocol_version: StealthProtocolVersion;
   app_slug: 'v2' | 'v3' | 'ow' | string;
   app_user_id: string;
   mode: StealthMode;
@@ -172,6 +258,11 @@ export interface StealthInitAppMessage {
   proxy_base_url?: string;
   /** Auth mode B: direct Supabase JWT. See StealthInitWidgetMessage. */
   access_token?: string;
+  /**
+   * Optional address gap limit. Same contract as StealthInitWidgetMessage.
+   * App mode supports this field for parity with widget mode.
+   */
+  gap_limit?: number;
 }
 
 /**
@@ -193,7 +284,16 @@ export type StealthInitMessage = StealthInitWidgetMessage | StealthInitAppMessag
 
 export interface StealthReadyMessage {
   type: 'OR_STEALTH_READY';
-  protocol_version: typeof STEALTH_PROTOCOL_VERSION;
+  /** Current preferred version. Prefer supported_protocol_versions when picking a version to speak. */
+  protocol_version: StealthProtocolVersion;
+  /**
+   * Every protocol version this widget build accepts at INIT, in ascending
+   * order. Added additively (DEC-0304): an app that reads only
+   * protocol_version is unaffected. Read this set to pick a version both
+   * sides speak with no app deploy, including after a widget rollback or a
+   * stale cached copy is served.
+   */
+  supported_protocol_versions: readonly number[];
 }
 
 export type StealthStage =
@@ -290,6 +390,32 @@ export interface StealthSyncCompleteWidgetMessage {
   bytes_downloaded: number;
   /** Wall-clock seconds from INIT to this message. */
   duration_seconds: number;
+  /**
+   * True when any matched transaction landed at or within gap_limit slots
+   * of the top of the derived address window on either chain. Signals that
+   * the wallet may have outgrown the current window and history could be
+   * incomplete. The consuming app must prompt the user to re-sync with a
+   * wider gap_limit. Absent or false means the history is complete within
+   * the current window. See docs/Stealth-Sync.md for full details.
+   */
+  address_window_exhausted?: boolean;
+  /**
+   * Present when the server-side cursor write (or-stealth-envelope-update)
+   * failed after a successful scan. The sync data is valid and
+   * sealed_transactions is populated, but last_block_scanned was not
+   * persisted to the server. The next sync will re-scan from the stored
+   * cursor. The calling app should surface this as a warning; the data
+   * itself is intact.
+   */
+  cursor_update_failed?: true;
+  /**
+   * Present when require_delivery_ack was set on the INIT message. Signals
+   * that the cursor has NOT yet been advanced. The consuming app must post
+   * OR_STEALTH_DELIVERY_ACK to the widget to confirm its own save, after
+   * which the widget writes the cursor. Keeping the popup open while this
+   * field is present is the recommended pattern.
+   */
+  pending_delivery_ack?: true;
 }
 
 /**
@@ -313,6 +439,18 @@ export interface StealthSyncCompleteAppMessage {
   bytes_downloaded: number;
   /** Wall-clock seconds from INIT to this message. */
   duration_seconds: number;
+  /**
+   * True when any matched transaction landed at or within gap_limit slots
+   * of the top of the derived address window on either chain. See the
+   * widget-mode variant above for full semantics.
+   */
+  address_window_exhausted?: boolean;
+  /**
+   * Present when the server-side cursor write (or-stealth-envelope-update)
+   * failed. See StealthSyncCompleteWidgetMessage.cursor_update_failed for
+   * full semantics.
+   */
+  cursor_update_failed?: true;
 }
 
 /**
@@ -347,12 +485,15 @@ export interface StealthDeleteCompleteMessage {
 export type StealthErrorCode =
   | 'INVALID_XPUB'
   | 'INVALID_DESCRIPTOR'
+  | 'INVALID_GAP_LIMIT'
   | 'NETWORK'
   | 'TIMEOUT'
   | 'KEY_MISMATCH'
   | 'CONNECTION_NOT_FOUND'
   | 'ORIGIN_NOT_ALLOWED'
   | 'PROTOCOL_VERSION_MISMATCH'
+  | 'WINDOW_EXHAUSTED'
+  | 'DELIVERY_ACK_MISSING'
   | 'INTERNAL';
 
 export interface StealthErrorMessage {
@@ -366,9 +507,20 @@ export interface StealthErrorMessage {
 // Discriminated unions for type-safe handlers
 // ─────────────────────────────────────────────────────────────────────
 
+/**
+ * App -> Widget: confirms the consuming app has saved the sealed transactions.
+ * Only sent when require_delivery_ack was set on the INIT message.
+ * The widget advances the sync cursor upon receiving this message.
+ */
+export interface StealthDeliveryAckMessage {
+  type: 'OR_STEALTH_DELIVERY_ACK';
+  connection_id: string;
+}
+
 export type StealthMessageFromApp =
   | StealthInitMessage
-  | StealthProxyResponseMessage;
+  | StealthProxyResponseMessage
+  | StealthDeliveryAckMessage;
 
 export type StealthMessageFromWidget =
   | StealthReadyMessage
@@ -421,7 +573,7 @@ export interface SealedEnvelope {
    *     xpub: string,
    *     label: string,
    *     wallet_birthday: string,    // ISO date
-   *     gap_limit: number,          // default 20
+   *     gap_limit: number,          // default 250
    *     script_type: 'p2pkh' | 'p2sh-p2wpkh' | 'p2wpkh' | 'p2tr'
    *   }
    *   {

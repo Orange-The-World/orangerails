@@ -1,16 +1,24 @@
 name: ORBI probe exit-code tests
 
-# Runs on every pull request or push to dev that touches the probe scripts,
-# the CI workflow itself, or the spec doc. This is the acceptance gate for
-# DL-0430: every exit-code path must be watched going red before the ticket
-# closes. See STALENESS_PROBE_CRON.md for the full exit-code spec.
+# Runs on every pull request that touches the probe scripts, the CI workflow
+# itself, or the spec doc, and on every push to dev touching the same paths.
+#
+# The pull_request trigger is DELIBERATELY NOT filtered by base branch. A PR
+# stacked on another feature branch matched neither trigger, so a change to
+# one of these six files skipped this gate entirely and the PR still read
+# GREEN. The paths filter stays and bounds the cost; the base filter does not
+# come back. See the long note in ci.yml for the same fix there.
+#
+# This is the acceptance gate for DL-0430: every exit-code path must be
+# watched going red before the ticket closes. See STALENESS_PROBE_CRON.md for
+# the full exit-code spec.
 
 on:
   pull_request:
-    branches: [dev]
     paths:
       - 'scripts/ops/orbi-staleness-probe.sh'
       - 'scripts/ops/orbi-forward-fill-liveness.sh'
+      - 'scripts/ops/orbi-probe-failed.sh'
       - 'scripts/ops/tests/mock-systemctl.sh'
       - '.github/workflows/orbi-probe-test.yml'
       - 'STALENESS_PROBE_CRON.md'
@@ -19,6 +27,7 @@ on:
     paths:
       - 'scripts/ops/orbi-staleness-probe.sh'
       - 'scripts/ops/orbi-forward-fill-liveness.sh'
+      - 'scripts/ops/orbi-probe-failed.sh'
       - 'scripts/ops/tests/mock-systemctl.sh'
       - '.github/workflows/orbi-probe-test.yml'
       - 'STALENESS_PROBE_CRON.md'
@@ -55,7 +64,24 @@ jobs:
         run: |
           chmod +x scripts/ops/orbi-staleness-probe.sh
           chmod +x scripts/ops/orbi-forward-fill-liveness.sh
+          chmod +x scripts/ops/orbi-probe-failed.sh
           chmod +x scripts/ops/tests/mock-systemctl.sh
+
+      # The probe refuses to start unless ORBI_ALERT_SCRIPT points at an
+      # executable file (DL-0812). Every path below that is not deliberately
+      # testing a misconfigured host therefore needs a real alert target. This
+      # stub records the call and succeeds, so a page that would have been sent
+      # is visible in the job log rather than inferred.
+      - name: Create stub alert script
+        run: |
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'echo "stub-alert called with: $*"' \
+            'echo "$*" >> "${RUNNER_TEMP:?stub-alert needs RUNNER_TEMP}/alert-calls.log"' \
+            'exit 0' \
+            > "$RUNNER_TEMP/stub-alert.sh"
+          chmod +x "$RUNNER_TEMP/stub-alert.sh"
+          ls -l "$RUNNER_TEMP/stub-alert.sh"
 
       # -----------------------------------------------------------------------
       # Fixture: create the exchange_rates table the probe queries.
@@ -67,8 +93,11 @@ jobs:
         run: |
           psql -h localhost -U testuser -d testdb -c "
             CREATE TABLE IF NOT EXISTS public.exchange_rates (
-              bucket_ts  timestamptz NOT NULL,
-              granularity text        NOT NULL
+              bucket_ts       timestamptz NOT NULL,
+              granularity     text        NOT NULL,
+              source_currency text        NOT NULL,
+              target_currency text        NOT NULL,
+              status          text        NOT NULL DEFAULT 'CONFIRMED'
             );
           "
 
@@ -82,16 +111,26 @@ jobs:
         run: |
           psql -h localhost -U testuser -d testdb -c "
             TRUNCATE public.exchange_rates;
-            INSERT INTO public.exchange_rates (bucket_ts, granularity)
-            VALUES (now() - interval '1 minute', '1m');
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            VALUES (now() - interval '1 minute', '1m', 'BTC', 'USD');
           "
 
       - name: "[staleness] path 1 -- fresh -> expect exit 0"
         env:
           ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          # DL-1341 raised the shipped default from 10 to 90; pin it here so
+          # this test keeps proving the exit-code CONTRACT and does not
+          # quietly start proving one specific default value instead.
+          STALE_THRESHOLD_MINUTES: "10"
         run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
           ./scripts/ops/orbi-staleness-probe.sh
-          echo "confirmed: exit 0 (fresh data)"
+          if [[ -e "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: healthy data paged someone: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0 (fresh data), alert script NOT invoked"
 
       # -----------------------------------------------------------------------
       # Staleness probe -- path 2: stale data, expect exit 1
@@ -103,14 +142,22 @@ jobs:
         run: |
           psql -h localhost -U testuser -d testdb -c "
             TRUNCATE public.exchange_rates;
-            INSERT INTO public.exchange_rates (bucket_ts, granularity)
-            VALUES (now() - interval '20 minutes', '1m');
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            VALUES (now() - interval '20 minutes', '1m', 'BTC', 'USD');
           "
 
       - name: "[staleness] path 2 -- stale -> expect exit 1"
         env:
           ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          # DL-1341: 20 minutes old must stay STALE under the threshold this
+          # test pins, independent of the script's shipped default. Before this
+          # line existed, raising the default to 90 made 20 minutes read as
+          # fresh and this job went red -- the contract still held, only the
+          # fixture had drifted out from under the new default.
+          STALE_THRESHOLD_MINUTES: "10"
         run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
           set +e
           ./scripts/ops/orbi-staleness-probe.sh
           EXIT=$?
@@ -119,13 +166,19 @@ jobs:
             echo "ERROR: expected exit 1 (stale), got $EXIT" >&2
             exit 1
           fi
-          echo "confirmed: exit 1 (stale data)"
+          if [[ ! -s "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: probe exited 1 but the alert script was never invoked; nobody was paged" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 1 (stale data), alert invoked: $(cat "$RUNNER_TEMP/alert-calls.log")"
 
       # -----------------------------------------------------------------------
       # Staleness probe -- path 3: bad DSN, expect exit 2
       # Proves the probe is loud when the DB is unreachable.
       # -----------------------------------------------------------------------
       - name: "[staleness] path 3 -- bad DSN -> expect exit 2"
+        env:
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
         run: |
           set +e
           ORBI_PROBE_DSN="postgres://nobody:wrong@unreachable-host:5432/db" \
@@ -137,6 +190,194 @@ jobs:
             exit 1
           fi
           echo "confirmed: exit 2 (bad DSN)"
+
+      # -----------------------------------------------------------------------
+      # Staleness probe -- path 4: alert path unset, expect exit 2
+      # The data is FRESH here on purpose. Without the guard this run would exit
+      # 0 and the job would report a healthy probe that can page nobody. Exit 2,
+      # never 1: a misconfigured host must not look like a stale table.
+      # -----------------------------------------------------------------------
+      - name: "[staleness] path 4 -- alert path unset -> expect exit 2"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ""
+        run: |
+          set +e
+          ./scripts/ops/orbi-staleness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (alert path unset), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (alert path unset)"
+
+      # -----------------------------------------------------------------------
+      # Staleness probe -- path 5: alert path set but not executable, expect 2
+      # A path that is merely SET is not a path that can page. This is the case
+      # a typo in the unit environment produces.
+      # -----------------------------------------------------------------------
+      - name: "[staleness] path 5 -- alert path not executable -> expect exit 2"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/no-such-alert.sh
+        run: |
+          set +e
+          ./scripts/ops/orbi-staleness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (alert path not executable), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (alert path not executable)"
+
+      # -----------------------------------------------------------------------
+      # Staleness probe -- path 6: stale data, alert script FAILS, expect exit 2
+      # A STALE that paged and a STALE that paged nobody must not share an exit
+      # code. Exit 1 means someone was actually told; an undelivered page is an
+      # ERROR like any other. Without the probe fix this step sees 1 and fails.
+      # -----------------------------------------------------------------------
+      - name: Create failing alert stub
+        run: |
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'echo "failing-alert called with: $*, refusing to deliver" >&2' \
+            'exit 1' \
+            > "$RUNNER_TEMP/failing-alert.sh"
+          chmod +x "$RUNNER_TEMP/failing-alert.sh"
+          ls -l "$RUNNER_TEMP/failing-alert.sh"
+
+      - name: "[staleness] re-seed stale data (20 minutes old)"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            TRUNCATE public.exchange_rates;
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            VALUES (now() - interval '20 minutes', '1m', 'BTC', 'USD');
+          "
+
+      - name: "[staleness] path 6 -- stale + page undeliverable -> expect exit 2"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/failing-alert.sh
+          # DL-1341: same reason as path 2 above, pinned independently of the
+          # shipped default.
+          STALE_THRESHOLD_MINUTES: "10"
+        run: |
+          set +e
+          ./scripts/ops/orbi-staleness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -eq 1 ]]; then
+            echo "ERROR: undelivered STALE exited 1, identical to a delivered STALE; that is the silent-success bug" >&2
+            exit 1
+          fi
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (stale, page undeliverable), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (stale, alert script exited non-zero)"
+
+      # -----------------------------------------------------------------------
+      # DSN sanitizer -- coverage added for the DL-2098 review findings on
+      # DL-1341: a password can be percent-encoded, a DSN can already carry a
+      # query string, and a DSN can have a shape the sanitizer regex does not
+      # anticipate at all. Each of these has to behave correctly or fail LOUD,
+      # never fail silent.
+      # -----------------------------------------------------------------------
+      - name: "[dsn-sanitizer] re-seed fresh data (1 minute old)"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            TRUNCATE public.exchange_rates;
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            VALUES (now() - interval '1 minute', '1m', 'BTC', 'USD');
+          "
+
+      - name: "[dsn-sanitizer] no password in the DSN -> parses cleanly, auth required -> expect exit 2"
+        env:
+          # No ":pass" segment. The regex's password group is optional, so this
+          # must still match and reach the query step -- it should not error
+          # out in the parser itself. The postgres:16 image requires a
+          # password, so the query fails and the probe reports ERROR, not a
+          # crash and not a false STALE.
+          ORBI_PROBE_DSN: "postgres://testuser@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+        run: |
+          set +e
+          OUT=$(./scripts/ops/orbi-staleness-probe.sh 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUT"
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (auth required, no password supplied), got $EXIT" >&2
+            exit 1
+          fi
+          if echo "$OUT" | grep -q 'WARNING: DSN does not match'; then
+            echo "ERROR: a DSN with no password is a VALID shape and must not warn" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (no password), sanitizer did not warn on a valid shape"
+
+      - name: "[dsn-sanitizer] DSN already carries a query string -> connect_timeout is appended, not duplicated -> expect exit 0"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb?sslmode=prefer"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          STALE_THRESHOLD_MINUTES: "10"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          ./scripts/ops/orbi-staleness-probe.sh
+          if [[ -e "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: fresh data paged someone: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0, existing query string preserved and connect_timeout appended"
+
+      - name: "[dsn-sanitizer] unparseable DSN shape -> warns instead of failing silent -> expect exit 2"
+        env:
+          # Not a postgres URI at all. The sanitizer must not silently accept
+          # this: it should warn on stderr and pass it through unchanged, and
+          # psql must then fail loudly rather than the probe reporting a false
+          # OK or STALE.
+          ORBI_PROBE_DSN: "not-a-valid-dsn"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+        run: |
+          set +e
+          OUT=$(./scripts/ops/orbi-staleness-probe.sh 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUT"
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (query failed on an unparseable DSN), got $EXIT" >&2
+            exit 1
+          fi
+          if ! echo "$OUT" | grep -q 'WARNING: DSN does not match'; then
+            echo "ERROR: sanitizer fell through silently -- no warning was printed for an unparseable DSN" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2, and the sanitizer warned instead of failing silent"
+
+      - name: "[dsn-sanitizer] percent-decode self-test (p%40ss -> p@ss)"
+        # Proves the exact decode one-liner shipped in the script, without
+        # needing a database whose password we can rotate mid-job. A full
+        # end-to-end auth proof would need a second postgres service with a
+        # password containing an unencoded @, which this job does not carry;
+        # this is a self-test of the decode logic, the same pattern the repo
+        # already uses for scripts/check-anon-rpc-grants.mjs --selftest.
+        run: |
+          urldecode() {
+            local encoded="$1"
+            printf '%b' "${encoded//%/\\x}"
+          }
+          RESULT="$(urldecode 'p%40ss')"
+          if [[ "$RESULT" != 'p@ss' ]]; then
+            echo "ERROR: expected 'p@ss', got '${RESULT}'" >&2
+            exit 1
+          fi
+          echo "confirmed: percent-encoded password decodes correctly"
 
       # -----------------------------------------------------------------------
       # Liveness check -- path 1: service active, expect exit 0
@@ -185,3 +426,77 @@ jobs:
             exit 1
           fi
           echo "confirmed: exit 1 (service failed)"
+
+      # -----------------------------------------------------------------------
+      # OnFailure handler. The handler is what pages when a probe unit dies
+      # before it can report for itself, so what must be proved is that it exits
+      # NON-ZERO when it cannot deliver. These four steps cover every exit the
+      # script documents, including the success path: a handler that always
+      # exited 3 would satisfy the failure cases alone and still page nobody.
+      # -----------------------------------------------------------------------
+      - name: "[onfailure] path 1 -- ORBI_ALERT_SCRIPT unset -> expect exit 3"
+        run: |
+          set +e
+          env -u ORBI_ALERT_SCRIPT ./scripts/ops/orbi-probe-failed.sh orbi-staleness-probe.service
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 3 ]]; then
+            echo "ERROR: expected exit 3 (no transport), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 3 (ORBI_ALERT_SCRIPT unset)"
+
+      - name: "[onfailure] path 2 -- ORBI_ALERT_SCRIPT names a bad path -> expect exit 3"
+        env:
+          ORBI_ALERT_SCRIPT: /nonexistent/no-such-alert.sh
+        run: |
+          set +e
+          ./scripts/ops/orbi-probe-failed.sh orbi-staleness-probe.service
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 3 ]]; then
+            echo "ERROR: expected exit 3 (alert script missing), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 3 (alert script missing or not executable)"
+
+      - name: "[onfailure] path 3 -- alert script runs and fails -> expect exit 4"
+        run: |
+          cat > /tmp/failing-alert.sh <<'EOF'
+          #!/usr/bin/env bash
+          exit 1
+          EOF
+          chmod +x /tmp/failing-alert.sh
+          set +e
+          ORBI_ALERT_SCRIPT=/tmp/failing-alert.sh ./scripts/ops/orbi-probe-failed.sh orbi-staleness-probe.service
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 4 ]]; then
+            echo "ERROR: expected exit 4 (delivery failed), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 4 (alert script failed and the handler did not swallow it)"
+
+      - name: "[onfailure] path 4 -- alarm delivered -> expect exit 0 and a correct payload"
+        run: |
+          cat > /tmp/ok-alert.sh <<'EOF'
+          #!/usr/bin/env bash
+          printf '%s' "$1" > /tmp/alert-level
+          printf '%s' "$2" > /tmp/alert-body
+          exit 0
+          EOF
+          chmod +x /tmp/ok-alert.sh
+          ORBI_ALERT_SCRIPT=/tmp/ok-alert.sh ./scripts/ops/orbi-probe-failed.sh orbi-staleness-probe.service
+          LEVEL="$(cat /tmp/alert-level)"
+          BODY="$(cat /tmp/alert-body)"
+          echo "level=${LEVEL}"
+          echo "body=${BODY}"
+          if [[ "$LEVEL" != "ERROR" ]]; then
+            echo "ERROR: expected level ERROR, got ${LEVEL}" >&2
+            exit 1
+          fi
+          case "$BODY" in
+            *orbi-staleness-probe.service*) ;;
+            *) echo "ERROR: alarm body does not name the failed unit: ${BODY}" >&2; exit 1 ;;
+          esac
+          echo "confirmed: exit 0, level ERROR, body names the failed unit"

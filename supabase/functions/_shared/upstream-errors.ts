@@ -174,9 +174,8 @@ export const _CLASS_NAME_SHAPE_FOR_TEST = CLASS_NAME_SHAPE;
  */
 export function classifyUpstreamError(raw: string, errorClass?: string): UpstreamErrorCode {
   // ── Tier 1: the provider library's own type ──────────────────────────────
-  if (errorClass) {
-    const mapped = CCXT_ERROR_CODES[errorClass];
-    if (mapped) return mapped;
+  if (errorClass && Object.prototype.hasOwnProperty.call(CCXT_ERROR_CODES, errorClass)) {
+    return CCXT_ERROR_CODES[errorClass];
   }
 
   // ── Tier 2: message shape (unchanged from the original implementation) ───

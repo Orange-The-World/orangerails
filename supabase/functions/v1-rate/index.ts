@@ -9,13 +9,29 @@
 // Updated: Dev 2, 2026-07-22 -- P2 fixes: flag gate, keyErr 5xx, body validation, UTC timestamp, hasOwn, await usage log
 // Updated: Dev 1, 2026-07-22 -- ISO_UTC_RE: Z suffix only (spec says offset timestamps return 400)
 // Updated: Security, 2026-07-23 -- key lookup uses maybeSingle so a bad or revoked key returns 401, not 500
+// Updated: Sr Dev A, 2026-08-14 -- DL-1043: validate FORWARD_FILL_MAX_DAYS; reject NaN/non-positive, fall back to 2d, log on misconfig
+// Updated: Sr Dev A, 2026-08-18 -- DL-0505: return 404 unsupported_pair when pair has no coverage; stale forward-fill continues to return fill_type:gap
+// Updated: Sr Dev A, 2026-08-18 -- DL-0505 Auditor fix: existence probe distinguishes unsupported_pair from before_coverage_start; per-item errors in batch preserve prior results and metering
+// Updated: Sr Dev B, 2026-08-20 -- DL-1361: surface rate_type and data_source_authority for CB-sourced composites (official_reference vs market)
+// Updated: Sr Dev B, 2026-08-21 -- DL-1361 round 2: drop OFFICIAL_CB_AUTHORITIES whitelist; any non-null composite authority is official_reference
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
+import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const RATE_LIMIT_RPM = parseInt(Deno.env.get('RATE_LIMIT_RPM') ?? '60')
 const BATCH_LIMIT = parseInt(Deno.env.get('BATCH_LIMIT') ?? '50')
+// Maximum time a forward-fill can reach back before the response converts to fill_type:gap.
+// A plausible-looking stale number is worse than an honest null. Default: 2 days.
+// Measured across all 72 served pairs: 100% of consecutive-row intervals are under 2 days
+// (widest legitimate gap observed: 1d 10h 38m). 2 days clears normal operation with ~40%
+// headroom and rejects every stale fill found in the gap audit (10.9-29.1 days old).
+// Override with FORWARD_FILL_MAX_DAYS env var (no redeploy needed).
+const _fwdDaysRaw = parseInt(Deno.env.get('FORWARD_FILL_MAX_DAYS') ?? '2')
+const _fwdDaysValid = Number.isFinite(_fwdDaysRaw) && _fwdDaysRaw > 0
+if (!_fwdDaysValid) console.error(`[v1-rate] FORWARD_FILL_MAX_DAYS invalid ("${Deno.env.get('FORWARD_FILL_MAX_DAYS')}"); falling back to 2d default`)
+const FORWARD_FILL_MAX_MS = (_fwdDaysValid ? _fwdDaysRaw : 2) * 24 * 60 * 60 * 1000
 
 // Product registry: each product maps 1:1 to a granularity.
 // ORBI-M   = 1-minute bars, crypto pairs (BTC, USDC, USDT, DAI, EURC, PYUSD)
@@ -25,6 +41,34 @@ const VALID_PRODUCTS: Record<string, { granularity: string }> = {
   'ORBI-M': { granularity: '1m' },
   'ORBI-D': { granularity: '1d' },
   'ORBI-D-authority': { granularity: '1d' },
+}
+
+// Matches a trailing ISO-date suffix written by orbi-cb-cross-rates.py for dated
+// composites, e.g. '-2026-06-19' in 'BTC-USD * USD-CNY-ECB-2026-06-19'.
+const ISO_DATE_SUFFIX_RE = /-\d{4}-\d{2}-\d{2}$/
+
+// Extract the data-source authority from a composite_via string.
+// Formats written by orbi-cb-cross-rates.py:
+//   Standard: 'BTC-USD * USD-{TARGET}-{AUTHORITY}'
+//   Dated:    'BTC-USD * USD-{TARGET}-{AUTHORITY}-YYYY-MM-DD'
+//   Peg:      'BTC-USD * USD-{TARGET}-PEG'
+// 'PEG' is a construction method (pegged rate), not a data-source institution,
+// so it returns null. Dated forms strip the date suffix before extracting the
+// authority, so 'ECB-2026-06-19' correctly yields 'ECB', not '19'.
+// Returns null for non-composite rows (composite_via is null or does not match).
+export function extractCompositeAuthority(compositeVia: string | null | undefined): string | null {
+  if (!compositeVia) return null
+  const afterStar = compositeVia.split('* ')[1]
+  if (!afterStar) return null
+  // Strip trailing ISO-date suffix (e.g. -2026-06-19) before splitting
+  const stripped = afterStar.replace(ISO_DATE_SUFFIX_RE, '')
+  const segments = stripped.split('-')
+  // Minimum: 'USD-XXX-AUTH' = 3 segments
+  if (segments.length < 3) return null
+  const authority = segments[segments.length - 1]
+  // 'PEG' marks a construction method (pegged rate), not a data-source institution
+  if (authority === 'PEG') return null
+  return authority
 }
 
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
@@ -68,7 +112,39 @@ interface RateItem {
 // timezone marker are also rejected.
 const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/
 
-Deno.serve(async (req: Request) => {
+// Caller surface and non-200 behavior (required for Auditor sign-off):
+//
+// Callers:
+//   1. External ORBI API consumers holding orbi_api_keys, calling this
+//      endpoint directly.
+//   2. workers/api-gateway (this repo): routes GET /v1/rate and POST /v1/rate
+//      to this function via proxyToSupabase, which returns fetch(upstream)
+//      verbatim without inspecting or rewriting the status. Any non-200
+//      response from this function (including 502) reaches the end consumer
+//      unchanged.
+//
+//   400/401/404/405/429/503 -- handler returns structured JSON { error, message };
+//     callers act per code (retry 429 with Retry-After, fix request on 4xx,
+//     back off on 503).
+//   404 unsupported_pair -- the requested asset/fiat pair has no rate coverage
+//     on the given product; this pair is not ingested and will never forward-fill.
+//     Distinguish from fill_type:gap (pair IS covered, data temporarily missing).
+//   404 before_coverage_start -- pair IS ingested but the requested time predates
+//     its first available bucket; request a later timestamp.
+//   Batch (POST) requests embed both codes as per-item errors in the 200 envelope
+//     so earlier resolved results are not discarded and successful items are metered.
+//   Single-item GET/POST surfaces them as HTTP 404 for backward compatibility.
+//   500 -- outer try/catch (below) returns structured JSON
+//     { error: 'server_error', message, correlation_id }; callers treat as
+//     transient and may retry.
+//   502 -- wrapSentryHandler catches any exception that escapes the outer
+//     catch, reports it to GlitchTip, then re-throws; Supabase edge runtime
+//     converts the unhandled throw into 502 Bad Gateway. This fires only for
+//     true programming bugs or fatal init failures after module load. Callers
+//     receive a raw Supabase 502 body (no structured JSON); the api-gateway
+//     forwards this verbatim to the end consumer. Treat 502 as a transient
+//     outage and retry with exponential backoff.
+Deno.serve(wrapSentryHandler(async (req: Request) => {
   const correlationId = crypto.randomUUID()
   try {
   // ----- Feature flag -----
@@ -98,6 +174,7 @@ Deno.serve(async (req: Request) => {
   // Return 500 so callers can distinguish unavailability from a bad key.
   if (keyErr) {
     console.error(`key-lookup DB error [${correlationId}]:`, keyErr)
+    void reportError(keyErr, 'v1-rate', req)
     return Response.json({ error: 'server_error', message: 'Database error during key lookup', correlation_id: correlationId }, { status: 500 })
   }
   if (!keyRow) return errResponse(401, 'invalid_key', 'API key invalid or revoked')
@@ -187,7 +264,7 @@ Deno.serve(async (req: Request) => {
     // PostgREST select syntax has no AS; a bare cast keeps the field name `rate`.
     const { data: row, error: rateErr } = await supabase
       .from('exchange_rates')
-      .select('bucket_ts, rate::text, provenance, tier, source_authority')
+      .select('bucket_ts, rate::text, provenance, tier, source_authority, composite_via')
       .eq('source_currency', item.asset.toUpperCase())
       .eq('target_currency', item.fiat.toUpperCase())
       .eq('granularity', granularity)
@@ -204,22 +281,76 @@ Deno.serve(async (req: Request) => {
     // Return 500 so callers can distinguish DB-down from legitimate no-data.
     if (rateErr) {
       console.error(`rate-lookup DB error [${correlationId}]:`, rateErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity, bucketTs }))
+      void reportError(rateErr, 'v1-rate', req)
       return Response.json({ error: 'server_error', message: 'Database error fetching exchange rate', correlation_id: correlationId }, { status: 500 })
     }
 
-    const resolvedTs = row ? new Date(row.bucket_ts).toISOString() : bucketTs
-    const fillType = !row ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
+    // No rows at or before the requested time -- two distinct cases:
+    //   unsupported_pair: pair is not ingested at all; callers must fix asset/fiat/product.
+    //   before_coverage_start: pair IS ingested but requested time predates its first
+    //     bucket; callers should request a later timestamp.
+    // For batch requests, push a per-item error and continue so previously resolved items
+    // are not discarded and all successful items reach the usage-log insert below.
+    // Single-item requests are surfaced as HTTP 404 after the loop (see below).
+    if (!row) {
+      const { data: coverageRow, error: coverageErr } = await supabase
+        .from('exchange_rates')
+        .select('bucket_ts')
+        .eq('source_currency', item.asset.toUpperCase())
+        .eq('target_currency', item.fiat.toUpperCase())
+        .eq('granularity', granularity)
+        .eq('product', product)
+        .eq('source_authority', 'ORBI')
+        .eq('status', 'CONFIRMED')
+        .is('superseded_by_id', null)
+        .order('bucket_ts', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+
+      if (coverageErr) {
+        console.error(`coverage-probe DB error [${correlationId}]:`, coverageErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity }))
+        void reportError(coverageErr, 'v1-rate', req)
+        return Response.json({ error: 'server_error', message: 'Database error fetching rate coverage', correlation_id: correlationId }, { status: 500 })
+      }
+
+      const errorCode = coverageRow ? 'before_coverage_start' : 'unsupported_pair'
+      const errorMessage = coverageRow
+        ? `${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on ${product} has no data before ${bucketTs}; coverage starts at ${coverageRow.bucket_ts}`
+        : `No rate coverage for ${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on product ${product}`
+
+      results.push({
+        asset: item.asset.toUpperCase(),
+        fiat: item.fiat.toUpperCase(),
+        product,
+        requested_at: item.at,
+        error: errorCode,
+        message: errorMessage,
+      })
+      continue
+    }
+
+    const resolvedTs = new Date(row.bucket_ts).toISOString()
+    // Refuse to forward-fill across gaps wider than FORWARD_FILL_MAX_MS. A plausible-looking
+    // number spanning years of missing data is worse than an honest null (MXN: 5.5-year hole
+    // caused 65%-low rates across all of 2021-2026, root cause: composite never built for gap).
+    const gapMs = new Date(bucketTs).getTime() - new Date(row.bucket_ts).getTime()
+    const staleGap = gapMs > FORWARD_FILL_MAX_MS
+    const fillType = staleGap ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
+    const compositeAuth = staleGap ? null : extractCompositeAuthority(row.composite_via)
+    const rateType = staleGap ? null : (compositeAuth !== null ? 'official_reference' : 'market')
 
     results.push({
       asset: item.asset.toUpperCase(),
       fiat: item.fiat.toUpperCase(),
       product,
       requested_at: item.at,
-      resolved_at: resolvedTs,
-      rate: row?.rate ?? null,
-      provenance: row?.provenance ?? null,
-      tier: row?.tier ?? null,
-      source_authority: row?.source_authority ?? null,
+      resolved_at: staleGap ? bucketTs : resolvedTs,
+      rate: staleGap ? null : row.rate,
+      provenance: staleGap ? null : (row.provenance ?? null),
+      tier: staleGap ? null : (row.tier ?? null),
+      source_authority: staleGap ? null : (row.source_authority ?? null),
+      data_source_authority: compositeAuth,
+      rate_type: rateType,
       fill_type: fillType
     })
 
@@ -236,12 +367,20 @@ Deno.serve(async (req: Request) => {
   }
 
   // Await so metering actually writes; failure is non-fatal and must not block the response.
-  const { error: logErr } = await supabase.from('orbi_usage_log').insert(usageLogs)
-  if (logErr) console.error('usage-log insert failed:', logErr.message)
+  // Guard against empty array: Supabase returns an error on insert([]).
+  if (usageLogs.length > 0) {
+    const { error: logErr } = await supabase.from('orbi_usage_log').insert(usageLogs)
+    if (logErr) console.error('usage-log insert failed:', logErr.message)
+  }
 
+  // Single-item requests: surface per-item errors as HTTP 404 for backward compatibility.
+  if (items.length === 1 && results[0]?.error) {
+    return errResponse(404, results[0].error as string, results[0].message as string)
+  }
   return Response.json(items.length === 1 ? results[0] : { results, count: results.length })
   } catch (err) {
     console.error(`v1-rate unhandled error [${correlationId}]:`, err)
+    void reportError(err, 'v1-rate', req)
     return Response.json({ error: 'server_error', message: 'Internal error', correlation_id: correlationId }, { status: 500 })
   }
-})
+}, 'v1-rate'))

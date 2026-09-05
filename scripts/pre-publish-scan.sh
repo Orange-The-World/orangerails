@@ -91,11 +91,17 @@ EXCLUDE_FILES=(
 
 EXEMPT_GENERIC=(
   "scripts/pre-publish-scan.sh"
-  # The companion workflows carry the structural PATTERN as a literal (they
-  # are detectors). Exempt them the same way the scanner exempts itself.
+  # Detector files: a detector file is trusted by path and reviewed by humans.
+  # These carry internal patterns as literals and are unscanned for real
+  # internal terms too, not just structural patterns.
   ".github/workflows/post-merge-hygiene.yml"
+  ".github/workflows/pr-commit-metadata-scan.yml"
   ".github/PULL_REQUEST_TEMPLATE.md"
   ".github/workflows/repo-hygiene.yml"
+  # comment-findings-scan.yml is a detector file: it carries the TAILNET and
+  # CGNAT structural pattern classes as canary literals and is exempt from the
+  # same scan it implements. Reviewed by humans and trusted by path.
+  ".github/workflows/comment-findings-scan.yml"
   "CONTRIBUTING.md"
   "CODE_OF_CONDUCT.md"
   # CHANGELOG can mention "originally created in the MorningRevolution org" as
@@ -236,7 +242,18 @@ scan() {
   local count
   count=$(printf '%s\n' "$filtered" | wc -l)
   printf "  \033[31m✗\033[0m  %s (%d findings)\n" "$name" "$count"
-  printf '%s\n' "$filtered" | sed 's/^/      /' | head -20
+  # In CI the output goes to a PUBLIC Actions log, so never echo matched
+  # CONTENT there: a reserved-term or infra-shape hit would publish the exact
+  # internal string this scan exists to keep out of the public tree. Emit
+  # file:line only (the category is already named on the line above), which is
+  # enough to locate and clean up. Locally, emit the full matched line so a
+  # developer can see exactly what matched. The canary self-test sets
+  # SCAN_NO_REDACT to force full output so it can still assert the token fired.
+  if [[ -z "${SCAN_NO_REDACT:-}" && ( -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ) ]]; then
+    printf '%s\n' "$filtered" | sed -E 's/^([^:]+:[0-9]+):.*/\1/' | sed 's/^/      /' | head -20
+  else
+    printf '%s\n' "$filtered" | sed 's/^/      /' | head -20
+  fi
   if [[ "$count" -gt 20 ]]; then
     printf "      ... %d more\n" "$((count - 20))"
   fi
@@ -266,7 +283,12 @@ self_test() {
   # without ever matching the canary. Matching the token is what proves the
   # term scan actually fired.
   local out
+  # Force full (unredacted) output so the assertion below can see the canary
+  # token itself; in CI real scans redact content, but the self-test must
+  # prove the match mechanism fired by matching the token, not just file:line.
+  SCAN_NO_REDACT=1
   out=$(scan "canary self-test" "$canary" "i" "" 2>&1)
+  unset SCAN_NO_REDACT
   rm -f "$cf"
   EXIT_CODE=$saved
   if ! printf '%s' "$out" | grep -q "$canary"; then
@@ -398,7 +420,7 @@ scan "CGNAT-range address" \
 scan "Admin-only orangerails subdomains in shipping code" \
      "\\b(blocks|stealth)\\.orangerails\\.com\\b" \
      "" \
-     "$EXEMPT_PROTOCOL_RE|$EXEMPT_CRYPTO_RE|^./caddy/|docs/Stealth-Sync\\.md|scripts/README\\.md|src/stealth/lib/mock-fixtures|^./CHANGELOG\\.md"
+     "$EXEMPT_PROTOCOL_RE|$EXEMPT_CRYPTO_RE|^./caddy/|docs/Stealth-Sync\\.md|scripts/README\\.md|src/stealth/lib/mock-fixtures|^./CHANGELOG\\.md|^./benches/"
 
 # ----------------------------------------------------------------------
 # Category 4 — Internal milestone tags + dead PR references

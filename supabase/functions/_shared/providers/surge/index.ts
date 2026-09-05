@@ -299,6 +299,7 @@ export const surgeAdapter: ProviderAdapter = {
   status: 'beta',
   category: 'lender',
   tags: ['lender', 'btc-backed', 'usdc', 'base', 'evm', 'us'],
+  custody: 'custodial',
   popularity: 80,
 
   credentialFields: [

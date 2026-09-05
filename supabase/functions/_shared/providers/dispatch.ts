@@ -42,6 +42,7 @@ const ccxtAdapters: ProviderAdapter[] = CCXT_MANIFEST.map((entry) =>
     tags: entry.tags,
     popularity: entry.popularity,
     credentialShape: entry.credentialShape,
+    capabilities: entry.capabilities,
   }),
 );
 
@@ -98,10 +99,23 @@ export interface ProviderManifest {
    * Optional in-app route for providers whose connect flow lives outside
    * the generic credential-entry dialog. When set, pickers should route
    * the tile's "Connect" action to this URL instead of opening the
-   * credential form. Used today by Sparrow (Stealth Sync widget popup);
-   * future client-side providers can adopt the same pattern.
+   * credential form. Used today by Quiltt (bank account OAuth flow).
+   * Sparrow and xpub cleared their connectUrl in DL-1007 because those
+   * routes now redirect to /providers, creating a loop if used as CTA targets.
    */
   connectUrl?: string;
+  /**
+   * Exchange-level sync capabilities, sourced from CCXT manifest introspection.
+   * Present only for CCXT-backed exchanges (98 today). Absent for native
+   * adapters (blink, xpub, btcpay, strike, surge) and client-side manifests
+   * (quiltt, sparrow). Never defaults to false: absent means unknown or
+   * not applicable, not "cannot do this".
+   */
+  capabilities?: {
+    trades: boolean;
+    deposits: boolean;
+    withdrawals: boolean;
+  };
 }
 
 /**
@@ -151,7 +165,6 @@ const CLIENT_SIDE_MANIFESTS: ReadonlyArray<ProviderManifest> = [
     popularity: 85,
     multiWallet: false,
     credentialFields: [],
-    connectUrl: '/connect/sparrow',
   },
 ];
 
@@ -166,6 +179,8 @@ export function listProviderManifests(): ProviderManifest[] {
     popularity: p.popularity,
     multiWallet: p.multiWallet,
     credentialFields: p.credentialFields,
+    ...(p.capabilities !== undefined ? { capabilities: p.capabilities } : {}),
+    ...(p.connectUrl !== undefined ? { connectUrl: p.connectUrl } : {}),
   }));
   return [...live, ...CLIENT_SIDE_MANIFESTS, ...ROADMAP_MANIFESTS];
 }
@@ -219,4 +234,4 @@ export type {
   SyncResult,
   CredentialField,
 } from './types.ts';
-export { parseCredentials } from './types.ts';
+export { parseCredentials, resolveCustody } from './types.ts';

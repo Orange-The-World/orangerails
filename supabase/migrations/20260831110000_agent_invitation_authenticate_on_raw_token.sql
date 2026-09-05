@@ -1,0 +1,706 @@
+-- ============================================================
+-- Agent invitation redemption: authenticate on the RAW token
+-- ============================================================
+-- Ticket:  OR-T0965 (P0)
+-- Ruling:  OR-T0954 (design), OR-T0988 (which principal calls these)
+-- Related: OR-T0937 (self hosted anon grant), OR-T0701 / OR-T0717 /
+--          OR-T0963 / OR-T1027 (the default privilege class this file
+--          has to defend against)
+--
+-- ------------------------------------------------------------
+-- WHY
+-- ------------------------------------------------------------
+-- complete_agent_invitation authenticated on the invitation UUID alone.
+-- Anyone who learned an unredeemed invitation id inside its 7 day window
+-- could activate that agent member with THEIR OWN identity_pubkey and
+-- kem_pubkey, making themselves a valid key wrap recipient for that agent.
+-- Silent from the owner's side: nothing errors and nothing is logged as a
+-- failure.
+--
+-- ------------------------------------------------------------
+-- WHAT CHANGES
+-- ------------------------------------------------------------
+-- 1. complete_agent_invitation takes p_token text, the RAW token. The body
+--    computes the sha256 digest and matches it against
+--    agent_invitation_tokens.token_hash, alongside the existing
+--    redeemed_at IS NULL, revoked_at IS NULL, expires_at > now()
+--    predicates, FOR UPDATE.
+-- 2. p_invitation_id is GONE from that signature. The token alone
+--    identifies the row, and token_hash is UNIQUE.
+-- 3. peek_agent_invitation changes the same way IN THIS SAME FILE: raw
+--    token in, hashed in the body.
+--
+-- WHY THE RAW TOKEN AND NOT THE HASH. If the client sends the hash then
+-- the stored column IS the credential, and anyone who can merely READ
+-- agent_invitation_tokens can complete any live invitation. Hashing at
+-- rest buys nothing when the wire value equals the stored value. Leaving
+-- peek on the hash would keep the read side as a leak to credential path,
+-- and splitting the two halves across two migrations would leave a window
+-- in which no client can satisfy both.
+--
+-- NOT DONE, and deliberately not: constant time comparison, rate limiting,
+-- challenge and response. The token is full entropy and unstructured, so
+-- there is nothing adaptively searchable. Adding them would be cost with
+-- no defence bought.
+--
+-- ------------------------------------------------------------
+-- WHY DROP AND CREATE RATHER THAN CREATE OR REPLACE
+-- ------------------------------------------------------------
+-- complete_agent_invitation changes its argument TYPE list
+-- (uuid,uuid,text,text becomes text,uuid,text,text) and
+-- peek_agent_invitation changes an input parameter NAME (p_token_hash
+-- becomes p_token, with the same text type). PostgreSQL permits neither
+-- through CREATE OR REPLACE. Both are therefore DROP plus CREATE.
+--
+-- ------------------------------------------------------------
+-- WHY EVERY GRANT IS RE-STATED, AND WHY THE anon GRANT IS CONDITIONAL
+-- ------------------------------------------------------------
+-- A dropped and recreated function is born with the pg_default_acl of the
+-- CREATING ROLE, not with its old ACL. Migrations execute as postgres.
+-- Read live from pg_default_acl on 2026-08-31, objtype f, schema public.
+-- EVERY row is listed, not only the postgres one, because which row applies
+-- depends on which role creates the object:
+--
+--   hosted prod  lcdicqalreskibdfxkzb
+--     grantor postgres       : anon=X, authenticated=X, service_role=X
+--     (that is the only row)
+--   hosted dev   fzwmnzmtqidumdqjdddz
+--     grantor postgres       : postgres=X, authenticated=X, service_role=X
+--     grantor supabase_admin : postgres=X, anon=X, authenticated=X, service_role=X
+--   self hosted  (container supabase-db, database postgres)
+--     grantor postgres       : postgres=X, service_role=X
+--     grantor supabase_admin : postgres=X, service_role=X
+--     (neither row names anon or authenticated)
+--
+-- The default ACL is not the only source of a grant, so the CURRENT proacl
+-- of both functions was read on the same three clusters on 2026-08-31 as
+-- well. It does NOT agree with the default ACLs above, and that is the whole
+-- reason this paragraph exists:
+--
+--   hosted prod  : postgres=X, service_role=X on both, old signatures
+--                  (uuid,uuid,text,text) and (p_token_hash text)
+--   hosted dev   : postgres=X, service_role=X on both, already the new
+--                  signatures, from the out of band apply noted below
+--   self hosted  : postgres=X, anon=X, authenticated=X, service_role=X on
+--                  BOTH functions, old signatures. Those anon and
+--                  authenticated grants are live and pre-existing there,
+--                  not inherited from that cluster's pg_default_acl, which
+--                  names neither role. Section 1 says what this file does
+--                  to them.
+--
+-- So on production, creating a function as postgres IS granting anon AND
+-- authenticated EXECUTE on it. On dev, creating as postgres grants
+-- authenticated, and creating as supabase_admin would also grant anon. An
+-- earlier version of this header quoted only the dev postgres row and
+-- concluded dev cannot regrant anon. That was incomplete; the correction is
+-- the Auditor's on OR-T1087 and it is verified live above.
+-- Without the explicit REVOKE below, this file would silently hand anon
+-- EXECUTE back on a key binding function. That is the same defect class
+-- tracked on OR-T0701, OR-T0717, OR-T0963 and fixed at source by OR-T1027.
+-- This file does not depend on that fix having landed.
+--
+-- The anon grant is CONDITIONAL rather than hard coded because the three
+-- clusters legitimately disagree and must not be forced to agree here:
+--
+--   hosted dev, hosted prod : the caller is service_role through an edge
+--                             function (ruled on OR-T0988). anon has held
+--                             no EXECUTE on these since 20260721120000.
+--   self hosted             : anon DOES hold EXECUTE and the OR-T0937
+--                             ruling keeps it.
+--
+-- A hard coded grant would be wrong on two clusters out of three whichever
+-- way it was written. So this file CAPTURES the anon EXECUTE grants actually
+-- in force before the drop and restores exactly those afterwards. It is
+-- stable on re-run because the captured post state equals the intended state.
+-- PUBLIC is never captured and never restored: it is revoked unconditionally
+-- and deliberately. authenticated is treated the same way, and section 1
+-- says why.
+--
+-- THE LIMIT OF THIS FORMULATION, stated because it is real. Capture and
+-- restore is correct only on a cluster whose CURRENT grants are already
+-- correct. It preserves a wrong grant exactly as faithfully as a right one,
+-- so on its own it records drift as intent. That is why the capture is
+-- narrowed to the single role a ruling actually covers, and why the
+-- assertions at the end compare the post state against the captured set
+-- rather than trusting the restore loop to have done the right thing.
+--
+-- ------------------------------------------------------------
+-- SECURITY DEFINER SEARCH PATH
+-- ------------------------------------------------------------
+-- Both functions pin SET search_path = public, pg_temp, with pg_temp LAST.
+-- PostgreSQL searches the temporary schema FIRST for relation names unless
+-- pg_temp is named explicitly, so a bare SET search_path TO 'public' inside
+-- a SECURITY DEFINER body still lets a caller who can create a temp table
+-- shadow public.agent_invitation_tokens or public.agent_members.
+--
+-- No such caller exists on the ruled path today: OR-T0988 rules the caller
+-- is service_role through an edge function speaking PostgREST, which cannot
+-- issue CREATE TEMP TABLE. So this is hardening and NOT a live hole. It is
+-- done because the mitigation otherwise rests on a property of the current
+-- deployment rather than on a property of these functions.
+--
+-- HOUSE STANDARD, ruled on OR-T1131: every SECURITY DEFINER function in
+-- this repo pins search_path with pg_temp LAST, and the migration that
+-- creates it asserts that pin BY NAME. The assertion block below does that
+-- for both functions, so a later edit that drops pg_temp trips this file.
+--
+-- ------------------------------------------------------------
+-- IDEMPOTENT
+-- ------------------------------------------------------------
+-- Safe to re-run. Both old signatures are dropped IF EXISTS and the new
+-- functions are created unconditionally, so a second run is a no-op in
+-- effect. The capture table's CREATE TABLE IF NOT EXISTS contributes
+-- nothing to that and is not claimed to: the whole file is one transaction
+-- and the table is dropped inside it, so it cannot survive a run either
+-- way, committed or aborted. Hosted dev already carries this shape, applied out of band
+-- with no migration file and no ledger row (that drift is the reason this
+-- file exists at all); re-running it there is expected and harmless.
+--
+-- ------------------------------------------------------------
+-- REVERSIBLE
+-- ------------------------------------------------------------
+-- Yes, mechanically: re-apply 20260521020000 (previous
+-- complete_agent_invitation) and 20260520030000 (previous peek). Doing so
+-- REOPENS the takeover primitive, so it is a rollback of last resort and
+-- must not be done to unblock a deploy.
+--
+-- ------------------------------------------------------------
+-- PRE-LAND COUNTS, read live 2026-08-31
+-- live invitations = redeemed_at IS NULL AND revoked_at IS NULL AND expires_at > now()
+-- ------------------------------------------------------------
+--   hosted dev  fzwmnzmtqidumdqjdddz : 0 live, 0 rows total, agent_members 0
+--   hosted prod lcdicqalreskibdfxkzb : 0 live, 0 rows total, agent_members 0
+--   self hosted (container supabase-db) : 0 live (recorded on OR-T0965, 04:52 UTC)
+--
+-- Zero everywhere, so the OR-T0954 land outright rule applies and no
+-- invitation has to be re-minted. Outstanding invitations minted under the
+-- old scheme could NOT be completed after this change, by design; there
+-- are none.
+--
+-- OPERATIONAL NOTE, read before applying to production. The five agent
+-- edge functions (or-mcp, or-agent-invite-mint, or-agent-invite-redeem,
+-- or-agent-token-refresh, or-agent-revoke) were retired from this repo per
+-- CHANGELOG, yet remain deployed and ACTIVE on the hosted projects. Their
+-- source is therefore not in the tree and cannot be updated alongside this
+-- change. This migration changes the signature they call, so redemption
+-- through the deployed or-agent-invite-redeem will fail until that function
+-- is rebuilt. With zero agent_members and zero invitations on every
+-- cluster, the blast radius of that today is nil, and leaving the takeover
+-- primitive live on production to preserve an unused code path would be the
+-- wrong trade. Recorded rather than glossed.
+-- ============================================================
+
+BEGIN;
+
+-- ------------------------------------------------------------
+-- 0. Preconditions. These are the invariants the new lookup relies on.
+--    token_hash UNIQUE is what makes the token alone sufficient to
+--    identify a row now that p_invitation_id is gone.
+-- ------------------------------------------------------------
+DO $precheck$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE n.nspname = 'public'
+       AND t.relname = 'agent_invitation_tokens'
+       AND c.contype = 'u'
+       AND pg_get_constraintdef(c.oid) = 'UNIQUE (token_hash)'
+  ) THEN
+    ALTER TABLE public.agent_invitation_tokens
+      ADD CONSTRAINT agent_invitation_tokens_token_hash_key UNIQUE (token_hash);
+    RAISE NOTICE 'OR-T0965: added missing UNIQUE (token_hash)';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+     WHERE n.nspname = 'public'
+       AND t.relname = 'agent_members'
+       AND c.contype = 'u'
+       AND pg_get_constraintdef(c.oid) = 'UNIQUE (shadow_user_id)'
+  ) THEN
+    ALTER TABLE public.agent_members
+      ADD CONSTRAINT agent_members_shadow_user_id_key UNIQUE (shadow_user_id);
+    RAISE NOTICE 'OR-T0965: added missing UNIQUE (shadow_user_id)';
+  END IF;
+END
+$precheck$;
+
+-- ------------------------------------------------------------
+-- 1. Capture the EXECUTE grants in force BEFORE the drop.
+--    ONLY anon is captured, so only anon can be restored.
+--    authenticated is NOT captured. No ruling grants it EXECUTE on either
+--    function on any cluster, and it holds none on either hosted project
+--    today: proacl is postgres plus service_role on both, read live
+--    2026-08-31. It is revoked unconditionally below and never restored,
+--    so an authenticated grant arriving from pg_default_acl is REMOVED
+--    rather than recorded as intent.
+--
+--    READ THIS BEFORE APPLYING TO THE SELF HOSTED CLUSTER. There,
+--    authenticated DOES hold EXECUTE on both functions today: proacl is
+--    postgres, anon, authenticated, service_role on each, read live
+--    2026-08-31. That grant is live and pre-existing, not inherited from
+--    pg_default_acl, which on that cluster names only postgres and
+--    service_role. This file therefore REVOKES authenticated EXECUTE on
+--    both functions there and does NOT restore it. That is INTENDED. It is
+--    a privilege reduction on a key binding function, no ruling grants
+--    authenticated EXECUTE on either, and the pre-land counts below are
+--    zero on every cluster, so nothing in service depends on it. Reversing
+--    it, if it is ever wanted, is one GRANT.
+--    It is also SILENT: authenticated is outside the capture table and so
+--    outside both assertions, which compare the post state against the
+--    captured anon set only. The apply output will not mention it. That is
+--    why it is written here instead.
+--    anon is unaffected on that cluster: it is captured before the drop and
+--    restored after it, per the OR-T0937 ruling.
+--    PUBLIC is never captured and never restored. Grantee 0 in aclexplode
+--    is PUBLIC and is dropped by the pg_roles join, which is the intended
+--    behaviour, not an oversight.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public._or_t0965_acl_capture (
+  proname text NOT NULL,
+  rolname text NOT NULL,
+  PRIMARY KEY (proname, rolname)
+);
+
+INSERT INTO public._or_t0965_acl_capture (proname, rolname)
+SELECT DISTINCT p.proname, r.rolname
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  CROSS JOIN LATERAL aclexplode(p.proacl) a
+  JOIN pg_roles r ON r.oid = a.grantee
+ WHERE n.nspname = 'public'
+   AND p.proname IN ('complete_agent_invitation', 'peek_agent_invitation')
+   AND a.privilege_type = 'EXECUTE'
+   AND r.rolname = 'anon'
+ON CONFLICT DO NOTHING;
+
+-- ------------------------------------------------------------
+-- 2. Drop every prior overload of both functions.
+--    Named explicitly rather than by a catalogue loop so that an
+--    unexpected extra overload is left behind and trips the assertions
+--    at the end, instead of being silently swallowed.
+-- ------------------------------------------------------------
+DROP FUNCTION IF EXISTS public.complete_agent_invitation(uuid, uuid, text, text);
+DROP FUNCTION IF EXISTS public.complete_agent_invitation(text, uuid, text, text);
+DROP FUNCTION IF EXISTS public.peek_agent_invitation(text);
+
+-- ------------------------------------------------------------
+-- 3. peek_agent_invitation(p_token text)
+--    Read only validation of a raw token. Returns nothing at all for a
+--    malformed, unknown, expired, revoked or already redeemed token:
+--    one indistinguishable outcome, no error text to differentiate on.
+--    Never echoes the token or its digest.
+-- ------------------------------------------------------------
+CREATE FUNCTION public.peek_agent_invitation(p_token text)
+RETURNS TABLE (
+  invitation_id   uuid,
+  agent_member_id uuid,
+  owner_user_id   uuid,
+  expires_at      timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $peek$
+BEGIN
+  IF p_token IS NULL
+     OR length(p_token) < 43
+     OR length(p_token) > 512
+     OR p_token !~ '^[A-Za-z0-9_=-]+$' THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT t.id, t.agent_member_id, t.owner_user_id, t.expires_at
+    FROM public.agent_invitation_tokens t
+   WHERE t.token_hash = encode(sha256(convert_to(p_token, 'UTF8')), 'hex')
+     AND t.redeemed_at IS NULL
+     AND t.revoked_at  IS NULL
+     AND t.expires_at  > now()
+   LIMIT 1;
+END;
+$peek$;
+
+COMMENT ON FUNCTION public.peek_agent_invitation(text) IS
+  'Validates a RAW invitation token and returns the invitation it names. '
+  'The digest is computed inside the body: the caller never sends, and '
+  'never needs to know, the stored token_hash. Returns zero rows for every '
+  'failure mode so they cannot be told apart. OR-T0965.';
+
+-- ------------------------------------------------------------
+-- 4. complete_agent_invitation(p_token text, ...)
+--    p_invitation_id is gone. The raw token is the whole credential and
+--    the digest is computed here, never accepted from the caller.
+--    Every invitation related failure raises the SAME message.
+--    The three argument validation errors above it are about the CALLER'S
+--    OWN inputs, not about the invitation, so they leak nothing about
+--    whether a given token exists.
+-- ------------------------------------------------------------
+CREATE FUNCTION public.complete_agent_invitation(
+  p_token           text,
+  p_shadow_user_id  uuid,
+  p_identity_pubkey text,
+  p_kem_pubkey      text
+)
+RETURNS TABLE (
+  agent_member_id uuid,
+  owner_user_id   uuid
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $complete$
+DECLARE
+  v_agent_member_id uuid;
+  v_owner_user_id   uuid;
+  v_invitation_id   uuid;
+  v_token_hash      text;
+BEGIN
+  IF p_identity_pubkey IS NULL
+     OR length(p_identity_pubkey) < 40
+     OR length(p_identity_pubkey) > 1024 THEN
+    RAISE EXCEPTION 'identity_pubkey missing or invalid length';
+  END IF;
+  IF p_kem_pubkey IS NULL
+     OR length(p_kem_pubkey) < 40
+     OR length(p_kem_pubkey) > 4096 THEN
+    RAISE EXCEPTION 'kem_pubkey missing or invalid length';
+  END IF;
+  IF p_identity_pubkey !~ '^[A-Za-z0-9+/=_-]+$' THEN
+    RAISE EXCEPTION 'identity_pubkey is not valid base64';
+  END IF;
+  IF p_kem_pubkey !~ '^[A-Za-z0-9+/=_-]+$' THEN
+    RAISE EXCEPTION 'kem_pubkey is not valid base64';
+  END IF;
+  IF p_shadow_user_id IS NULL THEN
+    RAISE EXCEPTION 'shadow_user_id is required';
+  END IF;
+
+  -- Malformed token: same message as unknown, expired, revoked or already
+  -- redeemed. Deliberate.
+  IF p_token IS NULL
+     OR length(p_token) < 43
+     OR length(p_token) > 512
+     OR p_token !~ '^[A-Za-z0-9_=-]+$' THEN
+    RAISE EXCEPTION 'Invitation could not be completed';
+  END IF;
+
+  v_token_hash := encode(sha256(convert_to(p_token, 'UTF8')), 'hex');
+
+  SELECT t.id, t.agent_member_id, t.owner_user_id
+    INTO v_invitation_id, v_agent_member_id, v_owner_user_id
+    FROM public.agent_invitation_tokens t
+   WHERE t.token_hash  = v_token_hash
+     AND t.redeemed_at IS NULL
+     AND t.revoked_at  IS NULL
+     AND t.expires_at  > now()
+   FOR UPDATE;
+
+  IF v_agent_member_id IS NULL THEN
+    RAISE EXCEPTION 'Invitation could not be completed';
+  END IF;
+
+  UPDATE public.agent_members
+     SET shadow_user_id   = p_shadow_user_id,
+         identity_pubkey  = p_identity_pubkey,
+         kem_pubkey       = p_kem_pubkey,
+         activated_at     = now(),
+         last_activity_at = now()
+   WHERE id = v_agent_member_id
+     AND activated_at IS NULL;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Invitation could not be completed';
+  END IF;
+
+  UPDATE public.agent_invitation_tokens
+     SET redeemed_at = now()
+   WHERE id = v_invitation_id;
+
+  PERFORM public.append_audit_entry(
+    p_action          => 'agents.invite_redeemed',
+    p_actor_user_id   => p_shadow_user_id,
+    p_actor_member_id => v_agent_member_id,
+    p_resource_type   => 'agent_member',
+    p_resource_id     => v_agent_member_id::text,
+    p_result          => 'ok'
+  );
+
+  RETURN QUERY SELECT v_agent_member_id, v_owner_user_id;
+END;
+$complete$;
+
+COMMENT ON FUNCTION public.complete_agent_invitation(text, uuid, text, text) IS
+  'Redeems an invitation using the RAW token as the sole credential. The '
+  'invitation id is NOT an argument: knowing it is not sufficient to bind '
+  'keys to an agent member. Every invitation related failure raises one '
+  'indistinguishable message. OR-T0965.';
+
+-- ------------------------------------------------------------
+-- 5. Grants, every one of them stated here and none inherited.
+--    Revoke first, unconditionally, because a recreated function carries
+--    the creating role's pg_default_acl and on hosted prod that includes
+--    anon and authenticated.
+-- ------------------------------------------------------------
+REVOKE ALL ON FUNCTION public.peek_agent_invitation(text)                          FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.complete_agent_invitation(text, uuid, text, text)    FROM PUBLIC;
+
+DO $revoke_roles$
+DECLARE
+  v_role text;
+  v_sig  text;
+BEGIN
+  FOREACH v_role IN ARRAY ARRAY['anon', 'authenticated']
+  LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN
+      FOREACH v_sig IN ARRAY ARRAY[
+        'public.peek_agent_invitation(text)',
+        'public.complete_agent_invitation(text,uuid,text,text)'
+      ]
+      LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I', v_sig, v_role);
+      END LOOP;
+    END IF;
+  END LOOP;
+END
+$revoke_roles$;
+
+GRANT EXECUTE ON FUNCTION public.peek_agent_invitation(text)                       TO service_role;
+GRANT EXECUTE ON FUNCTION public.complete_agent_invitation(text, uuid, text, text) TO service_role;
+
+-- Restore exactly the anon grants that were in force before the drop, and
+-- nothing else. On the hosted projects this loop restores nothing, because
+-- nothing was there. On the self hosted cluster it restores the anon grant
+-- the OR-T0937 ruling keeps.
+DO $restore$
+DECLARE
+  r record;
+  v_sig text;
+BEGIN
+  FOR r IN SELECT proname, rolname FROM public._or_t0965_acl_capture LOOP
+    v_sig := CASE r.proname
+               WHEN 'complete_agent_invitation' THEN 'public.complete_agent_invitation(text,uuid,text,text)'
+               WHEN 'peek_agent_invitation'     THEN 'public.peek_agent_invitation(text)'
+             END;
+    IF v_sig IS NULL THEN
+      CONTINUE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r.rolname) THEN
+      RAISE NOTICE 'OR-T0965: captured role % no longer exists, not restored', r.rolname;
+      CONTINUE;
+    END IF;
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', v_sig, r.rolname);
+    RAISE NOTICE 'OR-T0965: restored EXECUTE on % to %', v_sig, r.rolname;
+  END LOOP;
+END
+$restore$;
+
+-- ------------------------------------------------------------
+-- 6. Assertions. These pin SHAPE, not just existence, so that a later
+--    edit that changes the shape trips this file rather than passing it.
+--    A file whose assertions still pass after the fix is reverted is
+--    asserting nothing.
+--
+--    THE CAPTURE TABLE IS STILL ALIVE HERE ON PURPOSE and is dropped only
+--    after this block. Dropping it first destroyed the only record of the
+--    pre-state, which left the grant half of these assertions with nothing
+--    to compare against: it could see only grantee 0 (PUBLIC), and a NAMED
+--    anon or authenticated grant is a different grantee. On hosted prod,
+--    where pg_default_acl for objtype f granted by postgres carries anon=X
+--    and authenticated=X, a drop and create materialises exactly such a
+--    named grant, so the one defect this file exists to prevent was the
+--    one thing the assertions could not go red on.
+--
+--    KNOWN LIMIT, written down rather than left implicit: the three body
+--    checks below are text searches over pg_get_functiondef, and that text
+--    includes comments. A FULL revert to the old signatures IS caught, by
+--    the argument shape checks. A deliberately subtle rewrite that took a
+--    pre-computed digest while carrying the word sha256 in a comment would
+--    NOT be caught. Catching that needs a behavioural assertion, which
+--    needs fixture rows inside a migration, which is why it is not here.
+-- ------------------------------------------------------------
+DO $assert$
+DECLARE
+  n         integer;
+  v_args    text;
+  v_def     text;
+  v_public  integer;
+  r         record;
+BEGIN
+  -- exactly one overload of each, so no old signature survives
+  SELECT count(*) INTO n
+    FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+   WHERE ns.nspname = 'public' AND p.proname = 'complete_agent_invitation';
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'OR-T0965 assert: expected exactly 1 complete_agent_invitation, found %', n;
+  END IF;
+
+  SELECT count(*) INTO n
+    FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+   WHERE ns.nspname = 'public' AND p.proname = 'peek_agent_invitation';
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'OR-T0965 assert: expected exactly 1 peek_agent_invitation, found %', n;
+  END IF;
+
+  -- complete: raw token first, invitation id gone
+  SELECT pg_get_function_arguments(p.oid), pg_get_functiondef(p.oid)
+    INTO v_args, v_def
+    FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+   WHERE ns.nspname = 'public' AND p.proname = 'complete_agent_invitation';
+  IF v_args NOT LIKE 'p_token text%' THEN
+    RAISE EXCEPTION 'OR-T0965 assert: complete_agent_invitation first arg is not the raw token, got %', v_args;
+  END IF;
+  IF v_args LIKE '%p_invitation_id%' THEN
+    RAISE EXCEPTION 'OR-T0965 assert: p_invitation_id is still in the signature, got %', v_args;
+  END IF;
+  IF position('sha256' IN v_def) = 0 THEN
+    RAISE EXCEPTION 'OR-T0965 assert: complete_agent_invitation does not hash inside the body';
+  END IF;
+  IF position('token_hash  = v_token_hash' IN v_def) = 0
+     AND position('token_hash = v_token_hash' IN v_def) = 0 THEN
+    RAISE EXCEPTION 'OR-T0965 assert: complete_agent_invitation does not match on the in-body digest';
+  END IF;
+
+  -- peek: parameter is named p_token, not p_token_hash
+  SELECT pg_get_function_arguments(p.oid), pg_get_functiondef(p.oid)
+    INTO v_args, v_def
+    FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+   WHERE ns.nspname = 'public' AND p.proname = 'peek_agent_invitation';
+  IF v_args <> 'p_token text' THEN
+    RAISE EXCEPTION 'OR-T0965 assert: peek_agent_invitation args are %, expected p_token text', v_args;
+  END IF;
+  IF position('sha256' IN v_def) = 0 THEN
+    RAISE EXCEPTION 'OR-T0965 assert: peek_agent_invitation does not hash inside the body';
+  END IF;
+
+  -- Both functions must pin search_path, must include public, and must name
+  -- pg_temp LAST (OR-T1131). proconfig carries the pin verbatim, e.g.
+  -- {"search_path=public, pg_temp"}. A SECURITY DEFINER body whose path does
+  -- not name pg_temp searches the temporary schema first for relation names.
+  FOR r IN
+    SELECT p.proname AS proname,
+           coalesce(
+             (SELECT cfg FROM unnest(p.proconfig) AS cfg
+               WHERE cfg LIKE 'search_path=%' LIMIT 1),
+             '<none>') AS sp
+      FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+     WHERE ns.nspname = 'public'
+       AND p.proname IN ('complete_agent_invitation', 'peek_agent_invitation')
+  LOOP
+    IF r.sp = '<none>' THEN
+      RAISE EXCEPTION 'OR-T1131 assert: % pins no search_path at all', r.proname;
+    END IF;
+    IF position('public' IN r.sp) = 0 THEN
+      RAISE EXCEPTION 'OR-T1131 assert: % pins a search_path without public, got %', r.proname, r.sp;
+    END IF;
+    IF r.sp !~ ',\s*pg_temp$' THEN
+      RAISE EXCEPTION 'OR-T1131 assert: % must name pg_temp LAST in its pinned search_path, got %', r.proname, r.sp;
+    END IF;
+  END LOOP;
+
+  -- no PUBLIC execute on either, on any cluster
+  SELECT count(*) INTO v_public
+    FROM pg_proc p
+    JOIN pg_namespace ns ON ns.oid = p.pronamespace
+    CROSS JOIN LATERAL aclexplode(p.proacl) a
+   WHERE ns.nspname = 'public'
+     AND p.proname IN ('complete_agent_invitation', 'peek_agent_invitation')
+     AND a.privilege_type = 'EXECUTE'
+     AND a.grantee = 0;
+  IF v_public > 0 THEN
+    RAISE EXCEPTION 'OR-T0965 assert: PUBLIC still holds EXECUTE on % of the two functions', v_public;
+  END IF;
+
+  -- service_role must be able to call both: this is the caller on the
+  -- hosted projects per OR-T0988, so losing it breaks redemption outright
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    IF NOT has_function_privilege('service_role',
+         'public.complete_agent_invitation(text,uuid,text,text)', 'EXECUTE') THEN
+      RAISE EXCEPTION 'OR-T0965 assert: service_role cannot execute complete_agent_invitation';
+    END IF;
+    IF NOT has_function_privilege('service_role',
+         'public.peek_agent_invitation(text)', 'EXECUTE') THEN
+      RAISE EXCEPTION 'OR-T0965 assert: service_role cannot execute peek_agent_invitation';
+    END IF;
+  END IF;
+
+  -- the uniqueness the token-only lookup depends on
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace ns ON ns.oid = t.relnamespace
+     WHERE ns.nspname='public' AND t.relname='agent_invitation_tokens'
+       AND c.contype='u' AND pg_get_constraintdef(c.oid)='UNIQUE (token_hash)'
+  ) THEN
+    RAISE EXCEPTION 'OR-T0965 assert: UNIQUE (token_hash) missing';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t ON t.oid = c.conrelid
+      JOIN pg_namespace ns ON ns.oid = t.relnamespace
+     WHERE ns.nspname='public' AND t.relname='agent_members'
+       AND c.contype='u' AND pg_get_constraintdef(c.oid)='UNIQUE (shadow_user_id)'
+  ) THEN
+    RAISE EXCEPTION 'OR-T0965 assert: UNIQUE (shadow_user_id) missing';
+  END IF;
+
+  -- The post state named role grants must EQUAL what was captured before
+  -- the drop. This is the assertion that CAN go red on the defect this file
+  -- exists to prevent. Two directions, because they are two different
+  -- failures:
+  --   ARRIVED : a grant exists now that did not exist before. That is the
+  --             pg_default_acl of the creating role materialising on a
+  --             recreated function, which on hosted prod means anon and
+  --             authenticated, and it means the revoke did not hold.
+  --   LOST    : a grant that was deliberately in force before is gone,
+  --             which on the self hosted cluster is the OR-T0937 anon
+  --             grant being silently stripped.
+  FOR r IN
+    SELECT p.proname AS proname, rr.rolname AS rolname
+      FROM pg_proc p
+      JOIN pg_namespace ns ON ns.oid = p.pronamespace
+      CROSS JOIN LATERAL aclexplode(p.proacl) a
+      JOIN pg_roles rr ON rr.oid = a.grantee
+     WHERE ns.nspname = 'public'
+       AND p.proname IN ('complete_agent_invitation', 'peek_agent_invitation')
+       AND a.privilege_type = 'EXECUTE'
+       AND rr.rolname IN ('anon', 'authenticated')
+    EXCEPT
+    SELECT c.proname, c.rolname FROM public._or_t0965_acl_capture c
+  LOOP
+    RAISE EXCEPTION 'OR-T0965 assert: % holds EXECUTE on % and did not before this migration', r.rolname, r.proname;
+  END LOOP;
+
+  FOR r IN
+    SELECT c.proname AS proname, c.rolname AS rolname
+      FROM public._or_t0965_acl_capture c
+    EXCEPT
+    SELECT p.proname, rr.rolname
+      FROM pg_proc p
+      JOIN pg_namespace ns ON ns.oid = p.pronamespace
+      CROSS JOIN LATERAL aclexplode(p.proacl) a
+      JOIN pg_roles rr ON rr.oid = a.grantee
+     WHERE ns.nspname = 'public'
+       AND p.proname IN ('complete_agent_invitation', 'peek_agent_invitation')
+       AND a.privilege_type = 'EXECUTE'
+       AND rr.rolname IN ('anon', 'authenticated')
+  LOOP
+    RAISE EXCEPTION 'OR-T0965 assert: % lost the EXECUTE on % it held before this migration', r.rolname, r.proname;
+  END LOOP;
+
+  RAISE NOTICE 'OR-T0965: all assertions passed';
+END
+$assert$;
+
+-- Only now is the pre-state safe to discard: nothing after this point reads
+-- it. Inside the transaction either way, so an abort leaves nothing behind.
+DROP TABLE public._or_t0965_acl_capture;
+
+COMMIT;

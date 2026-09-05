@@ -1,0 +1,88 @@
+name: Update Deno lockfile
+
+# Manually dispatched to regenerate deno.lock from the current imports.
+# Run this once after pinning imports (DL-0510 esm.sh phase 2) to
+# commit the real lockfile so subsequent CI runs verify against it
+# rather than regenerating it on every run.
+#
+# The workflow pushes a branch with the updated deno.lock.
+# Open a PR from that branch manually so CI fires under a real
+# user identity (GITHUB_TOKEN pushes cannot trigger CI runs).
+# Review and merge that PR; CI then verifies in strict mode.
+
+on:
+  workflow_dispatch:
+  # Also starts from a branch push, because the seats that own this work
+  # have no workflow_dispatch tool. Creating a chore/deno-lock-* branch
+  # starts the run. The branch this job pushes is fix/deno-lock-*, which
+  # does not match, so the workflow cannot retrigger itself.
+  push:
+    branches:
+      - 'chore/deno-lock-*'
+
+permissions:
+  contents: write
+
+jobs:
+  update-lockfile:
+    name: Regenerate deno.lock and push branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          # Same pin as ci.yml: Supabase edge runtime ships deno 2.1.4.
+          deno-version: v2.1.4
+
+      - name: Regenerate deno.lock
+        env:
+          DENO_DIR: ${{ runner.temp }}/deno-dir
+          NO_COLOR: '1'
+        run: |
+          # Remove the stub so deno cache writes a fresh lockfile with
+          # the real hashes for all current imports.
+          rm -f deno.lock
+          mapfile -t FILES < <(find supabase/functions -name '*.ts' -type f | sort)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::No .ts files found under supabase/functions -- nothing to lock."
+            exit 1
+          fi
+          echo "Caching ${#FILES[@]} file(s) and writing deno.lock"
+          deno cache --lock=deno.lock --node-modules-dir=auto "${FILES[@]}"
+          if [ ! -s deno.lock ]; then
+            echo "::error::deno cache produced an empty deno.lock -- aborting."
+            exit 1
+          fi
+          echo "deno.lock written ($(wc -c < deno.lock) bytes)"
+
+      - name: Push branch with updated lockfile
+        id: push-branch
+        run: |
+          BRANCH="fix/deno-lock-$(date -u +%Y%m%d-%H%M)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add deno.lock
+          if git diff --staged --quiet; then
+            echo "::notice::deno.lock is unchanged -- no branch pushed, no PR needed."
+            exit 0
+          fi
+          git commit \
+            -m "fix: commit real deno.lock from pinned imports (DL-0534)" \
+            -m "Replaces the stub lockfile with the real content generated from supabase/functions after esm.sh import pinning (DL-0510 Phase 2)." \
+            -m "CI now verifies future imports against committed hashes instead of regenerating the lock on every run."
+          git push origin "$BRANCH"
+          echo "::notice::Branch pushed: $BRANCH"
+          echo ""
+          echo "Next step: open a PR from '$BRANCH' -> 'dev' so CI runs"
+          echo "under a real user identity -- GITHUB_TOKEN pushes cannot"
+          echo "trigger pull_request/push CI runs (documented GitHub behaviour)."
+          echo ""
+          PR_URL="https://github.com/Orange-The-World/orangerails/compare/dev...$BRANCH?expand=1"
+          echo "Create the PR here: $PR_URL"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"

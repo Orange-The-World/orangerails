@@ -14,19 +14,57 @@
  * learn nothing else from the value. It is stored and compared as an opaque
  * string; nothing here decodes it.
  *
+ * Cursor semantics (DL-0419 trackMax-inside-guard):
+ *   last_block_scanned on the stealth_connections row advances only when new
+ *   rows are actually inserted, and only to max(block_height) of those rows.
+ *   Advancing unconditionally to the client-supplied height (body.last_block_scanned)
+ *   is the DL-0015 bug applied to the sealed-tx path: the cursor jumps past
+ *   items that were never committed, silently losing them on the next sync.
+ *   or-stealth-envelope-update writes the same column in step 4 of the widget
+ *   sync flow, after this function returns OK. It is NOT a scan-tip endpoint:
+ *   its last_block_scanned carries the same meaning as ours, the last height
+ *   the caller read contiguously. Both functions import that contract from
+ *   ../_shared/scan-cursor.ts (OR-T1914).
+ *
+ *   OR-T1120: max(block_height) of the inserted rows is a real height, but it
+ *   is not evidence that every height BELOW it was read. The client's
+ *   rolling-window extension pass can match a block above the point where a
+ *   filter fetch aborted, so a transaction can land at a height sitting above a
+ *   gap nobody scanned. The advance is therefore ALSO bounded above by
+ *   body.last_block_scanned, the last height the client read contiguously. That
+ *   value is a ceiling only: it can hold the cursor back, never push it forward,
+ *   so the forward-only guard above still holds against a client that lies.
+ *
  * POST body:
  *   connection_id:        string (uuid)
- *   app_user_id:          string (uuid)
+ *   app_user_id:          string (opaque host-app user id, not necessarily a uuid)
  *   sealed_transactions:  SealedTransactionInput[]
- *   last_block_scanned:   number
+ *   last_block_scanned:   number (the last height the client scanned CONTIGUOUSLY;
+ *                         a CEILING on the cursor advance, never used to raise it)
  *
  * Response:
  *   { connection_id, inserted, total, skipped_duplicates, last_block_scanned }
+ *   last_block_scanned in the response is the effective stored cursor after the
+ *   call (null when the connection has never scanned), never the height the
+ *   client supplied.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
+import {
+  authenticateRequestOrWidgetToken,
+  enforceWidgetAppUser,
+  isAuthError,
+  getCallerPlatformId,
+} from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+// The cursor contract, and the ceiling that enforces it, live in one shared
+// module so that the two endpoints writing last_block_scanned cannot document
+// it in opposite directions again (OR-T1914). Re-exported below so this
+// function's import surface is unchanged.
+import {
+  boundCursorAdvance,
+  isContiguousScannedHeight,
+} from '../_shared/scan-cursor.ts';
 
 interface SealedTransactionInput {
   version: 1;
@@ -44,6 +82,12 @@ interface TransactionsStoreRequestBody {
   app_user_id?: string;
   sealed_transactions?: SealedTransactionInput[];
   last_block_scanned?: number;
+  /**
+   * Widget-mode credential. Present when the caller is browser code inside a
+   * host app's connect session and holds neither a platform API key nor an
+   * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
+   */
+  widget_token?: string;
 }
 
 interface TransactionsStoreResponseBody {
@@ -51,7 +95,7 @@ interface TransactionsStoreResponseBody {
   inserted: number;
   total: number;
   skipped_duplicates: number;
-  last_block_scanned: number;
+  last_block_scanned: number | null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -67,7 +111,12 @@ const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
 const MAX_TX_PER_REQUEST = 10_000;
 const MAX_SEALED_RECORD_BYTES = 16_384;
 
-function isSealedTx(x: unknown): x is SealedTransactionInput {
+/** Validates app_user_id: any non-empty string is valid (opaque host-app user id, not necessarily a uuid). */
+export function isValidAppUserId(x: unknown): x is string {
+  return typeof x === 'string' && x.length > 0;
+}
+
+export function isSealedTx(x: unknown): x is SealedTransactionInput {
   if (!x || typeof x !== 'object') return false;
   const o = x as Record<string, unknown>;
   return (
@@ -85,25 +134,83 @@ function isSealedTx(x: unknown): x is SealedTransactionInput {
   );
 }
 
+/**
+ * The cursor contract and its ceiling are defined once, in
+ * ../_shared/scan-cursor.ts, and imported above. They are re-exported here
+ * because callers and tests have always imported them from this module, and
+ * because moving a definition should not be able to quietly change what an
+ * endpoint exports.
+ *
+ * boundCursorAdvance's first argument is named candidateHeight there. On this
+ * endpoint the candidate is max(block_height) of the rows that actually landed;
+ * on or-stealth-envelope-update it is the height the caller posted.
+ */
+export { boundCursorAdvance, isContiguousScannedHeight };
+
+/**
+ * Response cursor derivation (DL-0419). Returns the effective stored cursor
+ * AFTER this call, derived only from stored state, never raised by the client
+ * scan tip (body.last_block_scanned). Advances only when new rows landed and
+ * the bounded height exceeds the stored cursor; otherwise returns the stored
+ * cursor unchanged, which is null on a connection that has never scanned.
+ * Mirrors the forward-only patch guard, INCLUDING the OR-T1120 ceiling, so the
+ * value returned to the caller always equals the value persisted. A caller told
+ * the cursor reached a height the database never stored would resume from the
+ * wrong place.
+ *
+ * clientContiguousScanned is REQUIRED and deliberately has no default. It used
+ * to default to undefined, which fails isContiguousScannedHeight, so a caller
+ * that simply forgot the argument got the old unbounded behaviour with no type
+ * error and no failing test -- in a function whose entire job is to mirror the
+ * persist path. Unbounded is still reachable by passing undefined explicitly,
+ * which is a decision a reviewer can see rather than an omission nobody can.
+ */
+export function deriveResponseCursor(
+  storedCursor: number | null,
+  inserted: number,
+  maxBlockInserted: number,
+  clientContiguousScanned: unknown,
+): number | null {
+  const candidate = boundCursorAdvance(maxBlockInserted, clientContiguousScanned);
+  const advanced = inserted > 0 && candidate > (storedCursor ?? -1);
+  return advanced ? candidate : storedCursor;
+}
+
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
 
   try {
-    const ctx = await authenticateRequest(req);
-    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
-
+    // The body is read BEFORE auth because a widget-mode caller presents its
+    // credential in the body rather than in a header. Header-based callers are
+    // resolved exactly as before; see authenticateRequestOrWidgetToken.
     const raw = await readBoundedText(req);
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
-    const body = JSON.parse(raw || '{}') as TransactionsStoreRequestBody;
+
+    // Parsing now happens before authentication, so malformed JSON from an
+    // unauthenticated caller must answer 400 rather than fall through to the
+    // catch below and answer 500.
+    let body: TransactionsStoreRequestBody;
+    try {
+      body = JSON.parse(raw || '{}') as TransactionsStoreRequestBody;
+    } catch {
+      return jsonResponse({ error: 'Request body is not valid JSON' }, 400, cors);
+    }
+
+    const ctx = await authenticateRequestOrWidgetToken(req, body.widget_token);
+    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
     // ── Validate ──────────────────────────────────────────────────────
     if (!body.connection_id || !UUID_RE.test(body.connection_id)) {
       return jsonResponse({ error: 'connection_id (uuid) required' }, 400, cors);
     }
-    if (!body.app_user_id || !UUID_RE.test(body.app_user_id)) {
-      return jsonResponse({ error: 'app_user_id (uuid) required' }, 400, cors);
+    // app_user_id is an opaque host-application identifier stored in a TEXT
+    // column (migration 20260624000000). It is NOT a uuid: real host user ids
+    // are cuids. Any non-empty string is valid, matching the validation in
+    // or-stealth-connection-create and or-stealth-envelope-update.
+    if (!isValidAppUserId(body.app_user_id)) {
+      return jsonResponse({ error: 'app_user_id required' }, 400, cors);
     }
     if (!Array.isArray(body.sealed_transactions)) {
       return jsonResponse({ error: 'sealed_transactions must be an array' }, 400, cors);
@@ -148,6 +255,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       );
     }
 
+    // Widget mode gets the same lock for the same reason: the token pins one
+    // app_user_id, so a body naming a different one is an attempt to reach
+    // into another user's records.
+    const widgetUserErr = enforceWidgetAppUser(ctx, body.app_user_id);
+    if (widgetUserErr) {
+      return jsonResponse({ error: widgetUserErr.message }, widgetUserErr.status, cors);
+    }
+
     // Audit 2026-05-16 High #2: every stealth_connections read/write must be
     // bound to the calling platform. Resolve once here.
     const platformIdOrErr = await getCallerPlatformId(ctx);
@@ -159,9 +274,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // Verify the connection belongs to the caller. Defense in depth on top
     // of the UNIQUE constraint check; saves us from quietly inserting tx
     // rows under a connection_id the caller does not own.
+    // Also read last_block_scanned here so the trackMax forward-only guard
+    // below knows the stored cursor without a second round trip.
     const { data: ownerRow, error: ownerErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .select('id, app_user_id')
+      .select('id, app_user_id, last_block_scanned')
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
       .maybeSingle();
@@ -176,6 +293,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
+    // Stamp last_sync_attempt_at on entry so every sync attempt is recorded,
+    // including runs that find zero new transactions (where last_sync_at would
+    // still advance but the attempt column would otherwise stay NULL forever).
+    // Non-fatal: a failure here must not block the actual sync work.
+    const { error: attemptErr } = await ctx.serviceClient
+      .from('stealth_connections')
+      .update({ last_sync_attempt_at: new Date().toISOString() })
+      .eq('platform_id', callerPlatformId)
+      .eq('id', body.connection_id);
+    if (attemptErr) {
+      console.error('[or-stealth-transactions-store] last_sync_attempt_at stamp failed:', attemptErr);
+    }
+
     const total = body.sealed_transactions.length;
 
     // ── Idempotent insert: ON CONFLICT (connection_id, txid_blind_index_hex) DO NOTHING ──
@@ -184,6 +314,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // the txid_blind_index_hex set after.
     let inserted = 0;
     let skipped_duplicates = 0;
+    // trackMax: highest block_height among rows that were actually inserted.
+    // Stays -1 when no rows land (all dupes or empty batch), which keeps the
+    // forward-only guard below from advancing the cursor.
+    let maxBlockInserted = -1;
 
     if (total > 0) {
       const rows = body.sealed_transactions.map((tx) => ({
@@ -228,15 +362,40 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           return jsonResponse({ error: 'Failed to insert transactions' }, 500, cors);
         }
         inserted = fresh.length;
+        // trackMax-inside-guard: compute max block_height only for the rows that
+        // actually landed. This endpoint never raises the cursor to
+        // body.last_block_scanned, because on the store path that would move the
+        // watermark past blocks this call never committed, silently losing
+        // events that settle later.
+        // This is a CANDIDATE height, not the final cursor: boundCursorAdvance
+        // below caps it at the last height the client scanned contiguously.
+        // or-stealth-envelope-update writes this same column in step 4 of the
+        // widget sync flow. That one does advance to the height the caller
+        // reports, because it has no committed rows to derive a height from, and
+        // it is held to the same contiguity contract as this function:
+        // ../_shared/scan-cursor.ts, imported by both. Do not read the sentence
+        // above as "the sibling is the safe place to send a chain tip" -- it is
+        // not, and reading it that way is the defect OR-T1914 fixed.
+        maxBlockInserted = Math.max(...fresh.map((r) => r.block_height as number));
       }
+    }
+
+    // Forward-only cursor guard (trackMax-inside-guard). Advance last_block_scanned
+    // only when new rows were inserted AND the advance height exceeds the stored
+    // cursor. Always update last_sync_at so the connection shows activity.
+    // OR-T1120: the advance height is max(block_height) of the inserted rows
+    // CAPPED at the last height the client scanned contiguously, so the cursor
+    // can never step over a gap the client never read.
+    const storedCursor = (ownerRow.last_block_scanned as number | null) ?? -1;
+    const cursorAdvanceTo = boundCursorAdvance(maxBlockInserted, body.last_block_scanned);
+    const cursorPatch: Record<string, unknown> = { last_sync_at: new Date().toISOString() };
+    if (inserted > 0 && cursorAdvanceTo > storedCursor) {
+      cursorPatch.last_block_scanned = cursorAdvanceTo;
     }
 
     const { error: updErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .update({
-        last_block_scanned: body.last_block_scanned,
-        last_sync_at: new Date().toISOString(),
-      })
+      .update(cursorPatch)
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id);
     if (updErr) {
@@ -244,12 +403,22 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Failed to update connection sync metadata' }, 500, cors);
     }
 
+    // Return the effective stored cursor so callers can distinguish "cursor
+    // advanced" from "no new rows, cursor unchanged." Derived only from stored
+    // state: on a fresh connection with no stored cursor and zero inserts this
+    // is null, never the client-supplied scan tip (body.last_block_scanned).
+    const effectiveCursor = deriveResponseCursor(
+      ownerRow.last_block_scanned as number | null,
+      inserted,
+      maxBlockInserted,
+      body.last_block_scanned,
+    );
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,
       inserted,
       total,
       skipped_duplicates,
-      last_block_scanned: body.last_block_scanned,
+      last_block_scanned: effectiveCursor,
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {

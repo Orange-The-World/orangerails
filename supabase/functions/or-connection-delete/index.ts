@@ -8,6 +8,13 @@
  * limit of 50 subscriptions). Best-effort cleanup either way , connection
  * row delete is the load-bearing step and always proceeds.
  *
+ * Stealth connections (stealth_connections table) are surfaced in the same
+ * list as regular connections via or-connection-list. This endpoint mirrors
+ * that union: when the id is absent from connections, it falls through to
+ * stealth_connections scoped by the same subaccount's (platform_id,
+ * app_user_id) pair. Strike cleanup and source_wallets cleanup are
+ * regular-connection concerns and are skipped for the stealth path.
+ *
  * POST body:
  *   subaccount_id?:   uuid    required in platform mode
  *   connection_id:    uuid    the connection to delete (must belong to subaccount)
@@ -20,8 +27,9 @@ import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { strikeDeleteSubscription, parseStrikeCredentials } from '../_shared/providers/strike/index.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { safeErrorLine } from '../_shared/error-redaction.ts';
 
-// ─── AES helpers (mirror or-sync's pattern; will share once a util module lands) ─
+// --- AES helpers (mirror or-sync's pattern; will share once a util module lands) ---
 
 function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
@@ -43,7 +51,7 @@ async function decryptAes(ciphertextB64: string, key: CryptoKey): Promise<string
   return new TextDecoder().decode(plain);
 }
 
-// ─── Strike-specific best-effort cleanup ─────────────────────────────────
+// --- Strike-specific best-effort cleanup ---
 
 interface ConnectionRow {
   id: string;
@@ -62,20 +70,98 @@ async function cleanupStrikeSubscription(
   try {
     const key = await importAesKey(credentialsKey);
     const credsJson = await decryptAes(conn.encrypted_credentials, key);
-    const creds = parseStrikeCredentials(JSON.parse(credsJson));
+    // Do NOT call JSON.parse(credsJson) directly. credsJson is decrypted
+    // credential plaintext, and V8 puts a fragment of the input string into
+    // the SyntaxError message, which the catch below used to log. Replacing it
+    // with a fixed string means there is no fragment to leak at all, which is
+    // stronger than sanitising the message afterwards.
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(credsJson);
+    } catch {
+      throw new Error('stored credentials are not valid JSON');
+    }
+    // JSON.parse can return a string, a number or an array. Those used to
+    // reach parseStrikeCredentials as `any`. Reject them with a fixed string
+    // rather than let the shape error be phrased by something downstream.
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
+      throw new Error('stored credentials are not a JSON object');
+    }
+    const creds = parseStrikeCredentials(decoded as Record<string, unknown>);
     await strikeDeleteSubscription(creds, conn.strike_subscription_id);
     return { ok: true };
   } catch (err) {
     // Best-effort: if Strike returns 404, the subscription was already gone
     // (idempotent , strike.ts treats 404 as success for DELETEs). Any other
     // failure logs and we proceed with the row delete anyway.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[or-connection-delete] strike subscription cleanup failed for ${conn.id}: ${msg.slice(0, 200)}`);
-    return { ok: false, reason: msg.slice(0, 100) };
+    console.warn(await safeErrorLine('or-connection-delete', `strike-cleanup conn=${conn.id}`, err));
+    // `reason` is not read by the handler today, but it is one refactor away
+    // from a response body, so it carries no upstream text.
+    return { ok: false, reason: 'cleanup-failed' };
   }
 }
 
-// ─── Handler ─────────────────────────────────────────────────────────────
+// --- Stealth fallback ---
+
+/** Discriminated union returned by tryDeleteStealthConnection. */
+export type StealthFallbackResult =
+  | { deleted: true }
+  | { notFound: true }
+  | { dbError: string; status: 500 };
+
+/**
+ * Called when the requested id is absent from `connections`. Attempts the
+ * same id in `stealth_connections`, scoped to the same logical subaccount by
+ * resolving (platform_id, external_user_id) from the subaccount row.
+ *
+ * This mirrors the join or-connection-list uses to union both tables, so the
+ * same id that appears in a list response can be deleted via this endpoint.
+ * A foreign-subaccount id and a genuinely unknown id both resolve to
+ * notFound: the count guard ensures no row outside the caller's scope is
+ * ever touched.
+ *
+ * Exported for Deno unit tests (index.test.ts).
+ */
+// deno-lint-ignore no-explicit-any
+export async function tryDeleteStealthConnection(
+  serviceClient: any,
+  connectionId: string,
+  subaccountId: string,
+): Promise<StealthFallbackResult> {
+  // Resolve the platform + user identity that owns this subaccount. This is
+  // the same pair or-connection-list reads to scope its stealth query.
+  const { data: subRow, error: subErr } = await serviceClient
+    .from('subaccounts')
+    .select('platform_id, external_user_id')
+    .eq('id', subaccountId)
+    .maybeSingle();
+
+  if (subErr || !subRow) {
+    console.error(await safeErrorLine('or-connection-delete', 'stealth-subaccount-read', subErr));
+    return { dbError: 'Failed to look up subaccount for stealth fallback', status: 500 };
+  }
+
+  // count:'exact' guard mirrors the regular delete path. A no-match (count=0)
+  // can never widen into deleting a row owned by another subaccount, because
+  // the three .eq() filters together form the full ownership scope.
+  const { error: delErr, count } = await serviceClient
+    .from('stealth_connections')
+    .delete({ count: 'exact' })
+    .eq('id', connectionId)
+    .eq('platform_id', subRow.platform_id)
+    .eq('app_user_id', subRow.external_user_id);
+
+  if (delErr) {
+    console.error(await safeErrorLine('or-connection-delete', 'stealth-delete', delErr));
+    return { dbError: 'Failed to delete stealth connection', status: 500 };
+  }
+  if ((count ?? 0) === 0) {
+    return { notFound: true };
+  }
+  return { deleted: true };
+}
+
+// --- Handler ---
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -109,11 +195,26 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .maybeSingle();
 
     if (fetchErr) {
-      console.error('[or-connection-delete] fetch failed:', fetchErr);
+      console.error(await safeErrorLine('or-connection-delete', 'connection-fetch', fetchErr));
       return jsonResponse({ error: 'Failed to look up connection' }, 500, cors);
     }
     if (!conn) {
-      return jsonResponse({ error: 'Connection not found in this subaccount' }, 404, cors);
+      // The id was not in connections. Stealth connections surface under the
+      // same subaccount via or-connection-list, so they must be deletable via
+      // this endpoint. Mirror the list path's (platform_id, app_user_id)
+      // scoping so a foreign subaccount cannot delete another's row.
+      const stealthResult = await tryDeleteStealthConnection(
+        ctx.serviceClient,
+        body.connection_id,
+        subaccountId,
+      );
+      if ('dbError' in stealthResult) {
+        return jsonResponse({ error: stealthResult.dbError }, stealthResult.status, cors);
+      }
+      if ('notFound' in stealthResult) {
+        return jsonResponse({ error: 'Connection not found in this subaccount' }, 404, cors);
+      }
+      return jsonResponse({ ok: true }, 200, cors);
     }
 
     // Step 2: optionally clean up the Strike webhook subscription. Skipped
@@ -133,7 +234,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .delete()
       .eq('connection_id', body.connection_id);
     if (swDelErr) {
-      console.error('[or-connection-delete] source_wallets cleanup failed:', swDelErr);
+      console.error(await safeErrorLine('or-connection-delete', 'source-wallets-cleanup', swDelErr));
       // Best effort: log but do not block the connection delete.
     }
 
@@ -146,7 +247,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .eq('subaccount_id', subaccountId);
 
     if (delErr) {
-      console.error('[or-connection-delete] delete failed:', delErr);
+      console.error(await safeErrorLine('or-connection-delete', 'connection-delete', delErr));
       return jsonResponse({ error: 'Failed to delete connection' }, 500, cors);
     }
     if ((count ?? 0) === 0) {
@@ -159,7 +260,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     return jsonResponse(response, 200, cors);
   } catch (err) {
-    console.error('[or-connection-delete] fatal:', err);
+    console.error(await safeErrorLine('or-connection-delete', 'fatal', err));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-connection-delete'));

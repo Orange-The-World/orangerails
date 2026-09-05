@@ -51,12 +51,19 @@
  * payload here.
  */
 
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const ENCRYPTED_LABEL_MAX = 4096;
 const QUILTT_CREDENTIALS_SENTINEL = 'quiltt-managed';
+
+interface SourceWalletInput {
+  external_wallet_id: string;
+  is_synced: boolean;
+  encrypted_metadata: string;
+  encrypted_metadata_key_version?: number;
+}
 
 interface LinkCompleteBody {
   platform_slug?: string;
@@ -64,6 +71,48 @@ interface LinkCompleteBody {
   widget_token?: string;
   encrypted_label?: string;
   quiltt_connection_id?: string;
+  accounts?: SourceWalletInput[];
+}
+
+// ---------------------------------------------------------------------------
+// Exported helpers (tested in index.test.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Promote a just-inserted connection from 'pending' to 'active'.
+ * Called after source_wallets upsert succeeds (DL-0740).
+ * The status guard prevents accidental double-activate races.
+ */
+export async function activateConnection(
+  service: SupabaseClient,
+  connectionId: string,
+): Promise<string | null> {
+  const { error } = await service
+    .from('connections')
+    .update({ status: 'active' })
+    .eq('id', connectionId)
+    .eq('status', 'pending');
+  if (error) return `activateConnection failed: ${error.message}`;
+  return null;
+}
+
+/**
+ * Delete a just-inserted pending connection whose wallet write failed.
+ * Lets the client retry with a fresh widget token without leaving a zombie
+ * active row with zero selection rows (DL-0740).
+ * The status guard prevents deleting a row that was already promoted.
+ */
+export async function rollbackPendingConnection(
+  service: SupabaseClient,
+  connectionId: string,
+): Promise<string | null> {
+  const { error } = await service
+    .from('connections')
+    .delete()
+    .eq('id', connectionId)
+    .eq('status', 'pending');
+  if (error) return `rollbackPendingConnection failed: ${error.message}`;
+  return null;
 }
 
 function makeServiceClient(): SupabaseClient {
@@ -105,6 +154,43 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         return jsonResponse({ error: 'quiltt_connection_id must be a string ≤256 chars' }, 400, cors);
       }
     }
+    if (body.accounts !== undefined) {
+      if (!Array.isArray(body.accounts)) {
+        return jsonResponse({ error: 'accounts must be an array' }, 400, cors);
+      }
+      // Cap matches MAX_WALLETS_PER_CONNECTION in or-source-wallets-set.
+      // Banks can have more accounts than crypto wallets (DL-0326 user had 18);
+      // revisit deliberately rather than discovering this limit in a 400 (DL-0442).
+      if (body.accounts.length > 50) {
+        return jsonResponse({ error: 'accounts: max 50 entries per connection' }, 400, cors);
+      }
+      for (const acc of body.accounts) {
+        if (
+          !acc.external_wallet_id ||
+          typeof acc.external_wallet_id !== 'string' ||
+          acc.external_wallet_id.length > 256
+        ) {
+          return jsonResponse({ error: 'accounts[].external_wallet_id required (string, <=256 chars)' }, 400, cors);
+        }
+        if (typeof acc.is_synced !== 'boolean') {
+          return jsonResponse({ error: 'accounts[].is_synced required (boolean)' }, 400, cors);
+        }
+        // encrypted_metadata is NOT NULL in source_wallets; the client must seal
+        // { currency, label? } under the user's key before passing it here.
+        if (
+          !acc.encrypted_metadata ||
+          typeof acc.encrypted_metadata !== 'string' ||
+          acc.encrypted_metadata.length > 65536
+        ) {
+          return jsonResponse(
+            { error: 'accounts[].encrypted_metadata required (base64 ciphertext, <=64 KB)' },
+            400,
+            cors,
+          );
+        }
+      }
+    }
+
     const quilttConnectionId = body.quiltt_connection_id ?? null;
 
     const service = makeServiceClient();
@@ -197,6 +283,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // creating a duplicate. The partial unique index keeps subsequent
     // relinks idempotent.
     let connectionId: string;
+    let wasInserted = false;
     const existingByQid = quilttConnectionId
       ? await service
           .from('connections')
@@ -248,7 +335,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             encrypted_label:         body.encrypted_label ?? null,
             encrypted_credentials:   QUILTT_CREDENTIALS_SENTINEL,
             credentials_key_version: 1,
-            status:                  'active',
+            // Insert as 'pending' when accounts are present so a wallet-write
+            // failure cannot leave an active connection with zero selection rows.
+            // The row is promoted to 'active' after source_wallets upsert succeeds,
+            // or deleted on failure so the client can retry with a fresh token
+            // (DL-0740).
+            status:                  body.accounts && body.accounts.length > 0 ? 'pending' : 'active',
           })
           .select('id')
           .single();
@@ -257,6 +349,48 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           return jsonResponse({ error: 'Failed to create connection' }, 500, cors);
         }
         connectionId = insertConn.data.id as string;
+        wasInserted = true;
+      }
+    }
+
+    // DL-0442: persist account selection at link time.
+    // The client encrypts { currency, label? } per account under the user's key
+    // (encrypted_metadata is NOT NULL in source_wallets; the server cannot fill it).
+    // Subsequent selection changes go through or-source-wallets-set.
+    if (body.accounts && body.accounts.length > 0) {
+      const walletRows = body.accounts.map((acc) => ({
+        connection_id:                  connectionId,
+        external_wallet_id:             acc.external_wallet_id,
+        is_synced:                      acc.is_synced,
+        encrypted_metadata:             acc.encrypted_metadata,
+        encrypted_metadata_key_version: acc.encrypted_metadata_key_version ?? 1,
+      }));
+      const { error: walletErr } = await service
+        .from('source_wallets')
+        .upsert(walletRows, { onConflict: 'connection_id,external_wallet_id' });
+      if (walletErr) {
+        console.error('[or-quiltt-link-complete] source_wallets upsert failed:', walletErr.message);
+        if (wasInserted) {
+          // Remove the pending connection so the client can retry with a fresh
+          // widget token. If rollback itself fails the pending row lingers until
+          // cleanup_pending_connections cron runs (~10 min). Still return 500 so
+          // the client never treats a failed wallet write as a successful link.
+          const rbErr = await rollbackPendingConnection(service, connectionId);
+          if (rbErr) {
+            console.error('[or-quiltt-link-complete] rollback failed, pending row may linger (cron will clean up):', rbErr);
+          }
+        }
+        return jsonResponse({ error: 'Failed to persist account selection' }, 500, cors);
+      }
+      if (wasInserted) {
+        // Fail closed: if activate fails the connection stays pending and cron
+        // deletes it in ~10 minutes. Return 500 so the client retries with a
+        // fresh widget token rather than treating this as a successful link.
+        const actErr = await activateConnection(service, connectionId);
+        if (actErr) {
+          console.error('[or-quiltt-link-complete] activate failed, connection stays pending:', actErr);
+          return jsonResponse({ error: 'Failed to activate connection' }, 500, cors);
+        }
       }
     }
 

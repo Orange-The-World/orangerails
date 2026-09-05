@@ -67,7 +67,6 @@ const TX_QUERY = `
               }
               settlementVia {
                 __typename
-                ... on SettlementViaLn { preImage }
                 ... on SettlementViaOnChain { transactionHash }
                 ... on SettlementViaIntraLedger { counterPartyUsername }
               }
@@ -115,7 +114,6 @@ const TX_QUERY_BY_WALLETS = `
                 }
                 settlementVia {
                   __typename
-                  ... on SettlementViaLn { preImage }
                   ... on SettlementViaOnChain { transactionHash }
                   ... on SettlementViaIntraLedger { counterPartyUsername }
                 }
@@ -176,8 +174,7 @@ async function blinkPost<T>(apiKey: string, query: string, variables?: Record<st
     body: JSON.stringify({ query, variables: variables ?? {} }),
   });
   if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    throw new Error(`Blink API ${res.status}: ${detail.slice(0, 200)}`);
+    throw new Error(`Blink API ${res.status}`);
   }
   const json = await res.json() as { data?: T; errors?: { message: string }[] };
   if (json.errors?.length) throw new Error(`Blink GraphQL: ${json.errors[0].message}`);
@@ -331,6 +328,7 @@ export const blinkAdapter: ProviderAdapter = {
   status: 'live',
   category: 'lightning_wallet',
   tags: ['lightning', 'on-chain', 'custodial', 'galoy'],
+  custody: 'custodial',
   popularity: 90,
   multiWallet: true,
   credentialFields: [

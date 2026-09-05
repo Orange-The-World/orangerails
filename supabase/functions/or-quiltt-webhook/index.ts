@@ -77,8 +77,9 @@
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY , standard
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
+import { alarmOnUnknownQuilttEventTypes } from '../_shared/quiltt-event-types.ts';
+import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
 import { applyRouting, buildRows, type QuilttEventLike } from './routing.ts';
 
 const MAX_BODY = 256 * 1024;             // 256KB , generous for batched events
@@ -226,6 +227,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       console.error('[or-quiltt-webhook] inbox insert failed:', insertErr.message);
       return new Response('inbox insert failed', { status: 500 });
     }
+
+    // An event type nobody has decided about must not be able to arrive, do
+    // nothing and retire unnoticed. This does not reject or drop anything: the
+    // rows are already stored above and the drain still marks them processed.
+    // See _shared/quiltt-event-types.ts for why the alarm is on the TYPE rather
+    // than on the unmapped event.
+    //
+    // After the insert, and only on the success path, because a failed insert
+    // returns 500 and Quiltt redelivers; alarming before it would alarm again
+    // on every redelivery. Quiltt does not redeliver after a 200, so each
+    // accepted event alarms exactly once.
+    alarmOnUnknownQuilttEventTypes(rows, {
+      warn: (line) => console.warn(line),
+      // Fire and forget, same posture as the rest of this function's error
+      // reporting: a slow or unreachable error tracker must not delay the 200
+      // that stops Quiltt retrying.
+      capture: (err) => { void reportError(err, 'or-quiltt-webhook'); },
+    });
 
     return new Response('ok', { status: 200 });
   } catch (e) {

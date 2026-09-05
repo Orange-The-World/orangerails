@@ -9,67 +9,34 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as UnlockRouteImport } from './routes/unlock'
-import { Route as SignupRouteImport } from './routes/signup'
-import { Route as RecoverRouteImport } from './routes/recover'
-import { Route as PortalRouteImport } from './routes/portal'
-import { Route as LoginRouteImport } from './routes/login'
-import { Route as DocsRouteImport } from './routes/docs'
-import { Route as DemoRouteImport } from './routes/demo'
-import { Route as ConnectRouteImport } from './routes/connect'
-import { Route as AppRouteImport } from './routes/app'
-import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AdminRouteImport } from './routes/admin'
+import { Route as AppRouteImport } from './routes/app'
+import { Route as ConnectRouteImport } from './routes/connect'
+import { Route as DemoRouteImport } from './routes/demo'
+import { Route as DocsRouteImport } from './routes/docs'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as PortalRouteImport } from './routes/portal'
+import { Route as PrivacyRouteImport } from './routes/privacy'
+import { Route as ProvidersRouteImport } from './routes/providers'
+import { Route as QuilttRouteImport } from './routes/quiltt'
+import { Route as RecoverRouteImport } from './routes/recover'
+import { Route as SignupRouteImport } from './routes/signup'
+import { Route as SparrowRouteImport } from './routes/sparrow'
+import { Route as TermsRouteImport } from './routes/terms'
+import { Route as UnlockRouteImport } from './routes/unlock'
 import { Route as AdminIndexRouteImport } from './routes/admin/index'
-import { Route as DocsXpubExportRouteImport } from './routes/docs/xpub-export'
-import { Route as ConnectStealthRouteImport } from './routes/connect/stealth'
-import { Route as ConnectSparrowRouteImport } from './routes/connect/sparrow'
-import { Route as ConnectQuilttRouteImport } from './routes/connect/quiltt'
 import { Route as AdminCustomerIdRouteImport } from './routes/admin/$customerId'
+import { Route as ConnectBitcoinRouteImport } from './routes/connect/bitcoin'
+import { Route as ConnectQuilttRouteImport } from './routes/connect/quiltt'
+import { Route as ConnectSparrowRouteImport } from './routes/connect/sparrow'
+import { Route as ConnectStealthRouteImport } from './routes/connect/stealth'
+import { Route as DocsStrikeCsvRouteImport } from './routes/docs/strike-csv'
+import { Route as DocsXpubExportRouteImport } from './routes/docs/xpub-export'
 
-const UnlockRoute = UnlockRouteImport.update({
-  id: '/unlock',
-  path: '/unlock',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SignupRoute = SignupRouteImport.update({
-  id: '/signup',
-  path: '/signup',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const RecoverRoute = RecoverRouteImport.update({
-  id: '/recover',
-  path: '/recover',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PortalRoute = PortalRouteImport.update({
-  id: '/portal',
-  path: '/portal',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LoginRoute = LoginRouteImport.update({
-  id: '/login',
-  path: '/login',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DocsRoute = DocsRouteImport.update({
-  id: '/docs',
-  path: '/docs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DemoRoute = DemoRouteImport.update({
-  id: '/demo',
-  path: '/demo',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ConnectRoute = ConnectRouteImport.update({
-  id: '/connect',
-  path: '/connect',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AppRoute = AppRouteImport.update({
-  id: '/app',
-  path: '/app',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRoute = AdminRouteImport.update({
@@ -77,9 +44,74 @@ const AdminRoute = AdminRouteImport.update({
   path: '/admin',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const AppRoute = AppRouteImport.update({
+  id: '/app',
+  path: '/app',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ConnectRoute = ConnectRouteImport.update({
+  id: '/connect',
+  path: '/connect',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DemoRoute = DemoRouteImport.update({
+  id: '/demo',
+  path: '/demo',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DocsRoute = DocsRouteImport.update({
+  id: '/docs',
+  path: '/docs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PortalRoute = PortalRouteImport.update({
+  id: '/portal',
+  path: '/portal',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProvidersRoute = ProvidersRouteImport.update({
+  id: '/providers',
+  path: '/providers',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const QuilttRoute = QuilttRouteImport.update({
+  id: '/quiltt',
+  path: '/quiltt',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RecoverRoute = RecoverRouteImport.update({
+  id: '/recover',
+  path: '/recover',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignupRoute = SignupRouteImport.update({
+  id: '/signup',
+  path: '/signup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SparrowRoute = SparrowRouteImport.update({
+  id: '/sparrow',
+  path: '/sparrow',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TermsRoute = TermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UnlockRoute = UnlockRouteImport.update({
+  id: '/unlock',
+  path: '/unlock',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminIndexRoute = AdminIndexRouteImport.update({
@@ -87,19 +119,14 @@ const AdminIndexRoute = AdminIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AdminRoute,
 } as any)
-const DocsXpubExportRoute = DocsXpubExportRouteImport.update({
-  id: '/xpub-export',
-  path: '/xpub-export',
-  getParentRoute: () => DocsRoute,
+const AdminCustomerIdRoute = AdminCustomerIdRouteImport.update({
+  id: '/$customerId',
+  path: '/$customerId',
+  getParentRoute: () => AdminRoute,
 } as any)
-const ConnectStealthRoute = ConnectStealthRouteImport.update({
-  id: '/stealth',
-  path: '/stealth',
-  getParentRoute: () => ConnectRoute,
-} as any)
-const ConnectSparrowRoute = ConnectSparrowRouteImport.update({
-  id: '/sparrow',
-  path: '/sparrow',
+const ConnectBitcoinRoute = ConnectBitcoinRouteImport.update({
+  id: '/bitcoin',
+  path: '/bitcoin',
   getParentRoute: () => ConnectRoute,
 } as any)
 const ConnectQuilttRoute = ConnectQuilttRouteImport.update({
@@ -107,10 +134,25 @@ const ConnectQuilttRoute = ConnectQuilttRouteImport.update({
   path: '/quiltt',
   getParentRoute: () => ConnectRoute,
 } as any)
-const AdminCustomerIdRoute = AdminCustomerIdRouteImport.update({
-  id: '/$customerId',
-  path: '/$customerId',
-  getParentRoute: () => AdminRoute,
+const ConnectSparrowRoute = ConnectSparrowRouteImport.update({
+  id: '/sparrow',
+  path: '/sparrow',
+  getParentRoute: () => ConnectRoute,
+} as any)
+const ConnectStealthRoute = ConnectStealthRouteImport.update({
+  id: '/stealth',
+  path: '/stealth',
+  getParentRoute: () => ConnectRoute,
+} as any)
+const DocsStrikeCsvRoute = DocsStrikeCsvRouteImport.update({
+  id: '/strike-csv',
+  path: '/strike-csv',
+  getParentRoute: () => DocsRoute,
+} as any)
+const DocsXpubExportRoute = DocsXpubExportRouteImport.update({
+  id: '/xpub-export',
+  path: '/xpub-export',
+  getParentRoute: () => DocsRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -122,13 +164,20 @@ export interface FileRoutesByFullPath {
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
   '/portal': typeof PortalRoute
+  '/privacy': typeof PrivacyRoute
+  '/providers': typeof ProvidersRoute
+  '/quiltt': typeof QuilttRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
+  '/sparrow': typeof SparrowRoute
+  '/terms': typeof TermsRoute
   '/unlock': typeof UnlockRoute
   '/admin/$customerId': typeof AdminCustomerIdRoute
+  '/connect/bitcoin': typeof ConnectBitcoinRoute
   '/connect/quiltt': typeof ConnectQuilttRoute
   '/connect/sparrow': typeof ConnectSparrowRoute
   '/connect/stealth': typeof ConnectStealthRoute
+  '/docs/strike-csv': typeof DocsStrikeCsvRoute
   '/docs/xpub-export': typeof DocsXpubExportRoute
   '/admin/': typeof AdminIndexRoute
 }
@@ -140,13 +189,20 @@ export interface FileRoutesByTo {
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
   '/portal': typeof PortalRoute
+  '/privacy': typeof PrivacyRoute
+  '/providers': typeof ProvidersRoute
+  '/quiltt': typeof QuilttRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
+  '/sparrow': typeof SparrowRoute
+  '/terms': typeof TermsRoute
   '/unlock': typeof UnlockRoute
   '/admin/$customerId': typeof AdminCustomerIdRoute
+  '/connect/bitcoin': typeof ConnectBitcoinRoute
   '/connect/quiltt': typeof ConnectQuilttRoute
   '/connect/sparrow': typeof ConnectSparrowRoute
   '/connect/stealth': typeof ConnectStealthRoute
+  '/docs/strike-csv': typeof DocsStrikeCsvRoute
   '/docs/xpub-export': typeof DocsXpubExportRoute
   '/admin': typeof AdminIndexRoute
 }
@@ -160,13 +216,20 @@ export interface FileRoutesById {
   '/docs': typeof DocsRouteWithChildren
   '/login': typeof LoginRoute
   '/portal': typeof PortalRoute
+  '/privacy': typeof PrivacyRoute
+  '/providers': typeof ProvidersRoute
+  '/quiltt': typeof QuilttRoute
   '/recover': typeof RecoverRoute
   '/signup': typeof SignupRoute
+  '/sparrow': typeof SparrowRoute
+  '/terms': typeof TermsRoute
   '/unlock': typeof UnlockRoute
   '/admin/$customerId': typeof AdminCustomerIdRoute
+  '/connect/bitcoin': typeof ConnectBitcoinRoute
   '/connect/quiltt': typeof ConnectQuilttRoute
   '/connect/sparrow': typeof ConnectSparrowRoute
   '/connect/stealth': typeof ConnectStealthRoute
+  '/docs/strike-csv': typeof DocsStrikeCsvRoute
   '/docs/xpub-export': typeof DocsXpubExportRoute
   '/admin/': typeof AdminIndexRoute
 }
@@ -181,13 +244,20 @@ export interface FileRouteTypes {
     | '/docs'
     | '/login'
     | '/portal'
+    | '/privacy'
+    | '/providers'
+    | '/quiltt'
     | '/recover'
     | '/signup'
+    | '/sparrow'
+    | '/terms'
     | '/unlock'
     | '/admin/$customerId'
+    | '/connect/bitcoin'
     | '/connect/quiltt'
     | '/connect/sparrow'
     | '/connect/stealth'
+    | '/docs/strike-csv'
     | '/docs/xpub-export'
     | '/admin/'
   fileRoutesByTo: FileRoutesByTo
@@ -199,13 +269,20 @@ export interface FileRouteTypes {
     | '/docs'
     | '/login'
     | '/portal'
+    | '/privacy'
+    | '/providers'
+    | '/quiltt'
     | '/recover'
     | '/signup'
+    | '/sparrow'
+    | '/terms'
     | '/unlock'
     | '/admin/$customerId'
+    | '/connect/bitcoin'
     | '/connect/quiltt'
     | '/connect/sparrow'
     | '/connect/stealth'
+    | '/docs/strike-csv'
     | '/docs/xpub-export'
     | '/admin'
   id:
@@ -218,13 +295,20 @@ export interface FileRouteTypes {
     | '/docs'
     | '/login'
     | '/portal'
+    | '/privacy'
+    | '/providers'
+    | '/quiltt'
     | '/recover'
     | '/signup'
+    | '/sparrow'
+    | '/terms'
     | '/unlock'
     | '/admin/$customerId'
+    | '/connect/bitcoin'
     | '/connect/quiltt'
     | '/connect/sparrow'
     | '/connect/stealth'
+    | '/docs/strike-csv'
     | '/docs/xpub-export'
     | '/admin/'
   fileRoutesById: FileRoutesById
@@ -238,74 +322,23 @@ export interface RootRouteChildren {
   DocsRoute: typeof DocsRouteWithChildren
   LoginRoute: typeof LoginRoute
   PortalRoute: typeof PortalRoute
+  PrivacyRoute: typeof PrivacyRoute
+  ProvidersRoute: typeof ProvidersRoute
+  QuilttRoute: typeof QuilttRoute
   RecoverRoute: typeof RecoverRoute
   SignupRoute: typeof SignupRoute
+  SparrowRoute: typeof SparrowRoute
+  TermsRoute: typeof TermsRoute
   UnlockRoute: typeof UnlockRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/unlock': {
-      id: '/unlock'
-      path: '/unlock'
-      fullPath: '/unlock'
-      preLoaderRoute: typeof UnlockRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/signup': {
-      id: '/signup'
-      path: '/signup'
-      fullPath: '/signup'
-      preLoaderRoute: typeof SignupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/recover': {
-      id: '/recover'
-      path: '/recover'
-      fullPath: '/recover'
-      preLoaderRoute: typeof RecoverRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/portal': {
-      id: '/portal'
-      path: '/portal'
-      fullPath: '/portal'
-      preLoaderRoute: typeof PortalRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/login': {
-      id: '/login'
-      path: '/login'
-      fullPath: '/login'
-      preLoaderRoute: typeof LoginRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/docs': {
-      id: '/docs'
-      path: '/docs'
-      fullPath: '/docs'
-      preLoaderRoute: typeof DocsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/demo': {
-      id: '/demo'
-      path: '/demo'
-      fullPath: '/demo'
-      preLoaderRoute: typeof DemoRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/connect': {
-      id: '/connect'
-      path: '/connect'
-      fullPath: '/connect'
-      preLoaderRoute: typeof ConnectRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/app': {
-      id: '/app'
-      path: '/app'
-      fullPath: '/app'
-      preLoaderRoute: typeof AppRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin': {
@@ -315,11 +348,102 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/app': {
+      id: '/app'
+      path: '/app'
+      fullPath: '/app'
+      preLoaderRoute: typeof AppRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/connect': {
+      id: '/connect'
+      path: '/connect'
+      fullPath: '/connect'
+      preLoaderRoute: typeof ConnectRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/demo': {
+      id: '/demo'
+      path: '/demo'
+      fullPath: '/demo'
+      preLoaderRoute: typeof DemoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/docs': {
+      id: '/docs'
+      path: '/docs'
+      fullPath: '/docs'
+      preLoaderRoute: typeof DocsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/portal': {
+      id: '/portal'
+      path: '/portal'
+      fullPath: '/portal'
+      preLoaderRoute: typeof PortalRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/providers': {
+      id: '/providers'
+      path: '/providers'
+      fullPath: '/providers'
+      preLoaderRoute: typeof ProvidersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/quiltt': {
+      id: '/quiltt'
+      path: '/quiltt'
+      fullPath: '/quiltt'
+      preLoaderRoute: typeof QuilttRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/recover': {
+      id: '/recover'
+      path: '/recover'
+      fullPath: '/recover'
+      preLoaderRoute: typeof RecoverRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/signup': {
+      id: '/signup'
+      path: '/signup'
+      fullPath: '/signup'
+      preLoaderRoute: typeof SignupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sparrow': {
+      id: '/sparrow'
+      path: '/sparrow'
+      fullPath: '/sparrow'
+      preLoaderRoute: typeof SparrowRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/terms': {
+      id: '/terms'
+      path: '/terms'
+      fullPath: '/terms'
+      preLoaderRoute: typeof TermsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/unlock': {
+      id: '/unlock'
+      path: '/unlock'
+      fullPath: '/unlock'
+      preLoaderRoute: typeof UnlockRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin/': {
@@ -329,25 +453,18 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminIndexRouteImport
       parentRoute: typeof AdminRoute
     }
-    '/docs/xpub-export': {
-      id: '/docs/xpub-export'
-      path: '/xpub-export'
-      fullPath: '/docs/xpub-export'
-      preLoaderRoute: typeof DocsXpubExportRouteImport
-      parentRoute: typeof DocsRoute
+    '/admin/$customerId': {
+      id: '/admin/$customerId'
+      path: '/$customerId'
+      fullPath: '/admin/$customerId'
+      preLoaderRoute: typeof AdminCustomerIdRouteImport
+      parentRoute: typeof AdminRoute
     }
-    '/connect/stealth': {
-      id: '/connect/stealth'
-      path: '/stealth'
-      fullPath: '/connect/stealth'
-      preLoaderRoute: typeof ConnectStealthRouteImport
-      parentRoute: typeof ConnectRoute
-    }
-    '/connect/sparrow': {
-      id: '/connect/sparrow'
-      path: '/sparrow'
-      fullPath: '/connect/sparrow'
-      preLoaderRoute: typeof ConnectSparrowRouteImport
+    '/connect/bitcoin': {
+      id: '/connect/bitcoin'
+      path: '/bitcoin'
+      fullPath: '/connect/bitcoin'
+      preLoaderRoute: typeof ConnectBitcoinRouteImport
       parentRoute: typeof ConnectRoute
     }
     '/connect/quiltt': {
@@ -357,12 +474,33 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConnectQuilttRouteImport
       parentRoute: typeof ConnectRoute
     }
-    '/admin/$customerId': {
-      id: '/admin/$customerId'
-      path: '/$customerId'
-      fullPath: '/admin/$customerId'
-      preLoaderRoute: typeof AdminCustomerIdRouteImport
-      parentRoute: typeof AdminRoute
+    '/connect/sparrow': {
+      id: '/connect/sparrow'
+      path: '/sparrow'
+      fullPath: '/connect/sparrow'
+      preLoaderRoute: typeof ConnectSparrowRouteImport
+      parentRoute: typeof ConnectRoute
+    }
+    '/connect/stealth': {
+      id: '/connect/stealth'
+      path: '/stealth'
+      fullPath: '/connect/stealth'
+      preLoaderRoute: typeof ConnectStealthRouteImport
+      parentRoute: typeof ConnectRoute
+    }
+    '/docs/strike-csv': {
+      id: '/docs/strike-csv'
+      path: '/strike-csv'
+      fullPath: '/docs/strike-csv'
+      preLoaderRoute: typeof DocsStrikeCsvRouteImport
+      parentRoute: typeof DocsRoute
+    }
+    '/docs/xpub-export': {
+      id: '/docs/xpub-export'
+      path: '/xpub-export'
+      fullPath: '/docs/xpub-export'
+      preLoaderRoute: typeof DocsXpubExportRouteImport
+      parentRoute: typeof DocsRoute
     }
   }
 }
@@ -380,12 +518,14 @@ const AdminRouteChildren: AdminRouteChildren = {
 const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)
 
 interface ConnectRouteChildren {
+  ConnectBitcoinRoute: typeof ConnectBitcoinRoute
   ConnectQuilttRoute: typeof ConnectQuilttRoute
   ConnectSparrowRoute: typeof ConnectSparrowRoute
   ConnectStealthRoute: typeof ConnectStealthRoute
 }
 
 const ConnectRouteChildren: ConnectRouteChildren = {
+  ConnectBitcoinRoute: ConnectBitcoinRoute,
   ConnectQuilttRoute: ConnectQuilttRoute,
   ConnectSparrowRoute: ConnectSparrowRoute,
   ConnectStealthRoute: ConnectStealthRoute,
@@ -395,10 +535,12 @@ const ConnectRouteWithChildren =
   ConnectRoute._addFileChildren(ConnectRouteChildren)
 
 interface DocsRouteChildren {
+  DocsStrikeCsvRoute: typeof DocsStrikeCsvRoute
   DocsXpubExportRoute: typeof DocsXpubExportRoute
 }
 
 const DocsRouteChildren: DocsRouteChildren = {
+  DocsStrikeCsvRoute: DocsStrikeCsvRoute,
   DocsXpubExportRoute: DocsXpubExportRoute,
 }
 
@@ -413,8 +555,13 @@ const rootRouteChildren: RootRouteChildren = {
   DocsRoute: DocsRouteWithChildren,
   LoginRoute: LoginRoute,
   PortalRoute: PortalRoute,
+  PrivacyRoute: PrivacyRoute,
+  ProvidersRoute: ProvidersRoute,
+  QuilttRoute: QuilttRoute,
   RecoverRoute: RecoverRoute,
   SignupRoute: SignupRoute,
+  SparrowRoute: SparrowRoute,
+  TermsRoute: TermsRoute,
   UnlockRoute: UnlockRoute,
 }
 export const routeTree = rootRouteImport

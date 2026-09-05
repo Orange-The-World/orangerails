@@ -32,6 +32,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   STEALTH_PROTOCOL_VERSION,
+  STEALTH_SUPPORTED_PROTOCOL_VERSIONS,
   type StealthInitMessage,
   type StealthReadyMessage,
   type StealthErrorMessage,
@@ -42,8 +43,7 @@ import { ListRoute } from "./routes/list";
 import { DeleteRoute } from "./routes/delete";
 import { DirectLoadCard } from "./components/DirectLoadCard";
 import { StealthInitProvider } from "./StealthInitContext";
-
-const DEFAULT_ALLOWED_ORIGINS = import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS ?? "";
+import { parseAllowedOrigins, isAllowedOrigin } from "./allowed-origins";
 
 const DIRECT_LOAD_GRACE_MS = 1500;
 
@@ -54,21 +54,7 @@ const DIRECT_LOAD_GRACE_MS = 1500;
  */
 const APP_MODE_IMPLEMENTED_MODES: ReadonlySet<string> = new Set<string>();
 
-function parseAllowedOrigins(): ReadonlySet<string> {
-  const raw =
-    (import.meta.env.VITE_OR_STEALTH_ALLOWED_ORIGINS as string | undefined) ??
-    DEFAULT_ALLOWED_ORIGINS;
-  return new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0),
-  );
-}
 
-function isAllowedOrigin(origin: string, allowlist: ReadonlySet<string>): boolean {
-  return allowlist.has(origin);
-}
 
 /**
  * Resolve the most specific origin we can target the READY message at.
@@ -107,6 +93,7 @@ function postReady(target: Window | null) {
   const ready: StealthReadyMessage = {
     type: "OR_STEALTH_READY",
     protocol_version: STEALTH_PROTOCOL_VERSION,
+    supported_protocol_versions: STEALTH_SUPPORTED_PROTOCOL_VERSIONS,
   };
   target.postMessage(ready, pickReadyTargetOrigin());
 }
@@ -147,7 +134,15 @@ function ErrorCard({ message }: { message: string }) {
 }
 
 export function App() {
-  const allowlist = useMemo(parseAllowedOrigins, []);
+  // `undefined` for raw so the default parameter reads the env var. The
+  // second argument always allows the origin this widget is served from, so
+  // our own /connect pages can drive it without that hostname having to be
+  // listed in VITE_OR_STEALTH_ALLOWED_ORIGINS on every environment. See the
+  // note on parseAllowedOrigins for why same-origin needs no gate.
+  const allowlist = useMemo(
+    () => parseAllowedOrigins(undefined, window.location.origin),
+    [],
+  );
   const [init, setInit] = useState<StealthInitMessage | null>(null);
   const [parent, setParent] = useState<Window | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -195,11 +190,15 @@ export function App() {
         return;
       }
 
-      if (data.protocol_version !== STEALTH_PROTOCOL_VERSION) {
+      const supportedVersions: readonly number[] = STEALTH_SUPPORTED_PROTOCOL_VERSIONS;
+      if (
+        typeof data.protocol_version !== "number" ||
+        !supportedVersions.includes(data.protocol_version)
+      ) {
         setError("protocol version mismatch");
         postError(event.source as Window | null, event.origin, {
           code: "PROTOCOL_VERSION_MISMATCH",
-          message: `Widget speaks protocol v${STEALTH_PROTOCOL_VERSION}; got v${String(data.protocol_version)}.`,
+          message: `Widget supports protocol version(s) ${supportedVersions.join(", ")}; got v${String(data.protocol_version)}.`,
           retryable: false,
         });
         return;
@@ -249,10 +248,10 @@ export function App() {
         // a key, so admitting this INIT would dispatch a keyless session into
         // key-holding crypto. Refuse here, explicitly, before route dispatch.
         if (!APP_MODE_IMPLEMENTED_MODES.has(data.mode)) {
-          setError(`seal_mode='app' is not implemented for mode '${data.mode}'`);
+          setError(`seal_mode='app' is not yet supported. This feature is not available in the current widget version.`);
           postError(event.source as Window | null, event.origin, {
             code: "INTERNAL",
-            message: `seal_mode='app' is not implemented for mode '${data.mode}'. The widget refuses to run a key-holding route with no key.`,
+            message: `App mode (seal_mode='app') is not yet supported. No keyless route exists in the current widget release. Use seal_mode='widget' with a key, or wait for app-mode support to be announced.`,
             retryable: false,
           });
           return;
@@ -267,6 +266,20 @@ export function App() {
           postError(event.source as Window | null, event.origin, {
             code: "INTERNAL",
             message: "OR_STEALTH_INIT missing or_stealth_key_b64 (required in widget mode).",
+            retryable: false,
+          });
+          return;
+        }
+      }
+
+      // Optional gap_limit: reject explicitly rather than silently coercing.
+      if (data.gap_limit !== undefined) {
+        const g = data.gap_limit;
+        if (!Number.isInteger(g) || g < 1 || g > 1000) {
+          setError("INIT gap_limit out of range");
+          postError(event.source as Window | null, event.origin, {
+            code: "INVALID_GAP_LIMIT",
+            message: `OR_STEALTH_INIT gap_limit must be an integer between 1 and 1000; got ${String(g)}.`,
             retryable: false,
           });
           return;
@@ -313,11 +326,17 @@ export function App() {
   }
 
   if (!init) {
-    const isDirectLoad =
-      !awaitingInit &&
-      (typeof window === "undefined" || (window.opener === null && window.parent === window));
-
-    if (isDirectLoad) {
+    // No INIT yet. While the grace window is still open (awaitingInit) we wait,
+    // giving a real parent time to finish the handshake. Once it expires with no
+    // INIT, none is coming, so show the direct-load guidance regardless of whether
+    // an opener or parent frame exists. This is the bare /connect/sparrow case
+    // (#451): the Sparrow route opens this widget in a popup with a non-null
+    // window.opener but never sends OR_STEALTH_INIT, so the old opener/parent gate
+    // left the popup stuck on the waiting state forever. A real parent that does
+    // send INIT sets init and supersedes this card, and the server render still
+    // shows the card because awaitingInit starts false there. Requirement 2:
+    // popup and same-tab paths now reach the same explained state.
+    if (!awaitingInit) {
       return <DirectLoadCard />;
     }
 

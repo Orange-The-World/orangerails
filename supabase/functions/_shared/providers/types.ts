@@ -64,6 +64,11 @@ export interface NormalizedTransaction {
    * was scoped via source_wallets; null for legacy account-wide sync.
    */
   source_wallet_id: string | null;
+  /**
+   * Provider-specific recipient identifier. For Strike this is the opaque
+   * receiverId from the invoice. Not persisted in v0; reserved for PR 2.
+   */
+  receiverId?: string | null;
 }
 
 export interface DiscoveredWallet {
@@ -117,6 +122,22 @@ export interface SyncResult {
    * and hands it back unchanged on the next call.
    */
   next_cursor: string | null;
+  /**
+   * When true, the adapter completed but its results are known to be
+   * incomplete (e.g. address window exhausted, a wallet subset unreachable).
+   * or-sync writes status='partial' instead of 'active' so connections are
+   * never reported healthy when only part of the history was synced.
+   * Absent or false means the sync was complete.
+   */
+  partial?: boolean;
+  /**
+   * Sources that were refused during this sync pass (e.g. 'withdrawals' when
+   * the API key lacks the withdrawal-history scope). A non-empty list forces
+   * status='partial' on the connection even when the adapter does not set
+   * partial: true explicitly. Absent or empty means all attempted sources
+   * replied. Only emitted when non-empty.
+   */
+  denied_sources?: string[];
 }
 
 // --- Adapter contract ---------------------------------------------------
@@ -202,14 +223,53 @@ export interface ProviderAdapter {
    * "Lightning", "Self-hosted") and full-text search matching. Lower-case,
    * hyphenated. Country codes are ISO 3166-1 alpha-2 lower-case ('us',
    * 'ca', 'eu').
+   *
+   * These strings are for search chips and UI filters only. They are NOT
+   * the custody source of truth -- read the `custody` field for that.
    */
   tags?: string[];
+
+  /**
+   * Whether this provider holds user funds (custodial) or the user holds
+   * the keys (self_custody).
+   *
+   * Required and fail-closed by design. TypeScript enforces it at compile
+   * time. At runtime, resolveCustody() treats an absent or unrecognised
+   * value as 'custodial' and emits a loud error -- never 'self_custody',
+   * never silent.
+   *
+   * Tags may carry 'custodial' or 'self-custody' strings for search chips
+   * but are NOT authoritative. Always read this field, never tags.
+   */
+  custody: 'custodial' | 'self_custody';
 
   /**
    * Default sort weight inside a category , higher first. Hand-picked so
    * the most popular options surface first. Defaults to 50.
    */
   popularity?: number;
+
+  /**
+   * Exchange capabilities introspected from the CCXT manifest.
+   * Present only for CCXT-backed exchanges; omitted entirely for native
+   * adapters (blink, xpub, btcpay, strike, surge). Never defaults to false
+   * because a missing capability is not the same as a known-false one.
+   */
+  capabilities?: {
+    trades: boolean;
+    deposits: boolean;
+    withdrawals: boolean;
+  };
+
+  /**
+   * Optional in-app route for this provider's connect flow. When set,
+   * pickers route the tile's "Connect" action to this URL instead of
+   * opening the generic credential-entry dialog. Propagated unchanged
+   * into ProviderManifest.connectUrl by listProviderManifests().
+   *
+   * Leave unset for providers that use the standard credential form.
+   */
+  connectUrl?: string;
 
   /** Schema for the credential blob the adapter expects. */
   credentialFields: CredentialField[];
@@ -272,8 +332,12 @@ export function parseCredentials(
   let parsed: unknown;
   try {
     parsed = JSON.parse(credentialsJson);
-  } catch (err) {
-    throw new Error(`[${adapter.slug}] credentials JSON parse failed: ${err instanceof Error ? err.message : String(err)}`);
+  } catch {
+    // credentialsJson is decrypted credential material. A parse failure here
+    // throws a FIXED string: the underlying exception is discarded, never
+    // composed into this message. Keep it that way, and do not reintroduce
+    // the caught error into the text.
+    throw new Error(`[${adapter.slug}] credentials are not valid JSON`);
   }
   if (!parsed || typeof parsed !== 'object') {
     throw new Error(`[${adapter.slug}] credentials must be an object`);
@@ -287,4 +351,27 @@ export function parseCredentials(
     }
   }
   return obj;
+}
+
+/**
+ * Runtime custody classifier that fails closed.
+ *
+ * TypeScript enforces `custody` at compile time, but runtime objects (e.g.
+ * adapters from a future dynamic registry or a JSON payload) may bypass
+ * typechecking. This helper is the authoritative read path: if `custody`
+ * is absent or is an unrecognised string, it emits a loud console.error
+ * and returns 'custodial'. It NEVER returns 'self_custody' for an unknown
+ * or absent value.
+ *
+ * @param adapter - Any object that may have a `custody` field.
+ */
+export function resolveCustody(
+  adapter: { custody?: unknown },
+): 'custodial' | 'self_custody' {
+  const value = adapter.custody;
+  if (value === 'custodial' || value === 'self_custody') return value;
+  console.error(
+    `[custody] absent or unrecognised custody value (${JSON.stringify(value)}): failing closed to 'custodial'.`,
+  );
+  return 'custodial';
 }

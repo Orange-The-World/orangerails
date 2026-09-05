@@ -33,6 +33,18 @@ const ANON_KEY = process.env.ORANGERAILS_TEST_ANON_KEY;
 
 const RUN = Boolean(SUPABASE_URL && SERVICE_ROLE_KEY && ANON_KEY);
 
+// When env vars are absent the describe block below registers 0 tests, which
+// is invisible in CI output. This explicit skip ensures the file always
+// appears in the vitest report so reviewers know the live-DB tests were not
+// silently dropped.
+if (!RUN) {
+  test.skip(
+    'OR-21 RLS isolation tests SKIPPED: set ORANGERAILS_TEST_SUPABASE_URL, ' +
+      'ORANGERAILS_TEST_SERVICE_ROLE_KEY, and ORANGERAILS_TEST_ANON_KEY to run against dev',
+    () => {},
+  );
+}
+
 describe.runIf(RUN)('OR-21: audit_entries cross-tenant RLS isolation', () => {
   // Service-role client: used for fixture setup, teardown, and RLS bypass baseline.
   const admin = RUN

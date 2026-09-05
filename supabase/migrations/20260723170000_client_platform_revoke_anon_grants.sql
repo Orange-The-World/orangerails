@@ -69,7 +69,7 @@ BEGIN;
 
 -- 1. Future tables in this schema must not inherit anon SELECT. This is the
 --    actual point of the migration.
-ALTER DEFAULT PRIVILEGES IN SCHEMA client_platform
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA client_platform
   REVOKE SELECT ON TABLES FROM anon;
 
 -- 2. Drop the standing blanket grant on the tables that already exist.
@@ -90,7 +90,32 @@ GRANT SELECT ON client_platform.api_plans TO anon;
 REVOKE EXECUTE ON FUNCTION client_platform.is_member_of(uuid) FROM anon, PUBLIC;
 REVOKE EXECUTE ON FUNCTION client_platform.has_role(uuid, text) FROM anon, PUBLIC;
 
--- 5. Prove it, in this transaction, or abort.
+-- 5. Remove all anon privileges on public.data_keys.
+--    data_keys inherits INSERT, SELECT, UPDATE and DELETE from the public-schema default
+--    table ACL (pg_default_acl objtype=r, acl=anon=arwd/postgres). RLS is enabled and
+--    the only policy scopes to authenticated, so anon cannot reach any row today.
+--    Removing all four grants ensures a future permissive policy on this table cannot
+--    turn them live without a migration and review. Placed here (file 4) per CTO ruling;
+--    file 5 does not duplicate it.
+--
+--    GUARD (OR-T2231, CTO ruling on OR-T2230). This file is numbered four days before
+--    20260727000000_data_keys_ownership_and_rotate_authz.sql, which is what creates
+--    public.data_keys. dev and prod both already applied this file successfully because
+--    history was not replayed in strict filename order (table already existed by the time
+--    this ran). A from-scratch replay in filename order reaches this line before the table
+--    exists and REVOKE would fail with 42P01. Guarded so that case skips cleanly instead;
+--    an environment where the table already exists is unaffected, byte for byte.
+DO $data_keys_revoke$
+BEGIN
+  IF to_regclass('public.data_keys') IS NULL THEN
+    RAISE NOTICE 'public.data_keys does not exist yet on this database (fresh bootstrap before 20260727000000), skipping REVOKE';
+  ELSE
+    REVOKE ALL ON public.data_keys FROM anon;
+  END IF;
+END
+$data_keys_revoke$;
+
+-- 6. Prove it, in this transaction, or abort.
 --    (a) covers all 7 tables step 2 must close, each named. The schema holds 8
 --    tables and every one of them carries an anon SELECT entry; api_plans is
 --    deliberately re-granted at step 3, so 7 must end with none. Named, not
@@ -119,6 +144,18 @@ BEGIN
   END IF;
   IF has_table_privilege('anon', 'client_platform.organizations', 'SELECT') THEN
     RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.organizations';
+  END IF;
+
+  -- (c) step 5: all four anon grants on public.data_keys are gone. Guarded the same
+  --     way as the REVOKE above: only checked when the table exists on this database,
+  --     so a from-scratch replay before 20260727000000 does not 42P01 here either.
+  IF to_regclass('public.data_keys') IS NOT NULL THEN
+    IF has_table_privilege('anon', 'public.data_keys', 'SELECT')
+       OR has_table_privilege('anon', 'public.data_keys', 'INSERT')
+       OR has_table_privilege('anon', 'public.data_keys', 'UPDATE')
+       OR has_table_privilege('anon', 'public.data_keys', 'DELETE') THEN
+      RAISE EXCEPTION 'FAIL: anon still holds privileges on public.data_keys';
+    END IF;
   END IF;
 
   -- (b) nothing broke

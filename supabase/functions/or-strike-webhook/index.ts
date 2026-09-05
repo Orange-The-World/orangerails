@@ -33,7 +33,7 @@
  *   500 , DB failure (Strike will retry per their policy)
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const CONN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -56,7 +56,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
 
     const sig = req.headers.get('X-Webhook-Signature');
-    if (!sig) return new Response('missing signature', { status: 401 });
+    if (!sig) {
+      console.warn('[or-strike-webhook] missing-sig 401: conn=%s', connId);
+      return new Response('missing signature', { status: 401 });
+    }
 
     // Read raw body for HMAC verification BEFORE parsing.
     const body = await req.text();
@@ -81,11 +84,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     if (!conn || !conn.strike_webhook_secret || conn.provider_type !== 'strike') {
       // Don't leak "no such connection" vs "wrong provider" , both 401.
+      console.warn('[or-strike-webhook] unknown-conn 401: found=%s has_secret=%s provider=%s id=%s',
+        !!conn, !!(conn?.strike_webhook_secret), conn?.provider_type ?? 'n/a', connId);
       return new Response('unknown connection', { status: 401 });
     }
 
     const expected = await computeHmacHex(conn.strike_webhook_secret, body);
     if (!timingSafeEqual(expected, sig)) {
+      console.warn('[or-strike-webhook] bad-sig 401: conn=%s sig_len=%s expected_len=%s', connId, sig.length, expected.length);
       return new Response('bad signature', { status: 401 });
     }
 

@@ -1,0 +1,530 @@
+name: scheduled dev to prod promotion
+
+# DL-0564, Gate 2.
+#
+# Promotion to production is currently an act of memory: someone has to decide
+# to open the promotion pull request. When nobody does, finished work piles up
+# on dev invisibly. Measured here on 2026-08-03: dev is 73 commits ahead of prod
+# and the oldest unpromoted commit is 11 days old. Before that backlog was
+# cleared it had reached 384 commits ahead. Nothing has ever opened a promotion
+# on a schedule.
+#
+# Promotion in this repository is owned by the Release role: it decides when dev
+# goes to prod and it owns backing a promotion out again. This workflow does not
+# change that ownership and does not exercise it. The threshold Release answers
+# to, set for this repository on 2026-08-02, is 50 commits ahead OR 3 days since
+# the oldest unpromoted commit, whichever comes first.
+#
+# This workflow turns the promotion into a default event that Release responds
+# to, rather than something a human has to remember to start. It only ever
+# opens or updates one pull request.
+#
+# HARD LIMITS. This workflow never merges, never enables auto-merge, and never
+# pushes to prod. Merging is Release's decision. If Release holds the gate, the
+# CTO owns the risk decision. Nothing here changes a branch, a ruleset, or a
+# repository setting.
+#
+# WHY IT NEEDS FLEET_PAT. "Allow GitHub Actions to create and approve pull
+# requests" is off in this repository and is deliberately staying off, because
+# that single toggle also lets Actions APPROVE pull requests, which would
+# undermine the one-approving-review requirement. With the toggle off, the
+# built-in GITHUB_TOKEN cannot open a pull request. So the write step uses a
+# repository secret named FLEET_PAT (a machine user), and only the read-only
+# comparison uses GITHUB_TOKEN. Until FLEET_PAT exists this workflow fails
+# loudly on purpose rather than quietly doing nothing.
+
+on:
+  schedule:
+    # Every 2 days at 06:17 UTC (about 02:17 US Eastern). Off-peak, and
+    # deliberately not on the hour: minute 0 is the busiest slot on shared
+    # runners and schedule delivery there is the least reliable.
+    - cron: '17 6 */2 * *'
+  workflow_dispatch:
+
+# Least privilege for the built-in token. contents:read is what the compare
+# call needs; pull-requests:write is declared because this workflow's purpose
+# is writing a pull request, even though the actual write is done with
+# FLEET_PAT (the built-in token cannot do it while the create-and-approve
+# toggle is off).
+permissions:
+  contents: read
+  pull-requests: write
+
+# One promotion pull request at a time, per repository. A scheduled run and a
+# manual run must never race each other into opening two.
+concurrency:
+  group: scheduled-dev-to-prod-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Open or update the dev to prod promotion pull request
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      # The one jq expression that maps a raw GitHub pull-request object into
+      # the {number, head, head_repo} shape the candidate filter below reads.
+      # Both the self-test and the real step feed data through THIS SAME
+      # STRING (OR-T1132), so a rename of .head.ref or .head.repo.full_name,
+      # or dropping the `// ""` null-repo fallback, breaks the self-test
+      # instead of leaving it green over a broken gate.
+      SHAPE_FILTER: '{number, head: .head.ref, head_repo: (.head.repo.full_name // "")}'
+      # The one jq expression that decides which open pull requests into prod
+      # count as a promotion candidate. Both the self-test below and the real
+      # step feed data through THIS SAME STRING (OR-T1102), so deleting
+      # `.head_repo == $repo` or narrowing the head match can no longer leave
+      # a green self-test standing over a broken gate: change the string once
+      # and both the test and the gate see the new behaviour.
+      CANDIDATE_FILTER: '.[] | select(.head_repo == $repo and (.head == "dev" or (.head | startswith("release/"))))'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # This workflow never pushes. Do not leave a credential in .git.
+          persist-credentials: false
+
+      - name: Self-test the candidate-selection logic
+        run: |
+          set -euo pipefail
+
+          # OR-T1102: this used to run a shell function (verdict()) that
+          # REIMPLEMENTED the CANDIDATES decision in a second, independent
+          # piece of logic. Deleting `.head_repo == $repo` from the real jq
+          # filter below left every one of those cases printing ok, because
+          # the paraphrase never called the filter it was supposed to guard.
+          #
+          # OR-T1132: the fixtures used to be hand-built in the ALREADY
+          # SHAPED form ({"number":1,"head":"dev","head_repo":"..."}), which
+          # meant the mapping from a raw GitHub API object into that shape
+          # (SHAPE_FILTER, applied by the real step below) was never
+          # exercised by this test. Renaming .head.ref to .head.label, or
+          # dropping the `// ""` fallback on a null head.repo, left this
+          # self-test green while the real step's CANDIDATES came back
+          # empty. These fixtures are now RAW pull-request-shaped JSON, with
+          # nested .head.ref and .head.repo.full_name, run through
+          # SHAPE_FILTER and then CANDIDATE_FILTER, the same two strings
+          # (set once, in this job's env:) that the real step applies to the
+          # live API response. One implementation of each decision; this
+          # step and the real step both call both of them.
+          OWN="${GH_REPO}"
+
+          RAW_FIXTURES='[
+            {"number":1,"head":{"ref":"dev","repo":{"full_name":"'"${OWN}"'"}}},
+            {"number":2,"head":{"ref":"release/x","repo":{"full_name":"'"${OWN}"'"}}},
+            {"number":3,"head":{"ref":"dev","repo":{"full_name":"someone-else/orangerails"}}},
+            {"number":4,"head":{"ref":"release/x","repo":{"full_name":"someone-else/orangerails"}}},
+            {"number":5,"head":{"ref":"fix/thing","repo":{"full_name":"'"${OWN}"'"}}},
+            {"number":6,"head":{"ref":"dev","repo":null}}
+          ]'
+
+          # number 1 (our dev) and 2 (our release/x) must survive both
+          # filters; 3-4 (a fork sharing our branch names), 5 (an unrelated
+          # head of ours) and 6 (a fork whose source repo was since deleted,
+          # so head.repo is null and SHAPE_FILTER's `// ""` turns that into
+          # the empty string) must all be rejected.
+          SHAPED="$(printf '%s' "${RAW_FIXTURES}" | jq -c "[.[] | ${SHAPE_FILTER}]")"
+          GOT="$(printf '%s' "${SHAPED}" | jq --arg repo "${OWN}" -c "[${CANDIDATE_FILTER}] | map(.number)")"
+          EXPECTED='[1,2]'
+
+          if [ "${GOT}" != "${EXPECTED}" ]; then
+            echo "::error::candidate-selection self-test failed. Expected candidates ${EXPECTED} (our dev, our release/x), the real filter returned ${GOT}."
+            echo "::error::decision logic self-test failed. The guard is broken, not passing."
+            exit 1
+          fi
+          echo "ok: 6 RAW pull-request-shaped fixtures through SHAPE_FILTER then CANDIDATE_FILTER -> ${GOT} (fork and unrelated heads correctly rejected)"
+          echo "Self-test passed: 6 raw fixtures shaped and filtered by the same two strings the real step uses, all as expected."
+
+      - name: Compare prod and dev
+        id: compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          gh api "repos/${GH_REPO}/compare/prod...dev" > compare.json
+
+          AHEAD=$(jq -r '.ahead_by' compare.json)
+          BEHIND=$(jq -r '.behind_by' compare.json)
+          # The compare payload lists commits oldest first, so element 0 is
+          # the oldest unpromoted commit even when the list is truncated.
+          OLDEST_DATE=$(jq -r '.commits[0].commit.committer.date // ""' compare.json)
+          OLDEST_SHA=$(jq -r '.commits[0].sha // ""' compare.json)
+
+          if [ -n "${OLDEST_DATE}" ]; then
+            OLDEST_EPOCH=$(date -u -d "${OLDEST_DATE}" +%s)
+            NOW_EPOCH=$(date -u +%s)
+            AGE_DAYS=$(( (NOW_EPOCH - OLDEST_EPOCH) / 86400 ))
+          else
+            AGE_DAYS=0
+          fi
+
+          {
+            echo "ahead=${AHEAD}"
+            echo "behind=${BEHIND}"
+            echo "age_days=${AGE_DAYS}"
+            echo "oldest_date=${OLDEST_DATE}"
+            echo "oldest_sha=${OLDEST_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "dev is ${AHEAD} commit(s) ahead of prod and ${BEHIND} behind."
+          echo "Oldest unpromoted commit is ${AGE_DAYS} day(s) old."
+
+      - name: Nothing to promote
+        if: steps.compare.outputs.ahead == '0'
+        run: |
+          echo "nothing to promote: dev is 0 commits ahead of prod."
+          echo "Clean no-op. No pull request opened, nothing updated."
+
+      - name: Require FLEET_PAT
+        if: steps.compare.outputs.ahead != '0'
+        env:
+          FLEET_PAT: ${{ secrets.FLEET_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FLEET_PAT:-}" ]; then
+            echo "::error title=FLEET_PAT is not set::There is work to promote but this workflow cannot open the pull request."
+            cat <<'MSG'
+
+          FLEET_PAT is missing.
+
+          There ARE commits to promote, so staying silent would hide exactly the
+          problem this workflow exists to surface. Failing instead.
+
+          What to do:
+            1. Add a repository secret named FLEET_PAT.
+            2. Its value is a token for the orange-builder machine user, scoped
+               to this repository with Contents:read, Pull requests:write and
+               Issues:write. Issues:write is required, not optional: this job
+               creates the owner:release label and applies it, and the label
+               endpoints sit under Issues. Without it the job dies at the label
+               step and no promotion pull request is opened.
+            3. Re-run this workflow (Actions, then Run workflow).
+
+          Why not the built-in GITHUB_TOKEN: "Allow GitHub Actions to create and
+          approve pull requests" is off in this repository and stays off, because
+          the same toggle would also let Actions approve pull requests. So the
+          built-in token can read the comparison but cannot open the promotion.
+
+          MSG
+            exit 1
+          fi
+          echo "FLEET_PAT is present."
+
+      - name: Open or update the promotion pull request
+        id: promo
+        if: steps.compare.outputs.ahead != '0'
+        env:
+          # Every write below runs as the machine user, never as the built-in
+          # token. See the FLEET_PAT note in the header.
+          GH_TOKEN: ${{ secrets.FLEET_PAT }}
+          AHEAD: ${{ steps.compare.outputs.ahead }}
+          BEHIND: ${{ steps.compare.outputs.behind }}
+          AGE_DAYS: ${{ steps.compare.outputs.age_days }}
+          OLDEST_DATE: ${{ steps.compare.outputs.oldest_date }}
+          OLDEST_SHA: ${{ steps.compare.outputs.oldest_sha }}
+        run: |
+          set -euo pipefail
+
+          COMPARE_URL="${GITHUB_SERVER_URL}/${GH_REPO}/compare/prod...dev"
+
+          # ---- threshold ------------------------------------------------
+          BREACH="no"
+          BREACH_WHY="below both thresholds"
+          if [ "${AHEAD}" -ge 50 ] && [ "${AGE_DAYS}" -ge 3 ]; then
+            BREACH="YES"
+            BREACH_WHY="${AHEAD} commits (limit 50) and ${AGE_DAYS} days (limit 3)"
+          elif [ "${AHEAD}" -ge 50 ]; then
+            BREACH="YES"
+            BREACH_WHY="${AHEAD} commits, over the 50 commit limit"
+          elif [ "${AGE_DAYS}" -ge 3 ]; then
+            BREACH="YES"
+            BREACH_WHY="oldest unpromoted commit is ${AGE_DAYS} days old, over the 3 day limit"
+          fi
+
+          # Publish the verdict so the escalation step below can act on it.
+          # Until now the breach existed only as a word inside a markdown table
+          # in the pull request body, which nothing reads and no seat watches.
+          {
+            echo "breach=${BREACH}"
+            echo "breach_why=${BREACH_WHY}"
+          } >> "${GITHUB_OUTPUT}"
+
+          # ---- divergence ------------------------------------------------
+          if [ "${BEHIND}" -gt 0 ]; then
+            DIVERGED="**prod has ${BEHIND} commit(s) that dev does not have.** The
+          branches have diverged, and that is what makes this promotion conflict.
+          Gate 3 (\`prod-backmerge.yml\`, ticket DL-0565) exists to bring those
+          commits back into dev. Expect to run the backmerge before, or as part
+          of, merging this."
+          else
+            DIVERGED="prod has no commits that dev is missing. The branches have
+          not diverged, so this promotion should be a clean fast path."
+          fi
+
+          # ---- body -------------------------------------------------------
+          {
+            echo "Opened automatically by \`.github/workflows/scheduled-promotion.yml\` (DL-0564, Gate 2)."
+            echo
+            echo "## State of the promotion"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commits on dev not on prod | **${AHEAD}** |"
+            echo "| Oldest unpromoted commit | **${AGE_DAYS} day(s)** old (${OLDEST_DATE}, \`${OLDEST_SHA}\`) |"
+            echo "| Commits on prod not on dev | **${BEHIND}** |"
+            echo "| Threshold breached (50 commits or 3 days) | **${BREACH}** (${BREACH_WHY}) |"
+            echo
+            echo "Full comparison: ${COMPARE_URL}"
+            echo
+            echo "## Divergence"
+            echo
+            echo "${DIVERGED}"
+            echo
+            echo "## Who owns this"
+            echo
+            echo "**The Release seat owns merging this.** This workflow will never merge it,"
+            echo "will never enable auto-merge, and will never push to prod. If Release holds"
+            echo "the gate and chooses not to promote, the CTO owns the risk decision."
+            echo
+            echo "There is no GitHub account that corresponds to the Release role in this"
+            echo "repository, so this pull request carries the \`owner:release\` label and names"
+            echo "Release here rather than setting a GitHub assignee that would be wrong."
+            echo
+            echo "## About this automation"
+            echo
+            echo "The schedule runs every 2 days. If dev is level with prod the run is a clean"
+            echo "no-op. If a promotion into prod is already open, whether its head is dev or"
+            echo "a release branch cut for the purpose, this workflow updates that one rather"
+            echo "than opening a second, because a duplicate promotion would be actively"
+            echo "harmful."
+            echo
+            echo "This workflow is inert until a repository secret named \`FLEET_PAT\` is added"
+            echo "(a token for the \`orange-builder\` machine user, being created shortly). That"
+            echo "is expected. Until then a run with work to promote fails loudly instead of"
+            echo "silently doing nothing. FLEET_PAT is required because \"Allow GitHub Actions"
+            echo "to create and approve pull requests\" is off in this repository and is staying"
+            echo "off: that single toggle would also let Actions approve pull requests, which"
+            echo "would undermine the one-approving-review requirement."
+          } > pr-body.md
+
+          # ---- label ------------------------------------------------------
+          if ! gh api "repos/${GH_REPO}/labels/owner:release" >/dev/null 2>&1; then
+            gh api -X POST "repos/${GH_REPO}/labels" \
+              -f name='owner:release' \
+              -f color='d93f0b' \
+              -f description='Owned by the Release seat' >/dev/null
+            echo "Created label owner:release."
+          fi
+
+          # ---- reuse or open ----------------------------------------------
+          # Duplicate guard. Ask GitHub for every OPEN pull request whose base
+          # is prod, with NO filter on the head. If a promotion is already open
+          # we update it, and we never reach gh pr create while one is open.
+          #
+          # The head filter that used to be here had to go (OR-T0990). A
+          # promotion is now opened from a release/* branch cut at a fixed sha,
+          # because the prod ruleset requires the last push to be approved and a
+          # promotion whose head IS dev loses its approval every time anything
+          # merges into dev. With a release/* promotion open, a query filtered on
+          # head=dev returns empty and this job opens a SECOND promotion into
+          # prod. The cron runs every two days, so that lands within two days of
+          # the first release-branch promotion.
+          #
+          # Dropping the filter widens the answer to every open pull request into
+          # prod, and not all of those are promotions: a prod-hotfix is one too.
+          # So the candidates are narrowed by head ref, to dev or release/*.
+          # Taking a hotfix as the promotion would be worse than the duplicate
+          # this guard exists to stop. It would rewrite that pull request's body,
+          # and because this job would then believe a promotion was already open,
+          # no promotion would be opened at all. That omission would be silent.
+          # head_repo carries the head branch's OWNING repository, not just
+          # its ref name. A pull request into prod can be opened from a fork,
+          # and a fork's default branch is named dev by GitHub convention, so
+          # the ref alone cannot tell "our promotion" from "someone else's
+          # fork that happens to share a branch name" (OR-T1086). A fork whose
+          # source repo was since deleted reports repo as null, which // ""
+          # turns into an empty string that can never equal GH_REPO, so it is
+          # correctly rejected rather than silently passing.
+          # --paginate walks every page of results rather than trusting the
+          # first 100 to be everything (OR-T1102): past 100 open pull
+          # requests into prod, an unpaginated call silently dropped the
+          # rest, and the one open promotion among them could be missed,
+          # opening a duplicate.
+          # SHAPE_FILTER is the exact string the self-test step above just
+          # proved against RAW pull-request-shaped fixtures (OR-T1132): one
+          # implementation of the mapping from the API response into
+          # {number, head, head_repo}, called twice.
+          OPEN_INTO_PROD="$(gh api --paginate "repos/${GH_REPO}/pulls?state=open&base=prod&per_page=100" \
+                              --jq "[.[] | ${SHAPE_FILTER}]")"
+
+          # CANDIDATE_FILTER is the exact string the self-test step above
+          # just proved against fixtures (OR-T1102): one implementation,
+          # called twice. sort_by(.number) makes "the first candidate" the
+          # LOWEST pull request number, the oldest open promotion, rather
+          # than whatever order the API happened to return, which was never
+          # documented or guaranteed.
+          CANDIDATES="$(printf '%s' "${OPEN_INTO_PROD}" \
+                          | jq --arg repo "${GH_REPO}" \
+                              "[${CANDIDATE_FILTER}] | sort_by(.number)")"
+
+          echo "open pull requests into prod: $(printf '%s' "${OPEN_INTO_PROD}" | jq 'length')"
+          printf '%s\n' "${OPEN_INTO_PROD}" | jq -r '.[] | "  pull request \(.number) head=\(.head)"'
+          echo "promotion candidates among them (head dev or release/*): $(printf '%s' "${CANDIDATES}" | jq 'length')"
+
+          if [ "$(printf '%s' "${CANDIDATES}" | jq 'length')" -gt 1 ]; then
+            echo "::warning::More than one promotion into prod is open. Updating the first and leaving the others untouched. Two open promotions is a state a human has to resolve; close the one that is not wanted."
+          fi
+
+          EXISTING="$(printf '%s' "${CANDIDATES}" | jq -r '.[0].number // ""')"
+
+          if [ -n "${EXISTING}" ]; then
+            EXISTING_TITLE=$(gh api "repos/${GH_REPO}/pulls/${EXISTING}" --jq '.title')
+            echo "Reusing open promotion pull request ${EXISTING}. Not opening a duplicate."
+
+            gh pr edit "${EXISTING}" --body-file pr-body.md
+            gh pr edit "${EXISTING}" --add-label 'owner:release'
+
+            # Only retitle a title this workflow itself generated. A title a
+            # human wrote is left alone; the counts live in the body either way.
+            case "${EXISTING_TITLE}" in
+              "promote: dev to prod ("*)
+                gh pr edit "${EXISTING}" --title "promote: dev to prod (${AHEAD} commits)"
+                ;;
+              *)
+                echo "Left the existing human-written title unchanged."
+                ;;
+            esac
+
+            {
+              echo "pr_number=${EXISTING}"
+              echo "pr_url=${GITHUB_SERVER_URL}/${GH_REPO}/pull/${EXISTING}"
+            } >> "${GITHUB_OUTPUT}"
+
+            echo "Updated: ${GITHUB_SERVER_URL}/${GH_REPO}/pull/${EXISTING}"
+            exit 0
+          fi
+
+          # No promotion is open, so open one from dev. This stays --head dev on
+          # purpose. Cutting a release branch is a contents WRITE, which would
+          # mean widening this workflow's token from Contents:read on a public
+          # repository and deleting the persist-credentials: false on the
+          # checkout above, whose comment says this workflow never pushes. That
+          # trade was considered and refused: Release cuts the branch by hand and
+          # owns the runbook. head=dev is still accepted by the source guard, so
+          # when no release branch has been cut this behaves as it always has.
+          URL=$(gh pr create \
+                  --base prod \
+                  --head dev \
+                  --title "promote: dev to prod (${AHEAD} commits)" \
+                  --body-file pr-body.md \
+                  --label 'owner:release')
+          {
+            echo "pr_number=$(basename "${URL}")"
+            echo "pr_url=${URL}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Opened: ${URL}"
+
+      # ------------------------------------------------------------------
+      # Escalate a breach to the seat that owns the merge.
+      #
+      # WHY THIS STEP EXISTS. Before it, a threshold breach produced exactly
+      # two artifacts: the word YES inside a markdown table in the pull
+      # request body, and the label owner:release. No seat watches labels and
+      # no seat reads a pull request body on a schedule, so the breach
+      # notified nobody. Measured on 2026-09-05: the promotion backlog stood
+      # at 330 commits with a promotion open, and Release had never been told.
+      # The seat was not slow. It was never asked.
+      #
+      # A GitHub runner cannot reach the delivery database or the seat wake
+      # tool, both of which are private to the fleet hosts. The one channel
+      # that reaches a seat from a hosted runner is chat, and this repository
+      # already proves that path in approved-green-pr-sweep.yml. This step
+      # reuses that exact secret contract rather than inventing a second one.
+      #
+      # It is deliberately noisy on failure. If neither channel delivers, the
+      # job fails, because a silent escalation is the bug being fixed here.
+      - name: Escalate a threshold breach to the Release seat
+        if: steps.promo.outputs.breach == 'YES'
+        env:
+          # Issues:write already lives on FLEET_PAT because the label step
+          # above needs it, so the fallback needs no new scope.
+          GH_TOKEN: ${{ secrets.FLEET_PAT }}
+          ZULIP_SITE: ${{ secrets.ZULIP_SITE }}
+          ZULIP_BOT_EMAIL: ${{ secrets.ZULIP_BOT_EMAIL }}
+          ZULIP_API_KEY: ${{ secrets.ZULIP_API_KEY }}
+          AHEAD: ${{ steps.compare.outputs.ahead }}
+          AGE_DAYS: ${{ steps.compare.outputs.age_days }}
+          BREACH_WHY: ${{ steps.promo.outputs.breach_why }}
+          PR_URL: ${{ steps.promo.outputs.pr_url }}
+          PR_NUMBER: ${{ steps.promo.outputs.pr_number }}
+          ISSUE_TITLE: 'Promotion backlog past the threshold, Release to decide'
+        run: |
+          set -euo pipefail
+
+          # The mention is never inside a bold run. Zulip closes the bold
+          # markers against the mention markers and the result renders as
+          # plain text, returns success, and notifies nobody.
+          SUMMARY="Promotion backlog is past the threshold: ${BREACH_WHY}."
+          LINE2="dev is ${AHEAD} commit(s) ahead of prod and the oldest unpromoted commit is ${AGE_DAYS} day(s) old."
+          LINE3="Promotion pull request ${PR_NUMBER}: ${PR_URL}"
+          LINE4="Merging this is the Release decision. If Release holds the gate, the risk decision is the CTO's."
+
+          delivered=0
+
+          if [ -n "${ZULIP_SITE:-}" ] && [ -n "${ZULIP_BOT_EMAIL:-}" ] && [ -n "${ZULIP_API_KEY:-}" ]; then
+            BODY="@**Release** ${SUMMARY}"$'\n\n'"${LINE2}"$'\n\n'"${LINE3}"$'\n\n'"${LINE4}"
+            if curl -s --fail -X POST "${ZULIP_SITE}/api/v1/messages" \
+                 -u "${ZULIP_BOT_EMAIL}:${ZULIP_API_KEY}" \
+                 --data-urlencode "type=stream" \
+                 --data-urlencode "to=Releases" \
+                 --data-urlencode "topic=Promotion backlog past the threshold" \
+                 --data-urlencode "content=${BODY}" >/dev/null; then
+              delivered=1
+              echo "Escalated to chat."
+            else
+              echo "::warning::Chat post failed. Falling back to a GitHub issue."
+            fi
+          else
+            echo "::warning::Chat credentials are not configured on this repository. Falling back to a GitHub issue. Add ZULIP_SITE, ZULIP_BOT_EMAIL and ZULIP_API_KEY to reach the seat directly."
+          fi
+
+          # The fallback is not decoration. It is the channel that always
+          # works, because it uses the same token the rest of this job
+          # already proved. One issue, reused, so a standing breach does not
+          # become a new issue every two days.
+          ISSUE_BODY="$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s' \
+            "${SUMMARY}" \
+            "${LINE2}" \
+            "${LINE3}" \
+            "${LINE4}" \
+            "Opened by .github/workflows/scheduled-promotion.yml. It closes nothing and merges nothing. Close this issue when the promotion lands or when Release decides to hold.")"
+
+          EXISTING_ISSUE="$(gh issue list \
+                              --repo "${GH_REPO}" \
+                              --state open \
+                              --limit 100 \
+                              --json number,title \
+                            | jq -r --arg t "${ISSUE_TITLE}" 'map(select(.title == $t)) | .[0].number // empty')"
+
+          if [ -n "${EXISTING_ISSUE}" ]; then
+            gh issue edit "${EXISTING_ISSUE}" --repo "${GH_REPO}" --body "${ISSUE_BODY}" >/dev/null
+            echo "Updated issue ${EXISTING_ISSUE}."
+            delivered=1
+          else
+            if gh issue create \
+                 --repo "${GH_REPO}" \
+                 --title "${ISSUE_TITLE}" \
+                 --body "${ISSUE_BODY}" \
+                 --label 'owner:release' >/dev/null; then
+              echo "Opened an issue for the breach."
+              delivered=1
+            else
+              echo "::error::Could not open a GitHub issue for the breach either."
+            fi
+          fi
+
+          if [ "${delivered}" != "1" ]; then
+            echo "::error::The promotion backlog breached the threshold and no channel delivered the escalation. Release has not been told. This is the failure this step exists to prevent, so the job is failing rather than passing quietly."
+            exit 1
+          fi

@@ -1,0 +1,38 @@
+name: "Bench: GCS match cost (DL-0353)"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'bench/**'
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: GCS match cost bench
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Run GCS match cost bench
+        run: |
+          set -o pipefail
+          deno run --allow-read --allow-net benches/gcs_match_cost.ts 2>&1 | tee /tmp/bench_output.txt
+
+      - name: Post results to job summary
+        if: always()
+        run: |
+          echo '## GCS Match Cost Bench (DL-0353)' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Script: `benches/gcs_match_cost.ts` -- fixed-window match cost only.' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/bench_output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

@@ -40,12 +40,14 @@ import {
   unwrapMekBytes,
   generateRecoveryCode,
   deriveRecoveryKek,
+  CURRENT_VAULT_KEY_VERSION,
 } from "@/lib/vault";
 import {
   deriveVerifierKey,
   deriveCredentialsKey,
   deriveTransactionsKey,
   deriveBlindIndexKey,
+  derivePqcSecretWrapKey,
 } from "@/lib/key-derivation";
 import {
   encryptCredentials as encryptCredentialsFields,
@@ -58,6 +60,7 @@ import {
 } from "@/lib/crypto-fields";
 import {
   ensurePqcKeypairs as ensurePqcKeypairsImpl,
+  carryPqcSecretsAcrossRotation,
   type EnsurePqcKeypairsResult,
   type SupabaseLike as PqcSupabaseLike,
 } from "@/lib/pqc-lifecycle";
@@ -88,12 +91,43 @@ interface VaultSetupResult {
 }
 
 interface RecoveryResult {
-  /** Updated MEK wrapper under the new password + existing salt. */
+  /** Updated MEK wrapper under the new (rotated) MEK + new password KEK. */
   newEncMekCiphertext: string;
   /** New recovery code (the old one is invalidated). */
   newRecoveryCode: string;
-  /** Updated recovery ciphertext for the new code. */
+  /** Updated recovery ciphertext wrapping the new MEK. */
   newRecoveryCiphertext: string;
+  /**
+   * New verifier ciphertext derived from the new MEK + same salt.
+   * The caller MUST persist this alongside enc_mek_ciphertext; if it is
+   * not updated, unlock() will fail on the next page load.
+   */
+  newVerifierCiphertext: string;
+  /**
+   * The PQC KEM secret key re-wrapped under the rotated MEK, or null when this
+   * vault has no PQC keys yet.
+   *
+   * The caller MUST persist this in the SAME update as the MEK wrappers. It is
+   * wrapped under an HKDF subkey of the MEK, so leaving it behind orphans it
+   * permanently: the old wrap key is gone, and ensurePqcKeypairs() will never
+   * regenerate because kem_public_key is still populated.
+   */
+  newKemSecretWrapped: string | null;
+  /** The PQC signing secret key re-wrapped under the rotated MEK, or null. Same rule. */
+  newSigSecretWrapped: string | null;
+  /**
+   * True when a stored PQC secret existed and could NOT be opened by the old
+   * wrap key, so that keypair is being discarded and a fresh one is generated
+   * on the next unlock.
+   *
+   * The recovery screen must state this to the user. Regenerating silently is
+   * not acceptable: the point of choosing recovery over lockout is that the user
+   * gets to know what they lost.
+   *
+   * False when there was simply nothing stored to carry. Nothing was lost then
+   * and saying otherwise would be a lie.
+   */
+  pqcKeysReplaced: boolean;
 }
 
 interface VaultContextValue {
@@ -129,9 +163,19 @@ interface VaultContextValue {
    * and generates a new recovery code. The caller must persist the returned
    * fields to user_vault_meta and show the new recovery code to the user.
    *
-   * The vault salt is intentionally NOT changed , all HKDF subkeys (credentials,
-   * transactions, PQC) remain valid because they depend on MEK + salt, and
-   * neither changes.
+   * The vault salt is intentionally NOT changed, so the user does not have to
+   * re-register. That is the ONLY thing the preserved salt buys.
+   *
+   * It does NOT mean the subkeys survive. Every HKDF subkey is derived from
+   * MEK + salt and the MEK is rotated here, so all of them change: credentials,
+   * transactions, verifier and the PQC secret wrap key. An earlier version of
+   * this comment claimed the opposite and that is how the PQC secrets came to
+   * be silently destroyed on every successful recovery. Anything wrapped under
+   * an MEK-derived key must be migrated or re-wrapped on this path.
+   *
+   * Pass the stored kem_secret_wrapped and sig_secret_wrapped in so they can be
+   * re-wrapped under the rotated MEK and returned for the caller to persist.
+   * Pass null for a vault that has no PQC keys yet.
    */
   recoverWithCode(params: {
     recoveryCode: string;
@@ -139,7 +183,30 @@ interface VaultContextValue {
     saltB64: string;
     verifierCiphertext: string;
     newPassword: string;
+    kemSecretWrapped: string | null;
+    sigSecretWrapped: string | null;
   }): Promise<RecoveryResult>;
+
+  /**
+   * Re-encrypt a credentials-subkey ciphertext using old-MEK material for
+   * decryption and the current (rotated) MEK subkey for re-encryption.
+   * Only callable between recoverWithCode() and clearMigrationKeys().
+   * Throws if migration keys are not loaded.
+   */
+  migrateCredentialsCiphertext(oldCiphertext: string): Promise<string>;
+
+  /**
+   * Same as migrateCredentialsCiphertext but for the transactions subkey.
+   * Use for encrypted_transactions.encrypted_payload.
+   */
+  migrateTransactionCiphertext(oldCiphertext: string): Promise<string>;
+
+  /**
+   * Zero the old-MEK migration subkeys from memory. Call once all ciphertexts
+   * have been re-encrypted and persisted. After this call the migrate* methods
+   * throw.
+   */
+  clearMigrationKeys(): void;
 
   /** Clear the MEK from memory. Subsequent encrypt/decrypt calls will throw. */
   lock(): void;
@@ -176,6 +243,20 @@ interface VaultContextValue {
 
   /** Same as above for the transactions subkey. */
   exportTransactionsKeyForSync(): Promise<string>;
+
+  /**
+   * Derive the per-app Stealth Sync subkey for the widget.
+   *
+   * Uses HKDF-SHA-256 on the in-memory MEK (salt='', info='or-stealth-v1',
+   * 32 bytes), matching STEALTH_HKDF_INFO in src/stealth/lib/postmessage.ts.
+   * The MEK is a non-extractable HKDF CryptoKey, so the derivation is done
+   * directly via deriveBits without exporting the MEK as raw bytes.
+   *
+   * Returns the base64-encoded 32-byte subkey. Safe to send as
+   * OR_STEALTH_INIT.or_stealth_key_b64 to the /connect/stealth popup.
+   * Throws if the vault is locked.
+   */
+  exportStealthKeyForWidget(): Promise<string>;
 
   /**
    * Generate the user's hybrid KEM + ML-DSA signing keypairs if they
@@ -328,6 +409,12 @@ export function VaultProvider({ children }: VaultProviderProps) {
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [saltB64, setSaltB64] = useState<string | null>(null);
 
+  // Old-MEK subkeys held transiently during the post-recovery re-encryption
+  // window. Populated by recoverWithCode(), zeroed by clearMigrationKeys().
+  // Must be zeroed before the user navigates away from the recovery page.
+  const migrationOldCredsKeyRef = useRef<CryptoKey | null>(null);
+  const migrationOldTxnKeyRef = useRef<CryptoKey | null>(null);
+
   // ------------------------------------------------------------------
   // Setup: first-time vault creation (v2 architecture).
   // MEK is random; password + recovery code each independently wrap it.
@@ -368,7 +455,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
       encMekCiphertext,
       recoveryCiphertext,
       recoveryCode,
-      keyVersion: 2,
+      keyVersion: CURRENT_VAULT_KEY_VERSION,
     };
   }, []);
 
@@ -415,7 +502,23 @@ export function VaultProvider({ children }: VaultProviderProps) {
 
   // ------------------------------------------------------------------
   // Recovery: regain access via the 12-word recovery code.
-  // The vault salt is preserved so all existing HKDF subkeys stay valid.
+  //
+  // TRUE MEK ROTATION: a fresh random MEK is generated. The old MEK is
+  // discarded after stashing old-derived subkeys in migration refs so the
+  // caller (recover.tsx) can re-encrypt all existing ciphertexts before
+  // clearing the old key material via clearMigrationKeys().
+  //
+  // The vault salt is preserved so the user does not need to re-register.
+  // All HKDF subkeys change with the MEK and every ciphertext must be
+  // migrated before clearMigrationKeys() is called.
+  //
+  // "Every ciphertext" includes the two that are NOT data rows and so are easy
+  // to forget: user_vault_meta.kem_secret_wrapped and sig_secret_wrapped. They
+  // are wrapped under derivePqcSecretWrapKey(mek, salt), which is an HKDF
+  // subkey of the MEK like any other. They are not migrated by the caller's
+  // loop because they do not live in connections or encrypted_transactions, so
+  // they are re-wrapped here instead and returned for the caller to persist in
+  // the same update as the MEK wrappers.
   // ------------------------------------------------------------------
   const recoverWithCode = useCallback(
     async ({
@@ -424,39 +527,127 @@ export function VaultProvider({ children }: VaultProviderProps) {
       saltB64: storedSalt,
       verifierCiphertext,
       newPassword,
+      kemSecretWrapped,
+      sigSecretWrapped,
     }: {
       recoveryCode: string;
       recoveryCiphertext: string;
       saltB64: string;
       verifierCiphertext: string;
       newPassword: string;
+      kemSecretWrapped: string | null;
+      sigSecretWrapped: string | null;
     }): Promise<RecoveryResult> => {
-      // 1. Unwrap MEK with recovery code , throws if code is wrong.
+      // 1. Unwrap OLD MEK with recovery code: proves the caller holds the code.
       const recoveryKek = await deriveRecoveryKek(recoveryCode);
-      const mekRaw = await unwrapMekBytes(recoveryCiphertext, recoveryKek);
-      const mek = await importMekAsHkdf(mekRaw);
+      const oldMekRaw = await unwrapMekBytes(recoveryCiphertext, recoveryKek);
+      const oldMek = await importMekAsHkdf(oldMekRaw);
 
-      // 2. Verify MEK matches the stored verifier (guards against swapped ciphertexts).
-      const verifierKey = await deriveVerifierKey(mek, storedSalt);
-      const ok = await verifyVaultPassword(verifierKey, verifierCiphertext);
+      // 2. Verify OLD MEK matches the stored verifier (guards against swapped ciphertexts).
+      const oldVerifierKey = await deriveVerifierKey(oldMek, storedSalt);
+      const ok = await verifyVaultPassword(oldVerifierKey, verifierCiphertext);
       if (!ok) throw new Error("Recovery code does not match this vault.");
 
-      // 3. Re-wrap MEK with the new password (same salt , subkeys stay valid).
-      const newKek = await deriveKek(newPassword, storedSalt);
-      const newEncMekCiphertext = await wrapMekBytes(mekRaw, newKek);
+      //    Past this line storedSalt is AUTHENTICATED, not merely to hand. The
+      //    check above derived the verifier subkey from (oldMek, storedSalt) and
+      //    opened the stored verifier ciphertext with it, which a wrong salt
+      //    could not have done. That fact is what step 5 leans on when it lets a
+      //    failed decryption mean a keypair is dead, so it is worth naming here
+      //    rather than leaving it to be re-derived by whoever reads step 5 next.
 
-      // 4. Generate a fresh recovery code (old one is consumed/invalidated).
+      // 3. Stash old subkeys before discarding the old MEK. The caller must
+      //    migrate every ciphertext using these keys and then call clearMigrationKeys().
+      migrationOldCredsKeyRef.current = await deriveCredentialsKey(oldMek, storedSalt);
+      migrationOldTxnKeyRef.current = await deriveTransactionsKey(oldMek, storedSalt);
+
+      // 4. TRUE ROTATION: generate a fresh random MEK.
+      //    Every prior kit (old recovery blob or old password KEK) now wraps
+      //    the old discarded MEK and cannot reach any new-MEK-encrypted data.
+      const newMekRaw = generateMekBytes();
+      const newMek = await importMekAsHkdf(newMekRaw);
+
+      // 5. Carry the PQC secret keys across the rotation.
+      //    These are wrapped under an HKDF subkey of the MEK, exactly like the
+      //    credentials and transactions subkeys, but they are NOT data rows so
+      //    the caller's migration loop never sees them. Left behind they are
+      //    orphaned permanently: the old wrap key is discarded below and
+      //    ensurePqcKeypairs() will not regenerate, because kem_public_key is
+      //    still populated and it short-circuits on that.
+      //
+      //    Done HERE, before the new envelopes are built and long before the
+      //    caller migrates a single row, so a failure at this point costs the
+      //    user nothing: every stored wrapper is still valid and the vault still
+      //    opens. The same failure after the migration loop would leave rows
+      //    under a MEK with no way back.
+      //
+      //    Null is expected, not an error: a vault with no PQC keys yet has
+      //    nothing to carry. Whichever key is carried as null has its PUBLIC key
+      //    cleared by the write, so ensurePqcKeypairs() regenerates a working
+      //    pair on the next unlock instead of short-circuiting forever on a
+      //    public key whose secret is gone.
+      //
+      //    A stored secret that will NOT open is also carried as null rather
+      //    than aborting. Aborting there was permanent, not cautious: the state
+      //    is static, so the same ciphertext and the same discarded MEK fail
+      //    again on every retry, and the recovery code is the user's last way
+      //    in.
+      //
+      //    Only an AES-GCM authentication tag failure counts as "will not
+      //    open". Every other failure throws out of here and aborts the
+      //    recovery, which is why this is awaited plainly and is deliberately
+      //    NOT wrapped in a catch: a transient failure read as a dead key would
+      //    discard a LIVE keypair, which is the destruction this whole path
+      //    exists to prevent.
+      //
+      //    oldMek and the authenticated salt go in alongside the wrap keys, and
+      //    they are not decoration. "Dead" and "wrong key" are the same AES-GCM
+      //    tag failure, so the carry proves the old wrap key really is the key
+      //    (oldMek, storedSalt) derives before it lets a tag failure mean dead.
+      //    Derive that key from any other salt and the carry throws here instead
+      //    of quietly reporting both secrets dead and clearing both public keys.
+      const oldPqcWrapKey = await derivePqcSecretWrapKey(oldMek, storedSalt);
+      const newPqcWrapKey = await derivePqcSecretWrapKey(newMek, storedSalt);
+      const { newKemSecretWrapped, newSigSecretWrapped, pqcKeysReplaced } =
+        await carryPqcSecretsAcrossRotation({
+          oldWrapKey: oldPqcWrapKey,
+          newWrapKey: newPqcWrapKey,
+          oldMek,
+          authenticatedSaltB64: storedSalt,
+          kemSecretWrapped,
+          sigSecretWrapped,
+        });
+
+      // 6. New verifier under the NEW MEK + same salt.
+      //    Caller MUST persist this or unlock() fails on next page load.
+      const newVerifierKey = await deriveVerifierKey(newMek, storedSalt);
+      const newVerifierCiphertext = await createVaultVerifier(newVerifierKey);
+
+      // 7. Wrap new MEK under the new password (same salt, new KEK).
+      const newKek = await deriveKek(newPassword, storedSalt);
+      const newEncMekCiphertext = await wrapMekBytes(newMekRaw, newKek);
+
+      // 8. Fresh recovery code wrapping the NEW MEK.
+      //    The old recovery code is now useless: it decrypts to the old MEK
+      //    which does not match any ciphertext in the database after migration.
       const newRecoveryCode = generateRecoveryCode();
       const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
-      const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
+      const newRecoveryCiphertext = await wrapMekBytes(newMekRaw, newRecoveryKek);
 
-      // 5. Load MEK into memory , vault is now unlocked.
-      mekRef.current = mek;
+      // 9. Load NEW MEK. Vault is now unlocked with the rotated key.
+      mekRef.current = newMek;
       saltRef.current = storedSalt;
       setSaltB64(storedSalt);
       setIsUnlocked(true);
 
-      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext };
+      return {
+        newEncMekCiphertext,
+        newRecoveryCode,
+        newRecoveryCiphertext,
+        newVerifierCiphertext,
+        newKemSecretWrapped,
+        newSigSecretWrapped,
+        pqcKeysReplaced,
+      };
     },
     [],
   );
@@ -513,6 +704,61 @@ export function VaultProvider({ children }: VaultProviderProps) {
     },
     [],
   );
+
+  // ------------------------------------------------------------------
+  // Migration helpers: re-encrypt ciphertexts after MEK rotation.
+  //
+  // These are only valid in the window between recoverWithCode() returning
+  // and clearMigrationKeys() being called. The caller (recover.tsx) must:
+  //   1. Migrate every ciphertext owned by this user.
+  //   2. Persist all migrated ciphertexts to the database.
+  //   3. Persist the rotated vault meta and PROVE that write landed.
+  //   4. Call clearMigrationKeys() to zero the old key material.
+  // If any step fails, clearMigrationKeys() must NOT be called: after a
+  // partial migration these stashed subkeys are the only thing that can still
+  // read data left under the old MEK in this session.
+  //
+  // Keeping them does NOT make the migration retryable. recoverWithCode()
+  // mints a fresh random MEK on every call and nothing records which rows
+  // already moved, so a second attempt derives its old-key material from the
+  // old MEK again and cannot read the rows the first attempt already rewrote.
+  // A safe retry needs a resumable or per-row-keyed rotation, which is not
+  // implemented.
+  // ------------------------------------------------------------------
+  const migrateCredentialsCiphertext = useCallback(
+    async (oldCiphertext: string): Promise<string> => {
+      const oldKey = migrationOldCredsKeyRef.current;
+      if (!oldKey || !mekRef.current || !saltRef.current) {
+        throw new Error(
+          "No migration keys available. Call recoverWithCode() before migrating ciphertexts.",
+        );
+      }
+      const newCredsKey = await deriveCredentialsKey(mekRef.current, saltRef.current);
+      const plaintext = await decryptString(oldCiphertext, oldKey);
+      return encryptString(plaintext, newCredsKey);
+    },
+    [saltB64],
+  );
+
+  const migrateTransactionCiphertext = useCallback(
+    async (oldCiphertext: string): Promise<string> => {
+      const oldKey = migrationOldTxnKeyRef.current;
+      if (!oldKey || !mekRef.current || !saltRef.current) {
+        throw new Error(
+          "No migration keys available. Call recoverWithCode() before migrating ciphertexts.",
+        );
+      }
+      const newTxnKey = await deriveTransactionsKey(mekRef.current, saltRef.current);
+      const plaintext = await decryptString(oldCiphertext, oldKey);
+      return encryptString(plaintext, newTxnKey);
+    },
+    [saltB64],
+  );
+
+  const clearMigrationKeys = useCallback(() => {
+    migrationOldCredsKeyRef.current = null;
+    migrationOldTxnKeyRef.current = null;
+  }, []);
 
   // ------------------------------------------------------------------
   // Lock: clear the MEK.
@@ -601,6 +847,25 @@ export function VaultProvider({ children }: VaultProviderProps) {
     return arrayBufferToBase64(raw);
   }, [saltB64]);
 
+  const exportStealthKeyForWidget = useCallback(async (): Promise<string> => {
+    const { mek } = requireUnlocked();
+    // mek is a non-extractable HKDF CryptoKey (importMekAsHkdf). Derive the
+    // stealth subkey directly via deriveBits without exporting the MEK.
+    // Wire contract: HKDF-SHA-256, salt='', info='or-stealth-v1', 256 bits.
+    // Matches STEALTH_HKDF_INFO in src/stealth/lib/postmessage.ts.
+    const derived = await crypto.subtle.deriveBits(
+      {
+        name: "HKDF",
+        hash: "SHA-256",
+        salt: new Uint8Array(0),
+        info: new TextEncoder().encode("or-stealth-v1"),
+      },
+      mek,
+      256,
+    );
+    return arrayBufferToBase64(derived);
+  }, []);
+
   const ensurePqcKeypairs = useCallback(
     async (supabase: PqcSupabaseLike, userId: string): Promise<EnsurePqcKeypairsResult> => {
       const { mek, saltB64 } = requireUnlocked();
@@ -621,7 +886,10 @@ export function VaultProvider({ children }: VaultProviderProps) {
       existingKeyId: string | null;
       supabase: GrantSupabaseLike;
     }) => {
-      requireUnlocked(); // gate: vault must be unlocked
+      // The unlocked MEK is what the grant derives its subkeys from. It used
+      // to be discarded here and re-derived from the password downstream,
+      // which produced the wrong key on every vault the current setup creates.
+      const { mek } = requireUnlocked();
       const { targetEmail, supabase, ...rest } = params;
 
       // Resolve email → userId + kemPublicKey via SECURITY DEFINER RPC.
@@ -636,8 +904,43 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const targetUserId = row.user_id;
       const targetKemPubB64 = row.kem_public_key;
 
+      // Fetch the owner's ML-DSA-65 signing secret (wrapped) to sign the grant
+      // binding, plus the three fields the password confirmation needs. Reading
+      // them here keeps app.tsx free of vault-shape handling, and reads what
+      // the row says now rather than what the page loaded earlier.
+      const { data: metaRow } = await (supabase as any)
+        .from("user_vault_meta")
+        .select(
+          "sig_secret_wrapped, vault_verifier_ciphertext, vault_key_version, enc_mek_ciphertext",
+        )
+        .eq("user_id", params.ownerUserId)
+        .single();
+      const meta = metaRow as Record<string, unknown> | null;
+
+      const ownerSigSecretWrapped = meta?.sig_secret_wrapped as string | undefined;
+      if (!ownerSigSecretWrapped) {
+        throw new Error(
+          "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
+        );
+      }
+
+      // No verifier means the password cannot be checked at all. Refuse rather
+      // than grant: a confirmation that is silently skipped is worse than one
+      // that stops and says so.
+      const ownerVerifierCiphertext = meta?.vault_verifier_ciphertext as string | undefined;
+      if (!ownerVerifierCiphertext) {
+        throw new Error(
+          "Your vault details could not be read, so your password cannot be confirmed. Nothing was granted. Reload the page and try again.",
+        );
+      }
+
       return grantCoAdminImpl({
         ...rest,
+        vaultMek: mek,
+        ownerVerifierCiphertext,
+        ownerKeyVersion: (meta?.vault_key_version as number | null) ?? 1,
+        ownerEncMekCiphertext: (meta?.enc_mek_ciphertext as string | null) ?? null,
+        ownerSigSecretWrapped,
         targetUserId,
         targetKemPubB64,
         supabase: supabase as unknown as Parameters<typeof grantCoAdminImpl>[0]["supabase"],
@@ -673,6 +976,9 @@ export function VaultProvider({ children }: VaultProviderProps) {
       ownerWorkspaceKeyId: string;
       wrappedCiphertextB64: string;
       kemSecretWrapped: string;
+      grantSigB64: string | null;
+      ownerSigPubB64: string;
+      granteeUserId: string;
     }): Promise<AdminSubkeys> => {
       const { mek, saltB64: s } = requireUnlocked();
       return loadAdminSubkeysDirect({
@@ -680,6 +986,10 @@ export function VaultProvider({ children }: VaultProviderProps) {
         kemSecretWrapped: params.kemSecretWrapped,
         adminMek: mek,
         adminSaltB64: s,
+        grantSigB64: params.grantSigB64,
+        ownerSigPubB64: params.ownerSigPubB64,
+        granteeUserId: params.granteeUserId,
+        ownerWorkspaceKeyId: params.ownerWorkspaceKeyId,
       });
     },
     [saltB64],
@@ -715,12 +1025,16 @@ export function VaultProvider({ children }: VaultProviderProps) {
     decryptTransaction,
     exportCredentialsKeyForSync,
     exportTransactionsKeyForSync,
+    exportStealthKeyForWidget,
     ensurePqcKeypairs,
     grantCoAdmin,
     revokeCoAdmin,
     loadAdminSubkeys,
     blindIndex,
     changeVaultPassword,
+    migrateCredentialsCiphertext,
+    migrateTransactionCiphertext,
+    clearMigrationKeys,
   };
 
   return <VaultContext.Provider value={value}>{children}</VaultContext.Provider>;

@@ -1,57 +1,98 @@
 /**
- * or-stealth-envelope-update: persist the sync cursor for a stealth
- * connection, without requiring a transaction upload.
+ * or-stealth-envelope-update -- advance the scan-tip cursor for a stealth connection.
  *
- * Naming note: the function name is fixed by consumer-side proxy
- * allow-lists that already include it, which is why it says "envelope"
- * while the envelope itself is only ever replaced in
- * or-stealth-connection-create.
+ * Master plan: STEALTH-SYNC-MASTER-PLAN.md section 4.6.
  *
- * Why this exists: the widget's sync starts from
- * max(birthday_height, last_block_scanned + 1). Until now the cursor
- * only advanced inside or-stealth-transactions-store, which consumer
- * apps that set skip_transaction_upload never call (and which nobody
- * calls on a sync that found zero new transactions). Result: those
- * syncs rescanned the whole birthday-to-tip window every time. The
- * widget now posts the cursor here at the end of every successful
- * sync, whether or not transactions were uploaded.
+ * Called by the widget in step 4 of the sync flow (sync.tsx lines 286-337),
+ * after or-stealth-transactions-store has stored any new sealed transactions.
+ * That function advances last_block_scanned only to the max block_height of
+ * rows it actually committed, so a sync that found zero matching transactions
+ * would never move the window forward. This one advances the cursor to the
+ * height the caller reports having scanned, which is why the widget calls it on
+ * every sync and not only on syncs that stored something.
+ *
+ * WHAT THE REPORTED HEIGHT MEANS, and where that is decided. Not here: the
+ * contract for this column is defined once, in ../_shared/scan-cursor.ts, and
+ * both endpoints that write it import from there. In short, last_block_scanned
+ * is the last height the CALLER SCANNED CONTIGUOUSLY. It is not a chain tip.
+ * Until OR-T1914 this header called it exactly that, while the sibling endpoint
+ * capped the same column at the contiguous height, so one column carried two
+ * opposite contracts and the weaker one won.
  *
  * POST body:
- *   connection_id:      string (uuid, required)
- *   app_user_id:        string (required)
- *   app_slug:           string (optional, defense-in-depth filter)
- *   last_block_scanned: number (required, non-negative integer)
- *
- * Rules:
- *   - The cursor only moves FORWARD here. A value at or below the stored
- *     cursor is acknowledged but not written (idempotent, and a stale or
- *     buggy client cannot rewind another tab's progress). Cursor RESETS
- *     (for a changed wallet birthday or an explicit full rescan) happen in
- *     or-stealth-connection-create when the envelope is replaced, not here.
+ *   connection_id:            string (uuid)
+ *   app_user_id:              string
+ *   last_block_scanned:       number (non-negative integer, the last height
+ *                             scanned CONTIGUOUSLY, not a chain tip)
+ *   from_height:              number, optional (see below)
+ *   contiguous_block_scanned: number, optional. For a caller that distinguishes
+ *                             its scan tip from the point it actually read to:
+ *                             the cursor is then capped at the lower of the two.
+ *                             A caller whose last_block_scanned is already the
+ *                             contiguous height gains nothing by repeating it.
+ *                             The value is a ceiling only, so it can hold the
+ *                             cursor back and can never push it forward.
  *
  * Response:
- *   { connection_id, last_block_scanned, updated }
+ *   { connection_id, last_block_scanned }
+ *   last_block_scanned reflects the stored cursor after the call. It may be
+ *   higher than the supplied value when a concurrent call already advanced it,
+ *   and lower when the contiguity ceiling applied.
+ *   The forward-only guarantee is enforced atomically by the UPDATE itself
+ *   (conditional WHERE on the row, not application-level read-then-compare).
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { authenticateRequest, isAuthError, getCallerPlatformId } from '../_shared/platform-auth.ts';
+import {
+  authenticateRequestOrWidgetToken,
+  enforceWidgetAppUser,
+  isAuthError,
+  getCallerPlatformId,
+} from '../_shared/platform-auth.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { advanceCursor, isAdvanceCursorError } from './cursor.ts';
+import { recordScanRange } from './scan_range.ts';
 
 interface EnvelopeUpdateRequestBody {
   connection_id?: string;
   app_user_id?: string;
-  app_slug?: string;
   last_block_scanned?: number;
+  /**
+   * Optional contiguity ceiling (OR-T1914). The last height the caller read
+   * WITHOUT a gap. When present, the cursor advances to at most
+   * min(last_block_scanned, contiguous_block_scanned).
+   *
+   * It exists because a rolling-window extension pass can match a transaction
+   * above the height where a filter fetch aborted, so a caller can legitimately
+   * hold two different numbers. Sending the higher one as the cursor makes the
+   * next sync resume above a range nobody read, and a payment inside that range
+   * is then lost silently. A caller that holds only one number sends only
+   * last_block_scanned, which the contract already requires to be the
+   * contiguous height.
+   */
+  contiguous_block_scanned?: number;
+  /**
+   * Inclusive start of the block range just scanned. When present alongside
+   * last_block_scanned (the to_height), the handler calls
+   * record_stealth_scan_range() to persist the interval. Optional: callers
+   * that omit it skip range recording and fall back to the cursor only.
+   * DL-1478.
+   */
+  from_height?: number;
+  /**
+   * Widget-mode credential. Present when the caller is browser code inside a
+   * host app's connect session and holds neither a platform API key nor an
+   * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
+   */
+  widget_token?: string;
+}
+
+interface EnvelopeUpdateResponseBody {
+  connection_id: string;
+  last_block_scanned: number;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Plausibility ceiling for a block height. Bitcoin adds ~52,600 blocks a
-// year, so real heights stay far below this for well over a century. A
-// cursor poisoned with an absurdly high value would make every future
-// sync silently skip real blocks, and the forward-only rule would make
-// that sticky, so nonsense is rejected outright.
-const MAX_PLAUSIBLE_HEIGHT = 10_000_000;
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -59,12 +100,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
 
   try {
-    const ctx = await authenticateRequest(req);
-    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
-
+    // The body is read BEFORE auth because a widget-mode caller presents its
+    // credential in the body rather than in a header. Header-based callers are
+    // resolved exactly as before; see authenticateRequestOrWidgetToken.
     const raw = await readBoundedText(req);
     if (raw === null) return jsonResponse({ error: 'Request body too large' }, 413, cors);
-    const body = JSON.parse(raw || '{}') as EnvelopeUpdateRequestBody;
+
+    // Parsing now happens before authentication, so malformed JSON from an
+    // unauthenticated caller must answer 400 rather than fall through to the
+    // catch below and answer 500.
+    let body: EnvelopeUpdateRequestBody;
+    try {
+      body = JSON.parse(raw || '{}') as EnvelopeUpdateRequestBody;
+    } catch {
+      return jsonResponse({ error: 'Request body is not valid JSON' }, 400, cors);
+    }
+
+    const ctx = await authenticateRequestOrWidgetToken(req, body.widget_token);
+    if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
     if (!body.connection_id || !UUID_RE.test(body.connection_id)) {
       return jsonResponse({ error: 'connection_id (uuid) required' }, 400, cors);
@@ -73,14 +126,30 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'app_user_id required' }, 400, cors);
     }
     if (
+      body.last_block_scanned === undefined ||
       typeof body.last_block_scanned !== 'number' ||
       !Number.isInteger(body.last_block_scanned) ||
-      body.last_block_scanned < 0 ||
-      body.last_block_scanned > MAX_PLAUSIBLE_HEIGHT
+      body.last_block_scanned < 0
     ) {
       return jsonResponse(
-        { error: `last_block_scanned must be an integer between 0 and ${MAX_PLAUSIBLE_HEIGHT}` },
-        400, cors,
+        { error: 'last_block_scanned must be a non-negative integer' },
+        400,
+        cors,
+      );
+    }
+    // A malformed ceiling is rejected rather than ignored. Falling through would
+    // treat "I sent a ceiling and got it wrong" as "I sent no ceiling", which is
+    // the unbounded path, and the caller would never learn its guard was dropped.
+    if (
+      body.contiguous_block_scanned !== undefined &&
+      (typeof body.contiguous_block_scanned !== 'number' ||
+        !Number.isInteger(body.contiguous_block_scanned) ||
+        body.contiguous_block_scanned < 0)
+    ) {
+      return jsonResponse(
+        { error: 'contiguous_block_scanned must be a non-negative integer when present' },
+        400,
+        cors,
       );
     }
 
@@ -90,29 +159,34 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (ctx.mode === 'direct' && body.app_user_id !== ctx.userId) {
       return jsonResponse(
         { error: 'app_user_id must match the authenticated user' },
-        403, cors,
+        403,
+        cors,
       );
     }
 
-    // Every stealth_connections read/write must be scoped to the calling
-    // platform, derived server-side from the API key. Resolve once here.
+    // Widget mode gets the same lock for the same reason: the token pins one
+    // app_user_id, so a body naming a different one is an attempt to reach
+    // into another user's records.
+    const widgetUserErr = enforceWidgetAppUser(ctx, body.app_user_id);
+    if (widgetUserErr) {
+      return jsonResponse({ error: widgetUserErr.message }, widgetUserErr.status, cors);
+    }
+
+    // Audit 2026-05-16 High #2: every stealth_connections read/write must be
+    // bound to the calling platform. Resolve once here.
     const platformIdOrErr = await getCallerPlatformId(ctx);
     if (isAuthError(platformIdOrErr)) {
       return jsonResponse({ error: platformIdOrErr.message }, platformIdOrErr.status, cors);
     }
     const callerPlatformId = platformIdOrErr;
 
-    let query = ctx.serviceClient
+    // Read the row to verify ownership (app_user_id must match the connection owner).
+    const { data: row, error: selErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .select('id, last_block_scanned')
+      .select('id, app_user_id, last_block_scanned')
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
-      .eq('app_user_id', body.app_user_id);
-    if (body.app_slug) {
-      query = query.eq('app_slug', body.app_slug);
-    }
-    const { data: row, error: selErr } = await query.maybeSingle();
-
+      .maybeSingle();
     if (selErr) {
       console.error('[or-stealth-envelope-update] select failed:', selErr);
       return jsonResponse({ error: 'Failed to load stealth connection' }, 500, cors);
@@ -120,54 +194,57 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (!row) {
       return jsonResponse({ error: 'Connection not found' }, 404, cors);
     }
-
-    const stored = (row.last_block_scanned as number | null) ?? -1;
-    if (body.last_block_scanned <= stored) {
-      // Forward-only: acknowledge without writing.
-      return jsonResponse(
-        {
-          connection_id: row.id as string,
-          last_block_scanned: stored,
-          updated: false,
-        },
-        200, cors,
-      );
+    if ((row.app_user_id as string) !== body.app_user_id) {
+      return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
-    // Same pins as the select (platform, id, app_user_id), plus an
-    // atomic forward-only guard: without the .or filter, two interleaved
-    // requests could land a lower cursor after a higher one.
-    let update = ctx.serviceClient
-      .from('stealth_connections')
-      .update({
-        last_block_scanned: body.last_block_scanned,
-        last_sync_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('platform_id', callerPlatformId)
-      .eq('id', row.id as string)
-      .eq('app_user_id', body.app_user_id)
-      .or(`last_block_scanned.is.null,last_block_scanned.lt.${body.last_block_scanned}`);
-    if (body.app_slug) {
-      update = update.eq('app_slug', body.app_slug);
-    }
-    const { error: updErr } = await update;
-
-    if (updErr) {
-      console.error('[or-stealth-envelope-update] update failed:', updErr);
-      return jsonResponse({ error: 'Failed to update sync cursor' }, 500, cors);
-    }
-
-    return jsonResponse(
-      {
-        connection_id: row.id as string,
-        last_block_scanned: body.last_block_scanned,
-        updated: true,
-      },
-      200, cors,
+    const cursorResult = await advanceCursor(
+      ctx.serviceClient,
+      callerPlatformId,
+      body.connection_id,
+      body.last_block_scanned,
+      body.contiguous_block_scanned,
     );
+    if (isAdvanceCursorError(cursorResult)) {
+      return jsonResponse({ error: cursorResult.error }, cursorResult.status, cors);
+    }
+    const effectiveCursor = cursorResult.effectiveCursor;
+    // The height this call was allowed to claim, after the contiguity ceiling
+    // (OR-T1914). Equal to body.last_block_scanned whenever no ceiling was sent
+    // or the ceiling was not lower.
+    const boundedHeight = cursorResult.boundedHeight;
+
+    // Record the scan range when the caller supplies from_height (DL-1478).
+    //
+    // The row read above is deliberately NOT passed here. record_stealth_scan_range
+    // resolves the owner from stealth_connections itself and rejects unless the
+    // id it is given matches: hand it the value we just read from that same row
+    // and it compares the owner against itself, so the check can never fail.
+    // recordScanRange only ever sees the request body, which carries the caller
+    // identity, token-pinned above (direct: equals ctx.userId, widget:
+    // enforceWidgetAppUser, platform: scoped by platform_id on the row read).
+    // DL-1597.
+    await recordScanRange(ctx.serviceClient, {
+      connection_id:      body.connection_id,
+      app_user_id:        body.app_user_id,
+      // The BOUNDED height, not the posted one. A range recorded as
+      // [from_height, posted] while the cursor was only allowed to reach the
+      // lower bounded height would be read back by the resume path as coverage
+      // for blocks nobody scanned, which is the same silent loss the ceiling
+      // exists to prevent, written into a different table.
+      last_block_scanned: boundedHeight,
+      from_height:        body.from_height,
+    });
+
+    const resp: EnvelopeUpdateResponseBody = {
+      connection_id: body.connection_id,
+      last_block_scanned: effectiveCursor,
+    };
+    return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-envelope-update] fatal:', err);
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
-}));
+}, 'or-stealth-envelope-update'));
+
+export type { EnvelopeUpdateRequestBody, EnvelopeUpdateResponseBody };

@@ -11,16 +11,20 @@
  * msg 916, Auditor msg 920).
  */
 
-// VERBATIM persistence spec (Developer msg 921 / DESIGN.md §3).
+// VERBATIM persistence spec (DESIGN.md §3.2), corrected against the live
+// dev schema for OR-T1721: composite ON CONFLICT target, the three split
+// envelope columns the table actually has, and :user_id bound from the
+// verified JWT (DESIGN.md §4), never from the request body.
 // The `WHERE ... < EXCLUDED.update_id` lives INSIDE the ON CONFLICT, so the
 // compare-and-set is one atomic op with the row lock held for the whole upsert.
 export const UPSERT_CHANNEL_STATE_SQL = `
-INSERT INTO channel_state (outpoint_bidx, update_id, sealed_blob)
-VALUES (:bidx, :new_id, :blob)
-ON CONFLICT (outpoint_bidx) DO UPDATE
-  SET update_id = EXCLUDED.update_id,
-      sealed_blob = EXCLUDED.sealed_blob,
-      updated_at  = now()
+INSERT INTO channel_state (user_id, outpoint_bidx, update_id, seal_version, sealed_iv, sealed_ct)
+VALUES (:user_id, :bidx, :new_id, :seal_version, :sealed_iv, :sealed_ct)
+ON CONFLICT (user_id, outpoint_bidx) DO UPDATE
+  SET update_id    = EXCLUDED.update_id,
+      seal_version = EXCLUDED.seal_version,
+      sealed_iv    = EXCLUDED.sealed_iv,
+      sealed_ct    = EXCLUDED.sealed_ct
   WHERE channel_state.update_id < EXCLUDED.update_id
 RETURNING update_id;
 `;
@@ -36,10 +40,12 @@ RETURNING update_id;
  * classification only — the write outcome is already decided — NOT a second
  * write gate (Auditor msg 924).
  *
- * TODO(impl): bind the request (bidx, new_id, sealed_blob) and run
- * UPSERT_CHANNEL_STATE_SQL inside a single statement, then map per above.
- * Persist-before-ack is enforced client-side: the client acks to LDK only
- * after this endpoint confirms durability.
+ * TODO(impl): verify the JWT, extract user_id (DESIGN.md §4), bind the
+ * request (user_id, bidx, new_id, seal_version, sealed_iv, sealed_ct) through
+ * a request-scoped client bound to the caller's JWT (never service_role,
+ * DESIGN.md §4.1), run UPSERT_CHANNEL_STATE_SQL inside a single statement,
+ * then map per above. Persist-before-ack is enforced client-side: the client
+ * acks to LDK only after this endpoint confirms durability.
  */
 export function handler(_req: Request): Response {
   return new Response(

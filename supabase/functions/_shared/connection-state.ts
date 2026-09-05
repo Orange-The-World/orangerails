@@ -7,16 +7,19 @@
  *   - calls or-connection-confirm   → pending becomes active
  *   - calls or-connection-cancel    → pending row is deleted
  *
- * If the consumer crashes, a janitor (see migration
- * 20260523000000_atomic_connect_flow.sql) deletes pending rows older
- * than 10 minutes.
+ * If the consumer crashes, the pending row is left behind. A janitor
+ * function that removes pending rows older than 10 minutes exists (see
+ * migration 20260523000000_atomic_connect_flow.sql), but it is NOT
+ * scheduled today: the migration only registers a pg_cron job when
+ * pg_cron is enabled, and no such job is currently active. Do not rely
+ * on an automatic sweep here until that schedule is added.
  *
  * These helpers are intentionally thin and pure-ish (they take the
  * service client as a parameter) so the edge function handlers stay
  * small and the test files can stub the client.
  */
 
-import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 
 export interface ConnectionRow {
   id: string;

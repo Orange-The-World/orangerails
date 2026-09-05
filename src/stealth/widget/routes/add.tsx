@@ -44,6 +44,7 @@ import {
   type ScriptType,
 } from "@/stealth/lib/derive";
 import { sealEnvelope, computeConnectionBlindIndex } from "@/stealth/lib/seal";
+import { DEFAULT_GAP_LIMIT } from "@/stealth/lib/postmessage";
 import type {
   StealthAddCompleteMessage,
   StealthErrorCode,
@@ -53,6 +54,7 @@ import type {
 } from "@/stealth/lib/postmessage";
 import { useStealthInit } from "../StealthInitContext";
 import { proxyFetch } from "../lib/proxyFetch";
+import { resolveFunctionUrl } from "../lib/resolveFunctionUrl";
 
 // Default wallet-birthday: today minus one year. Master plan §14: most
 // active wallets are well under a year old. Older wallets get nudged to
@@ -91,28 +93,6 @@ function shapeForCompletion(parsed: ParsedDescriptor): {
   }
   const t: ScriptType = parsed.keys[0].scriptType;
   return { kind: "xpub_stealth", scriptType: t };
-}
-
-/** Get the URL endpoint for the stealth functions. Order of preference:
- *    1. proxy_base_url from INIT , when the consuming app provides a
- *       server-side proxy (V2 pattern). The proxy attaches the platform
- *       API key, keeping that secret off the browser.
- *    2. VITE_OR_FUNCTIONS_BASE_URL build-time env , direct Supabase
- *       functions host (typically requires the consumer to also pass
- *       access_token in INIT for Bearer auth).
- *    3. Same-origin /functions/v1/* , relies on a reverse proxy at the
- *       widget host.
- */
-function resolveFunctionUrl(name: string, proxyBaseUrl: string | undefined): string {
-  if (proxyBaseUrl) {
-    return `${proxyBaseUrl.replace(/\/$/, "")}/${name}`;
-  }
-  const base = ((import.meta.env.VITE_OR_FUNCTIONS_BASE_URL as string | undefined) ?? "").replace(
-    /\/$/,
-    "",
-  );
-  if (base) return `${base}/${name}`;
-  return `/functions/v1/${name}`;
 }
 
 interface AccessTokenInit extends StealthInitWidgetMessage {
@@ -159,7 +139,7 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   // (waste sync time or miss transactions), never expose the xpub,
   // descriptor, or stealth key, none of which this code path touches.
   const birthdayInputRef = useRef<HTMLInputElement>(null);
-  const [gapLimit, setGapLimit] = useState<number>(20);
+  const [gapLimit, setGapLimit] = useState<number>(() => init.gap_limit ?? DEFAULT_GAP_LIMIT);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<{ alreadyExisted: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -353,6 +333,11 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
       const requestBody = {
         app_user_id: init.app_user_id,
         app_slug: init.app_slug,
+        // Widget-token auth: carried in the body so a host app whose users
+        // have no OrangeRails account can still authenticate. Harmless on the
+        // proxy path, where the platform key attached server-side outranks
+        // it, and absent for every caller that does not send one.
+        widget_token: initWithToken.widget_token,
         connection_kind: shape.kind,
         sealed_envelope: sealed,
         blind_index: blind,
@@ -578,9 +563,9 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
               className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
             />
             <p className="mt-1 text-[10px] text-muted-foreground">
-              How many empty addresses we scan before stopping. Default 20 works for almost every
-              wallet (Sparrow, BlueWallet, Ledger, Trezor). Only change this if your wallet
-              generates addresses with unusually large gaps.
+              How many empty addresses we scan before stopping. A higher limit finds more of your
+              history but makes each sync slower. If some transactions are missing after a sync,
+              raise this and sync again.
             </p>
           </div>
         </details>
@@ -607,9 +592,17 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
                 Rely on the address preview to confirm.
               </p>
             )}
+            {/*
+              break-all is load-bearing, not styling. A bech32 address is a
+              single unbroken token, so without it the address runs past the
+              container and is clipped at the right edge. This block asks the
+              user to compare these against their wallet's "Receive" tab, so a
+              clipped address makes the check it demands impossible to perform.
+              Observed on dev 2026-08-14.
+            */}
             <ol className="mt-2 space-y-1 font-mono text-[11px] text-foreground">
               {previewAddresses.map((addr, i) => (
-                <li key={addr}>
+                <li key={addr} className="break-all">
                   {i + 1}. {addr}
                 </li>
               ))}

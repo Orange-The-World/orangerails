@@ -4,11 +4,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useVault } from "@/context/VaultContext";
 import type { GrantSupabaseLike } from "@/context/VaultContext";
+import {
+  clearCoAdminListEntry,
+  CoAdminRevocationIncompleteError,
+  type CoAdminSupabaseLike,
+} from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
+import { classifyRead } from "@/lib/read-outcome";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
+import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
+import {
+  readWrappedDataKey,
+  DUPLICATE_WRAPPED_KEY_MESSAGE,
+  type WrappedKeyClient,
+} from "@/lib/co-admin-workspace-read";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
+import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
 import { ApiTokensSection } from "@/components/app/ApiTokensSection";
 import { ConfirmDialog } from "@/components/app/ConfirmDialog";
 import { SourceWalletBadges } from "@/components/app/SourceWalletBadges";
@@ -47,15 +60,26 @@ interface DecryptedSourceWallet {
   label?: string | null;
 }
 
+/**
+ * The columns of public.connections this client is allowed to read.
+ *
+ * authenticated holds a COLUMN level SELECT grant on this table, not a table
+ * level one, so that a signed in user cannot read their own connection's
+ * strike_webhook_secret. See the migration
+ * 20260902040000_connections_column_level_select.sql for the full column set
+ * and the reasoning. Adding a field here means adding it to that grant too,
+ * or the list query starts failing with a permission error.
+ *
+ * subaccount_id is deliberately absent: it is in the SELECT list of the query
+ * below only because Postgres requires SELECT privilege on a column used in a
+ * WHERE clause, and nothing in this client reads its value.
+ */
 interface Connection {
   id: string;
   provider_type: string;
   encrypted_label: string | null;
-  encrypted_credentials: string;
-  credentials_key_version: number;
-  status: "active" | "error" | "disconnected";
+  status: "pending" | "active" | "error" | "disconnected" | "partial";
   last_sync_at: string | null;
-  last_sync_cursor: string | null;
   encrypted_last_error: string | null;
   created_at: string;
   // Derived client-side after decryption. Never stored in the DB row.
@@ -98,6 +122,12 @@ interface WorkspaceOption {
   ownerEmail: string;
   workspaceKeyId: string;
   wrappedCiphertextB64: string;
+  // Grant-signature binding fields (DL-0619). loadAdminSubkeys verifies the
+  // owner's ML-DSA-65 signature over (granteeUserId, workspaceKeyId, wrapped
+  // ciphertext) before any decryption, so all three must travel with the row.
+  grantSigB64: string | null;
+  ownerSigPubB64: string;
+  granteeUserId: string;
   // No kemSecretWrapped here , the admin's own kem_secret_wrapped is used
   // for all workspace unwraps, stored separately in myKemSecretWrapped state.
 }
@@ -186,6 +216,12 @@ function AppHome() {
   // so the dialog renders branded instead of "orangerails.com says…".
   const [pendingDeleteConn, setPendingDeleteConn] = useState<Connection | null>(null);
   const [pendingRevokeAdmin, setPendingRevokeAdmin] = useState<CoAdminRow | null>(null);
+  // Set when a revocation stopped part way and left the list entry behind.
+  // keyRemoved says which half landed, which changes what the owner is told.
+  const [pendingListOnlyRemoval, setPendingListOnlyRemoval] = useState<{
+    row: CoAdminRow;
+    keyRemoved: boolean;
+  } | null>(null);
 
   // Security (change vault password) state
   const [securityOpen, setSecurityOpen] = useState(false);
@@ -225,11 +261,14 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
-      const { data: meta } = await (supabase as any)
+      const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
         .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
+      if (classifyRead(meta, metaErr) === "error") {
+        console.warn(`Failed to load vault meta: ${formatError(metaErr)}`);
+      }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
@@ -268,41 +307,87 @@ function AppHome() {
       }
 
       // Load list of users this person has granted co-admin to.
-      const { data: admins } = await supabase
+      const { data: admins, error: adminsErr } = await supabase
         .from("workspace_admins")
         .select("id, admin_user_id, added_at")
         .eq("owner_user_id", session.user.id);
+      if (classifyRead(admins, adminsErr) === "error") {
+        console.warn(`Failed to load co-admin list: ${formatError(adminsErr)}`);
+      }
       const adminRows = (admins ?? []) as CoAdminRow[];
 
       // Load workspaces where this user is a co-admin.
-      const { data: myAdminOf } = await supabase
-        .from("workspace_admins")
-        .select("owner_user_id")
-        .eq("admin_user_id", session.user.id);
+      //
+      // ONE RPC, deliberately, instead of selecting from workspace_admins and
+      // then reading the owner's user_vault_meta row once per owner. A policy
+      // grants a ROW, never a column, so that shape handed this co-admin every
+      // column of the owner's row, including sig_secret_wrapped: the owner's
+      // ML-DSA signing secret. Sealed under the owner's master key, so not
+      // readable, and nothing was broken by it. It goes anyway, because the
+      // whole point of the projection is that an admin never holds that
+      // material in any form.
+      //
+      // list_coadmin_workspaces returns the same three values the loop built,
+      // and it excludes an owner with no workspace_key_id and an owner with no
+      // sig_public_key, which are the two cases the loop skipped with continue.
+      // Fail closed is preserved by the function, not dropped here.
+      const { data: myAdminOf, error: myAdminOfErr } = await supabase.rpc(
+        "list_coadmin_workspaces",
+      );
+      // classifyRead separates the three outcomes this call really has, which
+      // is what dev now does for every read on this page (OR-T1768). "empty"
+      // is the ordinary case of administering nothing and stays silent; only
+      // "error" is surfaced. A failed call must never look like "you are a
+      // co-admin of nothing", so unlike the other reads on this page it is
+      // loud: setErr as well as the log, because an empty list here is
+      // indistinguishable to the user from a real answer.
+      if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
+        console.error("Failed to load co-admin workspaces:", myAdminOfErr);
+        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
+      }
 
       const workspaces: WorkspaceOption[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
-        const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
-        for (const ownerId of ownerIds) {
-          const { data: ownerMeta } = await supabase
-            .from("user_vault_meta")
-            .select("workspace_key_id")
-            .eq("user_id", ownerId)
-            .single();
-          if (!ownerMeta) continue;
-          const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
-          if (!ownerKeyId) continue;
-          const { data: wdk } = await supabase
-            .from("wrapped_data_keys")
-            .select("wrapped_ciphertext")
-            .eq("data_key_id", ownerKeyId)
-            .maybeSingle();
-          if (!wdk) continue;
+        for (const ownerRow of myAdminOf) {
+          const ownerId = ownerRow.owner_user_id;
+          const ownerKeyId = ownerRow.workspace_key_id;
+          // Owner's ML-DSA-65 public signing key, needed to verify the grant
+          // signature before decrypting. Fail closed: a workspace we cannot
+          // verify is never surfaced to the co-admin. The function already
+          // excludes an owner missing either value, so there is nothing left to
+          // skip at this point.
+          const ownerSigPubB64 = ownerRow.sig_public_key;
+          // This used to be a maybeSingle() whose error was discarded, which
+          // meant TWO wrapped key rows arrived here as NO row: the workspace
+          // vanished from this co-admin's list with nothing shown to anybody,
+          // while the owner's list still showed the grant. Nothing enforces one
+          // row per recipient per workspace key, so that state is reachable.
+          // The three cases are now separate and only the genuinely absent one
+          // is silent.
+          const wdkRead = await readWrappedDataKey(
+            supabase as unknown as WrappedKeyClient,
+            ownerKeyId,
+          );
+          if (wdkRead.status === "ambiguous") {
+            setErr(DUPLICATE_WRAPPED_KEY_MESSAGE);
+            continue;
+          }
+          if (wdkRead.status === "error") {
+            setErr(formatError(wdkRead.error));
+            continue;
+          }
+          // No grant at all is ordinary: this user is in the owner's list but
+          // has not been given a key. Skipping it quietly is correct.
+          if (wdkRead.status === "none") continue;
+          const wdk = wdkRead.row;
           workspaces.push({
             ownerUserId: ownerId,
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: (wdk as Record<string, unknown>).wrapped_ciphertext as string,
+            wrappedCiphertextB64: wdk.wrapped_ciphertext,
+            grantSigB64: wdk.grant_sig ?? null,
+            ownerSigPubB64,
+            granteeUserId: session.user.id,
           });
         }
       }
@@ -343,6 +428,9 @@ function AppHome() {
       ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
       wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
       kemSecretWrapped: myKemSecretWrapped,
+      grantSigB64: activeWorkspace.grantSigB64,
+      ownerSigPubB64: activeWorkspace.ownerSigPubB64,
+      granteeUserId: activeWorkspace.granteeUserId,
     });
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.credentialsKey;
@@ -356,6 +444,9 @@ function AppHome() {
       ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
       wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
       kemSecretWrapped: myKemSecretWrapped,
+      grantSigB64: activeWorkspace.grantSigB64,
+      ownerSigPubB64: activeWorkspace.ownerSigPubB64,
+      granteeUserId: activeWorkspace.granteeUserId,
     });
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.transactionsKey;
@@ -403,7 +494,14 @@ function AppHome() {
 
       const { data: conns, error: connErr } = await supabase
         .from("connections")
-        .select("*")
+        // Named columns, not "*". authenticated holds a column level SELECT
+        // grant on this table so that strike_webhook_secret stays
+        // server side, and PostgREST expands "*" into a whole row read that
+        // the grant refuses. subaccount_id is here for the .eq below:
+        // Postgres needs SELECT on a column used in a WHERE clause.
+        .select(
+          "id, subaccount_id, provider_type, status, encrypted_label, encrypted_last_error, last_sync_at, created_at",
+        )
         .eq("subaccount_id", targetSubaccountId)
         .order("created_at", { ascending: false });
       if (connErr) throw connErr;
@@ -607,11 +705,17 @@ function AppHome() {
       );
 
       if (!discRes.ok) {
-        const detail = await discRes.text().catch(() => "");
-        console.warn("[OrangeRails] Wallet discovery failed:", discRes.status, detail);
-        setNotice(
-          "Connection added. Wallet discovery failed , sync will pull all account transactions until you re-run discovery.",
-        );
+        const rawText = await discRes.text().catch(() => "");
+        console.warn("[OrangeRails] Wallet discovery failed:", discRes.status, rawText);
+        if (isDiscoveryAuthFailure(rawText)) {
+          // Credentials are confirmed invalid: remove the row so the user
+          // is not left with a broken active connection. All other failure
+          // modes (rate limiting, outage, unknown) leave the row and let
+          // the user retry without re-entering credentials.
+          await supabase.from("connections").delete().eq("id", newConnectionId);
+          await refresh();
+        }
+        setNotice(extractDiscoveryErrorMessage(discRes.status, rawText));
         return;
       }
 
@@ -628,8 +732,11 @@ function AppHome() {
       });
     } catch (e) {
       console.warn("[OrangeRails] Discovery threw:", e);
+      const throwMsg = e instanceof Error ? e.message : undefined;
       setNotice(
-        "Connection added. Couldn't discover wallets right now , sync will pull all account transactions until you retry.",
+        throwMsg
+          ? `Discovery could not complete: ${throwMsg}. Sync will use all-transactions mode until you retry.`
+          : "Discovery could not complete. Check your connection and try again.",
       );
     }
   }
@@ -744,14 +851,16 @@ function AppHome() {
         body: JSON.stringify(body),
       });
 
-      if (!fnRes.ok) {
+      // 422 carries a structured JSON body with per-connection error results; parse it
+      // instead of throwing raw text. Other non-2xx codes (401, 500, etc.) fall back to text.
+      if (!fnRes.ok && fnRes.status !== 422) {
         const detail = await fnRes.text().catch(() => "");
         throw new Error(`Sync failed (HTTP ${fnRes.status}): ${detail || "see console"}`);
       }
 
       const result = (await fnRes.json()) as {
-        synced: number;
-        connections: Array<{ connection_id: string; synced: number; error?: string }>;
+        synced?: number;
+        connections: Array<{ connection_id: string; synced?: number; error?: string }>;
       };
 
       // Surface any per-connection error from the edge function.
@@ -759,7 +868,7 @@ function AppHome() {
       if (connResult?.error) throw new Error(connResult.error);
 
       setNotice(
-        `Synced ${result.synced} transaction${result.synced === 1 ? "" : "s"} from ${conn.decrypted_label || conn.provider_type}.`,
+        `Synced ${result.synced ?? 0} transaction${(result.synced ?? 0) === 1 ? "" : "s"} from ${conn.decrypted_label || conn.provider_type}.`,
       );
       await refresh();
     } catch (e) {
@@ -801,6 +910,53 @@ function AppHome() {
       void logSecurityEvent(supabase, userId, "coadmin_revoked", { admin_user_id: a.admin_user_id });
       setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
       setNotice("Co-admin revoked.");
+    } catch (e) {
+      setErr(formatError(e));
+      // A revocation that stopped part way leaves the list entry on purpose,
+      // because it is the only record of who may still hold access. Offer the
+      // one action that can clear it, or the owner is stuck: revoking again
+      // finds no key row and refuses every time.
+      if (e instanceof CoAdminRevocationIncompleteError) {
+        // Close the revoke dialog in the SAME state update that opens the
+        // list-only one. ConfirmDialog closes itself from a .finally that runs
+        // after this function resolves, which is a later React commit, so
+        // leaving the close to that would render one commit with two modal
+        // dialogs mounted at once.
+        setPendingRevokeAdmin(null);
+        setPendingListOnlyRemoval({ row: a, keyRemoved: e.keyRemoved });
+      }
+    }
+  }
+
+  /**
+   * Clears the list entry and nothing else. This does not remove access.
+   *
+   * WHY IT LOGS. The list row is the only record of who may still hold a
+   * stored key, so removing it has to leave a record somewhere else, or the
+   * owner ends up with no list row, no key row they can read, and nothing at
+   * all to say this happened. keyRemoved is carried into that record because
+   * it is the difference between "the stored key was known to be gone" and
+   * "nobody established whether it is still there".
+   */
+  async function confirmClearCoAdminListEntry(a: CoAdminRow, keyRemoved: boolean) {
+    if (!userId) {
+      setErr("Missing user , try reloading.");
+      return;
+    }
+    try {
+      await clearCoAdminListEntry({
+        adminUserId: a.admin_user_id,
+        ownerUserId: userId,
+        supabase: supabase as unknown as CoAdminSupabaseLike,
+      });
+      // Not coadmin_revoked: this removed a record, not an access grant.
+      void logSecurityEvent(supabase, userId, "coadmin_list_entry_cleared", {
+        admin_user_id: a.admin_user_id,
+        key_removed: keyRemoved,
+      });
+      setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
+      setErr("");
+      setNotice("Removed from your list. This did not remove their access.");
     } catch (e) {
       setErr(formatError(e));
     }
@@ -857,6 +1013,9 @@ function AppHome() {
                           ownerWorkspaceKeyId: ws.workspaceKeyId,
                           wrappedCiphertextB64: ws.wrappedCiphertextB64,
                           kemSecretWrapped: myKemSecretWrapped,
+                          grantSigB64: ws.grantSigB64,
+                          ownerSigPubB64: ws.ownerSigPubB64,
+                          granteeUserId: ws.granteeUserId,
                         });
                       } catch (unwrapErr) {
                         const name =
@@ -1099,15 +1258,16 @@ function AppHome() {
                           storedVerifierCiphertext: vaultVerifierCiphertext,
                           keyVersion: vaultKeyVersion,
                         });
-                      // Persist new wrapping to user_vault_meta.
-                      const { error: saveErr } = await (supabase as any)
-                        .from("user_vault_meta")
-                        .update({
-                          enc_mek_ciphertext: newEncMekCiphertext,
-                          recovery_ciphertext: newRecoveryCiphertext,
-                        })
-                        .eq("user_id", userId);
-                      if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
+                      // Persist new wrapping to user_vault_meta. Same CAS guard, same
+                      // conflict handling, same table: src/lib/vault-persist.ts is the
+                      // single copy of this write, covered by its own tests.
+                      await persistRewrappedVaultMeta({
+                        supabase: supabase as unknown as VaultPersistClient,
+                        userId: userId as string,
+                        priorEncMekCiphertext: vaultEncMekCiphertext,
+                        newEncMekCiphertext,
+                        newRecoveryCiphertext,
+                      });
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
                       setChangePwNewRecovery(newRecoveryCode);
@@ -1231,6 +1391,29 @@ function AppHome() {
         }}
       />
 
+      <ConfirmDialog
+        open={pendingListOnlyRemoval !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingListOnlyRemoval(null);
+        }}
+        title="Remove from your list?"
+        description={
+          pendingListOnlyRemoval?.keyRemoved
+            ? "Their stored key was already removed, so this only tidies your list. Keys already loaded in a tab they left open keep working until that tab is closed."
+            : "This removes them from your list and nothing else. It does not remove their access, and it is not known here whether their stored key is still there. Only do this if you know the key is already gone, for example after a vault recovery."
+        }
+        confirmLabel="Remove from list"
+        destructive
+        onConfirm={async () => {
+          if (pendingListOnlyRemoval) {
+            await confirmClearCoAdminListEntry(
+              pendingListOnlyRemoval.row,
+              pendingListOnlyRemoval.keyRemoved,
+            );
+          }
+        }}
+      />
+
       {grantDialogOpen && userId && vaultSalt && (
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
@@ -1271,6 +1454,17 @@ function AppHome() {
 }
 
 // ------------------------------------------------------------------
+// Connection staleness helpers
+// ------------------------------------------------------------------
+
+const STALE_THRESHOLD_DAYS = 7;
+
+function isStaleConnection(lastSyncAt: string): boolean {
+  const ageMs = Date.now() - new Date(lastSyncAt).getTime();
+  return ageMs > STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
+}
+
+// ------------------------------------------------------------------
 // Sub-components
 // ------------------------------------------------------------------
 
@@ -1288,14 +1482,35 @@ function ConnectionRow({
   const statusColor =
     conn.status === "active"
       ? "text-green-600 dark:text-green-400"
-      : conn.status === "error"
-        ? "text-destructive"
-        : "text-muted-foreground";
+      : conn.status === "partial"
+        ? "text-yellow-600 dark:text-yellow-400"
+        : conn.status === "error"
+          ? "text-destructive"
+          : "text-muted-foreground";
+
+  const neverSynced = conn.last_sync_at === null;
+  const stale = !neverSynced && isStaleConnection(conn.last_sync_at!);
 
   return (
-    <div className="rounded-md border p-4 flex items-center justify-between gap-4">
-      <div className="flex-1 min-w-0 space-y-2">
+    <div className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
+      {stale && (
+        <span
+          aria-hidden="true"
+          className="shrink-0 w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400"
+        />
+      )}
+      <div className="flex-1 min-w-0 space-y-1">
         <div className="font-medium truncate">{conn.decrypted_label || conn.provider_type}</div>
+        {stale && (
+          <div className="text-xs text-amber-600 dark:text-amber-400">
+            Not syncing. Select to reconnect.
+          </div>
+        )}
+        {neverSynced && (
+          <div className="text-xs text-muted-foreground">
+            Not yet active
+          </div>
+        )}
         <div className="text-xs text-muted-foreground flex items-center gap-2">
           <span className="uppercase">{conn.provider_type}</span>
           <span>·</span>

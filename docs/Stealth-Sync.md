@@ -39,7 +39,7 @@ The customer's xpub never leaves the browser. The Orange Rails server holds a se
 ┌────────────────────────────┐
 │  connect.orangerails.com   │  ← The widget host
 │  Static HTML/JS/WASM       │     Where the math runs
-│  Loaded in popup           │     CSP locked, logged
+│  Loaded in popup           │     Framing denied, see public/_headers
 └────────────┬───────────────┘
              │
    ┌─────────┴─────────────────┐
@@ -85,6 +85,29 @@ When the widget needs to make a network request (fetch filters, fetch a block, s
 ## The cross-domain `postMessage` protocol
 
 Documented in `src/stealth/lib/postmessage.ts` in the orangerails repo. Stable surface for third-party integration. Versioned via `protocol_version` field; bumping it is the migration mechanism.
+
+### Protocol version support window (DEC-0304)
+
+The widget checks membership in a supported set, not equality with a single
+constant: `STEALTH_SUPPORTED_PROTOCOL_VERSIONS` in `postmessage.ts` lists
+every `protocol_version` this build of the widget will accept at INIT.
+`OR_STEALTH_READY` carries that same set as `supported_protocol_versions`,
+alongside the existing `protocol_version` field (the current preferred
+version), so a consuming app can pick a version both sides speak with no
+app deploy of its own, including right after a widget rollback or when a
+stale cached copy of the widget is served.
+
+At most two versions are live at a time: the current version and the one
+before it. A new version stays live for 90 days, measured from the later
+of the new version actually going live and this document being updated to
+say so. After that window the older version is removed in its own
+announced release, and an app still sending it gets back
+`PROTOCOL_VERSION_MISMATCH` naming the version(s) the widget currently
+supports.
+
+Today the supported set is `[1]`: this is the mechanism landing ahead of
+any real version bump. The required CI check that drives a full
+previous-version handshake lands with the first actual bump.
 
 **App → Widget:** one message type, `OR_STEALTH_INIT`, carrying mode (add / sync / list / delete), the per-app key, and the consuming app's identity.
 
@@ -284,8 +307,23 @@ const initMessage = {
   or_stealth_key_b64: derivedKeyB64,   // see Vault setup section above
   return_callback_origin: window.location.origin,
   // connection_id required for sync / list / delete, omit for add
+  // gap_limit: 250,  // optional, see "gap_limit" section below
 };
 ```
+
+**Optional `gap_limit` field.** An integer from 1 to 1000 that seeds
+the gap-limit form field shown to the user on the add route. The user
+can still override the value in the UI; this is just the starting point.
+When absent the widget uses its built-in default (see `DEFAULT_GAP_LIMIT`
+in `src/stealth/lib/postmessage.ts`). Out-of-range values (non-integer,
+below 1, or above 1000) are rejected at INIT with
+`OR_STEALTH_ERROR { code: 'INTERNAL' }` rather than silently clamped.
+
+> **Existing-connection caveat.** This field only affects connections
+> created after the INIT. Sealed envelopes bake in the gap_limit at
+> add-time; passing a new value to a sync or list INIT has no effect on
+> the stored value. Re-issuing a connection (new add) is the only way to
+> change the gap_limit of an existing row.
 
 Two fields the widget validates strictly and will silently reject you
 over if wrong:
@@ -328,6 +366,7 @@ window.addEventListener('message', (event) => {
       break;
     case 'OR_STEALTH_SYNC_COMPLETE':
       // event.data.sealed_transactions[]: see "Sealed envelope schema" above
+      // event.data.address_window_exhausted: boolean | undefined -- see below
       break;
     case 'OR_STEALTH_ERROR':
       // event.data.code, message, retryable
@@ -335,6 +374,40 @@ window.addEventListener('message', (event) => {
   }
 });
 ```
+
+### `OR_STEALTH_SYNC_COMPLETE`: the `address_window_exhausted` field
+
+`OR_STEALTH_SYNC_COMPLETE` carries an optional boolean field
+`address_window_exhausted`. When it is `true`, the widget found
+transactions at or near the top of the derived address window on at
+least one chain, which means the wallet has likely outgrown the current
+window and some transactions may be missing from the result.
+
+**Why this happens.** Stealth Sync derives a fixed set of addresses
+(`gap_limit * 2` per chain) before scanning. Any transaction that pays
+an address beyond that ceiling is silently invisible. A standard BIP44
+gap-limit scan would extend the window when activity is found near the
+top; Stealth Sync currently uses a fixed ceiling to keep the browser
+scan bounded. `address_window_exhausted` tells you when you have hit
+that ceiling.
+
+**What your app must do when this field is true:**
+
+1. Do not book the synced history as authoritative or complete.
+2. Prompt the user: "Some transactions may be missing. Re-connect this
+   wallet with a wider address window to recover the full history."
+3. Offer a path to re-add the wallet with a larger `gap_limit` value
+   (your app passes `gap_limit` inside the sealed envelope payload).
+   A value of 100 recovers most real-world wallets.
+
+**What your app can ignore.** When the field is absent or `false`, the
+history is complete within the current window. You do not need to
+handle the absent case specially: absent and `false` are equivalent.
+
+**Detection predicate.** The flag fires when any matched receive-chain
+or change-chain address has an index >= `gap_limit` within the
+`gap_limit * 2` window. This is the BIP44 signal that the window needs
+extending, implemented client-side with no new network calls.
 
 ### Implementation status: `add` and `sync` are live, `list` and `delete` are not yet
 

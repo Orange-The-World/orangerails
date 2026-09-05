@@ -34,11 +34,13 @@
  * leaves the server. It must never appear in any external API response body.
  */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
 import { buildCorsHeaders, jsonResponse, readBoundedText } from "../_shared/http.ts";
 import { authenticateRequest, resolveSubaccount, isAuthError } from "../_shared/platform-auth.ts";
 import { getProvider, listProviderSlugs, parseCredentials } from "../_shared/providers/dispatch.ts";
 import { wrapSentryHandler } from "../_shared/sentry.ts";
+import { lookupErrorCopy } from "../_shared/error-catalog.ts";
+import { safeErrorLine } from "../_shared/error-redaction.ts";
 
 // -- AES-256-GCM helpers (kept inline for edge-fn isolation) ----------------
 
@@ -168,7 +170,7 @@ Deno.serve(
           .maybeSingle();
 
         if (sessionErr) {
-          console.error("[or-discover-wallets] widget token lookup error:", sessionErr.message);
+          console.error(await safeErrorLine("or-discover-wallets", "widget-token-lookup", sessionErr));
           return jsonResponse({ error: "Invalid widget token" }, 401, cors);
         }
         if (!session) {
@@ -205,7 +207,7 @@ Deno.serve(
           if (insErr) {
             // Without the session rows the write path cannot dedup this
             // discovery, so fail loudly rather than silently degrade.
-            console.error("[or-discover-wallets] discovery_sessions insert failed:", insErr.message);
+            console.error(await safeErrorLine("or-discover-wallets", "discovery-sessions-insert", insErr));
             return jsonResponse({ error: "Could not record discovery session" }, 500, cors);
           }
         }
@@ -247,7 +249,7 @@ Deno.serve(
         .maybeSingle();
 
       if (connErr) {
-        console.error("[or-discover-wallets] connection lookup failed:", connErr);
+        console.error(await safeErrorLine("or-discover-wallets", "connection-lookup", connErr));
         return jsonResponse({ error: "Connection lookup failed" }, 500, cors);
       }
       if (!conn) return jsonResponse({ error: "Connection not found" }, 404, cors);
@@ -274,7 +276,25 @@ Deno.serve(
       );
       return jsonResponse({ discovered_wallets: stripped }, 200, cors);
     } catch (err) {
-      console.error("[or-discover-wallets] fatal:", err);
+      // When discoverWallets throws with upstreamCode, surface the OR error code
+      // and customer copy. Preserves the distinction between auth failures
+      // (bad key -> UPSTREAM_AUTH_FAILED) and transient outages
+      // (UPSTREAM_UNAVAILABLE, UPSTREAM_RATE_LIMITED).
+      const upstreamCode =
+        err instanceof Error ? (err as any).upstreamCode as string | undefined : undefined;
+      if (upstreamCode) {
+        const catalog = lookupErrorCopy(upstreamCode);
+        const status =
+          upstreamCode === 'UPSTREAM_RATE_LIMITED' ? 429
+          : upstreamCode === 'UPSTREAM_UNAVAILABLE' ? 503
+          : 422;
+        return jsonResponse({ error_code: upstreamCode, ...catalog }, status, cors);
+      }
+      // Never log `err` itself. On the credential paths this can be a
+      // JSON.parse SyntaxError over decrypted plaintext, and V8 embeds part of
+      // the input string in that message. safeErrorLine emits a code, a class,
+      // a hash and a correlation id, and drops the message.
+      console.error(await safeErrorLine("or-discover-wallets", "fatal", err));
       return jsonResponse({ error: "Internal error" }, 500, cors);
     }
   }, "or-discover-wallets"),

@@ -1,9 +1,19 @@
 /**
  * or-webhook-dispatch , drains the webhook_delivery queue.
  *
- * Cron-eligible. Invoke on a schedule (every 30-60s) via Supabase
- * Cron or any external scheduler. Also accepts a manual POST trigger
- * (no body required) for operators / tests.
+ * Invoked every minute by pg_cron via public.invoke_or_webhook_dispatch().
+ * Migration: 20260824120000_schedule_or_webhook_dispatch.sql.
+ *
+ * Until that migration this header read "Cron-eligible. Invoke on a schedule",
+ * which was an instruction to a future operator rather than a description of
+ * anything. Nobody carried it out, so the queue accumulated 52 rows at
+ * attempts = 0 between 11 June and 24 August while every dashboard looked
+ * healthy. If you are tempted to leave a similar note in a header, wire it
+ * instead.
+ *
+ * Auth: POST only, and requires X-Internal-Worker-Token matching the Vault
+ * secret or_internal_worker_token. Operators and tests can call it by hand
+ * with that header.
  *
  * What it does, every invocation:
  *   1. SELECT * FROM webhook_delivery
@@ -67,7 +77,7 @@
  * the response (just a count).
  */
 
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { jsonResponse } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
@@ -304,9 +314,53 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
   return result;
 }
 
-Deno.serve(wrapSentryHandler(async (_req: Request) => {
+/**
+ * Constant-time string compare. Same implementation as or-quiltt-sync's, kept
+ * local rather than shared because copying nine lines is cheaper than a new
+ * shared module in the _shared barrel for one caller each.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+Deno.serve(wrapSentryHandler(async (req: Request) => {
+  if (req.method !== 'POST') {
+    return jsonResponse({ error: 'Method not allowed' }, 405);
+  }
+
   try {
     const serviceClient = makeServiceClient();
+
+    // Caller auth. This function drains a queue and sends signed payloads to
+    // integrator endpoints, so it must not be invocable by anyone who can
+    // reach the URL. It previously took no request at all (the handler
+    // signature was `_req`), which was safe only because the function had no
+    // config.toml entry and therefore inherited verify_jwt = true. Wiring it
+    // to pg_cron means it now needs verify_jwt = false, so the platform gate
+    // goes away and this guard replaces it. Same shape as or-quiltt-sync.
+    //
+    // The token is read through get_or_internal_worker_token() rather than
+    // straight from vault: the vault schema is not exposed over PostgREST in
+    // the deployed edge runtime (DL-0599), so a direct read fails at runtime
+    // while working locally.
+    const callerToken = req.headers.get('X-Internal-Worker-Token');
+    // deno-lint-ignore no-explicit-any
+    const { data: expected, error: vaultErr } = await (serviceClient as any)
+      .rpc('get_or_internal_worker_token');
+    if (vaultErr) {
+      console.error('[or-webhook-dispatch] vault RPC failed:', vaultErr.code, vaultErr.message);
+      return jsonResponse({ error: 'vault read error' }, 503);
+    }
+    if (!expected) {
+      return jsonResponse({ error: 'worker token missing from vault' }, 503);
+    }
+    if (!callerToken || !timingSafeEqual(callerToken, expected)) {
+      return jsonResponse({ error: 'unauthorized' }, 401);
+    }
+
     const result = await dispatchBatch({ serviceClient });
     return jsonResponse(result, 200);
   } catch (err) {

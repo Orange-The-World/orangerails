@@ -43,6 +43,7 @@ import {
   type ParsedDescriptor,
   type ScriptType,
 } from './derive';
+import { scanStartHeight } from './ranges';
 import { sealEnvelope, unsealEnvelope, blindIndex } from './seal';
 import { loadBip158Matcher, type Bip158Matcher } from './wasm/index';
 import {
@@ -121,13 +122,66 @@ export interface SyncProgressEvent {
   detail?: string;
 }
 
+/**
+ * Thrown by runSync when the rolling-window extension passes are exhausted and
+ * matched addresses are still at the top of the derived window on either chain,
+ * meaning wallet history beyond the scanned window may be missing.
+ *
+ * The widget catch maps this to OR_STEALTH_ERROR code WINDOW_EXHAUSTED so an
+ * embedder can tell a genuine "history may be incomplete, re-sync with a wider
+ * gap_limit" failure apart from an unexpected INTERNAL error. Not retryable as
+ * is: repeating the sync repeats the same result; the app must widen gap_limit.
+ * See DL-0584 and issue #352.
+ */
+export class WindowExhaustedError extends Error {
+  readonly code = 'WINDOW_EXHAUSTED' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'WindowExhaustedError';
+    Object.setPrototypeOf(this, WindowExhaustedError.prototype);
+  }
+}
+
+/**
+ * How far below the chain tip a block must sit before we will record a
+ * transaction from it.
+ *
+ * Bitcoin occasionally rewrites its most recent block or two. That is normal.
+ * When it happens, a transaction we already recorded can stop existing, and
+ * nothing in this orchestrator ever looks back at a height it has covered, so
+ * the wrong balance is permanent rather than temporary. Six confirmations is
+ * the long-standing Bitcoin convention and covers every reorg observed on
+ * mainnet since 2013.
+ *
+ * The cost is visible to the customer and is accepted: an incoming payment
+ * does not appear for roughly an hour. Showing money that might vanish is
+ * worse than showing it late.
+ *
+ * This constant is only the PREVENTION. The DETECTION half re-checks the
+ * stored block hash of already-recorded transactions over a window an order
+ * of magnitude deeper than this, so that the single event which defeats this
+ * buffer is not also the event that defeats the detector. The two numbers are
+ * deliberately far apart and must not be collapsed into one.
+ */
+export const CONFIRMATION_DEPTH = 6;
+
 export interface RunSyncOptions {
   envelope: SealedEnvelope;
   orStealthKey: string;
   /** Block height the previous sync left off at. -1 or undefined means
    *  start from the wallet birthday height (which the caller resolves and
-   *  passes as `birthdayHeight`). */
+   *  passes as `birthdayHeight`).
+   *
+   *  Superseded by `resumeFromHeight` where that is supplied. Kept because a
+   *  single cursor cannot express a gap, and because the widget bundle and the
+   *  edge function deploy independently: either can be live first, so this
+   *  orchestrator must still work when only the old field arrives. */
   lastBlockScanned?: number | null;
+  /** Block height to resume at, already reduced from the connection's recorded
+   *  coverage by `resumeHeightFromRanges`. Undefined or null means the caller
+   *  had no coverage map to reduce, in which case the legacy cursor above is
+   *  used and behaviour is unchanged from before ranges existed. */
+  resumeFromHeight?: number | null;
   /** Block height corresponding to wallet_birthday. The caller resolves
    *  the date → height mapping; this orchestrator stays date-blind. */
   birthdayHeight: number;
@@ -150,6 +204,9 @@ export interface RunSyncOptions {
   /** PROGRESS pump. The orchestrator emits one event per stage and at
    *  most a handful of intra-stage updates. */
   onProgress?: (ev: SyncProgressEvent) => void;
+  /** Override the maximum number of rolling-window extension passes.
+   *  Defaults to 10. Exposed for tests; production callers should omit it. */
+  maxWindowPasses?: number;
 }
 
 export interface SyncResult {
@@ -162,6 +219,24 @@ export interface SyncResult {
    *  caller is responsible for sealing them before transport; the
    *  sealedTransactions array above is what gets uploaded to OR. */
   normalized: NormalizedTransaction[];
+  /**
+   * True when any matched address landed at or within gapLimit slots of the
+   * top of the derived window on either chain. Signals that the wallet may
+   * have outgrown the fixed address ceiling and history could be incomplete.
+   * Consuming apps must branch on this flag and prompt re-sync with a wider
+   * gap_limit. Surfaces through OR_STEALTH_SYNC_COMPLETE as
+   * address_window_exhausted. See issue #352 and docs/Stealth-Sync.md.
+   */
+  windowExhausted: boolean;
+  /**
+   * Set when a fetchFilter call fails permanently after all retries inside
+   * the concurrent worker pool. The scan stopped before failedHeight;
+   * lastBlockScanned is the last contiguous height fully processed. Persist
+   * lastBlockScanned as the cursor so the next sync resumes there instead of
+   * restarting from the wallet birthday. Transactions found before the
+   * failure are still in sealedTransactions and normalized.
+   */
+  filterFetchError?: { failedHeight: number; cause: string };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -506,11 +581,25 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('deriving', 0));
 
   // For Stealth Sync we cannot use an oracle (querying an indexer would
-  // leak addresses). We derive a fixed window per chain: 2x gap_limit
-  // entries per chain. If the user has more activity than that, the
-  // birthday-rescan UI lets them widen the window on a subsequent sync.
+  // leak addresses). We derive addresses locally and match against BIP158
+  // filters that are keyed only by block height -- no address is ever sent
+  // to a third party. The window extends automatically when activity is
+  // found near its edge, implementing real BIP44 gap-limit semantics
+  // client-side. See issue #353 for the full design rationale.
   const gapLimit = payload.gap_limit;
-  const windowSize = gapLimit * 2;
+
+  // Maximum extension passes beyond the initial scan (issue #353, req 3).
+  // Each pass extends one or both chains by gapLimit addresses when activity
+  // lands within gapLimit slots of the edge. Cap prevents unbounded work;
+  // windowExhausted signals when it fires. The final value should come from
+  // the three-point GCS benchmark described in the #353 open question.
+  const MAX_WINDOW_PASSES = opts.maxWindowPasses ?? 10;
+
+  // Per-chain window end index (exclusive). Starts at gapLimit * 2 per chain
+  // (same initial window as before). Each chain can extend independently:
+  // activity on the change branch does not force extension of the receive
+  // branch, and vice versa (issue #353, req: both chains extend independently).
+  const chainWindowEnd: [number, number] = [gapLimit * 2, gapLimit * 2];
 
   interface DerivedAddr {
     chain: 0 | 1;
@@ -522,7 +611,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   if (payload.kind === 'xpub_stealth') {
     for (const chain of [0, 1] as const) {
-      for (let i = 0; i < windowSize; i++) {
+      for (let i = 0; i < chainWindowEnd[chain]; i++) {
         const script = deriveScriptPubkeyBytes(payload.xpub, chain, i, payload.script_type);
         const address = deriveAddress(payload.xpub, chain, i, payload.script_type);
         derived.push({ chain, index: i, script, address });
@@ -534,7 +623,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     }
     const desc = opts.descriptor;
     for (const chain of [0, 1] as const) {
-      for (let i = 0; i < windowSize; i++) {
+      for (let i = 0; i < chainWindowEnd[chain]; i++) {
         const script = deriveMultisigScriptPubkeyBytes(desc, chain, i);
         const address = deriveMultisigAddress(desc, chain, i);
         derived.push({ chain, index: i, script, address });
@@ -546,17 +635,60 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('deriving', 100, `${derived.length} addresses ready`));
 
   // ── fetching_filters + matching (interleaved by height for fast-fail UX) ──
-  const tip = await opts.fetchTip();
-  const fromHeight = Math.max(
-    opts.birthdayHeight,
-    (opts.lastBlockScanned ?? -1) + 1,
-  );
+  const chainTip = await opts.fetchTip();
+
+  // Requirement 1 (issue #335): reject a birthday height outside [0, chainTip]
+  // before any scan. Coercing a known-wrong start onto the chain tip would
+  // silently claim a range was scanned that was not, and that is not
+  // recoverable. Rejection is recoverable: fix wallet_birthday, retry.
+  //
+  // This checks the RAW chain tip, not the buffered scan ceiling below. A
+  // birthday that lands inside the confirmation buffer is a legitimate date
+  // the user picked, not a mistake they could correct, so rejecting it would
+  // be wrong and unactionable. The already-up-to-date short-circuit below
+  // handles that case, and the blocks are picked up by a later sync once they
+  // are buried deep enough.
+  if (opts.birthdayHeight < 0 || opts.birthdayHeight > chainTip) {
+    throw new Error(
+      `stealth/sync: birthday height ${opts.birthdayHeight} is out of range [0, ${chainTip}] -- ` +
+      `abort before scanning; fix wallet_birthday and retry`,
+    );
+  }
+
+  // The scan ceiling, and the only thing this function treats as "the tip"
+  // from here down: the filter workers, the contiguous-cursor walk, and the
+  // rolling-window extension passes are all bounded by it.
+  //
+  // Deriving the ceiling once, here, is the point. lastBlockScanned is
+  // computed from this same bounded walk, so the coverage watermark cannot
+  // advance past the last block actually scanned. If the scan stopped at
+  // chainTip - CONFIRMATION_DEPTH while coverage was still recorded up to
+  // chainTip, those blocks would never be scanned by anyone, ever, and the
+  // money in them would never appear at all. That failure is worse than the
+  // one the buffer fixes: a delayed balance would become a permanently
+  // missing one. Keeping it to a single expression means there is no second
+  // place that has to remember to agree with this one.
+  //
+  // Goes negative on a chain shorter than CONFIRMATION_DEPTH blocks. That is
+  // handled rather than special-cased: birthdayHeight is >= 0, so fromHeight
+  // is > tip and the short-circuit below returns the stored cursor without
+  // scanning anything or advancing coverage.
+  const tip = chainTip - CONFIRMATION_DEPTH;
+
+  // Resume point. The rule itself lives in ./ranges.ts as scanStartHeight, in
+  // one place, so that a caller which must reason about where the next sync
+  // will start (the envelope replacement path, which promises the user a full
+  // rescan) can import it rather than restate it. Restating it is what went
+  // wrong before: a comment in an edge function quoted a two term version of
+  // this expression that had already grown a third term, and the recovery path
+  // written against that comment quietly stopped working.
+  const fromHeight = scanStartHeight({
+    birthdayHeight: opts.birthdayHeight,
+    lastBlockScanned: opts.lastBlockScanned,
+    resumeFromHeight: opts.resumeFromHeight,
+  });
   if (fromHeight > tip) {
     // Already current. Short-circuit with empty result.
-    // Guard: this path never fetched a filter or scanned a block, so it
-    // has not earned any forward progress on lastBlockScanned. Return the
-    // previous cursor unchanged -- the caller must not persist a height
-    // the scan never reached.
     emit(opts, progress('fetching_filters', 100, 'Already up to date.'));
     emit(opts, progress('matching', 100));
     emit(opts, progress('fetching_blocks', 100));
@@ -565,10 +697,14 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     emit(opts, progress('uploading', 100));
     return {
       txCount: 0,
+      // Requirement 2 (issue #335): nothing was scanned on this path, so the
+      // chain tip is never an accurate cursor value here. Return the stored
+      // cursor so the caller does not persist tip as a range never read.
       lastBlockScanned: opts.lastBlockScanned ?? -1,
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
+      windowExhausted: false,
     };
   }
 
@@ -592,6 +728,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     blockHashHex: string;
   }
   const hits: MatchedHit[] = [];
+
+  // req 4: cache filter records during the initial scan so extension passes
+  // can re-match locally without re-downloading from the CDN on every pass.
+  // null entries arrive only from mock fetchFilter implementations in tests;
+  // liveFetchFilter (the real implementation) throws on 404 rather than
+  // returning null, so the extension loop never sees a cached null in prod.
+  const filterCache = new Map<number, FilterRecord | null>();
 
   // Parallel filter fetch with bounded concurrency. Sequential
   // (one-at-a-time) was the right shape for the first proof-of-life
@@ -636,13 +779,31 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
 
   let nextHeight = fromHeight;
+  // Shared abort state: when one worker exhausts its retries, it sets these
+  // so other workers stop claiming new heights rather than piling up behind
+  // a broken range. fetchFailure is read after Promise.all resolves.
+  let fetchAborted = false;
+  let fetchFailure: { height: number; cause: unknown } | undefined;
   async function worker(): Promise<void> {
     while (true) {
+      if (fetchAborted) return;
       const h = nextHeight;
       if (h > tip) return;
       nextHeight = h + 1;
-      const f = await opts.fetchFilter(h);
+      let f: FilterRecord | null;
+      try {
+        f = await opts.fetchFilter(h);
+      } catch (err) {
+        // opts.fetchFilter (liveFetchFilter in production) already retries
+        // transient errors; this catch sees only permanent failures after all
+        // attempts are exhausted. Signal the other workers to stop and record
+        // the failure so the cursor can be advanced to the last good height.
+        if (!fetchFailure) fetchFailure = { height: h, cause: err };
+        fetchAborted = true;
+        return; // do not throw; let Promise.all resolve so we compute the cursor
+      }
       processedCount += 1;
+      filterCache.set(h, f);  // cache result (including null) for extension passes (req 4)
       if (f !== null) {
         bytesDownloaded += f.filter.length;
         const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
@@ -659,7 +820,38 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     Array.from({ length: FETCH_CONCURRENCY }, () => worker()),
   );
   emitFetchProgress(true);
-  emit(opts, progress('fetching_filters', 100));
+  // Only emit 100 % when the scan completed normally; on abort the 100 %
+  // would misrepresent partial coverage to the progress listener.
+  if (!fetchAborted) {
+    emit(opts, progress('fetching_filters', 100));
+  }
+
+  // Heights near tip often return null because the filter producer lags the
+  // block source. Returning tip unconditionally as the cursor would mark those
+  // heights as scanned and skip them permanently on the next sync, missing any
+  // transactions they contain. Walk forward from fromHeight and stop at the
+  // first height absent from the cache (fetch never ran -- aborted) or null
+  // (filter not yet produced). This is the highest height we can safely
+  // advance the cursor to. This mirrors the reasoning at the early-return
+  // path above (req 2 of issue #335): the chain tip is never an accurate
+  // cursor when heights were skipped.
+  let lastContiguousScanned = fromHeight - 1;
+  for (let h = fromHeight; h <= tip; h++) {
+    if (!filterCache.has(h) || filterCache.get(h) === null) break;
+    lastContiguousScanned = h;
+  }
+
+  // When the fetch was aborted, concurrent workers may have raced ahead of
+  // the failure point and pushed hits for heights above lastContiguousScanned
+  // into the array. Those heights are beyond the coverage gap and must not be
+  // processed -- doing so would let the cursor skip over unscanned heights and
+  // permanently drop any transactions there on future syncs. Trim in-place so
+  // all code below sees only the safe, contiguous range.
+  if (fetchAborted && hits.length > 0) {
+    const safe = hits.filter((hit) => hit.height <= lastContiguousScanned);
+    hits.splice(0, hits.length, ...safe);
+  }
+
   emit(opts, progress('matching', 100, `${hits.length} candidate blocks.`));
 
   // The concurrent filter fetch above pushes hits in COMPLETION order,
@@ -690,8 +882,48 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
 
   const normalized: NormalizedTransaction[] = [];
+
+  // Track the highest address index matched on each chain (receive=0,
+  // change=1). -1 means no match yet. Updated in the receive detection
+  // loop below; used after block parsing to detect exhaustion (#352).
+  const maxMatchedIndexPerChain: [number, number] = [-1, -1];
+
+  // Prefetch block bytes while parsing previous ones.
+  // UTXO tracking is order-sensitive so we process blocks strictly in
+  // ascending height order; but fetching them in parallel hides network
+  // round-trip latency. A sliding window of BLOCK_FETCH_LOOKAHEAD
+  // concurrent requests keeps ~16 MB in flight at most at any one time
+  // (each slot is released immediately after parsing); gives up to 8x
+  // speedup on the block phase.
+  //
+  // Rejection handling: a no-op .catch() is attached at creation so that
+  // if the loop exits early (an awaited block throws), outstanding
+  // in-flight Promises already have a handler and do NOT fire
+  // unhandledrejection in the browser or terminate the process on a
+  // server runtime.
+  const BLOCK_FETCH_LOOKAHEAD = 8;
+  const _prefetchBlock = (hash: string): Promise<BlockRecord> => {
+    const p = opts.fetchBlock(hash);
+    void p.catch(() => {}); // suppress unhandledrejection if slot is abandoned on throw
+    return p;
+  };
+  const blockFetches: Array<Promise<BlockRecord> | undefined> = [];
+  for (let pi = 0; pi < Math.min(BLOCK_FETCH_LOOKAHEAD, hits.length); pi++) {
+    blockFetches[pi] = _prefetchBlock(hits[pi].blockHashHex);
+  }
+
   for (let i = 0; i < hits.length; i++) {
-    const block = await opts.fetchBlock(hits[i].blockHashHex);
+    // Kick off the next prefetch at the trailing edge of the sliding
+    // window before awaiting the block at the front.
+    const nextPrefetch = i + BLOCK_FETCH_LOOKAHEAD;
+    if (nextPrefetch < hits.length) {
+      blockFetches[nextPrefetch] = _prefetchBlock(hits[nextPrefetch].blockHashHex);
+    }
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const block = await blockFetches[i]!;
+    // Release the slot so block.raw is GC-eligible once this iteration ends.
+    // Without this, every resolved Promise stays reachable for the whole run.
+    blockFetches[i] = undefined;
     bytesDownloaded += block.raw.length;
     // Height comes from the filter match, not the block record: the
     // X-Block-Height response header is invisible to browsers unless the
@@ -734,6 +966,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
             if (!receivedAddress) receivedAddress = d.address;
             anyReceive = true;
             newUtxos.push({ idx: oi, value: out.value, address: d.address });
+            // Record highest matched index per chain for exhaustion detection.
+            if (d.index > maxMatchedIndexPerChain[d.chain]) {
+              maxMatchedIndexPerChain[d.chain] = d.index;
+            }
             break;
           }
         }
@@ -810,7 +1046,249 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('fetching_blocks', 100));
   emit(opts, progress('building_txs', 100, `${normalized.length} transactions.`));
 
-  // ── sealing ──────────────────────────────────────────────────────────
+  // ── rolling-window extension (issue #353) ───────────────────────────
+  // After the initial filter scan, check whether any chain has a match within
+  // gapLimit slots of its current window edge -- the BIP44 signal that more
+  // addresses may have been used beyond the current ceiling. If so, extend
+  // that chain by gapLimit more addresses and run a second filter scan against
+  // ONLY the new addresses (passNewScripts). Repeat until no near-edge match
+  // or MAX_WINDOW_PASSES is reached.
+  //
+  // Key design decision: each extension pass scans passNewScripts, NOT all
+  // scripts. This avoids re-scanning blocks the initial pass already covered:
+  // a block that matched addr0 but not addr5 is not a hit for the extension
+  // pass (addr5-only scan). If a block has BOTH addr0 and addr5 outputs it
+  // WILL appear in both the initial hits and the extension hits; the
+  // processedTxids set below prevents double-counting in normalized.
+  //
+  // req 4: filter bytes from the initial scan are cached in filterCache.
+  // Extension passes re-match locally; CDN re-downloads only occur on a cache
+  // miss, which should not happen in normal flows since the initial scan covers
+  // the full [fromHeight, tip] range.
+  let windowPass = 0;
+  let windowExhausted = false;
+  // Txids recorded in normalized so far. Used to prevent double-counting when
+  // extension scans hit blocks already processed in an earlier pass.
+  const processedTxids = new Set<string>(normalized.map((tx) => tx.txid));
+
+  extensionLoop: while (windowPass < MAX_WINDOW_PASSES) {
+    const chain0Near = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
+    const chain1Near = maxMatchedIndexPerChain[1] >= chainWindowEnd[1] - gapLimit;
+    if (!chain0Near && !chain1Near) break;  // window not near its edge -- done
+
+    // Near-edge match: the wallet has used addresses close enough to the
+    // window ceiling that history beyond it may exist. Signal this to the
+    // caller regardless of whether subsequent extension passes resolve it
+    // (#352, issue #353 req 3). The caller surfaces this to the user.
+    windowExhausted = true;
+
+    // Derive addresses for the chain(s) that need extension. Collect them
+    // separately so the extension scan can target only the new scripts.
+    const passNewDerived: DerivedAddr[] = [];
+    for (const chain of [0, 1] as const) {
+      if (chain === 0 && !chain0Near) continue;
+      if (chain === 1 && !chain1Near) continue;
+
+      const prevEnd = chainWindowEnd[chain];
+      const newEnd  = prevEnd + gapLimit;
+      chainWindowEnd[chain] = newEnd;
+
+      for (let i = prevEnd; i < newEnd; i++) {
+        if (payload.kind === 'xpub_stealth') {
+          const script  = deriveScriptPubkeyBytes(payload.xpub, chain, i, payload.script_type);
+          const address = deriveAddress(payload.xpub, chain, i, payload.script_type);
+          const entry: DerivedAddr = { chain, index: i, script, address };
+          passNewDerived.push(entry);
+          derived.push(entry);
+        } else {
+          if (!opts.descriptor || opts.descriptor.kind !== 'multisig') {
+            throw new Error('descriptor_stealth payload requires opts.descriptor (multisig parsed)');
+          }
+          const desc = opts.descriptor;
+          const script  = deriveMultisigScriptPubkeyBytes(desc, chain, i);
+          const address = deriveMultisigAddress(desc, chain, i);
+          const entry: DerivedAddr = { chain, index: i, script, address };
+          passNewDerived.push(entry);
+          derived.push(entry);
+        }
+      }
+    }
+
+    // Scan filters for blocks matching ONLY the new addresses from this pass.
+    const passNewScripts = passNewDerived.map((d) => d.script);
+    const extHits: Array<{ height: number; blockHashHex: string }> = [];
+    let extNextHeight = fromHeight;
+    const extWorker = async (): Promise<void> => {
+      while (true) {
+        const h = extNextHeight;
+        if (h > tip) return;
+        extNextHeight = h + 1;
+        // req 4: re-use cached filter bytes from the initial scan. Only fall
+        // back to a network fetch on a cache miss (should not occur in normal
+        // flows since the initial scan covers the full [fromHeight, tip] range).
+        let f: FilterRecord | null;
+        if (filterCache.has(h)) {
+          f = filterCache.get(h)!;
+        } else {
+          try {
+            f = await opts.fetchFilter(h);
+          } catch {
+            // A cache-miss fetch in the extension pass failed. The height was
+            // null or missing in the initial scan; failing again is acceptable.
+            // Skip it rather than killing the extension pass.
+            continue;
+          }
+          filterCache.set(h, f);
+          if (f !== null) bytesDownloaded += f.filter.length;
+        }
+        if (f !== null) {
+          const blockHashLE = reverseBytes(hexToBytes(f.blockHashHex));
+          if (matcher.matchAny(f.filter, blockHashLE, passNewScripts)) {
+            extHits.push({ height: h, blockHashHex: f.blockHashHex });
+          }
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, extWorker));
+    extHits.sort((a, b) => a.height - b.height);
+
+    // Same reason as the trim on `hits` after the initial scan, and it has to
+    // be repeated here because this is a SEPARATE array that the earlier trim
+    // never touched. On an aborted filter fetch, heights above
+    // lastContiguousScanned were never contiguously scanned, and this pass can
+    // still produce a hit up there: its cache-miss branch `continue`s past a
+    // broken height instead of stopping, and concurrent workers may have raced
+    // past the failure point before the abort landed. A transaction recorded
+    // above the gap is sealed and uploaded, and the server then advances the
+    // stored cursor to the height it landed at, so the next sync resumes ABOVE
+    // heights nobody ever read. Those heights are never scanned again and any
+    // payment in them is missing from the balance permanently, with no error
+    // and no retry path. Trim in place so everything below sees only the safe,
+    // contiguous range.
+    if (fetchAborted && extHits.length > 0) {
+      const extSafe = extHits.filter((hit) => hit.height <= lastContiguousScanned);
+      extHits.splice(0, extHits.length, ...extSafe);
+    }
+
+    // Process extension hits. Only new-address outputs are checked for receives
+    // (passNewDerived), but inputs are checked against the full UTXO map so a
+    // spend of a previously-received UTXO is detected correctly even when the
+    // spending tx appears in an extension pass.
+    // Same sliding-window prefetch as the main block loop.
+    const extBlockFetches: Array<Promise<BlockRecord> | undefined> = [];
+    for (let pi = 0; pi < Math.min(BLOCK_FETCH_LOOKAHEAD, extHits.length); pi++) {
+      extBlockFetches[pi] = _prefetchBlock(extHits[pi].blockHashHex);
+    }
+    for (let ei = 0; ei < extHits.length; ei++) {
+      const nextExtPrefetch = ei + BLOCK_FETCH_LOOKAHEAD;
+      if (nextExtPrefetch < extHits.length) {
+        extBlockFetches[nextExtPrefetch] = _prefetchBlock(extHits[nextExtPrefetch].blockHashHex);
+      }
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const block = await extBlockFetches[ei]!;
+      // Release the slot so block.raw is GC-eligible once this iteration ends.
+      extBlockFetches[ei] = undefined;
+      bytesDownloaded += block.raw.length;
+      const blockHeight = extHits[ei].height;
+      const header = parseBlockHeader(block.raw);
+      const occurredAt = isoDateFromUnix(header.timestamp);
+      const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
+
+      const cur = new Cursor(block.raw);
+      cur.pos = header.txStart;
+      for (let t = 0; t < header.txCount; t++) {
+        const tx = parseTx(cur);
+
+        // Check inputs against full UTXO map (all passes).
+        let spentInputs = 0n;
+        for (const inp of tx.inputs) {
+          const key = utxoKey(inp.prevTxid, inp.voutIdx);
+          const utxo = utxoMap.get(key);
+          if (utxo) { spentInputs += utxo.value; utxoMap.delete(key); }
+        }
+
+        // Check outputs against NEW addresses only.
+        let receivedAmount = 0n;
+        let receivedAddress = '';
+        let anyReceive = false;
+        const newUtxos: Array<{ idx: number; value: bigint; address: string }> = [];
+        for (let oi = 0; oi < tx.outputs.length; oi++) {
+          const out = tx.outputs[oi];
+          for (const d of passNewDerived) {
+            if (bytesEqual(out.script, d.script)) {
+              receivedAmount += out.value;
+              if (!receivedAddress) receivedAddress = d.address;
+              anyReceive = true;
+              newUtxos.push({ idx: oi, value: out.value, address: d.address });
+              if (d.index > maxMatchedIndexPerChain[d.chain]) {
+                maxMatchedIndexPerChain[d.chain] = d.index;
+              }
+              break;
+            }
+          }
+        }
+
+        // Only add to normalized if this txid has not been recorded in a
+        // prior pass. Double-adding the same txid would corrupt the balance.
+        const alreadySeen = processedTxids.has(tx.txid);
+
+        if (spentInputs > 0n && !alreadySeen) {
+          const netOut = spentInputs - receivedAmount;
+          let recipientAddress = '';
+          for (const out of tx.outputs) {
+            let isOurs = false;
+            for (const d of derived) {
+              if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+            }
+            if (!isOurs) {
+              recipientAddress = scriptToAddressBestEffort(out.script);
+              if (recipientAddress) break;
+            }
+          }
+          normalized.push({
+            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            timestamp: occurredAtInstant, direction: 'out',
+            amount_sats: Number(netOut), address: recipientAddress,
+            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
+          });
+          processedTxids.add(tx.txid);
+          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
+        } else if (anyReceive && !alreadySeen) {
+          normalized.push({
+            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            timestamp: occurredAtInstant, direction: 'in',
+            amount_sats: Number(receivedAmount), address: receivedAddress,
+            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
+          });
+          processedTxids.add(tx.txid);
+          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
+        } else if (anyReceive || spentInputs > 0n) {
+          // txid was already processed in an earlier pass. Still update utxoMap
+          // for new-address UTXOs so future spends in later blocks can find them.
+          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
+        }
+      }
+    }
+    windowPass++;
+    // Outer while re-checks maxMatchedIndexPerChain against updated chainWindowEnd.
+  }
+
+  // Loud-fail (DL-0512): if the extension loop consumed all passes and the
+  // window is still near its edge on either chain, wallet history beyond the
+  // scanned window may be missing. Throw explicitly so the caller cannot
+  // silently succeed with a truncated result.
+  if (windowPass >= MAX_WINDOW_PASSES) {
+    const chain0StillNear = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
+    const chain1StillNear = maxMatchedIndexPerChain[1] >= chainWindowEnd[1] - gapLimit;
+    if (chain0StillNear || chain1StillNear) {
+      throw new WindowExhaustedError(
+        `stealth/sync: address window exhausted after ${MAX_WINDOW_PASSES} extension passes` +
+        ` -- wallet history beyond the scanned window may be missing`,
+      );
+    }
+  }
+
+  // ── sealing (runs after extension so all extension transactions are sealed) ──
   emit(opts, progress('sealing', 0));
   const sealedTransactions: SealedTransaction[] = [];
   for (let i = 0; i < normalized.length; i++) {
@@ -824,7 +1302,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       ciphertext_b64: env.ciphertext_b64,
       occurred_at: tx.occurred_at,
       block_height: tx.block_height,
-      txid_blind_index_b64: blind,
+      txid_blind_index_hex: blind,
     });
     if (i % 8 === 0 || i === normalized.length - 1) {
       const pct = ((i + 1) / Math.max(1, normalized.length)) * 100;
@@ -840,10 +1318,21 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   return {
     txCount: normalized.length,
-    lastBlockScanned: tip,
+    lastBlockScanned: lastContiguousScanned,
     bytesDownloaded,
     sealedTransactions,
     normalized,
+    windowExhausted,
+    ...(fetchFailure !== undefined
+      ? {
+          filterFetchError: {
+            failedHeight: fetchFailure.height,
+            cause: fetchFailure.cause instanceof Error
+              ? fetchFailure.cause.message
+              : String(fetchFailure.cause),
+          },
+        }
+      : {}),
   };
 }
 
@@ -918,24 +1407,47 @@ export async function liveFetchTip(
   return j.height;
 }
 
+/** How many times a single filter read is attempted before it is given up on. */
+export const FILTER_FETCH_ATTEMPTS = 3;
+
 /**
- * Fetch a BIP158 filter for the given block height, plus the sidecar JSON
- * that names which block hash that filter is bound to.
- *
- * Returns null if the producer does not yet have a filter for that height
- * (404 from either resource); the orchestrator treats that as "skip".
+ * Backoff before attempt N+1, in ms. One entry shorter than
+ * FILTER_FETCH_ATTEMPTS because the last attempt is never followed by a wait.
+ * Jittered at use, because 32 workers hitting the same blip would otherwise
+ * retry in lockstep and re-create the burst that knocked them over.
  */
-export async function liveFetchFilter(
-  height: number,
-  baseUrl: string = DEFAULT_FILTER_BASE,
-): Promise<FilterRecord | null> {
+const FILTER_RETRY_BACKOFF_MS = [250, 1000];
+
+/**
+ * Statuses where trying again is reasonable: the origin is overloaded, rate
+ * limiting, or briefly unavailable. Everything else (401, 403, 410, ...) is a
+ * durable answer and retrying only delays a failure the caller must see.
+ * 404 is handled separately and loudly , see fetchFilterPair.
+ */
+const RETRYABLE_FILTER_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/** An error the caller must surface immediately; retrying cannot change it. */
+class DurableFilterError extends Error {}
+
+/** One attempt at the .gcs.gz + .json pair. Throws; never returns null. */
+async function fetchFilterPair(height: number, baseUrl: string): Promise<FilterRecord> {
   const [gzResp, jsonResp] = await Promise.all([
     fetch(`${baseUrl}/${height}.gcs.gz`),
     fetch(`${baseUrl}/${height}.json`),
   ]);
-  if (gzResp.status === 404 || jsonResp.status === 404) return null;
-  if (!gzResp.ok) throw new Error(`fetchFilter ${height} gz failed: ${gzResp.status}`);
-  if (!jsonResp.ok) throw new Error(`fetchFilter ${height} json failed: ${jsonResp.status}`);
+  if (gzResp.status === 404 || jsonResp.status === 404) {
+    throw new DurableFilterError(
+      `liveFetchFilter: 404 at height ${height} -- filter should exist for all heights up to tip; ` +
+      `this is a fetch failure, not an empty result. Do not silently skip this height.`,
+    );
+  }
+  for (const [label, resp] of [['gz', gzResp], ['json', jsonResp]] as const) {
+    if (resp.ok) continue;
+    const message = `fetchFilter ${height} ${label} failed: ${resp.status}`;
+    throw RETRYABLE_FILTER_STATUS.has(resp.status)
+      ? new Error(message)
+      : new DurableFilterError(message);
+  }
 
   const sidecar = (await jsonResp.json()) as FilterSidecar;
   const gzBuf = new Uint8Array(await gzResp.arrayBuffer());
@@ -946,6 +1458,54 @@ export async function liveFetchFilter(
     blockHashHex: sidecar.block_hash,
     filter,
   };
+}
+
+/**
+ * Fetch a BIP158 filter for the given block height, plus the sidecar JSON
+ * that names which block hash that filter is bound to.
+ *
+ * Retries a transient failure up to FILTER_FETCH_ATTEMPTS times with jittered
+ * backoff. A first scan of a year-old wallet issues tens of thousands of these
+ * requests through 32 concurrent workers; the worker pool is joined with
+ * Promise.all, so a single unretried rejection aborts the whole scan and, with
+ * the cursor written only after that join, discards every filter already read.
+ * Observed on production 2026-08-18: 28,625 filters read, then one burst of
+ * network-layer rejections, and the customer saw "Sync failed Failed to fetch".
+ * A network rejection is not a status code, so the careful status handling in
+ * fetchFilterPair never saw it.
+ *
+ * A 404 from either resource is treated as DURABLE: it fails on the first
+ * attempt, is never retried, and reaches the caller immediately. Every height
+ * up to tip should have a filter, so a 404 means the read failed, and it must
+ * never be read as "this height has no transactions". Returning null for a 404
+ * let callers silently skip the height, dropping all its transactions with
+ * zero signal. The same first-attempt-and-out rule applies to every other
+ * durable status; only network rejections and RETRYABLE_FILTER_STATUS retry.
+ *
+ * Callers that need a null-safe interface (e.g. mock fetchFilter in tests)
+ * may still use the FetchFilter type with a null return; this function
+ * itself never returns null.
+ */
+export async function liveFetchFilter(
+  height: number,
+  baseUrl: string = DEFAULT_FILTER_BASE,
+): Promise<FilterRecord> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < FILTER_FETCH_ATTEMPTS; attempt++) {
+    try {
+      return await fetchFilterPair(height, baseUrl);
+    } catch (err) {
+      if (err instanceof DurableFilterError) throw err;
+      lastError = err;
+      const backoff = FILTER_RETRY_BACKOFF_MS[attempt];
+      if (backoff === undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, backoff * (0.5 + Math.random())));
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(
+    `fetchFilter ${height} failed after ${FILTER_FETCH_ATTEMPTS} attempts: ${detail}`,
+  );
 }
 
 /**

@@ -19,7 +19,7 @@
  * is populated, the env vars can be retired in a follow-up cleanup.
  */
 
-import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 
 export interface PlatformQuilttConfig {
   /** Master API key (Bearer token to Quiltt). */
@@ -86,8 +86,25 @@ export async function resolveQuilttConfigForPlatform(
   const apiKey = data.quiltt_api_key ?? envApiKey;
   const connectorIdLink = data.quiltt_connector_id_link ?? envConnectorIdLink;
   const connectorIdReconnect =
-    data.quiltt_connector_id_reconnect ?? envConnectorIdReconnect ?? connectorIdLink;
+    data.quiltt_connector_id_reconnect || envConnectorIdReconnect || connectorIdLink;
   const catalogProfileId = data.quiltt_catalog_profile_id ?? envCatalogProfileId;
+
+  // Fail-loud guard (DL-1402): when neither the per-platform reconnect column
+  // nor the env var is set, connectorIdReconnect above silently resolves to the
+  // LINK connector. A reconnect that runs on the LINK connector opens a fresh
+  // link instead of repairing the existing connection, which mints new account
+  // ids and breaks downstream account mapping. Emit a distinct, greppable signal
+  // so this is never invisible again. We do not throw: a noisy reconnect is
+  // recoverable, a silent one is not, and hard failing here would break every
+  // repair on a platform whose reconnect id has not been backfilled yet.
+  if (!data.quiltt_connector_id_reconnect && !envConnectorIdReconnect) {
+    console.error(
+      `[quiltt-config] RECONNECT_FALLBACK_TO_LINK platform=${data.slug} ` +
+        `platformId=${platformId}: no per-platform quiltt_connector_id_reconnect ` +
+        `and no QUILTT_CONNECTOR_ID_RECONNECT env; reconnect resolved to the LINK ` +
+        `connector and may mint new account ids. Backfill the reconnect connector id.`,
+    );
+  }
 
   return {
     apiKey,
