@@ -886,7 +886,10 @@ export function VaultProvider({ children }: VaultProviderProps) {
       existingKeyId: string | null;
       supabase: GrantSupabaseLike;
     }) => {
-      requireUnlocked(); // gate: vault must be unlocked
+      // The unlocked MEK is what the grant derives its subkeys from. It used
+      // to be discarded here and re-derived from the password downstream,
+      // which produced the wrong key on every vault the current setup creates.
+      const { mek } = requireUnlocked();
       const { targetEmail, supabase, ...rest } = params;
 
       // Resolve email → userId + kemPublicKey via SECURITY DEFINER RPC.
@@ -902,21 +905,41 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const targetKemPubB64 = row.kem_public_key;
 
       // Fetch the owner's ML-DSA-65 signing secret (wrapped) to sign the grant
-      // binding. This keeps app.tsx free of sig_secret_wrapped handling.
-      const { data: sigRow } = await (supabase as any)
+      // binding, plus the three fields the password confirmation needs. Reading
+      // them here keeps app.tsx free of vault-shape handling, and reads what
+      // the row says now rather than what the page loaded earlier.
+      const { data: metaRow } = await (supabase as any)
         .from("user_vault_meta")
-        .select("sig_secret_wrapped")
+        .select(
+          "sig_secret_wrapped, vault_verifier_ciphertext, vault_key_version, enc_mek_ciphertext",
+        )
         .eq("user_id", params.ownerUserId)
         .single();
-      const ownerSigSecretWrapped = (sigRow as Record<string, unknown> | null)?.sig_secret_wrapped as string | undefined;
+      const meta = metaRow as Record<string, unknown> | null;
+
+      const ownerSigSecretWrapped = meta?.sig_secret_wrapped as string | undefined;
       if (!ownerSigSecretWrapped) {
         throw new Error(
           "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
         );
       }
 
+      // No verifier means the password cannot be checked at all. Refuse rather
+      // than grant: a confirmation that is silently skipped is worse than one
+      // that stops and says so.
+      const ownerVerifierCiphertext = meta?.vault_verifier_ciphertext as string | undefined;
+      if (!ownerVerifierCiphertext) {
+        throw new Error(
+          "Your vault details could not be read, so your password cannot be confirmed. Nothing was granted. Reload the page and try again.",
+        );
+      }
+
       return grantCoAdminImpl({
         ...rest,
+        vaultMek: mek,
+        ownerVerifierCiphertext,
+        ownerKeyVersion: (meta?.vault_key_version as number | null) ?? 1,
+        ownerEncMekCiphertext: (meta?.enc_mek_ciphertext as string | null) ?? null,
         ownerSigSecretWrapped,
         targetUserId,
         targetKemPubB64,
