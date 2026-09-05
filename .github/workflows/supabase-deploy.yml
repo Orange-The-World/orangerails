@@ -715,12 +715,19 @@ jobs:
   # means an intentional RLS edit must update the baseline in the SAME PR, so
   # the diff is reviewed rather than silently absorbed.
   #
-  # SCOPE, stated so a green check is not read as more than it is: this
-  # compares the POLICY SET. It does not assert that row level security is
-  # switched ON, because pg_policies carries no relrowsecurity column and
-  # lists a table's policies whether or not RLS is enabled. Disabling RLS on
-  # a table changes not one byte of this baseline. That gap is tracked
-  # separately (OR-T1601) and is not closed here.
+  # SCOPE, stated so a green check is not read as more than it is: the
+  # comparison covers the POLICY SET and nothing else. It does not assert
+  # that row level security is switched ON, because pg_policies carries no
+  # relrowsecurity column and lists a table's policies whether or not RLS is
+  # enabled. Disabling RLS on a table changes not one byte of this baseline.
+  # That gap is closed by the SEPARATE step at the end of this job, which
+  # enumerates pg_class and asserts the enable bit directly (OR-T1601).
+  #
+  # The two are deliberately different shapes. The policy set is a BASELINE,
+  # because it legitimately differs per cluster and moves with every release.
+  # RLS being switched on is an INVARIANT: it should hold everywhere, always,
+  # and recording an exception as "expected" is precisely the failure a
+  # baseline invites and an assertion does not.
   #
   # Self-test runs first, against synthetic rows, and proves the diff can go
   # both red and green before the live comparison is trusted -- the same
@@ -821,7 +828,40 @@ jobs:
             exit 1
           fi
 
-          echo "self-test passed: the diff goes red on a removed policy, red on an added policy, red on a changed expression, red on a widened cmd, red on widened roles, and green on a match"
+          # RED: row level security switched OFF with the policy set left
+          # exactly as it was. This is the class the diff above structurally
+          # CANNOT see, so both halves are asserted here: the policy
+          # comparison must stay GREEN (that is the defect) and the
+          # enablement assertion must go RED (that is the fix). Proving only
+          # the second half would leave it unclear that the first is blind.
+          printf 'demo_table\tt\tf\t3\nother_table\tt\tf\t1\n' > "$WORKDIR/enablement-clean.tsv"
+          printf 'demo_table\tf\tf\t3\nother_table\tt\tf\t1\n' > "$WORKDIR/enablement-off.tsv"
+
+          if ! diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-clean.tsv" >/dev/null; then
+            echo "::error::self-test failed: flipping the RLS enable bit must leave the policy comparison unchanged, and this fixture pair is unchanged"
+            exit 1
+          fi
+
+          if [ -n "$(awk -F'\t' '$2 != "t" { print $1 }' "$WORKDIR/enablement-clean.tsv")" ]; then
+            echo "::error::self-test failed: a table set with RLS enabled everywhere was reported as having it off"
+            exit 1
+          fi
+
+          if [ -z "$(awk -F'\t' '$2 != "t" { print $1 }' "$WORKDIR/enablement-off.tsv")" ]; then
+            echo "::error::self-test failed: a table with row level security switched OFF was reported as clean. That is the exact regression the policy baseline cannot see."
+            exit 1
+          fi
+
+          # RED: a table born with RLS off and no policies. It emits no
+          # pg_policies row at all, so the policy baseline is byte-identical
+          # and only an enumeration of pg_class can see it.
+          printf 'demo_table\tt\tf\t3\nother_table\tt\tf\t1\nnew_table\tf\tf\t0\n' > "$WORKDIR/enablement-newborn.tsv"
+          if [ -z "$(awk -F'\t' '$2 != "t" { print $1 }' "$WORKDIR/enablement-newborn.tsv")" ]; then
+            echo "::error::self-test failed: a new table created with RLS off and zero policies was reported as clean"
+            exit 1
+          fi
+
+          echo "self-test passed: the policy diff goes red on a removed policy, red on an added policy, red on a changed expression, red on a widened cmd, red on widened roles, and green on a match; and the enablement assertion goes red on RLS switched off with the policy set unchanged, and red on a table born with RLS off and zero policies, both of which the policy diff reports as clean"
 
       - name: Compare live RLS policies to the committed baseline
         env:
@@ -923,7 +963,118 @@ jobs:
             exit 1
           fi
 
-          echo "RLS policy set on ${SUPABASE_PROJECT_REF} matches ${BASELINE} (${BASELINE_COUNT} policies). This compares the POLICY SET only; it does not assert that RLS is enabled on any table."
+          echo "RLS policy set on ${SUPABASE_PROJECT_REF} matches ${BASELINE} (${BASELINE_COUNT} policies)."
+          echo "That is the POLICY SET only. Whether row level security is switched ON is asserted by the next step, not by this one."
+
+      # -------------------------------------------------------------------
+      # OR-T1601. The comparison above is blind to whether RLS is switched
+      # ON. pg_policies has no relrowsecurity column and joins nothing to
+      # pg_class, so disabling row level security on a table changes not one
+      # byte of the baseline: the job prints "matches", goes green, and the
+      # table is readable by anyone holding the grant.
+      #
+      # Measured on dev 2026-09-02: 52 base tables in schema public, all 52
+      # with RLS enabled, none forced, 13 carrying ZERO policies, and four of
+      # those thirteen with SELECT granted to the anonymous role. For those
+      # four, deny-all rests on the enable bit alone.
+      #
+      # An INVARIANT, not a second baseline. A committed per-cluster file
+      # would record "RLS is off on table X" as the expected state the moment
+      # anyone regenerated it, and would go red on every legitimate new table,
+      # which teaches people to regenerate without reading. This goes red only
+      # when RLS is actually off, and it sees a table created with RLS off and
+      # no policies, which emits no pg_policies row and is invisible to a
+      # policy baseline by construction.
+      #
+      # relforcerowsecurity is REPORTED and NOT asserted. It is off on all 52
+      # dev tables today, so asserting it would be a posture change across
+      # every table rather than drift detection, and that is a decision.
+      #
+      # A deliberate exception goes in the RLS_DISABLED_TABLE_ALLOWLIST
+      # repository variable, comma separated, so it is a reviewed value with a
+      # name on it rather than a silent hole.
+      # -------------------------------------------------------------------
+      - name: Assert row level security is enabled on every table in schema public
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ needs.target.outputs.supabase_ref }}
+          APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+          ALLOWLIST: ${{ vars.RLS_DISABLED_TABLE_ALLOWLIST }}
+        run: |
+          set -uo pipefail
+
+          # Same reasoning as the step above. A half-applied schema cannot be
+          # compared to anything, and "I could not look" must never print as a
+          # pass.
+          if [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "cancelled" ]; then
+            echo "::error::RLS enablement UNKNOWN on ${SUPABASE_PROJECT_REF:-unresolved}: apply-migrations ended '${APPLY_RESULT}', so the schema state is not known."
+            exit 1
+          fi
+
+          if [ -z "${SUPABASE_PROJECT_REF}" ]; then
+            echo "::error::RLS enablement UNKNOWN: the target job produced no supabase_ref output."
+            exit 1
+          fi
+
+          LIVE_EN=$(mktemp)
+          ALLOW=$(mktemp)
+          trap 'rm -f "$LIVE_EN" "$ALLOW"' EXIT
+
+          if ! node scripts/generate-rls-policy-baseline.mjs --enablement --stdout > "$LIVE_EN"; then
+            echo "::error::RLS enablement UNKNOWN on ${SUPABASE_PROJECT_REF}: the read did not complete. See the script's own error above; it never echoes the token."
+            exit 1
+          fi
+
+          TOTAL=$(wc -l < "$LIVE_EN")
+          if [ "${TOTAL}" -eq 0 ]; then
+            echo "::error::RLS enablement UNKNOWN on ${SUPABASE_PROJECT_REF}: zero base tables reported for schema public. An empty answer and an unreadable one must not be allowed to look the same."
+            exit 1
+          fi
+
+          ENABLED=$(awk -F'\t' '$2 == "t"' "$LIVE_EN" | wc -l)
+          FORCED=$(awk -F'\t' '$3 == "t"' "$LIVE_EN" | wc -l)
+          NOPOLICY=$(awk -F'\t' '$4 == "0"' "$LIVE_EN" | wc -l)
+
+          printf '%s\n' "${ALLOWLIST}" | tr ',' '\n' | sed 's/[[:space:]]//g' | grep -v '^$' > "$ALLOW" || true
+          OFFENDING=$(awk -F'\t' '$2 != "t" { print $1 }' "$LIVE_EN" | grep -vxF -f "$ALLOW" || true)
+
+          echo "${TOTAL} base table(s) in schema public on ${SUPABASE_PROJECT_REF}: ${ENABLED} with row level security ENABLED, ${FORCED} with it FORCED, ${NOPOLICY} carrying zero policies."
+          echo "relforcerowsecurity is reported and not asserted here: it is off everywhere today, so asserting it would be a posture change rather than drift detection."
+
+          if [ -n "${OFFENDING}" ]; then
+            {
+              echo "## :no_entry: Row level security is OFF in schema \`public\` on \`${SUPABASE_PROJECT_REF}\`"
+              echo ""
+              echo "These base tables have row level security switched off. For a table"
+              echo "carrying no policies that bit is the whole of its protection, so the"
+              echo "table is readable by every role holding the grant."
+              echo ""
+              echo "The policy baseline check above CANNOT see this: \`pg_policies\` has no"
+              echo "\`relrowsecurity\` column, so its baseline is byte-identical either way."
+              echo ""
+              echo '```'
+              printf '%s\n' "${OFFENDING}"
+              echo '```'
+              echo ""
+              echo "Re-enable it, or add the table to the \`RLS_DISABLED_TABLE_ALLOWLIST\`"
+              echo "repository variable with the reason stated in the pull request."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::row level security is off on one or more tables in schema public on ${SUPABASE_PROJECT_REF}. See step summary."
+            exit 1
+          fi
+
+          {
+            echo "### RLS enablement on \`${SUPABASE_PROJECT_REF}\`"
+            echo ""
+            echo "Read at \`$(date -u '+%Y-%m-%d %H:%M UTC')\`. ${TOTAL} base tables in schema"
+            echo "\`public\`, ${ENABLED} with row level security enabled, ${FORCED} with it"
+            echo "forced, ${NOPOLICY} carrying zero policies. For those, the enable bit is"
+            echo "the whole of the protection and nothing in \`pg_policies\` describes them."
+            echo ""
+            echo '```'
+            cat "$LIVE_EN"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # OR-T1189. This comparison used to live inside check-pending-migrations, and
