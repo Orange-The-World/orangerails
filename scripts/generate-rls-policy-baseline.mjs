@@ -49,6 +49,28 @@ const ENABLEMENT_QUERY = `
   order by c.relname;
 `
 
+// Any policy in schema public that is NOT PERMISSIVE (i.e. RESTRICTIVE). A
+// RESTRICTIVE policy ANDs with every other policy on the same table and
+// command; a PERMISSIVE one ORs with them. Recreating a RESTRICTIVE policy
+// AS PERMISSIVE, same name/cmd/roles/expressions, leaves every column QUERY
+// selects byte-identical (OR-T1601 finding 2: permissive is not among
+// them), while flipping it from a mandatory filter into an alternative
+// grant. Zero rows is the PASS state here, unlike the other two queries in
+// this file, so it is handled separately in main() rather than sharing
+// their "refuse an empty result" guard.
+const RESTRICTIVE_QUERY = `
+  select
+    schemaname,
+    tablename,
+    policyname,
+    cmd,
+    array_to_string(roles, ',') as roles
+  from pg_policies
+  where schemaname = 'public'
+    and permissive <> 'PERMISSIVE'
+  order by schemaname, tablename, policyname;
+`
+
 function fail(message) {
   console.error(`generate-rls-policy-baseline: ${message}`)
   process.exit(2)
@@ -156,10 +178,34 @@ function toEnablementTsv(rows) {
   return lines.join('\n') + '\n'
 }
 
+// Unlike toTsv/toEnablementTsv, an empty input is the CLEAN result, not a
+// failure, so this never throws on zero rows.
+function toRestrictiveTsv(rows) {
+  const lines = rows.map((row) =>
+    [row.schemaname, row.tablename, row.policyname, row.cmd, `{${row.roles}}`].join('\t'),
+  )
+  return lines.length ? lines.join('\n') + '\n' : ''
+}
+
 async function main() {
   const args = process.argv.slice(2)
   const enablement = args.includes('--enablement')
-  const target = args.find((arg) => arg !== '--enablement')
+  const restrictive = args.includes('--restrictive')
+  const target = args.find((arg) => arg !== '--enablement' && arg !== '--restrictive')
+
+  if (enablement && restrictive) fail('--enablement and --restrictive are mutually exclusive')
+
+  if (restrictive) {
+    const rows = await runQuery(RESTRICTIVE_QUERY)
+    const tsv = toRestrictiveTsv(rows)
+    if (!target || target === '--stdout') {
+      process.stdout.write(tsv)
+    } else {
+      fs.writeFileSync(target, tsv)
+      console.error(`wrote ${rows.length} row(s) to ${target}`)
+    }
+    return
+  }
 
   const rows = await runQuery(enablement ? ENABLEMENT_QUERY : QUERY)
   if (rows.length === 0) {
