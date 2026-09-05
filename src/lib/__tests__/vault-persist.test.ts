@@ -287,12 +287,18 @@ describe("vault recovery: the rotated meta write", () => {
 
     await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
 
+    // Both public keys are cleared in this payload because the default args
+    // carry neither secret. That is the invariant, not an over-write; the test
+    // below spells out why it is correct even when another session created a
+    // keypair a moment ago.
     const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
     expect(metaUpdate?.values).toEqual({
       enc_mek_ciphertext: "enc-mek-v1",
       recovery_ciphertext: "recovery-ciphertext-v1",
       vault_verifier_ciphertext: "verifier-v1",
       vault_key_version: 2,
+      kem_public_key: null,
+      sig_public_key: null,
     });
   });
 
@@ -318,6 +324,14 @@ describe("vault recovery: the rotated meta write", () => {
       kem_secret_wrapped: "kem-wrapped-v1",
       sig_secret_wrapped: "sig-wrapped-v1",
     });
+
+    // The regression guard on the healthy path. Both secrets travelled, so
+    // NEITHER public key may be touched. A change that starts clearing keys on
+    // a recovery that worked fails here first, and that failure is the one that
+    // matters most: it would destroy live keypairs.
+    const columns = Object.keys(metaUpdates[0]?.values ?? {});
+    expect(columns).not.toContain("kem_public_key");
+    expect(columns).not.toContain("sig_public_key");
   });
 
   it("never writes null over a stored PQC secret", async () => {
@@ -339,8 +353,77 @@ describe("vault recovery: the rotated meta write", () => {
       vault_verifier_ciphertext: "verifier-v1",
       vault_key_version: 2,
       kem_secret_wrapped: "kem-wrapped-v1",
+      sig_public_key: null,
     });
     expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_secret_wrapped");
+
+    // The sig PUBLIC key is cleared instead, and the kem one is left alone.
+    // Leaving a public key behind is what makes the loss permanent:
+    // ensurePqcKeypairs short-circuits on a populated public key and never
+    // regenerates, so the row would keep a public key whose secret is wrapped
+    // under a MEK that no longer exists.
+    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("kem_public_key");
+  });
+
+  it("clears the kem public key when only the sig secret was carried", async () => {
+    // The mirror of the test above. An implementation that clears one side and
+    // forgets the other passes a single-orientation suite and still strands
+    // half the keypair, so both orientations are pinned.
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      newKemSecretWrapped: null,
+      newSigSecretWrapped: "sig-wrapped-v1",
+    });
+
+    const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdate?.values).toEqual({
+      enc_mek_ciphertext: "enc-mek-v1",
+      recovery_ciphertext: "recovery-ciphertext-v1",
+      vault_verifier_ciphertext: "verifier-v1",
+      vault_key_version: 2,
+      sig_secret_wrapped: "sig-wrapped-v1",
+      kem_public_key: null,
+    });
+    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("kem_secret_wrapped");
+    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_public_key");
+  });
+
+  it("clears BOTH public keys in the SAME statement when neither secret was carried", async () => {
+    // Two different situations arrive here and both need this. One: the stored
+    // secret would not open, so that keypair is already dead. Two: the secret
+    // columns were null when the recovery READ the row, and another session
+    // created a keypair while the migration loop was running. The old password
+    // still unlocks throughout that loop, deliberately, because meta is written
+    // last, so another tab loading the app is enough to backfill a keypair under
+    // the OLD MEK. The compare-and-swap does not catch it, because nothing in
+    // that backfill touches recovery_ciphertext.
+    //
+    // So yes, this clears a public key a legitimate concurrent write may have
+    // just made. That is correct: its secret is wrapped under the MEK this
+    // recovery is discarding, so it is dead too, and clearing it is what lets
+    // the next unlock regenerate a working pair instead of short-circuiting on a
+    // corpse forever.
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    // One statement, not two. A second write would leave a window in which the
+    // wrappers have rotated and the public keys have not.
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(1);
+    expect(metaUpdates[0]?.values?.kem_public_key).toBeNull();
+    expect(metaUpdates[0]?.values?.sig_public_key).toBeNull();
+
+    // Same compare-and-swap and same row-count proof as before. The clear is an
+    // addition to the statement, not a new write with weaker guards.
+    expect(metaUpdates[0]?.filters).toContainEqual({ column: "user_id", value: "user-1" });
+    expect(metaUpdates[0]?.filters).toContainEqual({
+      column: "recovery_ciphertext",
+      value: "recovery-ciphertext-v0",
+    });
+    expect(metaUpdates[0]?.columns).toBe("user_id");
   });
 
   it("migrates every row BEFORE the meta write, never after", async () => {

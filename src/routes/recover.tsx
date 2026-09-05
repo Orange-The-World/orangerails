@@ -24,6 +24,10 @@ function RecoverPage() {
   const [step, setStep] = useState<"form" | "new-code">("form");
   const [newRecoveryCode, setNewRecoveryCode] = useState("");
   const [newCodeCopied, setNewCodeCopied] = useState(false);
+  // Set from the recovery result, never worked out here. This component cannot
+  // see which stored secret opened and which did not, so anything it inferred
+  // would be a guess that drifts from what actually happened.
+  const [pqcKeysReplaced, setPqcKeysReplaced] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,6 +84,7 @@ function RecoverPage() {
         newVerifierCiphertext,
         newKemSecretWrapped,
         newSigSecretWrapped,
+        pqcKeysReplaced: keysReplaced,
       } = await recoverWithCode({
         recoveryCode,
         recoveryCiphertext: meta.recovery_ciphertext,
@@ -117,6 +122,7 @@ function RecoverPage() {
       void logSecurityEvent(supabase, session.user.id, "vault_recover");
 
       setNewRecoveryCode(freshCode);
+      setPqcKeysReplaced(keysReplaced);
       setStep("new-code");
     } catch (err) {
       setError(formatError(err));
@@ -135,6 +141,13 @@ function RecoverPage() {
               again.
             </p>
           </div>
+
+          {pqcKeysReplaced && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+              Your post-quantum keys could not be carried across and have been replaced. Anything
+              encrypted to the old keys cannot be read.
+            </div>
+          )}
 
           <div className="rounded-md border-2 border-orange-500/40 bg-orange-500/5 p-4 space-y-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-orange-600">
