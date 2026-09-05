@@ -47,6 +47,25 @@ export const RECOVERY_META_NOT_SAVED_MESSAGE =
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
+/**
+ * Shown when the pre-recovery read of user_vault_meta cannot be trusted: it
+ * returned an error, or it returned no row at all, for an account that is
+ * about to rotate its vault key.
+ *
+ * Zero rows does not prove the row is missing. It proves the row is not
+ * visible right now, whether because the session dropped, an RLS predicate
+ * stopped matching, or the row was deleted. A guard that read that as
+ * "nothing stored, proceed" would let the caller treat a vault with an
+ * unreadable row the same as one with no PQC secrets at all, then this file
+ * would re-encrypt every row under a fresh MEK. If a real row existed and
+ * simply failed to read at that moment, the only key that opened its secrets
+ * is now gone, and the final meta write below matches its own row and lands
+ * normally: nothing reports the loss. Refusing here, before anything is
+ * migrated, is the only point where that is still reversible.
+ */
+export const VAULT_META_UNREADABLE_MESSAGE =
+  "Could not load vault metadata. Reload the page and try again.";
+
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
 
@@ -87,6 +106,48 @@ export interface RotateVaultArgs {
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
+}
+
+/** The user_vault_meta columns a vault recovery needs before it can begin. */
+export interface VaultMetaForRecovery {
+  vault_salt: string;
+  vault_verifier_ciphertext: string;
+  recovery_ciphertext: string | null;
+  kem_secret_wrapped: string | null;
+  sig_secret_wrapped: string | null;
+}
+
+/**
+ * Read the row this account needs before vault recovery can begin, and
+ * refuse outright rather than let an unreadable row pass as an empty one.
+ *
+ * `.single()` is the guard: PostgREST answers a query that matches anything
+ * other than exactly one row with an error, for zero rows and for more than
+ * one alike. That is what makes the throw below unconditional on WHY the row
+ * could not be read, instead of having to enumerate every way a read can
+ * come back empty. The `!meta` half of the check is defensive in the same
+ * direction: it refuses even a client that returned an empty result with no
+ * error attached, rather than trusting that every failure is reported.
+ *
+ * This does not decide whether the vault has PQC secrets to carry. Once the
+ * row is proven readable, kem_secret_wrapped and sig_secret_wrapped coming
+ * back null is a legitimate answer: a vault with nothing stored yet.
+ */
+export async function loadVaultMetaForRecovery(
+  supabase: VaultPersistClient,
+  userId: string,
+): Promise<VaultMetaForRecovery> {
+  const { data: meta, error } = await supabase
+    .from("user_vault_meta")
+    .select(
+      "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
+    )
+    .eq("user_id", userId)
+    .single();
+
+  if (error || !meta) throw new Error(VAULT_META_UNREADABLE_MESSAGE);
+
+  return meta as VaultMetaForRecovery;
 }
 
 /**
