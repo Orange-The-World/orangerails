@@ -1,127 +1,115 @@
 name: Header probe
 
-# Manually triggered probe of one live URL's HTTP response headers.
-#
-# We had no way anywhere in this org to read a response header from a
-# deployed host. This workflow exists to close exactly that gap, and
-# only that gap: given a URL on our own domains, print the status line
-# plus a fixed allowlist of security headers and post the result on a
-# tracking issue.
-#
-# Safety, both non-negotiable:
-#   1. Only our own hosts can be probed (ALLOWED_HOSTS below).
-#   2. Only ALLOWED_HEADERS are ever printed. This is a public repo
-#      with a public Actions log; the full header block is never
-#      echoed because set-cookie and similar values could land in it.
-
+# Manual only, on purpose. Reads one response-header block from one of our
+# own hosts and posts the result as a comment on the tracking issue below,
+# so a seat holding only github-read can answer "is production serving the
+# header we shipped" without a terminal. See OR-T0601: no tool in this org
+# could answer that before this existed.
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "Full URL to probe, e.g. https://connect.orangerails.com/connect/stealth"
+        description: 'Full URL on one of our own hosts to probe (https://...)'
         required: true
-      issue:
-        description: "Tracking issue number to post the result comment on"
-        required: false
-        default: "906"
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
   issues: write
 
+env:
+  # Where every run posts its result. See OR-T0601.
+  TRACKING_ISSUE: '1324'
+  # The only header names this workflow will ever print, from our own
+  # hosts or otherwise. Everything else is dropped before it reaches the
+  # (public) Actions log -- set-cookie and similar must never land here.
+  ALLOWED_HEADERS: >-
+    content-security-policy
+    content-security-policy-report-only
+    x-frame-options
+    x-content-type-options
+    referrer-policy
+    strict-transport-security
+    permissions-policy
+    cross-origin-opener-policy
+
 jobs:
   probe:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Validate the host against the allowlist
-        id: check
+      - name: Validate URL is one of our own hosts
+        id: validate
+        shell: bash
         run: |
           set -euo pipefail
-          URL="${{ github.event.inputs.url }}"
-
-          HOST=$(python3 - "$URL" <<'PY'
-          import sys, urllib.parse
-          print((urllib.parse.urlparse(sys.argv[1]).hostname or "").lower())
-          PY
-          )
-
+          URL="${{ inputs.url }}"
+          # A probe tool that can be pointed anywhere is an outbound request
+          # generator with our name on it. Refuse anything off this list
+          # rather than trying to sanitize an arbitrary URL.
+          HOST="$(node -e "try{console.log(new URL(process.argv[1]).host)}catch{}" "$URL")"
           if [ -z "$HOST" ]; then
-            echo "message=REFUSED: could not parse a host out of \`$URL\`" >> "$GITHUB_OUTPUT"
+            echo "::error::Could not parse a host out of '$URL' -- refusing."
             exit 1
           fi
-
-          ALLOWED=false
           case "$HOST" in
             connect.orangerails.com|app.orangerails.com|docs.orangerails.com|orangerails.com|www.orangerails.com|dev.orangerails.com)
-              ALLOWED=true ;;
+              ;;
             *.pages.dev)
-              ALLOWED=true ;;
+              ;;
+            *)
+              echo "::error::REFUSED: host '$HOST' is not in the allowlist. This tool only probes Orange Rails' own hosts (connect/app/docs/dev/www.orangerails.com, orangerails.com, *.pages.dev)."
+              exit 1
+              ;;
           esac
-
-          if [ "$ALLOWED" != "true" ]; then
-            echo "message=REFUSED: host \`$HOST\` is not on the allowlist. This probe only reaches our own domains." >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-
           echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
 
       - name: Probe headers
-        if: success()
         id: probe
+        shell: bash
         run: |
-          set -euo pipefail
-          URL="${{ steps.check.outputs.url }}"
-
-          # No redirects, no body, a normal browser UA (our own WAF blocks the
-          # default curl/python UA on some of these hosts), hard timeout.
-          HEADERS=$(curl -sS -D - -o /dev/null --max-time 15 --max-redirs 0 \
-            -A "Mozilla/5.0 (X11; Linux x86_64) header-probe/1.0" \
-            "$URL")
-
-          STATUS_LINE=$(printf '%s\n' "$HEADERS" | head -n1 | tr -d '\r')
-
+          set -uo pipefail
+          URL="${{ steps.validate.outputs.url }}"
+          # A normal browser UA: some of our own Cloudflare-fronted hosts 403
+          # the default curl UA. No redirects followed, body discarded (-o
+          # /dev/null) -- we never need it and must never echo it, since an
+          # allowlisted host's page content is not something to put in a
+          # public Actions log either. -D- writes the header block to stdout.
+          RAW="$(curl -sS --max-time 15 -D- -o /dev/null \
+            -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+            "$URL" || true)"
+          if [ -z "$RAW" ]; then
+            echo "::error::No response from $URL (connection failed or timed out). Treat this as a probe failure, not an ABSENT header."
+            exit 1
+          fi
+          STATUS_LINE="$(printf '%s\n' "$RAW" | head -1 | tr -d '\r')"
           {
-            echo "**Header probe:** \`$URL\`"
+            echo "## Header probe: $URL"
             echo ""
             echo "Status: \`$STATUS_LINE\`"
             echo ""
-            for NAME in content-security-policy content-security-policy-report-only \
-                        x-frame-options x-content-type-options referrer-policy \
-                        strict-transport-security permissions-policy \
-                        cross-origin-opener-policy; do
-              VALUE=$(printf '%s\n' "$HEADERS" | grep -i "^$NAME:" | head -n1 \
-                        | sed -E 's/^[^:]+:[[:space:]]*//' | tr -d '\r')
+            for h in $ALLOWED_HEADERS; do
+              VALUE="$(printf '%s\n' "$RAW" | grep -i "^$h:" | head -1 | sed -E 's/^[^:]+:[[:space:]]*//' | tr -d '\r')"
               if [ -z "$VALUE" ]; then
-                echo "- \`$NAME\`: ABSENT"
+                echo "- \`$h\`: ABSENT"
               else
-                echo "- \`$NAME\`: \`$VALUE\`"
+                echo "- \`$h\`: \`$VALUE\`"
               fi
             done
-          } > result.md
+          } > /tmp/probe-result.md
+          cat /tmp/probe-result.md >> "$GITHUB_STEP_SUMMARY"
 
-          cat result.md
-
-      - name: Post result comment
-        if: success()
+      - name: Post result to tracking issue
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          gh issue comment "${{ github.event.inputs.issue }}" \
-            --repo "${{ github.repository }}" \
-            --body-file result.md
-
-      - name: Post refusal comment
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          MSG="${{ steps.check.outputs.message }}"
-          if [ -z "$MSG" ]; then
-            MSG="Header probe run failed. See the run log: $RUN_URL"
+          set -uo pipefail
+          if ! gh issue comment "$TRACKING_ISSUE" --repo "$GITHUB_REPOSITORY" --body-file /tmp/probe-result.md; then
+            echo "::error::gh issue comment was refused (token scope or API). The result above is the same text that would have posted."
+            exit 1
           fi
-          gh issue comment "${{ github.event.inputs.issue }}" \
-            --repo "${{ github.repository }}" \
-            --body "$MSG"$'\n\n'"Run: $RUN_URL"
