@@ -89,9 +89,11 @@ A single-item object (not array) is also accepted.
 
 | Product | Granularity | Assets |
 |---|---|---|
-| `ORBI-M` | 1-minute bars | BTC, USDC, USDT, DAI, EURC, PYUSD |
-| `ORBI-D` | 1-day bars | BTC, USD, EURC |
+| `ORBI-M` | 1-minute bars | BTC, USDC, USDT, DAI, PYUSD |
+| `ORBI-D` | 1-day bars | BTC, USD |
 | `ORBI-D-authority` | 1-day central-bank | USD, EUR, GBP, AUD |
+
+**EURC coverage:** EURC has no exchange-traded market data against BTC or other crypto pairs. Requesting any EURC pair other than EURC/EUR currently returns HTTP 200 with `rate: null` and `fill_type: "gap"`. If you need the EURC/EUR stablecoin peg (fixed 1:1), request `asset=EURC&fiat=EUR` with `product=ORBI-D` -- it resolves as a central-bank-authority peg, not exchange-traded data. A separate fix will return 422 with `unsupported_pair` for pairs with no coverage; this document will be updated when that lands.
 
 ---
 
