@@ -194,6 +194,7 @@ jobs:
           echo "FLEET_PAT is present."
 
       - name: Open or update the promotion pull request
+        id: promo
         if: steps.compare.outputs.ahead != '0'
         env:
           # Every write below runs as the machine user, never as the built-in
@@ -222,6 +223,14 @@ jobs:
             BREACH="YES"
             BREACH_WHY="oldest unpromoted commit is ${AGE_DAYS} days old, over the 3 day limit"
           fi
+
+          # Publish the verdict so the escalation step below can act on it.
+          # Until now the breach existed only as a word inside a markdown table
+          # in the pull request body, which nothing reads and no seat watches.
+          {
+            echo "breach=${BREACH}"
+            echo "breach_why=${BREACH_WHY}"
+          } >> "${GITHUB_OUTPUT}"
 
           # ---- divergence ------------------------------------------------
           if [ "${BEHIND}" -gt 0 ]; then
@@ -365,6 +374,11 @@ jobs:
                 ;;
             esac
 
+            {
+              echo "pr_number=${EXISTING}"
+              echo "pr_url=${GITHUB_SERVER_URL}/${GH_REPO}/pull/${EXISTING}"
+            } >> "${GITHUB_OUTPUT}"
+
             echo "Updated: ${GITHUB_SERVER_URL}/${GH_REPO}/pull/${EXISTING}"
             exit 0
           fi
@@ -383,4 +397,113 @@ jobs:
                   --title "promote: dev to prod (${AHEAD} commits)" \
                   --body-file pr-body.md \
                   --label 'owner:release')
+          {
+            echo "pr_number=$(basename "${URL}")"
+            echo "pr_url=${URL}"
+          } >> "${GITHUB_OUTPUT}"
+
           echo "Opened: ${URL}"
+
+      # ------------------------------------------------------------------
+      # Escalate a breach to the seat that owns the merge.
+      #
+      # WHY THIS STEP EXISTS. Before it, a threshold breach produced exactly
+      # two artifacts: the word YES inside a markdown table in the pull
+      # request body, and the label owner:release. No seat watches labels and
+      # no seat reads a pull request body on a schedule, so the breach
+      # notified nobody. Measured on 2026-09-05: the promotion backlog stood
+      # at 330 commits with a promotion open, and Release had never been told.
+      # The seat was not slow. It was never asked.
+      #
+      # A GitHub runner cannot reach the delivery database or the seat wake
+      # tool, both of which are private to the fleet hosts. The one channel
+      # that reaches a seat from a hosted runner is chat, and this repository
+      # already proves that path in approved-green-pr-sweep.yml. This step
+      # reuses that exact secret contract rather than inventing a second one.
+      #
+      # It is deliberately noisy on failure. If neither channel delivers, the
+      # job fails, because a silent escalation is the bug being fixed here.
+      - name: Escalate a threshold breach to the Release seat
+        if: steps.promo.outputs.breach == 'YES'
+        env:
+          # Issues:write already lives on FLEET_PAT because the label step
+          # above needs it, so the fallback needs no new scope.
+          GH_TOKEN: ${{ secrets.FLEET_PAT }}
+          ZULIP_SITE: ${{ secrets.ZULIP_SITE }}
+          ZULIP_BOT_EMAIL: ${{ secrets.ZULIP_BOT_EMAIL }}
+          ZULIP_API_KEY: ${{ secrets.ZULIP_API_KEY }}
+          AHEAD: ${{ steps.compare.outputs.ahead }}
+          AGE_DAYS: ${{ steps.compare.outputs.age_days }}
+          BREACH_WHY: ${{ steps.promo.outputs.breach_why }}
+          PR_URL: ${{ steps.promo.outputs.pr_url }}
+          PR_NUMBER: ${{ steps.promo.outputs.pr_number }}
+          ISSUE_TITLE: 'Promotion backlog past the threshold, Release to decide'
+        run: |
+          set -euo pipefail
+
+          # The mention is never inside a bold run. Zulip closes the bold
+          # markers against the mention markers and the result renders as
+          # plain text, returns success, and notifies nobody.
+          SUMMARY="Promotion backlog is past the threshold: ${BREACH_WHY}."
+          LINE2="dev is ${AHEAD} commit(s) ahead of prod and the oldest unpromoted commit is ${AGE_DAYS} day(s) old."
+          LINE3="Promotion pull request ${PR_NUMBER}: ${PR_URL}"
+          LINE4="Merging this is the Release decision. If Release holds the gate, the risk decision is the CTO's."
+
+          delivered=0
+
+          if [ -n "${ZULIP_SITE:-}" ] && [ -n "${ZULIP_BOT_EMAIL:-}" ] && [ -n "${ZULIP_API_KEY:-}" ]; then
+            BODY="@**Release** ${SUMMARY}"$'\n\n'"${LINE2}"$'\n\n'"${LINE3}"$'\n\n'"${LINE4}"
+            if curl -s --fail -X POST "${ZULIP_SITE}/api/v1/messages" \
+                 -u "${ZULIP_BOT_EMAIL}:${ZULIP_API_KEY}" \
+                 --data-urlencode "type=stream" \
+                 --data-urlencode "to=Releases" \
+                 --data-urlencode "topic=Promotion backlog past the threshold" \
+                 --data-urlencode "content=${BODY}" >/dev/null; then
+              delivered=1
+              echo "Escalated to chat."
+            else
+              echo "::warning::Chat post failed. Falling back to a GitHub issue."
+            fi
+          else
+            echo "::warning::Chat credentials are not configured on this repository. Falling back to a GitHub issue. Add ZULIP_SITE, ZULIP_BOT_EMAIL and ZULIP_API_KEY to reach the seat directly."
+          fi
+
+          # The fallback is not decoration. It is the channel that always
+          # works, because it uses the same token the rest of this job
+          # already proved. One issue, reused, so a standing breach does not
+          # become a new issue every two days.
+          ISSUE_BODY="$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s' \
+            "${SUMMARY}" \
+            "${LINE2}" \
+            "${LINE3}" \
+            "${LINE4}" \
+            "Opened by .github/workflows/scheduled-promotion.yml. It closes nothing and merges nothing. Close this issue when the promotion lands or when Release decides to hold.")"
+
+          EXISTING_ISSUE="$(gh issue list \
+                              --repo "${GH_REPO}" \
+                              --state open \
+                              --limit 100 \
+                              --json number,title \
+                            | jq -r --arg t "${ISSUE_TITLE}" 'map(select(.title == $t)) | .[0].number // empty')"
+
+          if [ -n "${EXISTING_ISSUE}" ]; then
+            gh issue edit "${EXISTING_ISSUE}" --repo "${GH_REPO}" --body "${ISSUE_BODY}" >/dev/null
+            echo "Updated issue ${EXISTING_ISSUE}."
+            delivered=1
+          else
+            if gh issue create \
+                 --repo "${GH_REPO}" \
+                 --title "${ISSUE_TITLE}" \
+                 --body "${ISSUE_BODY}" \
+                 --label 'owner:release' >/dev/null; then
+              echo "Opened an issue for the breach."
+              delivered=1
+            else
+              echo "::error::Could not open a GitHub issue for the breach either."
+            fi
+          fi
+
+          if [ "${delivered}" != "1" ]; then
+            echo "::error::The promotion backlog breached the threshold and no channel delivered the escalation. Release has not been told. This is the failure this step exists to prevent, so the job is failing rather than passing quietly."
+            exit 1
+          fi
