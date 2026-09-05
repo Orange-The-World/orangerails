@@ -47,13 +47,35 @@
  * rather than as a silent pass over every migration.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const MIGRATIONS_DIR = "supabase/migrations";
+
+/**
+ * Append a GitHub Actions step summary block, if GITHUB_STEP_SUMMARY is set. Never throws:
+ * a step summary is a nicety, and a filesystem hiccup writing it must never turn a real pass
+ * into a reported failure, or swallow a real failure behind an unrelated exception.
+ *
+ * OR-T1166. This script is invoked by both the pull-request gate (ci.yml, where nothing has
+ * been applied to any database yet) and the push-time deploy job
+ * (supabase-deploy.yml's check-duplicate-migrations, which used to format this same markdown
+ * inline in shell). Moving that job onto this shared script would silently drop its step
+ * summary unless the summary write moves here too, so it is folded into the one place the
+ * decision itself already lives.
+ */
+function writeStepSummary(markdown) {
+  const path = process.env.GITHUB_STEP_SUMMARY;
+  if (!path) return;
+  try {
+    appendFileSync(path, markdown);
+  } catch {
+    // See the comment above: never let this throw change the exit code.
+  }
+}
 
 /**
  * The version the apply job will use, byte for byte.
@@ -229,9 +251,15 @@ function runInTempTree(files, createDir) {
         writeFileSync(join(root, MIGRATIONS_DIR, name), "-- self-test fixture, never applied\n");
       }
     }
+    // Strip GITHUB_STEP_SUMMARY from the child's environment. Without this, running the
+    // self-test inside a real GitHub Actions job would have every fixture case in END_TO_END
+    // append its own throwaway pass/fail markdown into the SAME summary file the real, outer
+    // run is writing to, corrupting a real job's summary with fixture output (OR-T1166).
+    const { GITHUB_STEP_SUMMARY: _stripped, ...childEnv } = process.env;
     const run = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
       cwd: root,
       encoding: "utf8",
+      env: childEnv,
     });
     if (run.error) throw run.error;
     return { status: run.status, output: (run.stdout ?? "") + (run.stderr ?? "") };
@@ -299,6 +327,10 @@ if (process.argv.includes("--selftest")) {
   selftest();
 } else {
   if (!existsSync(MIGRATIONS_DIR)) {
+    writeStepSummary(
+      "## :rotating_light: Migration version check could not run\n\n" +
+      "`" + MIGRATIONS_DIR + "` does not exist in this checkout, so nothing was compared. " +
+      "That is treated as a failure, not a pass: fix the path or the checkout.\n");
     console.error(
       "::error::" + MIGRATIONS_DIR + " does not exist, so this check examined nothing. That is " +
       "a failure and not a pass. Fix the path or the checkout.");
@@ -320,6 +352,10 @@ if (process.argv.includes("--selftest")) {
   if (!duplicates.length && errors.length) {
     // The directory is there and holds no .sql file. Nothing to compare is UNKNOWN, and
     // UNKNOWN must never borrow the vocabulary of a clean result or of a collision.
+    writeStepSummary(
+      "## :rotating_light: Migration version check enumerated 0 file(s)\n\n" +
+      "`" + MIGRATIONS_DIR + "` exists but contains no `.sql` file. That proves nothing about " +
+      "uniqueness, so this is reported as a failure rather than a silent pass.\n");
     for (const message of errors) console.error(message);
     console.error(
       "::error::the migration version check enumerated 0 file(s) under " + MIGRATIONS_DIR +
@@ -328,6 +364,18 @@ if (process.argv.includes("--selftest")) {
   }
 
   if (duplicates.length) {
+    let summary = "## :rotating_light: Duplicate migration version(s)\n\n";
+    for (const dupe of duplicates) {
+      summary += "`" + dupe.version + "` is used by more than one file:\n\n";
+      for (const file of dupe.files) summary += "- `" + file + "`\n";
+      summary += "\n";
+    }
+    summary +=
+      "`supabase_migrations.schema_migrations` stores one row per version, so at most one " +
+      "of these can ever be tracked and the rest are reported as applied whether they ran " +
+      "or not. Rename the later file to an unused timestamp.\n";
+    writeStepSummary(summary);
+
     console.error("duplicate migration version(s) found:");
     for (const dupe of duplicates) {
       console.error("  version " + dupe.version + " is used by " + dupe.files.length + " files:");
