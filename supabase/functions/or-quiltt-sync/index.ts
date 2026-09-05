@@ -981,7 +981,8 @@ export async function reconcileConnectionError(
   if (!connectionId) return 'event missing record.id';
 
   // Prefer an exact quiltt_connection_id match; fall back to the legacy
-  // NULL-id row only if no exact match exists -- same pattern as handleEvent.
+  // NULL-id row only if no exact match exists AND it is not already spoken
+  // for by a different connection -- same pattern as handleEvent (OR-T2475).
   let conn: { id: string } | null = null;
   const exactMatch = await client
     .from('connections')
@@ -994,26 +995,25 @@ export async function reconcileConnectionError(
   if (exactMatch.data) {
     conn = exactMatch.data as { id: string };
   } else {
-    const legacy = await client
-      .from('connections')
-      .select('id')
-      .eq('subaccount_id', subaccountId)
-      .eq('provider_type', 'quiltt')
-      .is('quiltt_connection_id', null)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
-    if (!legacy.data) {
-      // No OR-side connection row yet; nothing to reconcile.
+    const fallback = await resolveLegacyFallback(client, subaccountId, connectionId);
+    if ('error' in fallback) return fallback.error;
+    if (fallback.decision.kind === 'legacy') {
+      conn = { id: fallback.decision.id };
+    } else {
+      // 'missing': no OR-side connection row yet. 'ambiguous' (OR-T2475): a
+      // row exists but belongs to a different, already-established Quiltt
+      // connection -- this is a status-only reconcile, not the data-pull
+      // path, so there is no row of this event's own to create here and
+      // touching the other connection's row would be the same collision
+      // this fix exists to close. Either way, nothing to reconcile.
       // Mark processed so the event does not retry forever.
       console.warn(
         `[or-quiltt-sync] event ${ev.event_id}: error event for Quiltt connection ` +
-          `(type: ${ev.event_type}), no OR connection row found -- marking processed`,
+          `(type: ${ev.event_type}), no unambiguous OR connection row found ` +
+          `(${fallback.decision.kind}) -- marking processed`,
       );
       return null;
     }
-    conn = legacy.data as { id: string };
   }
 
   // DL-1445: record WHY, not just THAT. This block used to write status alone,
