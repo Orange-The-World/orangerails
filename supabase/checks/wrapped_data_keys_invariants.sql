@@ -52,6 +52,25 @@
 --     widens this list on purpose. That is the direction this check should err
 --     in.
 --
+--     FIXED 2026-09-05 (OR-T0828, Auditor review 5053481295 on PR #966 at head
+--     06738fed): the strip used to remove num_nonnulls together with an
+--     open-ended run of its own argument characters via
+--     num_nonnulls [a-z0-9_, ]*. That character class has no terminator and
+--     both letters and spaces are in it, so on
+--     num_nonnulls(wrapped_cak, coadmin_keyring_ciphertext) IS NOT NULL) AND
+--     (get_byte(wrapped_cak, 0) IS NOT NULL it greedily consumed "IS NOT NULL
+--     AND get_byte" too and reported PASS on a constraint that reads a byte
+--     out of the ciphertext. Reproduced live against fzwmnzmtqidumdqjdddz
+--     (read only, no schema touched): that exact bypass def, plus md5(),
+--     strpos() and a bare comparison, all strip to an EMPTY residual under
+--     the old rule. Fixed by stripping individual allowed WORDS (the two
+--     opaque column names, num_nonnulls, check, is, not, null, and, or) with
+--     word-boundary matches instead of an open-ended phrase: a token not on
+--     that list survives no matter what sits next to it. Re-verified against
+--     the same four bypasses (all now FAIL, non-empty residual) and the
+--     three legitimate forms (num_nonnulls, IS NULL OR, IS NOT NULL AND --
+--     all still PASS, empty residual).
+--
 --   3 no_algorithm_coupling
 --     No check constraint on this table references the algorithm column, in
 --     either direction. A v3 recipient must still be able to consume a v2
