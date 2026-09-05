@@ -169,6 +169,17 @@ export function isAuthenticationTagFailure(err: unknown): boolean {
  *   thrown:    anything else. Abort the recovery: we do not know the secret is
  *              dead, and discarding a live keypair cannot be undone.
  *
+ * THE "dead" READING IS ONLY SOUND IF THIS KEY IS THE KEY THE SECRET WAS
+ * WRAPPED UNDER. A tag failure says THIS key did not open THIS ciphertext, and
+ * nothing in here can tell that apart from a secret that is genuinely dead:
+ * this function sees two opaque CryptoKeys and a string.
+ * carryPqcSecretsAcrossRotation() runs assertPqcWrapKeyMatchesSalt() before any
+ * secret is touched, which NARROWS that gap and does not close it. That check
+ * proves the handed key matches the salt the caller names. It does not prove
+ * the handed key is the one this ciphertext was wrapped under. Read the HONEST
+ * LIMIT note on that function before you rely on "dead", and call this function
+ * directly only if you are asserting the whole of that yourself.
+ *
  * Null is deliberately not one of them. Null already means "there was nothing
  * to carry" further up this path.
  *
@@ -221,14 +232,45 @@ export interface CarriedPqcSecrets {
  * recovery by default rather than by remembering to. A caller must NOT wrap
  * this in a bare catch: that is exactly how a transient failure becomes a
  * discarded live keypair.
+ *
+ * WHY oldMek AND authenticatedSaltB64 ARE REQUIRED. Nothing downstream can tell
+ * a dead secret from a wrong key: both are the same AES-GCM tag failure. So this
+ * function will not read a tag failure as "dead" until it has proved the old
+ * wrap key is the key that (oldMek, authenticatedSaltB64) produces. They are
+ * required rather than optional on purpose, so that adding a caller forces
+ * whoever adds it to say where their salt came from.
+ *
+ * authenticatedSaltB64 means the salt that has been PROVEN to belong to this
+ * vault, not merely the salt that was to hand. In recoverWithCode that proof is
+ * the verifier check: deriveVerifierKey(oldMek, storedSalt) opened the stored
+ * verifier ciphertext, which a wrong salt could not have done.
  */
 export async function carryPqcSecretsAcrossRotation(args: {
   oldWrapKey: CryptoKey;
   newWrapKey: CryptoKey;
+  oldMek: CryptoKey;
+  authenticatedSaltB64: string;
   kemSecretWrapped: string | null;
   sigSecretWrapped: string | null;
 }): Promise<CarriedPqcSecrets> {
-  const { oldWrapKey, newWrapKey, kemSecretWrapped, sigSecretWrapped } = args;
+  const {
+    oldWrapKey,
+    newWrapKey,
+    oldMek,
+    authenticatedSaltB64,
+    kemSecretWrapped,
+    sigSecretWrapped,
+  } = args;
+
+  // Prove the old wrap key before a single tag failure is allowed to mean
+  // "dead". Unconditional, even when there is nothing to carry: a caller whose
+  // salt is wrong is wrong whether or not this particular vault happens to hold
+  // PQC keys, and finding out on an empty vault costs nothing.
+  await assertPqcWrapKeyMatchesSalt({
+    wrapKey: oldWrapKey,
+    mek: oldMek,
+    saltB64: authenticatedSaltB64,
+  });
 
   let pqcKeysReplaced = false;
 
@@ -247,6 +289,97 @@ export async function carryPqcSecretsAcrossRotation(args: {
   const newSigSecretWrapped = await carry(sigSecretWrapped);
 
   return { newKemSecretWrapped, newSigSecretWrapped, pqcKeysReplaced };
+}
+
+/**
+ * A fixed, non-secret probe plaintext. Encrypting it under one key and opening
+ * it with another is how two CryptoKeys are compared here without ever pulling
+ * key bytes into JavaScript. The value is arbitrary; only its constancy matters.
+ */
+const PQC_WRAP_KEY_PROBE = "orangerails-pqc-wrap-key-probe-v1";
+
+/**
+ * Prove that `wrapKey` really is derivePqcSecretWrapKey(mek, saltB64), and throw
+ * loudly if it is not.
+ *
+ * WHY THIS EXISTS, and it is not about a bug that exists today. rewrapPqcSecretKey
+ * turns an AES-GCM tag failure into status "dead", and the caller turns "dead"
+ * into "clear the matching public key", which discards a keypair permanently.
+ * That reading is correct only when the key handed in is the key the secret was
+ * wrapped under. Nothing downstream can check that, so it is checked here,
+ * before any of it runs.
+ *
+ * The realistic way to break it is a salt rotation. Rotating the vault salt
+ * during recovery is a reasonable looking hardening and reads as purely
+ * additive. The moment the old wrap key is derived from a new salt, EVERY
+ * recovery on a vault with PQC keys reports both secrets dead, clears both
+ * public keys, and reports it to the user as an expected outcome. Silently, for
+ * every user, with no error. This turns that into a thrown error at step 5 of
+ * the recovery, where the user has lost nothing yet: every stored wrapper is
+ * still valid and the vault still opens.
+ *
+ * HOW, and why not the obvious way. Two CryptoKeys cannot be compared directly.
+ * They could be compared by exporting their raw bytes, and this deliberately
+ * does not: pulling key material into JavaScript on a self custody path to win a
+ * comparison is a bad trade. Instead a fixed non-secret probe is encrypted under
+ * the expected key and opened with the key that was handed in. Same key, same
+ * plaintext back. Different key, the tag fails.
+ *
+ * HONEST LIMIT, and it is narrower than the name suggests. This proves ONE
+ * thing: that the handed key is what derivePqcSecretWrapKey(mek, saltB64)
+ * produces. That is a self consistency check on the caller. It does NOT prove
+ * that the handed key opens the STORED ciphertext, and only that second
+ * proposition separates "this secret is dead" from "this key is wrong".
+ *
+ * So it catches a caller that derives from one salt while naming another, which
+ * is the mistake people actually make. It does NOT catch a stored secret that
+ * was wrapped under a derivation this code no longer reproduces: a rotation
+ * that carries the other ciphertexts across and leaves these two behind, a
+ * change to the HKDF context string, or a secret written by an older client. In
+ * each of those the probe passes, the rewrap tag fails, and the keypair is
+ * discarded as though the secret were dead.
+ *
+ * A better probe cannot close that. Opening the stored ciphertext IS the
+ * rewrap: if it opens, nothing was dead, and if it does not, the tag failure is
+ * the same observation either way. Closing it needs either a derivation
+ * identifier stored alongside the wrapped secret, or a dead path that a tag
+ * failure alone cannot authorise. Neither is here yet, and both are tracked
+ * separately. Do not read this function as covering them.
+ *
+ * It also cannot prove the caller named the right salt, because a caller that
+ * derives from salt B and also names salt B is self consistent and wrong. What
+ * makes the named salt trustworthy is separate and lives at the call site:
+ * recoverWithCode only reaches this point after deriveVerifierKey(oldMek,
+ * storedSalt) has opened the stored verifier, which a wrong salt could not have
+ * done.
+ */
+export async function assertPqcWrapKeyMatchesSalt(args: {
+  wrapKey: CryptoKey;
+  mek: CryptoKey;
+  saltB64: string;
+}): Promise<void> {
+  const { wrapKey, mek, saltB64 } = args;
+
+  const expected = await derivePqcSecretWrapKey(mek, saltB64);
+  const probeCiphertext = await encryptString(PQC_WRAP_KEY_PROBE, expected);
+
+  let opened: string;
+  try {
+    opened = await decryptString(probeCiphertext, wrapKey);
+  } catch (err) {
+    if (!isAuthenticationTagFailure(err)) throw err;
+    throw new Error(
+      "PQC wrap key does not match the vault salt it was said to come from. Refusing to " +
+        "carry the PQC secrets: under a mismatched key every stored secret looks dead, and " +
+        "treating that as dead destroys the keypairs permanently.",
+    );
+  }
+
+  if (opened !== PQC_WRAP_KEY_PROBE) {
+    throw new Error(
+      "PQC wrap key probe opened to the wrong plaintext. Refusing to carry the PQC secrets.",
+    );
+  }
 }
 
 // ------------------------------------------------------------------

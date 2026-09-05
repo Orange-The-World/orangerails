@@ -548,6 +548,13 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const ok = await verifyVaultPassword(oldVerifierKey, verifierCiphertext);
       if (!ok) throw new Error("Recovery code does not match this vault.");
 
+      //    Past this line storedSalt is AUTHENTICATED, not merely to hand. The
+      //    check above derived the verifier subkey from (oldMek, storedSalt) and
+      //    opened the stored verifier ciphertext with it, which a wrong salt
+      //    could not have done. That fact is what step 5 leans on when it lets a
+      //    failed decryption mean a keypair is dead, so it is worth naming here
+      //    rather than leaving it to be re-derived by whoever reads step 5 next.
+
       // 3. Stash old subkeys before discarding the old MEK. The caller must
       //    migrate every ciphertext using these keys and then call clearMigrationKeys().
       migrationOldCredsKeyRef.current = await deriveCredentialsKey(oldMek, storedSalt);
@@ -591,12 +598,21 @@ export function VaultProvider({ children }: VaultProviderProps) {
       //    NOT wrapped in a catch: a transient failure read as a dead key would
       //    discard a LIVE keypair, which is the destruction this whole path
       //    exists to prevent.
+      //
+      //    oldMek and the authenticated salt go in alongside the wrap keys, and
+      //    they are not decoration. "Dead" and "wrong key" are the same AES-GCM
+      //    tag failure, so the carry proves the old wrap key really is the key
+      //    (oldMek, storedSalt) derives before it lets a tag failure mean dead.
+      //    Derive that key from any other salt and the carry throws here instead
+      //    of quietly reporting both secrets dead and clearing both public keys.
       const oldPqcWrapKey = await derivePqcSecretWrapKey(oldMek, storedSalt);
       const newPqcWrapKey = await derivePqcSecretWrapKey(newMek, storedSalt);
       const { newKemSecretWrapped, newSigSecretWrapped, pqcKeysReplaced } =
         await carryPqcSecretsAcrossRotation({
           oldWrapKey: oldPqcWrapKey,
           newWrapKey: newPqcWrapKey,
+          oldMek,
+          authenticatedSaltB64: storedSalt,
           kemSecretWrapped,
           sigSecretWrapped,
         });
