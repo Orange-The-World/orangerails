@@ -140,7 +140,7 @@ jobs:
 
       - name: Restore Deno module cache
         id: deno-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/deno-dir
           key: deno-v2.1.4-${{ hashFiles('supabase/functions/**/*.ts') }}
