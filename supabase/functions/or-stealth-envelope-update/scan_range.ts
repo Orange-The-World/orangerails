@@ -73,21 +73,36 @@ export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | nu
 }
 
 /**
+ * Outcome of a recordScanRange call. `recorded` is true when a range write
+ * actually succeeded, and also true for the documented opt-out (no
+ * from_height supplied): both are "nothing went wrong". `recorded` is false
+ * only when the RPC itself returned an error, and `error` then carries the
+ * message so the caller has something better than a log line to act on.
+ */
+export interface ScanRangeResult {
+  recorded: boolean;
+  error?: string;
+}
+
+/**
  * Record the scan range for this request, if it carries one.
  *
- * Failure is logged and swallowed by design: the cursor write that precedes
- * this is the safe fallback while range recording is rolled out, so a rejected
- * range must not fail the caller's sync (DL-1478). Note that an ownership
- * rejection from the database lands here as a logged error, which is the
- * correct outcome: nothing is written.
+ * A failed write is logged AND returned to the caller, it is never left to a
+ * log line alone (OR-T0925). It still never throws: the cursor write that
+ * precedes this is the safe fallback while range recording is rolled out, so
+ * a rejected range must not fail the caller's sync (DL-1478). An ownership
+ * rejection from the database lands here as recorded: false with the
+ * database's own message, which the handler surfaces without dropping it.
  */
 // deno-lint-ignore no-explicit-any
-export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<void> {
+export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<ScanRangeResult> {
   const args = buildScanRangeArgs(req);
-  if (args === null) return;
+  if (args === null) return { recorded: true };
 
   const { error } = await client.rpc('record_stealth_scan_range', args);
   if (error) {
     console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', error);
+    return { recorded: false, error: String(error.message ?? error) };
   }
+  return { recorded: true };
 }
