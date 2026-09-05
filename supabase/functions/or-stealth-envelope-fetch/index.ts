@@ -14,7 +14,13 @@
  * Response:
  *   { connection_id, sealed_envelope, connection_kind,
  *     wallet_birthday_plaintext, last_block_scanned, last_sync_at, status,
- *     scan_ranges }
+ *     scan_ranges, scan_generation }
+ *
+ * scan_generation (OR-T2457) is the connection's current fencing token. The
+ * widget must carry it unchanged through the whole sync and send it back on
+ * the cursor/coverage write; a write carrying a stale value means the
+ * connection was reset (envelope replaced) while the sync was running and is
+ * refused rather than silently accepted.
  *
  * scan_ranges is the connection's recorded block coverage, the read side of
  * migration 20260821000000. It is returned rather than reduced to a single
@@ -61,6 +67,9 @@ interface EnvelopeFetchResponseBody {
    * rather than treat unknown as empty.
    */
   scan_ranges: Array<{ from_height: number; to_height: number }> | null;
+  /** See scan_generation in the module doc above. Always present: the column
+   *  is NOT NULL with a default, so every connection row carries one. */
+  scan_generation: string;
 }
 
 /**
@@ -136,7 +145,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     let query = ctx.serviceClient
       .from('stealth_connections')
       .select(
-        'id, app_slug, connection_kind, sealed_envelope, wallet_birthday_plaintext, last_block_scanned, last_sync_at, status, app_user_id',
+        'id, app_slug, connection_kind, sealed_envelope, wallet_birthday_plaintext, last_block_scanned, last_sync_at, status, app_user_id, scan_generation',
       )
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
@@ -199,6 +208,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       last_sync_at: (row.last_sync_at as string | null) ?? null,
       status: row.status as 'active' | 'error' | 'archived',
       scan_ranges: scanRanges,
+      scan_generation: row.scan_generation as string,
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {
