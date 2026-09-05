@@ -1,6 +1,16 @@
--- Envelope v3 schema: the keyring blob, and the data key generation counter.
+-- OUT-OF-ORDER-OK: verified on dev (fzwmnzmtqidumdqjdddz) 2026-09-05 that the
+-- two remaining column additions in this file (connections and
+-- encrypted_transactions data_key_generation) already exist with matching
+-- type/default/nullability and identical column comments, so applying this
+-- file now is a true no-op on those two. The third column this file
+-- originally touched, user_vault_meta.keyring_ciphertext, is REMOVED below
+-- because it is now owned by 20260831071500_user_vault_meta_keyring_ciphertext.sql
+-- (already applied on dev), which explicitly replaces its comment; keeping
+-- this file's older comment text would have regressed that on a late apply.
 --
--- Additive only. Three columns, all with a safe default, no backfill, no rewrite of any
+-- Envelope v3 schema: the data key generation counter.
+--
+-- Additive only. Two columns, both with a safe default, no backfill, no rewrite of any
 -- existing value. Idempotent: every statement is guarded, so a re-run is a no-op.
 --
 -- WHY data_key_generation defaults to 1 and is not null: every row that exists today was
@@ -22,19 +32,13 @@
 -- which already reports it clearly. Also rejected: a trigger or a monotonic guard, because
 -- this counter moves only when a rotation sweep runs and no sweep exists yet.
 --
--- NOT TOUCHED, deliberately: kem_secret_wrapped and sig_secret_wrapped stay, and stay
--- readable, because the v2 to v3 upgrade path reads them to fold their contents into the
--- keyring. Retiring them is a later change, after every vault has been upgraded.
+-- keyring_ciphertext (public.user_vault_meta): NOT part of this file. See
+-- 20260831071500_user_vault_meta_keyring_ciphertext.sql for the column, its
+-- comment, its grant and its assertions.
 --
 -- REVERSIBLE: yes, while every row still reads the default. The undo is at the bottom of
--- this file. Once a keyring has been written, dropping the column is data loss and that
--- undo no longer applies.
-
-alter table public.user_vault_meta
-  add column if not exists keyring_ciphertext text;
-
-comment on column public.user_vault_meta.keyring_ciphertext is
-  'Envelope v3. Single AES-256-GCM blob holding this vault''s data keys and its two PQC secrets, wrapped under the MEK. Opaque ciphertext: never parsed, indexed or constrained by the database. Null on a v2 vault, populated at its next unlock.';
+-- this file. Once a rotation has moved a row's generation, dropping the column is data
+-- loss and that undo no longer applies.
 
 alter table public.connections
   add column if not exists data_key_generation smallint not null default 1;
@@ -49,6 +53,5 @@ comment on column public.encrypted_transactions.data_key_generation is
   'Envelope v3. Which generation of the vault data key this row was encrypted under. NOT the same thing as payload_key_version, which is an envelope scheme selector and must not be used as a rotation counter.';
 
 -- UNDO, valid only while every row still reads the default:
---   alter table public.user_vault_meta drop column if exists keyring_ciphertext;
 --   alter table public.connections drop column if exists data_key_generation;
 --   alter table public.encrypted_transactions drop column if exists data_key_generation;
