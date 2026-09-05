@@ -14,7 +14,7 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
 
-# --- connect.orangerails.com: the Stealth Sync widget host (OR-T0609) ---
+# --- connect.orangerails.com: the Stealth Sync widget host ---
 # This host runs the client-side Bitcoin math (BIP157/158 filter matching via
 # WebAssembly) and holds a customer's per-app vault key in memory (see
 # docs/Stealth-Sync.md). It is the single most sensitive page in the product,
@@ -51,7 +51,7 @@
 #     explicitly rather than a *.supabase.co wildcard: a wildcard would let
 #     this page talk to ANY Supabase project, including an attacker's.
 #
-# KNOWN GAP, not fixed here -- flagged on OR-T0609. OR_STEALTH_INIT accepts
+# KNOWN GAP, not fixed here. OR_STEALTH_INIT accepts
 # an optional proxy_base_url (src/stealth/lib/postmessage.ts,
 # src/stealth/widget/lib/resolveFunctionUrl.ts) letting a CONSUMING APP
 # route the widget's calls through its own server-side proxy at a URL of
