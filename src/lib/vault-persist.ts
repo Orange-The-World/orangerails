@@ -87,6 +87,18 @@ export interface RotateVaultArgs {
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
+  /**
+   * user_vault_meta.workspace_key_id for this owner, or null if no co-admin
+   * has ever been granted. It does not change across a rotation (it is
+   * allocated once, in co-admin.ts), so it is read once by the caller and
+   * passed straight through rather than re-derived here.
+   *
+   * NULL IS AN INSTRUCTION here too, the same rule newKemSecretWrapped and
+   * newSigSecretWrapped state above: it means there is nothing in
+   * wrapped_data_keys for this owner, so the cleanup below is skipped rather
+   * than issuing a delete that would just match zero rows.
+   */
+  workspaceKeyId: string | null;
 }
 
 /**
@@ -110,6 +122,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     migrateCredentialsCiphertext,
     migrateTransactionCiphertext,
     clearMigrationKeys,
+    workspaceKeyId,
   } = args;
 
   // Re-encrypt connections first, then transactions, then meta.
@@ -313,6 +326,30 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   if (updateErr) throw updateErr;
   if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
     throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
+  }
+
+  // recoverWithCode() mints a FRESH MEK, so every wrapped_data_keys row this
+  // owner has ever granted a co-admin (see co-admin.ts) still carries a blob
+  // of subkeys HKDF-derived from the OLD MEK. That blob still unwraps without
+  // error, its ML-KEM wrapping is untouched by this rotation, so nothing here
+  // raises. It just decrypts connections and transactions to garbage, because
+  // those rows are now under the new MEK's subkeys. Found in OR-T1939, this
+  // cleanup is the Option A decision made in OR-T2403.
+  //
+  // Delete those rows so a co-admin fails CLOSED and VISIBLY, no row instead
+  // of a wrong one, rather than silently reading corrupt data. Re-granting is
+  // already a supported owner action, so there is nothing to rebuild here.
+  //
+  // Deliberately AFTER the meta write is proven landed, not before: a
+  // co-admin cleanup failure must not block or roll back the recovery that
+  // matters most, and this delete is naturally idempotent (matching zero rows
+  // on a retry is not an error), so letting it throw on failure is safe.
+  if (workspaceKeyId) {
+    const { error: wdkErr } = await supabase
+      .from("wrapped_data_keys")
+      .delete()
+      .eq("data_key_id", workspaceKeyId);
+    if (wdkErr) throw wdkErr;
   }
 
   // Zero old key material. Only reached once the meta write above is proven to

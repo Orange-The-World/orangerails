@@ -29,11 +29,19 @@ type QueryResult = { data: unknown[] | null; error: unknown };
 
 interface RecordedCall {
   table: string;
-  op: "select" | "update";
+  op: "select" | "update" | "delete";
   /** columns passed to .select(), which is what makes the row count readable */
   columns?: string;
   values?: Record<string, unknown>;
   filters: Array<{ column: string; value: unknown }>;
+}
+
+interface DeleteChain {
+  then(
+    onFulfilled: (value: QueryResult) => unknown,
+    onRejected?: (reason: unknown) => unknown,
+  ): Promise<unknown>;
+  eq(column: string, value: unknown): DeleteChain;
 }
 
 interface UpdateChain {
@@ -61,6 +69,8 @@ interface FakeOptions {
   metaUpdate?: QueryResult;
   /** what any other update returns */
   otherUpdate?: QueryResult;
+  /** what a delete (the wrapped_data_keys cleanup on recovery) returns */
+  deleteResult?: QueryResult;
   /** what a select returns instead of rows, for the error cases */
   selectResult?: Record<string, QueryResult>;
   /**
@@ -90,6 +100,9 @@ function makeFakeClient(options: FakeOptions = {}) {
   for (const [table, rows] of Object.entries(options.rows ?? {})) store[table] = rows.slice();
 
   function resultFor(call: RecordedCall): QueryResult {
+    if (call.op === "delete") {
+      return options.deleteResult ?? { data: [], error: null };
+    }
     if (call.op === "select") {
       const override = options.selectResult?.[call.table];
       if (override) return override;
@@ -184,6 +197,18 @@ function makeFakeClient(options: FakeOptions = {}) {
           };
           return chain;
         },
+        delete() {
+          const call: RecordedCall = { table, op: "delete", filters: [] };
+          calls.push(call);
+          const chain: DeleteChain = {
+            ...thenable(call),
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
+            },
+          };
+          return chain;
+        },
       };
     },
   };
@@ -208,6 +233,9 @@ function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) 
     migrateCredentialsCiphertext: async (c: string) => `${c}-migrated`,
     migrateTransactionCiphertext: async (c: string) => `${c}-migrated`,
     clearMigrationKeys,
+    // Null is the ordinary case here too: most vaults have never granted a
+    // co-admin. The tests below set a real id to exercise the cleanup.
+    workspaceKeyId: null as string | null,
   };
 }
 
@@ -571,6 +599,76 @@ describe("vault recovery: the rotated meta write", () => {
     )) {
       expect(call.filters).toContainEqual({ column: "order", value: ["id", true] });
     }
+  });
+});
+
+describe("vault recovery: co-admin wrapped_data_keys cleanup (OR-T2403)", () => {
+  it("does not touch wrapped_data_keys when the owner never granted a co-admin", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(calls.some((c) => c.table === "wrapped_data_keys")).toBe(false);
+  });
+
+  it("deletes every wrapped_data_keys row for the owner's workspace_key_id", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      workspaceKeyId: "workspace-key-1",
+    });
+
+    const wdkDelete = calls.find((c) => c.table === "wrapped_data_keys" && c.op === "delete");
+    expect(wdkDelete).toBeTruthy();
+    expect(wdkDelete?.filters).toContainEqual({
+      column: "data_key_id",
+      value: "workspace-key-1",
+    });
+  });
+
+  it("runs the cleanup only after the meta write is proven to have landed", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      workspaceKeyId: "workspace-key-1",
+    });
+
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    const wdkIndex = calls.findIndex((c) => c.table === "wrapped_data_keys" && c.op === "delete");
+    expect(metaIndex).toBeGreaterThanOrEqual(0);
+    expect(wdkIndex).toBeGreaterThan(metaIndex);
+  });
+
+  it("throws when the wrapped_data_keys delete errors", async () => {
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      deleteResult: { data: null, error: { message: "boom" } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, vi.fn()),
+        workspaceKeyId: "workspace-key-1",
+      }),
+    ).rejects.toBeTruthy();
+  });
+
+  it("never reaches the cleanup when the meta write itself fails", async () => {
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      metaUpdate: { data: [], error: null },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, vi.fn()),
+        workspaceKeyId: "workspace-key-1",
+      }),
+    ).rejects.toThrow(RECOVERY_META_NOT_SAVED_MESSAGE);
+
+    expect(calls.some((c) => c.table === "wrapped_data_keys")).toBe(false);
   });
 });
 
