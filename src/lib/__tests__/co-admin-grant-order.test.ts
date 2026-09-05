@@ -41,6 +41,7 @@ interface FakeOptions {
 
 function makeFakeClient(options: FakeOptions = {}) {
   const inserts: RecordedInsert[] = [];
+  const deletes: string[] = [];
 
   const client = {
     from(table: string) {
@@ -54,6 +55,7 @@ function makeFakeClient(options: FakeOptions = {}) {
           throw new Error("a grant does not read; this client only records inserts");
         },
         delete() {
+          deletes.push(table);
           throw new Error("a grant does not delete; see the note about compensating deletes");
         },
       };
@@ -66,6 +68,7 @@ function makeFakeClient(options: FakeOptions = {}) {
   return {
     client: client as unknown as Parameters<typeof persistCoAdminGrant>[0]["supabase"],
     inserts,
+    deletes,
   };
 }
 
@@ -173,16 +176,19 @@ describe("a grant that stops half way leaves the evidence, never the access", ()
   });
 
   it("does not delete the list row back out after the key write fails", async () => {
-    // The fake throws on delete(), so reaching one fails this test loudly. An
-    // error from a write is not proof the write did not land, only that its
-    // answer did not come back, so compensating here is one of the ways the
-    // dangerous state gets created rather than avoided.
-    const { client, inserts } = makeFakeClient({
+    // Delete calls are recorded on the fake and asserted directly, not just
+    // inferred from the fake's throw: a compensating delete whose own error
+    // gets caught and swallowed before it reaches the caller would still
+    // leave insertedTables looking exactly like the passing case below, so
+    // that assertion alone cannot fail if a delete is added. Recording calls
+    // catches that case too.
+    const { client, inserts, deletes } = makeFakeClient({
       errors: { wrapped_data_keys: { message: "network error" } },
     });
 
     await rejection(persist(client));
 
+    expect(deletes).toEqual([]);
     expect(insertedTables(inserts)).toEqual(["workspace_admins", "wrapped_data_keys"]);
   });
 });
