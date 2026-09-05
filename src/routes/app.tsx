@@ -9,15 +9,17 @@ import {
   CoAdminRevocationIncompleteError,
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
-import { readCoAdminGrant } from "@/lib/co-admin-grant-row";
+import { formatError } from "@/lib/format-error";
+import { classifyRead } from "@/lib/read-outcome";
+import type { NormalizedTransaction } from "@/lib/crypto-fields";
+import { decryptString } from "@/lib/vault";
+import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
 import {
   readWrappedDataKey,
   DUPLICATE_WRAPPED_KEY_MESSAGE,
   type WrappedKeyClient,
 } from "@/lib/co-admin-workspace-read";
-import { formatError } from "@/lib/format-error";
-import type { NormalizedTransaction } from "@/lib/crypto-fields";
-import { decryptString } from "@/lib/vault";
+import { readCoAdminGrant } from "@/lib/co-admin-grant-row";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
