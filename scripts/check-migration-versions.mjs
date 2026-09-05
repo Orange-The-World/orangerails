@@ -14,6 +14,9 @@
  * On 2026-08-31 two open pull requests both carried version 20260831120000 and CI was green on
  * both, because nothing on the pull request path looked at migration file names at all.
  *
+ * (Comment-only touch 2026-09-05 to refresh a wedged Cloudflare Pages preview check; no
+ * behavior change.)
+ *
  * WHERE THE OTHER COPY OF THIS DECISION LIVES, and why it was not enough on its own. The
  * check-pending-migrations job in the deploy workflow already refuses a duplicate version. Two
  * limits: it runs on a push to dev or prod and never on a pull request, and within that
