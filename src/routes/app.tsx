@@ -10,6 +10,7 @@ import {
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
+import { classifyRead } from "@/lib/read-outcome";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
@@ -260,11 +261,14 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
-      const { data: meta } = await (supabase as any)
+      const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
         .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
+      if (classifyRead(meta, metaErr) === "error") {
+        console.warn(`Failed to load vault meta: ${formatError(metaErr)}`);
+      }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
@@ -303,27 +307,38 @@ function AppHome() {
       }
 
       // Load list of users this person has granted co-admin to.
-      const { data: admins } = await supabase
+      const { data: admins, error: adminsErr } = await supabase
         .from("workspace_admins")
         .select("id, admin_user_id, added_at")
         .eq("owner_user_id", session.user.id);
+      if (classifyRead(admins, adminsErr) === "error") {
+        console.warn(`Failed to load co-admin list: ${formatError(adminsErr)}`);
+      }
       const adminRows = (admins ?? []) as CoAdminRow[];
 
       // Load workspaces where this user is a co-admin.
-      const { data: myAdminOf } = await supabase
+      const { data: myAdminOf, error: myAdminOfErr } = await supabase
         .from("workspace_admins")
         .select("owner_user_id")
         .eq("admin_user_id", session.user.id);
+      if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
+        console.warn(`Failed to load workspaces you administer: ${formatError(myAdminOfErr)}`);
+      }
 
       const workspaces: WorkspaceOption[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
         const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
         for (const ownerId of ownerIds) {
-          const { data: ownerMeta } = await supabase
+          const { data: ownerMeta, error: ownerMetaErr } = await supabase
             .from("user_vault_meta")
             .select("workspace_key_id, sig_public_key")
             .eq("user_id", ownerId)
             .single();
+          if (classifyRead(ownerMeta, ownerMetaErr) === "error") {
+            console.warn(
+              `Failed to load vault meta for workspace owner ${ownerId}, skipping this workspace: ${formatError(ownerMetaErr)}`,
+            );
+          }
           if (!ownerMeta) continue;
           const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
           if (!ownerKeyId) continue;
