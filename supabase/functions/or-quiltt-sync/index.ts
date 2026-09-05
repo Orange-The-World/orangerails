@@ -56,16 +56,6 @@ const MAX_ATTEMPTS = 25;
 // reaches MAX_ATTEMPTS within minutes and permanently retires an event that
 // only needed a connections row to show up (OR-T1902, regression of PR #801).
 const CONN_RACE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-// A connection-row race (DL-1414-C: or-quiltt-link-complete has not yet
-// inserted the connections row when this event's sync fires) is bounded by
-// WALL-CLOCK AGE, never by MAX_ATTEMPTS. reDriveReadyDeferrals re-admits
-// deferred rows on sink platforms unconditionally (it cannot tell an
-// OPK-wait apart from a conn-race wait -- both use opk_deferred_at), so a
-// sink-platform event stuck in this state gets re-admitted and re-deferred
-// every tick. Routing that churn through bumpAttempts (commit 5418820c)
-// reaches MAX_ATTEMPTS within minutes and permanently retires an event that
-// only needed a connections row to show up (OR-T1902, regression of PR #801).
-const CONN_RACE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // 50 pages × 100 = 5,000 transactions per connection per webhook event.
 // Covers most banks' full available history (Quiltt typically caps at ~2y).
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
