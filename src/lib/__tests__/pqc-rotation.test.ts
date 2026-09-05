@@ -29,6 +29,9 @@ import {
   rewrapPqcSecretKey,
   carryPqcSecretsAcrossRotation,
   isAuthenticationTagFailure,
+  ensurePqcKeypairs,
+  type SupabaseLike,
+  type PqcKeyMaterialRow,
 } from "../pqc-lifecycle";
 
 /** A fresh random MEK plus the PQC wrap key derived from it. */
@@ -275,5 +278,67 @@ describe("vault recovery: carrying both PQC secrets across the rotation", () => 
         sigSecretWrapped: null,
       }),
     ).rejects.toBeTruthy();
+  });
+});
+
+describe("ensurePqcKeypairs: the regeneration gate must match the write invariant (OR-T1977)", () => {
+  /** A stub SupabaseLike whose select always returns the given row and whose
+   * update records what it was called with, so the test can assert on the
+   * write instead of only on the return value. */
+  function stubSupabase(row: { kem_public_key: string | null; sig_public_key: string | null }) {
+    let updateArgs: Record<string, unknown> | null = null;
+    const supabase: SupabaseLike = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({ data: { ...row }, error: null }),
+          }),
+        }),
+        update: (values: Record<string, unknown>) => ({
+          eq: async () => {
+            updateArgs = values;
+            return { error: null };
+          },
+        }),
+      }),
+    };
+    return { supabase, getUpdateArgs: () => updateArgs };
+  }
+
+  it("repairs a row where kem_public_key survived a rotation and sig_public_key did not", async () => {
+    // The exact shape from the Auditor's OR-C1148 challenge: not reachable
+    // from this app's own write path today (vault-persist.ts clears both
+    // public keys together, OR-T1954), but the gate has to repair it
+    // regardless of how it arrived, or the row is broken forever.
+    const saltB64 = generateVaultSalt();
+    const { mek } = await mekWithPqcWrapKey(saltB64);
+    const { supabase, getUpdateArgs } = stubSupabase({
+      kem_public_key: "stale-kem-public-key",
+      sig_public_key: null,
+    });
+
+    const result = await ensurePqcKeypairs({ userId: "u1", mek, saltB64, supabase });
+
+    expect(result.generated).toBe(true);
+    const written = getUpdateArgs() as unknown as PqcKeyMaterialRow | null;
+    expect(written).not.toBeNull();
+    expect(written?.kem_public_key).toBeTruthy();
+    expect(written?.sig_public_key).toBeTruthy();
+    expect(written?.kem_secret_wrapped).toBeTruthy();
+    expect(written?.sig_secret_wrapped).toBeTruthy();
+  });
+
+  it("still short-circuits when both public keys are already populated", async () => {
+    const saltB64 = generateVaultSalt();
+    const { mek } = await mekWithPqcWrapKey(saltB64);
+    const { supabase, getUpdateArgs } = stubSupabase({
+      kem_public_key: "live-kem-public-key",
+      sig_public_key: "live-sig-public-key",
+    });
+
+    const result = await ensurePqcKeypairs({ userId: "u1", mek, saltB64, supabase });
+
+    expect(result).toEqual({ generated: false });
+    expect(getUpdateArgs()).toBeNull();
   });
 });
