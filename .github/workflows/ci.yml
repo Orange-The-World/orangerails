@@ -382,6 +382,8 @@ jobs:
           # supabase/functions/or-stealth-connection-create/envelope_replace.test.ts.
           # dev raised 19 -> 20 by OR-T2110, which adds
           # supabase/functions/_shared/quiltt-event-types.test.ts.
+          # dev raised 20 -> 21 by OR-T1721, which adds
+          # supabase/functions/or-ldk-channel-state/index.test.ts.
           DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '21' }}
         run: |
           set -euo pipefail
