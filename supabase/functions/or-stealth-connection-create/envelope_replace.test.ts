@@ -315,6 +315,52 @@ Deno.test('a failed coverage clear reports an error and does not replace the env
   assertEquals(db.ranges.length, 1);
 });
 
+// ── 6. OR-T1242: an absent birthday must not be collapsed with an explicit null ──
+
+Deno.test('wallet_birthday_plaintext OMITTED from the request preserves the stored birthday', async () => {
+  const db = dbWithCoverage();
+  const { client } = makeClient(db);
+
+  // No wallet_birthday_plaintext key at all -- exactly what a re-add that
+  // only means to swap the envelope looks like, and the shape an external
+  // platform-mode caller's request could take without this repo being able
+  // to see or pin its code.
+  const result = await applyEnvelopeReplacement(client, CONNECTION, {
+    sealed_envelope: NEW_ENVELOPE,
+    wallet_birthday_plaintext: undefined,
+  });
+
+  assertEquals(isEnvelopeReplacementError(result), false, JSON.stringify(result));
+  assertEquals(
+    db.connections[0].wallet_birthday_plaintext,
+    '2024-01-01',
+    'omitting the field must not overwrite the previously stored birthday',
+  );
+  assertEquals(db.connections[0].sealed_envelope, NEW_ENVELOPE, 'the envelope still replaces');
+  assertEquals(db.connections[0].last_block_scanned, null, 'the cursor still resets');
+  assertEquals(db.ranges.length, 0, 'coverage still clears');
+});
+
+Deno.test('wallet_birthday_plaintext sent as an explicit null still clears it (widget behaviour, unchanged)', async () => {
+  const db = dbWithCoverage();
+  const { client } = makeClient(db);
+
+  // Mirrors what src/stealth/widget/routes/add.tsx always sends: the key is
+  // present, the value is null, because under ZKA the birthday lives only
+  // inside the sealed envelope for a widget-mode connection.
+  const result = await applyEnvelopeReplacement(client, CONNECTION, {
+    sealed_envelope: NEW_ENVELOPE,
+    wallet_birthday_plaintext: null,
+  });
+
+  assertEquals(isEnvelopeReplacementError(result), false, JSON.stringify(result));
+  assertEquals(
+    db.connections[0].wallet_birthday_plaintext,
+    null,
+    'an explicit null must still clear a previously stored birthday',
+  );
+});
+
 Deno.test('a failed envelope write reports an error and leaves the connection rescanning', async () => {
   const db = dbWithCoverage();
   const { client } = makeClient(db, { table: 'stealth_connections', op: 'update' });
