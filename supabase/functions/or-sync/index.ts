@@ -248,36 +248,57 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // platformId only exists on a platform-mode context, so the resolution is
     // guarded to that mode. Direct-mode callers keep the body.format fallback.
     const enforceSinkFormat = Deno.env.get('OR_SYNC_SINK_FORMAT_ENFORCE') === '1';
-    let resolvedFormat: string | null = bodyFormat ?? null;
+    const requestedFormat: string | null = bodyFormat ?? null;
+    let resolvedFormat: string | null = requestedFormat;
     if (ctx.mode === 'platform') {
       try {
-        const serverFormat = await resolveSinkFormatForPlatform(
-          ctx.serviceClient,
-          ctx.platformId,
-          bodyFormat ?? null,
-        );
-        if (serverFormat !== (bodyFormat ?? null)) {
-          // Format names and the platform id only. No user data, no secrets.
-          console.log(
-            `[or-sync] sink_format-observe platform=${ctx.platformId} ` +
-            `would_change=1 body_format=${bodyFormat ?? 'null'} ` +
-            `server_format=${serverFormat ?? 'null'} enforced=${enforceSinkFormat ? '1' : '0'}`,
-          );
-        }
-        if (enforceSinkFormat) {
-          resolvedFormat = serverFormat;
+        const platformSinkFormat = await getPlatformSinkFormat(ctx.serviceClient, ctx.platformId);
+        // Case 1: sink_format is NULL. No-op, requestedFormat stands, always.
+        if (platformSinkFormat !== null) {
+          const mismatched = requestedFormat !== null && requestedFormat !== platformSinkFormat;
+          if (mismatched) {
+            if (enforceSinkFormat) {
+              // Case 3: populated and different. Refuse instead of silently
+              // rewriting the request to a sink the caller did not ask for.
+              return jsonResponse(
+                {
+                  error: 'Requested sink format does not match this platform\'s configured sink_format',
+                  requested_format: requestedFormat,
+                  platform_format: platformSinkFormat,
+                },
+                409,
+                cors,
+              );
+            }
+            // Dark rollout: still just observe. Format names and the
+            // platform id only. No user data, no secrets.
+            console.log(
+              `[or-sync] sink_format-observe platform=${ctx.platformId} ` +
+              `would_reject=1 body_format=${requestedFormat} ` +
+              `server_format=${platformSinkFormat} enforced=0`,
+            );
+          }
+          // Case 4 (OR-T1183 guard): enforcement may only ever override a
+          // format the caller actually sent. A populated sink_format must
+          // never turn sink mode on for a caller that sent none, because
+          // sinkMode below is derived from resolvedFormat being a non-empty
+          // string, and that would be a mode change, not a narrowing.
+          if (enforceSinkFormat && requestedFormat !== null) {
+            // Case 2 (equal) is a no-op here too: platformSinkFormat already
+            // equals requestedFormat, so this assignment changes nothing.
+            resolvedFormat = platformSinkFormat;
+          }
         }
       } catch (resolveErr) {
-        // Log the error CLASS only, never the error object. Now that the
-        // resolution actually executes, this catch can receive a Postgres
-        // error whose message may embed row values. Those must never reach
-        // the edge log in plaintext, the same control the sync error path
-        // upstream applies.
+        // Log the error CLASS only, never the error object. This catch can
+        // receive a Postgres error whose message may embed row values, which
+        // must never reach the edge log in plaintext, the same control the
+        // sync error path upstream applies.
         console.error(
           '[or-sync] sink_format resolve failed, class=' + errorClassName(resolveErr),
         );
         // Fall back to body.format on resolution failure rather than break.
-        resolvedFormat = bodyFormat ?? null;
+        resolvedFormat = requestedFormat;
       }
     }
     const format = resolvedFormat;
