@@ -154,3 +154,30 @@ export async function resolveSinkFormatForPlatform(
 
   return data?.sink_format ?? bodyFormatFallback ?? null;
 }
+
+/**
+ * Read the platform's raw sink_format column, with no body.format fallback
+ * folded in. resolveSinkFormatForPlatform above deliberately returns the
+ * fallback-applied value, so it cannot tell a caller whether sink_format was
+ * actually populated on the platform row versus NULL. The mismatch-reject
+ * logic in or-sync/index.ts needs exactly that distinction: NULL must always
+ * be a no-op (case 1 of the OR-T0991 ruling), populated-and-different must be
+ * a refusal (case 3), and the two are indistinguishable through the other
+ * function's return value alone.
+ */
+export async function getPlatformSinkFormat(
+  service: SupabaseClient,
+  platformId: string,
+): Promise<string | null> {
+  const { data, error } = await service
+    .from('platforms')
+    .select('sink_format')
+    .eq('id', platformId)
+    .maybeSingle<{ sink_format: string | null }>();
+
+  if (error) {
+    throw new Error(`platforms.sink_format lookup failed: ${error.message}`);
+  }
+
+  return data?.sink_format ?? null;
+}
