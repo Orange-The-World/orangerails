@@ -127,11 +127,20 @@ export async function recordScanRange(client: any, req: ScanRangeRequest): Promi
   // permission denied, or any other code) is NOT the expected guard outcome.
   // Swallowing it the same way is exactly what let a broken RPC read as a
   // healthy sync. Log the code itself, since the message alone does not tell
-  // a human which of those it was.
+  // a human which of those it was, and also push it through the same
+  // GlitchTip channel every other handler in this function uses (OR-T0925),
+  // since a log line nobody is watching is exactly how OR-T0903 ran on
+  // production failing every call with nothing noticing. Deliberately NOT
+  // called for the ownership rejection above: that is expected traffic, and
+  // reporting it would alert on every legitimate rejection.
   console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', {
     code: error.code,
     message: error.message,
   });
+  void reportError(
+    new Error(`record_stealth_scan_range failed (code=${error.code}): ${error.message ?? String(error)}`),
+    'or-stealth-envelope-update',
+  );
   return {
     attempted: true,
     recorded: false,
