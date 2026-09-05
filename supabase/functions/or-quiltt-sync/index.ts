@@ -954,7 +954,14 @@ export async function reconcileConnectionError(
         `recorded: ${platErr.message}`,
     );
   }
-  const sinkMode = typeof platRow?.sink_format === 'string' && platRow.sink_format.length > 0;
+  // 'none' (OR-T1208) is the explicit no-sink sentinel, distinct from NULL
+  // (never configured). This reads the column directly rather than going
+  // through resolveSinkFormatForPlatform, so it needs its own exclusion or a
+  // platform that opted out of sink delivery would still get a plaintext
+  // write here.
+  const sinkMode = typeof platRow?.sink_format === 'string' &&
+    platRow.sink_format.length > 0 &&
+    platRow.sink_format !== 'none';
 
   const connPatch: Record<string, unknown> = {
     status:     'error',
