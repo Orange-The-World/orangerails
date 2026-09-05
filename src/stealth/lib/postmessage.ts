@@ -344,6 +344,21 @@ export interface SealedTransaction {
   /** Plaintext block height for resume on the next sync. */
   block_height: number;
   /**
+   * Hex, RPC display order: the canonical hash of the block at block_height,
+   * as read from the BIP158 filter record that matched this transaction.
+   *
+   * Plaintext, deliberately. The server already holds block_height in
+   * plaintext, and the mapping from a height to a block hash is public chain
+   * data, so the hash says nothing about the customer that the height did not
+   * already say. What it buys is the ability to notice that the block this
+   * transaction was read from is no longer on the chain, which a height on its
+   * own can never show, and to notice it without holding the customer's key.
+   *
+   * Optional. Absent from records produced by widget builds older than this
+   * field, and those records are permanently unverifiable rather than wrong.
+   */
+  block_hash_hex?: string;
+  /**
    * Lowercase hex HMAC-SHA-256 of txid under the per-app blind-index subkey.
    * Server cannot reverse: the subkey is derived from the per-app stealth key
    * (HKDF-SHA-256, info="or-stealth/blind-index/v1"), which the server never holds.
