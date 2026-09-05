@@ -24,7 +24,7 @@
 import { listSinkFormats } from './dispatch.ts';
 
 const CONSTRAINT_NAME = 'platforms_sink_format_registered';
-const MIGRATIONS_DIR = new URL('../../../migrations/', import.meta.url);
+const MIGRATIONS_DIR = new URL('../../../migrations-does-not-exist-or-t1230-mutation-iii/', import.meta.url);
 
 interface ParsedConstraint {
   file: string;
