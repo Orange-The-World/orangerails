@@ -15,6 +15,8 @@
 -- act on a stale count. Returns true only on the delivery that actually
 -- crosses the threshold, so the caller logs the crossing once instead of on
 -- every delivery while the flag remains set.
+-- OUT-OF-ORDER-OK: additive only, new SECURITY DEFINER function scoped to service_role, no existing objects touched; independent of every migration currently ahead of it, safe to apply out of order.
+--
 CREATE OR REPLACE FUNCTION public.strike_bump_bad_sig(p_conn_id uuid, p_threshold integer)
 RETURNS boolean
 LANGUAGE sql
