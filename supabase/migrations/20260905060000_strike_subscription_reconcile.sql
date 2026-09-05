@@ -32,6 +32,8 @@
 -- Deliberately requires several consecutive bad-sig deliveries, not a
 -- single one, before acting: one unusual delivery must not by itself
 -- trigger a resubscribe cycle.
+-- OUT-OF-ORDER-OK: additive only, two new columns with defaults on public.connections; independent of every migration currently ahead of it, safe to apply out of order.
+--
 ALTER TABLE public.connections
     ADD COLUMN IF NOT EXISTS strike_bad_sig_count INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS strike_needs_resubscribe BOOLEAN NOT NULL DEFAULT FALSE;
