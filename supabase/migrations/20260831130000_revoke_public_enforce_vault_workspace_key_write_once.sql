@@ -1,3 +1,29 @@
+-- OUT-OF-ORDER-OK: absent from both ledgers, and no later migration touches this function, so applying it late is a no-op or the revoke it was always meant to be (OR-T2256).
+--
+-- What was actually checked, on 2026-09-05, twice and independently, by the
+-- DBA and by the author of this line:
+--
+--   * The dev ledger (supabase_migrations.schema_migrations) tops out at
+--     20260904150000 and has no row for 20260831130000. The prod ledger tops
+--     out at 20260822031500 and has no row for it either. So no environment
+--     is being asked to re-apply this; every environment is applying it for
+--     the first time.
+--   * Every migration numbered above this one was enumerated from the tree on
+--     dev and read. None of them mentions
+--     public.enforce_vault_workspace_key_write_once. There is no later grant
+--     for this revoke to take back, and no later object that depends on the
+--     grant it removes.
+--   * The body is re-runnable by construction. Both DO blocks are guarded:
+--     the first returns immediately when to_regprocedure finds no such
+--     function, and the second only raises on a post-condition.
+--
+-- Renumbering was considered and rejected. This file already carries its
+-- second version: it was 20260831120000 and was moved here because that
+-- prefix collided with 20260831120000_user_vault_meta_keyring_epoch.sql
+-- (OR-T1154). The ledger stores one row per version, so dev's existing
+-- 20260831120000 row cannot be attributed to either of the two files that
+-- shared that prefix. A third number would move the problem rather than end
+-- it, and would leave the same guard refusing the same run tomorrow.
 -- 20260831130000_revoke_public_enforce_vault_workspace_key_write_once.sql
 --
 -- WHY
