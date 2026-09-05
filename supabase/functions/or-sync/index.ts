@@ -51,7 +51,7 @@ import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/
 import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
-import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
 import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
 import {
   getSinkAdapter,
@@ -1437,6 +1437,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   } catch (err) {
     console.error('[or-sync] fatal:', err);
+    // DL-0603 / issue #373: this catch returns a Response rather than
+    // rethrowing, so wrapSentryHandler's own catch (which only fires on an
+    // exception that escapes the handler entirely) never sees it either.
+    // Report it directly so a fatal request-level failure is not silent.
+    void reportError(err, 'or-sync', req);
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-sync'));
@@ -1549,6 +1554,14 @@ export async function handleConnectionError(
   const correlationId = randomCorrelationId();
   const fp = await errorFingerprint(raw, errorClass);
   console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}${upstreamDetailSuffix(code, raw)}`);
+
+  // DL-0603 / issue #373: this per-connection catch previously only logged
+  // and updated the connection row, so a real sync error never reached
+  // GlitchTip (wrapSentryHandler only fires on an exception that escapes
+  // the whole request, and this catch does not rethrow). Report it here,
+  // fire-and-forget so a slow or unreachable pulse never adds latency to
+  // the batch response the caller is waiting on.
+  void reportError(e, 'or-sync');
 
   // Persist the taxonomy code on the connection row. In legacy
   // (non-sink) mode we still want it encrypted at rest so the column
