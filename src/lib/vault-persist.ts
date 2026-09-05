@@ -112,6 +112,41 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     clearMigrationKeys,
   } = args;
 
+  // Guard (OR-T0755): a caller's own select is the only thing that decides
+  // whether newKemSecretWrapped/newSigSecretWrapped are populated or null.
+  // Null is correct when there genuinely is no PQC secret to carry, but a
+  // caller whose select simply omits these columns gets undefined here too,
+  // and `?? null` at the call site cannot tell those two apart. Writing
+  // through on that undetected omission drops a real, live secret with no
+  // error at the time and no way back, because the migration loop below
+  // destroys the old wrap key it was stored under. So: read what this user
+  // actually has stored, and refuse before any row below is re-encrypted if
+  // a stored secret is non-null while the corresponding new value is null.
+  // Keep going when there is genuinely nothing stored yet; that is the
+  // ordinary no-PQC-keys case and the omit-on-null write further down is
+  // still correct for it.
+  const { data: storedMetaRows, error: storedMetaErr } = await supabase
+    .from("user_vault_meta")
+    .select("kem_secret_wrapped, sig_secret_wrapped")
+    .eq("user_id", userId);
+  if (storedMetaErr) throw storedMetaErr;
+  const storedMeta = (
+    storedMetaRows as Array<{
+      kem_secret_wrapped: string | null;
+      sig_secret_wrapped: string | null;
+    }> | null
+  )?.[0];
+  if (storedMeta?.kem_secret_wrapped != null && newKemSecretWrapped === null) {
+    throw new Error(
+      "migrateAndPersistRotatedVault: kem_secret_wrapped is stored for this user but the caller supplied null. Refusing before any row is re-encrypted, because writing through would destroy the stored PQC secret with no way back.",
+    );
+  }
+  if (storedMeta?.sig_secret_wrapped != null && newSigSecretWrapped === null) {
+    throw new Error(
+      "migrateAndPersistRotatedVault: sig_secret_wrapped is stored for this user but the caller supplied null. Refusing before any row is re-encrypted, because writing through would destroy the stored PQC secret with no way back.",
+    );
+  }
+
   // Re-encrypt connections first, then transactions, then meta.
   // Meta is written last so a partial failure leaves the STORED wrappers still
   // pointing at the old MEK: the user can still unlock, and every row that has
