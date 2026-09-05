@@ -656,7 +656,14 @@ jobs:
               break
             fi
             echo "anon-EXECUTE query attempt ${attempt}/3 did not return a success status"
-            [ "$attempt" -lt 3 ] && sleep 10
+            # An `if`, not `[ "$attempt" -lt 3 ] && sleep 10`. Same reasoning as
+            # check-pending-migrations above: this step's `set -uo pipefail`
+            # does not clear the `-e` GitHub Actions already applies by default,
+            # so a bare AND-list here can exit the step before the `unknown`
+            # call right after this loop (OR-T1536).
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
           done
           # Response body not echoed on failure -- the one place a
           # token-shaped string could reach a public build log.
