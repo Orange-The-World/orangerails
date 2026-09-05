@@ -120,6 +120,33 @@ jobs:
       # alone does not do it. If a future change binds target to an environment, this
       # carrier silently moves to after the approval it exists to inform and nothing
       # here will fail to warn you.
+      # OR-T1801. A missing reason already fails loud, below. A PRESENT but
+      # worthless one ("x", "redeploy", yesterday's reason pasted forward) was
+      # unguarded: nothing checked it named an actual restore point, so the
+      # step summary looked identical whether the reason was real or junk.
+      # This must run BEFORE the environment pause, same reasoning as the
+      # summary step below: an approver at the pause needs the refusal to
+      # have already fired, not to discover it after clicking approve.
+      # Checked on SHAPE (a parseable date/time), never on exact wording, so
+      # this does not silently stop firing the next time the message is
+      # reworded. A redeploy (apply_migrations false) needs no restore point
+      # and is untouched.
+      - name: Refuse an apply-migrations dispatch with no restore point in its reason
+        if: github.event_name == 'workflow_dispatch' && inputs.apply_migrations == true
+        env:
+          RUN_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          # A restore point is a UTC-shaped date, optionally with a time, so
+          # this looks for that shape rather than an exact sentence:
+          # 2026-09-04 or 2026-09-04T00:00 or 2026-09-04T00:00:00Z all count.
+          CANDIDATE="$(printf '%s' "${RUN_REASON}" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?Z?)?' | head -n1 || true)"
+          if [ -z "${CANDIDATE}" ] || ! date -u -d "${CANDIDATE}" >/dev/null 2>&1 || [ "${#RUN_REASON}" -lt 20 ]; then
+            echo "::error title=No restore point in the reason::apply_migrations is true but the reason input carries no parseable UTC timestamp. A restore point is the backup age an approver checks this dispatch against, and 'x', 'redeploy', or a reason pasted forward from a previous run all look identical to a real one without this check. State the restore point you are relying on, for example: 'restore point 2026-09-04T00:00:00Z, redeploying after a cancelled run.'"
+            exit 1
+          fi
+          echo "Reason carries a parseable restore point (${CANDIDATE}) and is ${#RUN_REASON} character(s) long. Proceeding."
+
       - name: Publish the restore point where the approver can read it
         env:
           # Read through env, never interpolated into the script body: a dispatch input
@@ -134,7 +161,7 @@ jobs:
             echo "Target project: ${{ steps.t.outputs.supabase_ref }} (environment ${{ steps.t.outputs.environment_name }})"
             echo "Event: ${{ github.event_name }} on ${{ github.ref_name }}"
             echo "Dispatching actor: ${{ github.actor }}"
-            echo "Run created (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "This step ran (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
             echo ""
             if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
               echo "Apply migrations requested: ${APPLY_MIGRATIONS:-false}"
