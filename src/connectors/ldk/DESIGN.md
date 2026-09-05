@@ -102,15 +102,20 @@ upsert so a concurrent restore cannot interleave. Keyed on the composite
 `(user_id, outpoint_bidx)`:
 
 ```sql
-INSERT INTO channel_state (user_id, outpoint_bidx, update_id, sealed_blob)
-VALUES (:user_id, :bidx, :new_id, :blob)
+INSERT INTO channel_state (user_id, outpoint_bidx, update_id, seal_version, sealed_iv, sealed_ct)
+VALUES (:user_id, :bidx, :new_id, :seal_version, :sealed_iv, :sealed_ct)
 ON CONFLICT (user_id, outpoint_bidx) DO UPDATE
   SET update_id = EXCLUDED.update_id,
-      sealed_blob = EXCLUDED.sealed_blob,
-      updated_at  = now()
+      seal_version = EXCLUDED.seal_version,
+      sealed_iv = EXCLUDED.sealed_iv,
+      sealed_ct = EXCLUDED.sealed_ct
   WHERE channel_state.update_id < EXCLUDED.update_id
 RETURNING update_id;
 ```
+
+(The envelope is stored as three columns, not one `sealed_blob`, and the
+table has no `updated_at`; corrected 2026-09-05 against the live dev
+schema, OR-T1721.)
 
 The `WHERE ... < EXCLUDED.update_id` lives **inside** the ON CONFLICT, so the
 compare-and-set is one atomic op, not application logic. `:user_id` is taken
