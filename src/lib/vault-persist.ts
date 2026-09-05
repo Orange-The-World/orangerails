@@ -47,11 +47,254 @@ export const RECOVERY_META_NOT_SAVED_MESSAGE =
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
+/**
+ * Shown when the reconciliation below the paging loops finds that this run did
+ * not re-encrypt every row the table holds for this user.
+ *
+ * It names both numbers on purpose. "migrated 0 of 12 transactions" and
+ * "migrated 12 of 12 transactions" have to read differently, because the whole
+ * family of defects on this path is a check that cannot tell those two apart.
+ */
+export function rowsNotReconciledMessage(
+  label: string,
+  migrated: number,
+  total: number | null | undefined,
+): string {
+  const totalText = typeof total === "number" ? String(total) : "unknown";
+  return (
+    `Vault recovery stopped before saving: migrated ${migrated} of ${totalText} ${label}. ` +
+    "Your stored vault keys were not changed. Do not close or reload this page, and contact " +
+    "support with this message."
+  );
+}
+
+/**
+ * Shown when a row UPDATE reported no error and yet changed no row.
+ *
+ * WHY THIS EXISTS AND WHY IT IS NOT COSMETIC. A PostgREST update that matches
+ * nothing, because row-level security refused it or because the row went away
+ * underneath us, comes back with no error at all. Counting those as migrated
+ * would make the reconciliation below compare a read against a read: on a run
+ * where every write is refused, the migrated total equals the table total, the
+ * reconciliation agrees, and the irreversible meta write proceeds having
+ * re-encrypted nothing. Asking each update for the row it changed is the only
+ * thing that makes the migrated number evidence of a landed write.
+ */
+export function rowNotWrittenMessage(label: string, rowId: string): string {
+  return (
+    `Vault recovery stopped before saving: a ${label} row (${rowId}) was not written. ` +
+    "Your stored vault keys were not changed. Do not close or reload this page, and contact " +
+    "support with this message."
+  );
+}
+
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
 
 /** Connections are re-encrypted in pages of this size. */
 export const CONNECTION_PAGE_SIZE = 500;
+
+/**
+ * How many times the reconciliation goes back to finish rows this run missed
+ * before it gives up. Bounded, so a table being written continuously by another
+ * session cannot keep this loop running for ever.
+ */
+export const RECONCILE_MAX_PASSES = 3;
+
+/**
+ * Read the exact number of rows this user owns in `table`.
+ *
+ * WHY A HEAD COUNT AND NOT A SELECT OF IDS. The failure being guarded against
+ * is a read that comes back short without erroring, so counting the rows a
+ * select returns would measure the fault with the ruler that has the fault in
+ * it. PostgREST computes an exact count server side and reports it out of band
+ * in the Content-Range header, so it is not clipped by the server-side maximum
+ * row count that clips the row payload.
+ *
+ * THE REQUIREMENT THIS READ HAS TO MEET. These tables are scoped by row-level
+ * security rather than by a column this code could filter on, so the count read
+ * and the paged reads have to carry the same filters as each other. If either
+ * side ever gains a filter the other does not have, the two sides stop
+ * measuring the same set and every comparison below becomes meaningless.
+ *
+ * A count that cannot be read is a FAILURE, not a pass. At the point where it
+ * matters, an unreadable count is indistinguishable from agreement, and letting
+ * it through would put the original silence straight back.
+ */
+async function exactRowCount(
+  supabase: VaultPersistClient,
+  table: string,
+  label: string,
+  migrated: number,
+): Promise<number> {
+  const { count, error } = await supabase
+    .from(table)
+    .select("id", { count: "exact", head: true });
+  if (error) throw error;
+  if (typeof count !== "number") throw new Error(rowsNotReconciledMessage(label, migrated, null));
+  return count;
+}
+
+/** One table's share of the rotation, as the reconciliation needs to see it. */
+interface TableReconcile {
+  table: string;
+  label: string;
+  /** ids this run has PROVEN it rewrote */
+  migrated: Set<string>;
+  /** re-walk the table, migrating only the rows not already in `migrated` */
+  sweep: () => Promise<void>;
+}
+
+/**
+ * Finish the rotation, and do not return until every row this user owns is
+ * PROVEN to be under the new MEK.
+ *
+ * WHY FINISHING AND NOT STOPPING. Between the first rewritten row and the meta
+ * write, the only copy of the new MEK is in this page's memory, so a row this
+ * run has already rewritten is readable only until the tab closes. Stopping is
+ * therefore not free: it gives up every row already written in order to save
+ * the rows that were missed. The missed rows are still under the old MEK and
+ * the old subkeys are still in memory, because clearMigrationKeys has not run,
+ * so they can simply be migrated too. That is strictly better than abandoning
+ * either set.
+ *
+ * WHY COMPLETENESS IS DECIDED BY A SWEEP AND NOT BY COMPARING COUNTS. An
+ * earlier version of this decided the rotation was complete when the exact row
+ * count equalled the number of rows this run had written. One concurrent DELETE
+ * of an already-migrated row defeats that comparison and opens a gap in the
+ * same operation, because offset paging addresses rows by POSITION: removing a
+ * row from a page already consumed shifts every later row one place toward the
+ * start, so exactly one row falls between the window just read and the next
+ * window and is never returned at all. The same delete also lowers the total by
+ * one, and the deleted row's id stays in the migrated set because it was
+ * written before it was removed. Those three effects cancel one for one, so the
+ * counts agree and the skipped row is stranded under a key nothing stores any
+ * more. Worked example at a page size of 500 over 1000 rows: read positions
+ * 0..499, delete the eighth row, read positions 500..999 and receive the
+ * original rows 501..999, because original row 500 has moved to position 499
+ * inside the window already read. Migrated 999, counted 999, one row silently
+ * lost for ever.
+ *
+ * Keyset pagination on id removes that particular shift, but it does NOT make
+ * the count comparison sound: one delete of a migrated row plus one insert
+ * below the cursor cancel each other in the total just as neatly, and the
+ * inserted row is still under the old MEK. So the test here is coverage, which
+ * is a property of what this run actually reached: keep sweeping until a
+ * COMPLETE walk of a table finds every row it returns already migrated. That
+ * does not care WHY a row was missed, which is the only reason to trust it
+ * against the next mechanism nobody has thought of.
+ *
+ * THE COST, stated because it is not free. A clean rotation now walks each
+ * table twice. The second walk is what turns the first walk's completeness from
+ * an assumption into evidence, and it issues no updates, because every row it
+ * sees is already in the migrated set.
+ *
+ * WHY THE COUNT IS STILL HERE. A sweep cannot see a row the read never returns
+ * at all. If the project's server-side maximum row count is ever lowered below
+ * the page size, every walk ends on the same short first page, so every sweep
+ * agrees there is nothing left to do while the rows past the cap sit
+ * unmigrated. Only a count computed server side catches that. The two tests
+ * fail in different directions and neither one replaces the other.
+ *
+ * WHY A TOTAL LOWER THAN THE MIGRATED COUNT IS NOT AN ERROR. It means rows went
+ * away after being rewritten, by deletion or by leaving this user's
+ * row-level-security scope, and a row that is gone cannot be stranded. Note it
+ * is no longer read as evidence that nothing was MISSED, which is exactly what
+ * the old version got wrong; it is only a reason not to abandon the rotation.
+ * The sweep is what decides completeness.
+ *
+ * WHAT HAPPENS IF IT NEVER CONVERGES. This is a real choice, not a default.
+ * After RECONCILE_MAX_PASSES sweeps, something is inserting rows about as fast
+ * as this loop migrates them. Both branches lose data, so the error names the
+ * arithmetic: stopping gives up the rows this run wrote, and continuing to the
+ * meta write would permanently discard the only key for the rows it did not.
+ * Stopping is chosen because it changes nothing that is stored, so the user
+ * still holds a vault that unlocks and everything still readable from storage
+ * stays readable, and because continuing would fail silently and be discovered
+ * months later by a user missing transactions. The real answer to this case is
+ * a resumable, per-row-keyed rotation that records which rows have moved. That
+ * does not exist yet and is not in scope here.
+ */
+async function reconcileEveryRow(
+  supabase: VaultPersistClient,
+  tables: TableReconcile[],
+): Promise<void> {
+  for (let pass = 0; ; pass++) {
+    // Sweep every table, THEN count every table. Doing both one table at a time
+    // would let a row inserted into the first table while the second is being
+    // swept escape this pass's count entirely.
+    const addedBySweep = new Map<string, number>();
+    for (const entry of tables) {
+      const before = entry.migrated.size;
+      await entry.sweep();
+      addedBySweep.set(entry.table, entry.migrated.size - before);
+    }
+
+    const unsettled: Array<{ entry: TableReconcile; total: number }> = [];
+    for (const entry of tables) {
+      const total = await exactRowCount(supabase, entry.table, entry.label, entry.migrated.size);
+      const added = addedBySweep.get(entry.table) ?? 0;
+      // A sweep that migrated something is proof this run had not finished, so
+      // the next sweep has to confirm there is nothing left. A total above the
+      // migrated count means rows exist that no sweep has ever reached.
+      if (added > 0 || total > entry.migrated.size) unsettled.push({ entry, total });
+    }
+    if (unsettled.length === 0) return;
+
+    if (pass >= RECONCILE_MAX_PASSES) {
+      // Prefer a table that is genuinely short, so the numbers in the message
+      // read as "migrated fewer than exist" rather than the other way round.
+      const blocked =
+        unsettled.find(({ entry, total }) => total > entry.migrated.size) ?? unsettled[0];
+      throw new Error(
+        rowsNotReconciledMessage(blocked.entry.label, blocked.entry.migrated.size, blocked.total),
+      );
+    }
+  }
+}
+
+/**
+ * Walk a table in ordered pages and hand every row not already migrated to
+ * `migrateRow`.
+ *
+ * WHY THE ORDER CLAUSE IS LOAD BEARING. Postgres guarantees no row order
+ * without ORDER BY, and the update inside this walk writes a new tuple version,
+ * which can change the order a later scan returns. Without it a row can be
+ * skipped between pages, which strands it under a key nothing stores any more,
+ * or returned twice.
+ *
+ * WHY THE PAGE LENGTH ENDS THE WALK. A capped or empty read raises no error, so
+ * the number of rows returned is the only honest signal that there is nothing
+ * more to read.
+ */
+async function walkAndMigrate<Row extends { id: string }>(
+  supabase: VaultPersistClient,
+  table: string,
+  columns: string,
+  pageSize: number,
+  migrated: Set<string>,
+  migrateRow: (row: Row) => Promise<void>,
+): Promise<void> {
+  let offset = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .order("id", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw error;
+
+    const page = (data ?? []) as Row[];
+    if (page.length === 0) break;
+
+    for (const row of page) {
+      if (!migrated.has(row.id)) await migrateRow(row);
+    }
+
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+}
 
 export interface RotateVaultArgs {
   supabase: VaultPersistClient;
@@ -118,103 +361,137 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // not moved yet still reads. That is the only property this ordering buys.
   // It does NOT make a retry safe. See the note on the meta write below before
   // relying on it.
-  // credentials subkey changes with the MEK.
   //
-  // WHY THIS READ IS PAGED. It used to be a single unpaged select. PostgREST
-  // caps a select at a server-side maximum row count, and a capped read is a
-  // SUCCESSFUL read: no error is raised on any path. A user holding more
-  // connection rows than that cap therefore had every row past it left wrapped
-  // under the OLD MEK while the meta write at the bottom of this function still
+  // WHY THESE READS ARE PAGED. Each used to be a single unpaged select.
+  // PostgREST caps a select at a server-side maximum row count, and a capped
+  // read is a SUCCESSFUL read: no error is raised on any path. A user holding
+  // more rows than that cap therefore had every row past it left wrapped under
+  // the OLD MEK while the meta write at the bottom of this function still
   // landed. Nothing in that sequence reports a problem, and because
   // recoverWithCode() mints a fresh MEK on every call, the key those rows are
   // still wrapped under is gone. Silent and permanent.
   //
-  // WHY THE ORDER CLAUSE IS LOAD BEARING. Postgres guarantees no row order
-  // without ORDER BY, and the update inside this loop writes a new tuple
-  // version, which can change the order a later scan returns. Without it a row
-  // can be skipped between pages, which strands it exactly as above, or
-  // returned twice, in which case migrateCredentialsCiphertext is handed
-  // ciphertext that is already under the new MEK, throws, and aborts the
-  // rotation partway with no safe retry.
+  // WHAT PAGING CANNOT FIX ON ITS OWN, stated rather than hidden. A walk over a
+  // stable order is still not immune to another session changing the table
+  // while it runs. An INSERT below the cursor is missed and is written under the
+  // OLD MEK by construction. A DELETE from a page already read shifts every
+  // later row one place toward the start, so a row falls between two windows and
+  // is never returned at all. Keyset pagination on id removes the second of
+  // those and neither of the first, so it is not the fix either. Both are
+  // handled by reconcileEveryRow below, which drives the walks and keeps
+  // sweeping until a complete walk finds nothing left to migrate.
   //
-  // Residual, stated rather than hidden: offset paging over a stable order is
-  // still not immune to another session INSERTing or DELETing a row while this
-  // loop runs, which shifts the window. Keyset pagination on id would close
-  // that too. It is deliberately out of scope here and is not a regression.
-  let connOffset = 0;
-  for (;;) {
-    const { data: conns, error: connsErr } = await supabase
-      .from("connections")
-      .select("id, encrypted_credentials, encrypted_label")
-      .order("id", { ascending: true })
-      .range(connOffset, connOffset + CONNECTION_PAGE_SIZE - 1);
-    if (connsErr) throw connsErr;
-
-    const connPage = (conns ?? []) as Array<{
-      id: string;
-      encrypted_credentials: string;
-      encrypted_label: string | null;
-    }>;
-    if (connPage.length === 0) break;
-
-    for (const conn of connPage) {
-      const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
-      const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
-      if (conn.encrypted_label) {
+  // Distinct ids, not a running tally, and added only once the UPDATE has
+  // returned the row it changed: a read that hands the same row back twice must
+  // not be able to make the reconciliation agree, and neither must a write that
+  // was refused at the row layer.
+  const migratedConnectionIds = new Set<string>();
+  const migrateConnection = async (conn: {
+    id: string;
+    encrypted_credentials: string;
+    encrypted_label: string | null;
+  }) => {
+    const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
+    const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
+    if (conn.encrypted_label) {
+      try {
+        connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
+      } catch {
         try {
-          connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
+          connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
         } catch {
-          try {
-            connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
-          } catch {
-            // Label migration failed with both keys. Leave the stale ciphertext.
-            // encrypted_label is cosmetic and the connection remains usable.
-          }
+          // Label migration failed with both keys. Leave the stale ciphertext.
+          // encrypted_label is cosmetic and the connection remains usable.
         }
       }
-      const { error: connErr } = await supabase
-        .from("connections")
-        .update(connUpdate)
-        .eq("id", conn.id);
-      if (connErr) throw connErr;
     }
-
-    // End on a short page, not on the absence of an error. A capped or empty
-    // read is not an error, so the row count is the only honest signal.
-    if (connPage.length < CONNECTION_PAGE_SIZE) break;
-    connOffset += CONNECTION_PAGE_SIZE;
-  }
-
-  // Re-encrypt transactions in pages of 500, in a deterministic id order.
-  // encrypted_payload uses the transactions subkey, which changes with the MEK.
-  // The order clause carries the same weight it does on the connections read
-  // above: this loop UPDATEs the rows of each page as it goes, so an unordered
-  // scan may skip a row (stranded under the old MEK, silently and permanently)
-  // or return one twice (decryption throws and the rotation aborts partway).
-  let offset = 0;
-  for (;;) {
-    const { data: txns, error: txnsErr } = await supabase
-      .from("encrypted_transactions")
-      .select("id, encrypted_payload")
-      .order("id", { ascending: true })
-      .range(offset, offset + TRANSACTION_PAGE_SIZE - 1);
-    if (txnsErr) throw txnsErr;
-    if (!txns || (txns as unknown[]).length === 0) break;
-
-    await Promise.all(
-      (txns as Array<{ id: string; encrypted_payload: string }>).map(async (txn) => {
-        const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
-        const { error: txnErr } = await supabase
-          .from("encrypted_transactions")
-          .update({ encrypted_payload: newPayload })
-          .eq("id", txn.id);
-        if (txnErr) throw txnErr;
-      }),
+    const { data: connWritten, error: connErr } = await supabase
+      .from("connections")
+      .update(connUpdate)
+      .eq("id", conn.id)
+      .select("id");
+    if (connErr) throw connErr;
+    if (!connWritten || (connWritten as unknown[]).length !== 1) {
+      throw new Error(rowNotWrittenMessage("connection", conn.id));
+    }
+    migratedConnectionIds.add(conn.id);
+  };
+  const walkConnections = () =>
+    walkAndMigrate(
+      supabase,
+      "connections",
+      "id, encrypted_credentials, encrypted_label",
+      CONNECTION_PAGE_SIZE,
+      migratedConnectionIds,
+      migrateConnection,
     );
 
-    if ((txns as unknown[]).length < TRANSACTION_PAGE_SIZE) break;
-    offset += TRANSACTION_PAGE_SIZE;
-  }
+  // encrypted_payload uses the transactions subkey, which changes with the MEK.
+  //
+  // These updates are issued one at a time rather than through Promise.all. The
+  // row that failed has to be nameable, and a batch that rejects partway leaves
+  // the migrated set holding whichever siblings happened to settle first, which
+  // is exactly the number the reconciliation below depends on being exact.
+  const migratedTransactionIds = new Set<string>();
+  const migrateTransaction = async (txn: { id: string; encrypted_payload: string }) => {
+    const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
+    const { data: txnWritten, error: txnErr } = await supabase
+      .from("encrypted_transactions")
+      .update({ encrypted_payload: newPayload })
+      .eq("id", txn.id)
+      .select("id");
+    if (txnErr) throw txnErr;
+    if (!txnWritten || (txnWritten as unknown[]).length !== 1) {
+      throw new Error(rowNotWrittenMessage("transaction", txn.id));
+    }
+    migratedTransactionIds.add(txn.id);
+  };
+  const walkTransactions = () =>
+    walkAndMigrate(
+      supabase,
+      "encrypted_transactions",
+      "id, encrypted_payload",
+      TRANSACTION_PAGE_SIZE,
+      migratedTransactionIds,
+      migrateTransaction,
+    );
+
+  // MIGRATE AND RECONCILE, BEFORE THE META WRITE.
+  //
+  // This drives both walks and does not return until every row is proven to be
+  // under the new MEK. It is the last instant at which the rotation can still be
+  // FINISHED: the stored enc_mek_ciphertext and recovery_ciphertext still wrap
+  // the OLD MEK, every row that has not moved still reads, and
+  // clearMigrationKeys has not run, so a row this run missed is still under the
+  // old subkeys and can simply be migrated now. After the write below, the same
+  // gap is unrecoverable AND silent.
+  //
+  // WHAT THIS CATCHES. Completeness is decided by a sweep that finds nothing
+  // left to migrate, so it covers a row missed by a reorder, by a concurrent
+  // insert, or by the position shift a concurrent delete causes, without having
+  // to enumerate those mechanisms. The exact count is kept alongside it for the
+  // one case a sweep cannot see: the page size is only safe while it stays
+  // strictly below the project's server-side maximum row count, and that cap is
+  // a project setting outside version control, so lowering it under 500 would
+  // make every walk end on the same short first page and agree with itself.
+  //
+  // Both tables are reconciled together rather than one after each walk,
+  // deliberately: a row inserted into connections DURING the transaction walk
+  // is caught only by a check that runs after both.
+  await reconcileEveryRow(supabase, [
+    {
+      table: "connections",
+      label: "connections",
+      migrated: migratedConnectionIds,
+      sweep: walkConnections,
+    },
+    {
+      table: "encrypted_transactions",
+      label: "transactions",
+      migrated: migratedTransactionIds,
+      sweep: walkTransactions,
+    },
+  ]);
 
   // From the first rewritten row until the meta write below lands, the only
   // copy of the new MEK is in the page's memory. Closing or reloading the tab
