@@ -92,7 +92,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const expected = await computeHmacHex(conn.strike_webhook_secret, body);
     if (!timingSafeEqual(expected, sig)) {
       console.warn('[or-strike-webhook] bad-sig 401: conn=%s sig_len=%s expected_len=%s', connId, sig.length, expected.length);
-      await recordBadSig(client, connId, conn.strike_bad_sig_count ?? 0);
+      await recordBadSig(client, connId);
       return new Response('bad signature', { status: 401 });
     }
     // A correctly verified delivery proves the stored secret is still
