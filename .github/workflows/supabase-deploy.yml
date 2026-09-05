@@ -1048,6 +1048,11 @@ jobs:
         #   MIGRATION_APPLY_ALLOWED_ACTORS_DEV    (dev project)
         #   MIGRATION_APPLY_ALLOWED_ACTORS_PROD   (prod project)
         # Either one absent or empty fails closed on that path only.
+        #
+        # (OR-T2468: this comment-only refresh commit carries no functional change.
+        # It exists to give the PR a fresh head sha with no Cloudflare Pages check
+        # attached, clearing an orphaned in_progress check past the retry window.
+        # See runbook or-release-unstick-orphaned-cloudflare-pages-check.)
         env:
           TARGET_ENV: ${{ needs.target.outputs.environment_name }}
           ALLOWED_DEV: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_DEV }}
