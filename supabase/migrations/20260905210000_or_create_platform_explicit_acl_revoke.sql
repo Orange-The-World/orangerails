@@ -50,11 +50,11 @@ BEGIN
     RAISE EXCEPTION 'or_create_platform: authenticated still holds a privilege after REVOKE: %', v_acl;
   END IF;
 
-  IF v_acl LIKE '%=%/%' AND v_acl !~ '(^|,)(postgres|service_role)=' THEN
-    -- Catch a PUBLIC grant, which Postgres prints as a bare "=X/owner" entry
-    -- with no role name before the "=", plus any other grantee this file did
-    -- not anticipate. Only postgres and service_role are expected to remain.
-    RAISE EXCEPTION 'or_create_platform: unexpected grantee remains in proacl: %', v_acl;
+  IF v_acl LIKE '{=%' OR v_acl LIKE '%,=%' THEN
+    -- Postgres prints a PUBLIC grant as a bare "=X/owner" entry with no role
+    -- name before the "=", either as the first entry in the array or right
+    -- after a comma. Either shape means PUBLIC holds a privilege.
+    RAISE EXCEPTION 'or_create_platform: PUBLIC still holds a privilege after REVOKE: %', v_acl;
   END IF;
 END
 $$;
