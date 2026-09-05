@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: read-only catalogue check, grants/revokes/alters nothing, documented idempotent and order-independent below.
 -- Make the ANONYMOUS role's half of the default privilege taps in schema public
 -- VISIBLE on every apply. This file grants nothing, revokes nothing and alters
 -- nothing. It reads pg_default_acl and raises a warning. If you came here
