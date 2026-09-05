@@ -478,7 +478,17 @@ jobs:
               break
             fi
             echo "migration query attempt ${attempt}/3 did not return a success status"
-            [ "$attempt" -lt 3 ] && sleep 10
+            # An `if`, not `[ "$attempt" -lt 3 ] && sleep 10`. GitHub Actions
+            # invokes every plain `run:` block as `bash -e` by default, whether
+            # or not the script also declares its own `set`; this step's
+            # `set -uo pipefail` above adds -u and pipefail, it does not clear
+            # -e. An AND-list left dangling at the end of a loop is how a
+            # different job's retry (the migration classifier, CI run
+            # 33637547005) silently died mid-attempt with no summary written
+            # (OR-T1536). This `if` cannot fail the same way.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
           done
           # The response body is not echoed. On an auth failure it is the only
           # place a token-shaped string could surface in a public build log.
