@@ -18,8 +18,10 @@ import { describe, it, expect, vi } from "vitest";
 import {
   migrateAndPersistRotatedVault,
   persistRewrappedVaultMeta,
+  loadVaultMetaForRecovery,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
+  VAULT_META_UNREADABLE_MESSAGE,
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
   type VaultPersistClient,
@@ -629,5 +631,63 @@ describe("vault password change: the re-wrapped meta write", () => {
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     expect(calls.every((c) => c.table === "user_vault_meta")).toBe(true);
+  });
+});
+
+describe("vault recovery: the pre-flight meta read", () => {
+  // A dedicated, minimal fake rather than reusing makeFakeClient above: that
+  // one models the paged connections/transactions reads and the meta UPDATE,
+  // and has no .eq().single() chain at all. This models only the single-row
+  // SELECT this function actually issues.
+  function makeMetaReadClient(result: { data: unknown; error: unknown }): VaultPersistClient {
+    return {
+      from(table: string) {
+        expect(table).toBe("user_vault_meta");
+        return {
+          select() {
+            return {
+              eq() {
+                return {
+                  single: async () => result,
+                };
+              },
+            };
+          },
+        };
+      },
+    } as VaultPersistClient;
+  }
+
+  it("throws VAULT_META_UNREADABLE_MESSAGE when the read returns an error", async () => {
+    const client = makeMetaReadClient({ data: null, error: { message: "PGRST116" } });
+
+    await expect(loadVaultMetaForRecovery(client, "user-1")).rejects.toThrow(
+      VAULT_META_UNREADABLE_MESSAGE,
+    );
+  });
+
+  it("throws VAULT_META_UNREADABLE_MESSAGE when the read returns no row and no error", async () => {
+    // The exact case a guard that only checked `error` would miss: a select
+    // that comes back empty without ever raising. This is what used to let a
+    // vault recovery proceed as if nothing had been stored, instead of
+    // refusing before anything was re-encrypted.
+    const client = makeMetaReadClient({ data: null, error: null });
+
+    await expect(loadVaultMetaForRecovery(client, "user-1")).rejects.toThrow(
+      VAULT_META_UNREADABLE_MESSAGE,
+    );
+  });
+
+  it("returns the row when the read succeeds", async () => {
+    const row = {
+      vault_salt: "salt-1",
+      vault_verifier_ciphertext: "verifier-1",
+      recovery_ciphertext: "recovery-1",
+      kem_secret_wrapped: null,
+      sig_secret_wrapped: null,
+    };
+    const client = makeMetaReadClient({ data: row, error: null });
+
+    await expect(loadVaultMetaForRecovery(client, "user-1")).resolves.toEqual(row);
   });
 });
