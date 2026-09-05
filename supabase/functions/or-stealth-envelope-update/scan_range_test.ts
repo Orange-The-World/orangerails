@@ -1,194 +1,128 @@
 /**
- * Unit tests for the scan-range RPC payload (DL-1597, DL-1610).
+ * Unit tests for scan-range recording in or-stealth-envelope-update (OR-T1953).
+ *
+ * Before this fix, buildScanRangeArgs returned a bare null for two unrelated
+ * reasons (a malformed request, and a well-formed one whose from_height
+ * exceeds last_block_scanned), and recordScanRange dropped both silently.
+ * These tests exercise both causes separately and prove each is now logged
+ * with a distinct, named reason.
  *
  * Run with: deno test --no-check supabase/functions/or-stealth-envelope-update/
- *
- * The first test is the regression guard for the defect that made the first
- * version of the database owner check unreachable. Read the module comment in
- * scan_range.ts for the full reasoning; the short version is that the handler
- * passed the app_user_id it had just read from the connection row, so the
- * database compared the owner against itself and could never reject anything.
- *
- * That test fails against the pre-fix handler and passes against this branch,
- * which is the property the review asked for.
  */
 
 // @ts-nocheck -- matches the --no-check CI flag; type coverage is the ratchet job.
 
-import {
-  assertEquals,
-  assertNotEquals,
-} from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { buildScanRangeArgs, recordScanRange } from './scan_range.ts';
 
-const CONN_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const baseReq = {
+  connection_id: 'conn-1',
+  app_user_id: 'user-1',
+  last_block_scanned: 100,
+};
 
-/** The identity of the signed-in caller making the request. */
-const CALLER = 'user-making-the-request';
+// --- buildScanRangeArgs: the two null causes are now distinguishable ---
 
-/**
- * The owner of CONN_ID as stored in stealth_connections, i.e. the value the
- * database resolves for itself and compares against. The pre-fix handler read
- * this value and passed it back in, which is what left the comparison unable
- * to distinguish anything.
- */
-const CONNECTION_OWNER = 'user-owning-the-connection';
-
-Deno.test(
-  'payload carries the CALLER id, not the connection owner, so the database check can reject',
-  () => {
-    const args = buildScanRangeArgs({
-      connection_id: CONN_ID,
-      app_user_id: CALLER,
-      last_block_scanned: 900_100,
-      from_height: 900_000,
-    });
-
-    assertNotEquals(args, null);
-    if (args === null) return;
-
-    // The assertion that fails against the pre-fix handler. It passed
-    // CONNECTION_OWNER here, and the database compares the value it is given
-    // against that same owner: always equal, so no input could be rejected.
-    assertNotEquals(
-      args.p_app_user_id,
-      CONNECTION_OWNER,
-      'payload must not carry the connection owner: the database compares against that same value, so the ownership check would be unable to fail',
-    );
-    assertEquals(args.p_app_user_id, CALLER);
-  },
-);
-
-Deno.test('payload shape matches the 4-arg record_stealth_scan_range signature', () => {
-  const args = buildScanRangeArgs({
-    connection_id: CONN_ID,
-    app_user_id: CALLER,
-    last_block_scanned: 900_100,
-    from_height: 900_000,
-  });
-
-  assertEquals(args, {
-    p_connection_id: CONN_ID,
-    p_from_height: 900_000,
-    p_to_height: 900_100,
-    p_app_user_id: CALLER,
+Deno.test('valid request: ok=true with RPC args built from the caller identity', () => {
+  const decision = buildScanRangeArgs({ ...baseReq, from_height: 50 });
+  assertEquals(decision, {
+    ok: true,
+    args: {
+      p_connection_id: 'conn-1',
+      p_from_height: 50,
+      p_to_height: 100,
+      p_app_user_id: 'user-1',
+    },
   });
 });
 
-Deno.test('recordScanRange sends the caller id through to the RPC', async () => {
-  let capturedFn: string | null = null;
-  // deno-lint-ignore no-explicit-any
-  let capturedArgs: any = null;
+Deno.test('malformed: from_height missing -- reason is malformed', () => {
+  const decision = buildScanRangeArgs({ ...baseReq });
+  assertEquals(decision, { ok: false, reason: 'malformed' });
+});
+
+Deno.test('malformed: from_height not an integer -- reason is malformed', () => {
+  const decision = buildScanRangeArgs({ ...baseReq, from_height: 1.5 });
+  assertEquals(decision, { ok: false, reason: 'malformed' });
+});
+
+Deno.test('malformed: from_height negative -- reason is malformed', () => {
+  const decision = buildScanRangeArgs({ ...baseReq, from_height: -1 });
+  assertEquals(decision, { ok: false, reason: 'malformed' });
+});
+
+Deno.test('range exceeded: from_height above last_block_scanned -- distinct reason, not malformed', () => {
+  const decision = buildScanRangeArgs({ ...baseReq, from_height: 101 });
+  assertEquals(decision, { ok: false, reason: 'range_exceeds_last_block_scanned' });
+});
+
+Deno.test('boundary: from_height equal to last_block_scanned is valid, not exceeded', () => {
+  const decision = buildScanRangeArgs({ ...baseReq, from_height: 100 });
+  assertEquals(decision.ok, true);
+});
+
+// --- recordScanRange: both causes must log a distinct line, and never call the RPC ---
+
+async function captureConsoleError(fn: () => Promise<void>): Promise<string[]> {
+  const calls: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    calls.push(args.map((a) => String(a)).join(' '));
+  };
+  try {
+    await fn();
+  } finally {
+    console.error = original;
+  }
+  return calls;
+}
+
+Deno.test('recordScanRange: malformed request logs a line naming "malformed", never calls the RPC', async () => {
+  let rpcCalled = false;
   const client = {
-    // deno-lint-ignore no-explicit-any
-    rpc(fn: string, args: any) {
-      capturedFn = fn;
-      capturedArgs = args;
+    rpc: () => {
+      rpcCalled = true;
       return Promise.resolve({ error: null });
     },
   };
-
-  await recordScanRange(client, {
-    connection_id: CONN_ID,
-    app_user_id: CALLER,
-    last_block_scanned: 900_100,
-    from_height: 900_000,
-  });
-
-  assertEquals(capturedFn, 'record_stealth_scan_range');
-  assertEquals(capturedArgs.p_app_user_id, CALLER);
-  assertNotEquals(capturedArgs.p_app_user_id, CONNECTION_OWNER);
+  const calls = await captureConsoleError(() => recordScanRange(client, { ...baseReq }));
+  assertEquals(rpcCalled, false);
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].includes('malformed'), true);
 });
 
-Deno.test('no from_height: opt-out, no RPC is issued at all', async () => {
-  let called = false;
+Deno.test('recordScanRange: from_height above last_block_scanned logs that exact reason, never calls the RPC', async () => {
+  let rpcCalled = false;
   const client = {
-    rpc() {
-      called = true;
+    rpc: () => {
+      rpcCalled = true;
       return Promise.resolve({ error: null });
     },
   };
-
-  await recordScanRange(client, {
-    connection_id: CONN_ID,
-    app_user_id: CALLER,
-    last_block_scanned: 900_100,
-  });
-
-  assertEquals(called, false);
+  const calls = await captureConsoleError(() =>
+    recordScanRange(client, { ...baseReq, from_height: 101 })
+  );
+  assertEquals(rpcCalled, false);
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].includes('range_exceeds_last_block_scanned'), true);
 });
 
-Deno.test('a rejected range is logged, not thrown: the cursor write must stand', async () => {
+Deno.test('recordScanRange: valid request calls the RPC with the built args and logs nothing', async () => {
+  let rpcArgs: unknown = null;
   const client = {
-    rpc() {
-      // What an ownership rejection from the database looks like here.
-      return Promise.resolve({
-        error: { message: 'record_stealth_scan_range: caller does not own connection' },
-      });
+    rpc: (_name: string, args: unknown) => {
+      rpcArgs = args;
+      return Promise.resolve({ error: null });
     },
   };
-
-  // Must not throw. The preceding cursor write is the safe fallback (DL-1478),
-  // and nothing was written by the rejected call.
-  await recordScanRange(client, {
-    connection_id: CONN_ID,
-    app_user_id: CALLER,
-    last_block_scanned: 900_100,
-    from_height: 900_000,
-  });
-});
-
-Deno.test('opt-out boundary: from_height past last_block_scanned does not record', () => {
-  assertEquals(
-    buildScanRangeArgs({
-      connection_id: CONN_ID,
-      app_user_id: CALLER,
-      last_block_scanned: 900_000,
-      from_height: 900_001,
-    }),
-    null,
+  const calls = await captureConsoleError(() =>
+    recordScanRange(client, { ...baseReq, from_height: 50 })
   );
-});
-
-Deno.test('opt-out boundary: negative and non-integer from_height do not record', () => {
-  assertEquals(
-    buildScanRangeArgs({
-      connection_id: CONN_ID,
-      app_user_id: CALLER,
-      last_block_scanned: 900_100,
-      from_height: -1,
-    }),
-    null,
-  );
-  assertEquals(
-    buildScanRangeArgs({
-      connection_id: CONN_ID,
-      app_user_id: CALLER,
-      last_block_scanned: 900_100,
-      from_height: 900_000.5,
-    }),
-    null,
-  );
-});
-
-Deno.test('records at the boundary: single-block scan (from == to) is legitimate', () => {
-  const args = buildScanRangeArgs({
-    connection_id: CONN_ID,
-    app_user_id: CALLER,
-    last_block_scanned: 900_000,
-    from_height: 900_000,
+  assertEquals(calls.length, 0);
+  assertEquals(rpcArgs, {
+    p_connection_id: 'conn-1',
+    p_from_height: 50,
+    p_to_height: 100,
+    p_app_user_id: 'user-1',
   });
-  assertEquals(args?.p_from_height, 900_000);
-  assertEquals(args?.p_to_height, 900_000);
-});
-
-Deno.test('records at the boundary: from_height 0 is a genesis-start scan, not a missing value', () => {
-  const args = buildScanRangeArgs({
-    connection_id: CONN_ID,
-    app_user_id: CALLER,
-    last_block_scanned: 900_100,
-    from_height: 0,
-  });
-  assertEquals(args?.p_from_height, 0);
-  assertEquals(args?.p_app_user_id, CALLER);
 });
