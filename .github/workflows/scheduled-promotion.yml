@@ -62,6 +62,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}
+      # The one jq expression that maps a raw GitHub pull-request object into
+      # the {number, head, head_repo} shape the candidate filter below reads.
+      # Both the self-test and the real step feed data through THIS SAME
+      # STRING (OR-T1132), so a rename of .head.ref or .head.repo.full_name,
+      # or dropping the `// ""` null-repo fallback, breaks the self-test
+      # instead of leaving it green over a broken gate.
+      SHAPE_FILTER: '{number, head: .head.ref, head_repo: (.head.repo.full_name // "")}'
       # The one jq expression that decides which open pull requests into prod
       # count as a promotion candidate. Both the self-test below and the real
       # step feed data through THIS SAME STRING (OR-T1102), so deleting
@@ -86,27 +93,37 @@ jobs:
           # filter below left every one of those cases printing ok, because
           # the paraphrase never called the filter it was supposed to guard.
           #
-          # This version feeds fixture pull-request JSON through
-          # CANDIDATE_FILTER, the SAME string (set once, in this job's env:)
-          # that the real step below applies to the live API response. There
-          # is one implementation of the decision; this step and the real
-          # step both call it.
+          # OR-T1132: the fixtures used to be hand-built in the ALREADY
+          # SHAPED form ({"number":1,"head":"dev","head_repo":"..."}), which
+          # meant the mapping from a raw GitHub API object into that shape
+          # (SHAPE_FILTER, applied by the real step below) was never
+          # exercised by this test. Renaming .head.ref to .head.label, or
+          # dropping the `// ""` fallback on a null head.repo, left this
+          # self-test green while the real step's CANDIDATES came back
+          # empty. These fixtures are now RAW pull-request-shaped JSON, with
+          # nested .head.ref and .head.repo.full_name, run through
+          # SHAPE_FILTER and then CANDIDATE_FILTER, the same two strings
+          # (set once, in this job's env:) that the real step applies to the
+          # live API response. One implementation of each decision; this
+          # step and the real step both call both of them.
           OWN="${GH_REPO}"
 
-          FIXTURES='[
-            {"number":1,"head":"dev","head_repo":"'"${OWN}"'"},
-            {"number":2,"head":"release/x","head_repo":"'"${OWN}"'"},
-            {"number":3,"head":"dev","head_repo":"someone-else/orangerails"},
-            {"number":4,"head":"release/x","head_repo":"someone-else/orangerails"},
-            {"number":5,"head":"fix/thing","head_repo":"'"${OWN}"'"},
-            {"number":6,"head":"dev","head_repo":""}
+          RAW_FIXTURES='[
+            {"number":1,"head":{"ref":"dev","repo":{"full_name":"'"${OWN}"'"}}},
+            {"number":2,"head":{"ref":"release/x","repo":{"full_name":"'"${OWN}"'"}}},
+            {"number":3,"head":{"ref":"dev","repo":{"full_name":"someone-else/orangerails"}}},
+            {"number":4,"head":{"ref":"release/x","repo":{"full_name":"someone-else/orangerails"}}},
+            {"number":5,"head":{"ref":"fix/thing","repo":{"full_name":"'"${OWN}"'"}}},
+            {"number":6,"head":{"ref":"dev","repo":null}}
           ]'
 
-          # number 1 (our dev) and 2 (our release/x) must survive the real
-          # filter; 3-4 (a fork sharing our branch names), 5 (an unrelated
+          # number 1 (our dev) and 2 (our release/x) must survive both
+          # filters; 3-4 (a fork sharing our branch names), 5 (an unrelated
           # head of ours) and 6 (a fork whose source repo was since deleted,
-          # so head_repo is the empty string) must all be rejected.
-          GOT="$(printf '%s' "${FIXTURES}" | jq --arg repo "${OWN}" -c "[${CANDIDATE_FILTER}] | map(.number)")"
+          # so head.repo is null and SHAPE_FILTER's `// ""` turns that into
+          # the empty string) must all be rejected.
+          SHAPED="$(printf '%s' "${RAW_FIXTURES}" | jq -c "[.[] | ${SHAPE_FILTER}]")"
+          GOT="$(printf '%s' "${SHAPED}" | jq --arg repo "${OWN}" -c "[${CANDIDATE_FILTER}] | map(.number)")"
           EXPECTED='[1,2]'
 
           if [ "${GOT}" != "${EXPECTED}" ]; then
@@ -114,8 +131,8 @@ jobs:
             echo "::error::decision logic self-test failed. The guard is broken, not passing."
             exit 1
           fi
-          echo "ok: real CANDIDATE_FILTER applied to 6 fixtures -> ${GOT} (fork and unrelated heads correctly rejected)"
-          echo "Self-test passed: 6 fixture cases run through the real jq filter, all as expected."
+          echo "ok: 6 RAW pull-request-shaped fixtures through SHAPE_FILTER then CANDIDATE_FILTER -> ${GOT} (fork and unrelated heads correctly rejected)"
+          echo "Self-test passed: 6 raw fixtures shaped and filtered by the same two strings the real step uses, all as expected."
 
       - name: Compare prod and dev
         id: compare
@@ -324,8 +341,12 @@ jobs:
           # requests into prod, an unpaginated call silently dropped the
           # rest, and the one open promotion among them could be missed,
           # opening a duplicate.
+          # SHAPE_FILTER is the exact string the self-test step above just
+          # proved against RAW pull-request-shaped fixtures (OR-T1132): one
+          # implementation of the mapping from the API response into
+          # {number, head, head_repo}, called twice.
           OPEN_INTO_PROD="$(gh api --paginate "repos/${GH_REPO}/pulls?state=open&base=prod&per_page=100" \
-                              --jq '[.[] | {number, head: .head.ref, head_repo: (.head.repo.full_name // "")}]')"
+                              --jq "[.[] | ${SHAPE_FILTER}]")"
 
           # CANDIDATE_FILTER is the exact string the self-test step above
           # just proved against fixtures (OR-T1102): one implementation,
