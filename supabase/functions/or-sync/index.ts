@@ -232,18 +232,32 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'credentials_key required' }, 400, cors);
     }
 
-    // Resolve sink format. platforms.sink_format is intended to win over
-    // body.format so a caller cannot request a sink shape that isn't theirs,
-    // with body.format kept as a backwards-compat fallback for callers (V2)
-    // that pre-date the multi-tenant column.
+    // Resolve sink format. platforms.sink_format is a tenancy boundary: a
+    // caller must not be able to select a sink shape that isn't theirs.
+    // resolveSinkFormatForPlatform (quiltt-config.ts) only RESOLVES and
+    // REPORTS a mismatch; this is where we decide what to do with one.
     //
-    // Rolled out dark. The flag OR_SYNC_SINK_FORMAT_ENFORCE is OFF by default,
-    // so behavior is unchanged here: body.format is used. We still run the
-    // resolution and log, per platform, when the server-resolved format WOULD
-    // differ from the body.format actually sent. That turns an otherwise
-    // unmeasurable question (no store records the body.format each platform
-    // sends) into an observed fact, with zero behavior change, before the flag
-    // is turned on later (a separate, prod, two-party change).
+    // OR-T1157 (out of the OR-T0991 ruling): the original dark rollout
+    // observed a mismatch with a console.log that lands in a surface no seat
+    // here can read, so the dark period could never produce evidence to flip
+    // the flag on. Silently rewriting the request was also the wrong
+    // semantic for a tenancy boundary regardless: it hides a caller that is
+    // misconfigured or hostile. So this now REFUSES a mismatch instead of
+    // rewriting it, which is visible to the caller and provable in CI with
+    // no log store and no prod read.
+    //
+    // OR_SYNC_SINK_FORMAT_ENFORCE is NOT retired by this change; it keeps its
+    // job as the one-step kill switch (its meaning changes from "silently
+    // rewrite" to "resolve, and on conflict, refuse"). Off (default, current
+    // prod state): resolvedFormat stays exactly body.format, unconditionally,
+    // for every one of the resolver's four cases -- including case 4
+    // (body.format absent, sink_format populated), which the resolver itself
+    // treats as needing no flag, but which this call site still gates behind
+    // OR_SYNC_SINK_FORMAT_ENFORCE. That is a deliberate, more conservative
+    // choice than the ticket's minimum: it keeps the ENTIRE new resolution
+    // behind one switch rather than splitting the risk surface, so merging
+    // this PR to dev changes no prod behavior until OR-T1158's prod
+    // enumeration is in and the CTO flips the flag on that evidence.
     //
     // platformId only exists on a platform-mode context, so the resolution is
     // guarded to that mode. Direct-mode callers keep the body.format fallback.
@@ -251,22 +265,36 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     let resolvedFormat: string | null = bodyFormat ?? null;
     if (ctx.mode === 'platform') {
       try {
-        const serverFormat = await resolveSinkFormatForPlatform(
+        const resolution = await resolveSinkFormatForPlatform(
           ctx.serviceClient,
           ctx.platformId,
           bodyFormat ?? null,
         );
-        if (serverFormat !== (bodyFormat ?? null)) {
+        if (resolution.mismatch) {
           // Format names and the platform id only. No user data, no secrets.
           console.log(
-            `[or-sync] sink_format-observe platform=${ctx.platformId} ` +
-            `would_change=1 body_format=${bodyFormat ?? 'null'} ` +
-            `server_format=${serverFormat ?? 'null'} enforced=${enforceSinkFormat ? '1' : '0'}`,
+            `[or-sync] sink_format-mismatch platform=${ctx.platformId} ` +
+            `body_format=${resolution.bodyFormat ?? 'null'} ` +
+            `server_format=${resolution.serverFormat ?? 'null'} enforced=${enforceSinkFormat ? '1' : '0'}`,
           );
+          if (enforceSinkFormat) {
+            return jsonResponse(
+              {
+                error:
+                  'sink_format mismatch: this platform is configured for a different sink than the request specified',
+                platform_sink_format: resolution.serverFormat,
+                requested_format: resolution.bodyFormat,
+              },
+              409,
+              cors,
+            );
+          }
+          // Flag off: dark rollout, preserve exact current prod behavior.
+          resolvedFormat = bodyFormat ?? null;
+        } else if (enforceSinkFormat) {
+          resolvedFormat = resolution.format;
         }
-        if (enforceSinkFormat) {
-          resolvedFormat = serverFormat;
-        }
+        // Flag off, no mismatch: resolvedFormat already equals bodyFormat.
       } catch (resolveErr) {
         // Log the error CLASS only, never the error object. Now that the
         // resolution actually executes, this catch can receive a Postgres

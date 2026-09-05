@@ -129,6 +129,30 @@ export async function resolveQuilttConfigForPlatform(
 }
 
 /**
+ * The result of resolving or-sync's sink format for one platform-mode
+ * request (OR-T1157, out of the OR-T0991 ruling).
+ *
+ * Four cases, and this function decides all four; it never throws for a
+ * mismatch, it only reports one and leaves the decision to the caller:
+ *   1. sink_format IS NULL              -> format=body.format, mismatch=false.
+ *   2. populated, equals body.format    -> format=sink_format, mismatch=false (no-op).
+ *   3. populated, differs, body present -> format=sink_format, mismatch=true.
+ *   4. populated, body.format absent    -> format=sink_format, mismatch=false.
+ *      This is the intended server-side default; there is nothing to
+ *      conflict with, so it does not depend on any enforcement flag.
+ */
+export interface SinkFormatResolution {
+  /** The format this resolution recommends the caller use. */
+  format: string | null;
+  /** True only when a body.format and a sink_format are both present and disagree (case 3). */
+  mismatch: boolean;
+  /** platforms.sink_format as read (may be null). */
+  serverFormat: string | null;
+  /** body.format as passed in (may be null). */
+  bodyFormat: string | null;
+}
+
+/**
  * Resolve the platform's `sink_format` for or-sync (with body.format fallback
  * for legacy callers like V2 that pre-date the multi-tenant refactor).
  *
@@ -136,12 +160,16 @@ export async function resolveQuilttConfigForPlatform(
  * platform row has sink_format populated, server-side resolution wins
  * (defends against a malicious or buggy caller asking for a sink that's not
  * theirs). If the column is NULL (transition state), fall back to body.format.
+ *
+ * This function only RESOLVES and REPORTS; it does not reject. Whether a
+ * `mismatch: true` result is used as-is, refused, or logged is the caller's
+ * call, gated by OR_SYNC_SINK_FORMAT_ENFORCE in supabase/functions/or-sync.
  */
 export async function resolveSinkFormatForPlatform(
   service: SupabaseClient,
   platformId: string,
-  bodyFormatFallback?: string | null,
-): Promise<string | null> {
+  bodyFormat?: string | null,
+): Promise<SinkFormatResolution> {
   const { data, error } = await service
     .from('platforms')
     .select('sink_format')
@@ -152,5 +180,21 @@ export async function resolveSinkFormatForPlatform(
     throw new Error(`platforms.sink_format lookup failed: ${error.message}`);
   }
 
-  return data?.sink_format ?? bodyFormatFallback ?? null;
+  const serverFormat = data?.sink_format ?? null;
+  const body = bodyFormat ?? null;
+
+  if (serverFormat === null) {
+    // Case 1: transition state, nothing configured server-side yet.
+    return { format: body, mismatch: false, serverFormat, bodyFormat: body };
+  }
+  if (body === null) {
+    // Case 4: no conflict possible, intended resolution, no flag needed.
+    return { format: serverFormat, mismatch: false, serverFormat, bodyFormat: body };
+  }
+  if (body === serverFormat) {
+    // Case 2: agreement, no-op.
+    return { format: serverFormat, mismatch: false, serverFormat, bodyFormat: body };
+  }
+  // Case 3: populated and different. Report it; do not decide here.
+  return { format: serverFormat, mismatch: true, serverFormat, bodyFormat: body };
 }

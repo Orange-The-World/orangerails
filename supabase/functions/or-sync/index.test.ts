@@ -556,3 +556,45 @@ Deno.test('DL-1433: redactedUpstreamDetail strips partial numeric refs (card-end
   assert(!out.includes('5678'), 'partial numeric ref must not appear in redacted output');
   assertEquals(out.includes('[redacted]'), true, 'numeric placeholder must be present');
 });
+
+// ── OR-T1157: sink_format mismatch is refused under the enforce flag, ────────
+// not silently rewritten. The four-case decision itself lives in and is unit
+// tested against quiltt-config.ts (resolveSinkFormatForPlatform); these pin
+// that the handler actually wires that decision to a real HTTP refusal
+// instead of quietly using it, since that wiring cannot be exercised by a
+// unit test on the pure resolver alone.
+
+Deno.test('OR-T1157: a sink_format mismatch is refused with 409 when OR_SYNC_SINK_FORMAT_ENFORCE is on', () => {
+  const src = readSelf('./index.ts');
+  const mismatchIdx = src.indexOf('resolution.mismatch');
+  assert(mismatchIdx !== -1, 'handler must check resolution.mismatch');
+  const afterMismatch = src.slice(mismatchIdx);
+  assert(
+    afterMismatch.includes('enforceSinkFormat') && afterMismatch.indexOf('409') < afterMismatch.indexOf('resolvedFormat = bodyFormat ?? null;'),
+    'the 409 refusal must be gated by enforceSinkFormat and precede the flag-off fallback',
+  );
+  assert(afterMismatch.includes('sink_format mismatch'), '409 body must name the mismatch plainly');
+  assert(
+    afterMismatch.includes('platform_sink_format: resolution.serverFormat') &&
+      afterMismatch.includes('requested_format: resolution.bodyFormat'),
+    '409 body must name BOTH formats (platform-configured and requested), not just one',
+  );
+});
+
+Deno.test('OR-T1157: OR_SYNC_SINK_FORMAT_ENFORCE off preserves exact pre-existing body.format behavior', () => {
+  // This is the risk the ticket calls out by name: a live caller must not be
+  // broken by this PR landing on dev, only by the CTO later flipping the
+  // flag on OR-T1158's prod evidence. Pin that the flag-off path is reached
+  // for EVERY resolver outcome, including case 4 (body.format absent, sink
+  // populated), which the resolver itself does not gate but this call site
+  // still does, deliberately.
+  const src = readSelf('./index.ts');
+  assert(
+    src.includes("const enforceSinkFormat = Deno.env.get('OR_SYNC_SINK_FORMAT_ENFORCE') === '1';"),
+    'OR_SYNC_SINK_FORMAT_ENFORCE must still be the single flag, not retired',
+  );
+  assert(
+    src.includes('} else if (enforceSinkFormat) {\n          resolvedFormat = resolution.format;'),
+    'a non-mismatch resolution (including case 4) must only be adopted when the flag is on',
+  );
+});
