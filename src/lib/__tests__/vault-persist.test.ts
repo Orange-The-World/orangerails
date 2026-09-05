@@ -334,12 +334,17 @@ describe("vault recovery: the rotated meta write", () => {
     expect(columns).not.toContain("sig_public_key");
   });
 
-  it("never writes null over a stored PQC secret", async () => {
+  it("clears BOTH public keys when only the kem secret carried (OR-T1977)", async () => {
     const { client, calls } = makeFakeClient(oneConnection);
 
-    // Only one of the two is present, which is the shape that catches a naive
-    // spread: the absent one must be left out of the statement entirely rather
-    // than sent as null and clearing a column that may hold real ciphertext.
+    // Only one of the two secrets carried. The one that did still gets
+    // stored; the one that did not is left out of the statement entirely
+    // rather than sent as null and clearing a column that may hold real
+    // ciphertext. But BOTH public keys are cleared, not just the failed
+    // side's: ensurePqcKeypairs() gates on kem_public_key alone, so a row
+    // that keeps kem_public_key populated while sig_secret_wrapped is gone
+    // would never be flagged as needing regeneration, and the signing key
+    // would stay missing forever.
     await migrateAndPersistRotatedVault({
       ...rotateArgs(client, vi.fn()),
       newKemSecretWrapped: "kem-wrapped-v1",
@@ -353,22 +358,17 @@ describe("vault recovery: the rotated meta write", () => {
       vault_verifier_ciphertext: "verifier-v1",
       vault_key_version: 2,
       kem_secret_wrapped: "kem-wrapped-v1",
+      kem_public_key: null,
       sig_public_key: null,
     });
     expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_secret_wrapped");
-
-    // The sig PUBLIC key is cleared instead, and the kem one is left alone.
-    // Leaving a public key behind is what makes the loss permanent:
-    // ensurePqcKeypairs short-circuits on a populated public key and never
-    // regenerates, so the row would keep a public key whose secret is wrapped
-    // under a MEK that no longer exists.
-    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("kem_public_key");
   });
 
-  it("clears the kem public key when only the sig secret was carried", async () => {
+  it("clears BOTH public keys when only the sig secret carried (OR-T1977)", async () => {
     // The mirror of the test above. An implementation that clears one side and
-    // forgets the other passes a single-orientation suite and still strands
-    // half the keypair, so both orientations are pinned.
+    // forgets the other passes a single-orientation suite and still leaves
+    // ensurePqcKeypairs gated on a stale kem_public_key, so both orientations
+    // are pinned.
     const { client, calls } = makeFakeClient(oneConnection);
 
     await migrateAndPersistRotatedVault({
@@ -385,9 +385,9 @@ describe("vault recovery: the rotated meta write", () => {
       vault_key_version: 2,
       sig_secret_wrapped: "sig-wrapped-v1",
       kem_public_key: null,
+      sig_public_key: null,
     });
     expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("kem_secret_wrapped");
-    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_public_key");
   });
 
   it("clears BOTH public keys in the SAME statement when neither secret was carried", async () => {
