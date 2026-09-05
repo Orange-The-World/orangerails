@@ -256,7 +256,40 @@ describe("co-admin keyring, seal and open", () => {
       collidingA,
     );
 
+    // Positive control first. Without it a future edit that makes the open
+    // throw for an unrelated reason leaves this test green while proving
+    // nothing about the binding.
+    const reopened = await openCoAdminKeyring(sealed, cak, collidingA);
+    expect(reopened.version).toBe(COADMIN_KEYRING_VERSION);
+
     await expect(openCoAdminKeyring(sealed, cak, collidingB)).rejects.toThrow();
+  });
+
+  test("two different unpaired surrogates in the owner id do not interoperate", async () => {
+    // The AAD is the UTF-8 encoding of the JSON tuple, and TextEncoder
+    // replaces an unpaired surrogate with U+FFFD. If JSON.stringify passed
+    // lone surrogates through raw, these two bindings would encode to
+    // identical AAD bytes with no quote and no delimiter anywhere in either
+    // input, which is the collision class the tuple exists to close. Well
+    // formed JSON.stringify (ES2019) escapes them first, which is what keeps
+    // them apart. If this test ever goes red on a future runtime, the
+    // binding argument in co-admin-keyring.ts is void and we want to hear it
+    // from CI rather than from an incident.
+    const owner = ownerKeyringWithSecrets();
+    const cak = generateCoAdminKey();
+    const highSurrogate: CoAdminBinding = { ownerUserId: "\uD800", grantId: GRANT_ID };
+    const lowSurrogate: CoAdminBinding = { ownerUserId: "\uDFFF", grantId: GRANT_ID };
+
+    const sealed = await sealCoAdminKeyring(
+      projectKeyringForCoAdmin(owner),
+      cak,
+      highSurrogate,
+    );
+
+    const reopened = await openCoAdminKeyring(sealed, cak, highSurrogate);
+    expect(reopened.version).toBe(COADMIN_KEYRING_VERSION);
+
+    await expect(openCoAdminKeyring(sealed, cak, lowSurrogate)).rejects.toThrow();
   });
 });
 
