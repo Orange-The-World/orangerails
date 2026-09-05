@@ -90,6 +90,14 @@ interface EnvelopeUpdateRequestBody {
 interface EnvelopeUpdateResponseBody {
   connection_id: string;
   last_block_scanned: number;
+  /**
+   * Present only when record_stealth_scan_range failed for a reason other
+   * than the expected ownership rejection (OR-T0435). The cursor advance
+   * above already succeeded independently of this, so its presence does not
+   * change the 200 status; it exists so a caller or a probe can notice a
+   * broken range-record path instead of it reading as a healthy sync.
+   */
+  scan_range_error?: string;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -224,7 +232,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // identity, token-pinned above (direct: equals ctx.userId, widget:
     // enforceWidgetAppUser, platform: scoped by platform_id on the row read).
     // DL-1597.
-    await recordScanRange(ctx.serviceClient, {
+    const scanRangeResult = await recordScanRange(ctx.serviceClient, {
       connection_id:      body.connection_id,
       app_user_id:        body.app_user_id,
       // The BOUNDED height, not the posted one. A range recorded as
@@ -240,6 +248,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       connection_id: body.connection_id,
       last_block_scanned: effectiveCursor,
     };
+    // Only an unexpected failure is surfaced (not the ownership rejection,
+    // which is a normal outcome, and not a plain skip when from_height was
+    // never sent). See ScanRangeResult in scan_range.ts.
+    if (scanRangeResult.errorCode) {
+      resp.scan_range_error = scanRangeResult.errorCode;
+    }
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-envelope-update] fatal:', err);
