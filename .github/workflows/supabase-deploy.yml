@@ -550,10 +550,12 @@ jobs:
         # that depend on it. The failure then surfaces inside an unrelated migration
         # and looks nothing like the change that caused it.
         #
-        # This repo has that shape right now: versions 20260815000001 and
-        # 20260817230000 are still pending while a newer version is already applied
-        # on prod, and several later migrations abort on their first statement
-        # unless those two run first. Worked example: ticket DEV-0303.
+        # This is not hypothetical for this repo: it has already happened, and it
+        # is the reason this comment exists. Worked example: ticket DEV-0303. See
+        # that ticket for the specifics; this file deliberately does not carry a
+        # live snapshot of which migrations are pending on any project, because
+        # that state changes over time and a stale copy here would mislead more
+        # than it helps.
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
