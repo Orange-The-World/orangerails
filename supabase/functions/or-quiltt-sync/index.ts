@@ -51,6 +51,12 @@ const MAX_ATTEMPTS = 25;
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
 const MAX_PAGES = 50;
 const REDRIVE_SWEEP_SIZE = 500;  // max rows fetched in step 1 of reDriveReadyDeferrals per tick
+// How long a 'deferred-conn-race' row (DL-1414-C) can sit waiting on its
+// connections row before we log a loud warning about it. This case is never
+// retired via MAX_ATTEMPTS (OR-T1902): deferral is the correct behavior for
+// as long as the race is unresolved, so the bound on its cost is visibility,
+// not deletion.
+const CONN_RACE_STALE_WARNING_MS = 24 * 60 * 60 * 1000;  // 24h
 
 // Platforms that use sink delivery instead of OPK encryption (DL-0853).
 // Positive allowlist per DEC-0092 scope: extending to a new platform requires
@@ -78,6 +84,7 @@ interface PendingEvent {
   platform_id:   string | null;
   subaccount_id: string | null;
   attempts:      number;
+  received_at?:  string;
 }
 
 const _drainHandler = wrapSentryHandler(async (req: Request) => {
@@ -252,11 +259,29 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         skipped++;
       } else if (handled === 'deferred-conn-race') {
         // connections row missing (race with or-link-complete, DL-1414-C).
-        // Defer so the event sits out one tick, AND bump attempts so the
-        // loop is bounded: after MAX_ATTEMPTS ticks without the connections
-        // row appearing the event retires rather than cycling indefinitely.
+        // Defer so the event sits out one tick. Do NOT bump attempts here:
+        // this is an expected-to-eventually-resolve wait, not a failure, and
+        // bumping attempts toward MAX_ATTEMPTS silently and permanently
+        // discards the event once the count is exhausted (OR-T1902). This
+        // restores pull request 801's fix: a later commit (5418820c) added
+        // bumpAttempts back to bound the tick cost below, which undid it and started
+        // burning real customer events again within hours of cron running.
+        //
+        // The tick-cost concern that motivated bumpAttempts is real (this row
+        // re-enters the batch every tick once opk_public is set, since
+        // reDriveReadyDeferrals cannot tell "waiting on OPK" apart from
+        // "waiting on the connections row"), so bound it with a loud,
+        // non-destructive signal instead of a destructive one.
         await markDeferred(client, ev.event_id);
-        await bumpAttempts(client, ev, 'or-connection row not yet created (DL-1414-C)');
+        if (ev.received_at) {
+          const ageMs = Date.now() - new Date(ev.received_at).getTime();
+          if (ageMs > CONN_RACE_STALE_WARNING_MS) {
+            console.warn(
+              `[or-quiltt-sync] event ${ev.event_id}: still waiting on connections row ` +
+                `(DL-1414-C) after ${Math.floor(ageMs / 3_600_000)}h, subaccount ${subaccount_id}`,
+            );
+          }
+        }
         skipped++;
       } else {
         await bumpAttempts(client, ev, handled);
@@ -452,12 +477,16 @@ export async function handleEvent(
     // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
     // connections row (timing race on first connect or reconnect). Return
     // 'deferred-conn-race' so the drain loop defers the row (markDeferred)
-    // AND increments its attempt counter (bumpAttempts). opk_public is already
-    // set here (we passed the gate above), so reDriveReadyDeferrals would
-    // re-admit the event on the very next tick with a plain 'deferred' return,
-    // creating an unbounded loop if the connections row never appears. With
-    // 'deferred-conn-race' the loop is bounded: after MAX_ATTEMPTS ticks the
-    // event retires normally rather than cycling forever.
+    // WITHOUT bumping its attempt counter (OR-T1902). opk_public is already
+    // set here (we passed the gate above), so reDriveReadyDeferrals re-admits
+    // the event on the very next tick regardless of why it was deferred, and
+    // this row re-enters the batch on every tick until the connections row
+    // appears. That tick cost is real but is not a reason to permanently
+    // discard the event: bumping attempts toward MAX_ATTEMPTS on this path
+    // (commit 5418820c) undid pull request 801's fix and started silently retiring
+    // events whose connections row would have appeared eventually. The
+    // caller logs a loud warning once the wait is abnormally long instead,
+    // so this stays visible without being destructive.
     if (!legacy.data) return 'deferred-conn-race';
     conn = legacy.data as { id: string };
   }
@@ -1166,7 +1195,7 @@ async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, rawErrMsg:
 export async function fetchPendingBatch(client: SupabaseClient, batchSize: number) {
   return client
     .from('quiltt_webhook_inbox')
-    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts')
+    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts, received_at')
     .is('processed_at', null)
     .is('opk_deferred_at', null)
     .order('received_at', { ascending: true })
