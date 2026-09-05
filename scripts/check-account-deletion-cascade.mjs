@@ -31,11 +31,14 @@ import { dirname, join } from 'node:path';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SQL_PATH = join(HERE, 'sql', 'account-deletion-cascade.sql');
 
-// This check writes a fixture, even though it rolls it back. It is allowed on
-// the dev project only. Refusing the prod ref by name is cheap and it removes
-// the one mistake that would matter: a copied workflow line, or a dispatch
-// from the wrong branch, pointing a fixture at real customer data.
-const PROD_REF = 'lcdicqalreskibdfxkzb';
+// This check writes a fixture, even though it rolls it back. It is allowed
+// only on refs named here, checked as an ALLOW list rather than a block
+// list: naming one prod ref to refuse covers exactly one mistake, while
+// naming the refs this check may touch covers every other project that
+// exists too, including one created after this file was written.
+const ALLOWED_REFS = new Set([
+  'fzwmnzmtqidumdqjdddz', // orangerails dev
+]);
 
 const SENTINEL = 'DEV0323_';
 
@@ -116,6 +119,33 @@ async function runSql(ref, token, sql) {
   return { status: res.status, text: await res.text() };
 }
 
+/**
+ * Best-effort residue check. Never lets a failure here hide the real verdict:
+ * it always resolves to a human-readable note instead of throwing, so a
+ * caller can report it on any exit path without a second try/catch.
+ */
+async function describeResidue(ref, token) {
+  let residue;
+  try {
+    residue = await runSql(ref, token, RESIDUE_SQL);
+  } catch (err) {
+    return `could not be checked, the request itself failed (${err?.name ?? 'Error'}). Check for rows marked dev0323- on ${ref} by hand.`;
+  }
+  if (residue.status < 200 || residue.status >= 300) {
+    return `could not run (HTTP ${residue.status}). Check for rows marked dev0323- on ${ref} by hand.`;
+  }
+  let count;
+  try {
+    count = residueCount(JSON.parse(residue.text));
+  } catch (err) {
+    return `could not be read (${err.message}). Check for rows marked dev0323- on ${ref} by hand.`;
+  }
+  if (count !== 0) {
+    return `${count} fixture row(s) left behind on ${ref}. Remove the rows marked dev0323- by hand before trusting this check again.`;
+  }
+  return `0 residue rows on ${ref}.`;
+}
+
 function fail(message) {
   console.error(`::error::${message}`);
   process.exit(1);
@@ -123,7 +153,7 @@ function fail(message) {
 
 function selftest() {
   const cases = [
-    ['a pass on the real 400 shape', 400, '{"message":"ERROR: P0001: DEV0323_PASS all three legs held\\nCONTEXT: x"}', 'PASS'],
+    ['a pass on the real 400 shape', 400, '{"message":"ERROR: P0001: DEV0323_PASS all four legs held\\nCONTEXT: x"}', 'PASS'],
     ['a fail names the leg', 400, '{"message":"ERROR: P0001: DEV0323_FAIL deleting the account left 1 row(s) behind\\nCONTEXT: x"}', 'FAIL'],
     ['a 2xx means the SQL stopped asserting', 200, '[]', 'UNKNOWN'],
     ['an auth failure is unknown, not a pass', 401, '{"message":"Unauthorized"}', 'UNKNOWN'],
@@ -203,10 +233,11 @@ async function main() {
 
   if (!token) fail('SUPABASE_ACCESS_TOKEN is not set. This check cannot reach a database.');
   if (!ref) fail('SUPABASE_REF is not set. Refusing to guess which project to write a fixture to.');
-  if (ref === PROD_REF) {
+  if (!ALLOWED_REFS.has(ref)) {
     fail(
-      `Refusing to run: ${PROD_REF} is the production project. This check writes a fixture, ` +
-        'and rolling it back afterwards is not a reason to write it against real customer data.',
+      `Refusing to run: ${ref} is not on the allow list of refs this check may write a fixture to ` +
+        `(${[...ALLOWED_REFS].join(', ')}). This check writes a fixture, and rolling it back ` +
+        'afterwards is not a reason to guess which project is safe.',
     );
   }
 
@@ -215,63 +246,63 @@ async function main() {
     fail(`${SQL_PATH} contains no ${SENTINEL} verdict. It cannot report anything; fix the file.`);
   }
 
-  let last = null;
+  // Retry ONLY a request that never got a response: that is the one
+  // genuinely transient condition here. A response that carries no verdict
+  // will carry no verdict again, because the same file runs against the same
+  // database every time, so retrying it is a wasted wait at best and an
+  // extra fixture write at worst. The FIRST request-failure diagnosis is
+  // kept even if a later attempt fails a different way, so the reported
+  // reason is the original cause and not whatever the last retry collided
+  // with.
+  let diagnosis = null;
+  let outcome = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     let res;
     try {
       res = await runSql(ref, token, sql);
     } catch (err) {
-      last = { verdict: 'UNKNOWN', detail: `request failed: ${err?.name ?? 'Error'}` };
-      console.log(`attempt ${attempt}/3 did not complete`);
+      if (!diagnosis) {
+        diagnosis = { verdict: 'UNKNOWN', detail: `request failed: ${err?.name ?? 'Error'}` };
+      }
+      console.log(`attempt ${attempt}/3: request did not complete (${err?.name ?? 'Error'})`);
       if (attempt < 3) await new Promise((r) => setTimeout(r, 10_000));
       continue;
     }
-
-    last = classify(res.status, res.text);
-    if (last.verdict !== 'UNKNOWN') break;
-
-    console.log(`attempt ${attempt}/3 produced no verdict (HTTP ${res.status})`);
-    if (attempt < 3) await new Promise((r) => setTimeout(r, 10_000));
+    outcome = classify(res.status, res.text);
+    break;
   }
 
-  if (last.verdict === 'FAIL') {
-    fail(`Account deletion no longer clears the vault meta rows it owns on ${ref}. ${last.detail}`);
-  }
-  if (last.verdict !== 'PASS') {
+  const last = outcome ?? diagnosis;
+
+  if (!outcome) {
+    // Every attempt failed before a response arrived. Nothing was ever
+    // written, so there is no fixture to check for.
     fail(
       `Could not determine whether account deletion clears the vault meta rows on ${ref}. ` +
         `This is NOT a report that the cascade is fine. ${last.detail}`,
     );
   }
 
+  // A response arrived, which means the fixture may have been written.
+  // Every exit from here checks residue, or says plainly that it could not,
+  // instead of only the pass path doing so.
+  const residueNote = await describeResidue(ref, token);
+
+  if (last.verdict === 'FAIL') {
+    fail(
+      `Account deletion no longer clears the vault meta rows it owns on ${ref}. ${last.detail} ` +
+        `Residue: ${residueNote}`,
+    );
+  }
+  if (last.verdict !== 'PASS') {
+    fail(
+      `Could not determine whether account deletion clears the vault meta rows on ${ref}. ` +
+        `This is NOT a report that the cascade is fine. ${last.detail} Residue: ${residueNote}`,
+    );
+  }
+
   console.log(last.detail);
-
-  // The assertion rolled its own transaction back. Prove that rather than
-  // assume it: a fixture left behind on a shared project is a real cost, and
-  // a rollback that quietly stopped happening would be invisible.
-  const residue = await runSql(ref, token, RESIDUE_SQL);
-  if (residue.status < 200 || residue.status >= 300) {
-    fail(
-      `The assertion passed but the residue check could not run (HTTP ${residue.status}), so it ` +
-        'is not known whether the fixture rolled back. Check for rows marked dev0323- by hand.',
-    );
-  }
-
-  let count;
-  try {
-    count = residueCount(JSON.parse(residue.text));
-  } catch (err) {
-    fail(`The assertion passed but the residue check could not be read: ${err.message}`);
-  }
-
-  if (count !== 0) {
-    fail(
-      `The assertion passed but left ${count} fixture row(s) behind on ${ref}. The transaction did ` +
-        'not roll back. Remove the rows marked dev0323- before trusting this check again.',
-    );
-  }
-
-  console.log(`Fixture rolled back cleanly: 0 residue rows on ${ref}.`);
+  console.log(`Residue: ${residueNote}`);
 }
 
 main().catch((err) => {
