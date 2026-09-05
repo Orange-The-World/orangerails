@@ -497,8 +497,12 @@ function makeQuilttSyncMock(opts: {
   swError?: string;
   txNodes: Array<{ id: string; account: { id: string } | null }>;
   opkPublic?: string;
-}): { client: any; inserted: string[]; cleanup: () => void } {
+}): { client: any; inserted: string[]; connUpdates: Array<Record<string, unknown>>; cleanup: () => void } {
   const inserted: string[] = [];
+  // DL-1778: patches applied to the connections table, in call order, so a
+  // test can assert whether (and with what) last_sync_at was stamped without
+  // caring about the status/partial reconcile calls that also touch this table.
+  const connUpdates: Array<Record<string, unknown>> = [];
   const client = {
     from(table: string) {
       // deno-lint-ignore no-explicit-any
@@ -513,7 +517,10 @@ function makeQuilttSyncMock(opts: {
         not(_c: string, _op: string, _v: unknown) { return chain; },
         order(_c: string, _o: unknown) { return chain; },
         limit(_n: number) { return chain; },
-        update(_patch: unknown, _opts?: unknown) { return chain; },
+        update(patch: unknown, _opts?: unknown) {
+          if (table === 'connections') connUpdates.push(patch as Record<string, unknown>);
+          return chain;
+        },
         single() {
           if (table === 'subaccounts') {
             return Promise.resolve({
@@ -610,8 +617,50 @@ function makeQuilttSyncMock(opts: {
     );
   };
   const cleanup = () => { (globalThis as any).fetch = origFetch; };
-  return { client, inserted, cleanup };
+  return { client, inserted, connUpdates, cleanup };
 }
+
+// ── DL-1778: last_sync_at stamped only when the drain persists rows ───
+
+Deno.test('DL-1778: last_sync_at is stamped on the connection when transactions are persisted', async () => {
+  const { client, inserted, connUpdates } = makeQuilttSyncMock({
+    swRows: null,
+    txNodes: [
+      { id: 'tx-1', account: { id: 'acct-A' } },
+    ],
+  });
+  const ev = {
+    event_id: 'evt-stamp', event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-1' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0,
+  };
+  // deno-lint-ignore no-explicit-any
+  await handleEvent(client as any, ev, 'plat-1', 'sub-1', 'api-key');
+  assertEquals(inserted.length, 1, 'sanity: one transaction must land');
+  const stamp = connUpdates.find((u) => 'last_sync_at' in u);
+  assertEquals(stamp !== undefined, true, 'last_sync_at must be stamped when the drain persists a row');
+  assertEquals(typeof stamp?.['last_sync_at'], 'string', 'last_sync_at must be a timestamp string');
+  assertEquals('status' in (stamp ?? {}), false, 'the stamp update must not also set status');
+});
+
+Deno.test('DL-1778: last_sync_at is NOT stamped when zero rows are persisted', async () => {
+  const { client, inserted, connUpdates } = makeQuilttSyncMock({
+    swRows: [
+      { external_wallet_id: 'acct-A', is_synced: false },
+    ],
+    txNodes: [
+      { id: 'tx-1', account: { id: 'acct-A' } },
+    ],
+  });
+  const ev = {
+    event_id: 'evt-nostamp', event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-1' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0,
+  };
+  // deno-lint-ignore no-explicit-any
+  await handleEvent(client as any, ev, 'plat-1', 'sub-1', 'api-key');
+  assertEquals(inserted.length, 0, 'sanity: zero transactions must land (account deselected)');
+  const stamp = connUpdates.find((u) => 'last_sync_at' in u);
+  assertEquals(stamp, undefined, 'last_sync_at must not be stamped when the drain persisted nothing');
+});
 
 Deno.test('DL-0442 account filter: subset selected -- only matching accounts sync', async () => {
   const { client, inserted } = makeQuilttSyncMock({

@@ -726,6 +726,25 @@ export async function handleEvent(
 
   console.log(`[or-quiltt-sync] event ${ev.event_id}: ${newRows} new tx rows across ${pages + 1} pages`);
 
+  // DL-1778: stamp last_sync_at when this drain actually persists rows, so the
+  // column means "when we last received data for this connection" on every
+  // provider, not just on or-sync-driven ones. Quiltt data arrives on a
+  // per-minute webhook drain with no user-initiated or-sync call in between,
+  // so without this a continuously fed connection reads as stale (DL-1737,
+  // DL-1726). Stamp only: status is decided above and is not touched here.
+  if (newRows > 0) {
+    const { error: stampErr } = await client
+      .from('connections')
+      .update({ last_sync_at: new Date().toISOString() })
+      .eq('id', conn.id);
+    if (stampErr) {
+      console.error(
+        `[or-quiltt-sync] event ${ev.event_id}: failed to stamp last_sync_at:`,
+        stampErr.message,
+      );
+    }
+  }
+
   // Outbound webhook fan-out. Mirrors or-sync's enqueue pattern: insert a
   // webhook_delivery row when newRows > 0, let or-webhook-dispatch pick it
   // up on its own schedule. Best-effort — failure here must not mark the
