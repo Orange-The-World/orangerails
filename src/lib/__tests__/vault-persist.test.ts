@@ -52,6 +52,7 @@ interface SelectChain {
   ): Promise<unknown>;
   order(column: string, options?: { ascending?: boolean }): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
+  eq(column: string, value: unknown): SelectChain;
 }
 
 interface FakeOptions {
@@ -95,12 +96,22 @@ function makeFakeClient(options: FakeOptions = {}) {
       if (override) return override;
       const stored = store[call.table] ?? [];
 
+      // Honour .eq(column, value). Any filter that is not the special
+      // "order" or "range" marker is an equality filter on the stored rows,
+      // the same as a real .eq() call would apply.
+      const eqFilters = call.filters.filter((f) => f.column !== "order" && f.column !== "range");
+      const filtered = eqFilters.length
+        ? stored.filter((row) =>
+            eqFilters.every((f) => (row as Record<string, unknown>)[f.column] === f.value),
+          )
+        : stored;
+
       // Honour .order(column). A query that asked for an order gets a
       // deterministic view. One that did not gets the store in whatever
       // physical order it currently holds, which is exactly the latitude the
       // real database has, and is what lets the reordering tests below fail.
       const orderFilter = call.filters.find((f) => f.column === "order");
-      const view = stored.slice();
+      const view = filtered.slice();
       if (orderFilter) {
         const [column, ascending] = orderFilter.value as [string, boolean];
         view.sort((a, b) => {
@@ -164,6 +175,10 @@ function makeFakeClient(options: FakeOptions = {}) {
             range(from: number, to: number) {
               call.filters.push({ column: "range", value: [from, to] });
               return Promise.resolve(resultFor(call));
+            },
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
             },
           };
           return chain;
@@ -468,6 +483,80 @@ describe("vault recovery: the rotated meta write", () => {
 
     expect(calls.some((c) => c.table === "user_vault_meta" && c.op === "update")).toBe(false);
     expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("refuses before any row is re-encrypted when a kem_secret_wrapped is stored but the caller supplies null (OR-T0755)", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: {
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: "old-kem-wrapped", sig_secret_wrapped: null },
+        ],
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    ).rejects.toThrow(/kem_secret_wrapped is stored/);
+
+    // The whole point: refused before anything below ran, so nothing was
+    // touched, not the connection rows and not the meta row.
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+  });
+
+  it("refuses before any row is re-encrypted when a sig_secret_wrapped is stored but the caller supplies null (OR-T0755)", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: {
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: "old-sig-wrapped" },
+        ],
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    ).rejects.toThrow(/sig_secret_wrapped is stored/);
+
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+  });
+
+  it("does not refuse when nothing is stored yet, the ordinary no-PQC-keys case", async () => {
+    const { client } = makeFakeClient({
+      rows: {
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: null },
+        ],
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not refuse when the caller genuinely carries both secrets forward", async () => {
+    const { client } = makeFakeClient({
+      rows: {
+        user_vault_meta: [
+          {
+            user_id: "user-1",
+            kem_secret_wrapped: "old-kem-wrapped",
+            sig_secret_wrapped: "old-sig-wrapped",
+          },
+        ],
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, vi.fn()),
+        newKemSecretWrapped: "kem-wrapped-v1",
+        newSigSecretWrapped: "sig-wrapped-v1",
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("terminates and migrates every row exactly once against a fixture bigger than one page", async () => {
