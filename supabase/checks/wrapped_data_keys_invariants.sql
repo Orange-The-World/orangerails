@@ -131,15 +131,23 @@ material AS (SELECT conname, def, norm FROM cons
 -- column other than testing whether it is null.
 opaque AS (
   SELECT conname, def,
+         -- Allowlist of TOKENS a permitted null-presence test may use,
+         -- matched whole-word so nothing can hide by concatenation: the two
+         -- opaque column names, num_nonnulls, and the keywords a null test
+         -- is built from. Anything left after stripping these, and after
+         -- stripping all remaining punctuation and whitespace, means the
+         -- constraint does something to an opaque column other than
+         -- testing whether it is null. See the OR-T0828 fix note above:
+         -- this replaced an earlier version that stripped num_nonnulls
+         -- together with an open-ended run of its own argument characters,
+         -- which a real bypass walked straight through.
          regexp_replace(
-           regexp_replace(
-             regexp_replace(norm, 'num_nonnulls [a-z0-9_, ]*', ' ', 'gi'),
-             '\m(coadmin_keyring_ciphertext|wrapped_cak)\M IS NOT NULL', ' ', 'gi'),
-           '\m(coadmin_keyring_ciphertext|wrapped_cak)\M IS NULL', ' ', 'gi') AS residual
+           regexp_replace(norm, '\m(coadmin_keyring_ciphertext|wrapped_cak|num_nonnulls|check|is|not|null|and|or)\M', ' ', 'gi'),
+           '[,()[:space:]]', '', 'g') AS residual
     FROM cons
    WHERE norm ~* '\m(coadmin_keyring_ciphertext|wrapped_cak)\M'),
 inspectors AS (SELECT string_agg(conname, ', ' ORDER BY conname) AS names FROM opaque
-                WHERE residual ~* '\m(coadmin_keyring_ciphertext|wrapped_cak)\M'),
+                WHERE residual <> ''),
 algo AS (SELECT string_agg(conname, ', ' ORDER BY conname) AS names FROM cons
           WHERE def LIKE '%algorithm%')
 SELECT 1 AS ord, 'table_present' AS name,
@@ -157,7 +165,7 @@ SELECT 2, 'no_content_inspection',
             ELSE 'check constraint(s) doing something to an opaque grant column other than testing whether it is null: ' || (SELECT names FROM inspectors)
                  || '. Permitted forms are IS NULL, IS NOT NULL and num_nonnulls, nothing else. Residual(s): '
                  || (SELECT string_agg(conname || ' => ' || residual, ' ;; ' ORDER BY conname) FROM opaque
-                      WHERE residual ~* '\m(coadmin_keyring_ciphertext|wrapped_cak)\M') END
+                      WHERE residual <> '') END
 UNION ALL
 SELECT 3, 'no_algorithm_coupling',
        CASE WHEN (SELECT rel FROM t) IS NULL THEN 'UNKNOWN'
