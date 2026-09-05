@@ -1,0 +1,67 @@
+name: Health check -- connect.orangerails.com
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    name: connect.orangerails.com is up
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TARGET_URL: https://connect.orangerails.com
+      # Set in one place so it can be changed without touching the check logic.
+      # This agent string passes the Cloudflare zone bot filter on the
+      # orangerails.com zone. If you change it, verify the zone still passes
+      # it through before deploying the change.
+      USER_AGENT: 'OrangeRailsHealthCheck/1.0 (+https://orangerails.com)'
+      # A string that appears in the app shell and does not appear on a
+      # Cloudflare block page or a marketing 404. Chosen because it is the
+      # id of the loading splash element in index.html that the real app
+      # shell always contains. If the splash element is renamed or removed,
+      # update this value in the same PR.
+      EXPECTED_MARKER: 'id="or-splash"'
+    steps:
+      - name: Check connect.orangerails.com (with one retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          check() {
+            local attempt="$1"
+            echo "Attempt ${attempt}: ${TARGET_URL}"
+
+            HTTP_CODE=$(curl -s -o /tmp/response.txt -w '%{http_code}' \
+              --max-time 30 \
+              --user-agent "${USER_AGENT}" \
+              "${TARGET_URL}") || {
+              echo "::error::curl failed on attempt ${attempt} (network error or timeout)."
+              return 1
+            }
+
+            echo "HTTP ${HTTP_CODE}"
+
+            if [ "${HTTP_CODE}" != "200" ]; then
+              echo "::error::Expected HTTP 200, got ${HTTP_CODE}. First 512 bytes of response:"
+              head -c 512 /tmp/response.txt || true
+              echo
+              return 1
+            fi
+
+            if ! grep -qF "${EXPECTED_MARKER}" /tmp/response.txt; then
+              echo "::error::HTTP 200 but expected marker not found in response body. First 512 bytes:"
+              head -c 512 /tmp/response.txt || true
+              echo
+              return 1
+            fi
+
+            echo "OK: HTTP ${HTTP_CODE}, marker present."
+          }
+
+          if ! check 1; then
+            echo "First attempt failed. Waiting 10 seconds before retry."
+            sleep 10
+            check 2
+          fi
