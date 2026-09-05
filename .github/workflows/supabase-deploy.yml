@@ -1378,10 +1378,20 @@ jobs:
           out_of_order_scan () {
             local applied="$1" files="$2" dir="$3" allowlist="${4:-$OUT_OF_ORDER_ALLOWLIST}"
             local max base version reason below=0 unmarked=0 allowlisted=0 unknown=0 skipped=0 examined=0
+            local applied_rows=0 max_label
             # The highest applied version comes from the SAME set this function
             # is filtering with, so the guard can never judge one read of the
             # ledger while the apply loop runs against another.
             max=$(printf '%s\n' "$applied" | grep -E '^[0-9]+$' | sort | tail -1 || true)
+            # OR-T2152. max is the maximum of the applied set FILTERED to
+            # numeric versions, so an empty max has TWO causes and they are not
+            # the same fact: an empty ledger, or a ledger holding rows of which
+            # not one is numeric. Count the rows themselves, unfiltered, so the
+            # two can be told apart below. Without this the second case passed
+            # every pending file with no comparison at all while reporting
+            # "none applied", which is I-could-not-check reading as I-checked-
+            # and-it-was-fine, inside the guard written to end exactly that.
+            applied_rows=$(printf '%s\n' "$applied" | grep -c '[^[:space:]]' || true)
             while IFS= read -r base; do
               [ -n "$base" ] || continue
               version="${base%%_*}"
@@ -1390,14 +1400,31 @@ jobs:
               # is what makes the guard judge exactly the set that will run: it
               # cannot pass a file the loop would apply, nor fire on one the
               # loop would skip.
+              #
+              # OR-T2152. That identity is the property, not the flags. grep -qx
+              # treats the version as a regular expression rather than a fixed
+              # string; both sites do, so they agree. If either is ever changed
+              # to grep -Fqx, BOTH must change in the same edit, or the guard
+              # starts judging a different set of files than the loop applies.
               if printf '%s\n' "$applied" | grep -qx "$version"; then
                 skipped=$((skipped + 1))
                 continue
               fi
               examined=$((examined + 1))
-              # An empty max means an empty ledger: nothing has been applied, so
-              # nothing can be out of order and nothing can be uncomparable.
-              [ -n "$max" ] || continue
+              # An empty max is benign ONLY when the ledger is genuinely empty:
+              # nothing has been applied, so nothing can be out of order. When
+              # the ledger HAS rows and not one of them is numeric there is no
+              # version to order against, the comparison below cannot be made at
+              # all, and that is UNCOMPARABLE and therefore fatal, never a pass
+              # (OR-T2152).
+              if [ -z "$max" ]; then
+                if [ "$applied_rows" -eq 0 ]; then
+                  continue
+                fi
+                unknown=$((unknown + 1))
+                echo "  ? UNCOMPARABLE: ${base} -- the ledger holds ${applied_rows} applied version(s) and not one of them is numeric, so there is no highest applied version to order against."
+                continue
+              fi
               # A version this cannot compare is FATAL, not skipped. Two ways it
               # happens: a non-numeric prefix, and a numeric prefix of a
               # different width from the ledger's, where lexicographic order
@@ -1428,7 +1455,18 @@ jobs:
                 echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <reason>' line, at column one, with a non-empty reason, and is not on the OR-T2147 allowlist."
               fi
             done <<< "$files"
-            echo "ORDER SCAN: highest applied version ${max:-none applied}, ${skipped} already-applied file(s) skipped, ${examined} unapplied file(s) examined, ${below} numbered below it, ${allowlisted} allowlisted (OR-T2147), ${unmarked} of the rest unacknowledged, ${unknown} uncomparable."
+            # OR-T2152. Say WHICH of the two empty-max cases this run was. A
+            # ledger with rows but no numeric version must not print "none
+            # applied": that reads as a clean empty database when it is in fact
+            # a state this guard cannot order anything against.
+            if [ -n "$max" ]; then
+              max_label="$max"
+            elif [ "$applied_rows" -eq 0 ]; then
+              max_label="none applied"
+            else
+              max_label="none comparable (${applied_rows} applied version(s), not one numeric)"
+            fi
+            echo "ORDER SCAN: highest applied version ${max_label}, ${skipped} already-applied file(s) skipped, ${examined} unapplied file(s) examined, ${below} numbered below it, ${allowlisted} allowlisted (OR-T2147), ${unmarked} of the rest unacknowledged, ${unknown} uncomparable."
             [ "$unmarked" -eq 0 ] && [ "$unknown" -eq 0 ]
           }
 
@@ -1513,8 +1551,23 @@ jobs:
             echo "::error::order self-test FAILED: the guard stayed silent on a file whose version is NOT on the synthetic allowlist passed in, so the allowlist-branch self-test cannot fail and proves nothing."
             exit 1
           fi
+          # OR-T2152. A ledger holding rows of which NOT ONE is numeric leaves
+          # the highest applied version empty, and an empty maximum used to pass
+          # every pending file with no comparison at all. Neither environment
+          # can reach that state today (dev 164 applied versions, prod 102, all
+          # 14-digit numeric, read 2026-09-04), but a project restored from
+          # nothing that applies one non-numeric filename lands there and the
+          # guard is blind on it from then on. The synthetic applied set here is
+          # non-numeric and the pending file is IN ORDER, so the only thing that
+          # can make this go red is the missing comparison.
+          ST_APPLIED_NONNUMERIC=$(printf '%s\n' 'baseline' 'seed_from_restore')
+          if out_of_order_scan "$ST_APPLIED_NONNUMERIC" '20990101000009_in_order.sql' "$ST_DIR" >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the applied set held versions of which none was numeric, so there was no highest applied version to order against, and the guard passed a pending file anyway. Refusing to apply: I-could-not-check must never read as clean."
+            exit 1
+          fi
           rm -rf "$ST_DIR"
-          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, silent on a marked older file, silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147), red on a non-matching synthetic allowlist (OR-T2170)."
+          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, red on an applied set holding no numeric version at all (OR-T2152), silent on a marked older file, silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147), red on a non-matching synthetic allowlist (OR-T2170)."
 
           # The guard reads the ledger response already read above. NOT a
           # second API call: a second read could disagree with the set the loop
