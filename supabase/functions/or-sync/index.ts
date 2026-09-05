@@ -48,7 +48,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
-import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
+import { getPlatformSinkFormat } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
