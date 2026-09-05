@@ -75,11 +75,17 @@ export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | nu
 /**
  * Record the scan range for this request, if it carries one.
  *
- * Failure is logged and swallowed by design: the cursor write that precedes
- * this is the safe fallback while range recording is rolled out, so a rejected
- * range must not fail the caller's sync (DL-1478). Note that an ownership
- * rejection from the database lands here as a logged error, which is the
- * correct outcome: nothing is written.
+ * Failure is logged and swallowed BY DESIGN, on purpose: the cursor write that
+ * precedes this is the safe fallback while range recording is rolled out, so a
+ * rejected range must not fail the caller's sync (DL-1478). Note that an
+ * ownership rejection from the database lands here as a logged error, which is
+ * the correct outcome: nothing is written.
+ *
+ * Swallowed does not mean invisible, though (OR-T0925): a failure here is also
+ * reported through the same GlitchTip channel every other handler in this
+ * function uses, so it shows up as a real alert instead of only a log line
+ * nobody is watching. This is exactly the defect shape that let OR-T0903 run
+ * on production, failing every call, with nothing noticing.
  */
 // deno-lint-ignore no-explicit-any
 export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<void> {
@@ -89,5 +95,9 @@ export async function recordScanRange(client: any, req: ScanRangeRequest): Promi
   const { error } = await client.rpc('record_stealth_scan_range', args);
   if (error) {
     console.error('[or-stealth-envelope-update] record_stealth_scan_range failed:', error);
+    void reportError(
+      new Error(`record_stealth_scan_range failed: ${error.message ?? String(error)}`),
+      'or-stealth-envelope-update',
+    );
   }
 }
