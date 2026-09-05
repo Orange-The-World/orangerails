@@ -416,11 +416,15 @@ scan "CGNAT-range address" \
 # blocks.orangerails.com and stealth.orangerails.com are admin-only infra on
 # the PUBLIC product domain, documented in caddy/, docs/Stealth-Sync.md, and
 # scripts/README.md for maintainer ops. The check keeps them out of shipping
-# code; the operator doc paths are exempt.
+# code; the operator doc paths are exempt. public/_headers is also exempt
+# (OR-T0609): the connect widget's Content-Security-Policy must name these
+# hosts in connect-src for the browser to allow the requests it already
+# makes to them, so the CSP only makes an existing, network-visible
+# destination explicit and enforced. It discloses nothing new.
 scan "Admin-only orangerails subdomains in shipping code" \
      "\\b(blocks|stealth)\\.orangerails\\.com\\b" \
      "" \
-     "$EXEMPT_PROTOCOL_RE|$EXEMPT_CRYPTO_RE|^./caddy/|docs/Stealth-Sync\\.md|scripts/README\\.md|src/stealth/lib/mock-fixtures|^./CHANGELOG\\.md|^./benches/"
+     "$EXEMPT_PROTOCOL_RE|$EXEMPT_CRYPTO_RE|^./caddy/|docs/Stealth-Sync\\.md|scripts/README\\.md|src/stealth/lib/mock-fixtures|^./CHANGELOG\\.md|^./benches/|^./public/_headers"
 
 # ----------------------------------------------------------------------
 # Category 4 — Internal milestone tags + dead PR references
