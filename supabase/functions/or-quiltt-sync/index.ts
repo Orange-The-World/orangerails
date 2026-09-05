@@ -46,6 +46,16 @@ const TX_PAGE_SIZE = 100;
 // preserved) in the same UPDATE as the final attempt counter, so it cannot
 // take another slot and the queue head always advances past it.
 const MAX_ATTEMPTS = 25;
+// A connection-row race (DL-1414-C: or-quiltt-link-complete has not yet
+// inserted the connections row when this event's sync fires) is bounded by
+// WALL-CLOCK AGE, never by MAX_ATTEMPTS. reDriveReadyDeferrals re-admits
+// deferred rows on sink platforms unconditionally (it cannot tell an
+// OPK-wait apart from a conn-race wait -- both use opk_deferred_at), so a
+// sink-platform event stuck in this state gets re-admitted and re-deferred
+// every tick. Routing that churn through bumpAttempts (commit 5418820c)
+// reaches MAX_ATTEMPTS within minutes and permanently retires an event that
+// only needed a connections row to show up (OR-T1902, regression of PR #801).
+const CONN_RACE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // 50 pages × 100 = 5,000 transactions per connection per webhook event.
 // Covers most banks' full available history (Quiltt typically caps at ~2y).
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
@@ -78,6 +88,10 @@ interface PendingEvent {
   platform_id:   string | null;
   subaccount_id: string | null;
   attempts:      number;
+  // Optional: only fetchPendingBatch populates it. Existing call sites and
+  // test fixtures that build a PendingEvent by hand (handleEvent tests etc.)
+  // do not need it, since only the deferred-conn-race age check reads it.
+  received_at?:  string;
 }
 
 const _drainHandler = wrapSentryHandler(async (req: Request) => {
@@ -252,11 +266,13 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         skipped++;
       } else if (handled === 'deferred-conn-race') {
         // connections row missing (race with or-link-complete, DL-1414-C).
-        // Defer so the event sits out one tick, AND bump attempts so the
-        // loop is bounded: after MAX_ATTEMPTS ticks without the connections
-        // row appearing the event retires rather than cycling indefinitely.
-        await markDeferred(client, ev.event_id);
-        await bumpAttempts(client, ev, 'or-connection row not yet created (DL-1414-C)');
+        // Bounded by wall-clock age, not attempts -- see CONN_RACE_MAX_AGE_MS
+        // above for why an attempts-based bound reintroduces OR-T1902.
+        if (shouldRetireConnRace(ev.received_at)) {
+          await retireConnRace(client, ev.event_id);
+        } else {
+          await markDeferred(client, ev.event_id);
+        }
         skipped++;
       } else {
         await bumpAttempts(client, ev, handled);
@@ -451,13 +467,14 @@ export async function handleEvent(
     if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
     // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
     // connections row (timing race on first connect or reconnect). Return
-    // 'deferred-conn-race' so the drain loop defers the row (markDeferred)
-    // AND increments its attempt counter (bumpAttempts). opk_public is already
-    // set here (we passed the gate above), so reDriveReadyDeferrals would
-    // re-admit the event on the very next tick with a plain 'deferred' return,
-    // creating an unbounded loop if the connections row never appears. With
-    // 'deferred-conn-race' the loop is bounded: after MAX_ATTEMPTS ticks the
-    // event retires normally rather than cycling forever.
+    // 'deferred-conn-race' so the drain loop treats this differently from a
+    // plain OPK-deferral (opk_public is already set here, since we passed
+    // that gate above): it is bounded by WALL-CLOCK AGE via
+    // shouldRetireConnRace, not by attempts. Attempts-based bounding
+    // (commit 5418820c, reverted by OR-T1902) reached MAX_ATTEMPTS within
+    // minutes on sink platforms, because reDriveReadyDeferrals's sink branch
+    // re-admits ANY deferred row for a sink subaccount every tick regardless
+    // of why it was deferred, so bumpAttempts fired once per tick.
     if (!legacy.data) return 'deferred-conn-race';
     conn = legacy.data as { id: string };
   }
@@ -1166,7 +1183,7 @@ async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, rawErrMsg:
 export async function fetchPendingBatch(client: SupabaseClient, batchSize: number) {
   return client
     .from('quiltt_webhook_inbox')
-    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts')
+    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts, received_at')
     .is('processed_at', null)
     .is('opk_deferred_at', null)
     .order('received_at', { ascending: true })
@@ -1178,6 +1195,47 @@ export async function markDeferred(client: SupabaseClient, eventId: string) {
     .from('quiltt_webhook_inbox')
     .update({ opk_deferred_at: new Date().toISOString() })
     .eq('event_id', eventId);
+}
+
+/**
+ * True once a 'deferred-conn-race' event has been waiting longer than
+ * CONN_RACE_MAX_AGE_MS for or-quiltt-link-complete to create its connections
+ * row. Pure function of receivedAt so it needs no client and no mock to test
+ * (OR-T1902): the connections row either appears within seconds/minutes of
+ * the webhook, or the browser callback never fired and it never will.
+ * Fail-safe: a missing or unparseable receivedAt returns false (keep
+ * deferring) rather than risk retiring an event we cannot actually age.
+ */
+export function shouldRetireConnRace(receivedAt: string | null | undefined, nowMs: number = Date.now()): boolean {
+  if (!receivedAt) return false;
+  const ageMs = nowMs - new Date(receivedAt).getTime();
+  return Number.isFinite(ageMs) && ageMs >= CONN_RACE_MAX_AGE_MS;
+}
+
+/**
+ * Retire a 'deferred-conn-race' event that aged out without the connections
+ * row ever appearing. Deliberately does NOT go through bumpAttempts: this is
+ * an age-based retirement, not an attempts-based one, and last_error is left
+ * untouched so it still shows the original dispatch failure if one was ever
+ * recorded, same reasoning as the pre-dispatch cap guard above.
+ */
+export async function retireConnRace(client: SupabaseClient, eventId: string) {
+  const { error } = await client
+    .from('quiltt_webhook_inbox')
+    .update({
+      processed_at:      new Date().toISOString(),
+      retirement_reason: 'or-connection row never created (DL-1414-C)',
+    })
+    .eq('event_id', eventId);
+  if (error) {
+    console.error(
+      `[or-quiltt-sync] event ${eventId}: conn-race retirement UPDATE failed: ${error.message}`,
+    );
+  } else {
+    console.warn(
+      `[or-quiltt-sync] event ${eventId}: retired after ${Math.round(CONN_RACE_MAX_AGE_MS / 3_600_000)}h+ with no connections row created`,
+    );
+  }
 }
 
 /**
