@@ -77,10 +77,11 @@ export interface RotateVaultArgs {
    * nothing regenerates them.
    *
    * NULL IS AN INSTRUCTION, not just an absence. It means "nothing was carried
-   * for this key", and the write below answers it by CLEARING the matching
-   * public key in the same statement, so the next unlock regenerates a working
-   * pair instead of short-circuiting forever on a public key whose secret is
-   * gone. Pass null only when nothing was genuinely carried.
+   * for this key", and the write below answers it by CLEARING BOTH public
+   * keys in the same statement, not just the one whose secret died (OR-T1977):
+   * ensurePqcKeypairs() gates on kem_public_key alone, so the two public keys
+   * must always travel together or that gate stops regenerating a missing
+   * signing key forever. Pass null only when nothing was genuinely carried.
    */
   newKemSecretWrapped: string | null;
   newSigSecretWrapped: string | null;
