@@ -10,8 +10,8 @@
  * This endpoint gives the opener a way to ask directly instead of guessing.
  *
  * Auth: X-Platform-API-Key (platform mode only). No widget mode, no direct
- * mode. Chosen over a browser-side widget-token poll (Auditor review,
- * DL-1829) because it dissolves three problems at once: the opener's own
+ * mode. Chosen over a browser-side widget-token poll (see DL-1829) because
+ * it dissolves three problems at once: the opener's own
  * origin is not on the CORS allow-list (_shared/http.ts), so a browser poll
  * could not reach any endpoint here without a wildcard change; a bearer
  * widget_token would need a post-burn read window bounded well below its
@@ -53,8 +53,8 @@
  * reading "the most recent connections row for this subaccount": one
  * subaccount can hold several Quiltt connections (one Profile, many
  * banks), so that read would report an unrelated earlier link's success
- * for a later attempt that actually failed (Auditor, DL-1829, verified
- * against production data on lcdicqalreskibdfxkzb).
+ * for a later attempt that actually failed (DL-1829, verified against
+ * live production data).
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
