@@ -19,6 +19,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Needed so the migration policy-drop check (OR-T1376) can git diff base...head;
+          # the default shallow checkout only has the merge commit and cannot resolve either.
+          fetch-depth: 0
 
       # The project is managed with Bun (bun.lock, bunfig.toml).
       - name: Setup Bun
@@ -82,6 +86,26 @@ jobs:
         # PUBLIC, and a NULL acl, which means the built in default stands and PUBLIC holds
         # EXECUTE. Needs nothing but node, so it is unconditional.
         run: node scripts/check-anon-acl-snapshot.mjs --selftest
+
+      - name: Migration policy-drop self-test
+        # Exercises the parser and the marker-suppression logic in isolation (no git, no
+        # filesystem beyond this file), including the verbatim 20260421200000 DO block that
+        # ate a co-admin policy and a second policy on the same table, unnoticed for four
+        # months (OR-T1324, OR-T1262). Proves on every run that the check can go RED.
+        run: node scripts/check-migration-policy-drops.mjs --selftest
+
+      - name: Migration policy-drop check
+        # A real gate, no continue-on-error. Scoped to supabase/migrations/ files ADDED or
+        # CHANGED in this diff only -- it never re-examines a migration that predates it.
+        # Fails when a DROP POLICY target is built at runtime (EXECUTE/format()/%I/%s, or a
+        # loop over pg_policies) instead of naming the policy literally. See the script header
+        # for why this is a text lint over the diff and not a whole-tree schema oracle.
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: node scripts/check-migration-policy-drops.mjs
 
       - name: Build
         run: bun run build
