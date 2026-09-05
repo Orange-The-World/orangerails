@@ -29,8 +29,10 @@ import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
 import {
+  chooseFallbackConnection,
   chooseProfileId,
   chooseRouting,
+  type FallbackConnectionDecision,
   metadataSubaccountId,
   profileIdFromPayload,
   redactProviderError,
