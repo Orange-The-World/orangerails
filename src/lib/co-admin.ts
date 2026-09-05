@@ -48,6 +48,7 @@ import { base64ToBytes } from "./key-wrapping";
 import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } from "./pqc";
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
 import { signMemberGrant, verifyMemberGrant } from "./member-grant";
+import { formatError } from "./format-error";
 
 // ------------------------------------------------------------------
 // Encoding helpers
@@ -652,7 +653,7 @@ export async function revokeCoAdmin(params: {
   )
     .eq("recipient_user_id", adminUserId)
     .select("recipient_user_id");
-  if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${wdkErr}`);
+  if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${formatError(wdkErr)}`);
 
   if ((removedKeys ?? []).length === 0) {
     // Nothing was removed and nothing complained, which on its own is not
@@ -669,7 +670,7 @@ export async function revokeCoAdmin(params: {
 
     if (readErr) {
       throw new CoAdminRevocationIncompleteError(
-        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${readErr})`,
+        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${formatError(readErr)})`,
         false,
       );
     }
@@ -701,7 +702,7 @@ export async function revokeCoAdmin(params: {
   if (adminErr) {
     // Say which half landed. The stored key IS gone here, and an owner told
     // only that something failed would reasonably assume the opposite.
-    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${adminErr})`, true);
+    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${formatError(adminErr)})`, true);
   }
 
   if ((removedAdmins ?? []).length === 0) {
@@ -772,7 +773,7 @@ export async function clearCoAdminListEntry(params: {
   )
     .eq("admin_user_id", adminUserId)
     .select("admin_user_id");
-  if (error) throw new Error(`Failed to remove this co-admin from your list: ${error}`);
+  if (error) throw new Error(`Failed to remove this co-admin from your list: ${formatError(error)}`);
 
   if ((removed ?? []).length === 0) {
     throw new Error(
