@@ -29,11 +29,19 @@ type QueryResult = { data: unknown[] | null; error: unknown };
 
 interface RecordedCall {
   table: string;
-  op: "select" | "update";
+  op: "select" | "update" | "delete";
   /** columns passed to .select(), which is what makes the row count readable */
   columns?: string;
   values?: Record<string, unknown>;
   filters: Array<{ column: string; value: unknown }>;
+}
+
+interface DeleteChain {
+  then(
+    onFulfilled: (value: QueryResult) => unknown,
+    onRejected?: (reason: unknown) => unknown,
+  ): Promise<unknown>;
+  eq(column: string, value: unknown): DeleteChain;
 }
 
 interface UpdateChain {
@@ -61,6 +69,8 @@ interface FakeOptions {
   metaUpdate?: QueryResult;
   /** what any other update returns */
   otherUpdate?: QueryResult;
+  /** what a delete (the wrapped_data_keys cleanup on recovery) returns */
+  deleteResult?: QueryResult;
   /** what a select returns instead of rows, for the error cases */
   selectResult?: Record<string, QueryResult>;
   /**
@@ -90,6 +100,9 @@ function makeFakeClient(options: FakeOptions = {}) {
   for (const [table, rows] of Object.entries(options.rows ?? {})) store[table] = rows.slice();
 
   function resultFor(call: RecordedCall): QueryResult {
+    if (call.op === "delete") {
+      return options.deleteResult ?? { data: [], error: null };
+    }
     if (call.op === "select") {
       const override = options.selectResult?.[call.table];
       if (override) return override;
@@ -184,6 +197,18 @@ function makeFakeClient(options: FakeOptions = {}) {
           };
           return chain;
         },
+        delete() {
+          const call: RecordedCall = { table, op: "delete", filters: [] };
+          calls.push(call);
+          const chain: DeleteChain = {
+            ...thenable(call),
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
+            },
+          };
+          return chain;
+        },
       };
     },
   };
@@ -208,6 +233,9 @@ function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) 
     migrateCredentialsCiphertext: async (c: string) => `${c}-migrated`,
     migrateTransactionCiphertext: async (c: string) => `${c}-migrated`,
     clearMigrationKeys,
+    // Null is the ordinary case here too: most vaults have never granted a
+    // co-admin. The tests below set a real id to exercise the cleanup.
+    workspaceKeyId: null as string | null,
   };
 }
 
