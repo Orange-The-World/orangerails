@@ -20,6 +20,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Migration version self-test
+        # First, and before the toolchain, deliberately. This needs nothing but the node the
+        # runner already ships, so an install failure cannot silently take the answer with it.
+        # The self-test runs BEFORE the check for the same reason the anon RPC gate does: a
+        # broken comparison must fail as a broken comparison, not as a silent pass over every
+        # migration. One of its cases asserts the gate goes red on a collision and another
+        # asserts it does not go red without one, so both directions are exercised on every run.
+        run: node scripts/check-migration-versions.mjs --selftest
+
+      - name: Migration version uniqueness check
+        # A real gate, no continue-on-error. Two files sharing a version prefix means the
+        # ledger can only ever track one of them and the other is skipped in silence on every
+        # project. The deploy workflow refuses this too, but only on a push and only after the
+        # apply has already run, so on a pull request nothing was looking. It fails hard when
+        # it enumerates zero files: a run that checked nothing is not a run that passed.
+        run: node scripts/check-migration-versions.mjs
+
       # The project is managed with Bun (bun.lock, bunfig.toml).
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
