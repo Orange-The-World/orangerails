@@ -1035,21 +1035,28 @@ jobs:
     # own migrations at merge time, so the dev backlog is always 0 or 1 and prod
     # promotion is a batch that has already run once on a real database.
     #
-    # prod is UNCHANGED and still cannot be reached by a push: it needs an explicit
-    # workflow_dispatch with the box ticked, the GitHub Environment reviewers, and
-    # the actor allowlist below. Deploying code and rewriting a production schema
-    # stay different acts with different blast radii.
+    # prod is UNCHANGED: THIS JOB is not reachable by a push to prod. Its `if:`
+    # below admits a push only on dev, so on prod the only way in is an explicit
+    # workflow_dispatch with the box ticked, and it then passes the GitHub
+    # Environment reviewers and the actor allowlist below. Deploying code and
+    # rewriting a production schema stay different acts with different blast radii.
+    #
+    # Read that as a statement about THIS JOB and nothing wider. It is NOT a claim
+    # that the prod database is untouched by a push. check-pending-migrations and
+    # the anon-EXECUTE check both run on a push to prod and both read the prod
+    # project through the Management API query endpoint; neither is bound to a
+    # GitHub Environment. They read, this job writes, and the gates named above
+    # govern the write.
     if: >-
       ${{ (github.event_name == 'push' && github.ref_name == 'dev')
           || (github.event_name == 'workflow_dispatch' && inputs.apply_migrations) }}
     runs-on: ubuntu-latest
     # environment: binds this job to a GitHub Environment whose required-reviewer list
-    # is set in repo Settings -> Environments. prod dispatches bind to supabase-prod
-    # (configure required reviewers there); dev dispatches bind to supabase-dev (open
-    # for DBA applies). The environment name is resolved from the deploy job output so
-    # the right project is always protected. Add reviewers to supabase-prod in repo
-    # Settings -> Environments once this PR merges -- the job will pause for approval
-    # before any steps run.
+    # is set in repo Settings -> Environments. prod dispatches bind to supabase-prod,
+    # which has required reviewers configured; dev dispatches bind to supabase-dev
+    # (open for DBA applies). The environment name is resolved from the deploy job
+    # output so the right project is always protected. On a prod dispatch this job
+    # pauses for approval before any of its steps run.
     environment: ${{ needs.target.outputs.environment_name }}
     permissions:
       contents: read
@@ -1065,12 +1072,19 @@ jobs:
         # whoever merged, and the control is the reviewed PR that reached dev at all --
         # requiring a second per-person allowlist there would reintroduce exactly the
         # human bottleneck that produced the 37-migration backlog. This never loosens
-        # prod: prod cannot be reached by a push, so prod always takes the branch below.
+        # prod: the enclosing job's `if:` admits a push only on dev, so on prod the
+        # only way into this job is a dispatch and this step always runs. That is a
+        # statement about this job, not about the prod database, which other jobs in
+        # this file do read on a push to prod.
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        # Fallback gate. The primary gate is meant to be the required-reviewer list on
-        # the GitHub Environment this job binds to; until reviewers are configured on
-        # supabase-prod, this step is the only thing standing in front of the prod
-        # database, so it must not be looser than the prod path deserves.
+        # The SECOND of two gates on this job, not the only one. The first is the
+        # required-reviewer list on the GitHub Environment this job binds to, and
+        # reviewers are configured on supabase-prod: two distinct reviewers, self
+        # review prevented, admin bypass off, read from Settings -> Environments on
+        # 2026-09-03. Re-read it there rather than trusting this line, because that
+        # setting is not repository content and nothing in this file can assert it.
+        # This step is what still fails closed if that list is ever emptied, so it
+        # must not be looser than the prod path deserves.
         #
         # ONE allowlist per target, resolved from the environment the deploy job
         # computed. There is deliberately NO fallback from prod to dev: a single shared
