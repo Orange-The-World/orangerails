@@ -354,6 +354,34 @@ export async function persistCoAdminGrant(params: {
     throw new Error(`Failed to insert workspace_admins: ${formatError(adminErr)}`);
   }
 
+  // Clear any stale envelope for this exact (workspaceKeyId, targetUserId)
+  // pair before inserting the fresh one wrapped and signed by the caller.
+  //
+  // WHY. A previous grant attempt can have written this exact row and then
+  // failed before or during the workspace_admins insert above (a network
+  // drop, a closed tab, a retry after CoAdminGrantIncompleteError): the row
+  // survives with a stale ciphertext and signature. wrapped_data_keys carries
+  // a UNIQUE (data_key_id, recipient_user_id) constraint (see #973 /
+  // DEV-0412), so a bare retry's insert below would otherwise collide with
+  // that stranded row and fail forever on a raw unique-violation, instead of
+  // ever replacing it.
+  //
+  // A delete that matches no row is a no-op with no error, so this runs
+  // safely on every grant, not only a retry, and it never reuses the old
+  // ciphertext or signature: both are recomputed by the caller on every call
+  // already.
+  const { error: staleErr } = await (
+    supabase
+      .from("wrapped_data_keys")
+      .delete()
+      .eq("data_key_id", workspaceKeyId) as unknown as CoAdminDeleteBuilder
+  ).eq("recipient_user_id", targetUserId);
+  if (staleErr) {
+    throw new Error(
+      `Failed to clear a previous grant attempt for this recipient before re-granting: ${formatError(staleErr)}`,
+    );
+  }
+
   // The wrapped key. THIS is the write that grants access.
   const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
     data_key_id: workspaceKeyId,
