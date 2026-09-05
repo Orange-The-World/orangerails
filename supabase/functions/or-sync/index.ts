@@ -349,7 +349,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     let connQuery = ctx.serviceClient
       .from('connections')
-      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at, strike_subscription_id')
+      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at, strike_subscription_id, strike_needs_resubscribe')
       .eq('subaccount_id', subaccountId)
       .neq('status', 'disconnected');
     if (connection_ids?.length) connQuery = connQuery.in('id', connection_ids);
@@ -1271,6 +1271,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               id: conn.id as string,
               strike_subscription_id: (conn as { strike_subscription_id?: string | null }).strike_subscription_id ?? null,
               last_sync_cursor: conn.last_sync_cursor ?? null,
+              needs_resubscribe: (conn as { strike_needs_resubscribe?: boolean | null }).strike_needs_resubscribe ?? false,
             },
             credentials,
             subaccountId: subaccountId as string,
