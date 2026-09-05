@@ -1,7 +1,7 @@
 /**
- * or-quiltt-drain-alert -- four-signal health check for or_quiltt_sync_drain
+ * or-quiltt-drain-alert -- five-signal health check for or_quiltt_sync_drain
  *
- * Signals (DL-0640, signal D added by DL-1540):
+ * Signals (DL-0640, signal D added by DL-1540, signal E added by OR-T1667):
  *   A. Failure rate: >10% of or_quiltt_sync_drain runs failed in last 30 min.
  *      Reads cron.job_run_details via drain_cron_job_stats() SECURITY DEFINER RPC.
  *      Fires only when at least one run occurred (total_count > 0), so a quiet
@@ -27,6 +27,18 @@
  *
  *      Threshold is deliberately > 0 rather than a rate. Losing a customer's
  *      bank data is not a thing that has an acceptable background level.
+ *   E. Deferred-inbox backlog: rows with opk_deferred_at set and processed_at
+ *      still null. reDriveReadyDeferrals in or-quiltt-sync re-admits a deferred
+ *      row once its subaccount registers an OPK, and the drain runs every
+ *      minute; nothing watched this number before, so if that re-drive ever
+ *      stopped working the backlog would grow with no alarm. Fires when the
+ *      count exceeds DEFERRED_BACKLOG_THRESHOLD, or the oldest deferred row
+ *      exceeds DEFERRED_BACKLOG_AGE_HOURS: one stuck subaccount and twenty
+ *      are different incidents, so both the count and the age are reported.
+ *      Thresholds are justified on OR-T0250 against a measured arrival rate
+ *      of about one a day. This is a read only signal: no purge, delete or
+ *      retention behaviour is added anywhere by this file. A deferred row is
+ *      a real unprocessed customer webhook and must never be deleted.
  *
  * Auth: X-Internal-Worker-Token header, constant-time compared to OR_INTERNAL_WORKER_TOKEN.
  * Query errors surface as alert_firing = true (absence of evidence is not green).
@@ -52,6 +64,8 @@ const SUCCESS_WINDOW_MINUTES      = 60;
 const FAILURE_RATE_THRESHOLD      = 0.10; // 10%
 const STALL_HOURS                 = 2;
 const RETIREMENT_WINDOW_HOURS     = 24;
+const DEFERRED_BACKLOG_THRESHOLD  = 25;
+const DEFERRED_BACKLOG_AGE_HOURS  = 24;
 const SUPPRESSION_COOLDOWN_MINUTES = 60;
 
 interface DrainCronStats {
@@ -89,6 +103,14 @@ interface HealthReport {
       retired_rows:  number | null;
       window_hours:  number;
       firing:        boolean;
+    };
+    deferred_backlog: {
+      deferred_unprocessed: number | null;
+      oldest_age_hours:     number | null;
+      subaccounts:          number | null;
+      count_threshold:      number;
+      age_threshold_hours:  number;
+      firing:               boolean;
     };
   };
 }
@@ -245,11 +267,47 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   const retired:      number | null = retiredCount ?? null;
   const retiredFiring               = retired !== null && retired > 0;
 
+  // Signal E: deferred-inbox backlog -- rows with opk_deferred_at set and still
+  // unprocessed. Computed client side from a plain select (rather than a new
+  // RPC) because this ticket adds no migration: opk_deferred_at is a timestamp,
+  // not a boolean, so max age and distinct subaccounts are derived here rather
+  // than in a single aggregate query.
+  const { data: deferredRows, error: deferredErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select('opk_deferred_at, subaccount_id')
+    .not('opk_deferred_at', 'is', null)
+    .is('processed_at', null);
+
+  if (deferredErr) {
+    console.error('[or-quiltt-drain-alert] signal E (deferred backlog) query failed:', deferredErr.message);
+  }
+
+  const deferredList = deferredErr ? [] : (deferredRows ?? []);
+  const deferredUnprocessed: number | null = deferredErr ? null : deferredList.length;
+  const oldestAgeHours: number | null =
+    (!deferredErr && deferredList.length > 0)
+      ? Math.max(
+          ...deferredList.map((r: { opk_deferred_at: string }) =>
+            (Date.now() - new Date(r.opk_deferred_at).getTime()) / (1000 * 60 * 60),
+          ),
+        )
+      : (deferredErr ? null : 0);
+  const deferredSubaccounts: number | null =
+    deferredErr
+      ? null
+      : new Set(deferredList.map((r: { subaccount_id: string }) => r.subaccount_id)).size;
+  const deferredBacklogFiring =
+    !deferredErr &&
+    deferredUnprocessed !== null &&
+    (deferredUnprocessed > DEFERRED_BACKLOG_THRESHOLD ||
+      (oldestAgeHours !== null && oldestAgeHours > DEFERRED_BACKLOG_AGE_HOURS));
+
   // Surface query errors: a probe that cannot run must not exit green.
   const queryErrors: string[] = [];
   if (statsErr) queryErrors.push(`signals A+B (cron stats): ${statsErr.message}`);
   if (stallErr) queryErrors.push(`signal C (queue stall): ${stallErr.message}`);
   if (retiredErr) queryErrors.push(`signal D (retired events): ${retiredErr.message}`);
+  if (deferredErr) queryErrors.push(`signal E (deferred backlog): ${deferredErr.message}`);
   const queryError = queryErrors.length > 0 ? queryErrors.join('; ') : undefined;
 
   if (failureRateFiring) {
@@ -279,8 +337,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     );
   }
 
+  if (deferredBacklogFiring) {
+    console.error(
+      `[or-quiltt-drain-alert] ALERT signal E (deferred backlog): ` +
+      `${deferredUnprocessed} deferred-and-unprocessed row(s), oldest ` +
+      `${(oldestAgeHours ?? 0).toFixed(1)}h, across ${deferredSubaccounts} subaccount(s)`,
+    );
+  }
+
   const alertFiring = failureRateFiring || zeroCompletionsFiring || stallFiring ||
-    retiredFiring || queryError !== undefined;
+    retiredFiring || deferredBacklogFiring || queryError !== undefined;
 
   // zulip_post_sent: null when not firing, true/false when firing based on outcome.
   let zulipPostSent: boolean | null = null;
@@ -331,6 +397,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           `:x: **Signal D (retired events):** ${retired} webhook event(s) DESTROYED in the last ` +
           `${RETIREMENT_WINDOW_HOURS}h. Each one is a bank sync notification we received and threw ` +
           `away. Query quiltt_webhook_inbox for retirement_reason to see why.`,
+        );
+      }
+      if (deferredBacklogFiring) {
+        parts.push(
+          `:warning: **Signal E (deferred backlog):** ${deferredUnprocessed} deferred-and-unprocessed ` +
+          `row(s), oldest ${(oldestAgeHours ?? 0).toFixed(1)}h, across ${deferredSubaccounts} ` +
+          `subaccount(s). A deferred row is re-admitted once its subaccount registers an OPK; if ` +
+          `this keeps growing the re-drive may have stopped working.`,
         );
       }
       if (queryError) {
@@ -397,6 +471,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         retired_rows: retired,
         window_hours: RETIREMENT_WINDOW_HOURS,
         firing:       retiredFiring,
+      },
+      deferred_backlog: {
+        deferred_unprocessed: deferredUnprocessed,
+        oldest_age_hours:     oldestAgeHours,
+        subaccounts:          deferredSubaccounts,
+        count_threshold:      DEFERRED_BACKLOG_THRESHOLD,
+        age_threshold_hours:  DEFERRED_BACKLOG_AGE_HOURS,
+        firing:               deferredBacklogFiring,
       },
     },
   };
