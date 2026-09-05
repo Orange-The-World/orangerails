@@ -571,3 +571,5 @@ export async function persistRewrappedVaultMeta(args: RewrapVaultArgs): Promise<
     throw new Error(PASSWORD_CHANGE_CONFLICT_MESSAGE);
   }
 }
+
+// OR-T2427: no-op commit to replace an orphaned Cloudflare Pages check-run.
