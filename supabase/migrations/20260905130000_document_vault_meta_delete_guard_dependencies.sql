@@ -30,6 +30,8 @@
 -- Comment only. No behaviour change, and idempotent: COMMENT ON FUNCTION
 -- replaces the whole comment on every run.
 
+-- OUT-OF-ORDER-OK: comment-only migration (COMMENT ON FUNCTION), no schema or behavior change, and the target function's signature is unaffected by every migration currently ahead of it; safe to apply after any of them.
+--
 COMMENT ON FUNCTION public.enforce_vault_meta_no_direct_delete() IS
 'Allows DELETE on user_vault_meta / customer_vault_meta only when
 pg_trigger_depth() > 1 AND the owning auth.users row is already gone (true
