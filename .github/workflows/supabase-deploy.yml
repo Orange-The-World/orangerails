@@ -1548,7 +1548,7 @@ jobs:
             rm -f "$SQL_PAYLOAD"
 
             if [[ ! "$CODE" =~ ^2 ]]; then
-              echo "  x FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
+              echo "  x FAILED (HTTP $CODE) applying ${BASENAME}. The response body is not printed here: this repo is public and Actions logs are world readable."
               rm -f /tmp/mig.resp
               exit 1
             fi
