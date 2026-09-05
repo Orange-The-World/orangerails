@@ -26,14 +26,53 @@ user-facing.
 | Stealth Sync (`src/stealth/lib/`) | LDK connector (`src/connectors/ldk/`) | Role |
 |---|---|---|
 | `derive.ts` | `derive.ts` | Client-side seed + channel-key derivation (`deriveOrLdkKey`); no key material leaves the client. |
-| `seal.ts`   | `seal.ts`   | The ZKA boundary, **unchanged primitives**: `sealEnvelope` / `unsealEnvelope` / `blindIndex`. Wraps channel-state backups + payment records. |
+| `seal.ts`   | `seal.ts`   | The ZKA boundary, on the same audited AES-256-GCM / HMAC-SHA-256 core: `sealEnvelope` / `unsealEnvelope`, plus this connector's own blind index functions over the funding outpoint (`outpoint_bidx`, see 3) and the payment hash (`payment_bidx`, see 3.5). Those mirror `computeTxidBlindIndex`, NOT the deprecated `blindIndex` alias (see below). Wraps channel-state backups + payment records. |
 | `sync.ts`   | `sync.ts`   | `runSync` client-side scan over channel monitors / payment records → sealed payload before upload. |
 | `postmessage.ts` | `postmessage.ts` | Widget/app protocol; `deriveOrLdkKey(mek)`. |
 | `supabase/functions/or-stealth-*` | `supabase/functions/or-ldk-*` | Edge functions store `SealedEnvelope` + blind index only. **No decrypt path.** |
 
-**Key derivation:** HKDF from the client MEK with a fixed info string
-`'or-ldk-v1'` (Stealth uses `'or-stealth-v1'`). Client-only, deterministic, no
-server-issued salt.
+**Key derivation, and the separate label each blind index needs.** HKDF from
+the client MEK with a fixed info string `'or-ldk-v1'` (Stealth uses
+`'or-stealth-v1'`) derives the **sealing** key: the one AES-256-GCM uses to
+encrypt and decrypt envelopes. Client-only, deterministic, no server-issued
+salt.
+
+The blind indexes do **not** use that key. Each is an HMAC-SHA-256 under its
+own HKDF subkey, derived from the same client MEK with its own info label,
+distinct from the sealing label and from each other:
+
+```
+'or-ldk-v1'                   sealing key, AES-256-GCM (envelopes)
+'or-ldk/outpoint-index/v1'    subkey for outpoint_bidx (3)
+'or-ldk/payment-index/v1'     subkey for payment_bidx  (3.5)
+```
+
+Those three labels are binding on 3 and 3.5. A wiring PR that signs an index
+under the sealing key, or under the client MEK directly, or that reuses one
+label for both indexes, fails this section whatever else it gets right.
+
+**Why this is pinned here instead of left to the implementer.** The mirrored
+file says it in its own words. `src/stealth/lib/seal.ts` derives its txid index
+subkey with `info="or-stealth/blind-index/v1"` and records the reason next to
+the derivation: "One key doing both jobs is the classic way a side channel opens
+later." That file also carries the counter-example, `computeConnectionBlindIndex`,
+which signs under the client key directly. It is kept that way for exactly one
+stated reason: connection rows already in production were indexed that way, and
+changing the derivation would orphan them. This connector is pre-audit scaffold
+(see the status line at the top of this document, plus 3.3 and 3.5), so it has
+no already-indexed data and therefore no reason to inherit that exception.
+
+**Do not wire the `blindIndex` export.** `src/stealth/lib/seal.ts` exports
+`blindIndex` only as a `@deprecated` alias for `computeTxidBlindIndex`, kept
+until `sync.ts` can be edited safely, and its own comment says not to add a
+second call site. It also resolves to the **txid** index, whose guard demands
+canonical lowercase hex of 64 characters. A payment hash rendered as lowercase
+hex is 64 characters, so a payment hash passed to that name would satisfy the
+guard by coincidence rather than being refused: the wrong call would not be
+caught at runtime the way the guard is meant to catch it. Call
+`computeTxidBlindIndex` when the txid index is genuinely what is wanted, and
+otherwise use this connector's own index functions named in the mirror map
+above.
 
 **Seal primitives (VERIFIED baseline):** AES-256-GCM, fresh IV per envelope,
 client-supplied 32-byte key, HMAC-SHA-256 blind index, zero server-side key
@@ -388,7 +427,7 @@ src/connectors/ldk/
   index.ts           ← public surface (mirrors coinbase/index.ts shape)
   types.ts           ← SealedEnvelope, ChannelStateRecord, PersistOutcome
   derive.ts          ← deriveOrLdkKey (HKDF, info='or-ldk-v1')  [stub]
-  seal.ts            ← sealEnvelope/unsealEnvelope/blindIndex re-export plan  [stub]
+  seal.ts            ← sealEnvelope/unsealEnvelope + outpoint_bidx/payment_bidx index functions  [stub]
   persist.ts         ← persist-before-ack + watermark classification  [stub]
   persist.test.ts    ← watermark/idempotency classification tests  [real tests]
 supabase/functions/or-ldk-channel-state/
