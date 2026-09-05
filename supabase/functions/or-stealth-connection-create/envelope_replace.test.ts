@@ -47,6 +47,7 @@ interface FakeConnection {
   sealed_envelope: unknown;
   wallet_birthday_plaintext: string | null;
   last_block_scanned: number | null;
+  scan_generation: string;
 }
 
 interface FakeRange extends ScanRange {
@@ -147,6 +148,8 @@ const COVERAGE_TOP = 963_896;
 const OLD_ENVELOPE = { version: 1, algorithm: 'AES-GCM', iv_b64: 'old', ciphertext_b64: 'old' };
 const NEW_ENVELOPE = { version: 1, algorithm: 'AES-GCM', iv_b64: 'new', ciphertext_b64: 'new' };
 
+const INITIAL_GENERATION = 'gen-before-any-reset';
+
 function dbWithCoverage(): FakeDb {
   return {
     connections: [
@@ -155,6 +158,7 @@ function dbWithCoverage(): FakeDb {
         sealed_envelope: OLD_ENVELOPE,
         wallet_birthday_plaintext: '2024-01-01',
         last_block_scanned: COVERAGE_TOP,
+        scan_generation: INITIAL_GENERATION,
       },
     ],
     ranges: [
@@ -196,6 +200,28 @@ Deno.test('with coverage recorded, an envelope replacement makes the next sync s
   assertEquals(conn.last_block_scanned, null, 'the cursor is cleared alongside the coverage');
   assertEquals(db.ranges.length, 0, 'the coverage rows are gone');
 });
+
+// ── 1b. OR-T2457: the reset must rotate the fencing token ──────────────────
+
+Deno.test(
+  'an envelope replacement rotates scan_generation to a fresh value',
+  async () => {
+    const db = dbWithCoverage();
+    const { client } = makeClient(db);
+
+    const result = await applyEnvelopeReplacement(client, CONNECTION, {
+      sealed_envelope: NEW_ENVELOPE,
+      wallet_birthday_plaintext: '2023-06-01',
+    });
+
+    assertEquals(isEnvelopeReplacementError(result), false, JSON.stringify(result));
+    assert(
+      db.connections[0].scan_generation !== INITIAL_GENERATION,
+      'the reset must rotate scan_generation, or a write in flight from before it ' +
+        'would still carry a value that matches after the reset',
+    );
+  },
+);
 
 // ── 2. the case the old path already handled, unchanged ────────────────────
 
