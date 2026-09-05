@@ -225,6 +225,21 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   async function completeLinkOnOR(quilttConnectionId: string | undefined) {
     setPhase("completing");
     try {
+      if (window.opener) {
+        try {
+          window.opener.postMessage(
+            {
+              type: "OR_QUILTT_LINK_SUBMITTED",
+              platformSlug: params.platform_slug,
+              appUserId: params.app_user_id,
+              widgetToken: params.widget_token,
+            },
+            "*",
+          );
+        } catch {
+          // opener may be cross-origin in some embeddings; swallow silently.
+        }
+      }
       const supabaseUrl =
         (import.meta.env.VITE_SUPABASE_URL as string | undefined) ||
         "https://fzwmnzmtqidumdqjdddz.supabase.co";
@@ -291,23 +306,29 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
 
   // Notify the opener when the popup closes without completing the link.
   //
-  // Three cases on unload:
+  // Two cases on unload:
   //   "done"       -- clean auto-close after OR_QUILTT_LINK_COMPLETE was sent; no message needed.
-  //   "completing" -- keepalive fetch is in flight; it will complete and send OR_QUILTT_LINK_COMPLETE
-  //                   even after the popup closes. Sending CLOSED_INCOMPLETE here would be wrong.
+  //   "completing" -- keepalive delivers the in-flight POST after unload, but it does not keep
+  //                   this JavaScript context alive: the awaited fetch promise never resumes, so
+  //                   the success postMessage above can never run. The opener is told the popup
+  //                   closed mid write, distinct from a genuine abandonment, so it knows to
+  //                   reconcile by reading connection state instead of waiting for a message that
+  //                   cannot arrive.
   //   anything else -- genuine abandonment or error; opener cannot distinguish from silent failure,
   //                   so we send OR_QUILTT_POPUP_CLOSED_INCOMPLETE.
   useEffect(() => {
     function onPageHide() {
-      if (phase !== "done" && phase !== "completing" && window.opener) {
-        try {
-          window.opener.postMessage(
-            { type: "OR_QUILTT_POPUP_CLOSED_INCOMPLETE" },
-            "*",
-          );
-        } catch {
-          // opener may be cross-origin in some embeddings; swallow silently.
-        }
+      if (phase === "done" || !window.opener) {
+        return;
+      }
+      const type =
+        phase === "completing"
+          ? "OR_QUILTT_POPUP_CLOSED_WHILE_SUBMITTING"
+          : "OR_QUILTT_POPUP_CLOSED_INCOMPLETE";
+      try {
+        window.opener.postMessage({ type }, "*");
+      } catch {
+        // opener may be cross-origin in some embeddings; swallow silently.
       }
     }
     window.addEventListener("pagehide", onPageHide);
