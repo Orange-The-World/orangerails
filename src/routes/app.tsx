@@ -9,7 +9,12 @@ import {
   CoAdminRevocationIncompleteError,
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
-import { CO_ADMIN_GRANT_COLUMNS, readCoAdminGrant } from "@/lib/co-admin-grant-row";
+import { readCoAdminGrant } from "@/lib/co-admin-grant-row";
+import {
+  readWrappedDataKey,
+  DUPLICATE_WRAPPED_KEY_MESSAGE,
+  type WrappedKeyClient,
+} from "@/lib/co-admin-workspace-read";
 import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
@@ -319,11 +324,26 @@ function AppHome() {
           // verify rather than surface one the co-admin cannot safely open.
           const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
           if (!ownerSigPubB64) continue;
-          const { data: wdk } = await supabase
-            .from("wrapped_data_keys")
-            .select(CO_ADMIN_GRANT_COLUMNS)
-            .eq("data_key_id", ownerKeyId)
-            .maybeSingle();
+          // This used to be a maybeSingle() whose error was discarded, which
+          // meant TWO wrapped key rows arrived here as NO row: the workspace
+          // vanished from this co-admin's list with nothing shown to anybody,
+          // while the owner's list still showed the grant. Nothing enforces one
+          // row per recipient per workspace key, so that state is reachable.
+          // none / ambiguous / error are now separate, and only the genuinely
+          // absent case is silent.
+          const wdkRead = await readWrappedDataKey(
+            supabase as unknown as WrappedKeyClient,
+            ownerKeyId,
+          );
+          if (wdkRead.status === "ambiguous") {
+            setErr(DUPLICATE_WRAPPED_KEY_MESSAGE);
+            continue;
+          }
+          if (wdkRead.status === "error") {
+            setErr(formatError(wdkRead.error));
+            continue;
+          }
+          if (wdkRead.status === "none") continue;
           // Decide which envelope this grant is from the columns it actually
           // carries. This used to cast wrapped_ciphertext straight to string
           // with the row existing as its only guard, and that column is
@@ -332,7 +352,7 @@ function AppHome() {
           // readCoAdminGrant returns null for anything that is not exactly one
           // complete envelope, and skipping is the fail closed answer, the
           // same as the unverifiable grant skipped a few lines above.
-          const grant = readCoAdminGrant(wdk);
+          const grant = readCoAdminGrant(wdkRead.row);
           if (!grant) continue;
           // A v3 grant is recognised here but cannot be opened yet: the per
           // grant keyring primitive that unseals one is not wired into the
