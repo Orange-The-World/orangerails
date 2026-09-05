@@ -492,6 +492,46 @@ The one thing that forces a reversal: OCEAN's API refusing browser calls outrigh
 OR emits `mining_earning` (amount, time, source) and `mining_payout` (amount, time, txid, vout). It does not emit "income." Taxability lives in the consumer's chart of accounts, per the ratified engine and consumer split, and is not reopened by this section. The contract must not be shaped around any one consumer's chart of accounts: if a consumer's mapping has no account these events should land in, that is a conversation with that consumer about their mapping, not a reason to change what OR emits.
 
 
+## Webhooks: the `sync.completed` event
+
+OR pushes one event today: `sync.completed`, fired by `or-sync` and by both of `or-quiltt-sync`'s Quiltt delivery paths (the OPK data-pull path and the sink-delivery path, `handleEventSinkDelivery`). All emitters build the payload through one shared function, `buildSyncCompletedPayload()` in `supabase/functions/_shared/webhook-events.ts`, so every emitter produces the identical shape below; only the values passed in differ.
+
+Full registration, signing setup and retry schedule (how to set `webhook_url` / `webhook_secret` on your platform row, the HMAC scheme, backoff) are in `docs/webhooks.md`. This section is the payload contract: what every integrator needs to check their handler against, which is the part that had silently drifted before it was written down (DL-1480).
+
+### Payload shape
+
+```json
+{
+  "event": "sync.completed",
+  "provider": "quiltt",
+  "subaccount_id": "11111111-1111-1111-1111-111111111111",
+  "connection_id": "22222222-2222-2222-2222-222222222222",
+  "synced_count": 17,
+  "ts": "2026-05-22T12:00:00.000Z",
+  "type": "sync.completed",
+  "data": {
+    "subaccount_id": "11111111-1111-1111-1111-111111111111",
+    "connection_id": "22222222-2222-2222-2222-222222222222",
+    "synced_count": 17,
+    "ts": "2026-05-22T12:00:00.000Z"
+  }
+}
+```
+
+- `event` / `type`: always the literal string `"sync.completed"`. Both are present during the SDK migration window (see `docs/webhooks.md`); read whichever your receiver understands.
+- `provider`: optional, present only when the emitting path knows the upstream provider (e.g. `"quiltt"`). Flat only, never copied into `data`.
+- `synced_count`: **always a number, never omitted.** `0` is a real, meaningful value on the sink-delivery path (Quiltt platforms that pull data on demand): it means "nothing to report yet, call `or-sync` now," not "nothing happened." A receiver that treats `0` as absent and skips the notification will silently drop it, which is the exact failure this contract exists to prevent.
+- `data`: the canonical shape read by `@orangerails/webhooks`'s `constructEvent()`. Matches `SyncCompletedEvent['data']` in `packages/webhooks/src/types.ts` exactly, so it never carries a field the flat fields above do not also carry.
+
+### Signatures and delivery semantics
+
+Every POST carries `X-OR-Signature-V2: t=<unix_ts>,v1=<hex>` (preferred) and the legacy `X-OR-Signature: <hex>` (HMAC-SHA-256 over the raw body, no timestamp). Verify in constant time over the raw request bytes, never a re-serialized copy.
+
+**Any HTTP 2xx response is treated as delivered, full stop.** OR does not inspect your response body and does not retry differently based on whether your signature check passed or your handler recognised the payload. Do not answer non-2xx "to be safe" if you cannot process a shape, and do not answer 2xx and drop it silently either: log an unrecognised shape loudly on your own side. This is the specific failure DL-1480 hit: a payload shape a receiver did not recognise got a 2xx anyway, which reads on OR's side as delivered with nothing landed on the consumer's side, and on the Quiltt path that meant a customer seeing no bank data with no error anywhere.
+
+See `docs/webhooks.md` for registering `webhook_url` / `webhook_secret`, the full retry/backoff schedule, and disabled-platform behavior.
+
+
 ## Wire-format gotchas (read before integrating)
 
 Every error V2's integration hit. Each one is something you can step on too. Each links to the section above where it is documented in context.
