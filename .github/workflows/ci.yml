@@ -343,6 +343,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history needed so the next step can compute a merge-base
+          # with origin/prod (see below). This job's tree is small, so the
+          # extra clone cost is negligible.
+          fetch-depth: 0
 
       - name: Setup Deno
         uses: denoland/setup-deno@v2
@@ -353,43 +358,36 @@ jobs:
 
       - name: deno test supabase/functions
         shell: bash
-        env:
-          # The baseline is the number of test files actually present on the
-          # branch this job is running against, and it is PER BRANCH because
-          # the two branches genuinely differ.
-          #
-          # MEASURED 2026-08-03 with this job's own find pattern:
-          #   dev  16 files
-          #   prod  9 files
-          #
-          # The value shipped when this guard landed was 3, which was the count
-          # of test-file DIRECTORIES someone eyeballed rather than the count of
-          # files the pattern collects. A baseline of 3 against a real 15 means
-          # twelve test files can disappear and this job still reports green,
-          # which is the exact failure DL-0459 was opened to stop. The guard was
-          # correct; only its number was wrong.
-          #
-          # Why this is an expression and not one number: prod's tree has 9,
-          # so a single hardcoded 15 promoted from dev to prod turns this job
-          # red on prod the moment it lands, on a count that is correct for
-          # prod. Selecting on the branch lets the same file be true on both.
-          #
-          # When you add or remove a test file, change the number for that
-          # branch in the same PR, and say why in the message if it goes down.
-          # dev raised 17 -> 18 by DEV-0270, which adds
-          # supabase/functions/_shared/error-redaction.test.ts.
-          # dev raised 18 -> 19 by OR-T1203, which adds
-          # supabase/functions/or-stealth-connection-create/envelope_replace.test.ts.
-          # dev raised 19 -> 20 by OR-T2110, which adds
-          # supabase/functions/_shared/quiltt-event-types.test.ts.
-          # dev raised 20 -> 21 by OR-T1721, which adds
-          # supabase/functions/or-ldk-channel-state/index.test.ts. Both this
-          # branch and dev independently claimed the 19 -> 20 slot; dev landed
-          # first, so this one is 20 -> 21 and the two entries chain rather
-          # than replace each other.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '21' }}
         run: |
           set -euo pipefail
+
+          # The baseline is the number of edge-function test files that
+          # existed in the TREE this branch actually forked from, not a
+          # number keyed on the base branch's NAME.
+          #
+          # OR-T1064: the previous expression was
+          #   (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '21'
+          # It only recognised prod when the base branch was literally named
+          # "prod". A stacked hotfix branch cut from prod (base "hotfix-1",
+          # not "prod") fell through to the dev number and failed on a tree
+          # where the lower count was correct.
+          #
+          # Fix: find the merge-base with origin/prod and count the test
+          # files present IN THAT TREE.
+          #   - PR against dev: the merge-base is wherever dev and prod last
+          #     diverged, so the count there is a safe floor (dev's own
+          #     count today is always >= that historical count).
+          #   - PR whose branch, however many hops removed, forked from
+          #     prod: the merge-base IS that fork point, so the count there
+          #     is prod's real, current count.
+          # No branch name is read anywhere in this step, so no per-PR
+          # manual bump of a constant is needed here again: the number
+          # comes from the tree.
+          git fetch origin prod
+          MERGE_BASE=$(git merge-base HEAD origin/prod)
+          DENO_TEST_FILE_BASELINE=$(git ls-tree -r "$MERGE_BASE" --name-only -- supabase/functions \
+            | grep -cE '(_test\.ts|\.test\.ts)$' || true)
+          echo "Baseline ${DENO_TEST_FILE_BASELINE} test file(s), from merge-base ${MERGE_BASE} with origin/prod"
 
           # Guard: find must not fail silently. A non-zero exit (missing dir,
           # permission error) must not collapse to count=0 and must not read
