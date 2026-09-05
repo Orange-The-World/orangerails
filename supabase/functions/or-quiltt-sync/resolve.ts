@@ -205,6 +205,45 @@ export function chooseRouting(
  * than guessing. That is the correct answer here even though it costs the event
  * a retry: a wrong tenant is not recoverable and a retry is.
  */
+export interface LegacyConnectionRow {
+  id: string;
+}
+
+export type FallbackConnectionDecision =
+  | { kind: 'legacy'; id: string }
+  | { kind: 'ambiguous' }
+  | { kind: 'missing' };
+
+/**
+ * Decide what a Quiltt webhook should do when its connectionId has no exact
+ * quiltt_connection_id match among this subaccount's connections rows.
+ *
+ * `legacyRow` is the oldest connections row for this subaccount with a NULL
+ * quiltt_connection_id (pre-multi-connection-migration rows never got one),
+ * or null when there is none. `otherConnectionSeen` says whether a
+ * DIFFERENT quiltt connectionId has already produced a processed webhook
+ * event for this same subaccount.
+ *
+ * That second signal is the whole fix. The connections table itself carries
+ * no history: a NULL-id row looks identical whether it has only ever served
+ * one bank connection, or a second live connection has quietly been landing
+ * on it for months because it never got a row of its own (OR-T2475). Once a
+ * second connectionId is known to exist for this subaccount, blindly
+ * grabbing "the oldest NULL row" can no longer be trusted to be the row
+ * this event's connection actually belongs to, so the caller must not
+ * collapse onto it. When no other connection has ever been seen, the NULL
+ * row is unambiguously the single legacy connection and the existing
+ * behaviour is correct.
+ */
+export function chooseFallbackConnection(
+  legacyRow: LegacyConnectionRow | null,
+  otherConnectionSeen: boolean,
+): FallbackConnectionDecision {
+  if (!legacyRow) return { kind: 'missing' };
+  if (otherConnectionSeen) return { kind: 'ambiguous' };
+  return { kind: 'legacy', id: legacyRow.id };
+}
+
 export function chooseProfileId(
   mapProfileId: unknown,
   ev: InboxEventLike,

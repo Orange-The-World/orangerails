@@ -29,8 +29,10 @@ import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
 import {
+  chooseFallbackConnection,
   chooseProfileId,
   chooseRouting,
+  type FallbackConnectionDecision,
   metadataSubaccountId,
   profileIdFromPayload,
   redactProviderError,
@@ -273,6 +275,95 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
 }, 'or-quiltt-sync');
 if (import.meta.main) Deno.serve(_drainHandler);
 
+// ─── connection routing (OR-T2475) ─────────────────────────────────────
+
+/**
+ * Look up the legacy NULL-id connections row for a subaccount, if any, and
+ * decide whether it is safe to use for `connectionId` via
+ * chooseFallbackConnection.
+ *
+ * The "safe to use" check is a live query, not a property of the row: it
+ * asks whether any OTHER Quiltt connectionId has already produced a
+ * processed webhook event for this subaccount. A NULL-id row carries no
+ * memory of which connection it has been serving, so this is the only way
+ * to tell "one bank, never migrated" apart from "two banks already sharing
+ * one bucket" (OR-T2475).
+ *
+ * Called by all three sites that used to run this lookup inline
+ * (handleEvent, reconcileConnectionError, reconcileConnectionSuccess) so
+ * the ambiguity rule is answered identically everywhere a Quiltt event gets
+ * routed, not just on the data-pull path.
+ */
+async function resolveLegacyFallback(
+  client: SupabaseClient,
+  subaccountId: string,
+  connectionId: string,
+): Promise<{ decision: FallbackConnectionDecision } | { error: string }> {
+  const legacy = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .is('quiltt_connection_id', null)
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (legacy.error) return { error: `connection lookup failed: ${legacy.error.message}` };
+  if (!legacy.data) return { decision: { kind: 'missing' } };
+
+  const other = await client
+    .from('quiltt_webhook_inbox')
+    .select('event_id')
+    .eq('subaccount_id', subaccountId)
+    .not('processed_at', 'is', null)
+    .neq('payload->record->>id', connectionId)
+    .limit(1)
+    .maybeSingle();
+  if (other.error) return { error: `other-connection check failed: ${other.error.message}` };
+
+  return {
+    decision: chooseFallbackConnection(legacy.data as { id: string }, other.data != null),
+  };
+}
+
+/**
+ * Create a fresh connections row for a Quiltt connectionId that turned out
+ * to be ambiguous against the legacy NULL row (OR-T2475). Mirrors the
+ * insert shape handleEventSinkDelivery already uses for brand-new
+ * subaccounts, so a genuinely new connection always gets its own row
+ * instead of colliding with one that belongs to someone else.
+ *
+ * 23505 (unique_violation) is treated as success: a concurrent tick, or
+ * or-link-complete's own insert, may have created the identical row first.
+ */
+async function createConnectionForAmbiguousMatch(
+  client: SupabaseClient,
+  subaccountId: string,
+  connectionId: string,
+): Promise<{ id: string } | { error: string }> {
+  const insert = await client.from('connections').insert({
+    subaccount_id:           subaccountId,
+    provider_type:           'quiltt',
+    quiltt_connection_id:    connectionId,
+    encrypted_credentials:   'quiltt-managed',
+    credentials_key_version: 1,
+    status:                  'active',
+  });
+  if (insert.error && insert.error.code !== '23505') {
+    return { error: `connection insert failed: ${insert.error.message}` };
+  }
+  const created = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', connectionId)
+    .maybeSingle();
+  if (created.error) return { error: `connection lookup failed after insert: ${created.error.message}` };
+  if (!created.data) return { error: 'connection row missing immediately after insert' };
+  return created.data as { id: string };
+}
+
 // ─── event dispatch ──────────────────────────────────────────────────
 
 export async function handleEvent(
@@ -439,27 +530,32 @@ export async function handleEvent(
   if (exactMatch.data) {
     conn = exactMatch.data as { id: string };
   } else {
-    const legacy = await client
-      .from('connections')
-      .select('id')
-      .eq('subaccount_id', subaccountId)
-      .eq('provider_type', 'quiltt')
-      .is('quiltt_connection_id', null)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
-    // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
-    // connections row (timing race on first connect or reconnect). Return
-    // 'deferred-conn-race' so the drain loop defers the row (markDeferred)
-    // AND increments its attempt counter (bumpAttempts). opk_public is already
-    // set here (we passed the gate above), so reDriveReadyDeferrals would
-    // re-admit the event on the very next tick with a plain 'deferred' return,
-    // creating an unbounded loop if the connections row never appears. With
-    // 'deferred-conn-race' the loop is bounded: after MAX_ATTEMPTS ticks the
-    // event retires normally rather than cycling forever.
-    if (!legacy.data) return 'deferred-conn-race';
-    conn = legacy.data as { id: string };
+    const fallback = await resolveLegacyFallback(client, subaccountId, connectionId);
+    if ('error' in fallback) return fallback.error;
+    if (fallback.decision.kind === 'legacy') {
+      conn = { id: fallback.decision.id };
+    } else if (fallback.decision.kind === 'missing') {
+      // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
+      // connections row (timing race on first connect or reconnect). Return
+      // 'deferred-conn-race' so the drain loop defers the row (markDeferred)
+      // AND increments its attempt counter (bumpAttempts). opk_public is already
+      // set here (we passed the gate above), so reDriveReadyDeferrals would
+      // re-admit the event on the very next tick with a plain 'deferred' return,
+      // creating an unbounded loop if the connections row never appears. With
+      // 'deferred-conn-race' the loop is bounded: after MAX_ATTEMPTS ticks the
+      // event retires normally rather than cycling forever.
+      return 'deferred-conn-race';
+    } else {
+      // OR-T2475: a legacy NULL row exists, but a different Quiltt connection
+      // has already produced a processed event for this subaccount, so the
+      // row cannot be trusted to be this event's connection. Give this
+      // connection its own row instead of collapsing onto one that belongs
+      // to someone else -- this is the exact Mercury+TD pattern the comment
+      // above named as the thing to avoid, made concrete and testable.
+      const created = await createConnectionForAmbiguousMatch(client, subaccountId, connectionId);
+      if ('error' in created) return created.error;
+      conn = created;
+    }
   }
 
   // DL-0442: load account selection for this connection once, before paging.
@@ -885,7 +981,8 @@ export async function reconcileConnectionError(
   if (!connectionId) return 'event missing record.id';
 
   // Prefer an exact quiltt_connection_id match; fall back to the legacy
-  // NULL-id row only if no exact match exists -- same pattern as handleEvent.
+  // NULL-id row only if no exact match exists AND it is not already spoken
+  // for by a different connection -- same pattern as handleEvent (OR-T2475).
   let conn: { id: string } | null = null;
   const exactMatch = await client
     .from('connections')
@@ -898,26 +995,25 @@ export async function reconcileConnectionError(
   if (exactMatch.data) {
     conn = exactMatch.data as { id: string };
   } else {
-    const legacy = await client
-      .from('connections')
-      .select('id')
-      .eq('subaccount_id', subaccountId)
-      .eq('provider_type', 'quiltt')
-      .is('quiltt_connection_id', null)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
-    if (!legacy.data) {
-      // No OR-side connection row yet; nothing to reconcile.
+    const fallback = await resolveLegacyFallback(client, subaccountId, connectionId);
+    if ('error' in fallback) return fallback.error;
+    if (fallback.decision.kind === 'legacy') {
+      conn = { id: fallback.decision.id };
+    } else {
+      // 'missing': no OR-side connection row yet. 'ambiguous' (OR-T2475): a
+      // row exists but belongs to a different, already-established Quiltt
+      // connection -- this is a status-only reconcile, not the data-pull
+      // path, so there is no row of this event's own to create here and
+      // touching the other connection's row would be the same collision
+      // this fix exists to close. Either way, nothing to reconcile.
       // Mark processed so the event does not retry forever.
       console.warn(
         `[or-quiltt-sync] event ${ev.event_id}: error event for Quiltt connection ` +
-          `(type: ${ev.event_type}), no OR connection row found -- marking processed`,
+          `(type: ${ev.event_type}), no unambiguous OR connection row found ` +
+          `(${fallback.decision.kind}) -- marking processed`,
       );
       return null;
     }
-    conn = legacy.data as { id: string };
   }
 
   // DL-1445: record WHY, not just THAT. This block used to write status alone,
@@ -1050,17 +1146,13 @@ export async function reconcileConnectionSuccess(
     orConnId = exact.id;
     matchedExactly = true;
   } else {
-    const { data: legacy, error: legacyErr } = await client
-      .from('connections')
-      .select('id')
-      .eq('subaccount_id', subaccountId)
-      .eq('provider_type', 'quiltt')
-      .is('quiltt_connection_id', null)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (legacyErr) return `connection lookup failed: ${legacyErr.message}`;
-    if (legacy) orConnId = legacy.id;
+    // OR-T2475: the legacy fallback is only trusted when no OTHER Quiltt
+    // connection has already produced a processed event for this
+    // subaccount. Otherwise the row is already spoken for and promoting its
+    // status here would be reconciling the wrong connection's health.
+    const fallback = await resolveLegacyFallback(client, subaccountId, connectionId);
+    if ('error' in fallback) return fallback.error;
+    if (fallback.decision.kind === 'legacy') orConnId = fallback.decision.id;
   }
   if (!orConnId) return null;
   const { error: statusErr } = await client
