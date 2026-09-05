@@ -37,6 +37,21 @@ jobs:
         # it enumerates zero files: a run that checked nothing is not a run that passed.
         run: node scripts/check-migration-versions.mjs
 
+      - name: Migration dependency self-test
+        # The parser IS the control, so it is tested here rather than trusted. Runs before the
+        # check itself so a broken comparison fails as a broken comparison, not as a silent
+        # pass over every migration.
+        run: node scripts/check-migration-requires.mjs --selftest
+
+      - name: "Migration dependency check (-- Requires: headers)"
+        # A real gate, no continue-on-error. A migration can declare, on a line of its own,
+        # "-- Requires: <version>", naming a migration version it depends on and does not
+        # itself create. This fails the pull request when the named version has no matching
+        # file in this tree yet -- most often because the prerequisite pull request has not
+        # merged. It says nothing about a dependency nobody declared (OR-T1176): a declared
+        # header enforces what an author states, it does not discover what an author forgot.
+        run: node scripts/check-migration-requires.mjs
+
       # The project is managed with Bun (bun.lock, bunfig.toml).
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
