@@ -22,8 +22,7 @@ import { orangewayMeSink } from './orangeway-me.ts';
 
 const SINK_ADAPTERS: ReadonlyMap<string, SinkAdapter> = new Map<string, SinkAdapter>([
   [bitbooksV2Sink.format, bitbooksV2Sink],
-  [orangewayMeSink.format, orangewayMeSink],
-  ['or-t1230-mutation-proof-fake-adapter', orangewayMeSink],
+  // mutation (ii), OR-T1230: orangeway-me deliberately removed here.
   // Future:
   // [bitbooksV3Sink.format, bitbooksV3Sink],
   // [orangewayBooksSink.format, orangewayBooksSink],
