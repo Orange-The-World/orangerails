@@ -24,6 +24,8 @@
  * mode scopes the connection read by platform_id.
  */
 
+import { reportError } from '../_shared/sentry.ts';
+
 /** Exact argument list for the record_stealth_scan_range RPC (4-arg form). */
 export interface ScanRangeRpcArgs {
   p_connection_id: string;
