@@ -159,7 +159,18 @@ export async function resolveSinkFormatForPlatform(
   // null here, before it ever reaches that check, or a stored 'none' 400s
   // with "Unknown format: none" instead of falling through to the
   // legacy/direct path the platform actually wants.
-  const stored = data?.sink_format === 'none' ? null : data?.sink_format;
+  //
+  // Unlike NULL, 'none' must NOT fall back to bodyFormatFallback. NULL means
+  // "never configured", where the body.format fallback exists precisely for
+  // pre-multi-tenant callers (V2) that predate this column. 'none' means the
+  // platform was explicitly configured to have no sink, and the whole reason
+  // this resolver's result is meant to win over body.format is so a caller
+  // cannot request a sink shape that is not theirs. Falling back to the body
+  // here would let a legacy caller re-arm sink mode on a platform that was
+  // just told it does not have one.
+  if (data?.sink_format === 'none') {
+    return null;
+  }
 
-  return stored ?? bodyFormatFallback ?? null;
+  return data?.sink_format ?? bodyFormatFallback ?? null;
 }
