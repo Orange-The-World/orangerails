@@ -101,13 +101,32 @@ export interface VaultKeyring {
 
 /**
  * What the wrap is bound to. Both fields go into the AES-GCM AAD, so a blob
- * cannot be replayed onto another user's row or onto a different envelope
- * scheme version. Getting either wrong makes the unwrap fail loudly rather
- * than return the wrong keys.
+ * cannot be replayed onto another user's row, and an older generation of
+ * this same row cannot be restored underneath a caller. Getting either wrong
+ * makes the unwrap fail loudly rather than return the wrong keys.
+ *
+ * WHY THIS IS keyring_epoch AND NOT vault_key_version. An AAD may bind a
+ * value only if that value is fixed for the lifetime of the ciphertext it
+ * protects. vault_key_version is not: it is an envelope scheme selector that
+ * other call sites raise on their own, and the AAD is recomputed from
+ * whatever the row currently says, so raising it without re-wrapping in the
+ * same statement leaves a blob whose AAD can never be reproduced. That is an
+ * unopenable vault. keyring_epoch qualifies because the database forbids it
+ * from moving unless keyring_ciphertext is rewritten in the same statement,
+ * and forbids the ciphertext from moving without it.
+ *
+ * There is deliberately no compatibility fallback anywhere in this module.
+ * A fallback that accepts an older AAD hands back exactly the rollback the
+ * epoch exists to stop.
  */
 export interface KeyringBinding {
   userId: string;
-  vaultKeyVersion: number;
+  /**
+   * user_vault_meta.keyring_epoch for this row. Strictly increasing, never
+   * reused, and only ever changed in the same statement that rewrites the
+   * ciphertext it is bound to.
+   */
+  keyringEpoch: number;
 }
 
 // ------------------------------------------------------------------
@@ -362,16 +381,54 @@ export function decodeKeyring(json: string): VaultKeyring {
 // Wrap / unwrap
 // ------------------------------------------------------------------
 
+/**
+ * The one place a keyring epoch turns into AAD bytes.
+ *
+ * keyring_epoch is a bigint in Postgres, and a client library is free to hand
+ * it back as a JavaScript number or as a string depending on the driver. Two
+ * callers that disagree by a single character produce different AAD bytes and
+ * an unwrap failure that reads to the user as a destroyed vault, possibly
+ * months after the mistake was made. So it is normalised exactly once, here,
+ * to canonical decimal: digits only, no sign, no separators, no leading
+ * zeros, no exponent form. Anything else throws rather than being coerced,
+ * because a silent coercion is the failure this function exists to prevent.
+ */
+export function canonicalKeyringEpoch(value: unknown): string {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new Error(
+        "Keyring binding requires a keyring epoch that is a safe positive integer.",
+      );
+    }
+    return String(value);
+  }
+  if (typeof value === "string") {
+    if (!/^[1-9][0-9]*$/.test(value)) {
+      throw new Error(
+        "Keyring binding requires a keyring epoch in canonical decimal form: " +
+          "digits only, no sign, no separators, no leading zeros.",
+      );
+    }
+    if (BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        "Keyring epoch is past the JavaScript safe integer range, so a caller " +
+          "holding it as a number and one holding it as a string would build " +
+          "different AAD bytes.",
+      );
+    }
+    return value;
+  }
+  throw new Error(
+    "Keyring binding requires a keyring epoch as a number or a decimal string.",
+  );
+}
+
 function aadBytes(binding: KeyringBinding): Uint8Array {
   if (typeof binding.userId !== "string" || binding.userId.length === 0) {
     throw new Error("Keyring binding requires a user id.");
   }
-  if (!Number.isInteger(binding.vaultKeyVersion) || binding.vaultKeyVersion < 1) {
-    throw new Error("Keyring binding requires a positive integer vault key version.");
-  }
-  return new TextEncoder().encode(
-    `${AAD_PREFIX}|${binding.userId}|${binding.vaultKeyVersion}`,
-  );
+  const epoch = canonicalKeyringEpoch(binding.keyringEpoch);
+  return new TextEncoder().encode(`${AAD_PREFIX}|${binding.userId}|${epoch}`);
 }
 
 /**
@@ -407,8 +464,9 @@ export async function wrapKeyring(
  * Unwrap a stored keyring.
  *
  * Throws if the MEK is wrong, if the blob was written for a different user or
- * a different vault_key_version, if it was tampered with, or if it decodes to
- * something that is not a valid keyring.
+ * under a different keyring epoch, if it was tampered with, or if it decodes
+ * to something that is not a valid keyring. There is no fallback: a failure
+ * here is a failure, never a second attempt under an older binding.
  */
 export async function unwrapKeyring(
   ciphertextB64: string,
@@ -444,8 +502,20 @@ export async function unwrapKeyring(
  * returned ciphertext in the same single statement that writes the new MEK
  * wrappers and the new verifier.
  *
- * The binding does not change: recovery keeps the same user and the same
- * envelope scheme version.
+ * The user does not change. The EPOCH does, and it has to: the stored
+ * ciphertext is about to be replaced, and the database refuses a keyring
+ * ciphertext write that does not raise keyring_epoch in the same statement.
+ * So `binding` is the CURRENT binding, used to open the old blob, and the new
+ * blob is sealed under epoch + 1. The returned `keyringEpoch` is the value
+ * the caller must write.
+ *
+ * What the caller then owes, and it cannot be done from here because this
+ * module never touches the database: one UPDATE that matches BOTH the exact
+ * prior keyring_ciphertext AND the exact prior keyring_epoch, and sets the
+ * new ciphertext and this epoch together. Zero rows matched means someone
+ * else rotated first, which is a lost race and is retryable. A rejection from
+ * the epoch guard means something tried to move one column without the other,
+ * which is not a race. Report them differently.
  */
 export async function rewrapKeyringUnderNewMek(params: {
   ciphertextB64: string;
@@ -453,13 +523,24 @@ export async function rewrapKeyringUnderNewMek(params: {
   newMek: CryptoKey;
   saltB64: string;
   binding: KeyringBinding;
-}): Promise<{ keyring: VaultKeyring; ciphertextB64: string }> {
+}): Promise<{ keyring: VaultKeyring; ciphertextB64: string; keyringEpoch: number }> {
+  const currentEpoch = Number(canonicalKeyringEpoch(params.binding.keyringEpoch));
+  const keyringEpoch = currentEpoch + 1;
+  if (!Number.isSafeInteger(keyringEpoch)) {
+    throw new Error(
+      "Keyring epoch cannot be raised without leaving the safe integer range.",
+    );
+  }
+
   const keyring = await unwrapKeyring(
     params.ciphertextB64,
     params.oldMek,
     params.saltB64,
     params.binding,
   );
-  const ciphertextB64 = await wrapKeyring(keyring, params.newMek, params.saltB64, params.binding);
-  return { keyring, ciphertextB64 };
+  const ciphertextB64 = await wrapKeyring(keyring, params.newMek, params.saltB64, {
+    userId: params.binding.userId,
+    keyringEpoch,
+  });
+  return { keyring, ciphertextB64, keyringEpoch };
 }
