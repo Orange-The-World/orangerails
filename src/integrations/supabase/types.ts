@@ -1060,7 +1060,6 @@ export type Database = {
       }
       get_or_create_direct_subaccount: { Args: never; Returns: string }
       is_staff: { Args: never; Returns: boolean }
-      get_or_vault_salt: { Args: never; Returns: string }
       list_or_access_tokens: {
         Args: never
         Returns: {
