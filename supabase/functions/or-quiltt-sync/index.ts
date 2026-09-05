@@ -54,7 +54,8 @@ const MAX_ATTEMPTS = 25;
 // sink-platform event stuck in this state gets re-admitted and re-deferred
 // every tick. Routing that churn through bumpAttempts (commit 5418820c)
 // reaches MAX_ATTEMPTS within minutes and permanently retires an event that
-// only needed a connections row to show up (OR-T1902, regression of PR #801).
+// only needed a connections row to show up (OR-T1902, a regression of the
+// earlier defer-instead-of-burn-attempts fix for this same race).
 const CONN_RACE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // 50 pages × 100 = 5,000 transactions per connection per webhook event.
 // Covers most banks' full available history (Quiltt typically caps at ~2y).
