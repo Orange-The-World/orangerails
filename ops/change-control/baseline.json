@@ -1,0 +1,43 @@
+{
+  "repo": "Orange-The-World/orangerails",
+  "read_at": "2026-09-03T00:38:54.947Z",
+  "environments": [
+    {
+      "name": "dev-tests",
+      "can_admins_bypass": true,
+      "protection_rules": [],
+      "deployment_branch_policy": null
+    },
+    {
+      "name": "supabase-dev",
+      "can_admins_bypass": true,
+      "protection_rules": [],
+      "deployment_branch_policy": null
+    },
+    {
+      "name": "supabase-prod",
+      "can_admins_bypass": false,
+      "protection_rules": [
+        {
+          "type": "required_reviewers",
+          "prevent_self_review": true,
+          "reviewers": [
+            "User:Making-the-World-Orange",
+            "User:MorningRevolution"
+          ]
+        }
+      ],
+      "deployment_branch_policy": null
+    }
+  ],
+  "variables": {
+    "MIGRATION_APPLY_ALLOWED_ACTORS_PROD": [
+      "MorningRevolution",
+      "the-Orange-Juicer"
+    ],
+    "MIGRATION_APPLY_ALLOWED_ACTORS_DEV": [
+      "MorningRevolution",
+      "the-Orange-Juicer"
+    ]
+  }
+}

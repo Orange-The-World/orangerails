@@ -27,6 +27,7 @@ import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { strikeDeleteSubscription, parseStrikeCredentials } from '../_shared/providers/strike/index.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { safeErrorLine } from '../_shared/error-redaction.ts';
 
 // --- AES helpers (mirror or-sync's pattern; will share once a util module lands) ---
 
@@ -69,16 +70,34 @@ async function cleanupStrikeSubscription(
   try {
     const key = await importAesKey(credentialsKey);
     const credsJson = await decryptAes(conn.encrypted_credentials, key);
-    const creds = parseStrikeCredentials(JSON.parse(credsJson));
+    // Do NOT call JSON.parse(credsJson) directly. credsJson is decrypted
+    // credential plaintext, and V8 puts a fragment of the input string into
+    // the SyntaxError message, which the catch below used to log. Replacing it
+    // with a fixed string means there is no fragment to leak at all, which is
+    // stronger than sanitising the message afterwards.
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(credsJson);
+    } catch {
+      throw new Error('stored credentials are not valid JSON');
+    }
+    // JSON.parse can return a string, a number or an array. Those used to
+    // reach parseStrikeCredentials as `any`. Reject them with a fixed string
+    // rather than let the shape error be phrased by something downstream.
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
+      throw new Error('stored credentials are not a JSON object');
+    }
+    const creds = parseStrikeCredentials(decoded as Record<string, unknown>);
     await strikeDeleteSubscription(creds, conn.strike_subscription_id);
     return { ok: true };
   } catch (err) {
     // Best-effort: if Strike returns 404, the subscription was already gone
     // (idempotent , strike.ts treats 404 as success for DELETEs). Any other
     // failure logs and we proceed with the row delete anyway.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[or-connection-delete] strike subscription cleanup failed for ${conn.id}: ${msg.slice(0, 200)}`);
-    return { ok: false, reason: msg.slice(0, 100) };
+    console.warn(await safeErrorLine('or-connection-delete', `strike-cleanup conn=${conn.id}`, err));
+    // `reason` is not read by the handler today, but it is one refactor away
+    // from a response body, so it carries no upstream text.
+    return { ok: false, reason: 'cleanup-failed' };
   }
 }
 
@@ -118,7 +137,7 @@ export async function tryDeleteStealthConnection(
     .maybeSingle();
 
   if (subErr || !subRow) {
-    console.error('[or-connection-delete] stealth fallback: subaccount read failed', subErr);
+    console.error(await safeErrorLine('or-connection-delete', 'stealth-subaccount-read', subErr));
     return { dbError: 'Failed to look up subaccount for stealth fallback', status: 500 };
   }
 
@@ -133,7 +152,7 @@ export async function tryDeleteStealthConnection(
     .eq('app_user_id', subRow.external_user_id);
 
   if (delErr) {
-    console.error('[or-connection-delete] stealth fallback: delete failed', delErr);
+    console.error(await safeErrorLine('or-connection-delete', 'stealth-delete', delErr));
     return { dbError: 'Failed to delete stealth connection', status: 500 };
   }
   if ((count ?? 0) === 0) {
@@ -176,7 +195,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .maybeSingle();
 
     if (fetchErr) {
-      console.error('[or-connection-delete] fetch failed:', fetchErr);
+      console.error(await safeErrorLine('or-connection-delete', 'connection-fetch', fetchErr));
       return jsonResponse({ error: 'Failed to look up connection' }, 500, cors);
     }
     if (!conn) {
@@ -215,7 +234,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .delete()
       .eq('connection_id', body.connection_id);
     if (swDelErr) {
-      console.error('[or-connection-delete] source_wallets cleanup failed:', swDelErr);
+      console.error(await safeErrorLine('or-connection-delete', 'source-wallets-cleanup', swDelErr));
       // Best effort: log but do not block the connection delete.
     }
 
@@ -228,7 +247,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .eq('subaccount_id', subaccountId);
 
     if (delErr) {
-      console.error('[or-connection-delete] delete failed:', delErr);
+      console.error(await safeErrorLine('or-connection-delete', 'connection-delete', delErr));
       return jsonResponse({ error: 'Failed to delete connection' }, 500, cors);
     }
     if ((count ?? 0) === 0) {
@@ -241,7 +260,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     return jsonResponse(response, 200, cors);
   } catch (err) {
-    console.error('[or-connection-delete] fatal:', err);
+    console.error(await safeErrorLine('or-connection-delete', 'fatal', err));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-connection-delete'));
