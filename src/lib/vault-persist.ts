@@ -112,6 +112,40 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     clearMigrationKeys,
   } = args;
 
+  // Refuse before anything irreversible happens if a stored PQC secret would
+  // be dropped. Nothing else here forces a caller to select
+  // kem_secret_wrapped and sig_secret_wrapped before calling in: a caller
+  // that leaves them out of its select gets undefined, callers coerce that
+  // to null, and the meta write below would then silently omit the column
+  // (correctly, by the omit-on-null rule) while the stored ciphertext still
+  // pointed at a key this rotation is about to destroy. The row would keep a
+  // valid-looking kem_public_key, so PQC keypair regeneration would never
+  // trigger, and anything encrypted to that key afterwards would be
+  // unreadable from the moment it was written. Checking here, before the
+  // migration loop, means a caller written wrong fails loudly with nothing
+  // lost instead of orphaning a key with no error and no way back.
+  const { data: storedMetaRows, error: storedMetaErr } = await supabase
+    .from("user_vault_meta")
+    .select("kem_secret_wrapped, sig_secret_wrapped")
+    .eq("user_id", userId);
+  if (storedMetaErr) throw storedMetaErr;
+  const storedMeta = (
+    storedMetaRows as Array<{
+      kem_secret_wrapped: string | null;
+      sig_secret_wrapped: string | null;
+    }> | null
+  )?.[0];
+  if (storedMeta?.kem_secret_wrapped != null && newKemSecretWrapped === null) {
+    throw new Error(
+      "Refusing to rotate: a stored PQC KEM secret exists but the caller did not supply a re-wrapped value. Nothing was changed.",
+    );
+  }
+  if (storedMeta?.sig_secret_wrapped != null && newSigSecretWrapped === null) {
+    throw new Error(
+      "Refusing to rotate: a stored PQC signature secret exists but the caller did not supply a re-wrapped value. Nothing was changed.",
+    );
+  }
+
   // Re-encrypt connections first, then transactions, then meta.
   // Meta is written last so a partial failure leaves the STORED wrappers still
   // pointing at the old MEK: the user can still unlock, and every row that has

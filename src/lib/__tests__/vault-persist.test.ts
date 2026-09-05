@@ -52,6 +52,7 @@ interface SelectChain {
   ): Promise<unknown>;
   order(column: string, options?: { ascending?: boolean }): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
+  eq(column: string, value: unknown): SelectChain;
 }
 
 interface FakeOptions {
@@ -95,12 +96,20 @@ function makeFakeClient(options: FakeOptions = {}) {
       if (override) return override;
       const stored = store[call.table] ?? [];
 
+      // Honour a plain equality filter, e.g. .eq("user_id", userId). Anything
+      // that is not the special "order" or "range" markers is treated as a
+      // column-equals-value filter on the stored rows.
+      let view = stored.slice();
+      for (const f of call.filters) {
+        if (f.column === "order" || f.column === "range") continue;
+        view = view.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
+      }
+
       // Honour .order(column). A query that asked for an order gets a
       // deterministic view. One that did not gets the store in whatever
       // physical order it currently holds, which is exactly the latitude the
       // real database has, and is what lets the reordering tests below fail.
       const orderFilter = call.filters.find((f) => f.column === "order");
-      const view = stored.slice();
       if (orderFilter) {
         const [column, ascending] = orderFilter.value as [string, boolean];
         view.sort((a, b) => {
@@ -164,6 +173,10 @@ function makeFakeClient(options: FakeOptions = {}) {
             range(from: number, to: number) {
               call.filters.push({ column: "range", value: [from, to] });
               return Promise.resolve(resultFor(call));
+            },
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
             },
           };
           return chain;
@@ -424,6 +437,62 @@ describe("vault recovery: the rotated meta write", () => {
       value: "recovery-ciphertext-v0",
     });
     expect(metaUpdates[0]?.columns).toBe("user_id");
+  });
+
+  it("refuses to rotate, before touching any row, if a stored KEM secret has no replacement", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: "stored-kem-wrapped", sig_secret_wrapped: null },
+        ],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(/stored PQC KEM secret/);
+
+    // The whole point: nothing irreversible ran. No row was re-encrypted, the
+    // meta write never happened, and the old key material was not cleared.
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("refuses to rotate, before touching any row, if a stored signature secret has no replacement", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: "stored-sig-wrapped" },
+        ],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(/stored PQC signature secret/);
+
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("rotates cleanly when the vault genuinely has no stored PQC secrets", async () => {
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [{ user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: null }],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    ).resolves.toBeUndefined();
   });
 
   it("migrates every row BEFORE the meta write, never after", async () => {
