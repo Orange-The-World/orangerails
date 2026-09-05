@@ -648,7 +648,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // be wrong and unactionable. The already-up-to-date short-circuit below
   // handles that case, and the blocks are picked up by a later sync once they
   // are buried deep enough.
-  if (opts.birthdayHeight < 0 || opts.birthdayHeight > chainTip) {
+  if (!Number.isInteger(opts.birthdayHeight) || opts.birthdayHeight < 0 || opts.birthdayHeight > chainTip) {
     throw new Error(
       `stealth/sync: birthday height ${opts.birthdayHeight} is out of range [0, ${chainTip}] -- ` +
       `abort before scanning; fix wallet_birthday and retry`,
