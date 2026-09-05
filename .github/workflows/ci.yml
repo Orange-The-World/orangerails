@@ -607,6 +607,68 @@ jobs:
             echo "PLAYWRIGHT_BASE_URL=https://dev.orangerails.com" >> "$GITHUB_ENV"
           fi
 
+      - name: Wait for deployment to be ready
+        # Readiness gate (DL-1014): CF Pages returns an HTML fallback for any
+        # asset URL while a deployment is still initializing. Playwright hitting
+        # the live site before the JS bundle is served causes a MIME mismatch
+        # that fails the smoke suite before any assertion runs.
+        #
+        # Strategy: fetch the HTML page to locate the Vite-generated JS bundle
+        # URL (content-hash filename changes per build, so we cannot hardcode
+        # it), then poll that URL asserting content-type is
+        # application/javascript. An HTML response means CF Pages is not yet
+        # ready. This also handles the case where the HTML page itself is still
+        # the CF Pages "preparing" placeholder -- no <script src> will be found,
+        # and the gate keeps polling.
+        #
+        # 5s interval x 60 attempts = 5 min cap. Always prints attempt count.
+        # Exits non-zero and loud on timeout so failures are never silent.
+        run: |
+          set -euo pipefail
+          BASE_URL="${PLAYWRIGHT_BASE_URL}"
+          INTERVAL=5
+          MAX_ATTEMPTS=60
+          attempt=0
+          last_ct="(none)"
+
+          echo "Readiness gate (DL-1014): polling JS bundle at ${BASE_URL}"
+
+          while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
+            attempt=$(( attempt + 1 ))
+            echo "Attempt ${attempt}/${MAX_ATTEMPTS} ..."
+
+            html=$(curl -sf --max-time 10 "${BASE_URL}/" 2>/dev/null || true)
+
+            # Vite emits: <script type="module" crossorigin src="/assets/index-HASH.js">
+            bundle_path=$(printf '%s' "$html" \
+              | grep -oE 'src="(/assets/[^"]+\.js)"' \
+              | head -1 \
+              | sed 's/src="//;s/"//') || true
+
+            if [ -n "$bundle_path" ]; then
+              bundle_url="${BASE_URL}${bundle_path}"
+              ct=$(curl -sI --max-time 10 "${bundle_url}" 2>/dev/null \
+                    | grep -i '^content-type:' | head -1 | tr -d '\r\n' || true)
+              last_ct="${ct:-empty}"
+              echo "  bundle: ${bundle_path}"
+              echo "  content-type: ${last_ct}"
+              if printf '%s' "$ct" | grep -qi 'application/javascript'; then
+                echo "Readiness gate PASSED after ${attempt} attempt(s). content-type: ${ct}"
+                exit 0
+              fi
+              echo "  Not ready yet (expected application/javascript, got '${last_ct}')."
+            else
+              echo "  No JS bundle path found in HTML -- CF Pages may still be initializing."
+            fi
+
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then sleep "$INTERVAL"; fi
+          done
+
+          echo "::error::Readiness gate TIMED OUT after ${MAX_ATTEMPTS} attempt(s) \
+          ($((MAX_ATTEMPTS * INTERVAL))s). Last content-type: ${last_ct}. \
+          The deployment is not serving the JS bundle. Aborting."
+          exit 1
+
       - name: Run Playwright
         env:
           OR_API_BASE_URL: ${{ secrets.OR_API_BASE_URL }}
