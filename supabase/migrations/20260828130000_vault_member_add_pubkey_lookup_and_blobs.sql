@@ -1,3 +1,8 @@
+-- OUT-OF-ORDER-OK: never applied on dev or prod (both ledgers checked
+-- 2026-09-05, OR-T2256); merged via PR #925, Auditor-approved
+-- 2026-09-04, before the out-of-order guard (OR-T2147) existed. Only
+-- adds new objects (a column, a new table, a new function), so nothing
+-- already applied after it depends on or is undone by it.
 -- DL-0418 / DEV-0208: org vault member-add has no working path.
 --
 -- Adds the three objects the settled design depends on and that were never
