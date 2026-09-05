@@ -1,5 +1,5 @@
 name: CI
-# noop: synchronize trigger (DL-0696)
+# noop: synchronize trigger (DL-0696, OR-T1319)
 
 on:
   pull_request:
