@@ -114,6 +114,9 @@ export async function applyEnvelopeReplacement(
       sealed_envelope: fields.sealed_envelope,
       wallet_birthday_plaintext: fields.wallet_birthday_plaintext,
       last_block_scanned: null,
+      // OR-T2457: a fresh token every replacement, so a write in flight from
+      // before this reset carries a value that can never match again.
+      scan_generation: crypto.randomUUID(),
       updated_at: new Date().toISOString(),
     })
     .eq('id', connectionId);
