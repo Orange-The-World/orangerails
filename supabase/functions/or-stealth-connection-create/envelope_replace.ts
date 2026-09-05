@@ -50,6 +50,18 @@
  * and the store endpoint upserts with ignoreDuplicates, so re-reading a block
  * that was already read produces nothing new. Slow and correct is the intended
  * cost of a recovery lever that actually works.
+ *
+ * THE GAP THIS DID NOT CLOSE (OR-T2457). Clearing the cursor and coverage
+ * stops a FRESH read from resuming past the new birthday. It does nothing
+ * about a write from a sync of the OLD envelope that is still in flight when
+ * the reset happens: advanceCursor's forward-only guard treats a null cursor
+ * as "anything may write", and record_stealth_scan_range checks only that the
+ * caller owns the connection, so a stale write can land right after this
+ * function runs and put the pre-reset scan position back. The rescan then
+ * silently never happens. scan_generation closes that: this function rotates
+ * it to a fresh random value on every replacement, and the two writers
+ * (cursor.ts, scan_range.ts) refuse a write whose token is not the current
+ * one.
  */
 
 // deno-lint-ignore no-explicit-any
