@@ -29,7 +29,17 @@ import { strikeDeleteSubscription, parseStrikeCredentials } from '../_shared/pro
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import { safeErrorLine } from '../_shared/error-redaction.ts';
 
-// --- AES helpers (mirror or-sync's pattern; will share once a util module lands) ---
+// --- AES helpers (mirror or-sync's pattern) ---
+//
+// DECISION (OR-T0723): a third copy of this key-import code lives in
+// or-sync/index.ts (correctly requesting ['encrypt', 'decrypt'], since that
+// function really does encrypt). Kept as three deliberate separate inline
+// copies rather than unified into a shared module in this PR -- that is a
+// larger, riskier change and each copy's isolation was a deliberate choice
+// per its own comment. What changes here: importAesKey is exported so
+// index.test.ts can pin its usages array directly, the same pattern applied
+// to or-discover-wallets, so the next divergence fails a check instead of
+// waiting for a reviewer to read three files side by side.
 
 function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
@@ -38,7 +48,8 @@ function base64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
-async function importAesKey(base64Key: string): Promise<CryptoKey> {
+// Exported so index.test.ts can assert the usages array directly (OR-T0723).
+export async function importAesKey(base64Key: string): Promise<CryptoKey> {
   const keyBytes = base64ToBytes(base64Key);
   return crypto.subtle.importKey('raw', keyBytes as BufferSource, { name: 'AES-GCM' }, false, ['decrypt']);
 }
