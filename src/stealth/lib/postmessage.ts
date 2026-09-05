@@ -49,6 +49,27 @@
  */
 
 export const STEALTH_PROTOCOL_VERSION = 1 as const;
+
+/**
+ * The full set of protocol versions this widget build accepts at INIT and
+ * advertises in READY. Membership, not equality, is the compatibility rule:
+ * an INIT whose protocol_version is anywhere in this set is accepted, and an
+ * app can read this set off READY to pick a version both sides speak with no
+ * app deploy. STEALTH_PROTOCOL_VERSION stays the current preferred version.
+ *
+ * This PR ships the mechanism only. The set stays [1] here; a version is
+ * added to it only in the release that actually bumps the protocol, per the
+ * 90 day deprecation window documented in docs/Stealth-Sync.md.
+ */
+export const STEALTH_SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
+
+/**
+ * Union of every version this widget build accepts. Derived from
+ * STEALTH_SUPPORTED_PROTOCOL_VERSIONS so that adding a version to the array
+ * widens this type automatically, with no second place to edit.
+ */
+export type StealthProtocolVersion = (typeof STEALTH_SUPPORTED_PROTOCOL_VERSIONS)[number];
+
 export const STEALTH_HKDF_INFO = 'or-stealth-v1' as const;
 
 /**
@@ -112,7 +133,7 @@ export interface StealthInitWidgetMessage {
   type: 'OR_STEALTH_INIT';
   /** Absent or 'widget' both resolve to widget mode. */
   seal_mode?: 'widget';
-  protocol_version: typeof STEALTH_PROTOCOL_VERSION;
+  protocol_version: StealthProtocolVersion;
   app_slug: 'v2' | 'v3' | 'ow' | string;
   app_user_id: string;
   mode: StealthMode;
@@ -217,7 +238,7 @@ export interface StealthInitAppMessage {
   type: 'OR_STEALTH_INIT';
   /** Required discriminant for app mode. */
   seal_mode: 'app';
-  protocol_version: typeof STEALTH_PROTOCOL_VERSION;
+  protocol_version: StealthProtocolVersion;
   app_slug: 'v2' | 'v3' | 'ow' | string;
   app_user_id: string;
   mode: StealthMode;
@@ -263,7 +284,16 @@ export type StealthInitMessage = StealthInitWidgetMessage | StealthInitAppMessag
 
 export interface StealthReadyMessage {
   type: 'OR_STEALTH_READY';
-  protocol_version: typeof STEALTH_PROTOCOL_VERSION;
+  /** Current preferred version. Prefer supported_protocol_versions when picking a version to speak. */
+  protocol_version: StealthProtocolVersion;
+  /**
+   * Every protocol version this widget build accepts at INIT, in ascending
+   * order. Added additively (DEC-0304): an app that reads only
+   * protocol_version is unaffected. Read this set to pick a version both
+   * sides speak with no app deploy, including after a widget rollback or a
+   * stale cached copy is served.
+   */
+  supported_protocol_versions: readonly number[];
 }
 
 export type StealthStage =

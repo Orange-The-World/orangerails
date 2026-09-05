@@ -1,8 +1,12 @@
 name: Repository hygiene
 
 on:
+  # DELIBERATELY UNFILTERED, see the long note in ci.yml (DEV-0283): a PR
+  # stacked on another feature branch used to run none of the real checks and
+  # still read GREEN. This scan reads the working tree, so the branch a PR
+  # targets says nothing about whether the tree is clean. Every pull request
+  # gets scanned.
   pull_request:
-    branches: [dev, prod]
   push:
     branches: [dev, prod]
 
@@ -31,11 +35,19 @@ jobs:
         # the reserved-term scan then skips and structural checks still run.
         # GitHub masks the value in logs.
         #
-        # REQUIRE_RESERVED_TERMS makes a missing list a hard failure on push
-        # events (the term list MUST be present on a real run to dev/prod, or
-        # the guard is not actually running). Fork PRs run as pull_request,
-        # legitimately have no secret, and stay a soft-skip.
+        # REQUIRE_RESERVED_TERMS makes a missing list a hard failure on every
+        # run that can actually see the secret: pushes to dev/prod AND
+        # same-repo pull requests. The list MUST be present on a real run, or
+        # the guard is not running and this required check would report
+        # success while the category it exists to catch never ran.
+        #
+        # One expression covers all three cases. On a push event
+        # github.event.pull_request is null and null != true is true, so
+        # pushes stay hard-required with no second clause. On a same-repo PR
+        # fork is false, so it is hard-required too. On a fork PR fork is
+        # true: GitHub withholds the secret from forks, so a fork genuinely
+        # cannot supply the list and stays the legitimate soft-skip.
         env:
           OR_RESERVED_TERMS: ${{ secrets.OR_RESERVED_TERMS }}
-          REQUIRE_RESERVED_TERMS: ${{ github.event_name == 'push' }}
+          REQUIRE_RESERVED_TERMS: ${{ github.event.pull_request.head.repo.fork != true }}
         run: bash scripts/pre-publish-scan.sh

@@ -31,6 +31,14 @@ import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Length of a canonical UUID in its hyphenated 8-4-4-4-12 form, checked beside
+ * the pattern because JavaScript has no end-of-string anchor: without the m
+ * flag `$` matches at the end of the string OR immediately before a final
+ * newline, so UUID_RE alone accepts a UUID with a trailing "\n".
+ */
+const UUID_LENGTH = 36;
+
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -51,7 +59,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (!body.source_wallet_id || typeof body.source_wallet_id !== 'string') {
       return jsonResponse({ error: 'source_wallet_id required' }, 400, cors);
     }
-    if (!UUID_RE.test(body.source_wallet_id)) {
+    if (body.source_wallet_id.length !== UUID_LENGTH || !UUID_RE.test(body.source_wallet_id)) {
       return jsonResponse({ error: 'source_wallet_id must be a UUID' }, 400, cors);
     }
 

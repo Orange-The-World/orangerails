@@ -102,15 +102,20 @@ upsert so a concurrent restore cannot interleave. Keyed on the composite
 `(user_id, outpoint_bidx)`:
 
 ```sql
-INSERT INTO channel_state (user_id, outpoint_bidx, update_id, sealed_blob)
-VALUES (:user_id, :bidx, :new_id, :blob)
+INSERT INTO channel_state (user_id, outpoint_bidx, update_id, seal_version, sealed_iv, sealed_ct)
+VALUES (:user_id, :bidx, :new_id, :seal_version, :sealed_iv, :sealed_ct)
 ON CONFLICT (user_id, outpoint_bidx) DO UPDATE
-  SET update_id = EXCLUDED.update_id,
-      sealed_blob = EXCLUDED.sealed_blob,
-      updated_at  = now()
+  SET update_id    = EXCLUDED.update_id,
+      seal_version = EXCLUDED.seal_version,
+      sealed_iv    = EXCLUDED.sealed_iv,
+      sealed_ct    = EXCLUDED.sealed_ct
   WHERE channel_state.update_id < EXCLUDED.update_id
 RETURNING update_id;
 ```
+
+The envelope is stored as three columns on the live table, not one
+`sealed_blob` blob: `seal_version`, `sealed_iv`, `sealed_ct`. That is the
+table as it already exists (§3.3), so it is what the wiring binds to.
 
 The `WHERE ... < EXCLUDED.update_id` lives **inside** the ON CONFLICT, so the
 compare-and-set is one atomic op, not application logic. `:user_id` is taken
@@ -177,6 +182,154 @@ Retention is scoped to channel close instead:
 Superseded state needs no separate cleanup: an update to the same channel
 collides on the blind index and overwrites in place (§3.2), so there is no
 history pile to sweep.
+
+### 3.5 Payment records: the amount is sealed before it is written
+
+The mirror map (§2) and `seal.ts` both name payment records alongside
+channel-state backups, and no payment record path is implemented yet. When one
+is built, this is binding on it:
+
+> **The Lightning payment amount is sealed inside the envelope, client-side,
+> before it is written. It is never a column, never an index term, and never a
+> field the server can read. The same is true of every value that is a function
+> of the amount, including a routing fee, a bucket, a range, or any other
+> order-preserving encoding of it. Same envelope and same key custody as the
+> fields already sealed on this surface: AES-256-GCM, fresh IV, client-derived
+> key (`'or-ldk-v1'`), no server-side decrypt path.**
+
+This is a settled requirement, not an open design question, and it is written
+here because the wiring PR is reviewed against this document.
+
+**What is stored today: no Lightning payment amount.** No Lightning payment
+amount is stored anywhere in Orange Rails. There is no Lightning payment record
+on this connector: no type, table, column, view, function, RPC or edge function
+holds one, and every seal and persist entry point on this surface throws
+`scaffold only`. Read that as what it is, a claim about Lightning and about this
+connector. It is deliberately not a claim that no payment surface of any kind
+exists anywhere in the system: billing surfaces do exist, for other purposes and
+under other sections, and the reuse consequence in the list below is what keeps
+a Lightning amount off them. The user-facing claim that we cannot read your
+financial data is therefore not contradicted by anything in the system as it
+stands. This section constrains work that has not been built yet. It is not a
+fix for a live exposure and should not be cited as evidence of one.
+
+**What that rests on, and how to re-check it.** The database objects were
+checked by querying the databases. They were not inferred from this repository,
+and a code search is not evidence for this claim in either direction. §3.3 is
+why that distinction is load-bearing rather than pedantic: `channel_state` and
+its unique index already exist in the database while the wiring PR ships zero
+DDL, so schema state runs ahead of the diff, and a document that says so cannot
+then make a schema claim out of the diff two sections later. To re-check this
+line, query `information_schema.columns` in the dev and production projects for
+a column that could hold a Lightning payment value, and report which projects
+were reached: a project that could not be reached is not a project that came
+back clean.
+
+Seven consequences, all checkable at review. Read this as the complete list **for
+the LDK payment record surface** as it stands: if a proposal touches that surface,
+satisfies every bullet, and still lets the server learn a Lightning payment
+amount, that is a defect in this list, and the fix is an edit to this section on
+the bar set at the close of it (a founder decision plus an Auditor pass), not a
+judgement made at review time.
+
+That scope is deliberate and it cuts both ways. A cleartext amount that reaches
+the server by some **other** surface is out of this list's reach and is governed
+elsewhere, so a green walk of the seven bullets is a statement about the LDK
+payment record and not a clean bill of health for the product. What the list does
+bind wherever the row lands is the seventh consequence: a Lightning payment
+amount is never recorded on a pre-existing payment, billing or invoice surface,
+and reusing a table that already exists relaxes nothing. Narrowing the closedness
+claim is not licence to route a Lightning amount around it.
+
+- **No amount column.** A payment record row carries a blind index, a seal
+  version, the IV and the ciphertext, and nothing that describes value. If a
+  reviewer can name the column that holds the amount, the change is wrong.
+- **No fee column, and no other derived value in cleartext.** A routing fee is a
+  function of the amount, so a readable fee is an amount oracle: no amount
+  column plus a cleartext fee still tells the server roughly what was sent.
+  Every value derived from the amount, fee, total, balance and running sum
+  included, is sealed on exactly the same terms as the amount itself.
+- **No amount in a blind index.** The blind index exists to locate a row, and a
+  deterministic index over a value is a value oracle. Index terms stay on the
+  stable identifiers, as they do for channel state (§3).
+- **No bucket, no range, no order-preserving encoding.** A coarse bucket, a
+  magnitude band, or any encoding the server can compare or sort, is a value
+  oracle even though it is not the amount and describes no total. If the server
+  can put two payment records in value order from what it holds, the change is
+  wrong.
+- **Fixed-width serialization inside the envelope.** AES-256-GCM does not pad,
+  so ciphertext length is plaintext length. An amount serialized as decimal text
+  makes the sealed blob longer for a larger payment, and the server then reads
+  magnitude with no decrypt path at all. The amount is therefore serialized to a
+  fixed width, or the whole payment record is sealed as a fixed-size struct, so
+  that every payment record ciphertext is the same length whatever the value.
+  Until that holds, the claim in §6 (b) is true of the field and not of the
+  artifact.
+- **No server-side amount arithmetic.** Sums, balances and totals are computed
+  client-side after unsealing. A server that can add two amounts can read them.
+- **Reusing a table that already exists does not relax any of the above.** The
+  test is the same after the change as before it: if the server can read the
+  value of a Lightning payment, or put two of them in value order, from what it
+  holds, the change is wrong. That test does not ask which table the row landed
+  in, what the table is called, when it was built or who owns it. So a Lightning
+  payment amount is never recorded on a pre-existing payment, billing or invoice
+  surface, and a Lightning rail is never added to a table that carries a
+  cleartext amount column. The payment record this section governs is its own
+  table on the allowed column set below, and a row written somewhere else is not
+  exempt for having avoided a new one.
+
+**How a reviewer checks this, without judgement.** Stated only as above, the
+check rests on what counts as describing value, and §3.3 is why that is not
+enough: `channel_state` and its unique index already exist in the dev database
+and the wiring PR ships zero DDL, so a reviewer holding the wiring PR can have
+no schema in the diff to check against. Two requirements turn the check into an
+enumeration:
+
+- **The payment record DDL arrives as a migration pull request in this
+  repository**, owned by the database steward, so the columns are in a diff a
+  reviewer can read. A payment record table that appears in a database without
+  one is itself the finding.
+- **The allowed column set is exactly** `user_id`, `payment_bidx`,
+  `seal_version`, `iv`, `ciphertext`, `created_at`, `updated_at`. Anything
+  outside that list fails, whatever it is named and whatever it is said to hold.
+  Widening the list is a change to this section, not a reviewer's call.
+
+Both of those requirements describe a table that does not exist yet, and neither
+one fires on a table that already does: a write to a surface that is already
+there ships no DDL, so it raises no migration pull request, and it adds no
+column, so the allowed column set is never consulted. That limit is the reason
+the last consequence above is stated on its own rather than left to be read out
+of these two.
+
+**Metadata trade-off, on the same terms as §3.2 (3).** Every consequence above
+is about **value**, and none of them is about **existence**. A payment record
+row on the allowed column set carries a `payment_bidx` and a `created_at`, so
+the server can count how many Lightning payments a user made and see when each
+row appeared, with every bullet above satisfied and every payload sealed. That
+is the same class of exposure §3.2 (3) records for per-channel update cadence,
+two subsections earlier in this document, and it is written here rather than
+left to be inferred from there. Bounded and accepted: no amount, fee, balance,
+counterparty or destination leaks. Reducing it further is a different design,
+not a tightening of the bullets above: padding the table with decoy rows,
+batching writes so a row's arrival is not a payment's timing, or coarsening
+`created_at` to a window. None of those is proposed here, and each carries its
+own cost, so the exposure is accepted rather than engineered away. **This
+observable pattern is personal financial behavior metadata under GDPR / Law-25
+and must be disclosed in the privacy policy before any payment record path
+ships to users** (tracked with Compliance; not a blocker on this section or on
+the wiring PR). Nothing is observable today: per the paragraph above, no
+Lightning payment record exists, so this states what becomes observable the
+moment one is built.
+
+The trade-off, stated rather than discovered later: sealing the amount means
+the server cannot sort, filter, aggregate or report on value. Any product
+surface that appears to need server-side totals is asking for the seal to be
+broken, and the answer is a client-side computation, not a cleartext column.
+
+What would make this wrong: nothing in the product. It is a customer-facing
+claim about what we can read, so it is not a performance trade to be revisited
+by an implementer. Changing it is a founder decision plus an Auditor pass, the
+same bar as any other change to the ZKA boundary.
 
 ## 4. Auth contract — `or-ldk-channel-state` edge function
 
@@ -246,6 +399,9 @@ answered here and traced at review against the implementation.
 - **(b) Server state** — every persisted blob is client-encrypted; the
   decryption key is HKDF-derived client-side (`'or-ldk-v1'`), never leaves the
   client. Server sees ciphertext + blind index only. No server-issued salt.
+  Includes the payment amount specifically (§3.5): it is inside the envelope,
+  not a column and not an index term. This is checked against the schema, not
+  only against the code.
 - **(c) Signing** — no signer or key material instantiated server-side at any
   point in the persistence path. All signing on-device.
 - **(d) Recovery** — full fund recovery from seed alone with Orange Rails infra

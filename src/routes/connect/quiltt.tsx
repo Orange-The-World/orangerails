@@ -21,8 +21,10 @@
  *
  * The Quiltt connection_id from onExitSuccess is NOT required on our side —
  * or-quiltt-link-complete only needs (platform_slug, app_user_id, widget_token)
- * because one OR connections row covers all Quiltt links for a Profile (Phase
- * 1 design). The Quiltt connection_id arrives separately via webhook events.
+ * to create the connections row. or-quiltt-link-complete creates one OR
+ * connections row per linked quiltt_connection_id, so a single Profile can
+ * host many bank links. The Quiltt connection_id arrives separately via
+ * webhook events.
  */
 
 import { createFileRoute } from "@tanstack/react-router";
@@ -291,21 +293,33 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   //
   // Three cases on unload:
   //   "done"       -- clean auto-close after OR_QUILTT_LINK_COMPLETE was sent; no message needed.
-  //   "completing" -- keepalive fetch is in flight; it will complete and send OR_QUILTT_LINK_COMPLETE
-  //                   even after the popup closes. Sending CLOSED_INCOMPLETE here would be wrong.
+  //   "completing" -- the keepalive POST is guaranteed to be DELIVERED even if the popup closes,
+  //                   but it is NOT guaranteed to be PROCESSED: the postMessage that reports
+  //                   success runs after await resp.json(), in this same document, and that
+  //                   continuation never runs once the document is gone. The link may well have
+  //                   succeeded, so we must not claim it failed. Send a distinct message that
+  //                   tells the opener the outcome is unknown, and let it reconcile.
   //   anything else -- genuine abandonment or error; opener cannot distinguish from silent failure,
   //                   so we send OR_QUILTT_POPUP_CLOSED_INCOMPLETE.
   useEffect(() => {
     function onPageHide() {
-      if (phase !== "done" && phase !== "completing" && window.opener) {
-        try {
+      if (phase === "done" || !window.opener) {
+        return;
+      }
+      try {
+        if (phase === "completing") {
+          window.opener.postMessage(
+            { type: "OR_QUILTT_POPUP_CLOSED_WHILE_COMPLETING" },
+            "*",
+          );
+        } else {
           window.opener.postMessage(
             { type: "OR_QUILTT_POPUP_CLOSED_INCOMPLETE" },
             "*",
           );
-        } catch {
-          // opener may be cross-origin in some embeddings; swallow silently.
         }
+      } catch {
+        // opener may be cross-origin in some embeddings; swallow silently.
       }
     }
     window.addEventListener("pagehide", onPageHide);

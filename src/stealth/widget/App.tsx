@@ -32,6 +32,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   STEALTH_PROTOCOL_VERSION,
+  STEALTH_SUPPORTED_PROTOCOL_VERSIONS,
   type StealthInitMessage,
   type StealthReadyMessage,
   type StealthErrorMessage,
@@ -92,6 +93,7 @@ function postReady(target: Window | null) {
   const ready: StealthReadyMessage = {
     type: "OR_STEALTH_READY",
     protocol_version: STEALTH_PROTOCOL_VERSION,
+    supported_protocol_versions: STEALTH_SUPPORTED_PROTOCOL_VERSIONS,
   };
   target.postMessage(ready, pickReadyTargetOrigin());
 }
@@ -188,11 +190,15 @@ export function App() {
         return;
       }
 
-      if (data.protocol_version !== STEALTH_PROTOCOL_VERSION) {
+      const supportedVersions: readonly number[] = STEALTH_SUPPORTED_PROTOCOL_VERSIONS;
+      if (
+        typeof data.protocol_version !== "number" ||
+        !supportedVersions.includes(data.protocol_version)
+      ) {
         setError("protocol version mismatch");
         postError(event.source as Window | null, event.origin, {
           code: "PROTOCOL_VERSION_MISMATCH",
-          message: `Widget speaks protocol v${STEALTH_PROTOCOL_VERSION}; got v${String(data.protocol_version)}.`,
+          message: `Widget supports protocol version(s) ${supportedVersions.join(", ")}; got v${String(data.protocol_version)}.`,
           retryable: false,
         });
         return;
