@@ -1146,17 +1146,13 @@ export async function reconcileConnectionSuccess(
     orConnId = exact.id;
     matchedExactly = true;
   } else {
-    const { data: legacy, error: legacyErr } = await client
-      .from('connections')
-      .select('id')
-      .eq('subaccount_id', subaccountId)
-      .eq('provider_type', 'quiltt')
-      .is('quiltt_connection_id', null)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (legacyErr) return `connection lookup failed: ${legacyErr.message}`;
-    if (legacy) orConnId = legacy.id;
+    // OR-T2475: the legacy fallback is only trusted when no OTHER Quiltt
+    // connection has already produced a processed event for this
+    // subaccount. Otherwise the row is already spoken for and promoting its
+    // status here would be reconciling the wrong connection's health.
+    const fallback = await resolveLegacyFallback(client, subaccountId, connectionId);
+    if ('error' in fallback) return fallback.error;
+    if (fallback.decision.kind === 'legacy') orConnId = fallback.decision.id;
   }
   if (!orConnId) return null;
   const { error: statusErr } = await client
