@@ -181,23 +181,22 @@ const STRIKE_BAD_SIG_THRESHOLD = 3;
 async function recordBadSig(
   client: ReturnType<typeof createClient>,
   connId: string,
-  currentCount: number,
 ): Promise<void> {
-  const next = currentCount + 1;
+  // strike_bump_bad_sig does the read and the write as one UPDATE, so two
+  // bad-sig deliveries for the same connection arriving close together each
+  // see the row as it is at the moment they run, never a count read here and
+  // then staled by the other. It returns true only on the delivery that
+  // actually crosses the threshold (OR-T2248).
   try {
-    if (next >= STRIKE_BAD_SIG_THRESHOLD) {
-      await client
-        .from('connections')
-        .update({ strike_bad_sig_count: 0, strike_needs_resubscribe: true })
-        .eq('id', connId);
+    const { data: crossed, error } = await client.rpc('strike_bump_bad_sig', {
+      p_conn_id: connId,
+      p_threshold: STRIKE_BAD_SIG_THRESHOLD,
+    });
+    if (error) throw error;
+    if (crossed) {
       console.warn(
         `[or-strike-webhook] conn=${connId} crossed bad-sig threshold (${STRIKE_BAD_SIG_THRESHOLD}), flagged for resubscribe`,
       );
-    } else {
-      await client
-        .from('connections')
-        .update({ strike_bad_sig_count: next })
-        .eq('id', connId);
     }
   } catch (err) {
     console.error('[or-strike-webhook] recordBadSig failed:', err);
