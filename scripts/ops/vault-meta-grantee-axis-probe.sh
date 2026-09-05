@@ -114,8 +114,8 @@ alarm() {
 
 # expected_members CLUSTER_LABEL
 # Prints "role|member" pairs, one per line, that are NOT drift for that
-# cluster. Measured live against both projects on OR-T1539 (2026-09-02,
-# re-verified 2026-09-05). Anything else found as a member of postgres,
+# cluster. Measured live against both projects on OR-T1539 (2026-09-02;
+# checked again 2026-09-05). Anything else found as a member of postgres,
 # service_role or or_agent_reader is reported.
 expected_members() {
   local label="$1"
