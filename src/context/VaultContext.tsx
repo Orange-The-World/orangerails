@@ -68,6 +68,7 @@ import {
   grantCoAdmin as grantCoAdminImpl,
   loadAdminSubkeysDirect,
   revokeCoAdmin as revokeCoAdminImpl,
+  assertSaltMatchesUnlockedVault,
   type AdminSubkeys,
 } from "@/lib/co-admin";
 
