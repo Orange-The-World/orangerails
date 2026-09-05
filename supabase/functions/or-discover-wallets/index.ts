@@ -51,14 +51,18 @@ function base64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
-async function importAesKey(base64Key: string): Promise<CryptoKey> {
+// Exported so index.test.ts can assert the usages array directly, not just
+// that decryption still works (which it would even with an extra unused
+// usage).
+export async function importAesKey(base64Key: string): Promise<CryptoKey> {
   const keyBytes = base64ToBytes(base64Key);
   return crypto.subtle.importKey(
     "raw",
     keyBytes as BufferSource,
     { name: "AES-GCM" },
     false,
-    ["encrypt", "decrypt"],
+    // "decrypt" only: neither mode of this handler ever encrypts (OR-T0723).
+    ["decrypt"],
   );
 }
 
