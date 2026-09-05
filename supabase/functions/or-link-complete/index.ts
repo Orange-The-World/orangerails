@@ -29,9 +29,12 @@
  * token back here for verification). Audit 2026-05-16 High #3.
  *
  * If the env var REQUIRE_WIDGET_TOKEN is set to "true", tokenless requests
- * are rejected. Default is "false" during the rollout window so the V2/V3/OW
- * integrating apps have time to add the mint step. Flip to "true" once they
- * all integrate.
+ * are rejected. Default is permissive during the rollout window so the
+ * V2/V3/OW integrating apps have time to add the mint step. Flip to "true"
+ * once they all integrate. As of DEV-0204, an unset or unrecognised value
+ * is no longer silent: it is reported once at cold start via console.error
+ * and GlitchTip (see the REQUIRE_WIDGET_TOKEN startup check below), even
+ * though the permissive behaviour itself is unchanged for now.
  *
  * POST body (preferred, multi-wallet):
  *   platform_slug:          string  e.g. 'bitbooks-v2'
@@ -81,6 +84,10 @@ import {
   generateAccountEmittedId,
   guardAccountFingerprintKey,
 } from "../_shared/account-fingerprint.ts";
+import {
+  classifyRequireWidgetToken,
+  describeRequireWidgetTokenGap,
+} from "../_shared/widget-token-gate.ts";
 
 const MAX_WALLETS_PER_CALL = 50;
 const MAX_ENCRYPTED_METADATA_LEN = 8192;
@@ -123,6 +130,35 @@ function makeServiceClient(): SupabaseClient {
 // fails loudly here rather than silently creating connection rows with no
 // account identity.
 guardAccountFingerprintKey();
+
+// Startup check for REQUIRE_WIDGET_TOKEN (audit 2026-05-16 High #3,
+// DEV-0189, DEV-0204). Computed once at cold start, not per request:
+// this is a deploy-time secret and cannot change within an isolate's
+// lifetime, the same assumption SENTRY_DSN and the other env-derived
+// constants in this codebase already make.
+//
+// DEV-0204 PR 1: reporting only, no behaviour change. "unset" and
+// "unrecognised" both keep today's permissive default (see the
+// tokenless-call branch below); what changes is that the gap no
+// longer goes unreported. DEV-0204 PR 2, held on DL-2061 and
+// DEV-0202, is the separate PR that flips the default itself.
+const requireWidgetTokenRaw = Deno.env.get("REQUIRE_WIDGET_TOKEN");
+const requireWidgetTokenState = classifyRequireWidgetToken(requireWidgetTokenRaw);
+if (requireWidgetTokenState === "unset-or-unrecognised") {
+  const gap = describeRequireWidgetTokenGap(requireWidgetTokenRaw);
+  console.error(
+    `[or-link-complete] SECURITY GATE DEFAULTING TO PERMISSIVE: ${gap}. ` +
+      `Tokenless requests to or-link-complete are being ALLOWED through. ` +
+      `Set REQUIRE_WIDGET_TOKEN explicitly to "true" or "false" on this project.`,
+  );
+  void reportError(
+    new Error(
+      `or-link-complete: REQUIRE_WIDGET_TOKEN is unset-or-unrecognised (${gap}), ` +
+        `defaulting to permissive: tokenless requests are allowed through`,
+    ),
+    "or-link-complete",
+  );
+}
 
 Deno.serve(
   wrapSentryHandler(async (req: Request) => {
@@ -243,8 +279,7 @@ Deno.serve(
       //   - wrong user     -> 401 (token issued for a different app_user_id)
       //
       // On success we atomically mark the token used so a replay fails.
-      const requireToken =
-        (Deno.env.get("REQUIRE_WIDGET_TOKEN") ?? "false").toLowerCase() === "true";
+      const requireToken = requireWidgetTokenState === "true";
       if (body.widget_token) {
         // Atomic claim: scope every guard into one UPDATE ... RETURNING row.
         // Postgres serialises concurrent updates on the same row, so exactly
