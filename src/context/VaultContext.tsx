@@ -905,11 +905,12 @@ export function VaultProvider({ children }: VaultProviderProps) {
       // binding. This keeps app.tsx free of sig_secret_wrapped handling.
       const { data: sigRow } = await (supabase as any)
         .from("user_vault_meta")
-        .select("sig_secret_wrapped")
+        .select("sig_secret_wrapped, sig_public_key")
         .eq("user_id", params.ownerUserId)
         .single();
       const ownerSigSecretWrapped = (sigRow as Record<string, unknown> | null)?.sig_secret_wrapped as string | undefined;
-      if (!ownerSigSecretWrapped) {
+      const ownerSigPubB64 = (sigRow as Record<string, unknown> | null)?.sig_public_key as string | undefined;
+      if (!ownerSigSecretWrapped || !ownerSigPubB64) {
         throw new Error(
           "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
         );
@@ -918,6 +919,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
       return grantCoAdminImpl({
         ...rest,
         ownerSigSecretWrapped,
+        ownerSigPubB64,
         targetUserId,
         targetKemPubB64,
         supabase: supabase as unknown as Parameters<typeof grantCoAdminImpl>[0]["supabase"],

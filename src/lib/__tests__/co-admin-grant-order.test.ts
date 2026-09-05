@@ -28,6 +28,8 @@
 
 import { describe, it, expect } from "vitest";
 import { persistCoAdminGrant, CoAdminGrantIncompleteError } from "../co-admin";
+import { generateSigKeyPair } from "../signatures";
+import { signMemberGrant } from "../member-grant";
 
 interface RecordedInsert {
   table: string;
@@ -69,6 +71,10 @@ function makeFakeClient(options: FakeOptions = {}) {
   };
 }
 
+/** A fixed, valid-shaped owner signing public key. Not load-bearing for the
+ * cases that never reach signature verification. */
+const OWNER_SIG_PUB_B64 = "b3duZXItc2lnLXB1Yg==";
+
 function persist(supabase: Parameters<typeof persistCoAdminGrant>[0]["supabase"]) {
   return persistCoAdminGrant({
     ownerUserId: "owner-1",
@@ -76,6 +82,7 @@ function persist(supabase: Parameters<typeof persistCoAdminGrant>[0]["supabase"]
     workspaceKeyId: "workspace-key-1",
     wrappedCiphertextB64: "d3JhcHBlZA==",
     grantSig: "c2ln",
+    ownerSigPubB64: OWNER_SIG_PUB_B64,
     supabase,
   });
 }
@@ -106,7 +113,7 @@ describe("a co-admin grant writes the evidence before the access", () => {
   it("writes workspace_admins BEFORE wrapped_data_keys", async () => {
     const { client, inserts } = makeFakeClient();
 
-    await expect(persist(client)).resolves.toBeUndefined();
+    await expect(persist(client)).resolves.toEqual({ alreadyGranted: false });
 
     expect(insertedTables(inserts)).toEqual(["workspace_admins", "wrapped_data_keys"]);
   });
@@ -191,7 +198,7 @@ describe("granting again after a stop is the remedy, not a second dead end", () 
   it("treats an already-present list row as recorded and goes on to store the key", async () => {
     const { client, inserts } = makeFakeClient({ errors: { workspace_admins: UNIQUE_VIOLATION } });
 
-    await expect(persist(client)).resolves.toBeUndefined();
+    await expect(persist(client)).resolves.toEqual({ alreadyGranted: false });
 
     // Without this, the UNIQUE (owner_user_id, admin_user_id) constraint makes
     // the first write fail on every attempt after the first, the second write
@@ -212,5 +219,136 @@ describe("granting again after a stop is the remedy, not a second dead end", () 
     // something entirely different from a row that is already there.
     expect((err as Error).message).toContain("permission denied");
     expect(insertedTables(inserts)).toEqual(["workspace_admins"]);
+  });
+});
+
+describe("OR-T1942: a repeat grant to someone who already has a valid key", () => {
+  const WORKSPACE_KEY_ID = "workspace-key-1";
+  const TARGET_USER_ID = "admin-1";
+
+  /** A fake client whose wrapped_data_keys insert always 23505s, and whose
+   * select().eq().eq().single() returns the given existing row. */
+  function makeDuplicateKeyClient(existingRow: { wrapped_ciphertext: string; grant_sig: string } | null) {
+    const inserts: RecordedInsert[] = [];
+    const client = {
+      from(table: string) {
+        return {
+          insert(row: Record<string, unknown>) {
+            inserts.push({ table, row });
+            if (table === "wrapped_data_keys") {
+              return Promise.resolve({
+                data: null,
+                error: {
+                  code: "23505",
+                  message:
+                    'duplicate key value violates unique constraint "wrapped_data_keys_key_recipient_uniq"',
+                },
+              });
+            }
+            return Promise.resolve({ data: [row], error: null });
+          },
+          select() {
+            return {
+              eq() {
+                return {
+                  eq() {
+                    return {
+                      single() {
+                        return Promise.resolve(
+                          existingRow
+                            ? { data: existingRow, error: null }
+                            : { data: null, error: { message: "no rows" } },
+                        );
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+          delete() {
+            throw new Error("a grant does not delete; see the note about compensating deletes");
+          },
+        };
+      },
+      rpc() {
+        throw new Error("the workspace key id is already resolved before this helper is called");
+      },
+    };
+    return {
+      client: client as unknown as Parameters<typeof persistCoAdminGrant>[0]["supabase"],
+      inserts,
+    };
+  }
+
+  it("reports alreadyGranted, not an error, when the existing row verifies against the current owner key", async () => {
+    const owner = generateSigKeyPair();
+    const ownerSigPubB64 = btoa(String.fromCharCode(...owner.publicKey));
+    const wrappedCiphertextB64 = "ZXhpc3Rpbmctd3JhcHBlZA==";
+    const { signature: grantSig } = await signMemberGrant(owner.secretKey, {
+      memberUserId: TARGET_USER_ID,
+      workspaceKeyId: WORKSPACE_KEY_ID,
+      wrappedMekCiphertextB64: wrappedCiphertextB64,
+    });
+    const { client } = makeDuplicateKeyClient({ wrapped_ciphertext: wrappedCiphertextB64, grant_sig: grantSig });
+
+    const result = await persistCoAdminGrant({
+      ownerUserId: "owner-1",
+      targetUserId: TARGET_USER_ID,
+      workspaceKeyId: WORKSPACE_KEY_ID,
+      wrappedCiphertextB64: "bmV3LWF0dGVtcHQ=",
+      grantSig: "aXJyZWxldmFudA==",
+      ownerSigPubB64,
+      supabase: client,
+    });
+
+    expect(result).toEqual({ alreadyGranted: true });
+  });
+
+  it("still throws CoAdminGrantIncompleteError when the existing row does not verify", async () => {
+    // Signed by a DIFFERENT key than the one passed as the current owner
+    // signing key, the way a rotated or mismatched signer would look.
+    const owner = generateSigKeyPair();
+    const someoneElse = generateSigKeyPair();
+    const ownerSigPubB64 = btoa(String.fromCharCode(...owner.publicKey));
+    const wrappedCiphertextB64 = "ZXhpc3Rpbmctd3JhcHBlZA==";
+    const { signature: grantSig } = await signMemberGrant(someoneElse.secretKey, {
+      memberUserId: TARGET_USER_ID,
+      workspaceKeyId: WORKSPACE_KEY_ID,
+      wrappedMekCiphertextB64: wrappedCiphertextB64,
+    });
+    const { client } = makeDuplicateKeyClient({ wrapped_ciphertext: wrappedCiphertextB64, grant_sig: grantSig });
+
+    const err = await rejection(
+      persistCoAdminGrant({
+        ownerUserId: "owner-1",
+        targetUserId: TARGET_USER_ID,
+        workspaceKeyId: WORKSPACE_KEY_ID,
+        wrappedCiphertextB64: "bmV3LWF0dGVtcHQ=",
+        grantSig: "aXJyZWxldmFudA==",
+        ownerSigPubB64,
+        supabase: client,
+      }),
+    );
+
+    expect(err).toBeInstanceOf(CoAdminGrantIncompleteError);
+  });
+
+  it("throws CoAdminGrantIncompleteError when no existing row can be read back at all", async () => {
+    const { client } = makeDuplicateKeyClient(null);
+
+    const err = await rejection(
+      persistCoAdminGrant({
+        ownerUserId: "owner-1",
+        targetUserId: TARGET_USER_ID,
+        workspaceKeyId: WORKSPACE_KEY_ID,
+        wrappedCiphertextB64: "bmV3LWF0dGVtcHQ=",
+        grantSig: "aXJyZWxldmFudA==",
+        ownerSigPubB64: OWNER_SIG_PUB_B64,
+        supabase: client,
+      }),
+    );
+
+    expect(err).toBeInstanceOf(CoAdminGrantIncompleteError);
   });
 });

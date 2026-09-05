@@ -1420,7 +1420,11 @@ function AppHome() {
               }
             }
             setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
-            setNotice("Co-admin added. They'll see your data on their next unlock.");
+            setNotice(
+              result.alreadyGranted
+                ? "This person already has access. Nothing new was granted."
+                : "Co-admin added. They'll see your data on their next unlock.",
+            );
           }}
         />
       )}
