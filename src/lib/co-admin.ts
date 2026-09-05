@@ -261,6 +261,44 @@ export interface GrantResult {
   workspaceKeyId: string;
 }
 
+/**
+ * Assert that the salt about to be used for a co-admin grant is the same
+ * salt the caller's vault is actually unlocked under.
+ *
+ * WHY THIS EXISTS. grantCoAdmin's subkeys and the owner's ML-DSA signing
+ * secret are both derived from the unlocked MEK, but the salt paired with
+ * that MEK arrives as an ordinary parameter (ownerSaltB64) rather than being
+ * read back from the same place the MEK came from. Today the two always
+ * agree, because confirmVaultPassword runs first with that same parameter
+ * and cannot succeed under a salt that is not the vault's own: on a
+ * key-version-1 vault a wrong salt derives a wrong MEK and the verifier
+ * check fails, and on key-version-2 deriveKek over a wrong salt cannot
+ * unwrap enc_mek_ciphertext. Either way grantCoAdmin throws before this
+ * point is ever reached.
+ *
+ * That safety is load-bearing on the ORDER of those two steps, and nothing
+ * enforced it. If the confirm step is ever skipped, reordered, or given a
+ * different salt than the derivation step, the grant would silently derive
+ * subkeys that do not match the owner's own data path: a validly signed
+ * blob that decrypts nothing, surfacing weeks later as a co-admin who
+ * cannot open anything rather than as an error at grant time.
+ *
+ * Call this before deriving anything, so a mismatch is a loud failure at
+ * grant time instead of a silent one discovered later.
+ */
+export function assertSaltMatchesUnlockedVault(
+  unlockedSaltB64: string,
+  ownerSaltB64: string,
+): void {
+  if (unlockedSaltB64 !== ownerSaltB64) {
+    throw new Error(
+      "Vault salt mismatch: the salt passed to grantCoAdmin does not match the " +
+        "currently unlocked vault's own salt. Refusing to derive a grant from " +
+        "mismatched key material. Nothing was allocated, wrapped, or written.",
+    );
+  }
+}
+
 /** Subkeys returned by loadAdminSubkeysDirect for use in encrypt/decrypt. */
 export interface AdminSubkeys {
   credentialsKey: CryptoKey;
