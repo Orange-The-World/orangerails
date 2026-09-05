@@ -49,7 +49,7 @@ import {
   isAuthError,
   getCallerPlatformId,
 } from '../_shared/platform-auth.ts';
-import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
 import { advanceCursor, isAdvanceCursorError } from './cursor.ts';
 import { recordScanRange } from './scan_range.ts';
 
@@ -90,6 +90,21 @@ interface EnvelopeUpdateRequestBody {
 interface EnvelopeUpdateResponseBody {
   connection_id: string;
   last_block_scanned: number;
+  /**
+   * Present ONLY when the scan-range write failed for a reason that is not an
+   * ownership rejection: a missing or mismatched function (PGRST202), a
+   * revoked grant (42501), or anything unclassified. Its absence means the
+   * range was recorded, deliberately skipped, or rejected on ownership
+   * grounds, all of which are healthy outcomes.
+   *
+   * The cursor write has already succeeded by this point, so the sync itself
+   * stands. This field exists so it does not read green while a broken
+   * deployment silently drops every range (DL-1663).
+   *
+   * Only the code travels. The database message can carry an app_user_id, so
+   * it stays in the function log.
+   */
+  scan_range_failed?: { code: string };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -224,7 +239,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // identity, token-pinned above (direct: equals ctx.userId, widget:
     // enforceWidgetAppUser, platform: scoped by platform_id on the row read).
     // DL-1597.
-    await recordScanRange(ctx.serviceClient, {
+    const scanRange = await recordScanRange(ctx.serviceClient, {
       connection_id:      body.connection_id,
       app_user_id:        body.app_user_id,
       // The BOUNDED height, not the posted one. A range recorded as
@@ -240,6 +255,27 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       connection_id: body.connection_id,
       last_block_scanned: effectiveCursor,
     };
+
+    // A range write that failed for any reason other than an ownership
+    // rejection means the deployment or the grants are wrong, not that the
+    // request was invalid. recordScanRange has already logged the code; raise
+    // it on GlitchTip as well, because a log line in a function nobody is
+    // watching is how this went unseen for ten weeks (DL-0443), and put the
+    // code on the wire so the response stops reading green.
+    //
+    // The status stays 200: the cursor write succeeded and failing the whole
+    // sync here would punish the caller for a server-side deployment fault.
+    // Whether it SHOULD be fatal is a sync-contract decision and is not taken
+    // here (DL-1663).
+    if (scanRange.status === 'failed') {
+      void reportError(
+        new Error(`record_stealth_scan_range failed: code=${scanRange.code}`),
+        'or-stealth-envelope-update',
+        req,
+      );
+      resp.scan_range_failed = { code: scanRange.code };
+    }
+
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-envelope-update] fatal:', err);

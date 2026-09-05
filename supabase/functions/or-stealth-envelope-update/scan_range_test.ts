@@ -19,7 +19,23 @@ import {
   assertEquals,
   assertNotEquals,
 } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { buildScanRangeArgs, recordScanRange } from './scan_range.ts';
+import {
+  buildScanRangeArgs,
+  classifyScanRangeError,
+  recordScanRange,
+} from './scan_range.ts';
+
+/**
+ * A client whose rpc() always answers with one fixed error object, so each
+ * case below drives exactly one error shape through recordScanRange.
+ */
+function clientRejectingWith(error: unknown) {
+  return {
+    rpc() {
+      return Promise.resolve({ error });
+    },
+  };
+}
 
 const CONN_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
@@ -33,6 +49,20 @@ const CALLER = 'user-making-the-request';
  * to distinguish anything.
  */
 const CONNECTION_OWNER = 'user-owning-the-connection';
+
+/**
+ * A request that always reaches the RPC (from_height present and in range).
+ *
+ * Declared AFTER CONN_ID and CALLER on purpose: module-level const initialisers
+ * run top to bottom, so reading them from above would throw a ReferenceError at
+ * load time and kill every test in this file.
+ */
+const RECORDING_REQUEST = {
+  connection_id: CONN_ID,
+  app_user_id: CALLER,
+  last_block_scanned: 900_100,
+  from_height: 900_000,
+};
 
 Deno.test(
   'payload carries the CALLER id, not the connection owner, so the database check can reject',
@@ -118,24 +148,125 @@ Deno.test('no from_height: opt-out, no RPC is issued at all', async () => {
   assertEquals(called, false);
 });
 
-Deno.test('a rejected range is logged, not thrown: the cursor write must stand', async () => {
-  const client = {
+// ---------------------------------------------------------------------------
+// Error classification (DL-1663).
+//
+// Before this, every error was logged and swallowed, so a broken deployment
+// and a legitimately rejected range produced identical observable behaviour.
+// These cases exist to make the two impossible to confuse again.
+// ---------------------------------------------------------------------------
+
+/**
+ * The exact text the guard raises. Taken from the deployed function body on
+ * dev, not from our own source: 'record_stealth_scan_range: caller % does not
+ * own connection %'.
+ */
+const OWNERSHIP_REJECTION = {
+  code: 'P0001',
+  message:
+    'record_stealth_scan_range: caller user-making-the-request does not own connection bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+};
+
+Deno.test('an ownership rejection is still swallowed: the cursor write must stand', async () => {
+  const outcome = await recordScanRange(
+    clientRejectingWith(OWNERSHIP_REJECTION),
+    RECORDING_REQUEST,
+  );
+
+  // Must not throw and must not be reported as a failure. The preceding cursor
+  // write is the safe fallback (DL-1478) and nothing was written by the
+  // rejected call. A change that makes this 'failed' would fail real customer
+  // syncs and is a regression, not a stricter check.
+  assertEquals(outcome.status, 'rejected');
+  assertEquals(outcome.code, 'P0001');
+});
+
+Deno.test('PGRST202 is NOT swallowed: a missing or mismatched function is a broken deployment', async () => {
+  // This is the error that actually shipped: the 4-arg caller went out while
+  // the database still held the 3-arg function, every range write failed, and
+  // the sync read green.
+  const outcome = await recordScanRange(
+    clientRejectingWith({
+      code: 'PGRST202',
+      message:
+        'Could not find the function public.record_stealth_scan_range(p_app_user_id, p_connection_id, p_from_height, p_to_height) in the schema cache',
+    }),
+    RECORDING_REQUEST,
+  );
+
+  assertEquals(outcome.status, 'failed');
+  assertEquals(outcome.code, 'PGRST202');
+  assertNotEquals(outcome.status, 'rejected');
+});
+
+Deno.test('42501 is NOT swallowed: a revoked grant is not a rejected range', async () => {
+  const outcome = await recordScanRange(
+    clientRejectingWith({
+      code: '42501',
+      message: 'permission denied for function record_stealth_scan_range',
+    }),
+    RECORDING_REQUEST,
+  );
+
+  assertEquals(outcome.status, 'failed');
+  assertEquals(outcome.code, '42501');
+});
+
+Deno.test('an unrecognised error code is loud BY DEFAULT, so nothing joins the quiet set by omission', async () => {
+  const outcome = await recordScanRange(
+    clientRejectingWith({ code: '08006', message: 'connection failure' }),
+    RECORDING_REQUEST,
+  );
+
+  assertEquals(outcome.status, 'failed');
+  assertEquals(outcome.code, '08006');
+});
+
+Deno.test("the guard's OTHER P0001 is loud: matching on the errcode alone is not enough", () => {
+  // record_stealth_scan_range raises P0001 twice. Only one of them is an
+  // ownership rejection. This one means the connection row vanished between
+  // the handler's own read and this call, which is worth surfacing.
+  const outcome = classifyScanRangeError({
+    code: 'P0001',
+    message:
+      'record_stealth_scan_range: connection bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb not found or has no owner',
+  });
+
+  assertEquals(outcome.status, 'failed');
+});
+
+Deno.test('an error carrying no code at all is loud, reported as unknown', () => {
+  const outcome = classifyScanRangeError({ message: 'something went wrong' });
+
+  assertEquals(outcome.status, 'failed');
+  assertEquals(outcome.code, 'unknown');
+});
+
+Deno.test('the ownership message alone does not buy silence: the errcode must match too', () => {
+  const outcome = classifyScanRangeError({
+    message: 'record_stealth_scan_range: caller does not own connection',
+  });
+
+  assertEquals(outcome.status, 'failed');
+});
+
+Deno.test('a successful write reports recorded, and an opt-out reports skipped', async () => {
+  const ok = {
     rpc() {
-      // What an ownership rejection from the database looks like here.
-      return Promise.resolve({
-        error: { message: 'record_stealth_scan_range: caller does not own connection' },
-      });
+      return Promise.resolve({ error: null });
     },
   };
 
-  // Must not throw. The preceding cursor write is the safe fallback (DL-1478),
-  // and nothing was written by the rejected call.
-  await recordScanRange(client, {
-    connection_id: CONN_ID,
-    app_user_id: CALLER,
-    last_block_scanned: 900_100,
-    from_height: 900_000,
-  });
+  assertEquals((await recordScanRange(ok, RECORDING_REQUEST)).status, 'recorded');
+
+  assertEquals(
+    (await recordScanRange(ok, {
+      connection_id: CONN_ID,
+      app_user_id: CALLER,
+      last_block_scanned: 900_100,
+    })).status,
+    'skipped',
+  );
 });
 
 Deno.test('opt-out boundary: from_height past last_block_scanned does not record', () => {
