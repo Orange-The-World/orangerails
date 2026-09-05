@@ -10,7 +10,7 @@
 # supabase/migrations/20260902213700_assert_vault_meta_grantee_allow_list.sql
 # asserts this same allow list, but only ONCE, at apply time, and it is
 # VACUOUS on a fresh or restored database: the migration that creates the
-# or_agent_reader grants (PR #1110 / OR-T1489) is numbered above the
+# or_agent_reader grants (OR-T1489) is numbered above the
 # assertion, so on a from-scratch apply the assertion runs first, finds
 # nothing, and passes; the grants are created afterward and nothing checks
 # them again. This probe is the standing check that migration's own header
