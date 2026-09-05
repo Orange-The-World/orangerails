@@ -27,7 +27,10 @@
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
-import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
+import {
+  buildSyncCompletedPayload,
+  buildConnectionDataAvailablePayload,
+} from '../_shared/webhook-events.ts';
 import {
   chooseProfileId,
   chooseRouting,
@@ -772,8 +775,8 @@ export async function handleEvent(
  *      or-quiltt-link-complete normally creates this row from the browser,
  *      but that callback is optional and may not have fired yet (DL-0853
  *      root cause: REQUIRED server record behind an OPTIONAL browser callback).
- *   2. Enqueues a sync.completed webhook so the integrator knows to call
- *      or-sync for the data.
+ *   2. Enqueues a connection.data_available webhook so the integrator
+ *      knows to call or-sync for the data itself (DEV-0060).
  *
  * Returns 'processed' so the inbox event is consumed and not retried.
  */
@@ -839,16 +842,13 @@ export async function handleEventSinkDelivery(
       await client.from('webhook_delivery').insert({
         platform_id:   platformId,
         subaccount_id: subaccountId,
-        event_type:    'sync.completed',
-        // Zero is the honest value here, not a placeholder. Sink delivery
-        // means we pulled no rows ourselves: the whole point of the webhook
-        // is to tell the consumer to come and call or-sync. The OPK path
-        // reports a real row count because it did pull rows.
-        payload: buildSyncCompletedPayload({
+        event_type:    'connection.data_available',
+        // Sink delivery never pulls or stores a row itself: the whole point
+        // is to tell the consumer new data exists so it can call or-sync in
+        // the user's own session. No synced_count, because nothing synced.
+        payload: buildConnectionDataAvailablePayload({
           subaccountId,
           connectionId: connRow.id,
-          syncedCount:  0,
-          provider:     'quiltt',
         }),
       });
     }

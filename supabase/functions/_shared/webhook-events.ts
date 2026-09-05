@@ -37,6 +37,7 @@
 
 /** Event names OR emits. Keep in step with EventType in packages/webhooks. */
 export const SYNC_COMPLETED = 'sync.completed' as const;
+export const CONNECTION_DATA_AVAILABLE = 'connection.data_available' as const;
 
 export interface SyncCompletedInput {
   subaccountId: string;
@@ -92,6 +93,44 @@ export function buildSyncCompletedPayload(
     ...data,
     // Canonical shape. Read by @orangerails/webhooks constructEvent().
     type: SYNC_COMPLETED,
+    data,
+  };
+}
+
+export interface ConnectionDataAvailableInput {
+  subaccountId: string;
+  connectionId: string;
+  /** Override for tests. Production callers should omit it. */
+  ts?: string;
+}
+
+/**
+ * Build the wire payload for a connection.data_available delivery.
+ *
+ * Deliberately carries only subaccount_id, connection_id and ts. Never add
+ * an amount, a balance, a transaction, or anything else that required
+ * decrypting the customer's data to know -- that is the one invariant this
+ * event type exists to hold. If a future field needs more than "something
+ * changed for this connection", it is not a field on this event, it is a
+ * reason for the consumer to go call or-sync in the user's own session.
+ */
+export function buildConnectionDataAvailablePayload(
+  input: ConnectionDataAvailableInput,
+): Record<string, unknown> {
+  const ts = input.ts ?? new Date().toISOString();
+
+  const data = {
+    subaccount_id: input.subaccountId,
+    connection_id: input.connectionId,
+    ts,
+  };
+
+  return {
+    // Legacy flat shape. Read by receivers written before the SDK.
+    event: CONNECTION_DATA_AVAILABLE,
+    ...data,
+    // Canonical shape. Read by @orangerails/webhooks constructEvent().
+    type: CONNECTION_DATA_AVAILABLE,
     data,
   };
 }

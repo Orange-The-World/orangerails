@@ -232,3 +232,28 @@ describe("constructEvent , payload parsing", () => {
     expect(evt.id).toBe(EVENT_ID);
   });
 });
+
+describe("constructEvent , connection.data_available (DEV-0060)", () => {
+  const dataAvailableBody = JSON.stringify({
+    type: "connection.data_available",
+    data: {
+      subaccount_id: "sub_123",
+      connection_id: "conn_456",
+      ts: "2026-08-27T12:00:00.000Z",
+    },
+  });
+
+  it("parses without throwing and returns typed Event", async () => {
+    const sig = await v1Sig(dataAvailableBody);
+    const evt = await constructEvent({
+      rawBody: dataAvailableBody,
+      headers: { "x-or-signature": sig, "x-or-event-id": EVENT_ID },
+      secret: SECRET,
+    });
+    expect(evt.id).toBe(EVENT_ID);
+    expect(evt.type).toBe("connection.data_available");
+    expect(evt.data.subaccount_id).toBe("sub_123");
+    expect(evt.data.connection_id).toBe("conn_456");
+    expect("synced_count" in evt.data).toBe(false);
+  });
+});

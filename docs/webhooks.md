@@ -28,15 +28,45 @@ load for platforms that haven't opted in).
 
 ## Event types
 
-| Event            | Emitted by   | Payload fields                                                |
-|------------------|--------------|---------------------------------------------------------------|
-| `sync.completed` | `or-sync`    | `event`, `subaccount_id`, `connection_id`, `synced_count`, `ts` |
+| Event                        | Emitted by                              | Payload fields                                       |
+|-------------------------------|------------------------------------------|-------------------------------------------------------|
+| `sync.completed`              | `or-sync`, `or-quiltt-sync` (OPK path)   | `event`, `subaccount_id`, `connection_id`, `synced_count`, `ts` |
+| `connection.data_available`   | `or-strike-webhook`, `or-quiltt-sync` (sink-delivery path) | `event`, `subaccount_id`, `connection_id`, `ts` |
 
 One row is enqueued per connection that completed successfully — so a
 multi-connection sync produces multiple webhook events, one per
 connection. Failed connections do not emit. Empty syncs
 (`synced_count: 0`) still emit; consumers that want only non-empty
 events can filter on the field.
+
+### `connection.data_available`
+
+A provider (Strike, or Quiltt for a sink-mode platform) told OR that new
+data exists for a connection. OR has NOT fetched or stored anything: at
+receipt time OR does not hold the browser's `credentials_key`, and self
+custody (DEC-ZKA-01) means it never will just to answer a provider push.
+The payload therefore carries no financial content of any kind, ever:
+just `subaccount_id`, `connection_id` and `ts`. The consumer decides what
+to do: badge the connection, email its user, or call `or-sync` in that
+user's own session to actually pull the new data.
+
+This is a platform-to-platform signal only. Nothing in Orange Rails
+surfaces it to the end user directly.
+
+```json
+{
+  "event": "connection.data_available",
+  "subaccount_id": "11111111-1111-1111-1111-111111111111",
+  "connection_id": "22222222-2222-2222-2222-222222222222",
+  "ts": "2026-08-27T12:00:00.000Z",
+  "type": "connection.data_available",
+  "data": {
+    "subaccount_id": "11111111-1111-1111-1111-111111111111",
+    "connection_id": "22222222-2222-2222-2222-222222222222",
+    "ts": "2026-08-27T12:00:00.000Z"
+  }
+}
+```
 
 Example payload (dual-shape — both flat and nested fields are emitted during the SDK transition window so legacy hand-rolled receivers and `@orangerails/webhooks` consumers both work):
 

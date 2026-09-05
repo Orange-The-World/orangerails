@@ -11,7 +11,7 @@
  * to the `Event` union.
  */
 
-export type EventType = "sync.completed";
+export type EventType = "sync.completed" | "connection.data_available";
 
 export interface SyncCompletedEvent {
   /** UUID per delivery. Use for consumer-side dedupe. */
@@ -26,4 +26,22 @@ export interface SyncCompletedEvent {
   };
 }
 
-export type Event = SyncCompletedEvent;
+/**
+ * A provider told OR that new data exists for this connection. OR has NOT
+ * pulled or stored anything: no financial content of any kind is in this
+ * payload, by design (DL-1741 Option B, self-custody stays intact). The
+ * consumer decides what to do, e.g. call or-sync in the user's own session.
+ */
+export interface ConnectionDataAvailableEvent {
+  /** UUID per delivery. Use for consumer-side dedupe. */
+  id: string;
+  type: "connection.data_available";
+  data: {
+    subaccount_id: string;
+    connection_id: string;
+    /** ISO 8601 timestamp emitted by Orange Rails at dispatch. */
+    ts: string;
+  };
+}
+
+export type Event = SyncCompletedEvent | ConnectionDataAvailableEvent;

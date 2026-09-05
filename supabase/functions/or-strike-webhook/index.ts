@@ -35,6 +35,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { buildConnectionDataAvailablePayload } from '../_shared/webhook-events.ts';
 
 const CONN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -74,7 +75,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     const { data: conn, error: lookupErr } = await client
       .from('connections')
-      .select('id, strike_webhook_secret, provider_type')
+      .select('id, strike_webhook_secret, provider_type, subaccount_id')
       .eq('id', connId)
       .maybeSingle();
 
@@ -123,6 +124,49 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (insertErr) {
       console.error('[or-strike-webhook] insert failed:', insertErr);
       return new Response('insert failed', { status: 500 });
+    }
+
+    // Announce-don't-sync (DEV-0060, DL-1741 Option B). We cannot follow up
+    // with Strike right now (see module docstring: no credentials_key at
+    // receipt time), so tell the owning platform something arrived and let
+    // it decide what to do. Best-effort: the event is already durably
+    // queued above, so a failure here must not turn this 200 into a 500.
+    try {
+      const { data: sub, error: subErr } = await client
+        .from('subaccounts')
+        .select('platform_id')
+        .eq('id', conn.subaccount_id)
+        .maybeSingle();
+      if (subErr) {
+        console.error('[or-strike-webhook] subaccount lookup failed:', subErr.message);
+      } else if (sub?.platform_id) {
+        const { data: plat, error: platErr } = await client
+          .from('platforms')
+          .select('webhook_url')
+          .eq('id', sub.platform_id)
+          .maybeSingle();
+        if (platErr) {
+          console.error('[or-strike-webhook] platform lookup failed:', platErr.message);
+        } else if (typeof plat?.webhook_url === 'string' && plat.webhook_url.length > 0) {
+          const { error: whErr } = await client.from('webhook_delivery').insert({
+            platform_id:   sub.platform_id,
+            subaccount_id: conn.subaccount_id,
+            event_type:    'connection.data_available',
+            payload: buildConnectionDataAvailablePayload({
+              subaccountId: conn.subaccount_id,
+              connectionId: conn.id,
+            }),
+          });
+          if (whErr) {
+            console.error('[or-strike-webhook] webhook enqueue failed:', whErr.message);
+          }
+        }
+      }
+    } catch (whErr) {
+      console.error(
+        '[or-strike-webhook] webhook enqueue threw:',
+        whErr instanceof Error ? whErr.message : String(whErr),
+      );
     }
 
     return new Response('ok', { status: 200 });
