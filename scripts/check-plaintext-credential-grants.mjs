@@ -604,12 +604,26 @@ function selftest() {
 if (process.argv.includes("--selftest")) {
   selftest();
 } else if (!existsSync(MIGRATIONS_DIR)) {
-  console.log(`skip: no ${MIGRATIONS_DIR} in this repo`);
+  console.error(
+    `plaintext credential grant check FAILED: ${MIGRATIONS_DIR} does not exist in this checkout. ` +
+    "This gate watches every migration for a re-exposure of a plaintext credential column, and a " +
+    "missing migrations directory means it scanned nothing while reporting a status. Fix the " +
+    "checkout or the path rather than silently skipping the check.");
+  process.exit(1);
 } else {
   const files = readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith(".sql"))
     .sort()
     .map((f) => ({ name: f, sql: readFileSync(join(MIGRATIONS_DIR, f), "utf8") }));
+
+  if (files.length === 0) {
+    console.error(
+      `plaintext credential grant check FAILED: ${MIGRATIONS_DIR} exists but holds no .sql file. ` +
+      "The scoping migrations this gate depends on live there, so an empty directory means this " +
+      "run scanned zero migrations, not zero violations. Fix the checkout rather than let this go " +
+      "green on nothing.");
+    process.exit(1);
+  }
 
   const fail = violations(scan(files));
   const guardedColumns = Object.values(GUARDED).reduce((n, cols) => n + cols.length, 0);
