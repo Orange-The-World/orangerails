@@ -205,6 +205,11 @@ function AppHome() {
   const [myKemSecretWrapped, setMyKemSecretWrapped] = useState<string | null>(null);
   const [adminWorkspaces, setAdminWorkspaces] = useState<WorkspaceOption[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceOption | null>(null);
+  // A failed co-admin workspace load, kept OUT of the shared err state on
+  // purpose. refresh() clears err unconditionally and re-runs on its own
+  // dependency changes, so a message parked there can be wiped by work that
+  // has nothing to do with this list. Only the loader below writes this.
+  const [coAdminLoadErr, setCoAdminLoadErr] = useState<string | null>(null);
   // Cached admin subkeys , persists until tab closes (MVP limitation).
   const adminSubkeysRef = useRef<
     Map<string, { credentialsKey: CryptoKey; transactionsKey: CryptoKey }>
@@ -339,11 +344,31 @@ function AppHome() {
       // is the ordinary case of administering nothing and stays silent; only
       // "error" is surfaced. A failed call must never look like "you are a
       // co-admin of nothing", so unlike the other reads on this page it is
-      // loud: setErr as well as the log, because an empty list here is
-      // indistinguishable to the user from a real answer.
+      // loud. This goes in its own state and NOT in the shared err banner:
+      // refresh() starts with setErr(null), and an effect re-runs refresh
+      // whenever its identity changes. The un-awaited PQC key backfill above
+      // changes it: on resolving it calls setMyKemSecretWrapped, which is a
+      // dependency of getActiveCredentialsKey and getActiveTransactionsKey,
+      // which are dependencies of refresh. The backfill generates a keypair,
+      // writes it and re-reads the row while the path to here is two
+      // queries, so it commonly resolves AFTER this line and takes the
+      // message off the screen, leaving an empty co-admin list and nothing
+      // said. A load failure has to outlive an unrelated refresh.
+      //
+      // Clear the previous attempt's failure before recording this one. This
+      // is the ONLY place this state is cleared, which is the whole point of
+      // it being separate from err.
+      setCoAdminLoadErr(null);
       if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
+        // Log the real error for us; never show a raw backend message to a
+        // customer. list_coadmin_workspaces is not deployed to every target
+        // yet, and a missing-function error names the schema and function,
+        // so formatError(myAdminOfErr) here would put an internal
+        // identifier in a red box on a public product.
         console.error("Failed to load co-admin workspaces:", myAdminOfErr);
-        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
+        setCoAdminLoadErr(
+          "Could not load your co-admin workspaces. Please try again in a moment.",
+        );
       }
 
       const workspaces: WorkspaceOption[] = [];
@@ -1067,6 +1092,19 @@ function AppHome() {
         {err && (
           <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
             {err}
+          </div>
+        )}
+        {coAdminLoadErr && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+            <div>{coAdminLoadErr}</div>
+            {/* The switcher renders only when the list is non-empty, and a
+                failed load leaves it empty, so without this sentence a
+                failure and "you are a co-admin of nothing" still look the
+                same on screen even with a message above. */}
+            <div className="mt-1 text-xs opacity-90">
+              The workspace switcher is hidden because this list could not be
+              loaded. That is not the same as having no co-admin workspaces.
+            </div>
           </div>
         )}
 
