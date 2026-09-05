@@ -67,6 +67,11 @@ interface RecordedCall {
 interface FailurePoint {
   table: string;
   op: 'delete' | 'update';
+  // OR-T1256's reorder means stealth_connections now takes TWO separate
+  // updates (clear the cursor, then later write the new envelope). Both
+  // share table+op, so a failure point on that table must say which one it
+  // means. Leave unset for stealth_scan_ranges, where there is only one op.
+  hasSealedEnvelope?: boolean;
 }
 
 function makeClient(db: FakeDb, failAt: FailurePoint | null = null) {
@@ -74,6 +79,8 @@ function makeClient(db: FakeDb, failAt: FailurePoint | null = null) {
 
   function query(table: string, op: 'delete' | 'update', payload?: Record<string, unknown>) {
     const filters: Record<string, unknown> = {};
+    const isEnvelopeWrite = table === 'stealth_connections' && op === 'update' &&
+      !!payload && 'sealed_envelope' in payload;
     const builder = {
       eq(column: string, value: unknown) {
         filters[column] = value;
@@ -84,7 +91,12 @@ function makeClient(db: FakeDb, failAt: FailurePoint | null = null) {
       then(resolve: (r: { error: unknown }) => void) {
         calls.push({ table, op, filters });
 
-        if (failAt && failAt.table === table && failAt.op === op) {
+        const matchesFailAt = failAt !== null &&
+          failAt.table === table &&
+          failAt.op === op &&
+          (failAt.hasSealedEnvelope === undefined || failAt.hasSealedEnvelope === isEnvelopeWrite);
+
+        if (matchesFailAt) {
           resolve({ error: { message: 'simulated database failure' } });
           return;
         }
@@ -295,7 +307,12 @@ Deno.test('the coverage clear is scoped to the connection being replaced', async
 
 // ── 5. failure is reported, and fails on the safe side ────────────────────
 
-Deno.test('a failed coverage clear reports an error and does not replace the envelope', async () => {
+Deno.test('OR-T1256: a failed coverage clear leaves the cursor null but coverage intact, and the next sync does not skip', async () => {
+  // This is the half-applied case the reorder exists for. Before OR-T1256,
+  // coverage was deleted FIRST, so this failure point left both the cursor
+  // and coverage untouched, which was never the dangerous state. After the
+  // reorder the cursor is already null by the time coverage-delete can
+  // fail, so this is the case that has to be proven safe.
   const db = dbWithCoverage();
   const { client } = makeClient(db, { table: 'stealth_scan_ranges', op: 'delete' });
 
@@ -312,12 +329,27 @@ Deno.test('a failed coverage clear reports an error and does not replace the env
     'the envelope must not be replaced when the coverage could not be cleared, or the ' +
       'user would hold a new envelope with stale coverage and no rescan',
   );
-  assertEquals(db.ranges.length, 1);
+  assertEquals(db.ranges.length, 1, 'the coverage delete failed, so the row is still there');
+  assertEquals(
+    db.connections[0].last_block_scanned,
+    null,
+    'the cursor is cleared before coverage is touched, so it is already null here',
+  );
+  assertEquals(
+    nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT),
+    COVERAGE_TOP,
+    'the OLD coverage is still intact and still answers for the OLD envelope: the next ' +
+      'sync resumes at the top of it and does not skip the gap a stale cursor would create',
+  );
 });
 
-Deno.test('a failed envelope write reports an error and leaves the connection rescanning', async () => {
+Deno.test('OR-T1256: a failed envelope write rescans from the OLD birthday, not the old cursor plus one', async () => {
   const db = dbWithCoverage();
-  const { client } = makeClient(db, { table: 'stealth_connections', op: 'update' });
+  const { client } = makeClient(db, {
+    table: 'stealth_connections',
+    op: 'update',
+    hasSealedEnvelope: true,
+  });
 
   const result = await applyEnvelopeReplacement(client, CONNECTION, {
     sealed_envelope: NEW_ENVELOPE,
@@ -325,15 +357,23 @@ Deno.test('a failed envelope write reports an error and leaves the connection re
   });
 
   assert(isEnvelopeReplacementError(result), 'a failed envelope write must not answer ok');
-  assertEquals(db.ranges.length, 0, 'coverage went first, so this half already landed');
+  assertEquals(db.ranges.length, 0, 'the cursor and coverage already landed, so this half already applied');
 
-  // The residual state is the OLD envelope with its cursor untouched, so the
-  // connection resumes exactly where it was: one block past the cursor. That
-  // is the safe half to lose. Losing them the other way round would store the
-  // NEW envelope, carrying the birthday the user just asked for, behind
-  // coverage that still blocks the rescan, and a caller who does not retry is
-  // then back in the silent failure this whole change is about.
+  // The residual state is the OLD envelope, a NULL cursor, and no coverage.
+  // scanStartHeight falls through to the cursor arm (no coverage answers),
+  // evaluates max(oldBirthdayHeight, null + 1), and rescans from the OLD
+  // birthday. That is what the module comment always claimed; before
+  // OR-T1256 it did not deliver it, because the old order left a stale,
+  // NON-null cursor behind instead of a null one.
   assertEquals(db.connections[0].sealed_envelope, OLD_ENVELOPE);
-  assertEquals(db.connections[0].last_block_scanned, COVERAGE_TOP);
-  assertEquals(nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT), COVERAGE_TOP + 1);
+  assertEquals(
+    db.connections[0].last_block_scanned,
+    null,
+    'the cursor was cleared in step 1, before the envelope write that failed in step 3',
+  );
+  assertEquals(
+    nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT),
+    BIRTHDAY_HEIGHT,
+    'the next scan start is the wallet birthday, not the old cursor plus one',
+  );
 });
