@@ -81,6 +81,7 @@ export async function advanceCursor(
   platformId: string,
   connectionId: string,
   incomingHeight: number,
+  scanGeneration: string,
   clientContiguousScanned?: unknown,
 ): Promise<AdvanceCursorResult> {
   // OR-T1914: cap the advance at the last height the caller read contiguously.
@@ -96,6 +97,11 @@ export async function advanceCursor(
     })
     .eq('platform_id', platformId)
     .eq('id', connectionId)
+    // OR-T2457: ANDed with the forward-only OR below, in the same atomic
+    // UPDATE. A caller whose generation does not match the row's current
+    // one matches zero rows here, exactly like an ordinary forward-only
+    // no-op, and the re-read below tells the two cases apart.
+    .eq('scan_generation', scanGeneration)
     .or(`last_block_scanned.lt.${boundedHeight},last_block_scanned.is.null`)
     .select('last_block_scanned')
     .maybeSingle();
@@ -109,17 +115,14 @@ export async function advanceCursor(
     return { effectiveCursor: boundedHeight, boundedHeight };
   }
 
-  // No-op path: the stored cursor was already >= boundedHeight.
-  // Re-read the row so the response reflects the actual stored cursor, not the
-  // pre-UPDATE snapshot. A concurrent caller may have advanced the cursor further
-  // between the ownership SELECT (in the handler) and this UPDATE; the fresh
-  // read captures that maximum.
-  //
-  // NULL is impossible here: the UPDATE filter includes last_block_scanned.is.null,
-  // so a null cursor always triggers the UPDATE and lands in the branch above.
+  // No-op path: either the stored cursor was already >= boundedHeight (a
+  // legitimate concurrent caller advanced further), or scan_generation did
+  // not match (OR-T2457: this connection was reset since the caller started
+  // its sync). Re-read both columns to tell the two apart; they get
+  // different answers below.
   const { data: freshRow, error: freshErr } = await client
     .from('stealth_connections')
-    .select('last_block_scanned')
+    .select('last_block_scanned, scan_generation')
     .eq('platform_id', platformId)
     .eq('id', connectionId)
     .maybeSingle();
@@ -127,6 +130,19 @@ export async function advanceCursor(
   if (freshErr || !freshRow) {
     console.error('[advanceCursor] post-update read failed:', freshErr);
     return { error: 'Failed to read cursor after update', status: 500 };
+  }
+
+  // OR-T2457: a caller whose generation does not match the current one is
+  // refused outright, not folded into the ordinary no-op response. Checked
+  // before the null-cursor invariant below, because a stale caller can
+  // legitimately see a null cursor (the reset that stranded it is also what
+  // cleared the cursor) and that must not be misread as the invariant
+  // violation the next check guards against.
+  if ((freshRow.scan_generation as string | null) !== scanGeneration) {
+    return {
+      error: 'Connection was reset since this sync began; stale write refused',
+      status: 409,
+    };
   }
 
   // The UPDATE filter includes last_block_scanned.is.null, so null here means
