@@ -219,7 +219,7 @@ async function main() {
 
   if (!target || target === '--stdout') {
     process.stdout.write(policyTsv)
-    process.stdout.write('\n')
+  } else if (target === '--stdout-tables') {
     process.stdout.write(tableTsv)
   } else {
     fs.writeFileSync(target, policyTsv)
