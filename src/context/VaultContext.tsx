@@ -890,8 +890,15 @@ export function VaultProvider({ children }: VaultProviderProps) {
       // The unlocked MEK is what the grant derives its subkeys from. It used
       // to be discarded here and re-derived from the password downstream,
       // which produced the wrong key on every vault the current setup creates.
-      const { mek } = requireUnlocked();
+      const { mek, saltB64: unlockedSaltB64 } = requireUnlocked();
       const { targetEmail, supabase, ...rest } = params;
+
+      // The salt paired with that MEK arrives as params.ownerSaltB64, a
+      // separate value from the same caller. Assert the two agree before
+      // anything is looked up, allocated, wrapped or written: see
+      // assertSaltMatchesUnlockedVault for why this was previously safe only
+      // by call order and not by construction.
+      assertSaltMatchesUnlockedVault(unlockedSaltB64, params.ownerSaltB64);
 
       // Resolve email → userId + kemPublicKey via SECURITY DEFINER RPC.
       const { data: rows, error: rpcErr } = await supabase.rpc("lookup_user_for_coadmin", {
