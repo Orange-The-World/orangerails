@@ -53,6 +53,54 @@ export const TRANSACTION_PAGE_SIZE = 500;
 /** Connections are re-encrypted in pages of this size. */
 export const CONNECTION_PAGE_SIZE = 500;
 
+/**
+ * The value of encrypted_transactions.sealed_under that means "this payload
+ * was encrypted with the user's transactions subkey", which is derived from
+ * the MEK and therefore has to move when the MEK moves.
+ *
+ * The other permitted value is 'opk': a background writer sealed the payload
+ * to the subaccount's X25519 public key while the user was offline. The
+ * private half of that keypair never reaches this server and is not derived
+ * from the MEK, so a vault rotation cannot open those rows and must not try.
+ * Skipping them loses nothing: an OPK sealed row reads exactly as well after
+ * a rotation as before it, because the key that opens it did not change.
+ *
+ * This is why the read below filters instead of taking every row row level
+ * security makes visible. Visibility answers "may this session touch the
+ * row". It does not answer "was this row sealed under the key this walk
+ * holds", and only the second question is the one this loop needs.
+ */
+export const SEALED_UNDER_VAULT_KEY = "ort";
+
+/**
+ * The literal stored in connections.encrypted_credentials when the provider,
+ * not this vault, holds the bank credentials. It is a marker, not ciphertext:
+ * the column is NOT NULL and there is nothing encrypted to put in it.
+ *
+ * Handing it to migrateCredentialsCiphertext throws, and before this constant
+ * existed that throw landed in the middle of an irreversible rotation. There
+ * is nothing under this key to rotate, so the correct handling is to skip the
+ * credential and keep going. Refusing outright would lock every user with a
+ * provider managed connection out of vault recovery.
+ *
+ * Kept in step with the writer by name, not by import: this module ships to
+ * the browser and the writer runs on the edge, so there is no shared module
+ * to hold it. If the writer's sentinel ever changes, the test below fails on
+ * the value, which is the cheapest place for that to be noticed.
+ */
+export const CREDENTIALS_HELD_BY_PROVIDER = "quiltt-managed";
+
+/**
+ * Shown when a connection credential cannot be opened with this vault key.
+ * Unlike RECOVERY_META_NOT_SAVED_MESSAGE, this one is raised BEFORE anything
+ * has been written, which is the whole point of computing the whole batch
+ * before writing any of it: the user's existing password still works and no
+ * row has moved, so the honest instruction is to stop, not to hold the page
+ * open.
+ */
+export const ROTATION_UNREADABLE_CREDENTIALS_MESSAGE =
+  "Vault recovery stopped before it changed anything. One of your connections is stored under a key this vault cannot open, so continuing would have split your data across two keys. Nothing has been changed and your current password still works. Contact support with this message.";
+
 export interface RotateVaultArgs {
   supabase: VaultPersistClient;
   userId: string;
@@ -141,6 +189,27 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // still not immune to another session INSERTing or DELETing a row while this
   // loop runs, which shifts the window. Keyset pagination on id would close
   // that too. It is deliberately out of scope here and is not a regression.
+  // WHY THIS WALK COMPUTES EVERYTHING BEFORE IT WRITES ANYTHING. connections
+  // carries no column saying which key sealed a row, so unlike the transaction
+  // read below there is nothing to filter on: the only way to find out whether
+  // this key opens a credential is to try. Doing that inline, row by row,
+  // means the first unreadable credential is discovered AFTER the rows before
+  // it have already been rewritten, which is exactly the unrecoverable state
+  // described above. Computing the whole batch first turns that into a clean
+  // refusal with nothing written.
+  //
+  // The cost is holding one re-encrypted credential per connection in memory
+  // until the write phase. Connections are bank links, so this is single or
+  // low double digits per user, not the transaction volume below. That is why
+  // the same treatment is deliberately NOT applied to transactions, which get
+  // a column filter instead.
+  //
+  // A side effect worth naming so nobody reads it as an accident: no UPDATE is
+  // now issued while the read walk is in flight, so the read can no longer
+  // reorder underneath itself. The ORDER BY still matters, because offset
+  // paging without one is unstable regardless, and the concurrent INSERT and
+  // DELETE residual described above is unchanged.
+  const connectionUpdates: Array<{ id: string; update: Record<string, unknown> }> = [];
   let connOffset = 0;
   for (;;) {
     const { data: conns, error: connsErr } = await supabase
@@ -158,8 +227,32 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     if (connPage.length === 0) break;
 
     for (const conn of connPage) {
-      const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
-      const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
+      const connUpdate: Record<string, unknown> = {};
+
+      // A provider held credential is a marker, not a ciphertext. There is
+      // nothing under this key to rotate, so leave the column exactly as it
+      // is. Any OTHER credential this key cannot open is a real problem and
+      // stops the rotation here, with nothing written.
+      if (conn.encrypted_credentials !== CREDENTIALS_HELD_BY_PROVIDER) {
+        try {
+          connUpdate.encrypted_credentials = await migrateCredentialsCiphertext(
+            conn.encrypted_credentials,
+          );
+        } catch (err) {
+          const refusal = new Error(ROTATION_UNREADABLE_CREDENTIALS_MESSAGE) as Error & {
+            underlyingError?: unknown;
+          };
+          refusal.underlyingError = err;
+          throw refusal;
+        }
+      }
+
+      // The label is migrated even on a provider held connection, because the
+      // label IS a real ciphertext: the browser encrypts it and the writer
+      // stores it verbatim. Skipping the whole row would strand it under the
+      // old MEK. The give up branch below is unchanged and is deliberate:
+      // encrypted_label is cosmetic and the connection remains usable without
+      // it, so a label alone must not abort a rotation.
       if (conn.encrypted_label) {
         try {
           connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
@@ -172,11 +265,10 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
           }
         }
       }
-      const { error: connErr } = await supabase
-        .from("connections")
-        .update(connUpdate)
-        .eq("id", conn.id);
-      if (connErr) throw connErr;
+
+      if (Object.keys(connUpdate).length > 0) {
+        connectionUpdates.push({ id: conn.id, update: connUpdate });
+      }
     }
 
     // End on a short page, not on the absence of an error. A capped or empty
@@ -185,17 +277,34 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     connOffset += CONNECTION_PAGE_SIZE;
   }
 
+  // Write phase. Every credential above has already been proven readable, so
+  // the only failure left here is the database refusing the write, which the
+  // caller has to treat as a partial rotation exactly as before.
+  for (const { id, update } of connectionUpdates) {
+    const { error: connErr } = await supabase.from("connections").update(update).eq("id", id);
+    if (connErr) throw connErr;
+  }
+
   // Re-encrypt transactions in pages of 500, in a deterministic id order.
   // encrypted_payload uses the transactions subkey, which changes with the MEK.
   // The order clause carries the same weight it does on the connections read
   // above: this loop UPDATEs the rows of each page as it goes, so an unordered
   // scan may skip a row (stranded under the old MEK, silently and permanently)
   // or return one twice (decryption throws and the rotation aborts partway).
+  //
+  // THE FILTER IS LOAD BEARING, not a tidy up. Without it this read returns
+  // every row row level security makes visible, and visibility is not the same
+  // question as "which key sealed this row". An OPK sealed row landing in this
+  // page is handed to migrateTransactionCiphertext, which holds no key for it,
+  // throws, and aborts the rotation partway with no safe retry. See
+  // SEALED_UNDER_VAULT_KEY for why skipping those rows is correct and not a
+  // silent data loss: the key that opens them is not the one being rotated.
   let offset = 0;
   for (;;) {
     const { data: txns, error: txnsErr } = await supabase
       .from("encrypted_transactions")
       .select("id, encrypted_payload")
+      .eq("sealed_under", SEALED_UNDER_VAULT_KEY)
       .order("id", { ascending: true })
       .range(offset, offset + TRANSACTION_PAGE_SIZE - 1);
     if (txnsErr) throw txnsErr;
