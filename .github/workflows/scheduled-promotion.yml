@@ -62,6 +62,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}
+      # The one jq expression that decides which open pull requests into prod
+      # count as a promotion candidate. Both the self-test below and the real
+      # step feed data through THIS SAME STRING (OR-T1102), so deleting
+      # `.head_repo == $repo` or narrowing the head match can no longer leave
+      # a green self-test standing over a broken gate: change the string once
+      # and both the test and the gate see the new behaviour.
+      CANDIDATE_FILTER: '.[] | select(.head_repo == $repo and (.head == "dev" or (.head | startswith("release/"))))'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -73,50 +80,42 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The same decision the CANDIDATES filter below makes, exercised
-          # against the cases that matter before it is trusted to skip
-          # opening a promotion. A guard that has never been shown to reject
-          # a fork head is not known to reject one (OR-T1086).
-          verdict() {
-            head_ref="$1"
-            head_repo="$2"
-            this_repo="$3"
+          # OR-T1102: this used to run a shell function (verdict()) that
+          # REIMPLEMENTED the CANDIDATES decision in a second, independent
+          # piece of logic. Deleting `.head_repo == $repo` from the real jq
+          # filter below left every one of those cases printing ok, because
+          # the paraphrase never called the filter it was supposed to guard.
+          #
+          # This version feeds fixture pull-request JSON through
+          # CANDIDATE_FILTER, the SAME string (set once, in this job's env:)
+          # that the real step below applies to the live API response. There
+          # is one implementation of the decision; this step and the real
+          # step both call it.
+          OWN="${GH_REPO}"
 
-            if [ "${head_repo}" != "${this_repo}" ]; then
-              echo "reject-foreign-repo"
-              return
-            fi
+          FIXTURES='[
+            {"number":1,"head":"dev","head_repo":"'"${OWN}"'"},
+            {"number":2,"head":"release/x","head_repo":"'"${OWN}"'"},
+            {"number":3,"head":"dev","head_repo":"someone-else/orangerails"},
+            {"number":4,"head":"release/x","head_repo":"someone-else/orangerails"},
+            {"number":5,"head":"fix/thing","head_repo":"'"${OWN}"'"},
+            {"number":6,"head":"dev","head_repo":""}
+          ]'
 
-            case "${head_ref}" in
-              dev) echo "candidate" ;;
-              release/*) echo "candidate" ;;
-              *) echo "reject-other-head" ;;
-            esac
-          }
+          # number 1 (our dev) and 2 (our release/x) must survive the real
+          # filter; 3-4 (a fork sharing our branch names), 5 (an unrelated
+          # head of ours) and 6 (a fork whose source repo was since deleted,
+          # so head_repo is the empty string) must all be rejected.
+          GOT="$(printf '%s' "${FIXTURES}" | jq --arg repo "${OWN}" -c "[${CANDIDATE_FILTER}] | map(.number)")"
+          EXPECTED='[1,2]'
 
-          fail=0
-          check() {
-            got="$(verdict "$2" "$3" "$4")"
-            if [ "${got}" != "$5" ]; then
-              echo "::error::self-test '$1' expected '$5', got '${got}'"
-              fail=1
-            else
-              echo "ok: $1 -> ${got}"
-            fi
-          }
-
-          check "our own promotion PR, head dev" "dev"         "Orange-The-World/orangerails" "Orange-The-World/orangerails" "candidate"
-          check "our own release branch"         "release/x"   "Orange-The-World/orangerails" "Orange-The-World/orangerails" "candidate"
-          check "a fork's dev branch"            "dev"         "someone-else/orangerails"      "Orange-The-World/orangerails" "reject-foreign-repo"
-          check "a fork's release branch"        "release/x"   "someone-else/orangerails"      "Orange-The-World/orangerails" "reject-foreign-repo"
-          check "our own unrelated head"         "fix/thing"   "Orange-The-World/orangerails" "Orange-The-World/orangerails" "reject-other-head"
-          check "a deleted fork head, null repo" "dev"         ""                              "Orange-The-World/orangerails" "reject-foreign-repo"
-
-          if [ "${fail}" -ne 0 ]; then
-            echo "::error::candidate-selection self-test failed. The guard is broken, not passing."
+          if [ "${GOT}" != "${EXPECTED}" ]; then
+            echo "::error::candidate-selection self-test failed. Expected candidates ${EXPECTED} (our dev, our release/x), the real filter returned ${GOT}."
+            echo "::error::decision logic self-test failed. The guard is broken, not passing."
             exit 1
           fi
-          echo "Self-test passed: 6 cases, all as expected."
+          echo "ok: real CANDIDATE_FILTER applied to 6 fixtures -> ${GOT} (fork and unrelated heads correctly rejected)"
+          echo "Self-test passed: 6 fixture cases run through the real jq filter, all as expected."
 
       - name: Compare prod and dev
         id: compare
@@ -320,12 +319,23 @@ jobs:
           # source repo was since deleted reports repo as null, which // ""
           # turns into an empty string that can never equal GH_REPO, so it is
           # correctly rejected rather than silently passing.
-          OPEN_INTO_PROD="$(gh api "repos/${GH_REPO}/pulls?state=open&base=prod&per_page=100" \
+          # --paginate walks every page of results rather than trusting the
+          # first 100 to be everything (OR-T1102): past 100 open pull
+          # requests into prod, an unpaginated call silently dropped the
+          # rest, and the one open promotion among them could be missed,
+          # opening a duplicate.
+          OPEN_INTO_PROD="$(gh api --paginate "repos/${GH_REPO}/pulls?state=open&base=prod&per_page=100" \
                               --jq '[.[] | {number, head: .head.ref, head_repo: (.head.repo.full_name // "")}]')"
 
+          # CANDIDATE_FILTER is the exact string the self-test step above
+          # just proved against fixtures (OR-T1102): one implementation,
+          # called twice. sort_by(.number) makes "the first candidate" the
+          # LOWEST pull request number, the oldest open promotion, rather
+          # than whatever order the API happened to return, which was never
+          # documented or guaranteed.
           CANDIDATES="$(printf '%s' "${OPEN_INTO_PROD}" \
                           | jq --arg repo "${GH_REPO}" \
-                              '[.[] | select(.head_repo == $repo and (.head == "dev" or (.head | startswith("release/"))))]')"
+                              "[${CANDIDATE_FILTER}] | sort_by(.number)")"
 
           echo "open pull requests into prod: $(printf '%s' "${OPEN_INTO_PROD}" | jq 'length')"
           printf '%s\n' "${OPEN_INTO_PROD}" | jq -r '.[] | "  pull request \(.number) head=\(.head)"'
