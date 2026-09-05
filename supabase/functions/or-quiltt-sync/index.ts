@@ -530,27 +530,32 @@ export async function handleEvent(
   if (exactMatch.data) {
     conn = exactMatch.data as { id: string };
   } else {
-    const legacy = await client
-      .from('connections')
-      .select('id')
-      .eq('subaccount_id', subaccountId)
-      .eq('provider_type', 'quiltt')
-      .is('quiltt_connection_id', null)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
-    // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
-    // connections row (timing race on first connect or reconnect). Return
-    // 'deferred-conn-race' so the drain loop defers the row (markDeferred)
-    // AND increments its attempt counter (bumpAttempts). opk_public is already
-    // set here (we passed the gate above), so reDriveReadyDeferrals would
-    // re-admit the event on the very next tick with a plain 'deferred' return,
-    // creating an unbounded loop if the connections row never appears. With
-    // 'deferred-conn-race' the loop is bounded: after MAX_ATTEMPTS ticks the
-    // event retires normally rather than cycling forever.
-    if (!legacy.data) return 'deferred-conn-race';
-    conn = legacy.data as { id: string };
+    const fallback = await resolveLegacyFallback(client, subaccountId, connectionId);
+    if ('error' in fallback) return fallback.error;
+    if (fallback.decision.kind === 'legacy') {
+      conn = { id: fallback.decision.id };
+    } else if (fallback.decision.kind === 'missing') {
+      // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
+      // connections row (timing race on first connect or reconnect). Return
+      // 'deferred-conn-race' so the drain loop defers the row (markDeferred)
+      // AND increments its attempt counter (bumpAttempts). opk_public is already
+      // set here (we passed the gate above), so reDriveReadyDeferrals would
+      // re-admit the event on the very next tick with a plain 'deferred' return,
+      // creating an unbounded loop if the connections row never appears. With
+      // 'deferred-conn-race' the loop is bounded: after MAX_ATTEMPTS ticks the
+      // event retires normally rather than cycling forever.
+      return 'deferred-conn-race';
+    } else {
+      // OR-T2475: a legacy NULL row exists, but a different Quiltt connection
+      // has already produced a processed event for this subaccount, so the
+      // row cannot be trusted to be this event's connection. Give this
+      // connection its own row instead of collapsing onto one that belongs
+      // to someone else -- this is the exact Mercury+TD pattern the comment
+      // above named as the thing to avoid, made concrete and testable.
+      const created = await createConnectionForAmbiguousMatch(client, subaccountId, connectionId);
+      if ('error' in created) return created.error;
+      conn = created;
+    }
   }
 
   // DL-0442: load account selection for this connection once, before paging.
