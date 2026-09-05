@@ -9,9 +9,15 @@
 -- "you must be signed in". The check lives inside the function instead, where it
 -- holds no matter who ends up holding EXECUTE.
 --
--- This replaces the earlier grant revoke approach. A live read of both
--- environments showed no anon entry and no PUBLIC entry in the function ACL, so
--- the revoke was a no op in both.
+-- This is defense in depth alongside the earlier grant revoke approach
+-- (20260721120000), not a replacement for it: the guard below admits any
+-- signed-in end user, and this function is SECURITY DEFINER returning a live
+-- platform API key, so the revoke is what actually keeps anon and authenticated
+-- off EXECUTE. Both migrations must run. A live read of the cloud dev and prod
+-- projects showed no anon entry and no PUBLIC entry in the function ACL; the
+-- self-hosted cluster is a separate case and is not covered by that read (see
+-- OR-T0861), which is why the explicit REVOKE in
+-- 20260905210000_or_create_platform_explicit_acl_revoke.sql exists.
 --
 -- Why the check is not a bare "auth.uid() IS NULL" raise, which is the pattern
 -- the other helper functions use:
