@@ -31,12 +31,30 @@ const QUERY = `
   order by schemaname, tablename, policyname;
 `
 
+// Every BASE table in schema public, not only the ones carrying policies.
+// Enumerating from pg_class rather than pg_policies is the whole point of
+// this second query: a table with RLS off and no policies is ABSENT from
+// pg_policies and present here. Row shape, tab separated:
+//   tablename  rls_enabled  rls_forced  policy_count
+const ENABLEMENT_QUERY = `
+  select
+    c.relname as tablename,
+    c.relrowsecurity as rls_enabled,
+    c.relforcerowsecurity as rls_forced,
+    (select count(*) from pg_policy p where p.polrelid = c.oid)::int as policy_count
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public'
+    and c.relkind = 'r'
+  order by c.relname;
+`
+
 function fail(message) {
   console.error(`generate-rls-policy-baseline: ${message}`)
   process.exit(2)
 }
 
-async function fetchPolicies() {
+async function runQuery(query) {
   const token = process.env.SUPABASE_ACCESS_TOKEN
   const ref = process.env.SUPABASE_PROJECT_REF
   if (!token) fail('SUPABASE_ACCESS_TOKEN is not set')
@@ -56,7 +74,7 @@ async function fetchPolicies() {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ query: QUERY }),
+        body: JSON.stringify({ query }),
       })
     } catch (err) {
       lastStatus = 'network-error'
@@ -90,7 +108,7 @@ async function fetchPolicies() {
 
     if (!Array.isArray(parsed)) {
       fail(
-        `expected a JSON array of policy rows, got ${typeof parsed}: ${bodyText.slice(0, 300)}`,
+        `expected a JSON array of rows, got ${typeof parsed}: ${bodyText.slice(0, 300)}`,
       )
     }
 
@@ -117,22 +135,48 @@ function toTsv(rows) {
   return lines.join('\n') + '\n'
 }
 
+// The Management API can render a boolean as a JSON true or as the string
+// 't' depending on what is behind it. Normalise here rather than leaving the
+// consumer to guess, because the consumer's test is "is this exactly t" and a
+// silent mismatch there would read as RLS being OFF on every table, which is
+// the loudest possible wrong answer.
+function boolCell(value) {
+  return value === true || value === 't' || value === 'true' ? 't' : 'f'
+}
+
+function toEnablementTsv(rows) {
+  const lines = rows.map((row) =>
+    [
+      row.tablename,
+      boolCell(row.rls_enabled),
+      boolCell(row.rls_forced),
+      String(row.policy_count),
+    ].join('\t'),
+  )
+  return lines.join('\n') + '\n'
+}
+
 async function main() {
-  const rows = await fetchPolicies()
+  const args = process.argv.slice(2)
+  const enablement = args.includes('--enablement')
+  const target = args.find((arg) => arg !== '--enablement')
+
+  const rows = await runQuery(enablement ? ENABLEMENT_QUERY : QUERY)
   if (rows.length === 0) {
     fail(
-      'query returned zero policy rows; refusing to write an empty baseline (this would silently accept every future policy removal)',
+      enablement
+        ? 'query returned zero base tables in schema public; refusing to report an empty result (an empty answer and an unreadable one must never be allowed to look the same)'
+        : 'query returned zero policy rows; refusing to write an empty baseline (this would silently accept every future policy removal)',
     )
   }
 
-  const tsv = toTsv(rows)
-  const target = process.argv[2]
+  const tsv = enablement ? toEnablementTsv(rows) : toTsv(rows)
 
   if (!target || target === '--stdout') {
     process.stdout.write(tsv)
   } else {
     fs.writeFileSync(target, tsv)
-    console.error(`wrote ${rows.length} polic${rows.length === 1 ? 'y' : 'ies'} to ${target}`)
+    console.error(`wrote ${rows.length} row(s) to ${target}`)
   }
 }
 
