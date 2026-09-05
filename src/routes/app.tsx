@@ -12,6 +12,12 @@ import {
 import { formatError } from "@/lib/format-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
+import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
+import {
+  readWrappedDataKey,
+  DUPLICATE_WRAPPED_KEY_MESSAGE,
+  type WrappedKeyClient,
+} from "@/lib/co-admin-workspace-read";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
@@ -53,15 +59,26 @@ interface DecryptedSourceWallet {
   label?: string | null;
 }
 
+/**
+ * The columns of public.connections this client is allowed to read.
+ *
+ * authenticated holds a COLUMN level SELECT grant on this table, not a table
+ * level one, so that a signed in user cannot read their own connection's
+ * strike_webhook_secret. See the migration
+ * 20260902040000_connections_column_level_select.sql for the full column set
+ * and the reasoning. Adding a field here means adding it to that grant too,
+ * or the list query starts failing with a permission error.
+ *
+ * subaccount_id is deliberately absent: it is in the SELECT list of the query
+ * below only because Postgres requires SELECT privilege on a column used in a
+ * WHERE clause, and nothing in this client reads its value.
+ */
 interface Connection {
   id: string;
   provider_type: string;
   encrypted_label: string | null;
-  encrypted_credentials: string;
-  credentials_key_version: number;
   status: "pending" | "active" | "error" | "disconnected" | "partial";
   last_sync_at: string | null;
-  last_sync_cursor: string | null;
   encrypted_last_error: string | null;
   created_at: string;
   // Derived client-side after decryption. Never stored in the DB row.
@@ -315,18 +332,35 @@ function AppHome() {
           // verify rather than surface one the co-admin cannot safely open.
           const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
           if (!ownerSigPubB64) continue;
-          const { data: wdk } = await supabase
-            .from("wrapped_data_keys")
-            .select("wrapped_ciphertext, grant_sig")
-            .eq("data_key_id", ownerKeyId)
-            .maybeSingle();
-          if (!wdk) continue;
+          // This used to be a maybeSingle() whose error was discarded, which
+          // meant TWO wrapped key rows arrived here as NO row: the workspace
+          // vanished from this co-admin's list with nothing shown to anybody,
+          // while the owner's list still showed the grant. Nothing enforces one
+          // row per recipient per workspace key, so that state is reachable.
+          // The three cases are now separate and only the genuinely absent one
+          // is silent.
+          const wdkRead = await readWrappedDataKey(
+            supabase as unknown as WrappedKeyClient,
+            ownerKeyId,
+          );
+          if (wdkRead.status === "ambiguous") {
+            setErr(DUPLICATE_WRAPPED_KEY_MESSAGE);
+            continue;
+          }
+          if (wdkRead.status === "error") {
+            setErr(formatError(wdkRead.error));
+            continue;
+          }
+          // No grant at all is ordinary: this user is in the owner's list but
+          // has not been given a key. Skipping it quietly is correct.
+          if (wdkRead.status === "none") continue;
+          const wdk = wdkRead.row;
           workspaces.push({
             ownerUserId: ownerId,
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: (wdk as Record<string, unknown>).wrapped_ciphertext as string,
-            grantSigB64: ((wdk as Record<string, unknown>).grant_sig as string | null) ?? null,
+            wrappedCiphertextB64: wdk.wrapped_ciphertext,
+            grantSigB64: wdk.grant_sig ?? null,
             ownerSigPubB64,
             granteeUserId: session.user.id,
           });
@@ -435,7 +469,14 @@ function AppHome() {
 
       const { data: conns, error: connErr } = await supabase
         .from("connections")
-        .select("*")
+        // Named columns, not "*". authenticated holds a column level SELECT
+        // grant on this table so that strike_webhook_secret stays
+        // server side, and PostgREST expands "*" into a whole row read that
+        // the grant refuses. subaccount_id is here for the .eq below:
+        // Postgres needs SELECT on a column used in a WHERE clause.
+        .select(
+          "id, subaccount_id, provider_type, status, encrypted_label, encrypted_last_error, last_sync_at, created_at",
+        )
         .eq("subaccount_id", targetSubaccountId)
         .order("created_at", { ascending: false });
       if (connErr) throw connErr;
@@ -1192,21 +1233,16 @@ function AppHome() {
                           storedVerifierCiphertext: vaultVerifierCiphertext,
                           keyVersion: vaultKeyVersion,
                         });
-                      // Persist new wrapping to user_vault_meta.
-                      // CAS: match the prior ciphertext so a concurrent change or lost
-                      // session fails loudly instead of returning a dead recovery code.
-                      const { error: saveErr, data: saveData } = await (supabase as any)
-                        .from("user_vault_meta")
-                        .update({
-                          enc_mek_ciphertext: newEncMekCiphertext,
-                          recovery_ciphertext: newRecoveryCiphertext,
-                        })
-                        .eq("user_id", userId)
-                        .eq("enc_mek_ciphertext", vaultEncMekCiphertext)
-                        .select("user_id");
-                      if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
-                      if (!saveData || (saveData as unknown[]).length === 0)
-                        throw new Error("Vault was changed from another session. Reload the page and try again.");
+                      // Persist new wrapping to user_vault_meta. Same CAS guard, same
+                      // conflict handling, same table: src/lib/vault-persist.ts is the
+                      // single copy of this write, covered by its own tests.
+                      await persistRewrappedVaultMeta({
+                        supabase: supabase as unknown as VaultPersistClient,
+                        userId: userId as string,
+                        priorEncMekCiphertext: vaultEncMekCiphertext,
+                        newEncMekCiphertext,
+                        newRecoveryCiphertext,
+                      });
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
                       setChangePwNewRecovery(newRecoveryCode);

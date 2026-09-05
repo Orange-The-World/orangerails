@@ -27,7 +27,7 @@ export const Route = createFileRoute("/docs")({
       { name: "twitter:title", content: "Developer documentation , OrangeRails" },
       { name: "twitter:description", content: "Quickstart, API reference, self-hosting, adapter SDK." },
       { name: "twitter:image", content: "/og-image.jpg" },
-      { rel: "canonical", href: "https://orangerails.com/docs" },
+      { rel: "canonical", href: "https://connect.orangerails.com/docs" },
     ],
     scripts: [
       {
@@ -40,7 +40,7 @@ export const Route = createFileRoute("/docs")({
             "Quickstart, REST API reference, self-hosting with Docker and Helm, adapter SDK, and zero-knowledge architecture.",
           author: { "@type": "Organization", name: "OrangeRails" },
           about: { "@type": "SoftwareApplication", name: "OrangeRails", applicationCategory: "FinanceApplication" },
-          url: "https://orangerails.com/docs",
+          url: "https://connect.orangerails.com/docs",
         }),
       },
       {
@@ -50,7 +50,7 @@ export const Route = createFileRoute("/docs")({
           "@type": "BreadcrumbList",
           itemListElement: [
             { "@type": "ListItem", position: 1, name: "Home", item: "https://orangerails.com/" },
-            { "@type": "ListItem", position: 2, name: "Docs", item: "https://orangerails.com/docs" },
+            { "@type": "ListItem", position: 2, name: "Docs", item: "https://connect.orangerails.com/docs" },
           ],
         }),
       },
@@ -181,13 +181,13 @@ function DocsIndexPage() {
             </div>
 
             <div className="mt-12 grid gap-4 md:grid-cols-2">
-              <a href="https://docs.orangerails.com/support" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
+              <a href="https://support.orangerails.com" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
                 <h3 className="font-semibold">Need support?</h3>
-                <p className="mt-1 text-sm text-muted-foreground">Open a ticket at docs.orangerails.com/support.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Open a ticket at support.orangerails.com.</p>
               </a>
-              <a href="https://docs.orangerails.com/feedback" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
+              <a href="https://support.orangerails.com/feedback" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
                 <h3 className="font-semibold">Request a feature</h3>
-                <p className="mt-1 text-sm text-muted-foreground">Vote and propose at docs.orangerails.com/feedback.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Vote and propose at support.orangerails.com/feedback.</p>
               </a>
             </div>
           </div>

@@ -1,5 +1,25 @@
 name: Deploy Supabase edge functions and migrations
 
+# OR-T1772. The approver at the supabase-prod pause needs the restore point BEFORE
+# they click, and nothing in this file carried it. run-name is evaluated when the run
+# is created, so it is in the run title in the run list and at the top of the run page
+# with zero clicks, and it is there before the environment pause. `inputs` is null on a
+# push, so the push branch of this expression has to produce a real title rather than an
+# empty one or the literal string null.
+# A dispatch that carries NO reason must be LOUD, not blank: a run missing its
+# restore point has to look different from an ordinary run, because absence reading
+# as normal is the one shape a refusal cannot fire on.
+# github.event.inputs is used rather than the inputs context on purpose. Both are
+# valid for a workflow_dispatch, but the github context is unambiguously available at
+# workflow level, and an expression that fails to evaluate here produces exactly the
+# blank title this is meant to prevent.
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+      && (github.event.inputs.reason != ''
+          && format('DISPATCH by {0}: {1}', github.actor, github.event.inputs.reason)
+          || format('DISPATCH by {0}: NO REASON GIVEN', github.actor))
+      || format('push to {0} by {1}', github.ref_name, github.actor) }}
+
 on:
   push:
     branches: [dev, prod]
@@ -87,8 +107,56 @@ jobs:
             exit 1
           fi
 
+      # OR-T1772. This step lives in `target` ON PURPOSE. apply-migrations declares
+      # target in `needs`, so this summary is written BEFORE the environment pause.
+      # Do not move it into apply-migrations: that job is paused while the approver is
+      # looking at the run, so its summary would be written after the approval it was
+      # meant to inform. It would look correct in review and be useless at the only
+      # moment it matters.
+      # run-name carries the same value on one line and the UI truncates it. This is
+      # what carries the whole block.
+      # THE LOAD-BEARING FACT: it is target having NO `environment:` binding of its own,
+      # and no `if:`, that makes this summary arrive BEFORE the pause. The needs edge
+      # alone does not do it. If a future change binds target to an environment, this
+      # carrier silently moves to after the approval it exists to inform and nothing
+      # here will fail to warn you.
+      - name: Publish the restore point where the approver can read it
+        env:
+          # Read through env, never interpolated into the script body: a dispatch input
+          # is attacker-controlled text and ${{ }} substitution happens before the shell
+          # parses the line.
+          RUN_REASON: ${{ inputs.reason }}
+          APPLY_MIGRATIONS: ${{ inputs.apply_migrations }}
+        run: |
+          {
+            echo "## Restore point for the approver"
+            echo ""
+            echo "Target project: ${{ steps.t.outputs.supabase_ref }} (environment ${{ steps.t.outputs.environment_name }})"
+            echo "Event: ${{ github.event_name }} on ${{ github.ref_name }}"
+            echo "Dispatching actor: ${{ github.actor }}"
+            echo "Run created (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo ""
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "Apply migrations requested: ${APPLY_MIGRATIONS:-false}"
+              echo ""
+              if [ -n "${RUN_REASON}" ]; then
+                echo "Reason input, verbatim:"
+                echo ""
+                echo '```text'
+                printf '%s\n' "${RUN_REASON}"
+                echo '```'
+              else
+                echo "NO REASON WAS GIVEN, so there is no restore point on this run."
+                echo "An approver has nothing here to check a backup age against and should reject."
+              fi
+            else
+              echo "This run is a push, not a dispatch, so there is no reason input and no restore point was supplied."
+              echo "A push can never turn apply_migrations on."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   deploy:
-    needs: [target, check-pending-migrations]
+    needs: [target, check-pending-migrations, check-rls-policy-baseline]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -270,7 +338,7 @@ jobs:
 
 
   check-pending-migrations:
-    needs: [target, apply-migrations]
+    needs: [target, check-duplicate-migrations, apply-migrations]
     # Runs BEFORE the deploy job, not after it. deploy declares
     # needs: [target, check-pending-migrations], so when this job exits 1 the
     # deploy is SKIPPED and code cannot ship ahead of its schema. That is the
@@ -300,6 +368,7 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
           APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+          DUPES_RESULT: ${{ needs['check-duplicate-migrations'].result }}
         run: |
           set -uo pipefail
 
@@ -342,26 +411,17 @@ jobs:
           # recorded the `grep -qx` below matches for BOTH and the other is
           # counted as applied forever -- no red, on any project, ever. That is
           # not a drift report failing, it is a drift report that cannot see.
-          # Caught here rather than in a lint job because this is the check
-          # whose answer the duplicate invalidates.
-          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
-          if [ -n "$DUPES" ]; then
-            {
-              echo "## :rotating_light: Duplicate migration version(s)"
-              echo ""
-              for V in $DUPES; do
-                echo "\`${V}\` is used by more than one file:"
-                echo ""
-                ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
-                echo ""
-              done
-              echo "\`supabase_migrations.schema_migrations\` stores one row per"
-              echo "version, so at most one of these can ever be tracked and the"
-              echo "rest are reported as applied whether they ran or not. Rename"
-              echo "the later file to an unused timestamp."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- this report cannot see drift in the shadowed file(s)."
-            exit 1
+          #
+          # The comparison itself no longer lives here. It lived here until
+          # OR-T1189, and this job declares needs: [..., apply-migrations], so it
+          # could only ever announce a collision that the apply had already
+          # resolved by silently skipping one of the two files. It is now
+          # check-duplicate-migrations, which apply-migrations needs, so a
+          # colliding pair stops the apply rather than describing it afterwards.
+          # What remains here is the consequence for THIS report: if that check
+          # did not pass, this comparison cannot see, and it must say so.
+          if [ "${DUPES_RESULT}" != "success" ]; then
+            unknown "check-duplicate-migrations ended '${DUPES_RESULT}'. Until every migration file has its own version, the ledger cannot distinguish a file that was applied from one that was shadowed by a namesake, so the comparison below cannot see drift. That job's summary names the colliding files."
           fi
 
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
@@ -637,8 +697,296 @@ jobs:
 
           echo "0 anon-executable function(s) in schema public on ${SUPABASE_REF} (outside the allowlist)."
 
+  # ---------------------------------------------------------------------------
+  # OR-T1340. RLS regresses the same silent way anon-EXECUTE grants do: a
+  # migration drops or rewrites a policy and nothing throws, it just returns
+  # rows (or denies them) to whoever asks next. This job diffs what
+  # pg_policies actually reports on this branch's project against the
+  # baseline captured from THAT project: rls-policy-baseline.dev.tsv or
+  # rls-policy-baseline.prod.tsv, selected from the target job's resolved
+  # environment. One file cannot describe two clusters -- measured
+  # 2026-09-02, dev carries 67 policies in schema public and prod carries
+  # 73 -- so a single baseline makes one project permanently red and the
+  # obvious fix flips the failure to the other project. There is no
+  # fallback to the other cluster's file: a resolved target with no
+  # baseline is reported UNKNOWN and blocks the deploy, because measuring
+  # prod against dev's expectations is worse than not measuring it.
+  # A mismatch does not mean the change is wrong, it
+  # means an intentional RLS edit must update the baseline in the SAME PR, so
+  # the diff is reviewed rather than silently absorbed.
+  #
+  # SCOPE, stated so a green check is not read as more than it is: this
+  # compares the POLICY SET. It does not assert that row level security is
+  # switched ON, because pg_policies carries no relrowsecurity column and
+  # lists a table's policies whether or not RLS is enabled. Disabling RLS on
+  # a table changes not one byte of this baseline. That gap is tracked
+  # separately (OR-T1601) and is not closed here.
+  #
+  # Self-test runs first, against synthetic rows, and proves the diff can go
+  # both red and green before the live comparison is trusted -- the same
+  # discipline apply-migrations' own self-test uses. A script that can only
+  # ever report "clean" is worse than no script.
+  # ---------------------------------------------------------------------------
+  check-rls-policy-baseline:
+    # Needs apply-migrations, not just target: this job reads LIVE pg_policies,
+    # so it must run after the migration that could have changed them has
+    # actually applied, or it reads stale state and misses exactly the drift
+    # it exists to catch. apply-migrations is 'skipped' on every prod push and
+    # on a dispatch without the box ticked, and both are fine: nothing touched
+    # the schema. A 'failure' or 'cancelled' means the schema state is not
+    # known, so this check cannot trust what it reads either -- the compare
+    # step takes that result as APPLY_RESULT and exits UNKNOWN on it.
+    needs: [target, apply-migrations]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: "Self-test: prove the diff can go both red and green"
+        run: |
+          set -euo pipefail
+          WORKDIR=$(mktemp -d)
+          trap 'rm -rf "$WORKDIR"' EXIT
+
+          # Three synthetic policies, the same shape as a live baseline row,
+          # so this exercises the real comparison rather than a stand-in.
+          cat > "$WORKDIR/baseline.tsv" <<'TSV'
+          public	demo_table	demo select	SELECT	{authenticated}	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	d41d8cd98f00b204e9800998ecf8427e
+          public	demo_table	demo insert	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          public	demo_table	demo update	UPDATE	{authenticated}	cccccccccccccccccccccccccccccccc	cccccccccccccccccccccccccccccccc
+          TSV
+
+          # GREEN: an identical set compares clean.
+          cp "$WORKDIR/baseline.tsv" "$WORKDIR/live-clean.tsv"
+          if ! diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-clean.tsv" >/dev/null; then
+            echo "::error::self-test failed: an identical policy set was reported as a diff"
+            exit 1
+          fi
+
+          # RED: drop one policy, what a migration deleting a policy (by
+          # accident or on purpose without updating the baseline) produces.
+          grep -v 'demo update' "$WORKDIR/baseline.tsv" > "$WORKDIR/live-missing.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-missing.tsv" >/dev/null; then
+            echo "::error::self-test failed: a missing policy was reported as clean"
+            exit 1
+          fi
+
+          # RED: change one hash, what a migration rewriting a policy's
+          # USING/WITH CHECK expression without renaming it produces.
+          sed 's/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/00000000000000000000000000000000/' \
+            "$WORKDIR/baseline.tsv" > "$WORKDIR/live-changed.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-changed.tsv" >/dev/null; then
+            echo "::error::self-test failed: a changed policy expression was reported as clean"
+            exit 1
+          fi
+
+          # RED: an extra policy live that the baseline does not carry, what a
+          # migration ADDING a policy without updating the baseline produces.
+          # This is the third drift class named in OR-T1340 and the one the
+          # first version of this self-test never exercised.
+          cp "$WORKDIR/baseline.tsv" "$WORKDIR/live-extra.tsv"
+          printf 'public\tdemo_table\tdemo delete\tDELETE\t{authenticated}\teeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\td41d8cd98f00b204e9800998ecf8427e\n' >> "$WORKDIR/live-extra.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-extra.tsv" >/dev/null; then
+            echo "::error::self-test failed: a policy present live and absent from the baseline was reported as clean"
+            exit 1
+          fi
+
+          # RED: same policy name and expressions, different cmd. A migration
+          # that drops and recreates a policy under the same name but a wider
+          # command (SELECT becoming ALL) changes neither hash, so the cmd
+          # column is the only thing that can catch it.
+          sed 's/SELECT/ALL/' "$WORKDIR/baseline.tsv" > "$WORKDIR/live-cmd.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-cmd.tsv" >/dev/null; then
+            echo "::error::self-test failed: a policy whose cmd widened was reported as clean"
+            exit 1
+          fi
+
+          # RED: same policy name, cmd and expressions, different roles.
+          # Widening {authenticated} to include anon is the drift that actually
+          # exposes data to the public, and it too leaves both hashes untouched.
+          sed 's/{authenticated}/{authenticated,anon}/' \
+            "$WORKDIR/baseline.tsv" > "$WORKDIR/live-roles.tsv"
+          if diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-roles.tsv" >/dev/null; then
+            echo "::error::self-test failed: a policy whose roles widened to include anon was reported as clean"
+            exit 1
+          fi
+
+          echo "self-test passed: the diff goes red on a removed policy, red on an added policy, red on a changed expression, red on a widened cmd, red on widened roles, and green on a match"
+
+      - name: Compare live RLS policies to the committed baseline
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ needs.target.outputs.supabase_ref }}
+          ENVIRONMENT_NAME: ${{ needs.target.outputs.environment_name }}
+          APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+        run: |
+          set -uo pipefail
+
+          # One helper for every "we could not find out" exit, the same shape
+          # check-pending-migrations uses. UNKNOWN and DRIFT are different
+          # facts and must never share a message: the first means go and look,
+          # the second means a policy actually changed.
+          unknown () {
+            {
+              echo "## :grey_question: RLS policy state UNKNOWN on \`${SUPABASE_PROJECT_REF:-unresolved}\`"
+              echo ""
+              echo "$1"
+              echo ""
+              echo "This is **not** a report that the policy set matches its baseline, and"
+              echo "**not** a report that it drifted. The check could not determine the"
+              echo "state. Re-run it, or read pg_policies directly, before promoting."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::rls-policy-baseline state UNKNOWN on ${SUPABASE_PROJECT_REF:-unresolved}: $1"
+            exit 1
+          }
+
+          # apply-migrations is 'skipped' on every prod push (by design) and on
+          # a dispatch without the box ticked. Both are fine: nothing touched
+          # the schema, so what pg_policies reports can be trusted. A 'failure'
+          # or 'cancelled' is different -- some migrations may have applied and
+          # some not -- and a match read off a half-applied database proves
+          # nothing while rendering as a green check.
+          if [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "cancelled" ]; then
+            unknown "apply-migrations ended '${APPLY_RESULT}'. Some migrations may have applied and some not, so the live policy set cannot be compared to anything."
+          fi
+
+          if [ -z "${SUPABASE_PROJECT_REF}" ]; then
+            unknown "The target job produced no supabase_ref output."
+          fi
+
+          # One baseline per CLUSTER, selected from the RESOLVED target. An
+          # explicit case, not string surgery on the environment name, so an
+          # environment nobody has mapped is a loud error rather than a
+          # filename that merely happens not to exist.
+          case "${ENVIRONMENT_NAME}" in
+            supabase-dev)  BASELINE="supabase/rls-policy-baseline.dev.tsv" ;;
+            supabase-prod) BASELINE="supabase/rls-policy-baseline.prod.tsv" ;;
+            *) unknown "No RLS baseline is mapped for environment '${ENVIRONMENT_NAME:-unresolved}' (project ${SUPABASE_PROJECT_REF}). Add its baseline file and a case for it; do not point this check at another cluster's baseline." ;;
+          esac
+
+          if [ ! -f "$BASELINE" ]; then
+            unknown "No baseline file for the resolved target: ${BASELINE} does not exist in this branch. Capture it from ${SUPABASE_PROJECT_REF} and commit it. There is deliberately no fallback to the other cluster's file: the two policy sets differ, so that fallback would report a confident wrong answer."
+          fi
+
+          LIVE=$(mktemp)
+          trap 'rm -f "$LIVE"' EXIT
+
+          if ! node scripts/generate-rls-policy-baseline.mjs --stdout > "$LIVE"; then
+            echo "::error::rls-policy-baseline state UNKNOWN: could not fetch the live policy set from ${SUPABASE_PROJECT_REF}. See the script's own error above; it never echoes the token."
+            exit 1
+          fi
+
+          BASELINE_COUNT=$(wc -l < "$BASELINE")
+          LIVE_COUNT=$(wc -l < "$LIVE")
+          # The third number is the point. "N in baseline" and "N read live"
+          # alone let two different outcomes print the same pair: 67 and 67
+          # reads as a match even when a policy was renamed, because one row
+          # left and another arrived. COMPARED counts the rows that are
+          # byte-identical in both files, so on a clean run all three are equal
+          # and any gap is the size of the drift.
+          COMPARED=$(comm -12 <(sort "$BASELINE") <(sort "$LIVE") | wc -l)
+          echo "${BASELINE_COUNT} in baseline, ${LIVE_COUNT} read live from ${SUPABASE_PROJECT_REF}, ${COMPARED} identical in both -- comparing."
+
+          if ! diff -u "$BASELINE" "$LIVE" > /tmp/rls-diff.txt; then
+            {
+              echo "## :no_entry: RLS policy drift on \`${SUPABASE_PROJECT_REF}\`"
+              echo ""
+              echo "The live \`pg_policies\` set does not match \`${BASELINE}\`, the baseline"
+              echo "captured from this cluster."
+              echo "A policy was added, removed, or its USING/WITH CHECK expression changed"
+              echo "without the baseline being updated in the same PR (OR-T1340)."
+              echo ""
+              echo '```diff'
+              cat /tmp/rls-diff.txt
+              echo '```'
+              echo ""
+              echo "If this change is intentional, regenerate THIS cluster's baseline in this"
+              echo "PR. Regenerate the file named below and no other: the other cluster has a"
+              echo "different policy set, and pointing its baseline at this project is what"
+              echo "makes the two take turns being red."
+              echo '```'
+              echo "SUPABASE_ACCESS_TOKEN=... SUPABASE_PROJECT_REF=${SUPABASE_PROJECT_REF} \\"
+              echo "  node scripts/generate-rls-policy-baseline.mjs ${BASELINE}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::RLS policy drift detected on ${SUPABASE_PROJECT_REF}. See step summary for the diff."
+            exit 1
+          fi
+
+          echo "RLS policy set on ${SUPABASE_PROJECT_REF} matches ${BASELINE} (${BASELINE_COUNT} policies). This compares the POLICY SET only; it does not assert that RLS is enabled on any table."
+
+  # ---------------------------------------------------------------------------
+  # OR-T1189. This comparison used to live inside check-pending-migrations, and
+  # that job needs apply-migrations, so the check ran AFTER the apply it should
+  # have gated. By the time it could go red the shadowed file had already been
+  # skipped against a real database. The check was correct; it was downstream of
+  # the only thing it could have protected.
+  #
+  # It needs nothing but a checkout: no database, no secrets, no environment, no
+  # output from target. That is why there was never a reason for it to run late,
+  # and why it can gate the apply without slowing anything down.
+  # ---------------------------------------------------------------------------
+  check-duplicate-migrations:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Refuse two migration files sharing a version prefix
+        run: |
+          set -uo pipefail
+
+          MIG_DIR="supabase/migrations"
+          if [ ! -d "$MIG_DIR" ]; then
+            echo "no migrations directory; nothing to compare"
+            exit 0
+          fi
+
+          DUPES=$(ls "$MIG_DIR"/*.sql 2>/dev/null | sed 's|.*/||' | cut -d_ -f1 | sort | uniq -d)
+          if [ -n "$DUPES" ]; then
+            {
+              echo "## :rotating_light: Duplicate migration version(s)"
+              echo ""
+              for V in $DUPES; do
+                echo "\`${V}\` is used by more than one file:"
+                echo ""
+                ls "$MIG_DIR"/${V}_*.sql 2>/dev/null | sed 's|.*/|- `|; s|$|`|'
+                echo ""
+              done
+              echo "\`supabase_migrations.schema_migrations\` stores one row per"
+              echo "version, so at most one of these can ever be tracked and the"
+              echo "rest are reported as applied whether they ran or not. Rename"
+              echo "the later file to an unused timestamp."
+              echo ""
+              echo "apply-migrations needs this job, so nothing has been applied"
+              echo "on this run. Rename the file and push again."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::duplicate migration version(s): $(echo "$DUPES" | tr '\n' ' ')-- refusing to apply; one of these files would be recorded and the rest treated as applied without running."
+            exit 1
+          fi
+
+          echo "no duplicate migration version(s) in $MIG_DIR"
+
   apply-migrations:
-    needs: [target]
+    # needs check-duplicate-migrations, not just target. A colliding pair of
+    # filenames makes this job's own record of what it did untrue: the ledger
+    # holds ONE row per version, so it applies one file, records that version,
+    # and treats the namesake as already applied on every future run. The if:
+    # below is a plain expression rather than always(), so a failed need skips
+    # this job outright instead of the condition re-enabling it (OR-T1189).
+    needs: [target, check-duplicate-migrations]
     # A PUSH TO DEV REACHES THIS JOB. That is the whole change: dev applies its
     # own migrations at merge time, so the dev backlog is always 0 or 1 and prod
     # promotion is a batch that has already run once on a real database.
@@ -764,7 +1112,7 @@ jobs:
           # applied set is UNKNOWN, and UNKNOWN is not the same fact as empty.
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
-          jq -n '{query:"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
+          jq -n '{query:"SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version;"}' > "$PAYLOAD"
 
           RESPONSE=""
           HTTP_OK=0
@@ -807,6 +1155,83 @@ jobs:
           echo "$APPLIED" | tail -10
           echo
 
+          # -------------------------------------------------------------------
+          # OR-T1252. SHADOW SCAN, before anything is applied.
+          #
+          # "Applied" in this loop means "a row with that version number exists",
+          # never "this file ran". So a file can be merged, deployed and reported
+          # clean on every check while its SQL has never executed anywhere:
+          # rename a migration, or revert and re-add it under a different name,
+          # and the loop below finds its version already in the ledger and skips
+          # it, on this run and on every future run. check-duplicate-migrations
+          # cannot see this, because it compares the tree with itself and there
+          # is exactly one file.
+          #
+          # The ledger carries a name column, so the shadow IS detectable: the
+          # version is recorded under one file name and the tree carries another.
+          # Rows written before this workflow started recording names have a NULL
+          # name and cannot be compared. Those are counted and reported as
+          # UNVERIFIABLE and are never folded into the pass count, because "I
+          # could not check" is not the same fact as "I checked and it was fine".
+          # -------------------------------------------------------------------
+          LEDGER_MAP=$(mktemp); chmod 600 "$LEDGER_MAP"
+          echo "$RESPONSE" | jq -r '.[] | "\(.version)=\(.name // "")"' | sort -u > "$LEDGER_MAP"
+
+          shadow_scan() {
+            local map="$1" files="$2"
+            local base version fname ledger_line ledger_name
+            local checked=0 matched=0 unverifiable=0 mismatched=0
+            while IFS= read -r base; do
+              [ -n "$base" ] || continue
+              version="${base%%_*}"
+              fname="${base#*_}"; fname="${fname%.sql}"
+              ledger_line=$(grep -m1 "^${version}=" "$map" || true)
+              [ -n "$ledger_line" ] || continue
+              checked=$((checked + 1))
+              ledger_name="${ledger_line#*=}"
+              if [ -z "$ledger_name" ]; then
+                unverifiable=$((unverifiable + 1))
+              elif [ "$ledger_name" = "$fname" ]; then
+                matched=$((matched + 1))
+              else
+                mismatched=$((mismatched + 1))
+                echo "  x SHADOWED: ${base} -- version ${version} is recorded in the ledger under the name '${ledger_name}'. This file has never run against ${SUPABASE_REF} and never will."
+              fi
+            done <<< "$files"
+            echo "SHADOW SCAN: ${checked} already-recorded file(s) compared, ${matched} name-matched, ${unverifiable} unverifiable (ledger row predates name recording), ${mismatched} shadowed."
+            [ "$mismatched" -eq 0 ]
+          }
+
+          # The scan must be able to go RED. Run it first over a synthetic pair
+          # with a known shadow and a known match, and refuse to apply if the
+          # detector does not behave both ways. A comparison that silently checks
+          # nothing would otherwise read exactly like a clean tree.
+          ST_MAP=$(mktemp); chmod 600 "$ST_MAP"
+          printf '%s\n' '20990101000000=add_thing' '20990101000001=fine' > "$ST_MAP"
+          if shadow_scan "$ST_MAP" '20990101000000_add_thing_properly.sql' >/dev/null 2>&1; then
+            rm -f "$ST_MAP" "$LEDGER_MAP"
+            echo "::error::shadow-scan self-test FAILED: the detector did not fire on a file that IS shadowed. Refusing to apply, because a check that cannot go red proves nothing."
+            exit 1
+          fi
+          if ! shadow_scan "$ST_MAP" '20990101000001_fine.sql' >/dev/null 2>&1; then
+            rm -f "$ST_MAP" "$LEDGER_MAP"
+            echo "::error::shadow-scan self-test FAILED: the detector fired on a file whose name matches the ledger. Refusing to apply."
+            exit 1
+          fi
+          rm -f "$ST_MAP"
+          echo "shadow-scan self-test ok: fires on a mismatch, silent on a match."
+
+          TREE_FILES=$(ls "$MIG_DIR" 2>/dev/null | grep -E '\.sql$' | sort || true)
+          if [ -z "$TREE_FILES" ]; then
+            echo "SHADOW SCAN: no .sql files in $MIG_DIR to compare."
+          elif ! shadow_scan "$LEDGER_MAP" "$TREE_FILES"; then
+            rm -f "$LEDGER_MAP"
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more migration files carry a version that the ledger recorded under a DIFFERENT file name. Those files have never run and never will, because a version already in the ledger is skipped. Give each one a new, unused version timestamp and push again. NOTHING was applied on this run."
+            exit 1
+          fi
+          rm -f "$LEDGER_MAP"
+          echo
+
           # For each migration file, apply if not in the applied set
           APPLIED_COUNT=0
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
@@ -833,24 +1258,81 @@ jobs:
             fi
             echo "  v SQL applied (HTTP $CODE)"
 
-            # Record in schema_migrations
+            # Record in schema_migrations, WITH the name of the file that ran.
+            #
+            # OR-T1252. Recording only the version is what lets a renamed or
+            # re-added file be skipped for ever: the loop above treats a version
+            # present in the ledger as applied, whatever file carried it. The
+            # name column already exists and the Supabase CLI populates it; this
+            # workflow never did, so every row it wrote was unverifiable. From
+            # here on each row says which file ran and the shadow scan can
+            # compare it against the tree.
+            #
+            # OR-T1254. The SQL is ALREADY APPLIED by the time we get here. If
+            # the record does not land, the database carries the change and the
+            # ledger does not know it, so the next run applies the same file
+            # again. That is harmless only if the migration is idempotent, which
+            # nothing in this repo requires or checks. So the write is retried,
+            # then read back, and a total failure names the exact recovery
+            # statement rather than only reporting that it failed.
+            #
+            # NOT merged into the apply call above as one multi-statement
+            # request, deliberately: supabase/migrations contains CREATE INDEX
+            # CONCURRENTLY and DROP INDEX CONCURRENTLY migrations
+            # (20260715130000 and 20260716140000) and neither may run inside a
+            # transaction block, so a combined request would make those files
+            # impossible to apply at all.
+            NAME="${BASENAME#*_}"; NAME="${NAME%.sql}"
+            SQ="'"
+            V_SQL="${VERSION//$SQ/$SQ$SQ}"
+            N_SQL="${NAME//$SQ/$SQ$SQ}"
+            REC_SQL="INSERT INTO supabase_migrations.schema_migrations (version, name) VALUES ('${V_SQL}', '${N_SQL}') ON CONFLICT (version) DO UPDATE SET name = COALESCE(schema_migrations.name, EXCLUDED.name);"
             REC=$(mktemp); chmod 600 "$REC"
-            jq -n --arg v "$VERSION" \
-              '{query:"INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('"'"'\($v)'"'"') ON CONFLICT DO NOTHING;"}' > "$REC"
-            REC_CODE=$(curl -sS -o /tmp/mig.resp -w "%{http_code}" \
-              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
-              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data-binary "@$REC")
+            jq -n --arg q "$REC_SQL" '{query:$q}' > "$REC"
+
+            REC_OK=0
+            REC_CODE=""
+            for attempt in 1 2 3; do
+              REC_CODE=$(curl -sS -o /tmp/mig.resp -w "%{http_code}" \
+                -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+                -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data-binary "@$REC")
+              if [[ "$REC_CODE" =~ ^2 ]]; then
+                REC_OK=1
+                break
+              fi
+              echo "  ! ledger record attempt ${attempt}/3 returned HTTP ${REC_CODE}"
+              if [ "$attempt" -lt 3 ]; then
+                sleep 10
+              fi
+            done
             rm -f "$REC"
 
-            if [[ ! "$REC_CODE" =~ ^2 ]]; then
-              echo "  x FAILED to record migration in ledger (HTTP $REC_CODE): $(head -c 400 /tmp/mig.resp)"
+            # The response body is deliberately not echoed on any failure path:
+            # on an auth failure it is the only place a token-shaped string could
+            # reach a public build log.
+            if [ "$REC_OK" -ne 1 ]; then
               rm -f /tmp/mig.resp
+              echo "::error::${BASENAME} WAS APPLIED to ${SUPABASE_REF} and could NOT be recorded in the ledger after 3 attempts (last HTTP ${REC_CODE}). The database carries this change and the ledger does not know it, so a re-run would apply the same file a second time. Record it by hand before re-running: INSERT INTO supabase_migrations.schema_migrations (version, name) VALUES ('${VERSION}', '${NAME}') ON CONFLICT (version) DO UPDATE SET name = COALESCE(schema_migrations.name, EXCLUDED.name);"
+              exit 1
+            fi
+
+            # A 2xx is the API accepting the call. It is not the row being there.
+            RB=$(mktemp); chmod 600 "$RB"
+            jq -n --arg q "SELECT count(*) AS n FROM supabase_migrations.schema_migrations WHERE version = '${V_SQL}';" '{query:$q}' > "$RB"
+            RB_BODY=$(curl -sS -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$RB" || true)
+            rm -f "$RB"
+            if ! echo "$RB_BODY" | jq -e '(.[0].n | tonumber) == 1' >/dev/null 2>&1; then
+              rm -f /tmp/mig.resp
+              echo "::error::${BASENAME} was applied to ${SUPABASE_REF} and the ledger write returned success, but reading it back did not find exactly one row for version ${VERSION}. Treat the ledger as NOT carrying this migration and record it by hand before re-running."
               exit 1
             fi
             rm -f /tmp/mig.resp
-            echo "  v migration recorded in ledger (HTTP $REC_CODE)"
+            echo "  v migration recorded in ledger and read back (version ${VERSION}, name ${NAME})"
             APPLIED_COUNT=$((APPLIED_COUNT + 1))
           done
 
