@@ -265,11 +265,14 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
-      const { data: meta } = await (supabase as any)
+      const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
         .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
+      if (classifyRead(meta, metaErr) === "error") {
+        console.warn(`Failed to load vault meta: ${formatError(metaErr)}`);
+      }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
