@@ -200,18 +200,46 @@ is built, this is binding on it:
 This is a settled requirement, not an open design question, and it is written
 here because the wiring PR is reviewed against this document.
 
-**What is stored today: nothing.** No Lightning payment amount is stored
-anywhere in Orange Rails. There is no payment record type, table, column, view,
-function, RPC or edge function, and every seal and persist entry point on this
-surface throws `scaffold only`. The user-facing claim that we cannot read your
+**What is stored today: no Lightning payment amount.** No Lightning payment
+amount is stored anywhere in Orange Rails. There is no Lightning payment record
+on this connector: no type, table, column, view, function, RPC or edge function
+holds one, and every seal and persist entry point on this surface throws
+`scaffold only`. Read that as what it is, a claim about Lightning and about this
+connector. It is deliberately not a claim that no payment surface of any kind
+exists anywhere in the system: billing surfaces do exist, for other purposes and
+under other sections, and the reuse consequence in the list below is what keeps
+a Lightning amount off them. The user-facing claim that we cannot read your
 financial data is therefore not contradicted by anything in the system as it
 stands. This section constrains work that has not been built yet. It is not a
 fix for a live exposure and should not be cited as evidence of one.
 
-Six consequences, all checkable at review. Read this as the complete list as it
-stands: if a proposal satisfies every bullet and still lets the server learn the
+**What that rests on, and how to re-check it.** The database objects were
+checked by querying the databases. They were not inferred from this repository,
+and a code search is not evidence for this claim in either direction. §3.3 is
+why that distinction is load-bearing rather than pedantic: `channel_state` and
+its unique index already exist in the database while the wiring PR ships zero
+DDL, so schema state runs ahead of the diff, and a document that says so cannot
+then make a schema claim out of the diff two sections later. To re-check this
+line, query `information_schema.columns` in the dev and production projects for
+a column that could hold a Lightning payment value, and report which projects
+were reached: a project that could not be reached is not a project that came
+back clean.
+
+Seven consequences, all checkable at review. Read this as the complete list **for
+the LDK payment record surface** as it stands: if a proposal touches that surface,
+satisfies every bullet, and still lets the server learn a Lightning payment
 amount, that is a defect in this list, and the fix is an edit to this section on
-the bar set in the last paragraph, not a judgement made at review time.
+the bar set at the close of it (a founder decision plus an Auditor pass), not a
+judgement made at review time.
+
+That scope is deliberate and it cuts both ways. A cleartext amount that reaches
+the server by some **other** surface is out of this list's reach and is governed
+elsewhere, so a green walk of the seven bullets is a statement about the LDK
+payment record and not a clean bill of health for the product. What the list does
+bind wherever the row lands is the seventh consequence: a Lightning payment
+amount is never recorded on a pre-existing payment, billing or invoice surface,
+and reusing a table that already exists relaxes nothing. Narrowing the closedness
+claim is not licence to route a Lightning amount around it.
 
 - **No amount column.** A payment record row carries a blind index, a seal
   version, the IV and the ciphertext, and nothing that describes value. If a
@@ -239,6 +267,16 @@ the bar set in the last paragraph, not a judgement made at review time.
   artifact.
 - **No server-side amount arithmetic.** Sums, balances and totals are computed
   client-side after unsealing. A server that can add two amounts can read them.
+- **Reusing a table that already exists does not relax any of the above.** The
+  test is the same after the change as before it: if the server can read the
+  value of a Lightning payment, or put two of them in value order, from what it
+  holds, the change is wrong. That test does not ask which table the row landed
+  in, what the table is called, when it was built or who owns it. So a Lightning
+  payment amount is never recorded on a pre-existing payment, billing or invoice
+  surface, and a Lightning rail is never added to a table that carries a
+  cleartext amount column. The payment record this section governs is its own
+  table on the allowed column set below, and a row written somewhere else is not
+  exempt for having avoided a new one.
 
 **How a reviewer checks this, without judgement.** Stated only as above, the
 check rests on what counts as describing value, and §3.3 is why that is not
@@ -255,6 +293,33 @@ enumeration:
   `seal_version`, `iv`, `ciphertext`, `created_at`, `updated_at`. Anything
   outside that list fails, whatever it is named and whatever it is said to hold.
   Widening the list is a change to this section, not a reviewer's call.
+
+Both of those requirements describe a table that does not exist yet, and neither
+one fires on a table that already does: a write to a surface that is already
+there ships no DDL, so it raises no migration pull request, and it adds no
+column, so the allowed column set is never consulted. That limit is the reason
+the last consequence above is stated on its own rather than left to be read out
+of these two.
+
+**Metadata trade-off, on the same terms as §3.2 (3).** Every consequence above
+is about **value**, and none of them is about **existence**. A payment record
+row on the allowed column set carries a `payment_bidx` and a `created_at`, so
+the server can count how many Lightning payments a user made and see when each
+row appeared, with every bullet above satisfied and every payload sealed. That
+is the same class of exposure §3.2 (3) records for per-channel update cadence,
+two subsections earlier in this document, and it is written here rather than
+left to be inferred from there. Bounded and accepted: no amount, fee, balance,
+counterparty or destination leaks. Reducing it further is a different design,
+not a tightening of the bullets above: padding the table with decoy rows,
+batching writes so a row's arrival is not a payment's timing, or coarsening
+`created_at` to a window. None of those is proposed here, and each carries its
+own cost, so the exposure is accepted rather than engineered away. **This
+observable pattern is personal financial behavior metadata under GDPR / Law-25
+and must be disclosed in the privacy policy before any payment record path
+ships to users** (tracked with Compliance; not a blocker on this section or on
+the wiring PR). Nothing is observable today: per the paragraph above, no
+Lightning payment record exists, so this states what becomes observable the
+moment one is built.
 
 The trade-off, stated rather than discovered later: sealing the amount means
 the server cannot sort, filter, aggregate or report on value. Any product

@@ -1,0 +1,127 @@
+name: Header probe
+
+# Manually triggered probe of one live URL's HTTP response headers.
+#
+# We had no way anywhere in this org to read a response header from a
+# deployed host. This workflow exists to close exactly that gap, and
+# only that gap: given a URL on our own domains, print the status line
+# plus a fixed allowlist of security headers and post the result on a
+# tracking issue.
+#
+# Safety, both non-negotiable:
+#   1. Only our own hosts can be probed (ALLOWED_HOSTS below).
+#   2. Only ALLOWED_HEADERS are ever printed. This is a public repo
+#      with a public Actions log; the full header block is never
+#      echoed because set-cookie and similar values could land in it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Full URL to probe, e.g. https://connect.orangerails.com/connect/stealth"
+        required: true
+      issue:
+        description: "Tracking issue number to post the result comment on"
+        required: false
+        default: "906"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate the host against the allowlist
+        id: check
+        run: |
+          set -euo pipefail
+          URL="${{ github.event.inputs.url }}"
+
+          HOST=$(python3 - "$URL" <<'PY'
+          import sys, urllib.parse
+          print((urllib.parse.urlparse(sys.argv[1]).hostname or "").lower())
+          PY
+          )
+
+          if [ -z "$HOST" ]; then
+            echo "message=REFUSED: could not parse a host out of \`$URL\`" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          ALLOWED=false
+          case "$HOST" in
+            connect.orangerails.com|app.orangerails.com|docs.orangerails.com|orangerails.com|www.orangerails.com|dev.orangerails.com)
+              ALLOWED=true ;;
+            *.pages.dev)
+              ALLOWED=true ;;
+          esac
+
+          if [ "$ALLOWED" != "true" ]; then
+            echo "message=REFUSED: host \`$HOST\` is not on the allowlist. This probe only reaches our own domains." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Probe headers
+        if: success()
+        id: probe
+        run: |
+          set -euo pipefail
+          URL="${{ steps.check.outputs.url }}"
+
+          # No redirects, no body, a normal browser UA (our own WAF blocks the
+          # default curl/python UA on some of these hosts), hard timeout.
+          HEADERS=$(curl -sS -D - -o /dev/null --max-time 15 --max-redirs 0 \
+            -A "Mozilla/5.0 (X11; Linux x86_64) header-probe/1.0" \
+            "$URL")
+
+          STATUS_LINE=$(printf '%s\n' "$HEADERS" | head -n1 | tr -d '\r')
+
+          {
+            echo "**Header probe:** \`$URL\`"
+            echo ""
+            echo "Status: \`$STATUS_LINE\`"
+            echo ""
+            for NAME in content-security-policy content-security-policy-report-only \
+                        x-frame-options x-content-type-options referrer-policy \
+                        strict-transport-security permissions-policy \
+                        cross-origin-opener-policy; do
+              VALUE=$(printf '%s\n' "$HEADERS" | grep -i "^$NAME:" | head -n1 \
+                        | sed -E 's/^[^:]+:[[:space:]]*//' | tr -d '\r')
+              if [ -z "$VALUE" ]; then
+                echo "- \`$NAME\`: ABSENT"
+              else
+                echo "- \`$NAME\`: \`$VALUE\`"
+              fi
+            done
+          } > result.md
+
+          cat result.md
+
+      - name: Post result comment
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh issue comment "${{ github.event.inputs.issue }}" \
+            --repo "${{ github.repository }}" \
+            --body-file result.md
+
+      - name: Post refusal comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG="${{ steps.check.outputs.message }}"
+          if [ -z "$MSG" ]; then
+            MSG="Header probe run failed. See the run log: $RUN_URL"
+          fi
+          gh issue comment "${{ github.event.inputs.issue }}" \
+            --repo "${{ github.repository }}" \
+            --body "$MSG"$'\n\n'"Run: $RUN_URL"
