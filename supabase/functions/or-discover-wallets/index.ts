@@ -43,6 +43,15 @@ import { lookupErrorCopy } from "../_shared/error-catalog.ts";
 import { safeErrorLine } from "../_shared/error-redaction.ts";
 
 // -- AES-256-GCM helpers (kept inline for edge-fn isolation) ----------------
+//
+// DECISION (OR-T0723): two sibling copies of this key-import code exist, in
+// or-connection-delete/index.ts and or-sync/index.ts (the latter correctly
+// requests ["encrypt", "decrypt"], since it really does encrypt). Kept as
+// three deliberate separate inline copies rather than unified into a shared
+// module in this PR -- a larger, riskier change. Each function's usages
+// array is now pinned by its own test (index.test.ts here and in
+// or-connection-delete) so the next divergence fails a check instead of
+// waiting for a reviewer to read three files side by side.
 
 function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
