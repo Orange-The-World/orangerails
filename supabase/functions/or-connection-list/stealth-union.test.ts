@@ -37,6 +37,7 @@ import {
   isUnmappedStealthStatus,
   mapStealthStatus,
   mergeConnections,
+  SOURCE_WALLETS_UNAVAILABLE_ALARM,
   STEALTH_UNAVAILABLE_ALARM,
   stealthRowToConnection,
   tagRegularConnection,
@@ -183,15 +184,23 @@ Deno.test('6b. merging with an empty stealth set leaves the regular order untouc
 });
 
 Deno.test('8. stealth_unavailable is always a boolean, never omitted on success', () => {
-  const ok = buildListResponse([], false);
+  const ok = buildListResponse([], false, false);
   assertStrictEquals(ok.stealth_unavailable, false);
+  assertStrictEquals(ok.source_wallets_unavailable, false);
   // Present, not merely falsy-by-absence. A key that only shows up on
   // failure is a key clients forget to check.
   assertEquals(Object.keys(ok).includes('stealth_unavailable'), true);
+  assertEquals(Object.keys(ok).includes('source_wallets_unavailable'), true);
   assertEquals(JSON.parse(JSON.stringify(ok)).stealth_unavailable, false);
+  assertEquals(JSON.parse(JSON.stringify(ok)).source_wallets_unavailable, false);
 
-  const degraded = buildListResponse([], true);
+  const degraded = buildListResponse([], true, false);
   assertStrictEquals(degraded.stealth_unavailable, true);
+  assertStrictEquals(degraded.source_wallets_unavailable, false);
+
+  const walletDegraded = buildListResponse([], false, true);
+  assertStrictEquals(walletDegraded.stealth_unavailable, false);
+  assertStrictEquals(walletDegraded.source_wallets_unavailable, true);
 });
 
 Deno.test('8b. degradation does not drop the connections that were readable', () => {
@@ -199,10 +208,11 @@ Deno.test('8b. degradation does not drop the connections that were readable', ()
     tagRegularConnection({ id: 'bank', created_at: '2026-08-14T11:13:00.000Z' }),
   ] as unknown as UnifiedConnection[];
 
-  const degraded = buildListResponse(regular, true);
+  const degraded = buildListResponse(regular, true, false);
   // The whole point of degrading rather than failing closed.
   assertEquals(degraded.connections.map(c => c.id), ['bank']);
   assertStrictEquals(degraded.stealth_unavailable, true);
+  assertStrictEquals(degraded.source_wallets_unavailable, false);
 });
 
 Deno.test('9. the alarm token is a bare greppable literal', () => {
@@ -214,6 +224,11 @@ Deno.test('9. the alarm token is a bare greppable literal', () => {
   // No whitespace, punctuation or interpolation, so it survives log
   // formatting and greps as a literal.
   assertEquals(/^[A-Z_]+$/.test(STEALTH_UNAVAILABLE_ALARM), true);
+});
+
+Deno.test('9c. the source_wallets alarm token is a bare greppable literal', () => {
+  assertEquals(SOURCE_WALLETS_UNAVAILABLE_ALARM, 'SOURCE_WALLETS_UNAVAILABLE');
+  assertEquals(/^[A-Z_]+$/.test(SOURCE_WALLETS_UNAVAILABLE_ALARM), true);
 });
 
 Deno.test('10. sync progress is two fields, never one coerced into the other', () => {
@@ -301,6 +316,30 @@ Deno.test('9b. every degrade site in the handler carries the alarm token', async
       window.includes('STEALTH_UNAVAILABLE_ALARM'),
       true,
       `degrade site at index.ts:${i + 1} does not log STEALTH_UNAVAILABLE_ALARM within 6 lines`,
+    );
+  }
+});
+
+Deno.test('9d. every source_wallets degrade site carries the SOURCE_WALLETS_UNAVAILABLE_ALARM token', async () => {
+  const source = await Deno.readTextFile(new URL('./index.ts', import.meta.url));
+  const lines = source.split('\n');
+
+  const degradeSites = lines
+    .map((line, i) => ({ line, i }))
+    .filter(({ line }) => /\bsourceWalletsUnavailable\s*=\s*true\b/.test(line));
+
+  assertEquals(
+    degradeSites.length >= 1,
+    true,
+    `expected at least 1 sourceWalletsUnavailable degrade site, found ${degradeSites.length}`,
+  );
+
+  for (const { i } of degradeSites) {
+    const window = lines.slice(i, i + 6).join('\n');
+    assertEquals(
+      window.includes('SOURCE_WALLETS_UNAVAILABLE_ALARM'),
+      true,
+      `degrade site at index.ts:${i + 1} does not log SOURCE_WALLETS_UNAVAILABLE_ALARM within 6 lines`,
     );
   }
 });
