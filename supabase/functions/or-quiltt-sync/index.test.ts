@@ -1220,65 +1220,63 @@ Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending'
   );
 });
 
-Deno.test('OR-T2475: the legacy NULL-id fallback is refused once another connection is already live', () => {
+Deno.test('OR-T2475: the legacy NULL-id fallback is refused once another connection is already live', async () => {
   // The repro: a legacy NULL-id row exists (connection A), but a DIFFERENT
   // connectionId already has a processed event at this subaccount (connection
   // B, already established). reconcileConnectionSuccess must not treat A's
   // row as this event's connection just because it is the only NULL row --
   // that is exactly the collision measured on OR-T2218 (two live,
   // independently-scheduled Quiltt connections both landing on one row).
-  return (async () => {
-    let statusFilter: string[] | undefined;
-    let connectionLookups = 0;
+  let statusFilter: string[] | undefined;
+  let connectionLookups = 0;
 
-    // deno-lint-ignore no-explicit-any
-    const mockClient: any = {
-      from(table: string) {
-        if (table === 'quiltt_webhook_inbox') {
-          // A different connectionId already has a processed event here.
-          // deno-lint-ignore no-explicit-any
-          const inboxChain: any = {
-            select(_c: string) { return inboxChain; },
-            eq(_c: string, _v: unknown) { return inboxChain; },
-            not(_c: string, _op: string, _v: unknown) { return inboxChain; },
-            neq(_c: string, _v: unknown) { return inboxChain; },
-            limit(_n: number) { return inboxChain; },
-            maybeSingle() { return Promise.resolve({ data: { event_id: 'evt-conn-a-1' }, error: null }); },
-          };
-          return inboxChain;
-        }
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(table: string) {
+      if (table === 'quiltt_webhook_inbox') {
+        // A different connectionId already has a processed event here.
         // deno-lint-ignore no-explicit-any
-        const chain: any = {
-          select(_c: string) { return chain; },
-          eq(_c: string, _v: unknown) { return chain; },
-          is(_c: string, _v: unknown) { return chain; },
-          order(_c: string, _o: unknown) { return chain; },
-          limit(_n: number) { return chain; },
-          maybeSingle() {
-            connectionLookups++;
-            return Promise.resolve(
-              connectionLookups === 1
-                ? { data: null, error: null } // exact match: miss
-                : { data: { id: 'conn-legacy-A' }, error: null }, // legacy row: connection A's
-            );
-          },
-          update(_patch: Record<string, unknown>) { return chain; },
-          in(_col: string, vals: string[]) {
-            statusFilter = vals;
-            return Promise.resolve({ error: null });
-          },
+        const inboxChain: any = {
+          select(_c: string) { return inboxChain; },
+          eq(_c: string, _v: unknown) { return inboxChain; },
+          not(_c: string, _op: string, _v: unknown) { return inboxChain; },
+          neq(_c: string, _v: unknown) { return inboxChain; },
+          limit(_n: number) { return inboxChain; },
+          maybeSingle() { return Promise.resolve({ data: { event_id: 'evt-conn-a-1' }, error: null }); },
         };
-        return chain;
-      },
-    };
+        return inboxChain;
+      }
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() {
+          connectionLookups++;
+          return Promise.resolve(
+            connectionLookups === 1
+              ? { data: null, error: null } // exact match: miss
+              : { data: { id: 'conn-legacy-A' }, error: null }, // legacy row: connection A's
+          );
+        },
+        update(_patch: Record<string, unknown>) { return chain; },
+        in(_col: string, vals: string[]) {
+          statusFilter = vals;
+          return Promise.resolve({ error: null });
+        },
+      };
+      return chain;
+    },
+  };
 
-    const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-B', 'sub-1');
+  const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-B', 'sub-1');
 
-    assertEquals(err, null, 'ambiguous is a no-op, not an error');
-    assertEquals(
-      statusFilter,
-      undefined,
-      "connection A's row must not be touched: it belongs to a different, already-established connection (OR-T2475)",
-    );
-  })();
+  assertEquals(err, null, 'ambiguous is a no-op, not an error');
+  assertEquals(
+    statusFilter,
+    undefined,
+    "connection A's row must not be touched: it belongs to a different, already-established connection (OR-T2475)",
+  );
 });
