@@ -491,6 +491,34 @@ describe("vault recovery: the rotated meta write", () => {
     expect(selectCalls.length).toBe(2);
   });
 
+  it("terminates on an EMPTY page, the separate break from the short-page case above", async () => {
+    // The loop has two distinct exits: a short page (rowCount % PAGE_SIZE !== 0,
+    // pinned above) and an empty page (rowCount is an exact multiple of
+    // PAGE_SIZE, so the page after the last full one comes back with zero
+    // rows). A fixture that is never an exact multiple can only ever exercise
+    // the short-page break, so that termination path was previously unpinned.
+    const rowCount = TRANSACTION_PAGE_SIZE * 2;
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: `txn-${String(i).padStart(4, "0")}`,
+      encrypted_payload: `payload-${i}`,
+    }));
+    const { client, calls } = makeFakeClient({ rows: { encrypted_transactions: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const txnUpdates = calls.filter((c) => c.table === "encrypted_transactions" && c.op === "update");
+    const updatedIds = txnUpdates.map((c) => c.filters.find((f) => f.column === "id")?.value);
+    expect(txnUpdates.length).toBe(rowCount);
+    expect(new Set(updatedIds).size).toBe(rowCount);
+
+    // Two full pages plus one empty page: three selects, not two. That third,
+    // empty select is the direct evidence the loop took the empty-page break
+    // rather than happening to stop after the second full page for some other
+    // reason.
+    const selectCalls = calls.filter((c) => c.table === "encrypted_transactions" && c.op === "select");
+    expect(selectCalls.length).toBe(3);
+  });
+
   it("pages the connections read instead of trusting one capped select", async () => {
     // A single unpaged select is capped server side, and a capped read is a
     // SUCCESSFUL read: no error is raised. Every connection past the cap used to
