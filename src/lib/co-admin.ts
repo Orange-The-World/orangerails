@@ -600,10 +600,12 @@ export async function loadAdminSubkeysDirect(params: {
  * open it.
  *
  * SO: both deletes now prove themselves, and zero removed is never reported as
- * a successful revocation. It throws, deliberately and unlike the recovery-time
- * cleanup in co-admin-recovery.ts: that one runs after a recovery has already
- * succeeded and must not report a false failure, while this one is a security
- * action the owner asked for and must never report a false success.
+ * a successful revocation. It throws, deliberately: this is a security action
+ * the owner asked for and must never report a false success. (There is no
+ * comparable recovery-time cleanup to weigh this against: vault recovery does
+ * not currently remove or re-wrap stale wrapped_data_keys rows at all, see
+ * OR-T1939. A co-admin's grant simply stops decrypting after the owner
+ * recovers, which fails closed.)
  *
  * WHAT ZERO ROWS DOES NOT PROVE. A delete that removed nothing cannot tell
  * "there is no such row" from "the row is there and the policy did not permit
@@ -683,7 +685,7 @@ export async function revokeCoAdmin(params: {
     }
 
     throw new CoAdminRevocationIncompleteError(
-      "Nothing was removed by this attempt, and this cannot tell whether the stored key is already gone or whether the database refused to remove it. Your list has not been changed. If the key is already gone, for example after a vault recovery, clear the list entry on its own. That only tidies the list and does not remove access.",
+      "Nothing was removed by this attempt, and this cannot tell whether the stored key is already gone or whether the database refused to remove it. Your list has not been changed. If the key row is already gone, for example from an earlier revoke attempt, clear the list entry on its own. That only tidies the list and does not remove access.",
       false,
     );
   }
