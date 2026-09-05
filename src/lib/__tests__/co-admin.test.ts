@@ -20,7 +20,7 @@
 import { describe, it, expect } from "vitest";
 import { generateHybridKemKeyPair } from "../pqc";
 import { importAesKey } from "../vault";
-import { wrapBlob64, unwrapBlob64 } from "../co-admin";
+import { wrapBlob64, unwrapBlob64, assertSaltMatchesUnlockedVault } from "../co-admin";
 
 // ------------------------------------------------------------------
 // Helpers
