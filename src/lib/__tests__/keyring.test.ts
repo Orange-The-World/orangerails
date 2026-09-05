@@ -288,9 +288,12 @@ describe("keyring , the epoch is canonicalised exactly once", () => {
     // bytes, a client library upgrade would brick every vault it touched, and
     // it would look like data loss rather than like a version change.
     const blob = await wrapKeyring(kr, mek, salt, { userId: BINDING.userId, keyringEpoch: 7 });
+    // No cast: keyringEpoch is number | string, so the driver's decimal
+    // string shape assigns directly. That is the acceptance property this
+    // test exists to prove, not just that unwrapKeyring happens to accept it.
     const asString: KeyringBinding = {
       userId: BINDING.userId,
-      keyringEpoch: "7" as unknown as number,
+      keyringEpoch: "7",
     };
     await expect(unwrapKeyring(blob, mek, salt, asString)).resolves.toEqual(kr);
   });
