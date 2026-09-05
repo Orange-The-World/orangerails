@@ -1,0 +1,60 @@
+{
+    "rules": [
+        {
+            "risk": "low",
+            "pattern": "(\\.(test|spec)\\.[jt]sx?$|(^|/)(tests?|__tests__)/)"
+        },
+        {
+            "risk": "low",
+            "pattern": "(^|/)(docs|README)([./]|$)"
+        },
+        {
+            "risk": "low",
+            "pattern": "\\.(md|mdx|txt)$"
+        },
+        {
+            "risk": "high",
+            "pattern": "(\\.env|secrets?|credential|\\.pem$|\\.key$)"
+        },
+        {
+            "risk": "high",
+            "pattern": "(^|/)(auth|session|login|token)"
+        },
+        {
+            "risk": "high",
+            "pattern": "(^|/)(delete|drop|truncate|purge)"
+        },
+        {
+            "risk": "high",
+            "pattern": "(^|/)migrations/"
+        },
+        {
+            "risk": "high",
+            "pattern": "(^|/)supabase/functions/"
+        },
+        {
+            "risk": "high",
+            "pattern": "(lightning|btcpay|invoice|payment|payout|refund)"
+        },
+        {
+            "risk": "high",
+            "pattern": "(rls|row_level_security|policy|policies)"
+        },
+        {
+            "risk": "high",
+            "pattern": "(stealth|kdf|deriv|seed|xpub|wallet)"
+        },
+        {
+            "risk": "high",
+            "pattern": "(vault|deriv|kdf|hkdf|key-wrap|keyring|pqc|co-admin|rekey)"
+        },
+        {
+            "risk": "high",
+            "pattern": "^\\.github/"
+        },
+        {
+            "risk": "high",
+            "pattern": "^scripts/"
+        }
+    ]
+}
