@@ -538,7 +538,7 @@ export function classifySql(sql) {
         const lead = st.text.length - st.text.replace(/^\s+/, '').length;
         applyRules(
           st.text.replace(/\s+/g, ' ').trim(),
-          bodyLine0 + lineAt(inner.text, st.offset + lead),
+          bodyLine0 + lineAt(inner.text, st.offset + lead) + 1,
         );
       }
       reachable = reachable.concat(innerSts);
