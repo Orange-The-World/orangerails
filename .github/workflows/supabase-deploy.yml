@@ -2017,9 +2017,20 @@ jobs:
             echo "::error::order self-test FAILED: a version of a different width from the ledger's was compared as though lexicographic order meant chronological order. Refusing to apply."
             exit 1
           fi
-          if ! out_of_order_scan "$ST_APPLIED" '20990101000003_below_marked.sql' "$ST_DIR" >/dev/null 2>&1; then
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000003_below_marked.sql' "$ST_DIR" '' 'stfixturetargetproj' >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
-            echo "::error::order self-test FAILED: the guard fired on an older file that carries a valid OUT-OF-ORDER-OK marker with a reason. Refusing to apply."
+            echo "::error::order self-test FAILED: the guard fired on an older file that carries a valid OUT-OF-ORDER-OK marker naming the target project, with a reason. Refusing to apply."
+            exit 1
+          fi
+          # OR-T2561 / OR-T2555. The exact same marker text, honored above
+          # because it names the project this test told the guard it was
+          # targeting, must be REJECTED when the guard is told it is
+          # targeting a DIFFERENT project. A marker judged safe on one
+          # project must never be silently honored on another -- this is the
+          # regression OR-T2555 found and this ticket fixes.
+          if out_of_order_scan "$ST_APPLIED" '20990100999999_below_wrong_project.sql' "$ST_DIR" '' 'stfixturetargetproj' >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard silently honored an OUT-OF-ORDER-OK marker that names a DIFFERENT project than the one this run targets."
             exit 1
           fi
           if ! out_of_order_scan "$ST_APPLIED" '20990101000009_in_order.sql' "$ST_DIR" >/dev/null 2>&1; then
