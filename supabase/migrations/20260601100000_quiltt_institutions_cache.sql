@@ -2,7 +2,12 @@
 -- catalog so V2/OW/etc. can render bank tiles in their picker WITHOUT
 -- a per-user Quiltt session.
 --
--- Refreshed by the or-institutions-catalog edge function (24h TTL).
+-- NOT currently refreshed by anything: as of 2026-08-31 no code path writes or
+-- reads this table (0 rows, refreshed_at never set). Originally intended to be
+-- refreshed by the or-institutions-catalog edge function (24h TTL); that was
+-- never implemented. See OR-T1076 for the plan to wire it up: a scheduled job
+-- (not the public edge function) writes it, and or-institutions-catalog reads
+-- it with the anon key.
 -- Public read; service-role write only.
 
 CREATE TABLE IF NOT EXISTS public.quiltt_institutions_cache (
@@ -28,9 +33,10 @@ CREATE TABLE IF NOT EXISTS public.quiltt_institutions_cache (
 CREATE INDEX IF NOT EXISTS quiltt_institutions_cache_searchable_idx
   ON public.quiltt_institutions_cache (connector_id, searchable text_pattern_ops);
 
--- Whole-catalog age. or-institutions-catalog reads MIN(refreshed_at)
--- to decide whether to refresh. Per-row refreshed_at lets us partially
--- update if Quiltt's paginated response splits across multiple calls.
+-- Whole-catalog age. NOT currently read by anything (see the header
+-- comment); intended for a future refresher to decide whether to
+-- refresh. Per-row refreshed_at lets us partially update if Quiltt's
+-- paginated response splits across multiple calls.
 CREATE INDEX IF NOT EXISTS quiltt_institutions_cache_refreshed_idx
   ON public.quiltt_institutions_cache (connector_id, refreshed_at);
 
