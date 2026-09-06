@@ -151,5 +151,25 @@ export async function resolveSinkFormatForPlatform(
     throw new Error(`platforms.sink_format lookup failed: ${error.message}`);
   }
 
+  // 'none' is the explicit no-sink sentinel (OR-T1208): a platform that has
+  // deliberately opted out of sink delivery, as opposed to one that has
+  // simply never been configured (NULL). or-sync's sink-mode test treats any
+  // non-empty string as a format to look up, so the sentinel must resolve to
+  // null here, before it ever reaches that check, or a stored 'none' 400s
+  // with "Unknown format: none" instead of falling through to the
+  // legacy/direct path the platform actually wants.
+  //
+  // Unlike NULL, 'none' must NOT fall back to bodyFormatFallback. NULL means
+  // "never configured", where the body.format fallback exists precisely for
+  // pre-multi-tenant callers (V2) that predate this column. 'none' means the
+  // platform was explicitly configured to have no sink, and the whole reason
+  // this resolver's result is meant to win over body.format is so a caller
+  // cannot request a sink shape that is not theirs. Falling back to the body
+  // here would let a legacy caller re-arm sink mode on a platform that was
+  // just told it does not have one.
+  if (data?.sink_format === 'none') {
+    return null;
+  }
+
   return data?.sink_format ?? bodyFormatFallback ?? null;
 }

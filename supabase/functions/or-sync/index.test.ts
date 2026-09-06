@@ -556,3 +556,22 @@ Deno.test('DL-1433: redactedUpstreamDetail strips partial numeric refs (card-end
   assert(!out.includes('5678'), 'partial numeric ref must not appear in redacted output');
   assertEquals(out.includes('[redacted]'), true, 'numeric placeholder must be present');
 });
+
+// ── OR-T1249: sinkMode must not treat the 'none' sentinel as a format ────────
+//
+// resolveSinkFormatForPlatform already maps a stored 'none' to null before it
+// reaches `format`, so this line should never actually see the string 'none'
+// today. The exclusion here is belt-and-suspenders (OR-T1249's explicit ask):
+// it keeps this call site correct even if a future caller reaches it with
+// 'none' through some other path. Source-inspection, same rationale as the
+// other guards in this file: sinkMode is computed inline in the handler, not
+// exported, so a unit test over an extracted helper could not see it drift.
+
+Deno.test('OR-T1249: sinkMode computation excludes the none sentinel', () => {
+  const src = readSelf('./index.ts');
+  assertEquals(
+    src.includes("format.length > 0 && format !== 'none'"),
+    true,
+    'sinkMode must not enter sink mode for the explicit no-sink sentinel',
+  );
+});
