@@ -9,9 +9,17 @@
 -- "you must be signed in". The check lives inside the function instead, where it
 -- holds no matter who ends up holding EXECUTE.
 --
--- This replaces the earlier grant revoke approach. A live read of both
--- environments showed no anon entry and no PUBLIC entry in the function ACL, so
--- the revoke was a no op in both.
+-- This is a backstop, not a replacement for the earlier grant revoke approach
+-- (20260721120000). The guard alone is not sufficient: it admits any signed
+-- in end user, and this function is SECURITY DEFINER, minting a live platform
+-- API key in its result set, so under the guard alone any account that can
+-- sign up could mint one. The revoke is the actual control; this guard is
+-- defense in depth on top of it. Both migrations must run.
+--
+-- A live read on 2026-08-28 showed no anon entry and no PUBLIC entry in the
+-- function ACL on cloud prod. That was NOT true of the self hosted cluster:
+-- its proacl still carried anon at that time. The revoke was a no-op only in
+-- the one environment that was already clean, not in both.
 --
 -- Why the check is not a bare "auth.uid() IS NULL" raise, which is the pattern
 -- the other helper functions use:
