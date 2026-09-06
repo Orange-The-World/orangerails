@@ -94,9 +94,14 @@ function bytesToBase64(bytes: Uint8Array): string {
 // that wraps the MEK and not the MEK.
 //
 // The salt, the context string and the output length match deriveSubkey
-// exactly, so a granted subkey is byte-identical to the subkey the owner's own
-// data path uses. That equality is what keeps grants made before this change
-// valid, and it is asserted in the tests rather than assumed.
+// exactly, so on a KEY-VERSION-1 vault a granted subkey is byte-identical to
+// the subkey the owner's own data path used before this change, which is what
+// keeps existing v1 grants valid. On a KEY-VERSION-2 vault this is not a
+// "kept valid" story: the pre-change grant derived its subkeys from the
+// password-stretch KEK (deriveMekRaw), never from the MEK, so it was never
+// valid, and this change does not repair it, it only makes new v2 grants
+// correct going forward. Both properties (v1 byte-identity, v2 correctness)
+// are asserted in the tests rather than assumed.
 // ------------------------------------------------------------------
 
 async function hkdfSubkeyRaw(
