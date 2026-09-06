@@ -233,6 +233,7 @@ Deno.test('with no coverage recorded, behaviour is what it was before ranges exi
         sealed_envelope: OLD_ENVELOPE,
         wallet_birthday_plaintext: '2024-01-01',
         last_block_scanned: COVERAGE_TOP,
+        scan_generation: INITIAL_GENERATION,
       },
     ],
     ranges: [],
@@ -297,6 +298,7 @@ Deno.test('the coverage clear is scoped to the connection being replaced', async
     sealed_envelope: OLD_ENVELOPE,
     wallet_birthday_plaintext: '2024-01-01',
     last_block_scanned: COVERAGE_TOP,
+    scan_generation: INITIAL_GENERATION,
   });
   db.ranges.push({
     connection_id: OTHER_CONNECTION,
