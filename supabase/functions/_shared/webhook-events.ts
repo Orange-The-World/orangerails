@@ -72,7 +72,7 @@ export interface SyncCompletedInput {
  */
 export function buildSyncCompletedPayload(
   input: SyncCompletedInput,
-): Record<string, unknown> {
+) {
   const ts = input.ts ?? new Date().toISOString();
 
   // Exactly SyncCompletedEvent['data']. Nothing else belongs in here.
