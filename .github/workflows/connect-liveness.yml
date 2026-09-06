@@ -4,9 +4,6 @@ on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
-  push:
-    branches:
-      - feat/connect-liveness-check
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -26,10 +23,12 @@ jobs:
           # touching the check logic below.
           USER_AGENT: "OrangeRailsHealthCheck/1.0 (+https://orangerails.com)"
           TARGET_URL: "https://connect.orangerails.com"
-          # THIS IS A DELIBERATELY WRONG MARKER, used to prove the check can
-          # fail before it is trusted. It will be replaced with a string from
-          # the real app shell in a follow-up commit on this same branch.
-          MARKER: "this-string-does-not-appear-on-the-real-page-0001"
+          # A marker from the real app shell's markup (index.html), present
+          # on every route because it is part of the pre-React splash
+          # screen. Chosen because it is specific to this app: it would not
+          # appear on a Cloudflare block page, nor on a marketing page
+          # served by mistake in place of the app shell.
+          MARKER: 'id="or-splash"'
         run: |
           check() {
             code="$(curl -sS -o /tmp/body.html -w '%{http_code}' -A "$USER_AGENT" "$TARGET_URL")"
