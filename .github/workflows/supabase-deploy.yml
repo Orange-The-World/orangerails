@@ -1794,12 +1794,25 @@ jobs:
           # block legitimate work, and a warning in a log nobody reads is not a
           # control. The file itself must carry, on a line of its own:
           #
-          #   -- OUT-OF-ORDER-OK: <reason>
+          #   -- OUT-OF-ORDER-OK: <project_ref> <reason>
           #
-          # The line has to start at column one and the reason has to be
-          # non-empty. An empty marker is refused on purpose: a token people
-          # paste in without thinking is worse than no token, because it reads
-          # as a decision when none was made.
+          # The line has to start at column one, name the Supabase project ref
+          # this was judged safe for, and carry a non-empty reason after it. An
+          # empty marker, or one with no reason after the project ref, is
+          # refused on purpose: a token people paste in without thinking is
+          # worse than no token, because it reads as a decision when none was
+          # made.
+          #
+          # OR-T2561 / OR-T2555 / OR-C0373. The marker is honored ONLY on the
+          # project it names. A marker written while judging one project safe
+          # (e.g. "the affected table is empty on dev") says nothing about a
+          # different project, where the same table can hold real rows. Before
+          # this fix the check asked only "does a reason exist", never "for
+          # which project", so writing the marker once silently pre-authorized
+          # the same file to apply out of order on every project this guard
+          # runs against. A marker naming a different project than this run's
+          # own ${SUPABASE_REF} is treated exactly like no marker at all: it
+          # fails loud, it is never a silent skip.
           #
           # OR-T0419 / OR-T2139. This guard and the "order scan" built in
           # parallel under OR-T0419 were the same control at the same anchor
