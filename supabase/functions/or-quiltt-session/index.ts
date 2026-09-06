@@ -42,9 +42,9 @@
  *   QUILTT_CONNECTOR_ID_LINK — Connector created in the Quiltt dashboard
  *   QUILTT_CONNECTOR_ID_RECONNECT — optional, falls back to LINK if missing
  *
- * Model B (per-platform Quiltt key) reads from platforms.quiltt_api_key_ciphertext
- * when populated. Phase 1 ships Model A only; Model B fallback is a 1-line
- * change once the ciphertext column is wired to a decryption helper.
+ * Model B (per-platform Quiltt key) reads from platforms.quiltt_api_key
+ * when populated, resolved in _shared/quiltt-config.ts. Phase 1 ships Model A
+ * only; Model B fallback is a 1-line change to prefer the per-platform key.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
