@@ -36,10 +36,10 @@ import {
   importMekAsHkdf,
 } from "../vault";
 
-const BINDING: KeyringBinding = {
+const BINDING = {
   userId: "11111111-2222-3333-4444-555555555555",
   keyringEpoch: 3,
-};
+} satisfies KeyringBinding;
 
 async function freshMek() {
   return importMekAsHkdf(generateMekBytes());
@@ -289,9 +289,13 @@ describe("keyring , the epoch is canonicalised exactly once", () => {
     // bytes, a client library upgrade would brick every vault it touched, and
     // it would look like data loss rather than like a version change.
     const blob = await wrapKeyring(kr, mek, salt, { userId: BINDING.userId, keyringEpoch: 7 });
+    // No cast: KeyringBinding.keyringEpoch is number | string, so the
+    // decimal string type-checks at this call site on its own, the same way
+    // a caller holding a driver's bigint-as-string value would pass it
+    // straight through with no coercion.
     const asString: KeyringBinding = {
       userId: BINDING.userId,
-      keyringEpoch: "7" as unknown as number,
+      keyringEpoch: "7",
     };
     await expect(unwrapKeyring(blob, mek, salt, asString)).resolves.toEqual(kr);
   });
