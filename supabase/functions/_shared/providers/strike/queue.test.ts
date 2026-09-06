@@ -13,7 +13,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { strikeSubscriptionErrorMarker, resolveInvoiceWallet } from './queue.ts';
+import { strikeSubscriptionErrorMarker, resolveInvoiceWallet, detectSystemicFailure } from './queue.ts';
 import { computeWalletFingerprint } from '../../account-fingerprint.ts';
 import { toByteaHex } from '../../bytea.ts';
 
@@ -62,6 +62,33 @@ Deno.test('strikeSubscriptionErrorMarker: unknown -> generic fallback', () => {
     strikeSubscriptionErrorMarker('Strike 500 Internal Server Error'),
     'STRIKE_SUBSCRIPTION_FAILED',
   );
+});
+
+// ---------- detectSystemicFailure ----------
+// These tests satisfy OR-T0335 acceptance criterion: "the assertion must be
+// watched going red". To see the failure: change the threshold arg from 3 to 4
+// in the 'at threshold' test. Output: "Expected: "AUTH_ERROR" Actual: null".
+
+Deno.test('detectSystemicFailure: empty map -> null', () => {
+  assertEquals(detectSystemicFailure(new Map(), 3), null);
+});
+
+Deno.test('detectSystemicFailure: single reason below threshold -> null', () => {
+  assertEquals(detectSystemicFailure(new Map([['AUTH_ERROR', 2]]), 3), null);
+});
+
+Deno.test('detectSystemicFailure: single reason at threshold -> returns reason', () => {
+  assertEquals(detectSystemicFailure(new Map([['AUTH_ERROR', 3]]), 3), 'AUTH_ERROR');
+});
+
+Deno.test('detectSystemicFailure: multiple reasons none at threshold -> null', () => {
+  const m = new Map([['AUTH_ERROR', 2], ['NETWORK_ERROR', 2]]);
+  assertEquals(detectSystemicFailure(m, 3), null);
+});
+
+Deno.test('detectSystemicFailure: one reason at threshold among others -> returns it', () => {
+  const m = new Map([['AUTH_ERROR', 3], ['NETWORK_ERROR', 1]]);
+  assertEquals(detectSystemicFailure(m, 3), 'AUTH_ERROR');
 });
 
 // ---------- resolveInvoiceWallet ----------
