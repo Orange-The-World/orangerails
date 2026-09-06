@@ -1699,6 +1699,80 @@ jobs:
           echo
 
           # -------------------------------------------------------------------
+          # OR-T0957. An empty ledger has two different causes and only one of
+          # them is safe to read as "nothing to apply against, run every
+          # file": a genuinely fresh Supabase project, or a restore or
+          # truncate that emptied supabase_migrations.schema_migrations while
+          # the database it describes is still fully populated. Before this
+          # guard an empty APPLIED meant every .sql file in the tree was
+          # treated as pending and replayed against whatever the target
+          # already held, silently, on a prod dispatch included.
+          #
+          # The decision itself lives in scripts/ledger-freshness.sh, sourced
+          # rather than duplicated here, so the self-test in
+          # test-ledger-freshness.yml is proving the function that actually
+          # runs. It is a THIRD, independent read: a count of objects in the
+          # schemas our own migrations create. The ledger records what RAN;
+          # the catalog records what EXISTS, and the failure this guard
+          # exists for is precisely a case where those two disagree.
+          APPLIED_ROWS=$(printf '%s\n' "$APPLIED" | grep -c '[^[:space:]]' || true)
+          if [ "$APPLIED_ROWS" -eq 0 ]; then
+            source scripts/ledger-freshness.sh
+
+            # Schemas OUR migrations create objects in, discovered from the
+            # tree rather than hardcoded so a future migration opening a new
+            # schema is covered with no edit needed here. Always include
+            # public: most migrations write there with no CREATE SCHEMA
+            # statement at all. Deliberately NOT the Supabase platform
+            # schemas (auth, storage, realtime, ...): those carry objects on
+            # every project, fresh or not, and counting them would make the
+            # fresh branch permanently unreachable.
+            APP_SCHEMAS=$( { echo public; grep -hoE 'CREATE SCHEMA( IF NOT EXISTS)? [a-zA-Z_][a-zA-Z0-9_]*' "$MIG_DIR"/*.sql 2>/dev/null | awk '{print $NF}'; } | sort -u)
+            SCHEMA_LIST_SQL=$(printf "'%s'," $APP_SCHEMAS | sed 's/,$//')
+
+            PROBE_PAYLOAD=$(mktemp); chmod 600 "$PROBE_PAYLOAD"
+            jq -n --arg q "SELECT count(*) AS n FROM information_schema.tables WHERE table_schema IN (${SCHEMA_LIST_SQL});" '{query:$q}' > "$PROBE_PAYLOAD"
+
+            PROBE_OK=0
+            OBJECT_COUNT=0
+            for attempt in 1 2 3; do
+              if PROBE_RESP=$(curl -sS --fail-with-body \
+                -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+                -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data-binary "@$PROBE_PAYLOAD") && N=$(echo "$PROBE_RESP" | jq -r '.[0].n' 2>/dev/null) && printf '%s' "$N" | grep -qE '^[0-9]+$'; then
+                PROBE_OK=1
+                OBJECT_COUNT="$N"
+                break
+              fi
+              echo "freshness probe attempt ${attempt}/3 did not return a usable object count"
+              if [ "$attempt" -lt 3 ]; then
+                sleep 10
+              fi
+            done
+            rm -f "$PROBE_PAYLOAD"
+
+            set +e
+            VERDICT=$(classify_ledger_freshness "$APPLIED_ROWS" "$PROBE_OK" "$OBJECT_COUNT")
+            VERDICT_RC=$?
+            set -e
+
+            # VERDICT_RC, not the string, is the gate: the function's contract
+            # is 0 only for SKIP or FRESH. The string is read only to choose
+            # which message to print.
+            if [ "$VERDICT_RC" -ne 0 ]; then
+              if [ "$VERDICT" = "POPULATED" ]; then
+                echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger is empty but ${OBJECT_COUNT} object(s) already exist in the schema(s) this repo's migrations create (${APP_SCHEMAS}). That is an emptied ledger sitting on a populated database, most often a restore or truncate that did not carry supabase_migrations, not a fresh project. Replaying the full migration history here would run every CREATE against objects that already exist. Recovery: backfill supabase_migrations.schema_migrations with the versions that are genuinely applied, a deliberate reviewed DBA action, then re-run. NOTHING was applied on this run."
+              else
+                echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger is empty and the independent check of whether the database is actually empty could not get a usable answer after 3 attempts. Absence of evidence is not evidence of absence: this could be a fresh project or a populated one with an emptied ledger, and applying the wrong one is expensive. NOTHING was applied on this run. Re-run once the Supabase Management API is reachable, or read the schema directly before dispatching again."
+              fi
+              exit 1
+            fi
+            echo "FRESH: the ledger on ${SUPABASE_REF} is empty and so are the schema(s) this repo's migrations create (${APP_SCHEMAS}). Proceeding as a first apply, not a replay."
+          fi
+          echo
+
+          # -------------------------------------------------------------------
           # OR-T1252. SHADOW SCAN, before anything is applied.
           #
           # "Applied" in this loop means "a row with that version number exists",
