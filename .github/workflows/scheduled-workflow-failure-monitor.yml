@@ -1,0 +1,96 @@
+name: Scheduled workflow failure monitor
+
+on:
+  schedule:
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check scheduled workflows for consecutive failures
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZULIP_SITE: ${{ secrets.ZULIP_SITE }}
+          ZULIP_BOT_EMAIL: ${{ secrets.ZULIP_BOT_EMAIL }}
+          ZULIP_API_KEY: ${{ secrets.ZULIP_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ZULIP_SITE:-}" ] || [ -z "${ZULIP_BOT_EMAIL:-}" ] || [ -z "${ZULIP_API_KEY:-}" ]; then
+            echo "::error::Chat credentials not configured. Set ZULIP_SITE, ZULIP_BOT_EMAIL and ZULIP_API_KEY as org secrets scoped to this repo."
+            exit 1
+          fi
+
+          REPO="${GITHUB_REPOSITORY}"
+          ALERTED=0
+
+          # Enumerate all workflows in this repo.
+          WORKFLOWS=$(gh workflow list --repo "$REPO" --json databaseId,name --limit 100)
+          WORKFLOW_COUNT=$(echo "$WORKFLOWS" | jq 'length')
+
+          if [ "$WORKFLOW_COUNT" -eq 0 ]; then
+            echo "::error::gh workflow list returned 0 workflows. Either the repo has none or the call failed."
+            exit 1
+          fi
+
+          echo "Checking $WORKFLOW_COUNT workflow(s) for scheduled run history..."
+
+          while IFS= read -r workflow; do
+            WF_ID=$(echo "$workflow" | jq -r '.databaseId')
+            WF_NAME=$(echo "$workflow" | jq -r '.name')
+
+            # Get the last 3 scheduled runs for this workflow.
+            RUNS=$(gh run list \
+              --repo "$REPO" \
+              --workflow="$WF_ID" \
+              --event=schedule \
+              --limit=3 \
+              --json conclusion,url,createdAt 2>/dev/null || echo "[]")
+
+            RUN_COUNT=$(echo "$RUNS" | jq 'length')
+
+            # Alert class 1: zero scheduled runs ever recorded.
+            if [ "$RUN_COUNT" -eq 0 ]; then
+              MSG=":red_circle: **${WF_NAME}** has no scheduled run history. The trigger may be mis-configured or a required secret was missing at registration time."
+              echo "ALERT (never ran): $WF_NAME"
+              curl -s --fail -X POST "${ZULIP_SITE}/api/v1/messages" \
+                -u "${ZULIP_BOT_EMAIL}:${ZULIP_API_KEY}" \
+                --data-urlencode "type=stream" \
+                --data-urlencode "to=Delivery" \
+                --data-urlencode "topic=Scheduled CI failures (DL-0544)" \
+                --data-urlencode "content=${MSG}"
+              ALERTED=$((ALERTED + 1))
+              continue
+            fi
+
+            # Alert class 2: all of the last N runs (up to 3) are failures.
+            NON_FAILURE=$(echo "$RUNS" | jq '[.[] | select(.conclusion != "failure")] | length')
+
+            if [ "$NON_FAILURE" -eq 0 ]; then
+              LAST_URL=$(echo "$RUNS" | jq -r '.[0].url')
+              MSG=":red_circle: **${WF_NAME}** has failed its last ${RUN_COUNT} scheduled run(s). Last run: ${LAST_URL}"
+              echo "ALERT (all failures): $WF_NAME ($RUN_COUNT runs)"
+              curl -s --fail -X POST "${ZULIP_SITE}/api/v1/messages" \
+                -u "${ZULIP_BOT_EMAIL}:${ZULIP_API_KEY}" \
+                --data-urlencode "type=stream" \
+                --data-urlencode "to=Delivery" \
+                --data-urlencode "topic=Scheduled CI failures (DL-0544)" \
+                --data-urlencode "content=${MSG}"
+              ALERTED=$((ALERTED + 1))
+            else
+              echo "OK: $WF_NAME ($RUN_COUNT recent scheduled run(s), at least one non-failure)"
+            fi
+          done < <(echo "$WORKFLOWS" | jq -c '.[]')
+
+          echo "Monitor complete. Alerted on $ALERTED workflow(s) out of $WORKFLOW_COUNT checked."
+
+          # Exit non-zero so this workflow itself goes red when it catches
+          # something -- making it visible to the next monitor run.
+          if [ "$ALERTED" -gt 0 ]; then
+            exit 1
+          fi
