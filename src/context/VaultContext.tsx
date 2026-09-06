@@ -185,6 +185,14 @@ interface VaultContextValue {
     newPassword: string;
     kemSecretWrapped: string | null;
     sigSecretWrapped: string | null;
+    /**
+     * user_vault_meta.pqc_wrap_key_id as read alongside kemSecretWrapped and
+     * sigSecretWrapped. Required so a tag failure on a stored PQC secret can
+     * only be read as "dead" once the recorded wrap-key version is known to
+     * match what this code derives today. See carryPqcSecretsAcrossRotation
+     * (OR-T2093).
+     */
+    pqcWrapKeyId: number | null;
   }): Promise<RecoveryResult>;
 
   /**
@@ -529,6 +537,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
       newPassword,
       kemSecretWrapped,
       sigSecretWrapped,
+      pqcWrapKeyId,
     }: {
       recoveryCode: string;
       recoveryCiphertext: string;
@@ -537,6 +546,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
       newPassword: string;
       kemSecretWrapped: string | null;
       sigSecretWrapped: string | null;
+      pqcWrapKeyId: number | null;
     }): Promise<RecoveryResult> => {
       // 1. Unwrap OLD MEK with recovery code: proves the caller holds the code.
       const recoveryKek = await deriveRecoveryKek(recoveryCode);
@@ -615,6 +625,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
           authenticatedSaltB64: storedSalt,
           kemSecretWrapped,
           sigSecretWrapped,
+          storedPqcWrapKeyId: pqcWrapKeyId,
         });
 
       // 6. New verifier under the NEW MEK + same salt.
