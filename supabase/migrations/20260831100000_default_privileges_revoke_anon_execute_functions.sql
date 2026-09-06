@@ -169,7 +169,7 @@ BEGIN
   ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
     REVOKE EXECUTE ON FUNCTIONS FROM anon;
 
-  SELECT coalesce(d.defaclacl::text, 'NO-RULE')
+  SELECT d.defaclacl::text
     INTO v_after
     FROM pg_default_acl d
     JOIN pg_namespace n ON n.oid = d.defaclnamespace
@@ -177,17 +177,29 @@ BEGIN
      AND d.defaclobjtype = 'f'
      AND pg_get_userbyid(d.defaclrole) = 'postgres';
 
-  -- The rule row itself may disappear entirely if anon was the only non-default
-  -- entry in it. That is a correct end state, not a failure, so NO-RULE passes
-  -- the check below on its own terms.
-  IF coalesce(v_after, 'NO-RULE') LIKE '%anon=%' THEN
+  -- CTO finding on OR-T1027, 2026-08-31: a MISSING row is not a safe end
+  -- state. The rollback stanza above (GRANT EXECUTE ON FUNCTIONS TO PUBLIC)
+  -- makes Postgres delete the row rather than store a rule equal to the
+  -- built in default, and an absent row means the built in default applies:
+  -- EXECUTE ON FUNCTIONS TO PUBLIC, of which anon is a member. So a missing
+  -- row is the worst possible end state here, not a correct one, and it must
+  -- raise rather than pass. This statement's own REVOKE leaves authenticated
+  -- and service_role entries behind, so the row cannot actually vanish on
+  -- today's forward path; the guard is for the day that stops being true,
+  -- including a rollback of this file.
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'FAIL: the postgres-owned default privilege rule for functions in schema public is now ABSENT (no pg_default_acl row). An absent row means the Postgres built in default applies: EXECUTE ON FUNCTIONS TO PUBLIC, and anon is a member of PUBLIC. This is worse than the state before this migration ran.';
+  END IF;
+
+  IF v_after LIKE '%anon=%' THEN
     RAISE EXCEPTION
       'FAIL: anon still holds EXECUTE in the default privilege rule for functions in schema public. after=%',
       v_after;
   END IF;
 
-  RAISE NOTICE 'default privilege rule after:  %', coalesce(v_after, 'NO-RULE');
-  RAISE NOTICE 'verified: a newly created function in schema public will not carry anon EXECUTE';
+  RAISE NOTICE 'default privilege rule after:  %', v_after;
+  RAISE NOTICE 'verified: the postgres-owned default privilege rule for functions in schema public no longer grants anon EXECUTE';
 END
 $mig$;
 
