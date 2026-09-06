@@ -97,7 +97,23 @@ REVOKE EXECUTE ON FUNCTION client_platform.has_role(uuid, text) FROM anon, PUBLI
 --    Removing all four grants ensures a future permissive policy on this table cannot
 --    turn them live without a migration and review. Placed here (file 4) per CTO ruling;
 --    file 5 does not duplicate it.
-REVOKE ALL ON public.data_keys FROM anon;
+--
+--    GUARD (OR-T2231, CTO ruling on OR-T2230). This file is numbered four days before
+--    20260727000000_data_keys_ownership_and_rotate_authz.sql, which is what creates
+--    public.data_keys. dev and prod both already applied this file successfully because
+--    history was not replayed in strict filename order (table already existed by the time
+--    this ran). A from-scratch replay in filename order reaches this line before the table
+--    exists and REVOKE would fail with 42P01. Guarded so that case skips cleanly instead;
+--    an environment where the table already exists is unaffected, byte for byte.
+DO $data_keys_revoke$
+BEGIN
+  IF to_regclass('public.data_keys') IS NULL THEN
+    RAISE NOTICE 'public.data_keys does not exist yet on this database (fresh bootstrap before 20260727000000), skipping REVOKE';
+  ELSE
+    REVOKE ALL ON public.data_keys FROM anon;
+  END IF;
+END
+$data_keys_revoke$;
 
 -- 6. Prove it, in this transaction, or abort.
 --    (a) covers all 7 tables step 2 must close, each named. The schema holds 8
@@ -130,12 +146,16 @@ BEGIN
     RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.organizations';
   END IF;
 
-  -- (c) step 5: all four anon grants on public.data_keys are gone
-  IF has_table_privilege('anon', 'public.data_keys', 'SELECT')
-     OR has_table_privilege('anon', 'public.data_keys', 'INSERT')
-     OR has_table_privilege('anon', 'public.data_keys', 'UPDATE')
-     OR has_table_privilege('anon', 'public.data_keys', 'DELETE') THEN
-    RAISE EXCEPTION 'FAIL: anon still holds privileges on public.data_keys';
+  -- (c) step 5: all four anon grants on public.data_keys are gone. Guarded the same
+  --     way as the REVOKE above: only checked when the table exists on this database,
+  --     so a from-scratch replay before 20260727000000 does not 42P01 here either.
+  IF to_regclass('public.data_keys') IS NOT NULL THEN
+    IF has_table_privilege('anon', 'public.data_keys', 'SELECT')
+       OR has_table_privilege('anon', 'public.data_keys', 'INSERT')
+       OR has_table_privilege('anon', 'public.data_keys', 'UPDATE')
+       OR has_table_privilege('anon', 'public.data_keys', 'DELETE') THEN
+      RAISE EXCEPTION 'FAIL: anon still holds privileges on public.data_keys';
+    END IF;
   END IF;
 
   -- (b) nothing broke

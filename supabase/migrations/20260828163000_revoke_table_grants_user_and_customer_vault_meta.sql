@@ -279,8 +279,15 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.customer_vault_meta TO authenticate
 -- of calling has_table_privilege with a fixed privilege list. That is
 -- deliberate: a fixed list can only catch the privileges someone remembered to
 -- name, and MAINTAIN is a recent addition that an older list would silently
--- skip. Asking the catalogue what is actually granted catches anything,
--- including a privilege that does not exist yet.
+-- skip. Asking the catalogue what is actually granted catches any PRIVILEGE,
+-- including one that does not exist yet.
+--
+-- It does NOT catch any GRANTEE. An earlier version of this comment said
+-- "catches anything", which overclaimed on that axis. Every assertion below
+-- names PUBLIC, anon or authenticated, so a privilege held by any other role is
+-- invisible to all of them, and this file will apply clean and print nothing
+-- while that role holds it. The grantee axis is asserted separately, in
+-- 20260902213700_assert_vault_meta_grantee_allow_list.sql.
 --
 -- Every assertion below reads COLUMN ACLs as well as TABLE ACLs. An earlier
 -- version of this file read table ACLs only, which meant a surviving column

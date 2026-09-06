@@ -10,6 +10,7 @@ import {
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
+import { classifyRead } from "@/lib/read-outcome";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
@@ -18,6 +19,7 @@ import {
   DUPLICATE_WRAPPED_KEY_MESSAGE,
   type WrappedKeyClient,
 } from "@/lib/co-admin-workspace-read";
+import { readCoAdminGrant } from "@/lib/co-admin-grant-row";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
@@ -260,11 +262,14 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
-      const { data: meta } = await (supabase as any)
+      const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
         .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
+      if (classifyRead(meta, metaErr) === "error") {
+        console.warn(`Failed to load vault meta: ${formatError(metaErr)}`);
+      }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
@@ -303,35 +308,56 @@ function AppHome() {
       }
 
       // Load list of users this person has granted co-admin to.
-      const { data: admins } = await supabase
+      const { data: admins, error: adminsErr } = await supabase
         .from("workspace_admins")
         .select("id, admin_user_id, added_at")
         .eq("owner_user_id", session.user.id);
+      if (classifyRead(admins, adminsErr) === "error") {
+        console.warn(`Failed to load co-admin list: ${formatError(adminsErr)}`);
+      }
       const adminRows = (admins ?? []) as CoAdminRow[];
 
       // Load workspaces where this user is a co-admin.
-      const { data: myAdminOf } = await supabase
-        .from("workspace_admins")
-        .select("owner_user_id")
-        .eq("admin_user_id", session.user.id);
+      //
+      // ONE RPC, deliberately, instead of selecting from workspace_admins and
+      // then reading the owner's user_vault_meta row once per owner. A policy
+      // grants a ROW, never a column, so that shape handed this co-admin every
+      // column of the owner's row, including sig_secret_wrapped: the owner's
+      // ML-DSA signing secret. Sealed under the owner's master key, so not
+      // readable, and nothing was broken by it. It goes anyway, because the
+      // whole point of the projection is that an admin never holds that
+      // material in any form.
+      //
+      // list_coadmin_workspaces returns the same three values the loop built,
+      // and it excludes an owner with no workspace_key_id and an owner with no
+      // sig_public_key, which are the two cases the loop skipped with continue.
+      // Fail closed is preserved by the function, not dropped here.
+      const { data: myAdminOf, error: myAdminOfErr } = await supabase.rpc(
+        "list_coadmin_workspaces",
+      );
+      // classifyRead separates the three outcomes this call really has, which
+      // is what dev now does for every read on this page (OR-T1768). "empty"
+      // is the ordinary case of administering nothing and stays silent; only
+      // "error" is surfaced. A failed call must never look like "you are a
+      // co-admin of nothing", so unlike the other reads on this page it is
+      // loud: setErr as well as the log, because an empty list here is
+      // indistinguishable to the user from a real answer.
+      if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
+        console.error("Failed to load co-admin workspaces:", myAdminOfErr);
+        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
+      }
 
       const workspaces: WorkspaceOption[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
-        const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
-        for (const ownerId of ownerIds) {
-          const { data: ownerMeta } = await supabase
-            .from("user_vault_meta")
-            .select("workspace_key_id, sig_public_key")
-            .eq("user_id", ownerId)
-            .single();
-          if (!ownerMeta) continue;
-          const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
-          if (!ownerKeyId) continue;
+        for (const ownerRow of myAdminOf) {
+          const ownerId = ownerRow.owner_user_id;
+          const ownerKeyId = ownerRow.workspace_key_id;
           // Owner's ML-DSA-65 public signing key, needed to verify the grant
-          // signature before decrypting. Fail closed: skip a workspace we cannot
-          // verify rather than surface one the co-admin cannot safely open.
-          const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
-          if (!ownerSigPubB64) continue;
+          // signature before decrypting. Fail closed: a workspace we cannot
+          // verify is never surfaced to the co-admin. The function already
+          // excludes an owner missing either value, so there is nothing left to
+          // skip at this point.
+          const ownerSigPubB64 = ownerRow.sig_public_key;
           // This used to be a maybeSingle() whose error was discarded, which
           // meant TWO wrapped key rows arrived here as NO row: the workspace
           // vanished from this co-admin's list with nothing shown to anybody,
@@ -354,13 +380,26 @@ function AppHome() {
           // No grant at all is ordinary: this user is in the owner's list but
           // has not been given a key. Skipping it quietly is correct.
           if (wdkRead.status === "none") continue;
-          const wdk = wdkRead.row;
+          // Decide which envelope this grant is from the columns it actually
+          // carries. This used to cast wrapped_ciphertext straight to string
+          // with the row existing as its only guard, and that column is
+          // nullable from migration 20260828183000 onward, so a v3 grant would
+          // have carried a null into loadAdminSubkeys typed as a string.
+          // readCoAdminGrant returns null for anything that is not exactly one
+          // complete envelope, and skipping is the fail closed answer, the
+          // same as the unverifiable grant skipped a few lines above.
+          const grant = readCoAdminGrant(wdkRead.row);
+          if (!grant) continue;
+          // A v3 grant is recognised here but cannot be opened yet: the per
+          // grant keyring primitive that unseals one is not wired into the
+          // consume path. Decline it rather than half handle it. See DEV-0308.
+          if (grant.version !== 2) continue;
           workspaces.push({
             ownerUserId: ownerId,
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: wdk.wrapped_ciphertext,
-            grantSigB64: wdk.grant_sig ?? null,
+            wrappedCiphertextB64: grant.wrappedCiphertextB64,
+            grantSigB64: grant.grantSigB64,
             ownerSigPubB64,
             granteeUserId: session.user.id,
           });
@@ -925,13 +964,17 @@ function AppHome() {
         supabase: supabase as unknown as CoAdminSupabaseLike,
       });
       // Not coadmin_revoked: this removed a record, not an access grant.
-      void logSecurityEvent(supabase, userId, "coadmin_list_entry_cleared", {
+      const logged = await logSecurityEvent(supabase, userId, "coadmin_list_entry_cleared", {
         admin_user_id: a.admin_user_id,
         key_removed: keyRemoved,
       });
       setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
       setErr("");
-      setNotice("Removed from your list. This did not remove their access.");
+      setNotice(
+        logged
+          ? "Removed from your list. This did not remove their access."
+          : "Removed from your list, but the record of this could not be saved. This did not remove their access.",
+      );
     } catch (e) {
       setErr(formatError(e));
     }
@@ -1224,24 +1267,35 @@ function AppHome() {
                     }
                     setChangePwLoading(true);
                     try {
-                      const { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext } =
-                        await changeVaultPassword({
-                          currentPassword: changePwForm.current,
-                          newPassword: changePwForm.next,
-                          storedSaltB64: vaultSalt,
-                          storedEncMekCiphertext: vaultEncMekCiphertext,
-                          storedVerifierCiphertext: vaultVerifierCiphertext,
-                          keyVersion: vaultKeyVersion,
-                        });
+                      const {
+                        newEncMekCiphertext,
+                        newRecoveryCode,
+                        newRecoveryCiphertext,
+                        verifyPersistedEnvelopes,
+                      } = await changeVaultPassword({
+                        currentPassword: changePwForm.current,
+                        newPassword: changePwForm.next,
+                        storedSaltB64: vaultSalt,
+                        storedEncMekCiphertext: vaultEncMekCiphertext,
+                        storedVerifierCiphertext: vaultVerifierCiphertext,
+                        keyVersion: vaultKeyVersion,
+                      });
                       // Persist new wrapping to user_vault_meta. Same CAS guard, same
                       // conflict handling, same table: src/lib/vault-persist.ts is the
                       // single copy of this write, covered by its own tests.
+                      //
+                      // verifyPersisted is what makes the next line safe. The new
+                      // recovery code is shown immediately below, so this call has to
+                      // resolve only when the bytes the database RETURNED re-open the
+                      // vault, not merely when a row matched. The closure carries the
+                      // keys; nothing key-shaped passes through this component.
                       await persistRewrappedVaultMeta({
                         supabase: supabase as unknown as VaultPersistClient,
                         userId: userId as string,
                         priorEncMekCiphertext: vaultEncMekCiphertext,
                         newEncMekCiphertext,
                         newRecoveryCiphertext,
+                        verifyPersisted: verifyPersistedEnvelopes,
                       });
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
