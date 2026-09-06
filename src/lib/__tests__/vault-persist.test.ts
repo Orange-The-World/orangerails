@@ -27,6 +27,7 @@ import {
   RECONCILE_MAX_PASSES,
   type VaultPersistClient,
 } from "../vault-persist";
+import { CURRENT_PQC_WRAP_KEY_ID } from "../pqc-lifecycle";
 
 type QueryResult = { data: unknown[] | null; error: unknown; count?: number | null };
 
@@ -384,6 +385,7 @@ describe("vault recovery: the rotated meta write", () => {
       vault_key_version: 2,
       kem_secret_wrapped: "kem-wrapped-v1",
       sig_secret_wrapped: "sig-wrapped-v1",
+      pqc_wrap_key_id: CURRENT_PQC_WRAP_KEY_ID,
     });
 
     // The regression guard on the healthy path. Both secrets travelled, so
@@ -415,6 +417,7 @@ describe("vault recovery: the rotated meta write", () => {
       vault_key_version: 2,
       kem_secret_wrapped: "kem-wrapped-v1",
       sig_public_key: null,
+      pqc_wrap_key_id: CURRENT_PQC_WRAP_KEY_ID,
     });
     expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_secret_wrapped");
 
@@ -446,6 +449,7 @@ describe("vault recovery: the rotated meta write", () => {
       vault_key_version: 2,
       sig_secret_wrapped: "sig-wrapped-v1",
       kem_public_key: null,
+      pqc_wrap_key_id: CURRENT_PQC_WRAP_KEY_ID,
     });
     expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("kem_secret_wrapped");
     expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_public_key");
