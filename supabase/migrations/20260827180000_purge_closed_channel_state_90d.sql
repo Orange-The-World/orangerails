@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: merged below the ledger max with no marker (OR-T2498). Verified no
+-- OUT-OF-ORDER-OK: fzwmnzmtqidumdqjdddz merged below the ledger max with no marker (OR-T2498). Verified no
 -- migration between this file's version and the current ledger max touches
 -- public.channel_state or closed_at, so applying it late changes nothing about its effect.
 --
