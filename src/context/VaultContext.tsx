@@ -38,6 +38,7 @@ import {
   deriveKek,
   wrapMekBytes,
   unwrapMekBytes,
+  assertMekEnvelopeReopens,
   generateRecoveryCode,
   deriveRecoveryKek,
   CURRENT_VAULT_KEY_VERSION,
@@ -60,7 +61,7 @@ import {
 } from "@/lib/crypto-fields";
 import {
   ensurePqcKeypairs as ensurePqcKeypairsImpl,
-  rewrapPqcSecretKey,
+  carryPqcSecretsAcrossRotation,
   type EnsurePqcKeypairsResult,
   type SupabaseLike as PqcSupabaseLike,
 } from "@/lib/pqc-lifecycle";
@@ -115,6 +116,19 @@ interface RecoveryResult {
   newKemSecretWrapped: string | null;
   /** The PQC signing secret key re-wrapped under the rotated MEK, or null. Same rule. */
   newSigSecretWrapped: string | null;
+  /**
+   * True when a stored PQC secret existed and could NOT be opened by the old
+   * wrap key, so that keypair is being discarded and a fresh one is generated
+   * on the next unlock.
+   *
+   * The recovery screen must state this to the user. Regenerating silently is
+   * not acceptable: the point of choosing recovery over lockout is that the user
+   * gets to know what they lost.
+   *
+   * False when there was simply nothing stored to carry. Nothing was lost then
+   * and saying otherwise would be a lie.
+   */
+  pqcKeysReplaced: boolean;
 }
 
 interface VaultContextValue {
@@ -316,6 +330,11 @@ interface VaultContextValue {
    *
    * Caller must persist newEncMekCiphertext + newRecoveryCiphertext to
    * user_vault_meta and show newRecoveryCode to the user exactly once.
+   *
+   * verifyPersistedEnvelopes must be handed to the persist call as its
+   * verifyPersisted argument. It closes over the key material needed to prove
+   * the bytes the database actually stored still open this vault, so the
+   * caller never has to hold a key to check that.
    */
   changeVaultPassword(params: {
     currentPassword: string;
@@ -328,6 +347,10 @@ interface VaultContextValue {
     newEncMekCiphertext: string;
     newRecoveryCode: string;
     newRecoveryCiphertext: string;
+    verifyPersistedEnvelopes(persisted: {
+      encMekCiphertext: string;
+      recoveryCiphertext: string;
+    }): Promise<void>;
   }>;
 }
 
@@ -535,6 +558,13 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const ok = await verifyVaultPassword(oldVerifierKey, verifierCiphertext);
       if (!ok) throw new Error("Recovery code does not match this vault.");
 
+      //    Past this line storedSalt is AUTHENTICATED, not merely to hand. The
+      //    check above derived the verifier subkey from (oldMek, storedSalt) and
+      //    opened the stored verifier ciphertext with it, which a wrong salt
+      //    could not have done. That fact is what step 5 leans on when it lets a
+      //    failed decryption mean a keypair is dead, so it is worth naming here
+      //    rather than leaving it to be re-derived by whoever reads step 5 next.
+
       // 3. Stash old subkeys before discarding the old MEK. The caller must
       //    migrate every ciphertext using these keys and then call clearMigrationKeys().
       migrationOldCredsKeyRef.current = await deriveCredentialsKey(oldMek, storedSalt);
@@ -555,21 +585,47 @@ export function VaultProvider({ children }: VaultProviderProps) {
       //    still populated and it short-circuits on that.
       //
       //    Done HERE, before the new envelopes are built and long before the
-      //    caller migrates a single row, so that a secret which will not unwrap
-      //    aborts the recovery while everything stored is still valid. Failing
-      //    at this point costs the user nothing. Failing after the migration
-      //    loop would leave rows under a MEK with no way back.
+      //    caller migrates a single row, so a failure at this point costs the
+      //    user nothing: every stored wrapper is still valid and the vault still
+      //    opens. The same failure after the migration loop would leave rows
+      //    under a MEK with no way back.
       //
       //    Null is expected, not an error: a vault with no PQC keys yet has
-      //    nothing to carry.
+      //    nothing to carry. Whichever key is carried as null has its PUBLIC key
+      //    cleared by the write, so ensurePqcKeypairs() regenerates a working
+      //    pair on the next unlock instead of short-circuiting forever on a
+      //    public key whose secret is gone.
+      //
+      //    A stored secret that will NOT open is also carried as null rather
+      //    than aborting. Aborting there was permanent, not cautious: the state
+      //    is static, so the same ciphertext and the same discarded MEK fail
+      //    again on every retry, and the recovery code is the user's last way
+      //    in.
+      //
+      //    Only an AES-GCM authentication tag failure counts as "will not
+      //    open". Every other failure throws out of here and aborts the
+      //    recovery, which is why this is awaited plainly and is deliberately
+      //    NOT wrapped in a catch: a transient failure read as a dead key would
+      //    discard a LIVE keypair, which is the destruction this whole path
+      //    exists to prevent.
+      //
+      //    oldMek and the authenticated salt go in alongside the wrap keys, and
+      //    they are not decoration. "Dead" and "wrong key" are the same AES-GCM
+      //    tag failure, so the carry proves the old wrap key really is the key
+      //    (oldMek, storedSalt) derives before it lets a tag failure mean dead.
+      //    Derive that key from any other salt and the carry throws here instead
+      //    of quietly reporting both secrets dead and clearing both public keys.
       const oldPqcWrapKey = await derivePqcSecretWrapKey(oldMek, storedSalt);
       const newPqcWrapKey = await derivePqcSecretWrapKey(newMek, storedSalt);
-      const newKemSecretWrapped = kemSecretWrapped
-        ? await rewrapPqcSecretKey(oldPqcWrapKey, newPqcWrapKey, kemSecretWrapped)
-        : null;
-      const newSigSecretWrapped = sigSecretWrapped
-        ? await rewrapPqcSecretKey(oldPqcWrapKey, newPqcWrapKey, sigSecretWrapped)
-        : null;
+      const { newKemSecretWrapped, newSigSecretWrapped, pqcKeysReplaced } =
+        await carryPqcSecretsAcrossRotation({
+          oldWrapKey: oldPqcWrapKey,
+          newWrapKey: newPqcWrapKey,
+          oldMek,
+          authenticatedSaltB64: storedSalt,
+          kemSecretWrapped,
+          sigSecretWrapped,
+        });
 
       // 6. New verifier under the NEW MEK + same salt.
       //    Caller MUST persist this or unlock() fails on next page load.
@@ -600,6 +656,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
         newVerifierCiphertext,
         newKemSecretWrapped,
         newSigSecretWrapped,
+        pqcKeysReplaced,
       };
     },
     [],
@@ -650,10 +707,40 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
       const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
 
-      // 5. Keep vault unlocked with the same MEK in memory.
+      // 5. Let the caller prove what the DATABASE stored, not merely what we
+      //    sent it. Both wrappers go out in one UPDATE and the old pair is
+      //    discarded, so a stored envelope that does not re-open is a permanent
+      //    lockout with no server-side copy to restore from. The wrapping keys
+      //    stay in this closure, so the route that does the write never handles
+      //    key material. Nothing new is derived here: these are the keys that
+      //    are already in scope.
+      const verifyPersistedEnvelopes = async (persisted: {
+        encMekCiphertext: string;
+        recoveryCiphertext: string;
+      }): Promise<void> => {
+        await assertMekEnvelopeReopens(
+          "The stored password key envelope",
+          persisted.encMekCiphertext,
+          newKek,
+          mekRaw,
+        );
+        await assertMekEnvelopeReopens(
+          "The stored recovery code envelope",
+          persisted.recoveryCiphertext,
+          newRecoveryKek,
+          mekRaw,
+        );
+      };
+
+      // 6. Keep vault unlocked with the same MEK in memory.
       mekRef.current = mek;
 
-      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext };
+      return {
+        newEncMekCiphertext,
+        newRecoveryCode,
+        newRecoveryCiphertext,
+        verifyPersistedEnvelopes,
+      };
     },
     [],
   );
@@ -839,7 +926,10 @@ export function VaultProvider({ children }: VaultProviderProps) {
       existingKeyId: string | null;
       supabase: GrantSupabaseLike;
     }) => {
-      requireUnlocked(); // gate: vault must be unlocked
+      // The unlocked MEK is what the grant derives its subkeys from. It used
+      // to be discarded here and re-derived from the password downstream,
+      // which produced the wrong key on every vault the current setup creates.
+      const { mek } = requireUnlocked();
       const { targetEmail, supabase, ...rest } = params;
 
       // Resolve email → userId + kemPublicKey via SECURITY DEFINER RPC.
@@ -855,21 +945,41 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const targetKemPubB64 = row.kem_public_key;
 
       // Fetch the owner's ML-DSA-65 signing secret (wrapped) to sign the grant
-      // binding. This keeps app.tsx free of sig_secret_wrapped handling.
-      const { data: sigRow } = await (supabase as any)
+      // binding, plus the three fields the password confirmation needs. Reading
+      // them here keeps app.tsx free of vault-shape handling, and reads what
+      // the row says now rather than what the page loaded earlier.
+      const { data: metaRow } = await (supabase as any)
         .from("user_vault_meta")
-        .select("sig_secret_wrapped")
+        .select(
+          "sig_secret_wrapped, vault_verifier_ciphertext, vault_key_version, enc_mek_ciphertext",
+        )
         .eq("user_id", params.ownerUserId)
         .single();
-      const ownerSigSecretWrapped = (sigRow as Record<string, unknown> | null)?.sig_secret_wrapped as string | undefined;
+      const meta = metaRow as Record<string, unknown> | null;
+
+      const ownerSigSecretWrapped = meta?.sig_secret_wrapped as string | undefined;
       if (!ownerSigSecretWrapped) {
         throw new Error(
           "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
         );
       }
 
+      // No verifier means the password cannot be checked at all. Refuse rather
+      // than grant: a confirmation that is silently skipped is worse than one
+      // that stops and says so.
+      const ownerVerifierCiphertext = meta?.vault_verifier_ciphertext as string | undefined;
+      if (!ownerVerifierCiphertext) {
+        throw new Error(
+          "Your vault details could not be read, so your password cannot be confirmed. Nothing was granted. Reload the page and try again.",
+        );
+      }
+
       return grantCoAdminImpl({
         ...rest,
+        vaultMek: mek,
+        ownerVerifierCiphertext,
+        ownerKeyVersion: (meta?.vault_key_version as number | null) ?? 1,
+        ownerEncMekCiphertext: (meta?.enc_mek_ciphertext as string | null) ?? null,
         ownerSigSecretWrapped,
         targetUserId,
         targetKemPubB64,

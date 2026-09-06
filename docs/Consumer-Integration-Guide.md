@@ -443,7 +443,7 @@ Both are `direction: 'in'` (a miner never pays a pool). Both carry the base `Nor
 |---|---|---|---|
 | `txid` | `string` | absent | required. The on chain transaction id that settled this payout. |
 | `vout` | `number` | absent | required. The output index within `txid` that paid the miner. |
-| `from_coinbase` | `boolean` | n/a | optional, only when the provider states it. `true` when the payout came straight from the block's coinbase transaction rather than a pool hot wallet. Carry the provider's own flag through unchanged, never infer it. |
+| `from_coinbase` | `boolean` | n/a | optional, only when the provider states it. `true` when the payout came straight from the block's coinbase transaction rather than a pool hot wallet. Carry the provider's own flag through unchanged, never infer it. Coinbase outputs are consensus-locked for 100 blocks before they can be spent, so a consumer that cares whether an already-reported payout is spendable yet should read this flag and count confirmations against that maturity window. |
 
 ### Source tags
 
@@ -460,7 +460,9 @@ Note on where this belongs: `OrangeRails-Protocol.html` (cited elsewhere in this
 
 A pool payout and the wallet's own on chain receipt of that same payout are the same logical bitcoin movement, reported by two different sources. If the miner also has the payout address connected to OR as its own wallet (an `xpub` connection, say), both a `mining_payout` row (from the pool connector) and an `onchain` row (from the wallet connector) will describe the same coins moving.
 
-OR emits both. Neither is suppressed at the source. The join key is `(txid, vout)`, the on chain output identifier, present on both rows. A consumer that wants one line per real world event collapses on that key. A consumer that does not care leaves both and has slightly redundant history, never a missing one.
+OR emits both. Neither is suppressed at the source. The join key is `txid` alone, present on both rows: `mining_payout.txid` and the matching `onchain` row's `id` (its provider-side transaction id). A consumer that wants one line per real world event collapses on that key. A consumer that does not care leaves both and has slightly redundant history, never a missing one.
+
+`vout` is required on every `mining_payout` row and always known to the pool connector, but it is not usable as part of the join key: OR's on chain wallet adapters (xpub today) sum every output that pays the connected wallet into one `onchain` row per transaction, with no per-output index carried on `NormalizedTransaction`. When a payout transaction pays the same miner in more than one output, `mining_payout.amount_sats` describes a single output while the matching `onchain` row is the sum of all of them, so after collapsing on `txid` the two amounts can legitimately disagree. A consumer that needs the amounts to reconcile exactly should sum every `mining_payout` row sharing a `txid` before comparing it to the `onchain` row, not compare row to row.
 
 Why neither row is dropped, stated plainly:
 
@@ -469,11 +471,11 @@ Why neither row is dropped, stated plainly:
 
 This is the ratified split (the engine emits economic facts, the consumer classifies and presents) applied to exactly this pair. OR's job is to make the join possible, not to decide for the consumer which row wins.
 
-### Why `(txid, vout)` is safe to dedupe on and Strike's `Reference` was not
+### Why `txid` is safe to dedupe on and Strike's `Reference` was not
 
 Read DL-1519 before writing or reviewing anything that dedupes across sources. OR once shipped customer-facing copy claiming Strike's `Reference` field was globally unique and safe to key dedup on. A real Strike export disproved it inside a week: the row that opened a target order and the row that later cancelled it share the same `Reference`, carry opposite amounts, and sit three weeks apart. Deduping on `Reference` alone silently collapsed the two into one and left a real sale on the books that never happened. The claim was retracted and the dedup key was rebuilt as a composite of reference plus normalized date plus type plus both signed amounts, which is a better heuristic, not a guarantee, because it is still built from fields the provider's software fills in and could get wrong again. (Full history, including the retraction and the rebuilt key, is on DL-1519 in the delivery board.)
 
-The mining case is not the same shape of risk, and the reason has to be stated out loud so nobody generalizes DL-1519 into "never trust an id from a provider": the question is not who supplies an identifier, it is what enforces its uniqueness. Strike's `Reference` is unique only because Strike's software is expected to make it so, a vendor's promise, and vendor promises have already broken once in this codebase. `txid` plus `vout` identifies one output of one transaction that has been mined into the Bitcoin blockchain. Its uniqueness is enforced by Bitcoin consensus, not by OCEAN's or ViaBTC's application code. Two independent sources reporting the same `(txid, vout)` are, by the definition of the protocol, reporting the same spend of the same coin. That is why this is the one cross-source join key OR treats as trustworthy, and it does not license deduping on any other provider-supplied reference by analogy.
+The mining case is not the same shape of risk, and the reason has to be stated out loud so nobody generalizes DL-1519 into "never trust an id from a provider": the question is not who supplies an identifier, it is what enforces its uniqueness. Strike's `Reference` is unique only because Strike's software is expected to make it so, a vendor's promise, and vendor promises have already broken once in this codebase. `txid` identifies one transaction that has been mined into the Bitcoin blockchain. Its uniqueness is enforced by Bitcoin consensus, not by OCEAN's or ViaBTC's application code. Two independent sources reporting the same `txid` are, by the definition of the protocol, reporting the same transaction. That is why this is the one cross-source join key OR treats as trustworthy, and it does not license deduping on any other provider-supplied reference by analogy. It does not, on its own, guarantee the amounts match when a transaction pays the miner in more than one output, see the multi-output note above.
 
 ### Privacy: OCEAN is called from the browser, ViaBTC is sealed like any exchange key
 

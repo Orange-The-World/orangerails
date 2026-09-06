@@ -6,12 +6,32 @@
  * browser; the server never sees plaintext subkeys.
  *
  * ## Grant flow (owner side)
- *   1. Re-derive MEK raw bytes from the owner's vault password.
- *   2. Run HKDF on the raw bytes to extract credentials + transactions subkeys.
+ *   1. Confirm the owner's vault password. Presence check only: no key
+ *      material is derived from it (see confirmVaultPassword).
+ *   2. Run HKDF on the UNLOCKED MEK to extract credentials + transactions
+ *      subkeys as raw bits.
  *   3. Concatenate into a 64-byte blob.
  *   4. Wrap the blob with the admin's hybrid KEM public key (see wrapBlob64).
  *   5. Insert workspace_admins, then wrapped_data_keys. That order is not
  *      interchangeable; see persistCoAdminGrant for why.
+ *
+ * ## A GRANT IS FROZEN AT THE MOMENT IT IS MADE. Read this before relying on one.
+ *   The blob holds HKDF subkeys of the OWNER's MEK, captured at step 2 and
+ *   never touched again. It is not a stable property of the workspace.
+ *
+ *   A vault recovery mints a fresh random MEK and rewrites every connection
+ *   and transaction row under the new subkeys. Nothing rewrites the blob. So
+ *   after a recovery every existing grant carries subkeys that open nothing.
+ *
+ *   That failure lands at the wrong layer and makes no noise. The recipient's
+ *   unwrap SUCCEEDS, two perfectly well formed AES-GCM keys are imported, and
+ *   only the decrypts fail. Neither the owner nor the recipient is told the
+ *   grant is dead, and emergency access is exactly the feature whose value is
+ *   that it works on the day it is needed. Re-granting fixes it completely.
+ *
+ *   Changing the vault password does NOT do this. That path re-wraps the same
+ *   MEK under a new KEK rather than rotating it, so the subkeys stay correct.
+ *   Recovery is the only path that rotates.
  *
  * ## Consume flow (admin side, post-unlock)
  *   1. Fetch wrapped_data_keys row for the owner's workspace_key_id.
@@ -42,12 +62,14 @@
  * revocation until the tab is closed. See docs/OrangeRails-CoAdmins.md.
  */
 
-import { deriveMekRaw, importAesKey } from "./vault";
+import { importAesKey } from "./vault";
+import { confirmVaultPassword } from "./password-confirm";
 import { HKDF_CONTEXTS, derivePqcSecretWrapKey } from "./key-derivation";
 import { base64ToBytes } from "./key-wrapping";
 import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } from "./pqc";
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
 import { signMemberGrant, verifyMemberGrant } from "./member-grant";
+import { formatError } from "./format-error";
 
 // ------------------------------------------------------------------
 // Encoding helpers
@@ -59,40 +81,34 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-/**
- * Pull the human-readable text out of a Supabase error.
- *
- * These errors are objects, and interpolating one straight into a template
- * literal yields "[object Object]". GrantCoAdminDialog renders whatever message
- * this module throws directly to the owner, so the Postgres message is the part
- * that has to survive.
- */
-function errorText(err: unknown): string {
-  if (err && typeof err === "object" && "message" in err) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === "string" && message.length > 0) return message;
-  }
-  return String(err);
-}
-
 // ------------------------------------------------------------------
-// HKDF from raw bytes , derives a 32-byte subkey without going through
-// a non-extractable CryptoKey, so the raw output can be concatenated.
+// HKDF to raw bits , derives a 32-byte subkey as bytes so two of them can be
+// concatenated into the 64-byte blob.
+//
+// THIS TAKES THE MEK ITSELF. An earlier version took raw bytes, on the stated
+// grounds that a non-extractable CryptoKey cannot produce raw output. That is
+// not true: deriveBits RETURNS raw bits, and non-extractability blocks
+// exporting the key, not deriving from it. deriveSubkey in key-derivation.ts
+// has always worked this way. Believing otherwise is what made the grant
+// re-derive from the vault password, which on a key-version-2 vault is the KEK
+// that wraps the MEK and not the MEK.
+//
+// The salt, the context string and the output length match deriveSubkey
+// exactly, so on a KEY-VERSION-1 vault a granted subkey is byte-identical to
+// the subkey the owner's own data path used before this change, which is what
+// keeps existing v1 grants valid. On a KEY-VERSION-2 vault this is not a
+// "kept valid" story: the pre-change grant derived its subkeys from the
+// password-stretch KEK (deriveMekRaw), never from the MEK, so it was never
+// valid, and this change does not repair it, it only makes new v2 grants
+// correct going forward. Both properties (v1 byte-identity, v2 correctness)
+// are asserted in the tests rather than assumed.
 // ------------------------------------------------------------------
 
 async function hkdfSubkeyRaw(
-  mekRaw: Uint8Array,
+  mek: CryptoKey,
   context: string,
   saltB64: string,
 ): Promise<Uint8Array> {
-  const hkdfKey = await crypto.subtle.importKey(
-    "raw",
-    mekRaw as BufferSource,
-    { name: "HKDF" },
-    /* extractable */ false,
-    ["deriveBits"],
-  );
-
   const saltBytes = base64ToBytes(saltB64);
   const infoBytes = new TextEncoder().encode(context);
 
@@ -103,7 +119,7 @@ async function hkdfSubkeyRaw(
       salt: saltBytes as BufferSource,
       info: infoBytes as BufferSource,
     },
-    hkdfKey,
+    mek,
     256,
   );
 
@@ -358,7 +374,7 @@ export async function persistCoAdminGrant(params: {
     admin_user_id: targetUserId,
   });
   if (adminErr && !isUniqueViolation(adminErr)) {
-    throw new Error(`Failed to insert workspace_admins: ${errorText(adminErr)}`);
+    throw new Error(`Failed to insert workspace_admins: ${formatError(adminErr)}`);
   }
 
   // The wrapped key. THIS is the write that grants access.
@@ -374,7 +390,7 @@ export async function persistCoAdminGrant(params: {
       "This co-admin was added to your list, but the key that gives them access was not stored, " +
         "so they cannot open any of your data. They are shown in your list on purpose, so the " +
         "attempt is visible rather than silent. Reload the page, then either try granting again " +
-        `or remove them from your list. (${errorText(wdkErr)})`,
+        `or remove them from your list. (${formatError(wdkErr)})`,
     );
   }
 }
@@ -382,12 +398,24 @@ export async function persistCoAdminGrant(params: {
 /**
  * Grant full co-admin access to a target user.
  *
- * The owner must re-confirm their vault password so we can derive
- * subkeys as raw bytes without having access to the non-extractable MEK.
+ * WHERE THE KEY MATERIAL COMES FROM. The subkeys are derived from the UNLOCKED
+ * MEK held by VaultContext, which is the same key the owner's own data path
+ * uses. It is not re-derived from the password: on a key-version-2 vault the
+ * stretched password is the KEK that wraps the MEK, so subkeys built from it
+ * would open nothing and the owner's signing secret would not unwrap at all.
+ *
+ * WHAT THE PASSWORD IS STILL FOR. The owner re-types it because this hands
+ * another person access, and the person doing that must be the owner rather
+ * than whoever found an unlocked tab. It is checked and discarded; nothing is
+ * derived from it here.
  *
  * @param params.ownerUserId       The authenticated owner's user ID.
  * @param params.ownerSaltB64      The owner's vault salt (from user_vault_meta).
  * @param params.ownerPassword     Re-confirmed vault password (never leaves the browser).
+ * @param params.ownerVerifierCiphertext  user_vault_meta.vault_verifier_ciphertext.
+ * @param params.ownerKeyVersion   user_vault_meta.vault_key_version.
+ * @param params.ownerEncMekCiphertext    user_vault_meta.enc_mek_ciphertext, null on legacy.
+ * @param params.vaultMek          The unlocked MEK from VaultContext.
  * @param params.targetUserId      The recipient's user ID (from pqc-lookup-user).
  * @param params.targetKemPubB64   The recipient's KEM public key, base64 (from pqc-lookup-user).
  * @param params.existingKeyId     Current workspace_key_id from user_vault_meta (null if not yet
@@ -398,26 +426,55 @@ export async function grantCoAdmin(params: {
   ownerUserId: string;
   ownerSaltB64: string;
   ownerPassword: string;
+  ownerVerifierCiphertext: string;
+  ownerKeyVersion: number;
+  ownerEncMekCiphertext: string | null;
+  vaultMek: CryptoKey;
   ownerSigSecretWrapped: string;
   targetUserId: string;
   targetKemPubB64: string;
   existingKeyId: string | null;
   supabase: CoAdminSupabaseLike;
 }): Promise<GrantResult> {
-  const { ownerUserId, ownerSaltB64, ownerPassword, ownerSigSecretWrapped, targetUserId, targetKemPubB64, supabase } =
-    params;
+  const {
+    ownerUserId,
+    ownerSaltB64,
+    ownerPassword,
+    ownerVerifierCiphertext,
+    ownerKeyVersion,
+    ownerEncMekCiphertext,
+    vaultMek,
+    ownerSigSecretWrapped,
+    targetUserId,
+    targetKemPubB64,
+    supabase,
+  } = params;
 
-  // Step a , derive raw MEK bytes from the re-confirmed password.
-  const mekRaw = await deriveMekRaw(ownerPassword, ownerSaltB64);
+  // Step a , confirm the owner is present. This is the only thing the password
+  // does in this flow, and it runs before anything is allocated, wrapped or
+  // written, so a wrong password leaves nothing behind.
+  const ownerConfirmed = await confirmVaultPassword({
+    password: ownerPassword,
+    saltB64: ownerSaltB64,
+    verifierCiphertext: ownerVerifierCiphertext,
+    keyVersion: ownerKeyVersion,
+    encMekCiphertext: ownerEncMekCiphertext,
+  });
+  if (!ownerConfirmed) {
+    throw new Error(
+      "That vault password is not correct. Nothing was granted and nothing was changed.",
+    );
+  }
 
-  // Step b-c , derive both subkeys as raw bytes and concat into 64-byte blob.
+  // Step b-c , derive both subkeys from the UNLOCKED MEK as raw bytes and
+  // concat into the 64-byte blob.
   const credsRaw = await hkdfSubkeyRaw(
-    mekRaw,
+    vaultMek,
     HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1,
     ownerSaltB64,
   );
   const txnsRaw = await hkdfSubkeyRaw(
-    mekRaw,
+    vaultMek,
     HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1,
     ownerSaltB64,
   );
@@ -456,7 +513,7 @@ export async function grantCoAdmin(params: {
   if (!workspaceKeyId) {
     const { data: allocated, error: allocErr } = await supabase.rpc("allocate_workspace_key");
     if (allocErr) {
-      throw new Error(`Failed to allocate workspace_key_id: ${errorText(allocErr)}`);
+      throw new Error(`Failed to allocate workspace_key_id: ${formatError(allocErr)}`);
     }
     if (typeof allocated !== "string" || allocated.length === 0) {
       throw new Error(
@@ -476,14 +533,12 @@ export async function grantCoAdmin(params: {
   // the wrapped ciphertext can be swapped after the fact. The signed payload
   // binds all four fields: context, grantee user id, workspace key id, and the
   // wrapped ciphertext bytes. All four must match at verify time.
-  const mekHkdf = await crypto.subtle.importKey(
-    "raw",
-    mekRaw,
-    { name: "HKDF" },
-    false,
-    ["deriveBits"],
-  );
-  const pqcWrapKey = await derivePqcSecretWrapKey(mekHkdf, ownerSaltB64);
+  //
+  // The owner's signing secret was wrapped under a subkey of the MEK by
+  // ensurePqcKeypairs, so it unwraps under that same MEK and nothing else.
+  // This is the identical call the consume side makes in
+  // loadAdminSubkeysDirect.
+  const pqcWrapKey = await derivePqcSecretWrapKey(vaultMek, ownerSaltB64);
   const ownerSigSecretBytes = await unwrapPqcSecretKey(pqcWrapKey, ownerSigSecretWrapped);
   const { signature: grantSig } = await signMemberGrant(ownerSigSecretBytes, {
     memberUserId: targetUserId,
@@ -652,7 +707,7 @@ export async function revokeCoAdmin(params: {
   )
     .eq("recipient_user_id", adminUserId)
     .select("recipient_user_id");
-  if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${wdkErr}`);
+  if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${formatError(wdkErr)}`);
 
   if ((removedKeys ?? []).length === 0) {
     // Nothing was removed and nothing complained, which on its own is not
@@ -669,7 +724,7 @@ export async function revokeCoAdmin(params: {
 
     if (readErr) {
       throw new CoAdminRevocationIncompleteError(
-        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${readErr})`,
+        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${formatError(readErr)})`,
         false,
       );
     }
@@ -701,7 +756,7 @@ export async function revokeCoAdmin(params: {
   if (adminErr) {
     // Say which half landed. The stored key IS gone here, and an owner told
     // only that something failed would reasonably assume the opposite.
-    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${adminErr})`, true);
+    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${formatError(adminErr)})`, true);
   }
 
   if ((removedAdmins ?? []).length === 0) {
@@ -772,7 +827,7 @@ export async function clearCoAdminListEntry(params: {
   )
     .eq("admin_user_id", adminUserId)
     .select("admin_user_id");
-  if (error) throw new Error(`Failed to remove this co-admin from your list: ${error}`);
+  if (error) throw new Error(`Failed to remove this co-admin from your list: ${formatError(error)}`);
 
   if ((removed ?? []).length === 0) {
     throw new Error(

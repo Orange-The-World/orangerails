@@ -31,8 +31,51 @@
  */
 
 import { assertEquals, assert, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { PAGE_ORDER, cursorOrExpression, nextCursorFrom } from './index.ts';
+import {
+  PAGE_ORDER,
+  cursorOrExpression,
+  nextCursorFrom,
+  isBlindIndexHex,
+  isUuid,
+} from './index.ts';
 import type { PageCursor } from './index.ts';
+
+// ── request validators: exact, not "exact except one newline" ──────────
+//
+// JavaScript has no end-of-string anchor. Without the m flag `$` matches at
+// the end of the string OR immediately before a final newline, so a pattern
+// alone accepts one character it says it rejects. Each validator now carries
+// a length check beside its pattern, and these cases are what hold it there.
+
+const VALID_BLIND_INDEX = 'a'.repeat(64);
+const VALID_UUID = '0f8fad5b-d9cb-469f-a165-70867728950e';
+
+Deno.test('isBlindIndexHex accepts exactly 64 lowercase hex characters', () => {
+  assert(isBlindIndexHex(VALID_BLIND_INDEX));
+});
+
+Deno.test('isBlindIndexHex rejects 64 hex characters followed by a newline', () => {
+  // The cursor this builds is the one the handler answers 400 for. Before the
+  // length check it was accepted, matched no row, and returned an empty page.
+  assert(!isBlindIndexHex(VALID_BLIND_INDEX + '\n'));
+  assert(!isBlindIndexHex(VALID_BLIND_INDEX + '\r\n'));
+  assert(!isBlindIndexHex('a'.repeat(63)));
+  assert(!isBlindIndexHex('A'.repeat(64)));
+  assert(!isBlindIndexHex(undefined));
+  assert(!isBlindIndexHex(64));
+});
+
+Deno.test('isUuid accepts a canonical uuid', () => {
+  assert(isUuid(VALID_UUID));
+});
+
+Deno.test('isUuid rejects a uuid followed by a newline', () => {
+  assert(!isUuid(VALID_UUID + '\n'));
+  assert(!isUuid(VALID_UUID + '\r\n'));
+  assert(!isUuid(VALID_UUID.slice(0, 35)));
+  assert(!isUuid(''));
+  assert(!isUuid(null));
+});
 
 interface Row {
   block_height: number;
