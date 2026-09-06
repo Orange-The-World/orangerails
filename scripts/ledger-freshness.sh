@@ -41,14 +41,14 @@ classify_ledger_freshness() {
   fi
 
   if [ "$probe_ok" -ne 1 ]; then
-    # BUG, left in on purpose for the first commit of this PR: this is the
-    # exact shape of the original defect, an inconclusive read treated as
-    # confidently fresh. The self-test must catch this and fail red before
-    # the fix commit restores the correct pair of lines:
-    #   echo "UNKNOWN"
-    #   return 1
-    echo "FRESH"
-    return 0
+    # Absence of evidence is not evidence of absence. An unreadable probe
+    # must never default to the one answer that requires no evidence at all.
+    # (This branch shipped as a deliberate bug in the first commit of this
+    # PR, to prove the self-test below catches it: see
+    # https://github.com/Orange-The-World/orangerails/actions/runs/34009672552
+    # for the resulting red run.)
+    echo "UNKNOWN"
+    return 1
   fi
 
   if [ "$object_count" -gt 0 ]; then
