@@ -58,6 +58,7 @@ interface SelectChain {
   gt(column: string, value: unknown): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
   limit(count: number): Promise<QueryResult>;
+  eq(column: string, value: unknown): SelectChain;
 }
 
 /**
@@ -130,12 +131,22 @@ function makeFakeClient(options: FakeOptions = {}) {
       const override = options.selectResult?.[call.table];
       if (override) return override;
 
+      // Honour a plain equality filter, e.g. .eq("user_id", userId). Anything
+      // that is not one of the paging/order markers below is treated as a
+      // column-equals-value filter on the stored rows.
+      let view = stored.slice();
+      for (const f of call.filters) {
+        if (f.column === "order" || f.column === "gt" || f.column === "range" || f.column === "limit") {
+          continue;
+        }
+        view = view.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
+      }
+
       // Honour .order(column). A query that asked for an order gets a
       // deterministic view. One that did not gets the store in whatever
       // physical order it currently holds, which is exactly the latitude the
       // real database has, and is what lets the reordering tests below fail.
       const orderFilter = call.filters.find((f) => f.column === "order");
-      const view = stored.slice();
       if (orderFilter) {
         const [column, ascending] = orderFilter.value as [string, boolean];
         view.sort((a, b) => {
@@ -242,6 +253,10 @@ function makeFakeClient(options: FakeOptions = {}) {
               call.filters.push({ column: "limit", value: count });
               return Promise.resolve(resultFor(call));
             },
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
+            },
           };
           return chain;
         },
@@ -277,6 +292,11 @@ function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) 
     newRecoveryCiphertext: "recovery-ciphertext-v1",
     newVerifierCiphertext: "verifier-v1",
     vaultKeyVersion: 2,
+    // Null is the ordinary case: a vault with no PQC keys yet. The tests that
+    // assert the meta write matches the four columns exactly are what prove
+    // these are not sent as null, which would overwrite real ciphertext.
+    newKemSecretWrapped: null as string | null,
+    newSigSecretWrapped: null as string | null,
     migrateCredentialsCiphertext: async (c: string) => `${c}-migrated`,
     migrateTransactionCiphertext: async (c: string) => `${c}-migrated`,
     clearMigrationKeys,
@@ -359,13 +379,199 @@ describe("vault recovery: the rotated meta write", () => {
 
     await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
 
+    // Both public keys are cleared in this payload because the default args
+    // carry neither secret. That is the invariant, not an over-write; the test
+    // below spells out why it is correct even when another session created a
+    // keypair a moment ago.
     const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
     expect(metaUpdate?.values).toEqual({
       enc_mek_ciphertext: "enc-mek-v1",
       recovery_ciphertext: "recovery-ciphertext-v1",
       vault_verifier_ciphertext: "verifier-v1",
       vault_key_version: 2,
+      kem_public_key: null,
+      sig_public_key: null,
     });
+  });
+
+  it("carries the re-wrapped PQC secrets in the SAME statement as the wrappers", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      newKemSecretWrapped: "kem-wrapped-v1",
+      newSigSecretWrapped: "sig-wrapped-v1",
+    });
+
+    // One statement, not two. A second write would leave a window in which the
+    // wrappers have rotated and the PQC secrets are still under the old MEK,
+    // and anything that interrupted that window would orphan them for good.
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(1);
+    expect(metaUpdates[0]?.values).toEqual({
+      enc_mek_ciphertext: "enc-mek-v1",
+      recovery_ciphertext: "recovery-ciphertext-v1",
+      vault_verifier_ciphertext: "verifier-v1",
+      vault_key_version: 2,
+      kem_secret_wrapped: "kem-wrapped-v1",
+      sig_secret_wrapped: "sig-wrapped-v1",
+    });
+
+    // The regression guard on the healthy path. Both secrets travelled, so
+    // NEITHER public key may be touched. A change that starts clearing keys on
+    // a recovery that worked fails here first, and that failure is the one that
+    // matters most: it would destroy live keypairs.
+    const columns = Object.keys(metaUpdates[0]?.values ?? {});
+    expect(columns).not.toContain("kem_public_key");
+    expect(columns).not.toContain("sig_public_key");
+  });
+
+  it("never writes null over a stored PQC secret", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    // Only one of the two is present, which is the shape that catches a naive
+    // spread: the absent one must be left out of the statement entirely rather
+    // than sent as null and clearing a column that may hold real ciphertext.
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      newKemSecretWrapped: "kem-wrapped-v1",
+      newSigSecretWrapped: null,
+    });
+
+    const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdate?.values).toEqual({
+      enc_mek_ciphertext: "enc-mek-v1",
+      recovery_ciphertext: "recovery-ciphertext-v1",
+      vault_verifier_ciphertext: "verifier-v1",
+      vault_key_version: 2,
+      kem_secret_wrapped: "kem-wrapped-v1",
+      sig_public_key: null,
+    });
+    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_secret_wrapped");
+
+    // The sig PUBLIC key is cleared instead, and the kem one is left alone.
+    // Leaving a public key behind is what makes the loss permanent:
+    // ensurePqcKeypairs short-circuits on a populated public key and never
+    // regenerates, so the row would keep a public key whose secret is wrapped
+    // under a MEK that no longer exists.
+    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("kem_public_key");
+  });
+
+  it("clears the kem public key when only the sig secret was carried", async () => {
+    // The mirror of the test above. An implementation that clears one side and
+    // forgets the other passes a single-orientation suite and still strands
+    // half the keypair, so both orientations are pinned.
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      newKemSecretWrapped: null,
+      newSigSecretWrapped: "sig-wrapped-v1",
+    });
+
+    const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdate?.values).toEqual({
+      enc_mek_ciphertext: "enc-mek-v1",
+      recovery_ciphertext: "recovery-ciphertext-v1",
+      vault_verifier_ciphertext: "verifier-v1",
+      vault_key_version: 2,
+      sig_secret_wrapped: "sig-wrapped-v1",
+      kem_public_key: null,
+    });
+    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("kem_secret_wrapped");
+    expect(Object.keys(metaUpdate?.values ?? {})).not.toContain("sig_public_key");
+  });
+
+  it("clears BOTH public keys in the SAME statement when neither secret was carried", async () => {
+    // Two different situations arrive here and both need this. One: the stored
+    // secret would not open, so that keypair is already dead. Two: the secret
+    // columns were null when the recovery READ the row, and another session
+    // created a keypair while the migration loop was running. The old password
+    // still unlocks throughout that loop, deliberately, because meta is written
+    // last, so another tab loading the app is enough to backfill a keypair under
+    // the OLD MEK. The compare-and-swap does not catch it, because nothing in
+    // that backfill touches recovery_ciphertext.
+    //
+    // So yes, this clears a public key a legitimate concurrent write may have
+    // just made. That is correct: its secret is wrapped under the MEK this
+    // recovery is discarding, so it is dead too, and clearing it is what lets
+    // the next unlock regenerate a working pair instead of short-circuiting on a
+    // corpse forever.
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    // One statement, not two. A second write would leave a window in which the
+    // wrappers have rotated and the public keys have not.
+    const metaUpdates = calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaUpdates.length).toBe(1);
+    expect(metaUpdates[0]?.values?.kem_public_key).toBeNull();
+    expect(metaUpdates[0]?.values?.sig_public_key).toBeNull();
+
+    // Same compare-and-swap and same row-count proof as before. The clear is an
+    // addition to the statement, not a new write with weaker guards.
+    expect(metaUpdates[0]?.filters).toContainEqual({ column: "user_id", value: "user-1" });
+    expect(metaUpdates[0]?.filters).toContainEqual({
+      column: "recovery_ciphertext",
+      value: "recovery-ciphertext-v0",
+    });
+    expect(metaUpdates[0]?.columns).toBe("user_id");
+  });
+
+  it("refuses to rotate, before touching any row, if a stored KEM secret has no replacement", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: "stored-kem-wrapped", sig_secret_wrapped: null },
+        ],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(/stored PQC KEM secret/);
+
+    // The whole point: nothing irreversible ran. No row was re-encrypted, the
+    // meta write never happened, and the old key material was not cleared.
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("refuses to rotate, before touching any row, if a stored signature secret has no replacement", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: "stored-sig-wrapped" },
+        ],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(/stored PQC signature secret/);
+
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("rotates cleanly when the vault genuinely has no stored PQC secrets", async () => {
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [{ user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: null }],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
+    ).resolves.toBeUndefined();
   });
 
   it("migrates every row BEFORE the meta write, never after", async () => {
@@ -949,13 +1155,37 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
 });
 
 describe("vault password change: the re-wrapped meta write", () => {
-  function rewrapArgs(client: VaultPersistClient) {
+  /**
+   * What the update RETURNS is now the point, not merely whether it matched a
+   * row, so the fake hands back the two envelope columns the source asks for.
+   */
+  const storedEnvelopes: QueryResult = {
+    data: [
+      {
+        enc_mek_ciphertext: "enc-mek-v1",
+        recovery_ciphertext: "recovery-ciphertext-v1",
+      },
+    ],
+    error: null,
+  };
+
+  type PersistedEnvelopes = { encMekCiphertext: string; recoveryCiphertext: string };
+
+  async function acceptEverything(): Promise<void> {
+    return undefined;
+  }
+
+  function rewrapArgs(
+    client: VaultPersistClient,
+    verifyPersisted: (persisted: PersistedEnvelopes) => Promise<void> = acceptEverything,
+  ) {
     return {
       supabase: client,
       userId: "user-1",
       priorEncMekCiphertext: "enc-mek-v0",
       newEncMekCiphertext: "enc-mek-v1",
       newRecoveryCiphertext: "recovery-ciphertext-v1",
+      verifyPersisted,
     };
   }
 
@@ -975,21 +1205,21 @@ describe("vault password change: the re-wrapped meta write", () => {
     await expect(persistRewrappedVaultMeta(rewrapArgs(client))).rejects.toThrow("boom");
   });
 
-  it("resolves when the update matches a row", async () => {
-    const { client } = makeFakeClient({
-      metaUpdate: { data: [{ user_id: "user-1" }], error: null },
-    });
+  it("resolves when the stored envelopes re-open", async () => {
+    const { client } = makeFakeClient({ metaUpdate: storedEnvelopes });
 
     await expect(persistRewrappedVaultMeta(rewrapArgs(client))).resolves.toBeUndefined();
   });
 
-  it("asks for the updated rows back and guards on the prior wrapped MEK", async () => {
-    const { client, calls } = makeFakeClient();
+  it("asks the update for the stored envelopes back, and guards on the prior wrapped MEK", async () => {
+    const { client, calls } = makeFakeClient({ metaUpdate: storedEnvelopes });
 
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     const metaUpdate = calls.find((c) => c.table === "user_vault_meta" && c.op === "update");
-    expect(metaUpdate?.columns).toBe("user_id");
+    // user_id would only prove a row matched. The envelopes prove what that row
+    // now holds, which is what the recovery code shown next depends on.
+    expect(metaUpdate?.columns).toBe("enc_mek_ciphertext, recovery_ciphertext");
     expect(metaUpdate?.filters).toContainEqual({ column: "user_id", value: "user-1" });
     expect(metaUpdate?.filters).toContainEqual({
       column: "enc_mek_ciphertext",
@@ -998,10 +1228,87 @@ describe("vault password change: the re-wrapped meta write", () => {
   });
 
   it("does not touch any table other than user_vault_meta", async () => {
-    const { client, calls } = makeFakeClient();
+    const { client, calls } = makeFakeClient({ metaUpdate: storedEnvelopes });
 
     await persistRewrappedVaultMeta(rewrapArgs(client));
 
     expect(calls.every((c) => c.table === "user_vault_meta")).toBe(true);
+  });
+
+  it("hands the verifier the bytes the DATABASE returned, not the ones it sent", async () => {
+    // The two differ here on purpose. Checking the strings we already hold
+    // proves nothing about what was stored, which is the whole defect.
+    const { client } = makeFakeClient({
+      metaUpdate: {
+        data: [
+          {
+            enc_mek_ciphertext: "enc-mek-as-stored",
+            recovery_ciphertext: "recovery-as-stored",
+          },
+        ],
+        error: null,
+      },
+    });
+    const seen: PersistedEnvelopes[] = [];
+
+    await persistRewrappedVaultMeta(
+      rewrapArgs(client, async (persisted) => {
+        seen.push(persisted);
+      }),
+    );
+
+    expect(seen).toEqual([
+      { encMekCiphertext: "enc-mek-as-stored", recoveryCiphertext: "recovery-as-stored" },
+    ]);
+  });
+
+  it("throws when a stored envelope does not re-open, so the recovery code is never shown", async () => {
+    const { client } = makeFakeClient({ metaUpdate: storedEnvelopes });
+
+    await expect(
+      persistRewrappedVaultMeta(
+        rewrapArgs(client, async () => {
+          throw new Error("The stored recovery code envelope could not be re-opened.");
+        }),
+      ),
+    ).rejects.toThrow(PASSWORD_CHANGE_NOT_PROVEN_MESSAGE);
+  });
+
+  it("keeps the underlying reason in the message it throws", async () => {
+    const { client } = makeFakeClient({ metaUpdate: storedEnvelopes });
+
+    await expect(
+      persistRewrappedVaultMeta(
+        rewrapArgs(client, async () => {
+          throw new Error("The stored password key envelope could not be re-opened.");
+        }),
+      ),
+    ).rejects.toThrow("The stored password key envelope could not be re-opened.");
+  });
+
+  it("throws when the row comes back without the columns it asked for", async () => {
+    // Not hypothetical: this update used to ask for user_id, so a client or a
+    // policy that returns the old shape must not read as a proven write.
+    const { client } = makeFakeClient({
+      metaUpdate: { data: [{ user_id: "user-1" }], error: null },
+    });
+
+    await expect(persistRewrappedVaultMeta(rewrapArgs(client))).rejects.toThrow(
+      PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
+    );
+  });
+
+  it("does not call the verifier at all when the update matched no row", async () => {
+    const { client } = makeFakeClient({ metaUpdate: { data: [], error: null } });
+    let calledTimes = 0;
+
+    await expect(
+      persistRewrappedVaultMeta(
+        rewrapArgs(client, async () => {
+          calledTimes += 1;
+        }),
+      ),
+    ).rejects.toThrow(PASSWORD_CHANGE_CONFLICT_MESSAGE);
+    expect(calledTimes).toBe(0);
   });
 });
