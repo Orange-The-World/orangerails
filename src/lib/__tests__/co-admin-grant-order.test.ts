@@ -41,6 +41,7 @@ interface FakeOptions {
 
 function makeFakeClient(options: FakeOptions = {}) {
   const inserts: RecordedInsert[] = [];
+  const deletes: string[] = [];
 
   const client = {
     from(table: string) {
@@ -54,6 +55,10 @@ function makeFakeClient(options: FakeOptions = {}) {
           throw new Error("a grant does not read; this client only records inserts");
         },
         delete() {
+          // Recorded rather than only thrown, so a compensating delete shows
+          // up as a failed assertion on `deletes` instead of being swallowed
+          // by rejection() capturing the thrown error as the rejection reason.
+          deletes.push(table);
           throw new Error("a grant does not delete; see the note about compensating deletes");
         },
       };
@@ -66,6 +71,7 @@ function makeFakeClient(options: FakeOptions = {}) {
   return {
     client: client as unknown as Parameters<typeof persistCoAdminGrant>[0]["supabase"],
     inserts,
+    deletes,
   };
 }
 
@@ -173,17 +179,23 @@ describe("a grant that stops half way leaves the evidence, never the access", ()
   });
 
   it("does not delete the list row back out after the key write fails", async () => {
-    // The fake throws on delete(), so reaching one fails this test loudly. An
-    // error from a write is not proof the write did not land, only that its
-    // answer did not come back, so compensating here is one of the ways the
-    // dangerous state gets created rather than avoided.
-    const { client, inserts } = makeFakeClient({
+    // An error from a write is not proof the write did not land, only that
+    // its answer did not come back, so compensating here is one of the ways
+    // the dangerous state gets created rather than avoided. The fake's
+    // delete() does throw, but that throw was previously only visible as the
+    // rejection reason, which rejection() captures without inspecting, so a
+    // delete added later would pass this test while asserting the same two
+    // inserts. Recording delete calls and asserting none were made tests the
+    // thing the title names instead of a side effect of it.
+    const { client, inserts, deletes } = makeFakeClient({
       errors: { wrapped_data_keys: { message: "network error" } },
     });
 
-    await rejection(persist(client));
+    const err = await rejection(persist(client));
 
+    expect(err).toBeInstanceOf(CoAdminGrantIncompleteError);
     expect(insertedTables(inserts)).toEqual(["workspace_admins", "wrapped_data_keys"]);
+    expect(deletes).toEqual([]);
   });
 });
 
