@@ -77,6 +77,45 @@ function toInvoice(raw: AlbyRawInvoice): LNInvoice {
   };
 }
 
+/**
+ * Assert the Alby response body matches the expected {invoices:[...]} shape.
+ *
+ * The live Alby API may return a top-level array
+ * instead of {invoices:[...]} and that timestamps may be ISO-8601 strings
+ * instead of unix numbers. We hold no live Alby key to confirm the shape, so
+ * we fail loud rather than silently returning empty results or producing
+ * invalid dates. VERIFY-before-prod: confirm against a real Alby account
+ * before relying on this adapter in production.
+ */
+function assertAlbyResponseShape(body: unknown): asserts body is AlbyInvoicesResponse {
+  if (Array.isArray(body)) {
+    throw new Error(
+      'AlbyConfirmsClient: expected {invoices:[...]} response shape but received a ' +
+        'top-level array. Verify GET /invoices against a live Alby account before ' +
+        'using this adapter in production. (VERIFY-before-prod: real Alby key required.)',
+    );
+  }
+  if (!body || typeof body !== 'object') {
+    throw new Error('AlbyConfirmsClient: response body is not an object.');
+  }
+  const b = body as Record<string, unknown>;
+  const invoices = b.invoices;
+  if (invoices !== undefined && !Array.isArray(invoices)) {
+    throw new Error('AlbyConfirmsClient: body.invoices is present but not an array.');
+  }
+  if (Array.isArray(invoices) && invoices.length > 0) {
+    const sample = invoices[0] as Record<string, unknown>;
+    if (typeof sample.created_at === 'string') {
+      throw new Error(
+        'AlbyConfirmsClient: expected created_at as a unix number (seconds) but received ' +
+          'a string. Alby may be returning ISO-8601 timestamps. Verify the field types ' +
+          'against a live Alby account before using this adapter in production. ' +
+          '(VERIFY-before-prod: real Alby key required.)',
+      );
+    }
+  }
+}
+
 export class AlbyConfirmsClient implements LNConfirmsClient {
   readonly provider = 'alby';
   private readonly accessToken: string;
@@ -120,8 +159,12 @@ export class AlbyConfirmsClient implements LNConfirmsClient {
         );
       }
 
-      const body = (await res.json()) as AlbyInvoicesResponse;
-      const batch = (body.invoices ?? []).map(toInvoice);
+      const rawBody: unknown = await res.json();
+      // Fail loud if the API shape is unexpected. Codex flagged that the live
+      // Alby endpoint may differ from the documented shape; silent fallback
+      // to empty results or invalid dates is worse than a loud throw here.
+      assertAlbyResponseShape(rawBody);
+      const batch = (rawBody.invoices ?? []).map(toInvoice);
       allInvoices.push(...batch);
 
       // A page shorter than pageSize signals the result set is exhausted.

@@ -133,3 +133,74 @@ describe('AlbyConfirmsClient.fetchSettled - pagination safety cap', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1000);
   });
 });
+
+describe('AlbyConfirmsClient.fetchSettled - API shape guards', () => {
+  it('throws if the Alby response is a top-level array', async () => {
+    // Guard: live Alby may return a top-level array instead
+    // of {invoices:[...]}. Without this guard, body.invoices is undefined,
+    // the ?? [] fallback returns empty, and all invoices are silently lost.
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse([
+        {
+          payment_hash: 'hash1',
+          amount: 1000,
+          memo: null,
+          settled: true,
+          settled_at: 1706745600,
+          created_at: 1706700000,
+          expires_at: null,
+        },
+      ]),
+    );
+
+    const client = new AlbyConfirmsClient({
+      accessToken: 'tok_test',
+      apiBase: 'https://test.invalid',
+    });
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      await expect(client.fetchSettled()).rejects.toThrow(/top-level array/);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('throws if created_at is a string instead of a unix number', async () => {
+    // Codex flag (PR #105): live Alby may use ISO-8601 strings for timestamps.
+    // Without this guard, unixToIso(string) produces NaN-based dates silently.
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        invoices: [
+          {
+            payment_hash: 'hash1',
+            amount: 1000,
+            memo: null,
+            settled: true,
+            settled_at: '2024-02-01T00:00:00.000Z',
+            created_at: '2024-01-31T10:00:00.000Z',
+            expires_at: null,
+          },
+        ],
+      }),
+    );
+
+    const client = new AlbyConfirmsClient({
+      accessToken: 'tok_test',
+      apiBase: 'https://test.invalid',
+    });
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      await expect(client.fetchSettled()).rejects.toThrow(
+        /ISO-8601 timestamps|string/,
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
