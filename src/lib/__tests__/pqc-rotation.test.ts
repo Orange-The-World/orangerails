@@ -415,3 +415,53 @@ describe("vault recovery: the old wrap key has to be the right key", () => {
     ).rejects.toBeTruthy();
   });
 });
+
+describe("vault recovery: a recorded wrap-key version that does not match the code must not be read as dead (OR-T2093)", () => {
+  it("throws instead of reporting dead when the stored wrap-key version does not match what this code derives", async () => {
+    const saltB64 = generateVaultSalt();
+    const before = await mekWithPqcWrapKey(saltB64);
+    const after = await mekWithPqcWrapKey(saltB64);
+    const stored = await buildPqcKeyMaterial(before.wrapKey);
+    const wrongVersion = CURRENT_PQC_WRAP_KEY_ID + 1;
+
+    await expect(
+      carryPqcSecretsAcrossRotation({
+        oldWrapKey: before.wrapKey,
+        newWrapKey: after.wrapKey,
+        oldMek: before.mek,
+        authenticatedSaltB64: saltB64,
+        kemSecretWrapped: stored.kem_secret_wrapped,
+        sigSecretWrapped: stored.sig_secret_wrapped,
+        storedPqcWrapKeyId: wrongVersion,
+      }),
+    ).rejects.toBeTruthy();
+
+    // Nothing was written, so the stored secrets must still open under the key
+    // they were really sealed with. Only a genuine dead-secret path may clear
+    // them, never a version mismatch.
+    expect(await unwrapPqcSecretKey(before.wrapKey, stored.kem_secret_wrapped)).toBeTruthy();
+    expect(await unwrapPqcSecretKey(before.wrapKey, stored.sig_secret_wrapped)).toBeTruthy();
+  });
+
+  it("does not block an empty carry on a version mismatch when there is nothing stored to protect", async () => {
+    const saltB64 = generateVaultSalt();
+    const before = await mekWithPqcWrapKey(saltB64);
+    const after = await mekWithPqcWrapKey(saltB64);
+
+    const carried = await carryPqcSecretsAcrossRotation({
+      oldWrapKey: before.wrapKey,
+      newWrapKey: after.wrapKey,
+      oldMek: before.mek,
+      authenticatedSaltB64: saltB64,
+      kemSecretWrapped: null,
+      sigSecretWrapped: null,
+      storedPqcWrapKeyId: CURRENT_PQC_WRAP_KEY_ID + 1,
+    });
+
+    expect(carried).toEqual({
+      newKemSecretWrapped: null,
+      newSigSecretWrapped: null,
+      pqcKeysReplaced: false,
+    });
+  });
+});
