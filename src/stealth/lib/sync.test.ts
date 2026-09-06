@@ -2401,3 +2401,75 @@ describe('stealth sync , the abort gap and what may be uploaded (OR-T1120)', () 
     }
   });
 });
+
+// ─── fetchFilterPair sidecar/height binding (OR-T1167) ──────────────────
+//
+// The BIP158 SipHash match proves the filter bytes and the block hash came
+// from the same block. It proves nothing about which HEIGHT that block sits
+// at: a producer or CDN serving height N+1's (filter, hash) pair under the
+// URL for height N passes that match cleanly, and liveFetchFilter used to
+// hand the caller a FilterRecord carrying the wrong height with nobody the
+// wiser. This exercises the real HTTP path (liveFetchFilter -> fetchFilterPair
+// -> global fetch), not the injected fetchFilter callback runSync's other
+// tests use, because the defect is specifically in the code between the raw
+// response and that callback's input.
+
+describe('liveFetchFilter , sidecar height must match the height requested (OR-T1167)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('throws a durable error, on the first attempt only, when the sidecar height disagrees', async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith('.json')) {
+        return new Response(
+          JSON.stringify({
+            block_hash: 'aa'.repeat(32),
+            // Off by one from the requested height (800_002): the misfile
+            // under test.
+            block_height: 800_003,
+            time: 0,
+            filter_size: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      // The .gcs.gz body is never read: the height check in fetchFilterPair
+      // must throw before gunzip runs, so an empty body is enough here.
+      return new Response(new Uint8Array([0]), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(liveFetchFilter(800_002, 'https://filters.example.test')).rejects.toThrow(
+      /sidecar at height 800002 reports block_height 800003/,
+    );
+
+    // Not retried: DurableFilterError is rethrown immediately by
+    // liveFetchFilter's catch, so exactly one .gcs.gz and one .json request
+    // were made, not FILTER_FETCH_ATTEMPTS pairs of them.
+    expect(requestedUrls).toHaveLength(2);
+    expect(requestedUrls).toContain('https://filters.example.test/800002.gcs.gz');
+    expect(requestedUrls).toContain('https://filters.example.test/800002.json');
+  });
+
+  it('accepts a sidecar whose height matches what was requested', async () => {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('.json')) {
+        return new Response(
+          JSON.stringify({ block_hash: 'bb'.repeat(32), block_height: 800_010, time: 0, filter_size: 1 }),
+          { status: 200 },
+        );
+      }
+      return new Response(gzipSync(Buffer.from([1, 2, 3])), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const record = await liveFetchFilter(800_010, 'https://filters.example.test');
+    expect(record.height).toBe(800_010);
+    expect(record.blockHashHex).toBe('bb'.repeat(32));
+  });
+});
