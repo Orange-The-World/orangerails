@@ -1862,8 +1862,8 @@ jobs:
           OUT_OF_ORDER_ALLOWLIST="20260713120001 20260716120001 20260717123000 20260721120000 20260722000001 20260722130000 20260722140000 20260723120000 20260723210000 20260724180000 20260730000000 20260730120000 20260730120001 20260730200000 20260802120000 20260803000000 20260803120000 20260803140000 20260803160000 20260803190000 20260804000000 20260804000001 20260804090000 20260804140000 20260806100000 20260809130000 20260815000001 20260817230000 20260819120000"
 
           out_of_order_scan () {
-            local applied="$1" files="$2" dir="$3" allowlist="${4:-$OUT_OF_ORDER_ALLOWLIST}"
-            local max base version reason below=0 unmarked=0 allowlisted=0 unknown=0 skipped=0 examined=0
+            local applied="$1" files="$2" dir="$3" allowlist="${4:-$OUT_OF_ORDER_ALLOWLIST}" target_ref="${5:-$SUPABASE_REF}"
+            local max base version marker_raw marker_ref marker_reason below=0 unmarked=0 allowlisted=0 unknown=0 skipped=0 examined=0
             local applied_rows=0 max_label
             # The highest applied version comes from the SAME set this function
             # is filtering with, so the guard can never judge one read of the
