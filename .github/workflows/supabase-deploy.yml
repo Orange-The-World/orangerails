@@ -1986,7 +1986,7 @@ jobs:
           ST_APPLIED=$(printf '%s\n' '20990101000000' '20990101000005')
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000000_already_applied.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000002_below_unmarked.sql"
-          printf '%s\n' '-- OUT-OF-ORDER-OK: synthetic self-test, a branch cut before the merge' 'select 1;' > "${ST_DIR}/20990101000003_below_marked.sql"
+          printf '%s\n' '-- OUT-OF-ORDER-OK: stfixturetargetproj synthetic self-test, a branch cut before the merge' 'select 1;' > "${ST_DIR}/20990101000003_below_marked.sql"
           printf '%s\n' '-- OUT-OF-ORDER-OK:' 'select 1;' > "${ST_DIR}/20990101000004_below_empty_marker.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/2099010100000X_notanumber.sql"
