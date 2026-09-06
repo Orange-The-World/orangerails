@@ -1,7 +1,7 @@
 /**
- * or-quiltt-drain-alert -- four-signal health check for or_quiltt_sync_drain
+ * or-quiltt-drain-alert -- five-signal health check for or_quiltt_sync_drain
  *
- * Signals (DL-0640, signal D added by DL-1540):
+ * Signals (DL-0640, signal D added by DL-1540, signal E added by OR-T2583):
  *   A. Failure rate: >10% of or_quiltt_sync_drain runs failed in last 30 min.
  *      Reads cron.job_run_details via drain_cron_job_stats() SECURITY DEFINER RPC.
  *      Fires only when at least one run occurred (total_count > 0), so a quiet
@@ -27,6 +27,19 @@
  *
  *      Threshold is deliberately > 0 rather than a rate. Losing a customer's
  *      bank data is not a thing that has an acceptable background level.
+ *   E. Starvation bound: the fetch batch (BATCH_SIZE = 20 in or-quiltt-sync)
+ *      is fully occupied by rows that are unprocessed and not opk-deferred
+ *      (processed_at IS NULL AND opk_deferred_at IS NULL), and the oldest of
+ *      them is older than the proven 25 minute worst-case retirement bound
+ *      from OR-T2581. That combination means the batch has been stuck longer
+ *      than the whole cluster should ever take to age out: real starvation,
+ *      not a normal burst.
+ *
+ *      Signal C does not catch this: it only fires after 2 hours on any
+ *      single stale row, and it does not exclude opk-deferred rows, which
+ *      are expected to sit unprocessed while a subaccount waits on its OPK.
+ *      Signal E is scoped to the exact starvation shape OR-T2581 proved,
+ *      with a much tighter age bound.
  *
  * Auth: X-Internal-Worker-Token header, constant-time compared to OR_INTERNAL_WORKER_TOKEN.
  * Query errors surface as alert_firing = true (absence of evidence is not green).
@@ -52,6 +65,8 @@ const SUCCESS_WINDOW_MINUTES      = 60;
 const FAILURE_RATE_THRESHOLD      = 0.10; // 10%
 const STALL_HOURS                 = 2;
 const RETIREMENT_WINDOW_HOURS     = 24;
+const STARVATION_UNPROCESSED_MIN  = 20; // BATCH_SIZE in or-quiltt-sync
+const STARVATION_AGE_MINUTES      = 25; // proven worst-case retirement bound (OR-T2581)
 const SUPPRESSION_COOLDOWN_MINUTES = 60;
 
 interface DrainCronStats {
@@ -89,6 +104,14 @@ interface HealthReport {
       retired_rows:  number | null;
       window_hours:  number;
       firing:        boolean;
+    };
+    starvation: {
+      unprocessed_non_deferred:      number | null;
+      retried_at_least_once:         number | null;
+      oldest_unprocessed_age_minutes: number | null;
+      unprocessed_threshold:         number;
+      age_threshold_minutes:         number;
+      firing:                        boolean;
     };
   };
 }
@@ -245,11 +268,74 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   const retired:      number | null = retiredCount ?? null;
   const retiredFiring               = retired !== null && retired > 0;
 
+  // Signal E: starvation bound -- the fetch batch is fully occupied by rows
+  // that are unprocessed and not opk-deferred, and the oldest of them is
+  // older than the proven worst-case retirement bound. Same columns
+  // fetchPendingBatch (or-quiltt-sync) filters on: processed_at IS NULL AND
+  // opk_deferred_at IS NULL.
+  const { count: unprocessedNonDeferredCount, error: starvationCountErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select('*', { count: 'exact', head: true })
+    .is('processed_at', null)
+    .is('opk_deferred_at', null);
+
+  if (starvationCountErr) {
+    console.error(
+      '[or-quiltt-drain-alert] signal E (starvation, count) query failed:',
+      starvationCountErr.message,
+    );
+  }
+
+  const { count: retriedAtLeastOnceCount, error: starvationRetriedErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select('*', { count: 'exact', head: true })
+    .is('processed_at', null)
+    .is('opk_deferred_at', null)
+    .gt('attempts', 0);
+
+  if (starvationRetriedErr) {
+    console.error(
+      '[or-quiltt-drain-alert] signal E (starvation, retried) query failed:',
+      starvationRetriedErr.message,
+    );
+  }
+
+  const { data: oldestUnprocessedRows, error: starvationOldestErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select('received_at')
+    .is('processed_at', null)
+    .is('opk_deferred_at', null)
+    .order('received_at', { ascending: true })
+    .limit(1);
+
+  if (starvationOldestErr) {
+    console.error(
+      '[or-quiltt-drain-alert] signal E (starvation, oldest) query failed:',
+      starvationOldestErr.message,
+    );
+  }
+
+  const unprocessedNonDeferred: number | null = unprocessedNonDeferredCount ?? null;
+  const retriedAtLeastOnce:     number | null = retriedAtLeastOnceCount ?? null;
+  const oldestUnprocessedAt:    string | null = oldestUnprocessedRows?.[0]?.received_at ?? null;
+  const oldestUnprocessedAgeMinutes: number | null = oldestUnprocessedAt !== null
+    ? (Date.now() - new Date(oldestUnprocessedAt).getTime()) / 60000
+    : null;
+
+  const starvationFiring =
+    unprocessedNonDeferred !== null &&
+    oldestUnprocessedAgeMinutes !== null &&
+    unprocessedNonDeferred >= STARVATION_UNPROCESSED_MIN &&
+    oldestUnprocessedAgeMinutes > STARVATION_AGE_MINUTES;
+
   // Surface query errors: a probe that cannot run must not exit green.
   const queryErrors: string[] = [];
   if (statsErr) queryErrors.push(`signals A+B (cron stats): ${statsErr.message}`);
   if (stallErr) queryErrors.push(`signal C (queue stall): ${stallErr.message}`);
   if (retiredErr) queryErrors.push(`signal D (retired events): ${retiredErr.message}`);
+  if (starvationCountErr) queryErrors.push(`signal E (starvation, count): ${starvationCountErr.message}`);
+  if (starvationRetriedErr) queryErrors.push(`signal E (starvation, retried): ${starvationRetriedErr.message}`);
+  if (starvationOldestErr) queryErrors.push(`signal E (starvation, oldest): ${starvationOldestErr.message}`);
   const queryError = queryErrors.length > 0 ? queryErrors.join('; ') : undefined;
 
   if (failureRateFiring) {
@@ -279,8 +365,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     );
   }
 
+  if (starvationFiring) {
+    console.error(
+      `[or-quiltt-drain-alert] ALERT signal E (starvation): ` +
+      `${unprocessedNonDeferred} unprocessed non-deferred row(s), oldest ` +
+      `${(oldestUnprocessedAgeMinutes ?? 0).toFixed(1)} min old ` +
+      `(threshold: >=${STARVATION_UNPROCESSED_MIN} rows AND >${STARVATION_AGE_MINUTES} min)`,
+    );
+  }
+
   const alertFiring = failureRateFiring || zeroCompletionsFiring || stallFiring ||
-    retiredFiring || queryError !== undefined;
+    retiredFiring || starvationFiring || queryError !== undefined;
 
   // zulip_post_sent: null when not firing, true/false when firing based on outcome.
   let zulipPostSent: boolean | null = null;
@@ -331,6 +426,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           `:x: **Signal D (retired events):** ${retired} webhook event(s) DESTROYED in the last ` +
           `${RETIREMENT_WINDOW_HOURS}h. Each one is a bank sync notification we received and threw ` +
           `away. Query quiltt_webhook_inbox for retirement_reason to see why.`,
+        );
+      }
+      if (starvationFiring) {
+        parts.push(
+          `:x: **Signal E (starvation):** ${unprocessedNonDeferred} unprocessed non-deferred ` +
+          `row(s), oldest ${(oldestUnprocessedAgeMinutes ?? 0).toFixed(1)} min old. The fetch batch ` +
+          `has been fully occupied longer than the proven ${STARVATION_AGE_MINUTES} min worst-case ` +
+          `retirement bound (OR-T2581): this is starvation, not a normal burst.`,
         );
       }
       if (queryError) {
@@ -397,6 +500,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         retired_rows: retired,
         window_hours: RETIREMENT_WINDOW_HOURS,
         firing:       retiredFiring,
+      },
+      starvation: {
+        unprocessed_non_deferred:       unprocessedNonDeferred,
+        retried_at_least_once:          retriedAtLeastOnce,
+        oldest_unprocessed_age_minutes: oldestUnprocessedAgeMinutes,
+        unprocessed_threshold:          STARVATION_UNPROCESSED_MIN,
+        age_threshold_minutes:          STARVATION_AGE_MINUTES,
+        firing:                         starvationFiring,
       },
     },
   };
