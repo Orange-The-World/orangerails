@@ -250,6 +250,65 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     const bucketTs = ts.toISOString()
 
+    // ----- Coverage probe FIRST (OR-T0113) -----
+    // The point lookup below orders bucket_ts DESC and scans backward from the
+    // requested instant. When that instant is before the pair's first CONFIRMED,
+    // non-superseded row, the backward scan finds nothing and must heap-fetch and
+    // reject every non-qualifying candidate on the way back -- measured 20-28s
+    // against orbi-prod for BTC-EUR/GBP historical requests (OR-T0113), which is
+    // past any statement timeout and surfaces to the caller as a 500, not a 404.
+    // This ascending, unbounded probe finds the pair's earliest qualifying row
+    // directly, so a before-coverage or unsupported-pair request is answered here
+    // without ever running the expensive backward scan.
+    const { data: coverageRow, error: coverageErr } = await supabase
+      .from('exchange_rates')
+      .select('bucket_ts')
+      .eq('source_currency', item.asset.toUpperCase())
+      .eq('target_currency', item.fiat.toUpperCase())
+      .eq('granularity', granularity)
+      .eq('product', product)
+      .eq('source_authority', 'ORBI')
+      .eq('status', 'CONFIRMED')
+      .is('superseded_by_id', null)
+      .order('bucket_ts', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+
+    if (coverageErr) {
+      console.error(`coverage-probe DB error [${correlationId}]:`, coverageErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity }))
+      void reportError(coverageErr, 'v1-rate', req)
+      return Response.json({ error: 'server_error', message: 'Database error fetching rate coverage', correlation_id: correlationId }, { status: 500 })
+    }
+
+    // No coverage row at all, or the requested instant predates the earliest one --
+    // two distinct cases:
+    //   unsupported_pair: pair is not ingested at all; callers must fix asset/fiat/product.
+    //   before_coverage_start: pair IS ingested but requested time predates its first
+    //     bucket; callers should request a later timestamp.
+    // For batch requests, push a per-item error and continue so previously resolved items
+    // are not discarded and all successful items reach the usage-log insert below.
+    // Single-item requests are surfaced as HTTP 404 after the loop (see below).
+    if (!coverageRow || new Date(bucketTs).getTime() < new Date(coverageRow.bucket_ts).getTime()) {
+      const errorCode = coverageRow ? 'before_coverage_start' : 'unsupported_pair'
+      const errorMessage = coverageRow
+        ? `${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on ${product} has no data before ${bucketTs}; coverage starts at ${coverageRow.bucket_ts}`
+        : `No rate coverage for ${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on product ${product}`
+
+      results.push({
+        asset: item.asset.toUpperCase(),
+        fiat: item.fiat.toUpperCase(),
+        product,
+        requested_at: item.at,
+        error: errorCode,
+        message: errorMessage,
+      })
+      continue
+    }
+
+    // ----- Point-in-time lookup -----
+    // Safe now: the coverage probe above proved a qualifying row exists at or
+    // before bucketTs, so this backward scan lands on it quickly instead of
+    // walking off the start of the pair's data.
     // All five equality filters are required to fire idx_rates_lookup end-to-end:
     //   (source_currency, target_currency, granularity, product, bucket_ts DESC)
     // source_authority='ORBI', status='CONFIRMED', superseded_by_id IS NULL
@@ -285,46 +344,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return Response.json({ error: 'server_error', message: 'Database error fetching exchange rate', correlation_id: correlationId }, { status: 500 })
     }
 
-    // No rows at or before the requested time -- two distinct cases:
-    //   unsupported_pair: pair is not ingested at all; callers must fix asset/fiat/product.
-    //   before_coverage_start: pair IS ingested but requested time predates its first
-    //     bucket; callers should request a later timestamp.
-    // For batch requests, push a per-item error and continue so previously resolved items
-    // are not discarded and all successful items reach the usage-log insert below.
-    // Single-item requests are surfaced as HTTP 404 after the loop (see below).
+    // Should not happen: the coverage probe above proved a qualifying row exists
+    // at or before bucketTs. Guard anyway rather than assume, in case a row was
+    // superseded or deleted between the two queries under concurrent writes.
     if (!row) {
-      const { data: coverageRow, error: coverageErr } = await supabase
-        .from('exchange_rates')
-        .select('bucket_ts')
-        .eq('source_currency', item.asset.toUpperCase())
-        .eq('target_currency', item.fiat.toUpperCase())
-        .eq('granularity', granularity)
-        .eq('product', product)
-        .eq('source_authority', 'ORBI')
-        .eq('status', 'CONFIRMED')
-        .is('superseded_by_id', null)
-        .order('bucket_ts', { ascending: true })
-        .limit(1)
-        .maybeSingle()
-
-      if (coverageErr) {
-        console.error(`coverage-probe DB error [${correlationId}]:`, coverageErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity }))
-        void reportError(coverageErr, 'v1-rate', req)
-        return Response.json({ error: 'server_error', message: 'Database error fetching rate coverage', correlation_id: correlationId }, { status: 500 })
-      }
-
-      const errorCode = coverageRow ? 'before_coverage_start' : 'unsupported_pair'
-      const errorMessage = coverageRow
-        ? `${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on ${product} has no data before ${bucketTs}; coverage starts at ${coverageRow.bucket_ts}`
-        : `No rate coverage for ${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on product ${product}`
-
       results.push({
         asset: item.asset.toUpperCase(),
         fiat: item.fiat.toUpperCase(),
         product,
         requested_at: item.at,
-        error: errorCode,
-        message: errorMessage,
+        error: 'before_coverage_start',
+        message: `${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on ${product} has no data before ${bucketTs}; coverage starts at ${coverageRow.bucket_ts}`,
       })
       continue
     }
