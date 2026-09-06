@@ -269,6 +269,7 @@ function AppHome() {
         .single();
       if (classifyRead(meta, metaErr) === "error") {
         console.warn(`Failed to load vault meta: ${formatError(metaErr)}`);
+        setErr(`Could not load your vault: ${formatError(metaErr)}`);
       }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
