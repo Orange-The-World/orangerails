@@ -351,11 +351,17 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(tx.block_height).toBe(700_001);
     expect(tx.occurred_at).toBe('2024-06-01');
     expect(tx.txid).toMatch(/^[0-9a-f]{64}$/);
+    // The block this was read from, not just the height it sat at. A reorg
+    // replaces the block at a height, so the height alone can never show that
+    // this transaction has stopped existing.
+    expect(tx.block_hash).toBe(blockHashHex);
 
     // The sealed transaction round-trips back to the same plaintext.
     const sealed = result.sealedTransactions[0];
     expect(sealed.occurred_at).toBe('2024-06-01');
     expect(sealed.block_height).toBe(700_001);
+    // Plaintext alongside the height, so the check can run without the key.
+    expect(sealed.block_hash_hex).toBe(blockHashHex);
     expect(sealed.txid_blind_index_hex).toMatch(/^[0-9a-f]{64}$/);
     expect(sealed).not.toHaveProperty('txid_blind_index_b64');
     const decrypted = await unsealEnvelope<typeof tx>(sealed, orStealthKey);
@@ -752,6 +758,15 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(decrypted!.amount_sats).toBe(6_789);
     expect(decrypted!.direction).toBe('in');
 
+    // Both loops must record the block hash, not just the initial one. The
+    // extension loop builds its records in a separate block of code, so a hash
+    // added only to the main loop would leave every extension-found
+    // transaction permanently unverifiable and nothing would say so.
+    expect(extNormalized!.block_hash).toBe(hashHexB);
+    expect(extSealed!.block_hash_hex).toBe(hashHexB);
+    const mainNormalized = result.normalized.find((t) => t.amount_sats === 12_345);
+    expect(mainNormalized!.block_hash).toBe(hashHexA);
+
     // Extension fired, so the flag must be set.
     expect(result.windowExhausted).toBe(true);
   });
@@ -968,6 +983,10 @@ describe('runSync height source and block ordering regressions', () => {
     const blockHash = reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80)));
     const blockHashHex = bytesToHex(blockHash);
     const fakeFilter = new Uint8Array([0x01]);
+    // A hash the block source reports that is NOT the one the filter matched.
+    // Distinct on purpose: with the same value in both places, reading the
+    // wrong one would pass.
+    const misreportedBlockHash = 'f'.repeat(64);
 
     const result = await runSync({
       envelope,
@@ -977,15 +996,27 @@ describe('runSync height source and block ordering regressions', () => {
       fetchTip: async () => 700_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) =>
         h === 700_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
-      // Simulate the browser CORS reality: the block record carries
-      // height 0 because the header was invisible to the client.
-      fetchBlock: async () => ({ height: 0, blockHashHex, raw: blockBuild.raw }),
+      // Simulate the browser CORS reality: the block record carries height 0
+      // because the header was invisible to the client, and a block hash that
+      // disagrees with the filter. Neither field on the block record is the
+      // source of truth here; the filter record is.
+      fetchBlock: async () => ({
+        height: 0,
+        blockHashHex: misreportedBlockHash,
+        raw: blockBuild.raw,
+      }),
       matcher: { matchAny: () => true },
     });
 
     expect(result.normalized).toHaveLength(1);
     expect(result.normalized[0].block_height).toBe(700_001);
     expect(result.sealedTransactions[0].block_height).toBe(700_001);
+    // The same rule applies to the hash, and it matters more: this is the
+    // value a reorg check compares against, so one taken from the block record
+    // would either never fire or fire on every row.
+    expect(result.normalized[0].block_hash).toBe(blockHashHex);
+    expect(result.sealedTransactions[0].block_hash_hex).toBe(blockHashHex);
+    expect(result.normalized[0].block_hash).not.toBe(misreportedBlockHash);
   });
 
   it('processes matched blocks by ascending height even when filters resolve out of order', async () => {
