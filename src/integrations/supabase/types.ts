@@ -1019,27 +1019,39 @@ export type Database = {
       wrapped_data_keys: {
         Row: {
           algorithm: string
+          coadmin_keyring_ciphertext: string | null
           created_at: string
           data_key_id: string
+          grant_sig: string
+          grant_sig_alg: string
           id: string
           recipient_user_id: string
-          wrapped_ciphertext: string
+          wrapped_cak: string | null
+          wrapped_ciphertext: string | null
         }
         Insert: {
           algorithm?: string
+          coadmin_keyring_ciphertext?: string | null
           created_at?: string
           data_key_id: string
+          grant_sig: string
+          grant_sig_alg?: string
           id?: string
           recipient_user_id: string
-          wrapped_ciphertext: string
+          wrapped_cak?: string | null
+          wrapped_ciphertext?: string | null
         }
         Update: {
           algorithm?: string
+          coadmin_keyring_ciphertext?: string | null
           created_at?: string
           data_key_id?: string
+          grant_sig?: string
+          grant_sig_alg?: string
           id?: string
           recipient_user_id?: string
-          wrapped_ciphertext?: string
+          wrapped_cak?: string | null
+          wrapped_ciphertext?: string | null
         }
         Relationships: []
       }
