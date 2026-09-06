@@ -48,6 +48,21 @@ export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
   "Vault was changed from another session. Reload the page and try again.";
 
 /**
+ * Shown when the password-change write matched a row but the bytes that came
+ * back from it do not re-open the vault.
+ *
+ * This is a different failure from the conflict above and needs a different
+ * sentence. By the time it can fire the update has already landed, so the
+ * stored envelopes are whatever the server now holds and neither the old nor
+ * the new password can be trusted to open them. Retrying is not the advice:
+ * the compare-and-swap would test against a value that is no longer there. The
+ * MEK is still in memory in this tab, which is why the message says not to
+ * close the page.
+ */
+export const PASSWORD_CHANGE_NOT_PROVEN_MESSAGE =
+  "Vault password change did not complete. The keys the server returned do not re-open your vault, so neither your old nor your new password can be relied on. Do not close or reload this page, and contact support with this message.";
+
+/**
  * Shown when the reconciliation below the paging loops finds that this run did
  * not re-encrypt every row the table holds for this user.
  *
@@ -329,6 +344,24 @@ export interface RotateVaultArgs {
   newRecoveryCiphertext: string;
   newVerifierCiphertext: string;
   vaultKeyVersion: number;
+  /**
+   * kem_secret_wrapped and sig_secret_wrapped re-wrapped under the rotated MEK,
+   * as returned by recoverWithCode.
+   *
+   * These are not data rows, so the migration loop below never touches them,
+   * and they are wrapped under an HKDF subkey of the MEK exactly like the
+   * credentials and transactions subkeys. If they do not travel in the update
+   * that rotates the wrappers, the key that opens them ceases to exist and
+   * nothing regenerates them.
+   *
+   * NULL IS AN INSTRUCTION, not just an absence. It means "nothing was carried
+   * for this key", and the write below answers it by CLEARING the matching
+   * public key in the same statement, so the next unlock regenerates a working
+   * pair instead of short-circuiting forever on a public key whose secret is
+   * gone. Pass null only when nothing was genuinely carried.
+   */
+  newKemSecretWrapped: string | null;
+  newSigSecretWrapped: string | null;
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
@@ -350,10 +383,46 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     newRecoveryCiphertext,
     newVerifierCiphertext,
     vaultKeyVersion,
+    newKemSecretWrapped,
+    newSigSecretWrapped,
     migrateCredentialsCiphertext,
     migrateTransactionCiphertext,
     clearMigrationKeys,
   } = args;
+
+  // Refuse before anything irreversible happens if a stored PQC secret would
+  // be dropped. Nothing else here forces a caller to select
+  // kem_secret_wrapped and sig_secret_wrapped before calling in: a caller
+  // that leaves them out of its select gets undefined, callers coerce that
+  // to null, and the meta write below would then silently omit the column
+  // (correctly, by the omit-on-null rule) while the stored ciphertext still
+  // pointed at a key this rotation is about to destroy. The row would keep a
+  // valid-looking kem_public_key, so PQC keypair regeneration would never
+  // trigger, and anything encrypted to that key afterwards would be
+  // unreadable from the moment it was written. Checking here, before the
+  // migration loop, means a caller written wrong fails loudly with nothing
+  // lost instead of orphaning a key with no error and no way back.
+  const { data: storedMetaRows, error: storedMetaErr } = await supabase
+    .from("user_vault_meta")
+    .select("kem_secret_wrapped, sig_secret_wrapped")
+    .eq("user_id", userId);
+  if (storedMetaErr) throw storedMetaErr;
+  const storedMeta = (
+    storedMetaRows as Array<{
+      kem_secret_wrapped: string | null;
+      sig_secret_wrapped: string | null;
+    }> | null
+  )?.[0];
+  if (storedMeta?.kem_secret_wrapped != null && newKemSecretWrapped === null) {
+    throw new Error(
+      "Refusing to rotate: a stored PQC KEM secret exists but the caller did not supply a re-wrapped value. Nothing was changed.",
+    );
+  }
+  if (storedMeta?.sig_secret_wrapped != null && newSigSecretWrapped === null) {
+    throw new Error(
+      "Refusing to rotate: a stored PQC signature secret exists but the caller did not supply a re-wrapped value. Nothing was changed.",
+    );
+  }
 
   // Re-encrypt connections first, then transactions, then meta.
   // Meta is written last so a partial failure leaves the STORED wrappers still
@@ -522,14 +591,69 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // error, so the row count is the only signal that it actually happened.
   // The compare-and-swap on recovery_ciphertext (read at the top of the submit)
   // makes a concurrent rotation fail loudly rather than be overwritten.
+  //
+  // The re-wrapped PQC secrets ride in this same statement. They are not data
+  // rows so nothing above migrated them, and they are wrapped under an
+  // MEK-derived subkey, so the rotation destroys them if they do not travel
+  // here. One statement also means there is no window in which the wrappers
+  // have rotated and the PQC secrets have not.
+  //
+  // A secret is only written when present. Passing null through into the update
+  // would overwrite a real ciphertext with null if a caller ever failed to read
+  // the columns first, which is the same silent destruction this is fixing.
+  //
+  // AND WHEN NOTHING WAS CARRIED, THE MATCHING PUBLIC KEY IS CLEARED. That is
+  // the invariant this write exists to hold: a rotation that completes without
+  // carrying a PQC secret across must not leave the public key behind.
+  //
+  // Leaving it behind is what makes the loss permanent rather than temporary.
+  // ensurePqcKeypairs() short-circuits on a populated kem_public_key, so the row
+  // keeps a public key whose secret is wrapped under a MEK that no longer
+  // exists, and everything encrypted to it from then on is unreadable from the
+  // moment it is written. Clearing it lets the next unlock regenerate a working
+  // pair.
+  //
+  // Two different situations arrive here and both need the same treatment.
+  //
+  //   1. The stored secret existed and would not open. It is already dead.
+  //
+  //   2. The secret column was null when the recovery READ the row, and another
+  //      session created a keypair while the migration loop above was running.
+  //      The old password still unlocks throughout that loop, deliberately,
+  //      because meta is written last, so another tab loading the app is enough
+  //      to backfill a keypair under the OLD MEK. This write then omits the
+  //      secret column, because it was null at read time, and the
+  //      compare-and-swap does not catch it, because nothing in that backfill
+  //      touches recovery_ciphertext.
+  //
+  // In case 2 this clears a public key a legitimate concurrent write just made.
+  // That is deliberate and it is correct: that keypair's secret is wrapped under
+  // the MEK this recovery is discarding, so it is already dead as well.
+  //
+  // A dead kem_secret_wrapped is deliberately left in place rather than nulled.
+  // It is unreadable either way, and ensurePqcKeypairs() overwrites all four
+  // columns when it regenerates on the next unlock. Nothing consumes a secret
+  // without its public key.
+  const rotatedMeta: Record<string, unknown> = {
+    enc_mek_ciphertext: newEncMekCiphertext,
+    recovery_ciphertext: newRecoveryCiphertext,
+    vault_verifier_ciphertext: newVerifierCiphertext,
+    vault_key_version: vaultKeyVersion,
+  };
+  if (newKemSecretWrapped !== null) {
+    rotatedMeta.kem_secret_wrapped = newKemSecretWrapped;
+  } else {
+    rotatedMeta.kem_public_key = null;
+  }
+  if (newSigSecretWrapped !== null) {
+    rotatedMeta.sig_secret_wrapped = newSigSecretWrapped;
+  } else {
+    rotatedMeta.sig_public_key = null;
+  }
+
   const { data: updatedRows, error: updateErr } = await supabase
     .from("user_vault_meta")
-    .update({
-      enc_mek_ciphertext: newEncMekCiphertext,
-      recovery_ciphertext: newRecoveryCiphertext,
-      vault_verifier_ciphertext: newVerifierCiphertext,
-      vault_key_version: vaultKeyVersion,
-    })
+    .update(rotatedMeta)
     .eq("user_id", userId)
     .eq("recovery_ciphertext", priorRecoveryCiphertext)
     .select("user_id");
@@ -559,6 +683,18 @@ export interface RewrapVaultArgs {
   priorEncMekCiphertext: string;
   newEncMekCiphertext: string;
   newRecoveryCiphertext: string;
+  /**
+   * Proves the bytes the database actually stored re-open to the same MEK.
+   *
+   * Supplied by changeVaultPassword, which closes over the new password KEK,
+   * the new recovery KEK and the raw MEK. Passing a function rather than the
+   * keys is what keeps key material out of this file and out of the route.
+   * It must throw if either stored envelope does not re-open.
+   */
+  verifyPersisted(persisted: {
+    encMekCiphertext: string;
+    recoveryCiphertext: string;
+  }): Promise<void>;
 }
 
 /**
@@ -576,8 +712,14 @@ export async function persistRewrappedVaultMeta(args: RewrapVaultArgs): Promise<
     priorEncMekCiphertext,
     newEncMekCiphertext,
     newRecoveryCiphertext,
+    verifyPersisted,
   } = args;
 
+  // The RETURNING on this update asks for the two envelopes rather than
+  // user_id. It is the same round trip either way, and the difference is what
+  // the answer can prove. user_id proved a row matched the compare-and-swap.
+  // The envelopes prove what that row now holds, which is the fact we actually
+  // need: both of the only two ways into this vault are in this one statement.
   const { error: saveErr, data: saveData } = await supabase
     .from("user_vault_meta")
     .update({
@@ -586,9 +728,34 @@ export async function persistRewrappedVaultMeta(args: RewrapVaultArgs): Promise<
     })
     .eq("user_id", userId)
     .eq("enc_mek_ciphertext", priorEncMekCiphertext)
-    .select("user_id");
+    .select("enc_mek_ciphertext, recovery_ciphertext");
   if (saveErr) throw new Error((saveErr as { message?: string }).message ?? "Save failed.");
   if (!saveData || (saveData as unknown[]).length === 0) {
     throw new Error(PASSWORD_CHANGE_CONFLICT_MESSAGE);
   }
+
+  const stored = (saveData as Array<Record<string, unknown>>)[0];
+  const storedEncMek = stored?.enc_mek_ciphertext;
+  const storedRecovery = stored?.recovery_ciphertext;
+  if (typeof storedEncMek !== "string" || typeof storedRecovery !== "string") {
+    // A row came back without the columns we asked for. We cannot prove the
+    // write, so we do not claim it.
+    throw new Error(PASSWORD_CHANGE_NOT_PROVEN_MESSAGE);
+  }
+
+  try {
+    await verifyPersisted({
+      encMekCiphertext: storedEncMek,
+      recoveryCiphertext: storedRecovery,
+    });
+  } catch (cause) {
+    const detail = (cause as { message?: string })?.message;
+    throw new Error(
+      detail
+        ? `${PASSWORD_CHANGE_NOT_PROVEN_MESSAGE} (${detail})`
+        : PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
+    );
+  }
 }
+
+// OR-T2427: no-op commit to replace an orphaned Cloudflare Pages check-run.
