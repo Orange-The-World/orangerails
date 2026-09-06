@@ -35,10 +35,10 @@ import {
   importMekAsHkdf,
 } from "../vault";
 
-const BINDING: KeyringBinding = {
+const BINDING = {
   userId: "11111111-2222-3333-4444-555555555555",
   keyringEpoch: 3,
-};
+} satisfies KeyringBinding;
 
 async function freshMek() {
   return importMekAsHkdf(generateMekBytes());
