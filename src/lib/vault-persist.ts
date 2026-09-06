@@ -62,6 +62,7 @@ export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
 export const PASSWORD_CHANGE_NOT_PROVEN_MESSAGE =
   "Vault password change did not complete. The keys the server returned do not re-open your vault, so neither your old nor your new password can be relied on. Do not close or reload this page, and contact support with this message.";
 
+/**
  * Shown when the reconciliation below the paging loops finds that this run did
  * not re-encrypt every row the table holds for this user.
  *
