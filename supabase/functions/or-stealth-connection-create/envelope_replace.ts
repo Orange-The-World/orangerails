@@ -58,7 +58,17 @@ type SupabaseClient = any;
 /** The fields an envelope replacement writes onto the connection row. */
 export interface EnvelopeReplacementFields {
   sealed_envelope: unknown;
-  wallet_birthday_plaintext: string | null;
+  /**
+   * `undefined` (the request body omitted this key) leaves the stored
+   * birthday untouched, so a caller that resends the envelope without
+   * resending the birthday cannot silently null out a value it never
+   * meant to touch. `null` (the request body included the key with an
+   * explicit null, as the widget always does under ZKA) still clears
+   * it, unchanged from before this distinction existed. A string still
+   * replaces it. See OR-T1242 for why "absent" and "explicit null" must
+   * not be collapsed into the same case here.
+   */
+  wallet_birthday_plaintext: string | null | undefined;
 }
 
 export type EnvelopeReplacementResult =
@@ -96,14 +106,25 @@ export async function applyEnvelopeReplacement(
   //    where the scan starts, but it is still the arm that answers for a
   //    connection with no coverage at all, and both arms must agree that this
   //    connection has read nothing since the new birthday.
+  //
+  //    wallet_birthday_plaintext is included in the patch only when the
+  //    caller actually named a value (a string, or an explicit null). When
+  //    it is undefined, the key is left out of the patch entirely rather
+  //    than sent as null, so the column keeps whatever it already held. See
+  //    the field comment on EnvelopeReplacementFields (OR-T1242) for why
+  //    that distinction matters.
+  const patch: Record<string, unknown> = {
+    sealed_envelope: fields.sealed_envelope,
+    last_block_scanned: null,
+    updated_at: new Date().toISOString(),
+  };
+  if (fields.wallet_birthday_plaintext !== undefined) {
+    patch.wallet_birthday_plaintext = fields.wallet_birthday_plaintext;
+  }
+
   const { error: updateErr } = await client
     .from('stealth_connections')
-    .update({
-      sealed_envelope: fields.sealed_envelope,
-      wallet_birthday_plaintext: fields.wallet_birthday_plaintext,
-      last_block_scanned: null,
-      updated_at: new Date().toISOString(),
-    })
+    .update(patch)
     .eq('id', connectionId);
 
   if (updateErr) {
