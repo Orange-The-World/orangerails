@@ -12,6 +12,7 @@
 import { describe, expect, test } from "vitest";
 import {
   addDataKeyGeneration,
+  canonicalizeUserId,
   canonicalKeyringEpoch,
   dataKeyAt,
   dataKeyFor,
@@ -323,6 +324,49 @@ describe("keyring , the epoch is canonicalised exactly once", () => {
     // 2^53 + 1, the first integer a JS number cannot hold exactly, so this is
     // where the number shape and the exact decimal string stop agreeing.
     expect(() => canonicalKeyringEpoch("9007199254740993")).toThrow(/safe integer range/i);
+  });
+});
+
+describe("keyring , the user id is canonicalised exactly once", () => {
+  test("the same user id in upper and lower case open the same blob", async () => {
+    const mek = await freshMek();
+    const salt = generateVaultSalt();
+    const kr = generateVaultKeyring();
+
+    // A caller that seals under an upper-case UUID and a caller that later
+    // reads the same user's id in lower case (a different code path, a
+    // normalized auth.uid() representation, a case-folding library upgrade)
+    // must agree on the same AAD bytes, or the second one bricks the vault.
+    const blob = await wrapKeyring(kr, mek, salt, {
+      userId: BINDING.userId.toUpperCase(),
+      keyringEpoch: BINDING.keyringEpoch,
+    });
+    await expect(unwrapKeyring(blob, mek, salt, BINDING)).resolves.toEqual(kr);
+  });
+
+  test("accepts canonical UUID shape and normalizes case", () => {
+    expect(canonicalizeUserId(BINDING.userId)).toBe(BINDING.userId);
+    expect(canonicalizeUserId(BINDING.userId.toUpperCase())).toBe(BINDING.userId);
+  });
+
+  test("refuses anything that is not canonical UUID form rather than interpolating it raw", () => {
+    expect(() => canonicalizeUserId("")).toThrow(/user id/i);
+    expect(() => canonicalizeUserId("not-a-uuid")).toThrow(/canonical UUID form/i);
+    expect(() => canonicalizeUserId("11111111222233334444555555555555")).toThrow(
+      /canonical UUID form/i,
+    );
+    expect(() => canonicalizeUserId("11111111-2222-3333-4444-55555555555")).toThrow(
+      /canonical UUID form/i,
+    );
+    expect(() => canonicalizeUserId("11111111-2222-3333-4444-5555555555zz")).toThrow(
+      /canonical UUID form/i,
+    );
+    expect(() => canonicalizeUserId("11111111-2222-3333-4444-555555555555|1")).toThrow(
+      /canonical UUID form/i,
+    );
+    expect(() => canonicalizeUserId(null)).toThrow(/user id/i);
+    expect(() => canonicalizeUserId(undefined)).toThrow(/user id/i);
+    expect(() => canonicalizeUserId(42)).toThrow(/user id/i);
   });
 });
 
