@@ -1,0 +1,80 @@
+name: Canary heartbeat
+
+# Proves the GlitchTip error-reporting pipeline is actually alive, not
+# just configured. Calls or-canary-heartbeat, which always fails, then
+# checks GlitchTip for the resulting event. See OR-T2400 / OR-T0934.
+#
+# Required repository secrets (added separately, never committed here):
+#   SUPABASE_PROJECT_URL       e.g. https://<project-ref>.supabase.co
+#   GLITCHTIP_API_TOKEN        GlitchTip auth token, read-only issues scope
+#   GLITCHTIP_ORG_SLUG         GlitchTip organization slug for pulse.orangerails.com
+#   GLITCHTIP_PROJECT_SLUG     GlitchTip project slug the edge functions report into
+#   ZULIP_ALERT_WEBHOOK        Zulip incoming-webhook URL for a channel someone reads
+#
+# Until those are set, this workflow will run, fail the ingest check every
+# time (because it cannot query GlitchTip), and post to Zulip. That is a
+# loud, correct failure mode: it does not silently report green.
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      skip_invocation:
+        description: 'Skip calling the canary function, to test the miss-alert path without waiting 6h'
+        type: boolean
+        default: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate correlation tag
+        id: tag
+        run: |
+          TAG="canary-$(date +%s)-${RANDOM}${RANDOM}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "invoked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Invoke the canary (deliberately expected to fail)
+        if: ${{ github.event.inputs.skip_invocation != 'true' }}
+        run: |
+          curl -s -o /dev/null -w "canary invocation http status: %{http_code}\n" \
+            "${{ secrets.SUPABASE_PROJECT_URL }}/functions/v1/or-canary-heartbeat?tag=${{ steps.tag.outputs.tag }}" || true
+
+      - name: Wait for GlitchTip ingest
+        run: sleep 30
+
+      - name: Check GlitchTip for the tagged event
+        id: check
+        run: |
+          if [ -z "${{ secrets.GLITCHTIP_API_TOKEN }}" ] || [ -z "${{ secrets.GLITCHTIP_ORG_SLUG }}" ] || [ -z "${{ secrets.GLITCHTIP_PROJECT_SLUG }}" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "reason=GlitchTip API secrets not configured on this repo yet" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.GLITCHTIP_API_TOKEN }}" \
+            "https://pulse.orangerails.com/api/0/projects/${{ secrets.GLITCHTIP_ORG_SLUG }}/${{ secrets.GLITCHTIP_PROJECT_SLUG }}/issues/?query=${{ steps.tag.outputs.tag }}&statsPeriod=1h")
+          COUNT=$(echo "$RESP" | jq 'if type=="array" then length else 0 end')
+          if [ "${COUNT:-0}" -gt 0 ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "reason=no GlitchTip issue matched tag ${{ steps.tag.outputs.tag }} within 1h" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Alert Zulip on a miss
+        if: ${{ steps.check.outputs.found != 'true' }}
+        run: |
+          if [ -z "${{ secrets.ZULIP_ALERT_WEBHOOK }}" ]; then
+            echo "canary miss, and ZULIP_ALERT_WEBHOOK is not configured, so no alert could be sent. Configure both secrets."
+            exit 1
+          fi
+          curl -s -X POST "${{ secrets.ZULIP_ALERT_WEBHOOK }}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"text\": \"Canary heartbeat MISSED: invoked at ${{ steps.tag.outputs.invoked_at }}, tag ${{ steps.tag.outputs.tag }}, reason: ${{ steps.check.outputs.reason }}. The error-reporting pipeline may be broken.\"}"
+          exit 1
+
+      - name: Confirm quiet on a hit
+        if: ${{ steps.check.outputs.found == 'true' }}
+        run: echo "canary event found in GlitchTip for tag ${{ steps.tag.outputs.tag }}, pipeline is alive, no alert sent"
