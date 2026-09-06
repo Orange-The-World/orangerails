@@ -23,8 +23,26 @@
  */
 export type ReadOutcome = "row" | "empty" | "error";
 
+/**
+ * PostgREST's code for ".single() matched zero-or-more-than-one rows."
+ * The SAME code covers both cases (its own message says "multiple (or
+ * no) rows returned"), so the code alone never proves zero rows: only
+ * `details` does, when PostgREST confirms it in text. A details-less or
+ * ambiguous PGRST116 must stay "error" rather than guess "empty", or a
+ * genuine multi-row integrity error would be hidden as an absent row.
+ */
+const PGRST_NO_ROWS = "PGRST116";
+const CONFIRMS_ZERO_ROWS = /\b0 rows\b/i;
+
+function isConfirmedZeroRows(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  if ((error as { code?: unknown }).code !== PGRST_NO_ROWS) return false;
+  const details = (error as { details?: unknown }).details;
+  return typeof details === "string" && CONFIRMS_ZERO_ROWS.test(details);
+}
+
 export function classifyRead(data: unknown, error: unknown): ReadOutcome {
-  if (error) return "error";
+  if (error) return isConfirmedZeroRows(error) ? "empty" : "error";
   if (data === null || data === undefined) return "empty";
   if (Array.isArray(data) && data.length === 0) return "empty";
   return "row";
