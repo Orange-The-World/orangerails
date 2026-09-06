@@ -1868,12 +1868,25 @@ jobs:
           # block legitimate work, and a warning in a log nobody reads is not a
           # control. The file itself must carry, on a line of its own:
           #
-          #   -- OUT-OF-ORDER-OK: <reason>
+          #   -- OUT-OF-ORDER-OK: <project_ref> <reason>
           #
-          # The line has to start at column one and the reason has to be
-          # non-empty. An empty marker is refused on purpose: a token people
-          # paste in without thinking is worse than no token, because it reads
-          # as a decision when none was made.
+          # The line has to start at column one, name the Supabase project ref
+          # this was judged safe for, and carry a non-empty reason after it. An
+          # empty marker, or one with no reason after the project ref, is
+          # refused on purpose: a token people paste in without thinking is
+          # worse than no token, because it reads as a decision when none was
+          # made.
+          #
+          # OR-T2561 / OR-T2555 / OR-C0373. The marker is honored ONLY on the
+          # project it names. A marker written while judging one project safe
+          # (e.g. "the affected table is empty on dev") says nothing about a
+          # different project, where the same table can hold real rows. Before
+          # this fix the check asked only "does a reason exist", never "for
+          # which project", so writing the marker once silently pre-authorized
+          # the same file to apply out of order on every project this guard
+          # runs against. A marker naming a different project than this run's
+          # own ${SUPABASE_REF} is treated exactly like no marker at all: it
+          # fails loud, it is never a silent skip.
           #
           # OR-T0419 / OR-T2139. This guard and the "order scan" built in
           # parallel under OR-T0419 were the same control at the same anchor
@@ -1923,8 +1936,8 @@ jobs:
           OUT_OF_ORDER_ALLOWLIST="20260713120001 20260716120001 20260717123000 20260721120000 20260722000001 20260722130000 20260722140000 20260723120000 20260723210000 20260724180000 20260730000000 20260730120000 20260730120001 20260730200000 20260802120000 20260803000000 20260803120000 20260803140000 20260803160000 20260803190000 20260804000000 20260804000001 20260804090000 20260804140000 20260806100000 20260809130000 20260815000001 20260817230000 20260819120000"
 
           out_of_order_scan () {
-            local applied="$1" files="$2" dir="$3" allowlist="${4:-$OUT_OF_ORDER_ALLOWLIST}"
-            local max base version reason below=0 unmarked=0 allowlisted=0 unknown=0 skipped=0 examined=0
+            local applied="$1" files="$2" dir="$3" allowlist="${4:-$OUT_OF_ORDER_ALLOWLIST}" target_ref="${5:-$SUPABASE_REF}"
+            local max base version marker_raw marker_ref marker_reason below=0 unmarked=0 allowlisted=0 unknown=0 skipped=0 examined=0
             local applied_rows=0 max_label
             # The highest applied version comes from the SAME set this function
             # is filtering with, so the guard can never judge one read of the
@@ -1990,16 +2003,35 @@ jobs:
                 echo "  ~ OUT-OF-ORDER, allowlisted (OR-T2147, one-time amnesty for pre-guard merges): ${base} (version ${version}) sorts below ${max}."
                 continue
               fi
-              # The first marker line decides. If its reason is empty the file
-              # is refused rather than reading on for a better one further down:
-              # what a reader sees first must be what counts.
-              reason=$(sed -n 's/^--[[:space:]]*OUT-OF-ORDER-OK:[[:space:]]*//p' "${dir}/${base}" 2>/dev/null | head -1 || true)
-              reason="${reason%"${reason##*[![:space:]]}"}"
-              if [ -n "$reason" ]; then
-                echo "  ~ OUT-OF-ORDER, acknowledged: ${base} (version ${version}) sorts below the highest applied version ${max}: ${reason}"
+              # OR-T2561. The first marker line decides. If it carries no
+              # separable project ref and reason the file is refused rather
+              # than reading on for a better one further down: what a reader
+              # sees first must be what counts. The marker reads
+              # '<project_ref> <reason>': the first whitespace-separated token
+              # is the project this was judged safe for, everything after the
+              # first space is the reason. It is honored ONLY when that ref
+              # equals target_ref (the project THIS run is applying to) -- a
+              # marker naming any other project, or one with no separable ref
+              # and reason at all, takes the SAME unmarked branch as no marker,
+              # never a silent skip.
+              marker_raw=$(sed -n 's/^--[[:space:]]*OUT-OF-ORDER-OK:[[:space:]]*//p' "${dir}/${base}" 2>/dev/null | head -1 || true)
+              marker_raw="${marker_raw%"${marker_raw##*[![:space:]]}"}"
+              marker_ref=""
+              marker_reason=""
+              case "$marker_raw" in
+                *' '*)
+                  marker_ref="${marker_raw%% *}"
+                  marker_reason="${marker_raw#* }"
+                  ;;
+              esac
+              if [ -z "$marker_ref" ] || [ -z "$marker_reason" ]; then
+                unmarked=$((unmarked + 1))
+                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <project_ref> <reason>' line, at column one, naming a project and a non-empty reason, and is not on the OR-T2147 allowlist."
+              elif [ "$marker_ref" = "$target_ref" ]; then
+                echo "  ~ OUT-OF-ORDER, acknowledged for ${target_ref}: ${base} (version ${version}) sorts below the highest applied version ${max}: ${marker_reason}"
               else
                 unmarked=$((unmarked + 1))
-                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <reason>' line, at column one, with a non-empty reason, and is not on the OR-T2147 allowlist."
+                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries an OUT-OF-ORDER-OK marker for a DIFFERENT project (${marker_ref}), not ${target_ref}. Treated as unmarked: a marker judged safe on one project must never be silently honored on another."
               fi
             done <<< "$files"
             # OR-T2152. Say WHICH of the two empty-max cases this run was. A
@@ -2028,12 +2060,16 @@ jobs:
           ST_APPLIED=$(printf '%s\n' '20990101000000' '20990101000005')
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000000_already_applied.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000002_below_unmarked.sql"
-          printf '%s\n' '-- OUT-OF-ORDER-OK: synthetic self-test, a branch cut before the merge' 'select 1;' > "${ST_DIR}/20990101000003_below_marked.sql"
+          printf '%s\n' '-- OUT-OF-ORDER-OK: stfixturetargetproj synthetic self-test, a branch cut before the merge' 'select 1;' > "${ST_DIR}/20990101000003_below_marked.sql"
           printf '%s\n' '-- OUT-OF-ORDER-OK:' 'select 1;' > "${ST_DIR}/20990101000004_below_empty_marker.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/2099010100000X_notanumber.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/209901010000091_toowide.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000001_below_allowlisted.sql"
+          # OR-T2561. Same reason text as below_marked, a DIFFERENT project
+          # ref: proves a marker judged safe for one project is rejected,
+          # not silently honored, when this run targets another.
+          printf '%s\n' '-- OUT-OF-ORDER-OK: stfixtureotherproj synthetic self-test, a branch cut before the merge' 'select 1;' > "${ST_DIR}/20990100999999_below_wrong_project.sql"
 
           if out_of_order_scan "$ST_APPLIED" '20990101000002_below_unmarked.sql' "$ST_DIR" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
@@ -2055,9 +2091,20 @@ jobs:
             echo "::error::order self-test FAILED: a version of a different width from the ledger's was compared as though lexicographic order meant chronological order. Refusing to apply."
             exit 1
           fi
-          if ! out_of_order_scan "$ST_APPLIED" '20990101000003_below_marked.sql' "$ST_DIR" >/dev/null 2>&1; then
+          if ! out_of_order_scan "$ST_APPLIED" '20990101000003_below_marked.sql' "$ST_DIR" '' 'stfixturetargetproj' >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
-            echo "::error::order self-test FAILED: the guard fired on an older file that carries a valid OUT-OF-ORDER-OK marker with a reason. Refusing to apply."
+            echo "::error::order self-test FAILED: the guard fired on an older file that carries a valid OUT-OF-ORDER-OK marker naming the target project, with a reason. Refusing to apply."
+            exit 1
+          fi
+          # OR-T2561 / OR-T2555. The exact same marker text, honored above
+          # because it names the project this test told the guard it was
+          # targeting, must be REJECTED when the guard is told it is
+          # targeting a DIFFERENT project. A marker judged safe on one
+          # project must never be silently honored on another -- this is the
+          # regression OR-T2555 found and this ticket fixes.
+          if out_of_order_scan "$ST_APPLIED" '20990100999999_below_wrong_project.sql' "$ST_DIR" '' 'stfixturetargetproj' >/dev/null 2>&1; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: the guard silently honored an OUT-OF-ORDER-OK marker that names a DIFFERENT project than the one this run targets."
             exit 1
           fi
           if ! out_of_order_scan "$ST_APPLIED" '20990101000009_in_order.sql' "$ST_DIR" >/dev/null 2>&1; then
@@ -2114,7 +2161,7 @@ jobs:
             exit 1
           fi
           rm -rf "$ST_DIR"
-          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, red on an applied set holding no numeric version at all (OR-T2152), silent on a marked older file, silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147), red on a non-matching synthetic allowlist (OR-T2170)."
+          echo "order self-test ok: red on an unmarked older file, red on an empty marker, red on a non-numeric version, red on a different-width version, red on an applied set holding no numeric version at all (OR-T2152), silent on a marked older file naming the target project, red on the identical marker naming a DIFFERENT project (OR-T2561/OR-T2555), silent on an in-order file, silent on a file already in the applied set, silent on an allowlisted file with no marker (OR-T2147), red on a non-matching synthetic allowlist (OR-T2170)."
 
           # The guard reads the ledger response already read above. NOT a
           # second API call: a second read could disagree with the set the loop
@@ -2123,7 +2170,7 @@ jobs:
           # already-applied skip, with the same expression that loop uses, so
           # the two cannot select different files.
           if [ -n "$TREE_FILES" ] && ! out_of_order_scan "$APPLIED" "$TREE_FILES" "$MIG_DIR"; then
-            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the order guard refused this run and NOTHING was applied. Two different things cause this and they have DIFFERENT remedies. (1) A pending file numbered BELOW the highest applied version named in the scan above, carrying no acknowledgement. It would run against a database already past it, where an absolute REVOKE, a DROP IF EXISTS or an UPDATE whose WHERE clause a later migration changed can silently undo later work. If that file has NEVER been applied in ANY environment, give it a new unused timestamp above the highest applied version. If it is ALREADY APPLIED somewhere else, DO NOT rename it: renaming changes its version, the environment that already ran it no longer finds that version in its ledger, and it applies the file a SECOND time, which is safe only if the migration is idempotent and nothing in this repo requires or checks that. For that case add a line at column one reading -- OUT-OF-ORDER-OK: followed by why applying it late is correct here. (2) A version the guard could not compare, listed above as UNCOMPARABLE. Give the file the same-width numeric timestamp prefix every other migration uses; I-could-not-check is never treated as clean. Do not switch this check off: filename order is a within-run property and cannot be a cross-run guarantee (OR-T0419, OR-T1481)."
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the order guard refused this run and NOTHING was applied. Two different things cause this and they have DIFFERENT remedies. (1) A pending file numbered BELOW the highest applied version named in the scan above, carrying no acknowledgement. It would run against a database already past it, where an absolute REVOKE, a DROP IF EXISTS or an UPDATE whose WHERE clause a later migration changed can silently undo later work. If that file has NEVER been applied in ANY environment, give it a new unused timestamp above the highest applied version. If it is ALREADY APPLIED somewhere else, DO NOT rename it: renaming changes its version, the environment that already ran it no longer finds that version in its ledger, and it applies the file a SECOND time, which is safe only if the migration is idempotent and nothing in this repo requires or checks that. For that case add a line at column one reading -- OUT-OF-ORDER-OK: ${SUPABASE_REF} followed by why applying it late is correct here on THIS project; a marker naming any other project is treated as unmarked, never silently honored. (2) A version the guard could not compare, listed above as UNCOMPARABLE. Give the file the same-width numeric timestamp prefix every other migration uses; I-could-not-check is never treated as clean. Do not switch this check off: filename order is a within-run property and cannot be a cross-run guarantee (OR-T0419, OR-T1481)."
             exit 1
           fi
           echo
