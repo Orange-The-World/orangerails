@@ -29,6 +29,7 @@ import {
   rewrapPqcSecretKey,
   carryPqcSecretsAcrossRotation,
   isAuthenticationTagFailure,
+  CURRENT_PQC_WRAP_KEY_ID,
 } from "../pqc-lifecycle";
 
 /** A fresh random MEK plus the PQC wrap key derived from it. */
@@ -200,6 +201,7 @@ describe("vault recovery: carrying both PQC secrets across the rotation", () => 
       authenticatedSaltB64: saltB64,
       kemSecretWrapped: stored.kem_secret_wrapped,
       sigSecretWrapped: stored.sig_secret_wrapped,
+      storedPqcWrapKeyId: CURRENT_PQC_WRAP_KEY_ID,
     });
 
     expect(carried.pqcKeysReplaced).toBe(false);
@@ -231,6 +233,7 @@ describe("vault recovery: carrying both PQC secrets across the rotation", () => 
       authenticatedSaltB64: saltB64,
       kemSecretWrapped: deadKem,
       sigSecretWrapped: stored.sig_secret_wrapped,
+      storedPqcWrapKeyId: CURRENT_PQC_WRAP_KEY_ID,
     });
 
     expect(carried.newKemSecretWrapped).toBeNull();
@@ -255,6 +258,7 @@ describe("vault recovery: carrying both PQC secrets across the rotation", () => 
       authenticatedSaltB64: saltB64,
       kemSecretWrapped: null,
       sigSecretWrapped: null,
+      storedPqcWrapKeyId: CURRENT_PQC_WRAP_KEY_ID,
     });
 
     expect(carried).toEqual({
@@ -281,6 +285,7 @@ describe("vault recovery: carrying both PQC secrets across the rotation", () => 
         authenticatedSaltB64: saltB64,
         kemSecretWrapped: "AAAA",
         sigSecretWrapped: null,
+        storedPqcWrapKeyId: CURRENT_PQC_WRAP_KEY_ID,
       }),
     ).rejects.toBeTruthy();
   });
@@ -322,6 +327,7 @@ describe("vault recovery: the old wrap key has to be the right key", () => {
         authenticatedSaltB64: authenticatedSalt,
         kemSecretWrapped: stored.kem_secret_wrapped,
         sigSecretWrapped: stored.sig_secret_wrapped,
+        storedPqcWrapKeyId: CURRENT_PQC_WRAP_KEY_ID,
       }),
     ).rejects.toBeTruthy();
 
@@ -351,6 +357,7 @@ describe("vault recovery: the old wrap key has to be the right key", () => {
         authenticatedSaltB64: authenticatedSalt,
         kemSecretWrapped: null,
         sigSecretWrapped: null,
+        storedPqcWrapKeyId: CURRENT_PQC_WRAP_KEY_ID,
       }),
     ).rejects.toBeTruthy();
   });
@@ -376,6 +383,7 @@ describe("vault recovery: the old wrap key has to be the right key", () => {
       authenticatedSaltB64: saltB64,
       kemSecretWrapped: stored.kem_secret_wrapped,
       sigSecretWrapped: null,
+      storedPqcWrapKeyId: CURRENT_PQC_WRAP_KEY_ID,
     });
 
     expect(carried.pqcKeysReplaced).toBe(false);
@@ -402,6 +410,7 @@ describe("vault recovery: the old wrap key has to be the right key", () => {
         authenticatedSaltB64: saltB64,
         kemSecretWrapped: null,
         sigSecretWrapped: null,
+        storedPqcWrapKeyId: CURRENT_PQC_WRAP_KEY_ID,
       }),
     ).rejects.toBeTruthy();
   });
