@@ -1,3 +1,5 @@
+import { CURRENT_PQC_WRAP_KEY_ID } from "@/lib/pqc-lifecycle";
+
 /**
  * The database half of vault recovery and of a vault password change.
  *
@@ -579,6 +581,16 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     rotatedMeta.sig_secret_wrapped = newSigSecretWrapped;
   } else {
     rotatedMeta.sig_public_key = null;
+  }
+  // Stamp the wrap-key version whenever a PQC secret actually moves in this
+  // write, carried or freshly cleared. It travels WITH the ciphertext, not
+  // with the rotation as a whole: a row with no PQC keys yet has nothing to
+  // version here (ensurePqcKeypairs stamps it when it first generates one),
+  // and leaving the column at a stale value while the secret above changes is
+  // exactly the drift carryPqcSecretsAcrossRotation exists to catch on the
+  // NEXT rotation (OR-T2093).
+  if (newKemSecretWrapped !== null || newSigSecretWrapped !== null) {
+    rotatedMeta.pqc_wrap_key_id = CURRENT_PQC_WRAP_KEY_ID;
   }
 
   const { data: updatedRows, error: updateErr } = await supabase
