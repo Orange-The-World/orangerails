@@ -100,7 +100,19 @@ jobs:
         #
         # The escape hatch is the same OUT-OF-ORDER-OK line the deploy guard reads, so an
         # author who satisfies this satisfies that one too.
-        if: github.event_name == 'pull_request'
+        #
+        # SCOPED TO base == dev/prod (OR-T2554). Only those two bases ever get a real
+        # apply-migrations run, so they are the only bases this comparison means anything
+        # for. Without this, a housekeeping PR that brings a stale feature branch up to
+        # date with dev (head=dev, base=some-old-branch) compares dev's already-applied
+        # migrations against that old branch's watermark and reports pre-existing,
+        # already-applied migrations as new findings. That failing check-run then attaches
+        # to dev's own tip commit (the PR's head sha), so dev itself reads red afterward
+        # and every other PR with head=dev inherits it. See PR #1387 for the instance that
+        # proved it: 14 findings, none of them a real new out-of-order migration.
+        if: |
+          github.event_name == 'pull_request' &&
+          contains(fromJSON('["dev", "prod"]'), github.event.pull_request.base.ref)
         run: |
           node scripts/check-migration-order.mjs \
             --base="origin/${{ github.event.pull_request.base.ref }}"
