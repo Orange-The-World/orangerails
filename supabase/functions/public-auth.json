@@ -8,10 +8,12 @@
     "orbi-api-key = checks against orbi_api_keys table (SHA-256 hash, revoked_at IS NULL).",
     "none = intentionally public, no auth at all.",
     "internal-worker-token = checks X-Internal-Worker-Token header against a vault secret (service-internal callers only, never exposed to integrators).",
+    "invitation-token = the caller presents the RAW agent invitation token in the request body; complete_agent_invitation hashes it in the body and matches the stored hash. Read this mode as: reachable by anyone on the internet, guarded by a bearer credential with a 7 day window and no account behind it to lock out. It is used by an invitee who has no session yet, which is why there is no JWT and why the anon key would add nothing. Rate limiting is wanted here and is not built yet. See supabase/functions/or-agent-invite-redeem.",
     "platform-api-key-or-widget-token = accepts a platform key header, OR a widget_token in the request BODY when no key header is present. The token is a pending_widget_sessions row id, minted server-to-server by or-link-mint-token; the platform and app_user_id are read off that row and can never be named by the caller. It is a short-lived bearer credential (300s default, 900s max) and is validated WITHOUT being consumed, so its replay window is the remaining TTL rather than a single request. It exists because a host app's user has no OrangeRails JWT and a browser must never hold a platform key. Same credential or-discover-wallets and or-link-complete already accept. See authenticateWidgetToken in _shared/platform-auth.ts.",
     "CI (scripts/check-public-auth.mjs) asserts this file and config.toml agree in both directions."
   ],
   "functions": {
+    "or-agent-invite-redeem": "invitation-token",
     "or-connection-cancel": "platform-api-key",
     "or-connection-confirm": "platform-api-key",
     "or-connection-create": "platform-api-key",
