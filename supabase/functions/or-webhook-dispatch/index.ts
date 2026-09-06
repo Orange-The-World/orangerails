@@ -21,7 +21,8 @@
  *        AND attempts < MAX_ATTEMPTS
  *      ORDER BY created_at ASC
  *      LIMIT BATCH_SIZE
- *   2. For each row:
+ *   2. For each row, in order, unless the breaker has already tripped this
+ *      invocation (see below):
  *        - Skip if last_attempt_at is younger than the backoff window
  *          (min(60s * 2^attempts, 1h)). This is the exponential-backoff
  *          schedule from the AC: 1m, 2m, 4m, 8m, 16m for attempts 0..4.
@@ -34,6 +35,21 @@
  *        - On HTTP 2xx → succeeded_at = now()
  *        - On any other outcome → attempts += 1, last_attempt_at = now(),
  *          last_error = short string ("HTTP 500" / "fetch failed" / etc.)
+ *
+ * Circuit breaker (OR-T0335). On 2026-08-12 13:43-14:08 EDT a single
+ * systemic database write failure was retried and retired 40 events across
+ * 6 platforms one row at a time, indistinguishable from 40 unrelated bad
+ * rows, with no alert until every row had aged past its own attempt cap.
+ * Many deliveries failing for the exact same reason in one scan is a broken
+ * deployment or a downstream outage, not that many unrelated bad rows, so:
+ * when FAILURE_STREAK_THRESHOLD (3) deliveries in this invocation fail with
+ * the identical error text, processing stops for the rest of the batch (no
+ * attempts bump on those remaining rows, so each stays exactly as retryable
+ * as it was before this tick) and onBreakerTrip pages a human via the
+ * existing GlitchTip path instead of letting the queue silently drain
+ * itself down to nothing. A lone row failing for its own distinct reason
+ * among healthy rows never reaches the threshold and is still retired
+ * normally , the breaker does not replace one failure mode with another.
  *
  * Signature contract (documented for consumers , v1 + v2 in parallel):
  *
@@ -79,12 +95,23 @@
 
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { jsonResponse } from '../_shared/http.ts';
-import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
 
 const MAX_ATTEMPTS = 5;
 const BATCH_SIZE = 50;
 const BACKOFF_BASE_SECONDS = 60;   // 1 minute
 const BACKOFF_MAX_SECONDS = 3600;  // 1 hour
+
+// Three deliveries failing with the exact same error text in one batch is
+// not three unrelated bad rows, it is one cause wearing three faces: a dead
+// downstream host, a broken deploy, or a bad secret rotation all produce
+// this shape, and a flaky integrator endpoint does not, because its
+// failures are spread across ticks and mixed in with other platforms'
+// distinct errors. Set low enough to trip inside a single BATCH_SIZE=50
+// scan so "in the same minute" is literal rather than eventual, and above
+// two so a pair of platforms coincidentally blipping on the same tick
+// cannot trip it alone.
+const FAILURE_STREAK_THRESHOLD = 3;
 
 interface DeliveryRow {
   id: string;
@@ -150,10 +177,45 @@ export function isBackoffElapsed(
   return now.getTime() - last >= windowSeconds * 1000;
 }
 
+/** What onBreakerTrip receives when the same failure fires the breaker. */
+export interface BreakerTripInfo {
+  /** The exact error text shared by every failure that tripped the breaker. */
+  reason: string;
+  /** How many deliveries had already failed with that text when it tripped. */
+  failureCount: number;
+  /** Rows left completely untouched (no attempts bump) once it tripped. */
+  remainingSkipped: number;
+}
+
+/**
+ * Default paging path: report to GlitchTip via the same reportError() used
+ * for uncaught exceptions elsewhere in this codebase, so it lands wherever
+ * that is already monitored. Kept separate from onBreakerTrip's call site
+ * so tests can inject a mock and assert a page fired with no network call.
+ */
+async function defaultOnBreakerTrip(info: BreakerTripInfo): Promise<void> {
+  await reportError(
+    new Error(
+      `or-webhook-dispatch circuit breaker tripped: ${info.failureCount} deliveries failed ` +
+        `identically ("${info.reason}") in one batch. ${info.remainingSkipped} remaining row(s) ` +
+        'were left untouched for the next tick instead of being retried toward their own ' +
+        'attempt cap. This is the shape of a broken deployment or a downstream outage, not ' +
+        'unrelated bad rows.',
+    ),
+    'or-webhook-dispatch',
+  );
+}
+
 interface DispatchDeps {
   serviceClient: SupabaseClient;
   fetchImpl?: typeof fetch;
   now?: () => Date;
+  /**
+   * Called once, at most, if the breaker trips. Defaults to paging via
+   * GlitchTip (defaultOnBreakerTrip). Injected so tests can assert a page
+   * fired without making a real network call, mirroring fetchImpl/now.
+   */
+  onBreakerTrip?: (info: BreakerTripInfo) => Promise<void> | void;
 }
 
 interface DispatchResult {
@@ -163,6 +225,10 @@ interface DispatchResult {
   failed: number;
   skipped_backoff: number;
   abandoned: number;
+  /** Rows left untouched because the breaker had already tripped this invocation. */
+  skipped_breaker: number;
+  breaker_tripped: boolean;
+  breaker_reason: string | null;
 }
 
 /**
@@ -174,6 +240,7 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
   const { serviceClient } = deps;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const now = deps.now ?? (() => new Date());
+  const onBreakerTrip = deps.onBreakerTrip ?? defaultOnBreakerTrip;
 
   const result: DispatchResult = {
     scanned: 0,
@@ -182,6 +249,9 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
     failed: 0,
     skipped_backoff: 0,
     abandoned: 0,
+    skipped_breaker: 0,
+    breaker_tripped: false,
+    breaker_reason: null,
   };
 
   // deno-lint-ignore no-explicit-any
@@ -210,7 +280,27 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
     ((platforms ?? []) as PlatformRow[]).map((p) => [p.id, p]),
   );
 
+  // Failures in THIS invocation only, grouped by their exact error text.
+  // Not persisted: a breaker that stays tripped across ticks would need an
+  // explicit reset path and ops visibility into that state, which is more
+  // machinery than "stop making today worse and page someone" needs. Each
+  // tick starts the count fresh, so a genuinely ongoing outage keeps
+  // tripping (and keeps paging) every minute until it clears or the
+  // rows are drained by hand, and a one-tick blip does not leave anything
+  // wedged.
+  const failureCounts = new Map<string, number>();
+  let breakerTripInfo: { reason: string; failureCount: number } | null = null;
+
   for (const row of pending) {
+    if (breakerTripInfo) {
+      // The breaker already tripped on an earlier row in this same batch.
+      // Leave this row completely untouched: no attempts bump, no
+      // last_attempt_at, so it stays exactly as retryable as it was
+      // before this invocation started.
+      result.skipped_breaker += 1;
+      continue;
+    }
+
     if (!isBackoffElapsed(row, now())) {
       result.skipped_backoff += 1;
       continue;
@@ -221,7 +311,8 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
       // Platform deregistered webhooks (or never had any). Don't keep
       // retrying , mark as succeeded with a sentinel error so ops can
       // tell the difference. attempts is not bumped so the row count
-      // stays accurate.
+      // stays accurate. Deliberately not counted toward the breaker:
+      // this is an expected, permanent stop, not a failure.
       await sb
         .from('webhook_delivery')
         .update({
@@ -254,15 +345,21 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
       // Signing failure means we have a malformed secret , bump
       // attempts so we eventually give up rather than spinning.
       const msg = e instanceof Error ? e.message : String(e);
+      const reason = `sign_failed: ${msg.slice(0, 200)}`;
       await sb
         .from('webhook_delivery')
         .update({
           attempts: row.attempts + 1,
           last_attempt_at: now().toISOString(),
-          last_error: `sign_failed: ${msg.slice(0, 200)}`,
+          last_error: reason,
         })
         .eq('id', row.id);
       result.failed += 1;
+      const count = (failureCounts.get(reason) ?? 0) + 1;
+      failureCounts.set(reason, count);
+      if (!breakerTripInfo && count >= FAILURE_STREAK_THRESHOLD) {
+        breakerTripInfo = { reason, failureCount: count };
+      }
       continue;
     }
 
@@ -299,16 +396,32 @@ export async function dispatchBatch(deps: DispatchDeps): Promise<DispatchResult>
         .eq('id', row.id);
       result.succeeded += 1;
     } else {
+      const reason = errMsg.slice(0, 500);
       await sb
         .from('webhook_delivery')
         .update({
           attempts: row.attempts + 1,
           last_attempt_at: now().toISOString(),
-          last_error: errMsg.slice(0, 500),
+          last_error: reason,
         })
         .eq('id', row.id);
       result.failed += 1;
+      const count = (failureCounts.get(reason) ?? 0) + 1;
+      failureCounts.set(reason, count);
+      if (!breakerTripInfo && count >= FAILURE_STREAK_THRESHOLD) {
+        breakerTripInfo = { reason, failureCount: count };
+      }
     }
+  }
+
+  if (breakerTripInfo) {
+    result.breaker_tripped = true;
+    result.breaker_reason = breakerTripInfo.reason;
+    await onBreakerTrip({
+      reason: breakerTripInfo.reason,
+      failureCount: breakerTripInfo.failureCount,
+      remainingSkipped: result.skipped_breaker,
+    });
   }
 
   return result;
