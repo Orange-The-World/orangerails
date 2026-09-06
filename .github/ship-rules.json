@@ -26,6 +26,10 @@
         },
         {
             "risk": "high",
+            "pattern": "(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml|npm-shrinkwrap\\.json|requirements(-[a-z]+)?\\.txt|Pipfile\\.lock|poetry\\.lock|Cargo\\.lock|go\\.sum|composer\\.lock|Gemfile\\.lock|gradle\\.lockfile)$"
+        },
+        {
+            "risk": "high",
             "pattern": "(^|/)migrations/"
         },
         {
