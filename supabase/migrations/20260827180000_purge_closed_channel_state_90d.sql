@@ -1,3 +1,7 @@
+-- OUT-OF-ORDER-OK: merged below the ledger max with no marker (OR-T2498). Verified no
+-- migration between this file's version and the current ledger max touches
+-- public.channel_state or closed_at, so applying it late changes nothing about its effect.
+--
 -- Closed Lightning channel state: retain 90 days, then delete automatically.
 --
 -- THE DECISION THIS IMPLEMENTS. 90 days. Founder ruling, 2026-08-25, recorded in the
