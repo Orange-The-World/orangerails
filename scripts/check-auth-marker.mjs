@@ -4,7 +4,9 @@
  * authenticating its caller must contain a call to the one shared, named
  * auth helper (requireCallerAuth, in
  * supabase/functions/_shared/require-caller-auth.ts). A function declared
- * "none" must not.
+ * "none" must not, and neither must a function declared in a mode where
+ * there is no caller identity to authenticate (see
+ * NO_CALLER_IDENTITY_MODES below).
  *
  * WHY A MARKER, NOT AN ANALYSIS OF THE CODE. This is deliberate design, not
  * a shortcut. check-public-auth.mjs's own header documents why detecting
@@ -88,6 +90,35 @@ const KNOWN_EXCEPTIONS = new Set([
   "v1-rate",
 ]);
 
+/**
+ * Modes where there is NO CALLER IDENTITY to authenticate, so the absence of
+ * requireCallerAuth is the correct state and not a gap. Checked exactly the
+ * same way "none" is: the function must not call the helper, and one that
+ * does is a real failure, because it means the declaration is wrong.
+ *
+ * This is NOT an exemption and nothing here is waved through. A mode belongs
+ * in this set only when a caller identity cannot exist at the moment the
+ * endpoint is reached, which is a property of the flow rather than of how
+ * much work someone has done yet. The one member today:
+ *
+ *   invitation-token -- the invitee has no session when they redeem, so there
+ *     is no JWT, no auth.uid and nothing for a caller-auth helper to check.
+ *     The credential is a raw bearer token carried in the request body; the
+ *     database function re-hashes it and matches the stored hash, so the
+ *     authentication happens downstream of the edge function by design.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT CHECK. Nothing here verifies that the
+ * downstream database function really does authenticate that token. That is a
+ * property of the migration and belongs to the review of the migration and to
+ * check-anon-rpc-grants.mjs. Do not read a pass here as a statement that the
+ * token is validated anywhere.
+ *
+ * Adding a mode to this set expands what can pass without a marker, so treat a
+ * diff to it as a security decision, exactly as the manifest's own README asks
+ * for entries in that file.
+ */
+const NO_CALLER_IDENTITY_MODES = new Set(["invitation-token"]);
+
 const note = (m) => console.log(m);
 
 if (!existsSync(MANIFEST)) {
@@ -125,12 +156,12 @@ for (const [fn, mode] of Object.entries(manifest)) {
   const source = allTsFiles(dir).map((f) => readFileSync(f, "utf8")).join("\n");
   const callsHelper = HELPER_CALL.test(source);
 
-  if (mode === "none") {
+  if (mode === "none" || NO_CALLER_IDENTITY_MODES.has(mode)) {
     if (callsHelper) {
       fail.push(
-        `${fn}: declares "none" (no caller auth) in public-auth.json but calls requireCallerAuth. ` +
-        `Either the declaration is wrong, or this function does authenticate its caller and the ` +
-        `manifest must say which mode.`);
+        `${fn}: declares "${mode}" in public-auth.json, which asserts there is no caller for this ` +
+        `function to authenticate, but it calls requireCallerAuth. Either the declaration is wrong, ` +
+        `or this function does authenticate its caller and the manifest must say which mode.`);
     } else {
       matched++;
     }
