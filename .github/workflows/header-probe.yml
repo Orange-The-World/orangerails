@@ -45,9 +45,11 @@ jobs:
       - name: Validate URL is one of our own hosts
         id: validate
         shell: bash
+        env:
+          RAW_URL: ${{ inputs.url }}
         run: |
           set -euo pipefail
-          URL="${{ inputs.url }}"
+          URL="$RAW_URL"
           # A probe tool that can be pointed anywhere is an outbound request
           # generator with our name on it. Refuse anything off this list
           # rather than trying to sanitize an arbitrary URL.
@@ -72,9 +74,11 @@ jobs:
       - name: Probe headers
         id: probe
         shell: bash
+        env:
+          RAW_URL: ${{ steps.validate.outputs.url }}
         run: |
           set -uo pipefail
-          URL="${{ steps.validate.outputs.url }}"
+          URL="$RAW_URL"
           # A normal browser UA: some of our own Cloudflare-fronted hosts 403
           # the default curl UA. No redirects followed, body discarded (-o
           # /dev/null) -- we never need it and must never echo it, since an
