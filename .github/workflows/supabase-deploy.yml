@@ -447,6 +447,26 @@ jobs:
             fi
           fi
 
+          # v1-rate's real serving deployment is a separate Supabase project
+          # (orbi-prod), reached through workers/api-gateway's own routing
+          # target. The copy this workflow would otherwise ship to
+          # lcdicqalreskibdfxkzb (orangerails-prod) has never served a live
+          # request: it holds zero rows in orbi_api_keys and orbi_usage_log,
+          # so every call to it 401s or 503s today. Keep deploying it to dev,
+          # where it is genuinely exercised; never redeploy it to
+          # orangerails-prod, or the next force push or workflow_dispatch full
+          # deploy silently recreates the stray deployment this exclusion
+          # exists to prevent.
+          PROD_EXCLUDE="v1-rate"
+          if [ "${{ steps.target.outputs.supabase_ref }}" = "lcdicqalreskibdfxkzb" ]; then
+            for EXCL in $PROD_EXCLUDE; do
+              if echo "$DEPLOY_FUNCS" | grep -qx "$EXCL"; then
+                echo "Excluding $EXCL from the orangerails-prod deploy set: it serves from orbi-prod, not this project."
+                DEPLOY_FUNCS=$(echo "$DEPLOY_FUNCS" | grep -vx "$EXCL" || true)
+              fi
+            done
+          fi
+
           if [ -z "$DEPLOY_FUNCS" ]; then
             echo "No edge functions changed; skipping deploy"
             exit 0
