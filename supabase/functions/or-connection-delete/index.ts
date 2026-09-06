@@ -26,7 +26,7 @@
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { strikeDeleteSubscription, parseStrikeCredentials } from '../_shared/providers/strike/index.ts';
-import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { wrapSentryHandler, reportError } from '../_shared/sentry.ts';
 import { safeErrorLine } from '../_shared/error-redaction.ts';
 
 // --- AES helpers (mirror or-sync's pattern; will share once a util module lands) ---
@@ -234,8 +234,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .delete()
       .eq('connection_id', body.connection_id);
     if (swDelErr) {
+      // Best effort, and REPORTED. The connection delete still proceeds:
+      // blocking a customer's delete because a cleanup query failed is its
+      // own bad outcome, and or-link-complete's liveness guard is the
+      // backstop that catches the orphaned rows on the next link.
+      //
+      // What is not acceptable is the failure being invisible. A failed
+      // cleanup leaves source_wallets rows pointing at a connection id that
+      // is about to stop existing. That orphan state is what lets a later
+      // re-add fingerprint-match a dead row, take the reconnect path, update
+      // a connection that no longer exists, and return success with nothing
+      // written and no error raised anywhere. DL-0389.
       console.error(await safeErrorLine('or-connection-delete', 'source-wallets-cleanup', swDelErr));
-      // Best effort: log but do not block the connection delete.
+      await reportError(swDelErr, 'or-connection-delete', req);
     }
 
     // Step 3: delete the OR connection row (cascades to transactions and the
