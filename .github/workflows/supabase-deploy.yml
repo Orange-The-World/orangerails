@@ -1929,16 +1929,35 @@ jobs:
                 echo "  ~ OUT-OF-ORDER, allowlisted (OR-T2147, one-time amnesty for pre-guard merges): ${base} (version ${version}) sorts below ${max}."
                 continue
               fi
-              # The first marker line decides. If its reason is empty the file
-              # is refused rather than reading on for a better one further down:
-              # what a reader sees first must be what counts.
-              reason=$(sed -n 's/^--[[:space:]]*OUT-OF-ORDER-OK:[[:space:]]*//p' "${dir}/${base}" 2>/dev/null | head -1 || true)
-              reason="${reason%"${reason##*[![:space:]]}"}"
-              if [ -n "$reason" ]; then
-                echo "  ~ OUT-OF-ORDER, acknowledged: ${base} (version ${version}) sorts below the highest applied version ${max}: ${reason}"
+              # OR-T2561. The first marker line decides. If it carries no
+              # separable project ref and reason the file is refused rather
+              # than reading on for a better one further down: what a reader
+              # sees first must be what counts. The marker reads
+              # '<project_ref> <reason>': the first whitespace-separated token
+              # is the project this was judged safe for, everything after the
+              # first space is the reason. It is honored ONLY when that ref
+              # equals target_ref (the project THIS run is applying to) -- a
+              # marker naming any other project, or one with no separable ref
+              # and reason at all, takes the SAME unmarked branch as no marker,
+              # never a silent skip.
+              marker_raw=$(sed -n 's/^--[[:space:]]*OUT-OF-ORDER-OK:[[:space:]]*//p' "${dir}/${base}" 2>/dev/null | head -1 || true)
+              marker_raw="${marker_raw%"${marker_raw##*[![:space:]]}"}"
+              marker_ref=""
+              marker_reason=""
+              case "$marker_raw" in
+                *' '*)
+                  marker_ref="${marker_raw%% *}"
+                  marker_reason="${marker_raw#* }"
+                  ;;
+              esac
+              if [ -z "$marker_ref" ] || [ -z "$marker_reason" ]; then
+                unmarked=$((unmarked + 1))
+                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <project_ref> <reason>' line, at column one, naming a project and a non-empty reason, and is not on the OR-T2147 allowlist."
+              elif [ "$marker_ref" = "$target_ref" ]; then
+                echo "  ~ OUT-OF-ORDER, acknowledged for ${target_ref}: ${base} (version ${version}) sorts below the highest applied version ${max}: ${marker_reason}"
               else
                 unmarked=$((unmarked + 1))
-                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <reason>' line, at column one, with a non-empty reason, and is not on the OR-T2147 allowlist."
+                echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries an OUT-OF-ORDER-OK marker for a DIFFERENT project (${marker_ref}), not ${target_ref}. Treated as unmarked: a marker judged safe on one project must never be silently honored on another."
               fi
             done <<< "$files"
             # OR-T2152. Say WHICH of the two empty-max cases this run was. A
