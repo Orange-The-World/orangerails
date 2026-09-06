@@ -423,12 +423,42 @@ export function canonicalKeyringEpoch(value: unknown): string {
   );
 }
 
-function aadBytes(binding: KeyringBinding): Uint8Array {
-  if (typeof binding.userId !== "string" || binding.userId.length === 0) {
+/** RFC 4122 UUID shape: 8-4-4-4-12 hex digits, hyphenated as shown. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The one place a keyring binding's user id turns into canonical bytes.
+ *
+ * This codebase's user ids are Supabase auth UUIDs. A client library, an
+ * `auth.uid()` call, or a future case-folding change is free to hand the
+ * same user back in a different case, and interpolating the id raw into the
+ * AAD means two such callers would build different bytes for the same user.
+ * The unwrap failure that follows reads to the user as a destroyed vault,
+ * possibly months after the mismatched write. So the id is validated as a
+ * UUID and normalized to lower case, exactly once, here, matching the rigor
+ * canonicalKeyringEpoch already applies to the other AAD field. Anything
+ * that is not that shape throws rather than being interpolated: a UUID
+ * cannot contain "|", so this also cannot collide with the epoch field's
+ * delimiter, and validating the shape here keeps that true even if the
+ * epoch's own format ever changes.
+ */
+export function canonicalizeUserId(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
     throw new Error("Keyring binding requires a user id.");
   }
+  if (!UUID_SHAPE.test(value)) {
+    throw new Error(
+      "Keyring binding requires a user id in canonical UUID form: " +
+        "8-4-4-4-12 hexadecimal digits, hyphenated as shown.",
+    );
+  }
+  return value.toLowerCase();
+}
+
+function aadBytes(binding: KeyringBinding): Uint8Array {
+  const userId = canonicalizeUserId(binding.userId);
   const epoch = canonicalKeyringEpoch(binding.keyringEpoch);
-  return new TextEncoder().encode(`${AAD_PREFIX}|${binding.userId}|${epoch}`);
+  return new TextEncoder().encode(`${AAD_PREFIX}|${userId}|${epoch}`);
 }
 
 /**
