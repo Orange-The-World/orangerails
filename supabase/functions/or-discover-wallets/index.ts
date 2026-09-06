@@ -41,34 +41,8 @@ import { getProvider, listProviderSlugs, parseCredentials } from "../_shared/pro
 import { wrapSentryHandler } from "../_shared/sentry.ts";
 import { lookupErrorCopy } from "../_shared/error-catalog.ts";
 import { safeErrorLine } from "../_shared/error-redaction.ts";
-
-// -- AES-256-GCM helpers (kept inline for edge-fn isolation) ----------------
-
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-async function importAesKey(base64Key: string): Promise<CryptoKey> {
-  const keyBytes = base64ToBytes(base64Key);
-  return crypto.subtle.importKey(
-    "raw",
-    keyBytes as BufferSource,
-    { name: "AES-GCM" },
-    false,
-    ["encrypt", "decrypt"],
-  );
-}
-
-async function decryptAes(ciphertextB64: string, key: CryptoKey): Promise<string> {
-  const data = base64ToBytes(ciphertextB64);
-  const iv = data.slice(0, 12);
-  const cipher = data.slice(12);
-  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipher);
-  return new TextDecoder().decode(plain);
-}
+// Decrypt only, and non extractable. Neither mode of this function encrypts.
+import { decryptAes, importAesKey } from "../_shared/aes-gcm.ts";
 
 function makeServiceClient() {
   return createClient(
