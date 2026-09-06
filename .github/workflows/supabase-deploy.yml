@@ -1048,7 +1048,26 @@ jobs:
             exit 1
           fi
 
-          echo "self-test passed: the policy diff goes red on a removed policy, red on an added policy, red on a changed expression, red on a widened cmd, red on widened roles, and green on a match; and the enablement assertion goes red on RLS switched off with the policy set unchanged, and red on a table born with RLS off and zero policies, both of which the policy diff reports as clean"
+          # RED / GREEN: OR-T1601 finding 2, the RESTRICTIVE-policy invariant.
+          # An empty report is the PASS state (green); any row in it is a
+          # RESTRICTIVE policy the assertion step below must fail on (red).
+          # This is deliberately not exercised through the diff above: a
+          # policy recreated AS PERMISSIVE with the same name, cmd, roles and
+          # expressions is byte-identical in every column that diff compares.
+          printf '' > "$WORKDIR/restrictive-clean.tsv"
+          printf 'public\tdemo_table\tdemo select\tSELECT\t{authenticated}\n' > "$WORKDIR/restrictive-found.tsv"
+
+          if [ -s "$WORKDIR/restrictive-clean.tsv" ]; then
+            echo "::error::self-test failed: an empty restrictive-policy report must be empty"
+            exit 1
+          fi
+
+          if [ ! -s "$WORKDIR/restrictive-found.tsv" ]; then
+            echo "::error::self-test failed: a RESTRICTIVE policy present live was reported as empty (clean)"
+            exit 1
+          fi
+
+          echo "self-test passed: the policy diff goes red on a removed policy, red on an added policy, red on a changed expression, red on a widened cmd, red on widened roles, and green on a match; the enablement assertion goes red on RLS switched off with the policy set unchanged, and red on a table born with RLS off and zero policies, both of which the policy diff reports as clean; and the restrictive-policy assertion goes red when a RESTRICTIVE policy is present and green when none are"
 
       - name: Compare live RLS policies to the committed baseline
         env:
@@ -1262,6 +1281,90 @@ jobs:
             cat "$LIVE_EN"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # -------------------------------------------------------------------
+      # OR-T1601 finding 2. permissive is not among the columns the main
+      # baseline compares (schemaname, tablename, policyname, cmd, roles,
+      # qual_md5, with_check_md5). Recreate a RESTRICTIVE policy AS
+      # PERMISSIVE, same name, cmd, roles and expressions, and every one of
+      # those columns is byte-identical: the diff above stays clean while
+      # the policy flips from a mandatory filter (RESTRICTIVE, ANDs with
+      # every other policy on the same table and command) into an
+      # alternative grant (PERMISSIVE, ORs with them).
+      #
+      # An INVARIANT, not a baseline column, asserted the same way RLS
+      # enablement is above: measured on dev 2026-09-05, zero RESTRICTIVE
+      # policies exist in schema public today. Widening the main baseline's
+      # row shape instead would require regenerating BOTH cluster baselines
+      # in this same PR, including the production one, which the CI token
+      # can reach and this change's author cannot read; an invariant needs
+      # no baseline file to go stale on the cluster nobody regenerated.
+      #
+      # A deliberate exception goes in RESTRICTIVE_POLICY_ALLOWLIST, keyed
+      # `table.policyname`, comma separated, the same shape as
+      # RLS_DISABLED_TABLE_ALLOWLIST above: a reviewed value with a name on
+      # it rather than a silent hole.
+      # -------------------------------------------------------------------
+      - name: Assert no RESTRICTIVE policies exist in schema public
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ needs.target.outputs.supabase_ref }}
+          APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+          ALLOWLIST: ${{ vars.RESTRICTIVE_POLICY_ALLOWLIST }}
+        run: |
+          set -uo pipefail
+
+          if [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "cancelled" ]; then
+            echo "::error::restrictive-policy state UNKNOWN on ${SUPABASE_PROJECT_REF:-unresolved}: apply-migrations ended '${APPLY_RESULT}', so the schema state is not known."
+            exit 1
+          fi
+
+          if [ -z "${SUPABASE_PROJECT_REF}" ]; then
+            echo "::error::restrictive-policy state UNKNOWN: the target job produced no supabase_ref output."
+            exit 1
+          fi
+
+          LIVE_RESTRICTIVE=$(mktemp)
+          ALLOW=$(mktemp)
+          trap 'rm -f "$LIVE_RESTRICTIVE" "$ALLOW"' EXIT
+
+          if ! node scripts/generate-rls-policy-baseline.mjs --restrictive --stdout > "$LIVE_RESTRICTIVE"; then
+            echo "::error::restrictive-policy state UNKNOWN on ${SUPABASE_PROJECT_REF}: the read did not complete. See the script's own error above; it never echoes the token."
+            exit 1
+          fi
+
+          printf '%s\n' "${ALLOWLIST}" | tr ',' '\n' | sed 's/[[:space:]]//g' | grep -v '^$' > "$ALLOW" || true
+
+          OFFENDING=""
+          while IFS=$'\t' read -r SCHEMA TABLE POLICY CMD ROLES; do
+            [ -z "$TABLE" ] && continue
+            KEY="${TABLE}.${POLICY}"
+            if grep -qxF "$KEY" "$ALLOW"; then
+              continue
+            fi
+            OFFENDING="${OFFENDING}- \`${SCHEMA}.${TABLE}\` policy \`${POLICY}\` (${CMD}, roles ${ROLES})\n"
+          done < "$LIVE_RESTRICTIVE"
+
+          if [ -n "${OFFENDING}" ]; then
+            {
+              echo "## :no_entry: RESTRICTIVE polic(y/ies) found in schema \`public\` on \`${SUPABASE_PROJECT_REF}\`"
+              echo ""
+              echo "A RESTRICTIVE policy ANDs with every other policy on its table and"
+              echo "command. Recreating it AS PERMISSIVE leaves the main policy baseline"
+              echo "byte-identical (same name, cmd, roles, expressions) while turning it"
+              echo "into an alternative grant instead of a mandatory filter (OR-T1601)."
+              echo ""
+              printf '%b' "${OFFENDING}"
+              echo ""
+              echo "If this is deliberate, add \`table.policyname\` to the"
+              echo "\`RESTRICTIVE_POLICY_ALLOWLIST\` repository variable with the reason"
+              echo "stated in the pull request."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::RESTRICTIVE polic(y/ies) found in schema public on ${SUPABASE_PROJECT_REF}. See step summary."
+            exit 1
+          fi
+
+          echo "0 RESTRICTIVE polic(y/ies) in schema public on ${SUPABASE_PROJECT_REF} (outside the allowlist)."
 
   # ---------------------------------------------------------------------------
   # OR-T1189. This comparison used to live inside check-pending-migrations, and
