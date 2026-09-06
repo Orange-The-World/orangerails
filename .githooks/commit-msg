@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# commit-msg hook (OR-T0254). Installed per clone with:
+#   git config core.hooksPath .githooks
+# See CONTRIBUTING.md, "Commit messages".
+set -euo pipefail
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+exec bash "${REPO_ROOT}/scripts/scan-commit-message.sh" "$1"
