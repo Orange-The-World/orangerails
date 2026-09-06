@@ -33,7 +33,7 @@
     "or-quiltt-session": "platform-api-key",
     "or-quiltt-session-revoke": "platform-api-key",
     "or-quiltt-session-via-widget": "platform-api-key",
-    "or-quiltt-sync": "platform-api-key",
+    "or-quiltt-sync": "internal-worker-token",
     "or-quiltt-webhook": "hmac",
     "or-source-wallet-lookup": "platform-api-key",
     "or-source-wallets-set": "platform-api-key",
