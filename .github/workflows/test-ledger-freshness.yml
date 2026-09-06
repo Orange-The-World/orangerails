@@ -31,8 +31,17 @@ jobs:
           check() {
             local desc="$1" applied_rows="$2" probe_ok="$3" object_count="$4" want_verdict="$5" want_rc="$6"
             local got_verdict got_rc
+            # set +e / set -e around the call, not an if: GitHub Actions runs
+            # this whole block under bash -e regardless of the `set -uo
+            # pipefail` above (it adds -u and pipefail, it does not clear -e).
+            # A bare `got_verdict=$(...)` assignment is not an `if`, a `while`
+            # or an `&&` chain, so without this bracket a test case expecting
+            # exit 1 (POPULATED, UNKNOWN) kills the whole script right here,
+            # before FAIL is ever set and before any ::error:: is printed.
+            set +e
             got_verdict=$(classify_ledger_freshness "$applied_rows" "$probe_ok" "$object_count")
             got_rc=$?
+            set -e
             if [ "$got_verdict" != "$want_verdict" ] || [ "$got_rc" -ne "$want_rc" ]; then
               echo "::error::self-test FAILED: ${desc} -- wanted verdict '${want_verdict}' exit ${want_rc}, got verdict '${got_verdict}' exit ${got_rc}"
               FAIL=1
