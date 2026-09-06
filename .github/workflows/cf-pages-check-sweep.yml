@@ -1,0 +1,309 @@
+name: Cloudflare Pages stuck check-run sweep
+
+# WHY THIS EXISTS (OR-T1344). Cloudflare's own Pages GitHub integration posts
+# a "Cloudflare Pages: <project>" check-run for every deployment it queues. If
+# a newer push to the same branch supersedes a queued deployment before it
+# starts, Cloudflare marks that deployment stage=queued:skipped, and never
+# sends a further update for the check-run it already opened. GitHub then
+# shows that check as in_progress forever, with zero failing checks, which
+# pins the PR at mergeable_state=unstable. gh_merge_pr refuses that state and
+# no amount of waiting clears it (OR-T0732, OR-T1293). The CTO measured 11 of
+# the last 25 orangerails-prod deployments landing in exactly this state, so
+# this is routine, not a flake.
+#
+# THE MECHANISM THIS WORKFLOW USES TO CLEAR IT, verified by the CTO on
+# OR-T1293: retrying the skipped deployment through Cloudflare's own API
+# makes Cloudflare run a fresh build for the SAME commit and post its result
+# under the SAME check-run name, which overwrites the stuck in_progress
+# state. This never tries to close or edit the Cloudflare check-run itself:
+# only Cloudflare's own GitHub App can do that, and forging a conclusion for
+# a build that never ran would be false reporting, not a fix.
+#
+# OPTIONS REJECTED, and why:
+#  - Have our own CI close out the check-run directly. GitHub check-runs are
+#    scoped to the App that created them; a repo token cannot complete a
+#    check-run opened by Cloudflare's App. Even if it could, marking a build
+#    "done" that never ran would be false reporting, worse than the stuck
+#    state it replaces.
+#  - Stop creating a check-run per deployment; create one per head sha
+#    instead. That is Cloudflare Pages GitHub-integration configuration, not
+#    something this repo controls, and no seat in this org holds a grant for
+#    it (OR-T1293). It would also mean abandoning Cloudflare's own git
+#    integration for something we build and maintain ourselves: a much
+#    bigger, riskier change for a per-PR papercut.
+#  - Manual retry every time (the status quo). Costs a person on every
+#    occurrence, and it keeps happening: 11 of 25 recent deployments,
+#    measured live.
+#
+# TWO PATHS, one resolver:
+#  - REACTIVE (check_run: created): fires within seconds of Cloudflare
+#    opening a check-run. Polls briefly for the paired deployment to settle,
+#    and only acts once it reads queued:skipped. Catches almost every case
+#    before a review is even requested.
+#  - SWEEP (schedule + workflow_dispatch): a catch-all for anything the
+#    reactive path missed (a runner delay, a webhook we did not get). Scans
+#    every open PR's head sha for an in_progress "Cloudflare Pages: " check
+#    older than the threshold.
+# Both triggers only fire once this workflow is on the repo's default
+# branch; that is a GitHub platform rule, not something this file controls.
+#
+# FAIL LOUD. Every run prints, and writes to the job summary, how many stuck
+# check-runs it found, how many it resolved, how many it left alone because
+# they were genuinely still building, how many failed transiently, and how
+# many it could not resolve. A run that finds nothing because it filtered
+# wrongly must not look the same as a run with genuinely nothing to do.
+#
+# EXIT CODE SPLIT, reactive vs sweep. The reactive path (check_run: created)
+# is itself a check-run on the PR it exists to unpin, so a non-zero exit
+# here turns a merely stuck PR into a genuinely RED one, which gh_merge_pr
+# refuses just as firmly. A transient Cloudflare API error (a 5xx or a rate
+# limit inside the 20s curl window) is therefore logged as a ::warning::
+# and does NOT fail the reactive run. The scheduled sweep keeps exit 1 on
+# any unresolved check, because there a red run is a monitoring signal, not
+# a merge gate.
+#
+# The FORCE_FAIL marker below is the one deliberate exception: it exists
+# ONLY so the fail-loud path can be proven before it is trusted, per this
+# ticket's acceptance criteria. Push a commit whose message contains
+# [cf-sweep-force-fail] and the reactive run for that commit resolves
+# against a deployment id that cannot exist, fails for real, turns that
+# commit's own PR check RED ON PURPOSE, and reports it. It never touches a
+# real deployment.
+
+on:
+  check_run:
+    types: [created]
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      stuck_after_minutes:
+        description: >
+          Treat an in_progress "Cloudflare Pages" check older than this many
+          minutes as stuck. Sweep path only; the reactive path uses its own
+          short poll instead.
+        required: false
+        default: '10'
+      stuck_max_age_minutes:
+        description: >
+          Stop retrying a check older than this many minutes and report it
+          unresolved instead. Bounds how many times the sweep can retry the
+          same stuck deployment; without this, a retry that does not clear
+          the check-run would otherwise be repeated every cycle forever.
+          Sweep path only.
+        required: false
+        default: '180'
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+concurrency:
+  group: cf-pages-check-sweep-${{ github.event.check_run.id || 'sweep' }}
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # check_run.name and check_run.details_url are attacker-influenceable
+    # text: whoever can create a check-run on this repo controls them, and
+    # this job holds Cloudflare Pages deploy credentials. They are passed
+    # in as env vars below, never interpolated directly into the bash
+    # script, so a value containing shell metacharacters cannot inject.
+    env:
+      CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      STUCK_AFTER_MINUTES: ${{ github.event.inputs.stuck_after_minutes || '10' }}
+      STUCK_MAX_AGE_MINUTES: ${{ github.event.inputs.stuck_max_age_minutes || '180' }}
+      EVENT_CHECK_RUN_ID: ${{ github.event.check_run.id }}
+      EVENT_CHECK_RUN_NAME: ${{ github.event.check_run.name }}
+      EVENT_CHECK_RUN_DETAILS_URL: ${{ github.event.check_run.details_url }}
+      EVENT_CHECK_RUN_STATUS: ${{ github.event.check_run.status }}
+      EVENT_CHECK_RUN_HEAD_SHA: ${{ github.event.check_run.head_sha }}
+    steps:
+      - name: Require Cloudflare credentials
+        run: |
+          if [ -z "${CF_ACCOUNT}" ] || [ -z "${CF_TOKEN}" ]; then
+            echo "::error::CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN is not set. This sweep cannot tell a stuck check from a resolved one without them, so it must not report a false '0 stuck'. Failing loud instead of guessing."
+            exit 1
+          fi
+
+      - name: Resolve stuck Cloudflare Pages check-run(s)
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          found=0
+          resolved=0
+          left_building=0
+          unresolved=0
+          transient_failed=0
+          report=""
+
+          # One check-run in, one result string out. Never mutates counters
+          # itself, so it is safe to call from either path below without
+          # double counting.
+          #   RETRIED:<id>               deployment was queued:skipped, retried
+          #   RETRY_FAILED:<detail>       deployment was queued:skipped, Cloudflare refused the retry
+          #   BUILDING:<stage>:<status>   not (yet) queued:skipped, left alone
+          #   LOOKUP_FAILED:<detail>      could not read the deployment at all
+          #   NO_DEPLOYMENT_ID            details_url carried no pages.dev preview link
+          resolve_one() {
+            local check_name="$1" details_url="$2" force_fail="$3"
+
+            local project prefix
+            project="${check_name#Cloudflare Pages: }"
+            prefix=$(printf '%s' "$details_url" \
+              | grep -oE 'https://[0-9a-f]{8}\.[a-z0-9-]+\.pages\.dev' | head -1 \
+              | sed -E 's#https://([0-9a-f]{8})\..*#\1#')
+
+            if [ "$force_fail" = "1" ]; then
+              # Deliberately unresolvable. Proves the fail-loud path without
+              # touching a real deployment.
+              prefix="00000000"
+            fi
+
+            if [ -z "$prefix" ]; then
+              echo "NO_DEPLOYMENT_ID"
+              return 0
+            fi
+
+            local dep ok stage stage_status
+            dep=$(curl -sS --max-time 20 -H "Authorization: Bearer ${CF_TOKEN}" \
+              "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/pages/projects/${project}/deployments/${prefix}")
+            ok=$(printf '%s' "$dep" | jq -r '.success // false' 2>/dev/null || echo false)
+            if [ "$ok" != "true" ]; then
+              echo "LOOKUP_FAILED:$(printf '%s' "$dep" | jq -c '.errors // "no body"' 2>/dev/null | tr '\n' ' ')"
+              return 0
+            fi
+
+            stage=$(printf '%s' "$dep" | jq -r '.result.latest_stage.name // "unknown"')
+            stage_status=$(printf '%s' "$dep" | jq -r '.result.latest_stage.status // "unknown"')
+            if [ "$stage" != "queued" ] || [ "$stage_status" != "skipped" ]; then
+              echo "BUILDING:${stage}:${stage_status}"
+              return 0
+            fi
+
+            local retry retry_ok
+            retry=$(curl -sS --max-time 20 -X POST -H "Authorization: Bearer ${CF_TOKEN}" \
+              "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/pages/projects/${project}/deployments/${prefix}/retry")
+            retry_ok=$(printf '%s' "$retry" | jq -r '.success // false' 2>/dev/null || echo false)
+            if [ "$retry_ok" = "true" ]; then
+              echo "RETRIED:${prefix}"
+            else
+              echo "RETRY_FAILED:$(printf '%s' "$retry" | jq -c '.errors // "no body"' 2>/dev/null | tr '\n' ' ')"
+            fi
+          }
+
+          if [ "${GITHUB_EVENT_NAME}" = "check_run" ]; then
+            check_id="${EVENT_CHECK_RUN_ID}"
+            check_name="${EVENT_CHECK_RUN_NAME}"
+            details_url="${EVENT_CHECK_RUN_DETAILS_URL}"
+            status="${EVENT_CHECK_RUN_STATUS}"
+            head_sha="${EVENT_CHECK_RUN_HEAD_SHA}"
+
+            case "$check_name" in
+              "Cloudflare Pages: "*) : ;;
+              *) echo "Not a Cloudflare Pages check (${check_name}). Nothing to do."; exit 0 ;;
+            esac
+            if [ "$status" = "completed" ]; then
+              echo "Check ${check_id} (${check_name}) is already completed. Nothing to do."
+              exit 0
+            fi
+
+            force_fail=0
+            msg=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${head_sha}" --jq '.commit.message' 2>/dev/null || echo "")
+            case "$msg" in
+              *"[cf-sweep-force-fail]"*)
+                force_fail=1
+                echo "::warning::[cf-sweep-force-fail] marker on ${head_sha}. Deliberately resolving against a deployment id that cannot exist, to prove the fail-loud path. No real deployment is touched."
+                ;;
+            esac
+
+            # A genuine build can take a few minutes end to end (observed up
+            # to about 2m30s); the skip decision, when it happens, is made
+            # within seconds of the superseding push. Poll briefly rather than
+            # judging on the very first look, and never force a retry on a
+            # deployment that has not been confirmed skipped.
+            attempt=0
+            result="BUILDING:unknown:unknown"
+            while [ "$attempt" -lt 16 ]; do
+              result=$(resolve_one "$check_name" "$details_url" "$force_fail")
+              case "$result" in
+                BUILDING:*)
+                  [ "$force_fail" = "1" ] && break
+                  attempt=$((attempt + 1))
+                  sleep 15
+                  continue
+                  ;;
+              esac
+              break
+            done
+
+            found=1
+            age_min=$((attempt * 15 / 60))
+            case "$result" in
+              RETRIED:*) resolved=1 ;;
+              BUILDING:*) left_building=1; report="- check ${check_id} (${check_name}): ${result}, still building after ${age_min}m, leaving it\n" ;;
+              *)
+                if [ "$force_fail" = "1" ]; then
+                  unresolved=1
+                  report="- check ${check_id} (${check_name}): ${result}\n"
+                else
+                  transient_failed=1
+                  echo "::warning::Cloudflare lookup for check ${check_id} (${check_name}) failed: ${result}. Not failing the reactive run for a transient CF error; the scheduled sweep will retry it."
+                  report="- check ${check_id} (${check_name}): ${result}, transient, not failing the reactive run\n"
+                fi
+                ;;
+            esac
+          else
+            now=$(date +%s)
+            prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefOid --limit 100)
+            while IFS= read -r pr; do
+              [ -z "$pr" ] && continue
+              sha=$(echo "$pr" | jq -r '.headRefOid')
+              checks=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs" --paginate \
+                --jq '.check_runs[] | select(.status == "in_progress") | select(.name | startswith("Cloudflare Pages: "))')
+              [ -z "$checks" ] && continue
+              while IFS= read -r check; do
+                [ -z "$check" ] && continue
+                check_id=$(echo "$check" | jq -r '.id')
+                check_name=$(echo "$check" | jq -r '.name')
+                details_url=$(echo "$check" | jq -r '.details_url')
+                started=$(echo "$check" | jq -r '.started_at')
+                age_min=$(( (now - $(date -d "$started" +%s)) / 60 ))
+                [ "$age_min" -lt "$STUCK_AFTER_MINUTES" ] && continue
+                found=$((found + 1))
+                if [ "$age_min" -ge "$STUCK_MAX_AGE_MINUTES" ]; then
+                  unresolved=$((unresolved + 1))
+                  report="${report}- PR check ${check_id} (${check_name}), ${age_min}m: EXCEEDS_MAX_RETRY_WINDOW, not retried again, needs a human to look\n"
+                  continue
+                fi
+                result=$(resolve_one "$check_name" "$details_url" "0")
+                case "$result" in
+                  RETRIED:*) resolved=$((resolved + 1)) ;;
+                  BUILDING:*) left_building=$((left_building + 1)); report="${report}- PR check ${check_id} (${check_name}), ${age_min}m: ${result}\n" ;;
+                  *) unresolved=$((unresolved + 1)); report="${report}- PR check ${check_id} (${check_name}), ${age_min}m: ${result}\n" ;;
+                esac
+              done < <(echo "$checks" | jq -c '.')
+            done < <(echo "$prs" | jq -c '.[]')
+          fi
+
+          echo "Cloudflare Pages stuck check-run sweep: found ${found}, retried ${resolved}, left building ${left_building}, transient failures ${transient_failed}, unresolved ${unresolved}."
+          {
+            echo "## Cloudflare Pages stuck check-run sweep"
+            echo
+            echo "Found **${found}**, retried **${resolved}**, left building (not our bug) **${left_building}**, transient failures (not failing this run) **${transient_failed}**, unresolved **${unresolved}**."
+            if [ -n "$report" ]; then
+              echo
+              printf '%b' "$report"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$unresolved" -gt 0 ]; then
+            echo "::error::${unresolved} stuck Cloudflare Pages check-run(s) could not be resolved. See the job summary."
+            exit 1
+          fi
