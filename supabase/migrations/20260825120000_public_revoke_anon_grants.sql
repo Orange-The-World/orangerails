@@ -55,13 +55,15 @@
 -- membership in the role that owns it (pg_has_role returns false), so a function
 -- created in public by that role would take an anon EXECUTE entry at birth and no
 -- migration in this repo can prevent it. This is a future condition, not a present
--- one on dev: as of 2026-09-05, no function in public on the dev project
--- (fzwmnzmtqidumdqjdddz) carries an anon entry from any grantor. Prod is a
--- separate case until this file's own REVOKE lands there: as of the same date,
--- the three trigger functions named above (enforce_customer_vault_pubkey_write_once,
--- enforce_vault_meta_no_direct_delete, enforce_vault_pubkey_write_once) still carry
--- a direct anon EXECUTE grant on prod, functionally inert per the NOTE ON TRIGGER
--- FUNCTIONS above, and cleared the moment this migration is applied there.
+-- one on either project: as of 2026-09-05, verified live against both projects
+-- (has_function_privilege and proacl, not inferred from an earlier migration
+-- header), no function in public on either the dev project (fzwmnzmtqidumdqjdddz)
+-- or the prod project (lcdicqalreskibdfxkzb) carries an anon entry from any
+-- grantor, including the three trigger functions named above. They were already
+-- cleared on both projects by 20260723190000_revoke_anon_execute_public_functions,
+-- before this file was written. This file's own REVOKE over them is therefore a
+-- no-op restatement of an already-closed grant on both projects, not the thing
+-- that closes it.
 --
 -- DECISION: cover the remainder by DETECTION, not by another revoke, because a
 -- revoke we cannot make stick is worse than no control at all. The detection is
