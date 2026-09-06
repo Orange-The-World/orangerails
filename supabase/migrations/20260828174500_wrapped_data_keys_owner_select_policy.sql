@@ -1,3 +1,10 @@
+-- OUT-OF-ORDER-OK: adds only a guarded, idempotent SELECT policy on columns (data_key_id, user_vault_meta.workspace_key_id) that predate this file; no migration merged since touches this table's RLS or those columns, so applying it now, later than its own timestamp, is a safe no-op relative to migration order.
+-- Verified by the DBA 2026-09-06: read the two later migrations that also touch
+-- wrapped_data_keys, 20260828234000 (wrapped_data_keys_complete_grant_rule) and
+-- 20260902001500 (wrapped_data_keys_unique_key_recipient). Neither adds, drops or
+-- rewrites a policy and neither references the columns this policy reads, so there is
+-- no interleaving hazard with this file applying late.
+--
 -- 20260828174500_wrapped_data_keys_owner_select_policy.sql
 --
 -- DEV-0326. A vault owner cannot delete their own wrapped_data_keys rows, because there
