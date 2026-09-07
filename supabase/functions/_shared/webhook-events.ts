@@ -86,9 +86,11 @@ export function buildSyncCompletedPayload(
 
   return {
     // Legacy flat shape. Read by receivers written before the SDK.
-    // provider is kept here for backwards compat; canonical source is data.provider.
+    // provider arrives here via ...data (data.provider === input.provider),
+    // so no separate top-level assignment is needed. The spread is the
+    // canonical source; a redundant explicit key before the spread caused
+    // TS2783/TS2785 because TypeScript correctly detected the overwrite.
     event: SYNC_COMPLETED,
-    provider: input.provider,
     ...data,
     // Canonical shape. Read by @orangerails/webhooks constructEvent().
     type: SYNC_COMPLETED,
