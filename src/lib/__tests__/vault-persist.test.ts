@@ -559,7 +559,7 @@ describe("vault recovery: the rotated meta write", () => {
     const { client, calls } = makeFakeClient({
       rows: {
         connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
-        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0" }],
+        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0", sealed_under: SEALED_UNDER_VAULT_KEY }],
       },
     });
 
@@ -604,6 +604,7 @@ describe("vault recovery: the rotated meta write", () => {
     const rows = Array.from({ length: rowCount }, (_, i) => ({
       id: `txn-${i}`,
       encrypted_payload: `payload-${i}`,
+      sealed_under: SEALED_UNDER_VAULT_KEY,
     }));
     const { client, calls } = makeFakeClient({ rows: { encrypted_transactions: rows } });
 
@@ -684,6 +685,7 @@ describe("vault recovery: the rotated meta write", () => {
     const rows = Array.from({ length: rowCount }, (_, i) => ({
       id: `txn-${String(i).padStart(4, "0")}`,
       encrypted_payload: `payload-${i}`,
+      sealed_under: SEALED_UNDER_VAULT_KEY,
     }));
     const { client, calls } = makeFakeClient({
       rows: { encrypted_transactions: rows },
@@ -730,15 +732,15 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const { client, calls } = makeFakeClient({
       rows: {
         encrypted_transactions: [
-          { id: "txn-1", encrypted_payload: "payload-1" },
-          { id: "txn-2", encrypted_payload: "payload-2" },
+          { id: "txn-1", encrypted_payload: "payload-1", sealed_under: SEALED_UNDER_VAULT_KEY },
+          { id: "txn-2", encrypted_payload: "payload-2", sealed_under: SEALED_UNDER_VAULT_KEY },
         ],
       },
       reorderAfterSelect: {
         encrypted_transactions: (rows) => {
           if (inserted) return rows;
           inserted = true;
-          return [...rows, { id: "txn-3", encrypted_payload: "payload-3" }];
+          return [...rows, { id: "txn-3", encrypted_payload: "payload-3", sealed_under: SEALED_UNDER_VAULT_KEY }];
         },
       },
     });
@@ -842,8 +844,8 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const { client, calls } = makeFakeClient({
       rows: {
         encrypted_transactions: [
-          { id: "txn-1", encrypted_payload: "payload-1" },
-          { id: "txn-2", encrypted_payload: "payload-2" },
+          { id: "txn-1", encrypted_payload: "payload-1", sealed_under: SEALED_UNDER_VAULT_KEY },
+          { id: "txn-2", encrypted_payload: "payload-2", sealed_under: SEALED_UNDER_VAULT_KEY },
         ],
       },
       reorderAfterSelect: {
@@ -852,7 +854,7 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
           churned = true;
           return [
             ...current.filter((row) => (row as { id: string }).id !== "txn-1"),
-            { id: "txn-9", encrypted_payload: "payload-9" },
+            { id: "txn-9", encrypted_payload: "payload-9", sealed_under: SEALED_UNDER_VAULT_KEY },
           ];
         },
       },
@@ -927,12 +929,12 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const clearMigrationKeys = vi.fn();
     let next = 2;
     const { client, calls } = makeFakeClient({
-      rows: { encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-1" }] },
+      rows: { encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-1", sealed_under: SEALED_UNDER_VAULT_KEY }] },
       reorderAfterSelect: {
         encrypted_transactions: (rows) => {
           const id = `txn-${next}`;
           next += 1;
-          return [...rows, { id, encrypted_payload: `payload-${id}` }];
+          return [...rows, { id, encrypted_payload: `payload-${id}`, sealed_under: SEALED_UNDER_VAULT_KEY }];
         },
       },
     });
@@ -984,7 +986,7 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const { client, calls } = makeFakeClient({
       rows: {
         connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
-        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0" }],
+        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0", sealed_under: SEALED_UNDER_VAULT_KEY }],
       },
     });
 
