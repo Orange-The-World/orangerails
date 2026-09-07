@@ -103,11 +103,68 @@ export function rowNotWrittenMessage(label: string, rowId: string): string {
   );
 }
 
+/**
+ * Shown when a row reaches the migration step sealed under a key this
+ * rotation does not manage, despite the read that fetched it filtering for
+ * exactly the key it does manage (see SEALED_UNDER_VAULT_KEY). This should be
+ * unreachable. It exists so a filter that is later dropped or bypassed fails
+ * with a named error instead of handing unreadable ciphertext to the crypto
+ * and aborting partway through an irreversible rotation with no clue why.
+ */
+export function rotationUnexpectedSealMessage(
+  label: string,
+  rowId: string,
+  sealedUnder: string,
+): string {
+  return (
+    `Vault recovery stopped before saving: a ${label} row (${rowId}) is sealed under "${sealedUnder}", ` +
+    "not a key this rotation manages. Your stored vault keys were not changed. Do not close or " +
+    "reload this page, and contact support with this message."
+  );
+}
+
 /** Transactions are re-encrypted in pages of this size. */
 export const TRANSACTION_PAGE_SIZE = 500;
 
 /** Connections are re-encrypted in pages of this size. */
 export const CONNECTION_PAGE_SIZE = 500;
+
+/**
+ * The value of encrypted_transactions.sealed_under that means "this payload
+ * was encrypted with the user's transactions subkey", which is derived from
+ * the MEK and therefore has to move when the MEK moves.
+ *
+ * The other permitted value is 'opk': a background writer sealed the payload
+ * to the subaccount's X25519 public key while the user was offline. The
+ * private half of that keypair never reaches this server and is not derived
+ * from the MEK, so a vault rotation cannot open those rows and must not try.
+ * Skipping them loses nothing: an OPK sealed row reads exactly as well after
+ * a rotation as before it, because the key that opens it did not change.
+ *
+ * This is why both the paged read and the exact count below filter on this
+ * column instead of taking every row row-level security makes visible.
+ * Visibility answers "may this session touch the row"; it does not answer
+ * "was this row sealed under the key this walk holds", and only the second
+ * question is the one reconcileEveryRow needs an honest answer to.
+ */
+export const SEALED_UNDER_VAULT_KEY = "ort";
+
+/**
+ * The literal stored in connections.encrypted_credentials when the provider,
+ * not this vault, holds the bank credentials. It is a marker, not ciphertext:
+ * the column is NOT NULL and there is nothing encrypted to put in it.
+ *
+ * Handing it to migrateCredentialsCiphertext throws, and that throw would
+ * land in the middle of an irreversible rotation. There is nothing under
+ * this key to rotate, so migrateConnection below skips only the credentials
+ * field for this marker and still migrates a real encrypted_label on the
+ * same row.
+ *
+ * Kept in step with the writer by name, not by import: this module ships to
+ * the browser and the writer runs on the edge, so there is no shared module
+ * to hold it.
+ */
+export const CREDENTIALS_HELD_BY_PROVIDER = "quiltt-managed";
 
 /**
  * How many times the reconciliation goes back to finish rows this run missed
@@ -136,15 +193,19 @@ export const RECONCILE_MAX_PASSES = 3;
  * matters, an unreadable count is indistinguishable from agreement, and letting
  * it through would put the original silence straight back.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SealFilter = (query: any) => any;
+
 async function exactRowCount(
   supabase: VaultPersistClient,
   table: string,
   label: string,
   migrated: number,
+  filter?: SealFilter,
 ): Promise<number> {
-  const { count, error } = await supabase
-    .from(table)
-    .select("id", { count: "exact", head: true });
+  let query = supabase.from(table).select("id", { count: "exact", head: true });
+  if (filter) query = filter(query);
+  const { count, error } = await query;
   if (error) throw error;
   if (typeof count !== "number") throw new Error(rowsNotReconciledMessage(label, migrated, null));
   return count;
@@ -158,6 +219,13 @@ interface TableReconcile {
   migrated: Set<string>;
   /** re-walk the table, migrating only the rows not already in `migrated` */
   sweep: () => Promise<void>;
+  /**
+   * Restricts BOTH this table's exact count and its paged reads to rows this
+   * rotation can actually open. Never set on only one of the two: a count
+   * that is unfiltered while the walk is filtered can never settle, because
+   * the count would always exceed what the walk will ever migrate.
+   */
+  filter?: SealFilter;
 }
 
 /**
@@ -247,7 +315,13 @@ async function reconcileEveryRow(
 
     const unsettled: Array<{ entry: TableReconcile; total: number }> = [];
     for (const entry of tables) {
-      const total = await exactRowCount(supabase, entry.table, entry.label, entry.migrated.size);
+      const total = await exactRowCount(
+        supabase,
+        entry.table,
+        entry.label,
+        entry.migrated.size,
+        entry.filter,
+      );
       const added = addedBySweep.get(entry.table) ?? 0;
       // A sweep that migrated something is proof this run had not finished, so
       // the next sweep has to confirm there is nothing left. A total above the
@@ -289,14 +363,13 @@ async function walkAndMigrate<Row extends { id: string }>(
   pageSize: number,
   migrated: Set<string>,
   migrateRow: (row: Row) => Promise<void>,
+  filter?: SealFilter,
 ): Promise<void> {
   let offset = 0;
   for (;;) {
-    const { data, error } = await supabase
-      .from(table)
-      .select(columns)
-      .order("id", { ascending: true })
-      .range(offset, offset + pageSize - 1);
+    let query = supabase.from(table).select(columns).order("id", { ascending: true });
+    if (filter) query = filter(query);
+    const { data, error } = await query.range(offset, offset + pageSize - 1);
     if (error) throw error;
 
     const page = (data ?? []) as Row[];
@@ -440,8 +513,18 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     encrypted_credentials: string;
     encrypted_label: string | null;
   }) => {
-    const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
-    const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
+    const connUpdate: Record<string, unknown> = {};
+
+    // A provider held credential is a marker, not ciphertext (see
+    // CREDENTIALS_HELD_BY_PROVIDER). There is nothing under this vault's key
+    // to rotate, so leave the column untouched rather than handing the
+    // marker to migrateCredentialsCiphertext, which has no key that opens it
+    // and would abort the rotation partway through.
+    if (conn.encrypted_credentials !== CREDENTIALS_HELD_BY_PROVIDER) {
+      connUpdate.encrypted_credentials = await migrateCredentialsCiphertext(
+        conn.encrypted_credentials,
+      );
+    }
     if (conn.encrypted_label) {
       try {
         connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
@@ -454,6 +537,15 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
         }
       }
     }
+
+    if (Object.keys(connUpdate).length === 0) {
+      // Provider held credential, no label: nothing on this row is under this
+      // vault's key, so there is nothing to write. It is reconciled by
+      // definition, not by a database round trip.
+      migratedConnectionIds.add(conn.id);
+      return;
+    }
+
     const { data: connWritten, error: connErr } = await supabase
       .from("connections")
       .update(connUpdate)
@@ -482,7 +574,19 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // the migrated set holding whichever siblings happened to settle first, which
   // is exactly the number the reconciliation below depends on being exact.
   const migratedTransactionIds = new Set<string>();
-  const migrateTransaction = async (txn: { id: string; encrypted_payload: string }) => {
+  const transactionSealFilter: SealFilter = (q) => q.eq("sealed_under", SEALED_UNDER_VAULT_KEY);
+  const migrateTransaction = async (txn: {
+    id: string;
+    encrypted_payload: string;
+    sealed_under: string;
+  }) => {
+    // Defence in depth. The read below already filters to
+    // SEALED_UNDER_VAULT_KEY; this is a named failure instead of a thrown
+    // decryption error if that filter is ever dropped or bypassed and an
+    // OPK-sealed row reaches here anyway.
+    if (txn.sealed_under !== SEALED_UNDER_VAULT_KEY) {
+      throw new Error(rotationUnexpectedSealMessage("transaction", txn.id, txn.sealed_under));
+    }
     const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
     const { data: txnWritten, error: txnErr } = await supabase
       .from("encrypted_transactions")
@@ -499,10 +603,11 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     walkAndMigrate(
       supabase,
       "encrypted_transactions",
-      "id, encrypted_payload",
+      "id, encrypted_payload, sealed_under",
       TRANSACTION_PAGE_SIZE,
       migratedTransactionIds,
       migrateTransaction,
+      transactionSealFilter,
     );
 
   // MIGRATE AND RECONCILE, BEFORE THE META WRITE.
@@ -539,6 +644,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       label: "transactions",
       migrated: migratedTransactionIds,
       sweep: walkTransactions,
+      filter: transactionSealFilter,
     },
   ]);
 

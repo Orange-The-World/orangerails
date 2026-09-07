@@ -25,6 +25,8 @@ import {
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
   RECONCILE_MAX_PASSES,
+  SEALED_UNDER_VAULT_KEY,
+  CREDENTIALS_HELD_BY_PROVIDER,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -124,7 +126,17 @@ function makeFakeClient(options: FakeOptions = {}) {
       if (call.options?.head) {
         const forced = options.countResult?.[call.table];
         if (forced) return { data: null, error: forced.error ?? null, count: forced.count ?? null };
-        return { data: null, error: null, count: stored.length };
+        // Honour a plain equality filter here too (e.g. .eq("sealed_under", ...)),
+        // the same way the paged read below does. A head count that ignored a
+        // filter the paged read honoured would hide exactly the class of bug
+        // this harness exists to catch: the two reads of "the same" table
+        // quietly measuring different sets.
+        let counted = stored;
+        for (const f of call.filters) {
+          if (f.column === "order" || f.column === "range") continue;
+          counted = counted.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
+        }
+        return { data: null, error: null, count: counted.length };
       }
 
       const override = options.selectResult?.[call.table];
@@ -547,7 +559,7 @@ describe("vault recovery: the rotated meta write", () => {
     const { client, calls } = makeFakeClient({
       rows: {
         connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
-        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0" }],
+        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0", sealed_under: SEALED_UNDER_VAULT_KEY }],
       },
     });
 
@@ -592,6 +604,7 @@ describe("vault recovery: the rotated meta write", () => {
     const rows = Array.from({ length: rowCount }, (_, i) => ({
       id: `txn-${i}`,
       encrypted_payload: `payload-${i}`,
+      sealed_under: SEALED_UNDER_VAULT_KEY,
     }));
     const { client, calls } = makeFakeClient({ rows: { encrypted_transactions: rows } });
 
@@ -672,6 +685,7 @@ describe("vault recovery: the rotated meta write", () => {
     const rows = Array.from({ length: rowCount }, (_, i) => ({
       id: `txn-${String(i).padStart(4, "0")}`,
       encrypted_payload: `payload-${i}`,
+      sealed_under: SEALED_UNDER_VAULT_KEY,
     }));
     const { client, calls } = makeFakeClient({
       rows: { encrypted_transactions: rows },
@@ -718,15 +732,15 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const { client, calls } = makeFakeClient({
       rows: {
         encrypted_transactions: [
-          { id: "txn-1", encrypted_payload: "payload-1" },
-          { id: "txn-2", encrypted_payload: "payload-2" },
+          { id: "txn-1", encrypted_payload: "payload-1", sealed_under: SEALED_UNDER_VAULT_KEY },
+          { id: "txn-2", encrypted_payload: "payload-2", sealed_under: SEALED_UNDER_VAULT_KEY },
         ],
       },
       reorderAfterSelect: {
         encrypted_transactions: (rows) => {
           if (inserted) return rows;
           inserted = true;
-          return [...rows, { id: "txn-3", encrypted_payload: "payload-3" }];
+          return [...rows, { id: "txn-3", encrypted_payload: "payload-3", sealed_under: SEALED_UNDER_VAULT_KEY }];
         },
       },
     });
@@ -830,8 +844,8 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const { client, calls } = makeFakeClient({
       rows: {
         encrypted_transactions: [
-          { id: "txn-1", encrypted_payload: "payload-1" },
-          { id: "txn-2", encrypted_payload: "payload-2" },
+          { id: "txn-1", encrypted_payload: "payload-1", sealed_under: SEALED_UNDER_VAULT_KEY },
+          { id: "txn-2", encrypted_payload: "payload-2", sealed_under: SEALED_UNDER_VAULT_KEY },
         ],
       },
       reorderAfterSelect: {
@@ -840,7 +854,7 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
           churned = true;
           return [
             ...current.filter((row) => (row as { id: string }).id !== "txn-1"),
-            { id: "txn-9", encrypted_payload: "payload-9" },
+            { id: "txn-9", encrypted_payload: "payload-9", sealed_under: SEALED_UNDER_VAULT_KEY },
           ];
         },
       },
@@ -915,12 +929,12 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const clearMigrationKeys = vi.fn();
     let next = 2;
     const { client, calls } = makeFakeClient({
-      rows: { encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-1" }] },
+      rows: { encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-1", sealed_under: SEALED_UNDER_VAULT_KEY }] },
       reorderAfterSelect: {
         encrypted_transactions: (rows) => {
           const id = `txn-${next}`;
           next += 1;
-          return [...rows, { id, encrypted_payload: `payload-${id}` }];
+          return [...rows, { id, encrypted_payload: `payload-${id}`, sealed_under: SEALED_UNDER_VAULT_KEY }];
         },
       },
     });
@@ -972,7 +986,7 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const { client, calls } = makeFakeClient({
       rows: {
         connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
-        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0" }],
+        encrypted_transactions: [{ id: "txn-1", encrypted_payload: "payload-v0", sealed_under: SEALED_UNDER_VAULT_KEY }],
       },
     });
 
@@ -1148,5 +1162,96 @@ describe("vault password change: the re-wrapped meta write", () => {
       ),
     ).rejects.toThrow(PASSWORD_CHANGE_CONFLICT_MESSAGE);
     expect(calledTimes).toBe(0);
+  });
+});
+
+describe("vault recovery: rows sealed under a key this rotation does not manage", () => {
+  it("filters encrypted_transactions by sealed_under on both the paged read and the exact count, and never rewrites an opk row", async () => {
+    const migrateTransactionCiphertext = vi.fn(async (c: string) => `${c}-migrated`);
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        encrypted_transactions: [
+          { id: "txn-1", encrypted_payload: "payload-1", sealed_under: SEALED_UNDER_VAULT_KEY },
+          { id: "txn-2", encrypted_payload: "payload-2", sealed_under: "opk" },
+        ],
+      },
+    });
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      migrateTransactionCiphertext,
+    });
+
+    // Only the row sealed under the vault key was ever handed to the crypto.
+    expect(migrateTransactionCiphertext).toHaveBeenCalledTimes(1);
+    expect(migrateTransactionCiphertext).toHaveBeenCalledWith("payload-1");
+
+    const txnUpdates = calls.filter(
+      (c) => c.table === "encrypted_transactions" && c.op === "update",
+    );
+    expect(txnUpdates.map((c) => c.filters.find((f) => f.column === "id")?.value)).toEqual([
+      "txn-1",
+    ]);
+
+    // Both the paged read and the exact count carried the SAME filter. If
+    // only one side had it, this run could never settle: the count would
+    // report 2 forever while the walk can only ever migrate 1.
+    const txnReads = calls.filter(
+      (c) => c.table === "encrypted_transactions" && c.op === "select",
+    );
+    expect(txnReads.length).toBeGreaterThan(0);
+    for (const read of txnReads) {
+      expect(read.filters.find((f) => f.column === "sealed_under")?.value).toBe(
+        SEALED_UNDER_VAULT_KEY,
+      );
+    }
+  });
+
+  it("skips a provider-held connection credential without writing it, but still migrates a real label on the same row", async () => {
+    const migrateCredentialsCiphertext = vi.fn(async (c: string) => `${c}-migrated`);
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [
+          {
+            id: "conn-quiltt",
+            encrypted_credentials: CREDENTIALS_HELD_BY_PROVIDER,
+            encrypted_label: "label-ciphertext",
+          },
+        ],
+      },
+    });
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      migrateCredentialsCiphertext,
+    });
+
+    // The marker was never handed to the crypto: it is not ciphertext and
+    // migrateCredentialsCiphertext has no key that opens it.
+    expect(migrateCredentialsCiphertext).not.toHaveBeenCalledWith(CREDENTIALS_HELD_BY_PROVIDER);
+    expect(migrateCredentialsCiphertext).toHaveBeenCalledWith("label-ciphertext");
+
+    const connUpdate = calls.find((c) => c.table === "connections" && c.op === "update");
+    expect(connUpdate?.values).toEqual({ encrypted_label: "label-ciphertext-migrated" });
+  });
+
+  it("counts a provider-held connection with no label as reconciled without issuing a write", async () => {
+    const { client, calls } = makeFakeClient({
+      rows: {
+        connections: [
+          {
+            id: "conn-quiltt-bare",
+            encrypted_credentials: CREDENTIALS_HELD_BY_PROVIDER,
+            encrypted_label: null,
+          },
+        ],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const connUpdates = calls.filter((c) => c.table === "connections" && c.op === "update");
+    expect(connUpdates).toHaveLength(0);
   });
 });
