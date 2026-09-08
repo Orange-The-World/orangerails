@@ -10,11 +10,33 @@
 -- before a fixed cutoff, and to record exactly how many we chose not to send.
 --
 -- ORDERING. This must run before the schedule exists, not merely before the
--- first tick. The apply runner walks supabase/migrations/*.sql in filename
--- order, one round trip per file, so version 20260824105000 is guaranteed to
--- run ahead of both 20260824110000 (the payload backfill) and 20260824120000
--- (the schedule). The ordering is therefore a property of the filenames rather
--- than of whoever runs the apply.
+-- first tick. That requirement is real and still stands.
+--
+-- CORRECTION, 2026-08-31, OR-T0419. The argument this paragraph used to make
+-- for how that requirement was met is FALSE, and it was falsified on these
+-- exact files. It read: "The apply runner walks supabase/migrations/*.sql in
+-- filename order, one round trip per file, so version 20260824105000 is
+-- guaranteed to run ahead of both 20260824110000 and 20260824120000. The
+-- ordering is therefore a property of the filenames rather than of whoever runs
+-- the apply."
+--
+-- Filename order is a WITHIN-RUN property. The runner sorts the files it is
+-- given in one run and skips anything already in the ledger; it cannot reorder
+-- across runs. On a partly-applied database, which is every environment we own,
+-- a file that merges later while numbering earlier is applied AFTER migrations
+-- that number above it.
+--
+-- That is what happened on dev on 2026-08-24. 20260824120000 (the schedule)
+-- merged first and applied. THIS file merged later with a lower version and did
+-- not. For about forty minutes the dev ledger held the schedule and not the
+-- retirement below, with the drain job active. Nothing was harmed only because
+-- webhook_delivery on dev held 0 rows. That was luck.
+--
+-- WHAT ENFORCES IT NOW. The apply job in .github/workflows/supabase-deploy.yml
+-- refuses to apply a migration numbered below the highest version already in
+-- the target ledger, and names the file and the max. A migration that genuinely
+-- may run late opts in with an explicit "-- out-of-order-apply:" marker line.
+-- Do NOT cite the filename argument again. Cite that guard.
 --
 -- HOW A ROW IS RETIRED, and why not succeeded_at. Setting succeeded_at would
 -- record these as delivered. They were never sent, so every future count of

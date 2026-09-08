@@ -1152,6 +1152,24 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, extWorker));
     extHits.sort((a, b) => a.height - b.height);
 
+    // Same reason as the trim on `hits` after the initial scan, and it has to
+    // be repeated here because this is a SEPARATE array that the earlier trim
+    // never touched. On an aborted filter fetch, heights above
+    // lastContiguousScanned were never contiguously scanned, and this pass can
+    // still produce a hit up there: its cache-miss branch `continue`s past a
+    // broken height instead of stopping, and concurrent workers may have raced
+    // past the failure point before the abort landed. A transaction recorded
+    // above the gap is sealed and uploaded, and the server then advances the
+    // stored cursor to the height it landed at, so the next sync resumes ABOVE
+    // heights nobody ever read. Those heights are never scanned again and any
+    // payment in them is missing from the balance permanently, with no error
+    // and no retry path. Trim in place so everything below sees only the safe,
+    // contiguous range.
+    if (fetchAborted && extHits.length > 0) {
+      const extSafe = extHits.filter((hit) => hit.height <= lastContiguousScanned);
+      extHits.splice(0, extHits.length, ...extSafe);
+    }
+
     // Process extension hits. Only new-address outputs are checked for receives
     // (passNewDerived), but inputs are checked against the full UTXO map so a
     // spend of a previously-received UTXO is detected correctly even when the

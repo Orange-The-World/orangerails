@@ -21,6 +21,11 @@ export interface SyncCompletedEvent {
     subaccount_id: string;
     connection_id: string;
     synced_count: number;
+    /**
+     * Upstream provider that triggered this sync, e.g. 'quiltt', 'strike', 'blink'.
+     * Required. Branch on this when you need to handle providers differently.
+     */
+    provider: string;
     /** ISO 8601 timestamp emitted by Orange Rails at dispatch. */
     ts: string;
   };
