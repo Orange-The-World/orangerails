@@ -154,6 +154,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // In direct mode, lock app_user_id to the authenticated user. Platform
     // mode is reserved for server-to-server integrations and will pass
     // app_user_id explicitly.
+    // Platform mode is intentionally allowed to replace any app_user_id
+    // within the authenticated platform. That integration contract includes
+    // the ability to trigger the full rescan caused by an envelope replace.
     //
     // The widget reaches this endpoint in direct mode only when the consuming
     // app shares our Supabase project, so its user has an OrangeRails JWT.
@@ -185,6 +188,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const blindIndex = typeof body.blind_index === 'string' && body.blind_index.length > 0
       ? body.blind_index
       : null;
+
+    // An absent birthday means the caller is not changing that field. An
+    // explicit null remains meaningful and clears the stored value.
+    const replacementFields = {
+      sealed_envelope: body.sealed_envelope,
+      ...(Object.prototype.hasOwnProperty.call(body, 'wallet_birthday_plaintext')
+        ? { wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null }
+        : {}),
+    };
 
     // ── Dedup path: check for an existing row with the same blind index ──
     // The unique partial index `stealth_connections_dedup_idx` on
@@ -221,10 +233,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         const replaced = await applyEnvelopeReplacement(
           ctx.serviceClient,
           existing.id as string,
-          {
-            sealed_envelope: body.sealed_envelope,
-            wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
-          },
+          replacementFields,
         );
         if (isEnvelopeReplacementError(replaced)) {
           return jsonResponse({ error: replaced.error }, replaced.status, cors);
@@ -282,10 +291,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           const replaced = await applyEnvelopeReplacement(
             ctx.serviceClient,
             raceRow.id as string,
-            {
-              sealed_envelope: body.sealed_envelope,
-              wallet_birthday_plaintext: body.wallet_birthday_plaintext ?? null,
-            },
+            replacementFields,
           );
           if (isEnvelopeReplacementError(replaced)) {
             return jsonResponse({ error: replaced.error }, replaced.status, cors);
