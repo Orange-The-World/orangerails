@@ -238,7 +238,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // returns 500 and Quiltt redelivers; alarming before it would alarm again
     // on every redelivery. Quiltt does not redeliver after a 200, so each
     // accepted event alarms exactly once.
-    alarmOnUnknownQuilttEventTypes(rows, {
+    const alarmRefs = rows.map(({ event_id, event_type }) => ({ event_id, event_type }));
+    alarmOnUnknownQuilttEventTypes(alarmRefs, {
       warn: (line) => console.warn(line),
       // Fire and forget, same posture as the rest of this function's error
       // reporting: a slow or unreachable error tracker must not delay the 200
