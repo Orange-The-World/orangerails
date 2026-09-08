@@ -25,6 +25,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Pin the hygiene scanner to dev HEAD
+        # OR-T2607: a branch or PR cut before the 2026-08-25 redaction fix
+        # still carries the OLD scripts/pre-publish-scan.sh in ITS OWN tree,
+        # which prints raw matched content into this public, unauthenticated
+        # Actions log on every red run. Always run the current script from
+        # dev instead of trusting whatever version happens to be committed
+        # on this ref. This only replaces the scanning code; the working
+        # tree checked out above (what gets scanned) is untouched.
+        run: |
+          git fetch --depth=1 origin dev
+          git show origin/dev:scripts/pre-publish-scan.sh > scripts/pre-publish-scan.sh
+
       - name: Run pre-publish hygiene scan
         # Fails the job (and the required check) if any reserved term or stray
         # internal reference is found. See scripts/pre-publish-scan.sh for the
