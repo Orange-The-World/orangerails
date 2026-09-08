@@ -541,6 +541,56 @@ describe("vault recovery: the rotated meta write", () => {
     expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
 
+  it("refuses to rotate when the caller passes undefined, not just explicit null, for a stored KEM secret", async () => {
+    // The exact shape this ticket named as the risk: a caller that omits the
+    // column from its select gets undefined, not null. A guard that only
+    // checks === null lets this straight through to the write, which then
+    // silently drops the column and orphans the stored ciphertext.
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: "stored-kem-wrapped", sig_secret_wrapped: null },
+        ],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        newKemSecretWrapped: undefined as unknown as string | null,
+      }),
+    ).rejects.toThrow(/stored PQC KEM secret/);
+
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("refuses to rotate when the caller passes undefined, not just explicit null, for a stored signature secret", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: "stored-sig-wrapped" },
+        ],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        newSigSecretWrapped: undefined as unknown as string | null,
+      }),
+    ).rejects.toThrow(/stored PQC signature secret/);
+
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
   it("rotates cleanly when the vault genuinely has no stored PQC secrets", async () => {
     const { client } = makeFakeClient({
       ...oneConnection,
