@@ -51,7 +51,7 @@ import {
 } from '../_shared/platform-auth.ts';
 import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
 import { advanceCursor, isAdvanceCursorError } from './cursor.ts';
-import { recordScanRange } from './scan_range.ts';
+import { recordScanRange, reportScanRangeOutcome } from './scan_range.ts';
 
 interface EnvelopeUpdateRequestBody {
   connection_id?: string;
