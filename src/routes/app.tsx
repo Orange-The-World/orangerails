@@ -1422,6 +1422,24 @@ function AppHome() {
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
           onSubmit={async ({ targetEmail, password }) => {
+            const refreshCoAdminList = async () => {
+              const { data: admins } = await supabase
+                .from("workspace_admins")
+                .select("id, admin_user_id, added_at")
+                .eq("owner_user_id", userId);
+              const freshRows = (admins ?? []) as CoAdminRow[];
+              const freshIds = freshRows.map((r) => r.admin_user_id);
+              const emailMap = new Map<string, string>();
+              if (freshIds.length > 0) {
+                const { data: emailRows } = await supabase.rpc("get_coadmin_emails", {
+                  user_ids: freshIds,
+                });
+                for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
+                  emailMap.set(row.user_id, row.email);
+                }
+              }
+              setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
+            };
             const result = await grantCoAdminWithRefresh({
               grant: () =>
                 grantCoAdmin({
@@ -1432,7 +1450,7 @@ function AppHome() {
                   existingKeyId: workspaceKeyId,
                   supabase: supabase as unknown as GrantSupabaseLike,
                 }),
-              refreshList: () => refreshCoAdminList(userId),
+              refreshList: refreshCoAdminList,
               onRefreshError: (refreshErr) =>
                 console.warn(
                   "[OrangeRails] Co-admin list refresh after a failed grant also failed:",
@@ -1443,7 +1461,7 @@ function AppHome() {
             if (result.workspaceKeyId !== workspaceKeyId) {
               setWorkspaceKeyId(result.workspaceKeyId);
             }
-            await refreshCoAdminList(userId);
+            await refreshCoAdminList();
             setNotice("Co-admin added. They'll see your data on their next unlock.");
           }}
         />
