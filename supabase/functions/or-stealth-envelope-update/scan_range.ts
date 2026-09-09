@@ -222,5 +222,10 @@ export function reportScanRangeOutcome(
   report: (err: Error, fnName: string, req: Request) => void,
 ): ScanRangeResponseFields {
   if (outcome.status !== 'failed') return {};
+  report(
+    new Error(`record_stealth_scan_range failed: code=${outcome.code}`),
+    fnName,
+    req,
+  );
   return { scan_range_failed: { code: outcome.code } };
 }
