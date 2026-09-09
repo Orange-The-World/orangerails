@@ -359,6 +359,77 @@ describe("vault recovery: the rotated meta write", () => {
     expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
   });
 
+  it("deletes stale co-admin wrapped_data_keys under the owner's pre-rotation workspace key, and leaves a different owner's key alone", async () => {
+    const { client, calls, store } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          {
+            user_id: "user-1",
+            kem_secret_wrapped: null,
+            sig_secret_wrapped: null,
+            workspace_key_id: "wk-1",
+          },
+        ],
+        wrapped_data_keys: [
+          { data_key_id: "wk-1", recipient_user_id: "admin-1" },
+          { data_key_id: "wk-2", recipient_user_id: "admin-2" },
+        ],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const wdkDelete = calls.find((c) => c.table === "wrapped_data_keys" && c.op === "delete");
+    expect(wdkDelete?.filters).toContainEqual({ column: "data_key_id", value: "wk-1" });
+    // The store proves it, not just the call: only the owner's own key is gone.
+    expect(store.wrapped_data_keys).toEqual([
+      { data_key_id: "wk-2", recipient_user_id: "admin-2" },
+    ]);
+  });
+
+  it("does not attempt a wrapped_data_keys delete when the owner has no workspace_key_id", async () => {
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: null, workspace_key_id: null },
+        ],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(calls.some((c) => c.table === "wrapped_data_keys")).toBe(false);
+  });
+
+  it("throws and does NOT clear the migration keys when the wrapped_data_keys delete errors", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          {
+            user_id: "user-1",
+            kem_secret_wrapped: null,
+            sig_secret_wrapped: null,
+            workspace_key_id: "wk-1",
+          },
+        ],
+      },
+      deleteResult: { wrapped_data_keys: { data: null, error: { message: "boom" } } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toBeTruthy();
+    // The meta write must not be reached, let alone succeed, once this throws.
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
   it("asks for the updated rows back, because the row count is the only signal", async () => {
     const { client, calls } = makeFakeClient(oneConnection);
 
