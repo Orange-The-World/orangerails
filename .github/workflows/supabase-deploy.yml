@@ -1432,10 +1432,14 @@ jobs:
     # own migrations at merge time, so the dev backlog is always 0 or 1 and prod
     # promotion is a batch that has already run once on a real database.
     #
-    # prod is UNCHANGED and still cannot be reached by a push: it needs an explicit
+    # THIS JOB is not reachable by a push to prod: it needs an explicit
     # workflow_dispatch with the box ticked, the GitHub Environment reviewers, and
     # the actor allowlist below. Deploying code and rewriting a production schema
     # stay different acts with different blast radii.
+    #
+    # Read that as a statement about THIS JOB, not about the prod database.
+    # check-pending-migrations runs on every push to prod and reads the prod
+    # project through the same Management API token; it does not write.
     if: >-
       ${{ (github.event_name == 'push' && github.ref_name == 'dev')
           || (github.event_name == 'workflow_dispatch' && inputs.apply_migrations) }}
@@ -1461,7 +1465,9 @@ jobs:
         # whoever merged, and the control is the reviewed PR that reached dev at all --
         # requiring a second per-person allowlist there would reintroduce exactly the
         # human bottleneck that produced the 37-migration backlog. This never loosens
-        # prod: prod cannot be reached by a push, so prod always takes the branch below.
+        # prod: THIS JOB (apply-migrations) is not reachable by a push to prod, so a
+        # prod apply always takes the dispatch branch below. Other jobs in this file
+        # do read the prod project on a push to prod; none of them write.
         if: ${{ github.event_name == 'workflow_dispatch' }}
         # WHAT THIS GATE CAN AND CANNOT DO. It answers whether this login is
         # allowed to apply on this target, and nothing finer than that. Every seat
