@@ -209,10 +209,11 @@ export interface ScanRangeResponseFields {
  * respectively) and must not be reported or surfaced, or a rate of normal
  * ownership rejections would be indistinguishable from a broken deployment.
  *
- * `report` is injected so this can be unit tested without a network call or a
- * fake SENTRY_DSN: the default forwards to the real reportError, a test passes a
- * spy. Only the error CODE goes into the thrown Error's message; the driver
- * message (which can carry an app_user_id) never leaves the function log.
+ * `report` is a required parameter, not a default: this module does not import
+ * reportError, so it stays free of the Sentry wiring and is trivial to unit
+ * test with a spy. index.ts supplies the real reportError. Only the error CODE
+ * goes into the thrown Error's message; the driver message (which can carry an
+ * app_user_id) never leaves the function log.
  */
 export function reportScanRangeOutcome(
   outcome: ScanRangeOutcome,
