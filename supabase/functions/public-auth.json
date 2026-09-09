@@ -19,7 +19,7 @@
     "or-connection-list": "platform-api-key",
     "or-discover-wallets": "platform-api-key",
     "or-institutions-catalog": "none",
-    "or-link-complete": "platform-api-key",
+    "or-link-complete": "widget-token",
     "or-link-mint-token": "platform-api-key",
     "or-platform-bootstrap": "platform-api-key",
     "or-platform-display": "none",
