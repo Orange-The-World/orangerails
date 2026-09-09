@@ -457,13 +457,14 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // lost instead of orphaning a key with no error and no way back.
   const { data: storedMetaRows, error: storedMetaErr } = await supabase
     .from("user_vault_meta")
-    .select("kem_secret_wrapped, sig_secret_wrapped")
+    .select("kem_secret_wrapped, sig_secret_wrapped, workspace_key_id")
     .eq("user_id", userId);
   if (storedMetaErr) throw storedMetaErr;
   const storedMeta = (
     storedMetaRows as Array<{
       kem_secret_wrapped: string | null;
       sig_secret_wrapped: string | null;
+      workspace_key_id: string | null;
     }> | null
   )?.[0];
   if (storedMeta?.kem_secret_wrapped != null && newKemSecretWrapped === null) {
@@ -652,6 +653,24 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // copy of the new MEK is in the page's memory. Closing or reloading the tab
   // anywhere in that window strands every row that already moved, and the
   // migration loop above is therefore the dangerous stretch, not the write.
+
+  // Delete any co-admin wrapped_data_keys rows under this owner's
+  // PRE-rotation workspace key. Those rows are HKDF children of the OLD MEK
+  // (see grantCoAdmin in co-admin.ts): once every row above is under the new
+  // MEK they open nothing, and left in place a co-admin's consume flow would
+  // succeed while the decrypt silently failed. Deleting here, in the same
+  // step as the meta write below rather than at the start of migration,
+  // means a run that throws before this point (and therefore never reaches
+  // the irreversible meta write either) has not touched co-admin access at
+  // all. Zero rows removed is the ordinary case, for an owner who never
+  // granted a co-admin, and is not treated as an error. See OR-T1949.
+  if (storedMeta?.workspace_key_id) {
+    const { error: wdkErr } = await supabase
+      .from("wrapped_data_keys")
+      .delete()
+      .eq("data_key_id", storedMeta.workspace_key_id);
+    if (wdkErr) throw wdkErr;
+  }
 
   // All ciphertexts migrated. Persist rotated vault meta now that every row is
   // under the new MEK.
