@@ -19,7 +19,12 @@ import {
   assertEquals,
   assertNotEquals,
 } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { buildScanRangeArgs, recordScanRange } from './scan_range.ts';
+import {
+  buildScanRangeArgs,
+  classifyScanRangeError,
+  recordScanRange,
+  reportScanRangeOutcome,
+} from './scan_range.ts';
 
 const CONN_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
