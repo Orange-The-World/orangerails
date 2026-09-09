@@ -658,17 +658,21 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   //
   // WHAT WRITING META LAST ACTUALLY BUYS, and what it does not.
   // If a row migration above threw, the stored enc_mek_ciphertext and
-  // recovery_ciphertext still wrap the OLD MEK, so the user can still unlock
-  // and every un-migrated row still reads. Nothing stored is invalidated. That
-  // is real and it is why this order stays.
+  // recovery_ciphertext still wrap the OLD MEK, so the user can still UNLOCK
+  // and every row this run had not reached yet still reads. That is real and
+  // it is why this order stays. It does NOT mean nothing was invalidated:
+  // every row this run already migrated is now re-encrypted under a MEK that
+  // was never persisted anywhere, and that prefix is permanently unreadable
+  // once this session ends. The ordering saves the ability to unlock and the
+  // un-migrated remainder. It does not save the rows already migrated.
   //
-  // It does NOT make a retry safe. recoverWithCode() generates a FRESH random
-  // MEK on every call and nothing records which rows already moved, so after a
-  // partial failure the rows are split across two MEKs. A retry unwraps the old
-  // MEK again and cannot read the rows the first attempt already rewrote: it
-  // throws on the first of them. Recovering from a partial migration needs a
-  // resumable or per-row-keyed rotation, which does not exist yet. Do not
-  // describe this path as retryable.
+  // It does NOT make a retry safe either. recoverWithCode() generates a FRESH
+  // random MEK on every call and nothing records which rows already moved, so
+  // after a partial failure the rows are split across two MEKs. A retry
+  // unwraps the old MEK again and cannot read the rows the first attempt
+  // already rewrote: it throws on the first of them. Recovering from a partial
+  // migration needs a resumable or per-row-keyed rotation, which does not
+  // exist yet (tracked in OR-T1023). Do not describe this path as retryable.
   // vault_verifier_ciphertext MUST be updated: it is derived from the MEK.
   // This write has to be PROVEN to have landed, not assumed. Every row above is
   // now under the new MEK and the only copies of that MEK are the wrappers in
