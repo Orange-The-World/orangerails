@@ -34,7 +34,7 @@ type QueryResult = { data: unknown[] | null; error: unknown; count?: number | nu
 
 interface RecordedCall {
   table: string;
-  op: "select" | "update";
+  op: "select" | "update" | "delete";
   /** columns passed to .select(), which is what makes the row count readable */
   columns?: string;
   values?: Record<string, unknown>;
@@ -81,6 +81,8 @@ interface FakeOptions {
   otherUpdate?: QueryResult;
   /** what a select returns instead of rows, for the error cases */
   selectResult?: Record<string, QueryResult>;
+  /** what a delete returns instead of removing matching rows, for the error cases */
+  deleteResult?: Record<string, QueryResult>;
   /**
    * Rewrites a table's backing rows immediately AFTER each select on it, so a
    * test can model another session changing the table mid-walk. The real
@@ -116,6 +118,18 @@ function makeFakeClient(options: FakeOptions = {}) {
   for (const [table, rows] of Object.entries(options.rows ?? {})) store[table] = rows.slice();
 
   function resultFor(call: RecordedCall): QueryResult {
+    if (call.op === "delete") {
+      const override = options.deleteResult?.[call.table];
+      if (override) return override;
+      const stored = store[call.table] ?? [];
+      let removed = stored;
+      for (const f of call.filters) {
+        removed = removed.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
+      }
+      const removedSet = new Set(removed);
+      store[call.table] = stored.filter((row) => !removedSet.has(row));
+      return { data: removed, error: null };
+    }
     if (call.op === "select") {
       const stored = store[call.table] ?? [];
 
