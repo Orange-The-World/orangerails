@@ -197,3 +197,78 @@ Deno.test('records at the boundary: from_height 0 is a genesis-start scan, not a
   assertEquals(args?.p_from_height, 0);
   assertEquals(args?.p_app_user_id, CALLER);
 });
+
+// --- OR-T0645 / OR-C1710: a NON-ownership RPC failure must be loud, end to end ---
+//
+// The tests above cover the ownership rejection (P0001 + "does not own
+// connection"): expected, swallowed, cursor write stands. Nothing before this
+// ticket exercised the other branch: a grant moved, the function signature
+// drifted, or anything else classifyScanRangeError has not been told to
+// expect. That branch must reach the caller's response and Sentry, or a
+// broken deployment reads as a healthy sync (this happened for real: OR-T0903).
+
+/** A grant-mismatch error, the shape the DB actually raised when this failed in prod. */
+const GRANT_ERROR = { code: '42501', message: 'permission denied for function record_stealth_scan_range' };
+
+Deno.test('classifyScanRangeError: a grant failure is "failed", not "rejected"', () => {
+  const outcome = classifyScanRangeError(GRANT_ERROR);
+  assertEquals(outcome.status, 'failed');
+  if (outcome.status === 'failed') {
+    assertEquals(outcome.code, '42501');
+    assertEquals(outcome.message, GRANT_ERROR.message);
+  }
+});
+
+Deno.test('recordScanRange: a rejected RPC promise with a non-ownership code returns status "failed"', async () => {
+  const client = { rpc: () => Promise.resolve({ error: GRANT_ERROR }) };
+
+  const outcome = await recordScanRange(client, {
+    connection_id: CONN_ID,
+    app_user_id: CALLER,
+    last_block_scanned: 900_100,
+    from_height: 900_000,
+  });
+
+  assertEquals(outcome.status, 'failed');
+});
+
+Deno.test('reportScanRangeOutcome: a failed outcome reports exactly once, code only, and sets scan_range_failed', () => {
+  const calls: Array<{ message: string; fnName: string }> = [];
+  const req = new Request('https://example.com/or-stealth-envelope-update');
+
+  const fields = reportScanRangeOutcome(
+    { status: 'failed', code: '42501', message: 'permission denied for app_user_id 11111111-1111-1111-1111-111111111111' },
+    'or-stealth-envelope-update',
+    req,
+    (err, fnName) => {
+      calls.push({ message: err.message, fnName });
+    },
+  );
+
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].fnName, 'or-stealth-envelope-update');
+  assertEquals(calls[0].message, 'record_stealth_scan_range failed: code=42501');
+  // The driver message (which carried an app_user_id above) must never reach
+  // the reported error. Only the code may leave the function.
+  assertEquals(calls[0].message.includes('app_user_id'), false);
+  assertEquals(fields, { scan_range_failed: { code: '42501' } });
+});
+
+Deno.test('reportScanRangeOutcome: recorded, rejected and skipped stay exactly as quiet as before this ticket', () => {
+  const req = new Request('https://example.com/or-stealth-envelope-update');
+  let reportCalled = false;
+  const report = () => { reportCalled = true; };
+
+  for (
+    const outcome of [
+      { status: 'recorded' as const },
+      { status: 'rejected' as const, code: 'P0001' },
+      { status: 'skipped' as const },
+    ]
+  ) {
+    const fields = reportScanRangeOutcome(outcome, 'or-stealth-envelope-update', req, report);
+    assertEquals(fields, {});
+  }
+
+  assertEquals(reportCalled, false);
+});
