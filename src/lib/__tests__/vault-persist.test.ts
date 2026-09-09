@@ -257,11 +257,23 @@ function makeFakeClient(options: FakeOptions = {}) {
           };
           return chain;
         },
+        delete() {
+          const call: RecordedCall = { table, op: "delete", filters: [] };
+          calls.push(call);
+          const chain = {
+            ...thenable(call),
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
+            },
+          };
+          return chain;
+        },
       };
     },
   };
 
-  return { client: client as VaultPersistClient, calls };
+  return { client: client as VaultPersistClient, calls, store };
 }
 
 function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) {
