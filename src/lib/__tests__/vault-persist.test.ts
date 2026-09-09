@@ -19,6 +19,7 @@ import {
   migrateAndPersistRotatedVault,
   persistRewrappedVaultMeta,
   rowNotWrittenMessage,
+  VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
@@ -97,6 +98,12 @@ interface FakeOptions {
    * where the count itself is the thing under test.
    */
   countResult?: Record<string, { count?: number | null; error?: unknown }>;
+  /**
+   * Fails a table's row UPDATE from the Nth call onward (1-based), so a test
+   * can prove behaviour when a write itself errors AFTER earlier rows on the
+   * SAME table already succeeded, not only on the very first write of a run.
+   */
+  failUpdateFromCall?: { table: string; call: number; error: unknown };
 }
 
 /**
@@ -114,6 +121,10 @@ function makeFakeClient(options: FakeOptions = {}) {
   // a test's fixture must not be mutated underneath it.
   const store: Record<string, unknown[]> = {};
   for (const [table, rows] of Object.entries(options.rows ?? {})) store[table] = rows.slice();
+
+  // Counts UPDATE calls per table, so failUpdateFromCall can fail a specific
+  // one rather than every write on that table.
+  const updateCallCounts: Record<string, number> = {};
 
   function resultFor(call: RecordedCall): QueryResult {
     if (call.op === "select") {
@@ -186,6 +197,14 @@ function makeFakeClient(options: FakeOptions = {}) {
     }
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
+    }
+
+    const failFrom = options.failUpdateFromCall;
+    if (failFrom && call.table === failFrom.table) {
+      updateCallCounts[call.table] = (updateCallCounts[call.table] ?? 0) + 1;
+      if (updateCallCounts[call.table] >= failFrom.call) {
+        return { data: null, error: failFrom.error };
+      }
     }
 
     // A row update that matched a row hands that row back when it is asked for
@@ -1253,5 +1272,52 @@ describe("vault recovery: rows sealed under a key this rotation does not manage"
 
     const connUpdates = calls.filter((c) => c.table === "connections" && c.op === "update");
     expect(connUpdates).toHaveLength(0);
+  });
+});
+
+describe("vault recovery: a raw failure after rows are already rewritten (OR-T1068)", () => {
+  it("wraps a raw update error on the second connection row in the do-not-close warning, keeping the original error and naming the old password", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      rows: {
+        connections: [
+          { id: "conn-1", encrypted_credentials: "creds-1", encrypted_label: null },
+          { id: "conn-2", encrypted_credentials: "creds-2", encrypted_label: null },
+        ],
+      },
+      failUpdateFromCall: {
+        table: "connections",
+        call: 2,
+        error: { message: "connection reset by peer" },
+      },
+    });
+
+    const rotation = migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys));
+
+    await expect(rotation).rejects.toThrow(/Do not close or reload this page/);
+    await expect(rotation).rejects.toThrow(/connection reset by peer/);
+    await expect(rotation).rejects.toThrow(VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("does NOT add the do-not-close warning when the very first row write fails, because nothing has been rewritten yet", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-1", encrypted_label: null }],
+      },
+      failUpdateFromCall: { table: "connections", call: 1, error: { message: "connection refused" } },
+    });
+
+    let caught: unknown;
+    try {
+      await migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys));
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeTruthy();
+    expect((caught as { message?: string }).message).toBe("connection refused");
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
 });
