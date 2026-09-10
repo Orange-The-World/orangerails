@@ -59,6 +59,10 @@
         {
             "risk": "high",
             "pattern": "^scripts/"
+        },
+        {
+            "risk": "high",
+            "pattern": "^scripts/pre-publish-scan\\.sh$"
         }
     ]
 }
