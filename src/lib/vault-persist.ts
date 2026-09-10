@@ -35,13 +35,33 @@
 export type VaultPersistClient = { from: (table: string) => any };
 
 /**
+ * Every message below that tells the user not to close the page fires at a
+ * moment when the stored enc_mek_ciphertext and recovery_ciphertext still
+ * wrap the OLD MEK, because the one write that would replace them either has
+ * not run yet or did not land. So the vault still opens with the password the
+ * user had BEFORE this recovery attempt, not the new one they just typed.
+ * That is worth saying every time: the obvious next move after seeing an
+ * error, trying the new password, fails and reads as the vault being gone.
+ */
+export const VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE =
+  "Your vault still opens with the password you had before this recovery attempt, not the new one you just chose.";
+
+/**
+ * Marks an error whose message already carries the do-not-close-this-page
+ * class of warning. The catch-all in migrateAndPersistRotatedVault (see
+ * raiseRotationFailure below) passes an error of this type through unchanged
+ * instead of burying it inside a second, more generic message.
+ */
+class VaultRotationSafeError extends Error {}
+
+/**
  * Shown when the rotated vault meta write did not land. By the time this can
  * happen every ciphertext the user owns is already under the new MEK, and the
  * only copies of that MEK are in the write that just failed. That is why the
  * message tells the user not to close the page rather than to try again.
  */
 export const RECOVERY_META_NOT_SAVED_MESSAGE =
-  "Vault recovery did not save. Your data has been re-encrypted but the new keys were not stored. Do not close or reload this page, and contact support with this message.";
+  `Vault recovery did not save. Your data has been re-encrypted but the new keys were not stored. Do not close or reload this page, and contact support with this message. ${VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE}`;
 
 /** Shown when the compare-and-swap on a password change matched no row. */
 export const PASSWORD_CHANGE_CONFLICT_MESSAGE =
@@ -79,7 +99,7 @@ export function rowsNotReconciledMessage(
   return (
     `Vault recovery stopped before saving: migrated ${migrated} of ${totalText} ${label}. ` +
     "Your stored vault keys were not changed. Do not close or reload this page, and contact " +
-    "support with this message."
+    `support with this message. ${VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE}`
   );
 }
 
@@ -99,7 +119,7 @@ export function rowNotWrittenMessage(label: string, rowId: string): string {
   return (
     `Vault recovery stopped before saving: a ${label} row (${rowId}) was not written. ` +
     "Your stored vault keys were not changed. Do not close or reload this page, and contact " +
-    "support with this message."
+    `support with this message. ${VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE}`
   );
 }
 
@@ -119,7 +139,7 @@ export function rotationUnexpectedSealMessage(
   return (
     `Vault recovery stopped before saving: a ${label} row (${rowId}) is sealed under "${sealedUnder}", ` +
     "not a key this rotation manages. Your stored vault keys were not changed. Do not close or " +
-    "reload this page, and contact support with this message."
+    `reload this page, and contact support with this message. ${VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE}`
   );
 }
 
@@ -335,7 +355,7 @@ async function reconcileEveryRow(
       // read as "migrated fewer than exist" rather than the other way round.
       const blocked =
         unsettled.find(({ entry, total }) => total > entry.migrated.size) ?? unsettled[0];
-      throw new Error(
+      throw new VaultRotationSafeError(
         rowsNotReconciledMessage(blocked.entry.label, blocked.entry.migrated.size, blocked.total),
       );
     }
@@ -418,6 +438,36 @@ export interface RotateVaultArgs {
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
+}
+
+/**
+ * Turns a raw failure into the do-not-close-this-page class of message, but
+ * only once a row has actually been rewritten under the new MEK: before that
+ * point closing or reloading the page is genuinely safe, and warning
+ * otherwise would be a false alarm the user has no way to check. The trigger
+ * is whether anything has been written yet, not which statement failed.
+ *
+ * An error that already carries that warning (VaultRotationSafeError) is
+ * re-thrown unchanged rather than buried inside a second, more generic one.
+ * A raw failure before the first write is re-thrown unchanged too, so a
+ * caller further up still sees the original error.
+ */
+function raiseRotationFailure(cause: unknown, rowsAlreadyWritten: boolean): never {
+  if (cause instanceof VaultRotationSafeError || !rowsAlreadyWritten) {
+    throw cause;
+  }
+  const detail =
+    cause instanceof Error
+      ? cause.message
+      : cause && typeof cause === "object" && "message" in cause
+        ? String((cause as { message?: unknown }).message)
+        : String(cause);
+  throw new VaultRotationSafeError(
+    "Vault recovery hit an unexpected error partway through re-encrypting your data. Some of " +
+      "your rows may already be under the new key material while others are not. Do not close " +
+      `or reload this page, and contact support with this message: ${detail} ` +
+      VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE,
+  );
 }
 
 /**
@@ -507,6 +557,11 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // returned the row it changed: a read that hands the same row back twice must
   // not be able to make the reconciliation agree, and neither must a write that
   // was refused at the row layer.
+  // Flips true the instant a row write actually lands, so a later failure can
+  // tell a reader "reload is safe, nothing happened yet" from "do not close
+  // this page, some of your data may already be under the new key". Read only
+  // in raiseRotationFailure below; never used to decide whether to write.
+  let anyRowWritten = false;
   const migratedConnectionIds = new Set<string>();
   const migrateConnection = async (conn: {
     id: string;
@@ -553,9 +608,10 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       .select("id");
     if (connErr) throw connErr;
     if (!connWritten || (connWritten as unknown[]).length !== 1) {
-      throw new Error(rowNotWrittenMessage("connection", conn.id));
+      throw new VaultRotationSafeError(rowNotWrittenMessage("connection", conn.id));
     }
     migratedConnectionIds.add(conn.id);
+    anyRowWritten = true;
   };
   const walkConnections = () =>
     walkAndMigrate(
@@ -585,7 +641,9 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     // decryption error if that filter is ever dropped or bypassed and an
     // OPK-sealed row reaches here anyway.
     if (txn.sealed_under !== SEALED_UNDER_VAULT_KEY) {
-      throw new Error(rotationUnexpectedSealMessage("transaction", txn.id, txn.sealed_under));
+      throw new VaultRotationSafeError(
+        rotationUnexpectedSealMessage("transaction", txn.id, txn.sealed_under),
+      );
     }
     const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
     const { data: txnWritten, error: txnErr } = await supabase
@@ -595,9 +653,10 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       .select("id");
     if (txnErr) throw txnErr;
     if (!txnWritten || (txnWritten as unknown[]).length !== 1) {
-      throw new Error(rowNotWrittenMessage("transaction", txn.id));
+      throw new VaultRotationSafeError(rowNotWrittenMessage("transaction", txn.id));
     }
     migratedTransactionIds.add(txn.id);
+    anyRowWritten = true;
   };
   const walkTransactions = () =>
     walkAndMigrate(
@@ -632,21 +691,25 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // Both tables are reconciled together rather than one after each walk,
   // deliberately: a row inserted into connections DURING the transaction walk
   // is caught only by a check that runs after both.
-  await reconcileEveryRow(supabase, [
-    {
-      table: "connections",
-      label: "connections",
-      migrated: migratedConnectionIds,
-      sweep: walkConnections,
-    },
-    {
-      table: "encrypted_transactions",
-      label: "transactions",
-      migrated: migratedTransactionIds,
-      sweep: walkTransactions,
-      filter: transactionSealFilter,
-    },
-  ]);
+  try {
+    await reconcileEveryRow(supabase, [
+      {
+        table: "connections",
+        label: "connections",
+        migrated: migratedConnectionIds,
+        sweep: walkConnections,
+      },
+      {
+        table: "encrypted_transactions",
+        label: "transactions",
+        migrated: migratedTransactionIds,
+        sweep: walkTransactions,
+        filter: transactionSealFilter,
+      },
+    ]);
+  } catch (cause) {
+    raiseRotationFailure(cause, anyRowWritten);
+  }
 
   // From the first rewritten row until the meta write below lands, the only
   // copy of the new MEK is in the page's memory. Closing or reloading the tab
@@ -736,13 +799,19 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     rotatedMeta.sig_public_key = null;
   }
 
-  const { data: updatedRows, error: updateErr } = await supabase
-    .from("user_vault_meta")
-    .update(rotatedMeta)
-    .eq("user_id", userId)
-    .eq("recovery_ciphertext", priorRecoveryCiphertext)
-    .select("user_id");
-  if (updateErr) throw updateErr;
+  let metaUpdateResult: { data: unknown; error: unknown };
+  try {
+    metaUpdateResult = await supabase
+      .from("user_vault_meta")
+      .update(rotatedMeta)
+      .eq("user_id", userId)
+      .eq("recovery_ciphertext", priorRecoveryCiphertext)
+      .select("user_id");
+  } catch (cause) {
+    raiseRotationFailure(cause, anyRowWritten);
+  }
+  const { data: updatedRows, error: updateErr } = metaUpdateResult;
+  if (updateErr) raiseRotationFailure(updateErr, anyRowWritten);
   if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
     throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
   }
