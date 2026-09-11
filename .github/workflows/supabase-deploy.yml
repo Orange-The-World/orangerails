@@ -72,10 +72,11 @@ jobs:
   # THE RULE NOW: a migration and the code that needs it land together, or neither
   # lands.
   #
-  #   target                    resolves the project (no secrets, no side effects)
-  #   apply-migrations          needs: target   AUTOMATIC on a push to dev
-  #   check-pending-migrations  needs: target   gates the deploy, does not follow it
-  #   deploy                    needs: gate     cannot ship ahead of its schema
+  #   target                      resolves the project (no secrets, no side effects)
+  #   check-duplicate-migrations  file-only gate; no database or target output needed
+  #   apply-migrations            needs: target + duplicate gate; automatic on a dev push
+  #   check-pending-migrations    needs: target + duplicate gate + apply; checks DB drift
+  #   deploy                      needs: drift and RLS gates; cannot ship ahead of its schema
   #
   # dev applies on merge, so its backlog can never exceed one and a bad migration
   # breaks dev in front of the person who wrote it. prod keeps the two-party
