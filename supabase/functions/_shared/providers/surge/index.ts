@@ -90,10 +90,8 @@ function decodeTokenEnvelope(token: string): SurgeTokenEnvelope {
   let env: unknown;
   try {
     env = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(
-      `[surge] bearer_token envelope is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    throw new Error('[surge] bearer_token envelope is not valid JSON');
   }
   if (!env || typeof env !== 'object') {
     throw new Error('[surge] bearer_token envelope must be an object');
