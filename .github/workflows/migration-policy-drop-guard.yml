@@ -1,0 +1,119 @@
+name: migration policy drop guard
+
+# OR-T1376, out of OR-T1324/OR-T1375.
+#
+# supabase/migrations/20260421200000_platforms_subaccounts.sql contained a
+# DO block that looped over pg_policies and dropped whatever it found,
+# regardless of what created it. It silently ate a co-admin policy created
+# 25 hours earlier by a different migration, and nobody noticed for four
+# months. The block's own header called the enumeration deliberate, "to
+# defend against policies added by future migrations we don't know about
+# yet" -- which is precisely what makes it dangerous: it is written to
+# destroy things the author has not seen.
+#
+# This is a text lint over the diff, not a schema oracle. There is no
+# machine-readable "expected policy set" for this repository, and building
+# one would mean keeping a manifest true forever, which is the same
+# enumeration problem with extra steps. See
+# scripts/ci/migration_policy_drop_guard.py for what it actually checks.
+#
+# OUT OF SCOPE, on purpose: this does not touch any existing migration and
+# does not restore any policy. It only looks at files a pull request adds
+# or changes under supabase/migrations/.
+
+on:
+  pull_request:
+    paths:
+      - 'supabase/migrations/**'
+      - '.github/workflows/migration-policy-drop-guard.yml'
+      - 'scripts/ci/migration_policy_drop_guard.py'
+      - 'scripts/ci/fixtures/**'
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: refuse enumerated/dynamic DROP POLICY in new migrations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Self-test the checker (it must be able to fail)
+        run: |
+          set -euo pipefail
+
+          fail=0
+
+          # Case 1: the exact DO block that ate a real policy (OR-T1324) must
+          # be flagged. A checker that cannot fail on this is not a checker.
+          if python3 scripts/ci/migration_policy_drop_guard.py \
+               scripts/ci/fixtures/dynamic_drop_policy.sql; then
+            echo "::error::self-test failed: dynamic_drop_policy.sql should have been flagged (exit != 0) and was not."
+            fail=1
+          else
+            echo "ok: dynamic_drop_policy.sql was flagged, as required."
+          fi
+
+          # Case 2: a literal DROP POLICY IF EXISTS must never be flagged.
+          if python3 scripts/ci/migration_policy_drop_guard.py \
+               scripts/ci/fixtures/literal_drop_policy.sql; then
+            echo "ok: literal_drop_policy.sql was not flagged, as required."
+          else
+            echo "::error::self-test failed: literal_drop_policy.sql was flagged and should not have been."
+            fail=1
+          fi
+
+          # Case 3: the same dynamic shape, with the opt-out marker, must be
+          # allowed through deliberately and visibly.
+          if python3 scripts/ci/migration_policy_drop_guard.py \
+               scripts/ci/fixtures/escaped_dynamic_drop_policy.sql; then
+            echo "ok: escaped_dynamic_drop_policy.sql was allowed through its marker, as required."
+          else
+            echo "::error::self-test failed: escaped_dynamic_drop_policy.sql carries a valid opt-out marker and should not have been flagged."
+            fail=1
+          fi
+
+          # Case 4: called with zero files, the checker must refuse rather
+          # than silently report success. This is the silent-loop failure
+          # shape this estate keeps rediscovering: a check that finishes and
+          # exits 0 without having examined anything.
+          if python3 scripts/ci/migration_policy_drop_guard.py; then
+            echo "::error::self-test failed: calling the checker with zero files exited 0. It must refuse."
+            fail=1
+          else
+            echo "ok: zero files was refused, not silently passed."
+          fi
+
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::migration_policy_drop_guard.py self-test failed. The guard is broken, not passing."
+            exit 1
+          fi
+          echo "Self-test passed: 4 cases, all as expected."
+
+      - name: Find added/changed migration files in this pull request
+        id: changed
+        run: |
+          set -euo pipefail
+          git diff --name-only --diff-filter=ACM \
+            "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" \
+            -- supabase/migrations/ > changed_migrations.txt || true
+
+          COUNT=$(wc -l < changed_migrations.txt | tr -d ' ')
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "0 migration files added or changed in this pull request. Nothing to lint here; the self-test above already proved the checker can find a violation and can fail."
+          else
+            echo "${COUNT} migration file(s) added or changed:"
+            cat changed_migrations.txt
+          fi
+
+      - name: Lint added/changed migrations for enumerated/dynamic DROP POLICY
+        if: steps.changed.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/migration_policy_drop_guard.py $(cat changed_migrations.txt)
