@@ -51,7 +51,7 @@ import {
 } from '../_shared/platform-auth.ts';
 import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
 import { advanceCursor, isAdvanceCursorError } from './cursor.ts';
-import { recordScanRange } from './scan_range.ts';
+import { recordScanRange, reportScanRangeOutcome } from './scan_range.ts';
 
 interface EnvelopeUpdateRequestBody {
   connection_id?: string;
@@ -263,14 +263,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     //
     // The status stays 200: the cursor write succeeded, and failing the whole
     // sync here would punish the caller for a server-side deployment fault.
-    if (scanRangeResult.status === 'failed') {
-      void reportError(
-        new Error(`record_stealth_scan_range failed: code=${scanRangeResult.code}`),
+    //
+    // The decision itself (report or stay quiet, what the response carries)
+    // lives in reportScanRangeOutcome (scan_range.ts) so it is unit testable
+    // without mocking this handler's auth/db chain (OR-T0645 / OR-C1710).
+    Object.assign(
+      resp,
+      reportScanRangeOutcome(
+        scanRangeResult,
         'or-stealth-envelope-update',
         req,
-      );
-      resp.scan_range_failed = { code: scanRangeResult.code };
-    }
+        (err, fnName, r) => void reportError(err, fnName, r),
+      ),
+    );
     return jsonResponse(resp, 200, cors);
   } catch (err) {
     console.error('[or-stealth-envelope-update] fatal:', err);
