@@ -48,7 +48,7 @@
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
-import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
+import { readConfiguredSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
 import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
@@ -66,6 +66,33 @@ import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
 import { computeWalletFingerprint } from '../_shared/account-fingerprint.ts';
 import { toByteaHex } from '../_shared/bytea.ts';
 import { readSyncCompleteness } from './_connection-result.ts';
+
+export function resolveSinkFormatRequest(
+  bodyFormat: string | null | undefined,
+  configuredFormat: string | null,
+  enforceSinkFormat: boolean,
+): { format: string | null; error?: string } {
+  if (configuredFormat === null) {
+    return { format: bodyFormat ?? null };
+  }
+
+  if (typeof bodyFormat !== 'string') {
+    return { format: configuredFormat };
+  }
+
+  if (configuredFormat === bodyFormat) {
+    return { format: bodyFormat };
+  }
+
+  if (enforceSinkFormat) {
+    return {
+      format: bodyFormat,
+      error: `Requested format ${bodyFormat} does not match configured sink format ${configuredFormat}`,
+    };
+  }
+
+  return { format: bodyFormat };
+}
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //
@@ -232,18 +259,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'credentials_key required' }, 400, cors);
     }
 
-    // Resolve sink format. platforms.sink_format is intended to win over
-    // body.format so a caller cannot request a sink shape that isn't theirs,
-    // with body.format kept as a backwards-compat fallback for callers (V2)
-    // that pre-date the multi-tenant column.
-    //
-    // Rolled out dark. The flag OR_SYNC_SINK_FORMAT_ENFORCE is OFF by default,
-    // so behavior is unchanged here: body.format is used. We still run the
-    // resolution and log, per platform, when the server-resolved format WOULD
-    // differ from the body.format actually sent. That turns an otherwise
-    // unmeasurable question (no store records the body.format each platform
-    // sends) into an observed fact, with zero behavior change, before the flag
-    // is turned on later (a separate, prod, two-party change).
+    // A populated platforms.sink_format is the platform's tenancy boundary.
+    // An omitted body.format uses that configured sink. A conflicting supplied
+    // format is refused when OR_SYNC_SINK_FORMAT_ENFORCE=1. Keep the switch as
+    // the one-step rollback until the production platform enumeration and CTO
+    // gate permit retiring it; disabled keeps existing callers on body.format.
     //
     // platformId only exists on a platform-mode context, so the resolution is
     // guarded to that mode. Direct-mode callers keep the body.format fallback.
@@ -251,22 +271,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     let resolvedFormat: string | null = bodyFormat ?? null;
     if (ctx.mode === 'platform') {
       try {
-        const serverFormat = await resolveSinkFormatForPlatform(
+        const configuredFormat = await readConfiguredSinkFormatForPlatform(
           ctx.serviceClient,
           ctx.platformId,
-          bodyFormat ?? null,
         );
-        if (serverFormat !== (bodyFormat ?? null)) {
-          // Format names and the platform id only. No user data, no secrets.
-          console.log(
-            `[or-sync] sink_format-observe platform=${ctx.platformId} ` +
-            `would_change=1 body_format=${bodyFormat ?? 'null'} ` +
-            `server_format=${serverFormat ?? 'null'} enforced=${enforceSinkFormat ? '1' : '0'}`,
-          );
+        const resolution = resolveSinkFormatRequest(
+          bodyFormat,
+          configuredFormat,
+          enforceSinkFormat,
+        );
+        if (resolution.error) {
+          return jsonResponse({ error: resolution.error }, 409, cors);
         }
-        if (enforceSinkFormat) {
-          resolvedFormat = serverFormat;
-        }
+        resolvedFormat = resolution.format;
       } catch (resolveErr) {
         // Log the error CLASS only, never the error object. Now that the
         // resolution actually executes, this catch can receive a Postgres
