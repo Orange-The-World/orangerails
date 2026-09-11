@@ -533,6 +533,83 @@ jobs:
         with:
           fetch-depth: 0
 
+      # OR-T1536. GitHub Actions runs every plain `run:` block as `bash -e` by
+      # default, and `set -uo pipefail` at the top of a step does NOT clear
+      # that -e. A trailing AND-list at the end of a retry loop
+      # (`[ "$attempt" -lt 3 ] && sleep 10`) evaluates false on the last
+      # attempt and that non-zero status exits the STEP right there, before
+      # the `unknown()` call below that explains an unresolved drift state
+      # (CI run 33637547005 died exactly this way, silently, with no summary
+      # written). The retry loop in the step below already uses the corrected
+      # `if` shape. This proves that shape actually survives 3 failed
+      # attempts under a real bash -e shell and reaches the code after the
+      # loop, and it proves the OLD AND-list shape does not, so this
+      # self-test can go both red and green -- the same discipline the
+      # ledger_shape_ok and shadow_scan self-tests in apply-migrations use.
+      # Release ruled (OR-T2461) that this inline proof is accepted in place
+      # of a live forced-failure workflow_dispatch run, which this seat has
+      # no tool to trigger.
+      - name: "Self-test: prove the retry-loop if-shape reaches the code after 3 failures under bash -e"
+        run: |
+          set -uo pipefail
+
+          # Stands in for a curl call that keeps failing (a stale token, a
+          # paused project): always non-zero, so the loop runs its full 3
+          # attempts every time.
+          always_fails() { return 22; }
+
+          # CORRECTED shape: an `if`, exactly what the real step below uses.
+          corrected_loop () {
+            local attempts=0
+            HTTP_OK=0
+            for attempt in 1 2 3; do
+              attempts=$((attempts + 1))
+              if always_fails; then HTTP_OK=1; break; fi
+              if [ "$attempt" -lt 3 ]; then sleep 0; fi
+            done
+            echo "corrected_loop ran ${attempts} attempt(s), HTTP_OK=${HTTP_OK}"
+            echo "REACHED_AFTER_LOOP"
+          }
+
+          # BUGGY shape: the AND-list this ticket found. Kept here only so
+          # this self-test can prove it is able to go red; never reused in a
+          # real step.
+          buggy_loop () {
+            local attempts=0
+            HTTP_OK=0
+            for attempt in 1 2 3; do
+              attempts=$((attempts + 1))
+              if always_fails; then HTTP_OK=1; break; fi
+              [ "$attempt" -lt 3 ] && sleep 0
+            done
+            echo "buggy_loop ran ${attempts} attempt(s), HTTP_OK=${HTTP_OK}"
+            echo "REACHED_AFTER_LOOP"
+          }
+
+          # Each shape runs in its OWN `bash -e` subprocess, matching exactly
+          # how GitHub Actions invokes a `run:` block, so this proves the
+          # property of that shell, not just a property of this step's own
+          # (non -e) top-level `set -uo pipefail`.
+          CORRECTED_OUT=$(bash -e -c "$(declare -f always_fails corrected_loop); corrected_loop" 2>&1) || true
+          if ! printf '%s' "$CORRECTED_OUT" | grep -q 'REACHED_AFTER_LOOP'; then
+            echo "::error::self-test FAILED: the CORRECTED retry-loop shape did not reach the line after the loop under bash -e. Output: ${CORRECTED_OUT}"
+            exit 1
+          fi
+          if ! printf '%s' "$CORRECTED_OUT" | grep -q 'ran 3 attempt'; then
+            echo "::error::self-test FAILED: the CORRECTED retry-loop shape did not run all 3 attempts before giving up. Output: ${CORRECTED_OUT}"
+            exit 1
+          fi
+          echo "corrected shape ok: ${CORRECTED_OUT}"
+
+          BUGGY_OUT=$(bash -e -c "$(declare -f always_fails buggy_loop); buggy_loop" 2>&1) || true
+          if printf '%s' "$BUGGY_OUT" | grep -q 'REACHED_AFTER_LOOP'; then
+            echo "::error::self-test HARNESS FAILED: the BUGGY (AND-list) shape reached the line after the loop under bash -e, so this self-test cannot tell corrected from buggy and proves nothing."
+            exit 1
+          fi
+          echo "buggy shape correctly dies early under bash -e, proving this self-test can go red: ${BUGGY_OUT}"
+
+          echo "self-test passed: the corrected if-shape survives 3 failed attempts under bash -e and reaches the code after the loop (where unknown() lives); the old AND-list shape dies before it."
+
       - name: Check pending DB migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
