@@ -33,9 +33,8 @@
  * function that already declares caller auth and has not yet been migrated
  * onto the shared helper is listed below, by name, dated to when this gate
  * landed. An entry here says "not wired up yet", never "this one is fine".
- * Migrating each is tracked in OR-T1039 (or-institutions-catalog) and
- * OR-T1040 (every other name on this list) -- not a new ticket per function,
- * because those two already cover the full sweep this list enumerates.
+ * Migrating every remaining name is tracked in OR-T1040 -- not a new ticket
+ * per function, because it already covers the full sweep this list enumerates.
  * Remove a name the day its function starts calling requireCallerAuth. Do
  * not add a new name without a reason and a tracking ticket in the same
  * commit.
@@ -56,7 +55,6 @@ const KNOWN_EXCEPTIONS = new Set([
   "or-connection-delete",
   "or-connection-list",
   "or-discover-wallets",
-  "or-institutions-catalog",
   "or-link-complete",
   "or-link-mint-token",
   "or-platform-bootstrap",
