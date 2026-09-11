@@ -43,8 +43,18 @@ export interface NormalizedTransaction {
   adapter: string;
   /** Direction relative to the connected account. */
   direction: 'in' | 'out';
-  /** Transaction kind. Will expand as more sources land. */
-  type: 'lightning' | 'onchain' | 'trade' | 'deposit' | 'withdrawal' | 'fee';
+  /**
+   * Transaction kind. Will expand as more sources land.
+   *
+   * `mining_earning` and `mining_payout` are the two mining-pool event types
+   * ratified in DL-1896 (see docs/Consumer-Integration-Guide.md, "Mining
+   * pool events: earnings and payouts"). A pool credits a miner's balance
+   * when a block is found (`mining_earning`, no txid) and later settles
+   * some of that balance on chain (`mining_payout`, txid required). They
+   * are never collapsed into one flagged event: a consumer that only sees
+   * payouts has no record of what was actually earned between them.
+   */
+  type: 'lightning' | 'onchain' | 'trade' | 'deposit' | 'withdrawal' | 'fee' | 'mining_earning' | 'mining_payout';
   /** BTC amount in satoshis when the source is denominated in BTC. */
   amount_sats?: number;
   /** Non-BTC amount when the source returns USD/EUR/etc. */
@@ -69,6 +79,31 @@ export interface NormalizedTransaction {
    * receiverId from the invoice. Not persisted in v0; reserved for PR 2.
    */
   receiverId?: string | null;
+  /**
+   * On-chain transaction id. Required on `mining_payout` (that is what
+   * settled it), absent on `mining_earning` (no bitcoin has moved yet).
+   * Part of the `(txid, vout)` dedup join key from DL-1896.
+   */
+  txid?: string;
+  /**
+   * Output index within `txid` that paid this wallet. Required on
+   * `mining_payout` by the DL-1896 contract. Left undefined by a provider
+   * that cannot determine it; a consumer must not assume 0.
+   */
+  vout?: number;
+  /**
+   * True when a `mining_payout` came straight from the block's coinbase
+   * transaction rather than a pool hot wallet. Carry the provider's own
+   * flag through unchanged, never infer it.
+   */
+  from_coinbase?: boolean;
+  /**
+   * Which transport of this adapter produced the row, shaped
+   * `<adapter-slug>.<transport>.v<version>` (e.g. `ocean.api.v1`). `adapter`
+   * alone says which provider; this says which of that provider's paths did,
+   * for a provider with more than one (DL-1519, DL-1896).
+   */
+  source_tag?: string;
 }
 
 export interface DiscoveredWallet {
