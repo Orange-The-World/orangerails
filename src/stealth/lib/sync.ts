@@ -212,6 +212,21 @@ export interface RunSyncOptions {
 export interface SyncResult {
   txCount: number;
   lastBlockScanned: number;
+  /**
+   * False on the short-circuit path (fromHeight > tip): this run read zero
+   * filters and lastBlockScanned above is the STORED cursor echoed back
+   * unchanged, not a height this run actually scanned. True on every path
+   * that walked the scan range, even when zero filters matched.
+   *
+   * Callers MUST NOT record coverage, advance a cursor, or write a scan
+   * range from this result unless scanned is true. Before this field
+   * existed, the caller inferred "did we scan" by comparing
+   * lastBlockScanned to the stored cursor -- but on the short-circuit path
+   * those are the SAME number, so the comparison was a tautology a
+   * zero-filter run could satisfy (OR-T1117). This field replaces that
+   * inference with a direct signal.
+   */
+  scanned: boolean;
   bytesDownloaded: number;
   sealedTransactions: SealedTransaction[];
   /** The decrypted normalized transactions. Returned to the caller for
@@ -701,6 +716,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       // chain tip is never an accurate cursor value here. Return the stored
       // cursor so the caller does not persist tip as a range never read.
       lastBlockScanned: opts.lastBlockScanned ?? -1,
+      // OR-T1117: this run read zero filters. lastBlockScanned above is an
+      // echo of the stored cursor, not a scanned height, so callers must not
+      // treat this result as new coverage.
+      scanned: false,
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
@@ -1319,6 +1338,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   return {
     txCount: normalized.length,
     lastBlockScanned: lastContiguousScanned,
+    scanned: true,
     bytesDownloaded,
     sealedTransactions,
     normalized,

@@ -1317,6 +1317,55 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     // Short-circuit must not touch the network.
     expect(fetchFilter).not.toHaveBeenCalled();
     expect(fetchBlock).not.toHaveBeenCalled();
+    // OR-T1117: the explicit signal, independent of what the numbers equal.
+    expect(result.scanned).toBe(false);
+  });
+
+  it('signals scanned: false when the stored cursor sits inside the confirmation buffer band, not just at the raw chain tip (OR-T1117)', async () => {
+    // Concrete sequence from OR-T1117: with the confirmation buffer
+    // (CONFIRMATION_DEPTH), the short-circuit fires whenever the resume
+    // point is within CONFIRMATION_DEPTH of the RAW chain tip, which is a
+    // band that recurs roughly every hour -- not only when the wallet is
+    // truly caught up to the raw tip. Before scanned existed, a caller
+    // comparing result.lastBlockScanned to the stored cursor could not
+    // tell this case apart from a run that actually scanned something,
+    // because on this path they are always the same number.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cursor-guard-buffer-band',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const rawChainTip = 900_001;
+    // Inside the buffer band: above the buffered ceiling (rawChainTip -
+    // CONFIRMATION_DEPTH) but below the raw tip, so this is NOT the old
+    // "already at the raw tip" case above.
+    const storedCursor = rawChainTip - CONFIRMATION_DEPTH + 1;
+    const fetchFilter = vi.fn();
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => rawChainTip,
+      fetchFilter,
+      fetchBlock,
+    });
+
+    expect(fetchFilter).not.toHaveBeenCalled();
+    expect(fetchBlock).not.toHaveBeenCalled();
+    expect(result.lastBlockScanned).toBe(storedCursor);
+    expect(storedCursor).toBeLessThan(rawChainTip); // not at the raw tip
+    // The fix: a caller gating on this field cannot record coverage for a
+    // run that read nothing, no matter what lastBlockScanned equals.
+    expect(result.scanned).toBe(false);
   });
 
   it('returns stored cursor unchanged when tip is below stored cursor', async () => {
@@ -1351,6 +1400,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(result.txCount).toBe(0);
     expect(fetchFilter).not.toHaveBeenCalled();
     expect(fetchBlock).not.toHaveBeenCalled();
+    expect(result.scanned).toBe(false);
   });
 
   it('advances cursor and fetches filters when behind tip (positive path)', async () => {
@@ -1406,6 +1456,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(result.lastBlockScanned).toBeGreaterThan(storedCursor);
     expect(result.lastBlockScanned).toBe(tip - CONFIRMATION_DEPTH);
     expect(result.txCount).toBe(0);
+    expect(result.scanned).toBe(true);
   });
 
   it('stops cursor at last contiguous height when filter producer lags (404 -> null)', async () => {
@@ -1452,6 +1503,9 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(result.lastBlockScanned).toBe(lastAvailable);
     expect(result.lastBlockScanned).not.toBe(tip);
     expect(result.txCount).toBe(0);
+    // Filters were read (just none matched by lastAvailable+1..tip being
+    // null), so this is not the short-circuit path.
+    expect(result.scanned).toBe(true);
   });
 
   describe('block-prefetch sliding window', () => {
