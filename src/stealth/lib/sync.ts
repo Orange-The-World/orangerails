@@ -160,10 +160,13 @@ export class WindowExhaustedError extends Error {
  * otherwise be parsed and recorded as if it were the block requested, with
  * no error at all.
  *
- * Not retryable the way a network blip is: the response already in hand is
- * provably not the block asked for, so repeating the identical request is
- * expected to reproduce the same mismatch. The caller should treat this as
- * a hard failure of the block source for that hash, not a transient one.
+ * The widget's catch (routes/sync.tsx) does not special-case this error: it
+ * falls into the generic branch and is reported retryable:true, same as any
+ * other block-parsing failure. That is deliberate, not an oversight: unlike
+ * a stale CDN edge or cache entry can plausibly serve correct bytes on a
+ * later attempt, so retrying the whole sync is a reasonable next step for
+ * the embedder even though the exact response already in hand is provably
+ * wrong and re-parsing it would reproduce the same mismatch.
  */
 export class BlockContentMismatchError extends Error {
   readonly code = 'BLOCK_CONTENT_MISMATCH' as const;
