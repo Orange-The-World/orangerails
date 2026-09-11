@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ORBI truth-table freshness probe every 15 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+Unit=orbi-truthtable-freshness-probe.service
+
+[Install]
+WantedBy=timers.target
