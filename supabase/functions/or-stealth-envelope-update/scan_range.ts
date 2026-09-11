@@ -49,12 +49,14 @@
  * defect survived unnoticed.
  */
 
-/** Exact argument list for the record_stealth_scan_range RPC (4-arg form). */
+/** Exact argument list for the record_stealth_scan_range RPC (5-arg form,
+ *  OR-T2457 added p_scan_generation). */
 export interface ScanRangeRpcArgs {
   p_connection_id: string;
   p_from_height: number;
   p_to_height: number;
   p_app_user_id: string;
+  p_scan_generation: string;
 }
 
 /**
@@ -66,6 +68,14 @@ export interface ScanRangeRequest {
   app_user_id: string;
   last_block_scanned: number;
   from_height?: number;
+  /**
+   * The scan_generation the caller read at the start of its sync (OR-T2457).
+   * Carried through unchanged, same as app_user_id above: the database
+   * function compares it to the connection's CURRENT scan_generation and
+   * refuses the write on a mismatch, which is what makes it a fence rather
+   * than a label.
+   */
+  scan_generation: string;
 }
 
 /**
@@ -137,6 +147,7 @@ export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | nu
     p_from_height: from,
     p_to_height: req.last_block_scanned,
     p_app_user_id: req.app_user_id,
+    p_scan_generation: req.scan_generation,
   };
 }
 

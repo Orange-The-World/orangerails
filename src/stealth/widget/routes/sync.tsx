@@ -208,6 +208,14 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           // coverage-map read. The widget and the edge function ship
           // separately, so either can be the older half.
           scan_ranges?: ScanRange[] | null;
+          // The connection's fencing token (OR-T2457), read here and echoed
+          // back unchanged on the step-5 cursor write below. Required on the
+          // write side, but read defensively here for the same split-deploy
+          // reason as scan_ranges: an older envelope-fetch predating this
+          // field would otherwise crash the sync on a destructure of
+          // undefined rather than surfacing a clear "cursor update failed"
+          // once the write is attempted.
+          scan_generation?: string;
         };
         setIsFirstSync(envJson.last_block_scanned === null);
 
@@ -455,6 +463,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             widget_token: currentWidgetToken,
             last_block_scanned: result.lastBlockScanned,
             from_height: scannedFrom,
+            // OR-T2457: the token read at step 1, unchanged. or-stealth-envelope-update
+            // refuses the write (409) if the connection was reset (envelope
+            // replaced) since this sync began, rather than silently accepting
+            // a scan position that predates the reset.
+            scan_generation: envJson.scan_generation,
           };
           let cursorWritten = false;
           if (init.proxy_base_url && parent) {
