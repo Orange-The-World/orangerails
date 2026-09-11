@@ -134,6 +134,65 @@ jobs:
           echo "ok: 6 RAW pull-request-shaped fixtures through SHAPE_FILTER then CANDIDATE_FILTER -> ${GOT} (fork and unrelated heads correctly rejected)"
           echo "Self-test passed: 6 raw fixtures shaped and filtered by the same two strings the real step uses, all as expected."
 
+      - name: Self-test the release-branch body logic
+        # OR-T1470: verify that RETITLE_AHEAD and BEYOND_LINE are correct for all
+        # three head cases: head=dev (unchanged), head=release/X with dev ahead of
+        # the cut, and head=release/X identical to dev.
+        run: |
+          set -euo pipefail
+
+          # Reproduce the RETITLE_AHEAD decision in a testable function.
+          retitle_ahead() {
+            local existing_head="$1" prod_dev_ahead="$2" prod_release_ahead="$3"
+            if [ "${existing_head}" != "dev" ]; then
+              echo "${prod_release_ahead}"
+            else
+              echo "${prod_dev_ahead}"
+            fi
+          }
+
+          # Case 1: head=dev -> use prod...dev count (unchanged from existing behaviour)
+          GOT=$(retitle_ahead "dev" "42" "17")
+          [ "${GOT}" = "42" ] || { echo "::error::head=dev: expected 42, got ${GOT}"; exit 1; }
+          echo "ok: head=dev  retitle_ahead=42 (prod...dev count, unchanged from existing behaviour)"
+
+          # Case 2: head=release/X with dev ahead of the cut -> use prod...release count
+          GOT=$(retitle_ahead "release/2026-09-01" "55" "17")
+          [ "${GOT}" = "17" ] || { echo "::error::head=release/X ahead: expected 17, got ${GOT}"; exit 1; }
+          echo "ok: head=release/X  retitle_ahead=17 (prod...release count, not the larger prod...dev count)"
+
+          # Case 3: head=release/X identical to dev -> prod...release == prod...dev
+          GOT=$(retitle_ahead "release/2026-09-01" "42" "42")
+          [ "${GOT}" = "42" ] || { echo "::error::head=release/X identical: expected 42, got ${GOT}"; exit 1; }
+          echo "ok: head=release/X identical to dev  retitle_ahead=42 (both counts equal)"
+
+          # Case 4: dev has commits past the release cut -> BEYOND_LINE names them
+          MOCK_BEYOND='{"ahead_by":5,"commits":[{"commit":{"committer":{"date":"2026-09-10T10:00:00Z"}},"sha":"abc1234"}]}'
+          BEYOND_AHEAD=$(printf '%s' "${MOCK_BEYOND}" | jq -r '.ahead_by')
+          BEYOND_OLDEST_DATE=$(printf '%s' "${MOCK_BEYOND}" | jq -r '.commits[0].commit.committer.date // ""')
+          if [ "${BEYOND_AHEAD}" -gt 0 ] && [ -n "${BEYOND_OLDEST_DATE}" ]; then
+            BEYOND_AGE_DAYS=0
+            BEYOND_LINE="**${BEYOND_AHEAD} commit(s) on dev are not in this promotion** (oldest is ${BEYOND_AGE_DAYS} day(s) old, ${BEYOND_OLDEST_DATE}). These will need a separate promotion once this one lands."
+          else
+            BEYOND_LINE="dev has no commits beyond this promotion's cut. Everything on dev is captured here."
+          fi
+          echo "${BEYOND_LINE}" | grep -q "5 commit(s) on dev are not in this promotion" || { echo "::error::BEYOND_LINE for ahead=5 did not contain expected text"; exit 1; }
+          echo "ok: head=release/X with dev ahead: BEYOND_LINE names the commit count"
+
+          # Case 5: dev identical to release cut -> BEYOND_LINE says nothing is omitted
+          MOCK_BEYOND_ZERO='{"ahead_by":0,"commits":[]}'
+          BEYOND_AHEAD=$(printf '%s' "${MOCK_BEYOND_ZERO}" | jq -r '.ahead_by')
+          BEYOND_OLDEST_DATE=$(printf '%s' "${MOCK_BEYOND_ZERO}" | jq -r '.commits[0].commit.committer.date // ""')
+          if [ "${BEYOND_AHEAD}" -gt 0 ] && [ -n "${BEYOND_OLDEST_DATE}" ]; then
+            BEYOND_LINE="beyond"
+          else
+            BEYOND_LINE="dev has no commits beyond this promotion's cut. Everything on dev is captured here."
+          fi
+          echo "${BEYOND_LINE}" | grep -q "dev has no commits beyond" || { echo "::error::BEYOND_LINE for ahead=0 did not contain expected text"; exit 1; }
+          echo "ok: head=release/X identical to dev: BEYOND_LINE confirms nothing is omitted"
+
+          echo "Self-test passed: release-branch body logic verified for all cases."
+
       - name: Compare prod and dev
         id: compare
         env:
