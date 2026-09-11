@@ -1,0 +1,211 @@
+name: Merge low-risk approved PRs
+
+# THE LAST STEP OF "HOW WE SHIP" USED TO BE A CHAT MESSAGE.
+#
+# The old workflow (approved-green-pr-sweep.yml) held `pull-requests: read`. It
+# could only REPORT: it found approved, green pull requests and posted them to
+# chat for a person to merge by hand. Work sat approved and green and unmerged
+# because the lifecycle's final move was "ask a human". This replaces the report
+# with the action.
+#
+# FOUNDER RULING, verbatim:
+#   "for merges, we can reduce the number of approvals if we focus on the high
+#    sensitive risky ones for me to review and ask questions for all the other ones
+#    low risk and all green are good to merge"
+#
+# So the gate is RISK-TIERED, not approval-tiered:
+#   low risk  + approved + green -> merged automatically, silently
+#   high risk                    -> never merged here; collected onto one GitHub
+#                                   issue naming the change and the files it touches
+#
+# WHERE THE RULES LIVE. In an internal database table, `ship_rules`: not in this
+# file and not in a markdown doc. `.github/ship-rules.json` is GENERATED from that
+# table. The runners have no network route to that database, so the exported file
+# is how the rule crosses the boundary. If the file is missing this workflow FAILS
+# rather than merging under no rule at all.
+
+on:
+  pull_request_review:
+    types: [submitted]
+  check_suite:
+    types: [completed]
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: merge-sweep-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    # KILL SWITCH. Set the repository variable MERGE_SWEEP_ENABLED to the string
+    # false and this stops merging immediately, with no code change, no revert
+    # and no admin-level action. Anything that can merge code on its own needs a
+    # way to be stopped by someone who cannot edit it.
+    if: vars.MERGE_SWEEP_ENABLED != 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Merge low-risk approved PRs, escalate the sensitive ones
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE: dev
+          ISSUE_TITLE: 'Approved changes held for a sensitive-path review (DL-0544)'
+        run: |
+          set -euo pipefail
+
+          R="$GITHUB_REPOSITORY"
+          RULES=.github/ship-rules.json
+          if [ ! -f "$RULES" ]; then
+            echo "::error::$RULES is missing. It is generated from the ship_rules table."
+            echo "::error::Refusing to merge with no rule."
+            exit 1
+          fi
+          jq -e '.rules | length > 0' "$RULES" >/dev/null || {
+            echo "::error::$RULES contains no rules. Refusing to merge with no rule."; exit 1; }
+
+          # Read the list into a FILE first. `gh` inside a `while read` loop
+          # consumes the loop's stdin and the loop silently stops after one
+          # iteration: a 56-item backlog once scanned as 1.
+          gh pr list --repo "$R" --state open --base "$BASE" \
+            --json number,title,url,isDraft,reviewDecision,mergeStateStatus \
+            --limit 200 > /tmp/prs.json
+          echo "Scanned $(jq 'length' /tmp/prs.json) open pull requests against ${BASE}."
+
+          # ASK THE REPO WHICH MERGE METHOD IT ALLOWS. Do not hardcode one.
+          # Found the hard way: a merge run by hand returned "GraphQL: Squash
+          # merges are not allowed on this repository". This workflow shipped
+          # with --squash hardcoded, so it would have failed EVERY merge in the
+          # repo it was written for, and the failure would have looked like a
+          # flaky merge rather than a wrong flag.
+          methods=$(gh api "repos/$R" \
+            -q '[(if .allow_squash_merge then "--squash" else empty end),
+                 (if .allow_merge_commit then "--merge"  else empty end),
+                 (if .allow_rebase_merge then "--rebase" else empty end)] | .[]')
+          METHOD=$(printf '%s\n' "$methods" | head -n1)
+          if [ -z "$METHOD" ]; then
+            echo "::error::This repository allows no merge method at all. Nothing to do."
+            exit 1
+          fi
+          echo "Merge method for ${R}: ${METHOD}"
+
+          merged=0; escalated=""; stale=0; incomplete=0
+
+          for number in $(jq -r '.[].number' /tmp/prs.json); do
+            pr=$(jq -c --argjson n "$number" '.[] | select(.number==$n)' /tmp/prs.json)
+            title=$(jq -r '.title' <<<"$pr")
+            url=$(jq   -r '.url'   <<<"$pr")
+
+            [ "$(jq -r '.isDraft'          <<<"$pr")" = "false"    ] || continue
+            [ "$(jq -r '.reviewDecision'   <<<"$pr")" = "APPROVED" ] || continue
+            [ "$(jq -r '.mergeStateStatus' <<<"$pr")" = "CLEAN"    ] || continue
+
+            # EVERY LIST BELOW IS PAGED, AND THE FILE LIST IS CHECKED FOR
+            # COMPLETENESS. `gh ... --json files,commits,reviews` returns at most
+            # 100 of each and does not page them, and it gives no signal that it
+            # truncated. A classifier that cannot tell "100 of 100" from "100 of
+            # 250" is the silent-success shape: a migration or an edge function at
+            # position 101 would be invisible and the change would merge as low
+            # risk. So the lists come from the REST API with --paginate, and the
+            # number of files fetched is compared with the number the API itself
+            # reports. A mismatch escalates. "I could not establish completeness"
+            # must never read the same as "clean".
+            want=$(gh api "repos/$R/pulls/$number" -q '.changed_files' </dev/null)
+            files=$(gh api --paginate "repos/$R/pulls/$number/files" \
+                      -q '.[].path' </dev/null)
+            got=$(printf '%s\n' "$files" | grep -c . || true)
+            if [ "$got" != "$want" ]; then
+              echo "::warning::${url}: fetched ${got} of ${want} changed files, not merging."
+              incomplete=$((incomplete+1))
+              escalated="${escalated}- [${title}](${url})"$'\n'"    - the changed-file list came back incomplete (${got} of ${want}), so the risk classification is not trustworthy."$'\n'
+              continue
+            fi
+
+            # AN APPROVAL THAT PREDATES THE CODE IS NOT AN APPROVAL OF THAT CODE.
+            # The branch ruleset does not dismiss stale reviews on push, so GitHub
+            # keeps reporting APPROVED after new commits land. Check it here.
+            # Timestamps are ISO-8601 UTC, so a lexical sort is a chronological one.
+            approved_at=$(gh api --paginate "repos/$R/pulls/$number/reviews" \
+                            -q '.[]|select(.state=="APPROVED")|.submitted_at' </dev/null \
+                          | sort | tail -n1)
+            commit_at=$(gh api --paginate "repos/$R/pulls/$number/commits" \
+                          -q '.[].commit.committer.date' </dev/null \
+                        | sort | tail -n1)
+            if [ -z "$approved_at" ] || [ -z "$commit_at" ]; then continue; fi
+            if [ "$(date -d "$approved_at" +%s)" -lt "$(date -d "$commit_at" +%s)" ]; then
+              echo "${url}: the approval predates the newest commit. STALE, not merging."
+              stale=$((stale+1)); continue
+            fi
+
+            # Classify EACH FILE. A file matched by any low rule is exempt from
+            # every high rule, otherwise a docs-only change goes high because the
+            # word "wallet" appears in a path. The change is high only if a file
+            # is still high after that.
+            reasons=""
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              if grep -qEi -f <(jq -r '.rules[]|select(.risk=="low")|.pattern' "$RULES") <<<"$f"; then
+                continue
+              fi
+              hits=$(jq -r '.rules[]|select(.risk=="high")|.pattern' "$RULES" \
+                     | while IFS= read -r p; do
+                         if printf '%s' "$f" | grep -qEi -- "$p"; then printf '%s\n' "$p"; fi
+                       done)
+              # An `if`, not an AND-list. Under set -e a trailing AND-list that
+              # evaluates false is the last command in the loop body, so the whole
+              # while returns 1 and the run dies. Latent today, certain later.
+              if [ -n "$hits" ]; then
+                reasons="${reasons}    - \`${f}\`"$'\n'
+              fi
+            done <<<"$files"
+
+            if [ -n "$reasons" ]; then
+              echo "${url}: touches a sensitive path, not merging, escalating."
+              escalated="${escalated}- [${title}](${url})"$'\n'"${reasons}"
+              continue
+            fi
+
+            echo "${url}: low risk, approved, green. Merging via ${METHOD}."
+            if gh pr merge "$number" --repo "$R" "$METHOD" --delete-branch; then
+              merged=$((merged+1))
+            else
+              echo "::warning::${url} passed every check but the merge call failed."
+              escalated="${escalated}- [${title}](${url})"$'\n'"    - the merge call failed after every check passed, so this needs a look."$'\n'
+            fi
+          done
+
+          held=$(printf '%s' "$escalated" | grep -c '^- \[' || true)
+          echo "Merged ${merged}. Held ${held}. Stale approvals skipped: ${stale}. Incomplete file lists: ${incomplete}."
+
+          # A clean run is SILENT. Only things needing a human get written down,
+          # and they go to a GitHub issue rather than to chat.
+          existing=$(gh issue list --repo "$R" --state open --limit 100 \
+                       --json number,title \
+                     | jq -r --arg t "$ISSUE_TITLE" 'map(select(.title==$t))|.[0].number // empty')
+
+          if [ -z "$escalated" ]; then
+            [ -n "$existing" ] && gh issue close "$existing" --repo "$R" \
+              --comment "Nothing sensitive is waiting. Merged ${merged} low-risk change(s) this run." || true
+            exit 0
+          fi
+
+          # THIS ISSUE IS WORLD READABLE. It carries the change and the files that
+          # matched, and nothing else. The per-rule rationale is deliberately not
+          # copied in, and this issue does not point at it either: it is internal
+          # operating context and it does not belong next to a link to a specific
+          # open change.
+          body=$(printf '%s\n\n%s\n' \
+            "These changes are approved and green, but they touch files the ship rules classify as sensitive, so they are not merged automatically. Each entry lists the files that matched." \
+            "${escalated}")
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$R" --body "$body"
+          else
+            gh issue create --repo "$R" --title "$ISSUE_TITLE" --body "$body"
+          fi
