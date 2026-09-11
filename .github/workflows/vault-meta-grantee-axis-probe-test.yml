@@ -1,0 +1,337 @@
+name: vault meta grantee-axis probe exit-code tests
+
+# Runs on every pull request or push to dev that touches this probe, so the
+# acceptance evidence required on OR-T1539 (every exit path watched going
+# red at least once) is enforced by CI, not just pasted on a ticket.
+
+on:
+  pull_request:
+    branches: [dev]
+    paths:
+      - 'scripts/ops/vault-meta-grantee-axis-probe.sh'
+      - '.github/workflows/vault-meta-grantee-axis-probe-test.yml'
+      - 'VAULT_META_GRANTEE_AXIS_PROBE_CRON.md'
+  push:
+    branches: [dev]
+    paths:
+      - 'scripts/ops/vault-meta-grantee-axis-probe.sh'
+      - '.github/workflows/vault-meta-grantee-axis-probe-test.yml'
+      - 'VAULT_META_GRANTEE_AXIS_PROBE_CRON.md'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vault-meta-grantee-axis-probe-test:
+    name: vault meta grantee-axis probe exit-code paths
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_USER: testuser
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Make script executable
+        run: chmod +x scripts/ops/vault-meta-grantee-axis-probe.sh
+
+      - name: Create stub alert script
+        run: |
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'echo "stub-alert called with: $*"' \
+            'echo "$*" >> "${RUNNER_TEMP:?stub-alert needs RUNNER_TEMP}/alert-calls.log"' \
+            'exit 0' \
+            > "$RUNNER_TEMP/stub-alert.sh"
+          chmod +x "$RUNNER_TEMP/stub-alert.sh"
+
+      # -----------------------------------------------------------------------
+      # Fixture: the two sealed tables, or_agent_reader granted exactly the
+      # allow-listed column, and postgres/service_role/authenticator wired
+      # the way they are on a real cluster. Real system catalogs, not a mock.
+      # -----------------------------------------------------------------------
+      - name: Seed fixture roles, tables and grants
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            CREATE ROLE postgres LOGIN;
+            CREATE ROLE service_role;
+            CREATE ROLE authenticated;
+            CREATE ROLE authenticator;
+            CREATE ROLE or_agent_reader;
+            GRANT service_role TO authenticator;
+            GRANT service_role TO postgres;
+
+            CREATE TABLE public.user_vault_meta (
+              user_id uuid PRIMARY KEY, vault_salt text, workspace_key_id uuid
+            );
+            CREATE TABLE public.customer_vault_meta (
+              customer_id uuid PRIMARY KEY, vault_salt text, workspace_key_id uuid
+            );
+            ALTER TABLE public.user_vault_meta OWNER TO postgres;
+            ALTER TABLE public.customer_vault_meta OWNER TO postgres;
+
+            GRANT SELECT (workspace_key_id) ON public.user_vault_meta TO or_agent_reader;
+            GRANT SELECT (workspace_key_id) ON public.customer_vault_meta TO or_agent_reader;
+          "
+
+      - name: "path 1 -- clean fixture -> expect exit 0, no alert"
+        env:
+          GRANTEE_AXIS_PROBE_DSN_DEV: "postgres://testuser:testpass@localhost:5432/testdb"
+          GRANTEE_AXIS_PROBE_DSN_PROD: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          GRANTEE_AXIS_PROBE_STATE_FILE: ${{ runner.temp }}/state-clean.txt
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          ./scripts/ops/vault-meta-grantee-axis-probe.sh
+          if [[ -e "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: a clean pair of clusters paged someone: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0 on a clean fixture, alert script not invoked"
+
+      # -----------------------------------------------------------------------
+      # G1 red: or_agent_reader granted a SEALED column, exactly the scenario
+      # this probe exists to catch. Proved live on dev too (see PR body).
+      # -----------------------------------------------------------------------
+      - name: "[G1] grant or_agent_reader a sealed column"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "GRANT SELECT (vault_salt) ON public.user_vault_meta TO or_agent_reader;"
+
+      - name: "path 2 -- G1 red (sealed column granted) -> expect exit 1, alarm names it"
+        env:
+          GRANTEE_AXIS_PROBE_DSN_DEV: "postgres://testuser:testpass@localhost:5432/testdb"
+          GRANTEE_AXIS_PROBE_DSN_PROD: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          GRANTEE_AXIS_PROBE_STATE_FILE: ${{ runner.temp }}/state-g1.txt
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          set +e
+          ./scripts/ops/vault-meta-grantee-axis-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (G1 sealed column), got $EXIT" >&2
+            exit 1
+          fi
+          BODY=$(cat "$RUNNER_TEMP/alert-calls.log")
+          case "$BODY" in
+            *G1*vault_salt*or_agent_reader*) ;;
+            *) echo "ERROR: alarm body does not name the offending column and grantee: $BODY" >&2; exit 1 ;;
+          esac
+          echo "confirmed: exit 1 (G1 red), alarm names column and grantee: $BODY"
+
+      - name: "[G1] revoke the sealed column"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "REVOKE SELECT (vault_salt) ON public.user_vault_meta FROM or_agent_reader;"
+
+      - name: "path 3 -- back to clean after G1 revert -> expect exit 0"
+        env:
+          GRANTEE_AXIS_PROBE_DSN_DEV: "postgres://testuser:testpass@localhost:5432/testdb"
+          GRANTEE_AXIS_PROBE_DSN_PROD: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          GRANTEE_AXIS_PROBE_STATE_FILE: ${{ runner.temp }}/state-g1-clean.txt
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          ./scripts/ops/vault-meta-grantee-axis-probe.sh
+          if [[ -e "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: revert did not restore a clean result: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 0 after revert, GREEN restored"
+
+      # -----------------------------------------------------------------------
+      # G2 red: an unexpected role granted MEMBERSHIP in service_role. This
+      # creates no ACL entry at all, so only the membership axis can catch it.
+      # -----------------------------------------------------------------------
+      - name: "[G2] grant an unexpected role membership in service_role"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            CREATE ROLE some_app_role;
+            GRANT service_role TO some_app_role;
+          "
+
+      - name: "path 4 -- G2 red (unexpected membership) -> expect exit 1, alarm names it"
+        env:
+          GRANTEE_AXIS_PROBE_DSN_DEV: "postgres://testuser:testpass@localhost:5432/testdb"
+          GRANTEE_AXIS_PROBE_DSN_PROD: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          GRANTEE_AXIS_PROBE_STATE_FILE: ${{ runner.temp }}/state-g2.txt
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          set +e
+          ./scripts/ops/vault-meta-grantee-axis-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (G2 unexpected membership), got $EXIT" >&2
+            exit 1
+          fi
+          BODY=$(cat "$RUNNER_TEMP/alert-calls.log")
+          case "$BODY" in
+            *G2*some_app_role*service_role*) ;;
+            *) echo "ERROR: alarm body does not name the unexpected member: $BODY" >&2; exit 1 ;;
+          esac
+          echo "confirmed: exit 1 (G2 red), alarm names the unexpected member: $BODY"
+
+      - name: "[G2] revoke the unexpected membership"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "REVOKE service_role FROM some_app_role; DROP ROLE some_app_role;"
+
+      # -----------------------------------------------------------------------
+      # G0 red: drop one of the two sealed tables. Must be could-not-check
+      # (exit 2), never a silent 1-of-2 pass.
+      # -----------------------------------------------------------------------
+      - name: "[G0] drop one sealed table"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "DROP TABLE public.customer_vault_meta;"
+
+      - name: "path 5 -- G0 red (only 1 of 2 tables present) -> expect exit 2"
+        env:
+          GRANTEE_AXIS_PROBE_DSN_DEV: "postgres://testuser:testpass@localhost:5432/testdb"
+          GRANTEE_AXIS_PROBE_DSN_PROD: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          GRANTEE_AXIS_PROBE_STATE_FILE: ${{ runner.temp }}/state-g0.txt
+        run: |
+          set +e
+          OUT=$(./scripts/ops/vault-meta-grantee-axis-probe.sh 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUT"
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (only 1 of 2 sealed tables present), got $EXIT" >&2
+            exit 1
+          fi
+          case "$OUT" in
+            *"G0 expected 2 sealed tables, found 1"*) ;;
+            *) echo "ERROR: output does not name the denominator failure: $OUT" >&2; exit 1 ;;
+          esac
+          echo "confirmed: exit 2, denominator failure reported by name rather than a silent partial pass"
+
+      # -----------------------------------------------------------------------
+      # Unreachable cluster must not suppress the other cluster's result, and
+      # the worst outcome (ERROR) must still win overall.
+      # -----------------------------------------------------------------------
+      - name: "path 6 -- one cluster unreachable -> expect exit 2, other cluster still reported"
+        env:
+          GRANTEE_AXIS_PROBE_DSN_DEV: "postgres://nobody:wrong@unreachable-host:5432/db"
+          GRANTEE_AXIS_PROBE_DSN_PROD: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          GRANTEE_AXIS_PROBE_STATE_FILE: ${{ runner.temp }}/state-unreachable.txt
+        run: |
+          set +e
+          OUT=$(./scripts/ops/vault-meta-grantee-axis-probe.sh 2>&1)
+          EXIT=$?
+          set -e
+          echo "$OUT"
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (dev unreachable), got $EXIT" >&2
+            exit 1
+          fi
+          case "$OUT" in
+            *"[prod] ERROR"*"G0 expected 2 sealed tables, found 1"*) ;;
+            *) echo "ERROR: prod's own result (still missing the dropped table from path 5) was suppressed by dev being unreachable: $OUT" >&2; exit 1 ;;
+          esac
+          echo "confirmed: exit 2 (one cluster unreachable), the other cluster's own result still reported independently"
+
+      # -----------------------------------------------------------------------
+      # Alert script not executable must refuse before touching either
+      # cluster.
+      # -----------------------------------------------------------------------
+      - name: "path 7 -- alert script not executable -> expect exit 2, no DB call"
+        env:
+          GRANTEE_AXIS_PROBE_DSN_DEV: "postgres://nobody:wrong@unreachable-host-that-would-hang:5432/db"
+          GRANTEE_AXIS_PROBE_DSN_PROD: "postgres://nobody:wrong@unreachable-host-that-would-hang:5432/db"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/no-such-alert.sh
+          GRANTEE_AXIS_PROBE_STATE_FILE: ${{ runner.temp }}/state-alert.txt
+        run: |
+          set +e
+          START=$(date +%s)
+          ./scripts/ops/vault-meta-grantee-axis-probe.sh
+          EXIT=$?
+          END=$(date +%s)
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (alert script not executable), got $EXIT" >&2
+            exit 1
+          fi
+          if [[ $(( END - START )) -gt 5 ]]; then
+            echo "ERROR: took $(( END - START ))s; a DSN that would hang was reached, meaning the alert-script guard did not run first" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (alert script not executable), refused before touching either cluster"
+
+      # -----------------------------------------------------------------------
+      # Dedup: identical fingerprint within the window pages once, not twice.
+      # -----------------------------------------------------------------------
+      - name: "[dedup] recreate the dropped table and re-introduce the G1 red"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            CREATE TABLE public.customer_vault_meta (
+              customer_id uuid PRIMARY KEY, vault_salt text, workspace_key_id uuid
+            );
+            ALTER TABLE public.customer_vault_meta OWNER TO postgres;
+            GRANT SELECT (workspace_key_id) ON public.customer_vault_meta TO or_agent_reader;
+            GRANT SELECT (vault_salt) ON public.user_vault_meta TO or_agent_reader;
+          "
+
+      - name: "path 8 -- same red twice in the dedup window -> pages once"
+        env:
+          GRANTEE_AXIS_PROBE_DSN_DEV: "postgres://testuser:testpass@localhost:5432/testdb"
+          GRANTEE_AXIS_PROBE_DSN_PROD: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          GRANTEE_AXIS_PROBE_STATE_FILE: ${{ runner.temp }}/state-dedup.txt
+          GRANTEE_AXIS_DEDUP_HOURS: "24"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+
+          set +e
+          ./scripts/ops/vault-meta-grantee-axis-probe.sh; EXIT1=$?
+          ./scripts/ops/vault-meta-grantee-axis-probe.sh; EXIT2=$?
+          set -e
+
+          if [[ $EXIT1 -ne 1 || $EXIT2 -ne 1 ]]; then
+            echo "ERROR: expected exit 1 both runs, got $EXIT1 then $EXIT2" >&2
+            exit 1
+          fi
+
+          CALLS=$(wc -l < "$RUNNER_TEMP/alert-calls.log")
+          if [[ "$CALLS" -ne 1 ]]; then
+            echo "ERROR: expected exactly 1 alert delivery across 2 identical-red runs, got $CALLS" >&2
+            exit 1
+          fi
+          echo "confirmed: identical fingerprint paged once across two runs inside the dedup window"
+
+      - name: "[cleanup] revoke the sealed column"
+        if: always()
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "REVOKE SELECT (vault_salt) ON public.user_vault_meta FROM or_agent_reader;" || true
