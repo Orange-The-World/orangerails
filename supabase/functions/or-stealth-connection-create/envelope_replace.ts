@@ -22,13 +22,16 @@
  * stealth_scan_ranges, keyed by connection_id, written only by
  * record_stealth_scan_range().
  *
- * ORDER MATTERS AND IS DELIBERATE. Coverage goes first, the connection row
- * second. If the coverage delete succeeds and the row update then fails, the
- * connection keeps its old envelope and rescans from its old birthday: slower
- * than it needed to be, and correct. The other order fails the other way, with
- * a new envelope and uncleared coverage, which is exactly the silent
- * no-rescan this module exists to remove. When only one of the two can land,
- * land the one whose failure the user can see.
+ * ORDER MATTERS AND IS DELIBERATE, AND THE ORDER IS AN INVARIANT, NOT A GUESS:
+ * a lost cursor can never cause a skip (a recorded range covering the
+ * birthday makes the coverage map authoritative and the cursor arm is never
+ * evaluated; with no coverage at all, a null cursor falls back to the
+ * birthday), but a lost coverage row can (an old cursor pointing past
+ * unscanned blocks, with nothing left to say otherwise, hides the gap
+ * forever). So the write order is: clear the cursor, then delete coverage,
+ * then write the new envelope and birthday last. Whichever step a half
+ * applied reset fails on, the connection is left able to rescan too much,
+ * never too little.
  *
  * BOTH FAILURES ARE REPORTED. A half applied reset that answers 200 tells the
  * user their wallet is being rescanned when it is not, and that silence is
@@ -76,7 +79,27 @@ export async function applyEnvelopeReplacement(
   connectionId: string,
   fields: EnvelopeReplacementFields,
 ): Promise<EnvelopeReplacementResult> {
-  // 1. Coverage first. See ORDER MATTERS above.
+  // 1. Clear the cursor first. See ORDER MATTERS above: a lost cursor can
+  //    never cause a skip, so it is the safe write to lose if a later step
+  //    fails.
+  const { error: cursorErr } = await client
+    .from('stealth_connections')
+    .update({
+      last_block_scanned: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', connectionId);
+
+  if (cursorErr) {
+    console.error('[applyEnvelopeReplacement] cursor clear failed:', cursorErr);
+    return {
+      ok: false,
+      error: 'Failed to clear the scan cursor for the replaced envelope',
+      status: 500,
+    };
+  }
+
+  // 2. Coverage second. See ORDER MATTERS above.
   const { error: coverageErr } = await client
     .from('stealth_scan_ranges')
     .delete()
@@ -91,18 +114,15 @@ export async function applyEnvelopeReplacement(
     };
   }
 
-  // 2. The connection row. last_block_scanned is reset alongside the envelope
-  //    for the same reason the coverage is: on its own it no longer decides
-  //    where the scan starts, but it is still the arm that answers for a
-  //    connection with no coverage at all, and both arms must agree that this
-  //    connection has read nothing since the new birthday.
+  // 3. The new envelope and birthday last. Both the cursor and the coverage
+  //    that could have hidden a gap are already gone by the time this can
+  //    fail, so a failure here leaves the connection resuming from the OLD
+  //    birthday, which is the promise this module exists to keep.
   const { error: updateErr } = await client
     .from('stealth_connections')
     .update({
       sealed_envelope: fields.sealed_envelope,
       wallet_birthday_plaintext: fields.wallet_birthday_plaintext,
-      last_block_scanned: null,
-      updated_at: new Date().toISOString(),
     })
     .eq('id', connectionId);
 
