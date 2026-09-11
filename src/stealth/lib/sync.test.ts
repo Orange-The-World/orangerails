@@ -2472,4 +2472,58 @@ describe('liveFetchFilter , sidecar height must match the height requested (OR-T
     expect(record.height).toBe(800_010);
     expect(record.blockHashHex).toBe('bb'.repeat(32));
   });
+
+  it('throws a durable error, on the first attempt only, when block_hash is not 64 hex chars', async () => {
+    // A sidecar whose block_hash is malformed (wrong length, non-hex) must
+    // throw immediately, without retrying. A record built from it would carry
+    // no block_hash at all, which downstream means "recorded before hashes
+    // were captured" and is treated as permanently unverifiable -- a different
+    // class of error that must not be reachable from a live producer.
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith('.json')) {
+        return new Response(
+          JSON.stringify({
+            block_hash: 'not-valid-hex',
+            block_height: 800_002,
+            time: 0,
+            filter_size: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(new Uint8Array([0]), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(liveFetchFilter(800_002, 'https://filters.example.test')).rejects.toThrow(
+      /carries no usable block_hash/,
+    );
+
+    // Durable: not retried. Exactly one .gcs.gz and one .json, then stop.
+    expect(requestedUrls).toHaveLength(2);
+  });
+
+  it('lowercases a valid all-uppercase block_hash and returns it normalised', async () => {
+    // The detector comparison is case-sensitive text; accept either case at
+    // the door and store exactly one so no valid transaction is ever flagged
+    // as orphaned due to a case mismatch alone.
+    const UPPER_HASH = 'CC'.repeat(32);
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('.json')) {
+        return new Response(
+          JSON.stringify({ block_hash: UPPER_HASH, block_height: 800_020, time: 0, filter_size: 1 }),
+          { status: 200 },
+        );
+      }
+      return new Response(gzipSync(Buffer.from([1, 2, 3])), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const record = await liveFetchFilter(800_020, 'https://filters.example.test');
+    expect(record.blockHashHex).toBe(UPPER_HASH.toLowerCase());
+  });
 });
