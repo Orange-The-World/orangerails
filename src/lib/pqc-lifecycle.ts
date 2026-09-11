@@ -65,12 +65,32 @@ export interface SupabaseLike {
 // Row fields we publish to user_vault_meta.
 // ------------------------------------------------------------------
 
+/**
+ * Version of the PQC secret-wrap derivation (derivePqcSecretWrapKey, i.e.
+ * HKDF_CONTEXTS.ORANGERAILS_PQC_SECRET_WRAP_V1 applied to the vault's own
+ * salt) that a freshly-wrapped PQC secret is sealed under right now.
+ *
+ * Stored alongside kem_secret_wrapped/sig_secret_wrapped as
+ * user_vault_meta.pqc_wrap_key_id (see the OR-T2093 migration) so a decrypt
+ * failure on those two columns can be told apart from a version mismatch
+ * BEFORE it is ever read as "this secret is dead". See
+ * carryPqcSecretsAcrossRotation and the HONEST LIMIT note on
+ * assertPqcWrapKeyMatchesSalt below.
+ *
+ * Bump this the day derivePqcSecretWrapKey's HKDF context or algorithm
+ * changes, in the same commit as the change itself. A bump with no matching
+ * change here, or a change with no matching bump, is exactly the class of
+ * bug this constant exists to catch.
+ */
+export const CURRENT_PQC_WRAP_KEY_ID = 1;
+
 export interface PqcKeyMaterialRow {
   kem_public_key: string;
   kem_secret_wrapped: string;
   sig_public_key: string;
   sig_secret_wrapped: string;
   pqc_key_version: number;
+  pqc_wrap_key_id: number;
 }
 
 /**
@@ -100,6 +120,7 @@ export async function buildPqcKeyMaterial(wrapKey: CryptoKey): Promise<PqcKeyMat
     sig_public_key: bytesToBase64(sig.publicKey),
     sig_secret_wrapped: sigSecretWrapped,
     pqc_key_version: 1,
+    pqc_wrap_key_id: CURRENT_PQC_WRAP_KEY_ID,
   };
 }
 
@@ -174,11 +195,14 @@ export function isAuthenticationTagFailure(err: unknown): boolean {
  * nothing in here can tell that apart from a secret that is genuinely dead:
  * this function sees two opaque CryptoKeys and a string.
  * carryPqcSecretsAcrossRotation() runs assertPqcWrapKeyMatchesSalt() before any
- * secret is touched, which NARROWS that gap and does not close it. That check
- * proves the handed key matches the salt the caller names. It does not prove
- * the handed key is the one this ciphertext was wrapped under. Read the HONEST
- * LIMIT note on that function before you rely on "dead", and call this function
- * directly only if you are asserting the whole of that yourself.
+ * secret is touched, which proves the handed key matches the salt the caller
+ * names but does NOT prove the handed key is the one this ciphertext was
+ * wrapped under. It closes that gap separately (OR-T2093), by comparing the
+ * caller's stored user_vault_meta.pqc_wrap_key_id against
+ * CURRENT_PQC_WRAP_KEY_ID before it will ever read a tag failure as "dead".
+ * This function itself has neither check: read the HONEST LIMIT note on
+ * assertPqcWrapKeyMatchesSalt before you rely on "dead", and call this
+ * function directly only if you are asserting the whole of that yourself.
  *
  * Null is deliberately not one of them. Null already means "there was nothing
  * to carry" further up this path.
@@ -252,6 +276,16 @@ export async function carryPqcSecretsAcrossRotation(args: {
   authenticatedSaltB64: string;
   kemSecretWrapped: string | null;
   sigSecretWrapped: string | null;
+  /**
+   * user_vault_meta.pqc_wrap_key_id as read alongside kemSecretWrapped and
+   * sigSecretWrapped. Required rather than optional for the same reason
+   * authenticatedSaltB64 is: adding a caller forces whoever adds it to say
+   * where the stored version came from. Pass null only when the row predates
+   * this column and truly cannot say; that is treated as a mismatch below,
+   * not as a pass, because guessing it is the version this function checks
+   * for is exactly the failure OR-T2093 closes.
+   */
+  storedPqcWrapKeyId: number | null;
 }): Promise<CarriedPqcSecrets> {
   const {
     oldWrapKey,
@@ -260,6 +294,7 @@ export async function carryPqcSecretsAcrossRotation(args: {
     authenticatedSaltB64,
     kemSecretWrapped,
     sigSecretWrapped,
+    storedPqcWrapKeyId,
   } = args;
 
   // Prove the old wrap key before a single tag failure is allowed to mean
@@ -271,6 +306,27 @@ export async function carryPqcSecretsAcrossRotation(args: {
     mek: oldMek,
     saltB64: authenticatedSaltB64,
   });
+
+  // The assert above proves oldWrapKey is self-consistent with the salt the
+  // caller names. It does NOT prove oldWrapKey opens the STORED ciphertext,
+  // and only that second proposition tells "dead" apart from "wrong key" --
+  // see the HONEST LIMIT note on assertPqcWrapKeyMatchesSalt. This is the
+  // check that closes that gap (OR-T2093): a tag failure below is only ever
+  // read as "dead" once we already know, from the recorded wrap-key version,
+  // that this key SHOULD be the one that sealed the ciphertext. Checked only
+  // when there is something to protect: an empty vault has no secret for a
+  // stale or absent version stamp to endanger.
+  if (
+    (kemSecretWrapped !== null || sigSecretWrapped !== null) &&
+    storedPqcWrapKeyId !== CURRENT_PQC_WRAP_KEY_ID
+  ) {
+    throw new Error(
+      `Stored PQC secrets are marked wrap-key version ${storedPqcWrapKeyId}, but this code derives ` +
+        `version ${CURRENT_PQC_WRAP_KEY_ID}. Refusing to carry or discard: a version mismatch means ` +
+        "the derivation changed under this vault, not that the secret is dead. This needs an explicit " +
+        "reconciliation before recovery can proceed.",
+    );
+  }
 
   let pqcKeysReplaced = false;
 
@@ -343,8 +399,14 @@ const PQC_WRAP_KEY_PROBE = "orangerails-pqc-wrap-key-probe-v1";
  * rewrap: if it opens, nothing was dead, and if it does not, the tag failure is
  * the same observation either way. Closing it needs either a derivation
  * identifier stored alongside the wrapped secret, or a dead path that a tag
- * failure alone cannot authorise. Neither is here yet, and both are tracked
- * separately. Do not read this function as covering them.
+ * failure alone cannot authorise. THE FIRST OF THOSE IS NOW HERE (OR-T2093):
+ * carryPqcSecretsAcrossRotation takes the caller's stored
+ * user_vault_meta.pqc_wrap_key_id and refuses to treat a tag failure as
+ * "dead" unless it matches CURRENT_PQC_WRAP_KEY_ID, so the case this function
+ * cannot see is caught one layer up, before the ambiguous tag failure is even
+ * attempted. This function's own limit is unchanged by that: it still proves
+ * only self-consistency, never that the handed key opens the stored
+ * ciphertext.
  *
  * It also cannot prove the caller named the right salt, because a caller that
  * derives from salt B and also names salt B is self consistent and wrong. What

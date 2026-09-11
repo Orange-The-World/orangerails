@@ -65,7 +65,7 @@ function RecoverPage() {
         // they are not carried across in the same write, the only key that opens
         // them is discarded and nothing ever regenerates them.
         .select(
-          "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
+          "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped, pqc_wrap_key_id",
         )
         .eq("user_id", session.user.id)
         .single();
@@ -93,6 +93,7 @@ function RecoverPage() {
         newPassword,
         kemSecretWrapped: meta.kem_secret_wrapped ?? null,
         sigSecretWrapped: meta.sig_secret_wrapped ?? null,
+        pqcWrapKeyId: meta.pqc_wrap_key_id ?? null,
       });
 
       // Everything from here to the meta write lives in src/lib/vault-persist.ts.
