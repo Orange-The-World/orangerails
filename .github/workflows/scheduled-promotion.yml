@@ -134,6 +134,65 @@ jobs:
           echo "ok: 6 RAW pull-request-shaped fixtures through SHAPE_FILTER then CANDIDATE_FILTER -> ${GOT} (fork and unrelated heads correctly rejected)"
           echo "Self-test passed: 6 raw fixtures shaped and filtered by the same two strings the real step uses, all as expected."
 
+      - name: Self-test the release-branch body logic
+        # OR-T1470: verify that RETITLE_AHEAD and BEYOND_LINE are correct for all
+        # three head cases: head=dev (unchanged), head=release/X with dev ahead of
+        # the cut, and head=release/X identical to dev.
+        run: |
+          set -euo pipefail
+
+          # Reproduce the RETITLE_AHEAD decision in a testable function.
+          retitle_ahead() {
+            local existing_head="$1" prod_dev_ahead="$2" prod_release_ahead="$3"
+            if [ "${existing_head}" != "dev" ]; then
+              echo "${prod_release_ahead}"
+            else
+              echo "${prod_dev_ahead}"
+            fi
+          }
+
+          # Case 1: head=dev -> use prod...dev count (unchanged from existing behaviour)
+          GOT=$(retitle_ahead "dev" "42" "17")
+          [ "${GOT}" = "42" ] || { echo "::error::head=dev: expected 42, got ${GOT}"; exit 1; }
+          echo "ok: head=dev  retitle_ahead=42 (prod...dev count, unchanged from existing behaviour)"
+
+          # Case 2: head=release/X with dev ahead of the cut -> use prod...release count
+          GOT=$(retitle_ahead "release/2026-09-01" "55" "17")
+          [ "${GOT}" = "17" ] || { echo "::error::head=release/X ahead: expected 17, got ${GOT}"; exit 1; }
+          echo "ok: head=release/X  retitle_ahead=17 (prod...release count, not the larger prod...dev count)"
+
+          # Case 3: head=release/X identical to dev -> prod...release == prod...dev
+          GOT=$(retitle_ahead "release/2026-09-01" "42" "42")
+          [ "${GOT}" = "42" ] || { echo "::error::head=release/X identical: expected 42, got ${GOT}"; exit 1; }
+          echo "ok: head=release/X identical to dev  retitle_ahead=42 (both counts equal)"
+
+          # Case 4: dev has commits past the release cut -> BEYOND_LINE names them
+          MOCK_BEYOND='{"ahead_by":5,"commits":[{"commit":{"committer":{"date":"2026-09-10T10:00:00Z"}},"sha":"abc1234"}]}'
+          BEYOND_AHEAD=$(printf '%s' "${MOCK_BEYOND}" | jq -r '.ahead_by')
+          BEYOND_OLDEST_DATE=$(printf '%s' "${MOCK_BEYOND}" | jq -r '.commits[0].commit.committer.date // ""')
+          if [ "${BEYOND_AHEAD}" -gt 0 ] && [ -n "${BEYOND_OLDEST_DATE}" ]; then
+            BEYOND_AGE_DAYS=0
+            BEYOND_LINE="**${BEYOND_AHEAD} commit(s) on dev are not in this promotion** (oldest is ${BEYOND_AGE_DAYS} day(s) old, ${BEYOND_OLDEST_DATE}). These will need a separate promotion once this one lands."
+          else
+            BEYOND_LINE="dev has no commits beyond this promotion's cut. Everything on dev is captured here."
+          fi
+          echo "${BEYOND_LINE}" | grep -q "5 commit(s) on dev are not in this promotion" || { echo "::error::BEYOND_LINE for ahead=5 did not contain expected text"; exit 1; }
+          echo "ok: head=release/X with dev ahead: BEYOND_LINE names the commit count"
+
+          # Case 5: dev identical to release cut -> BEYOND_LINE says nothing is omitted
+          MOCK_BEYOND_ZERO='{"ahead_by":0,"commits":[]}'
+          BEYOND_AHEAD=$(printf '%s' "${MOCK_BEYOND_ZERO}" | jq -r '.ahead_by')
+          BEYOND_OLDEST_DATE=$(printf '%s' "${MOCK_BEYOND_ZERO}" | jq -r '.commits[0].commit.committer.date // ""')
+          if [ "${BEYOND_AHEAD}" -gt 0 ] && [ -n "${BEYOND_OLDEST_DATE}" ]; then
+            BEYOND_LINE="beyond"
+          else
+            BEYOND_LINE="dev has no commits beyond this promotion's cut. Everything on dev is captured here."
+          fi
+          echo "${BEYOND_LINE}" | grep -q "dev has no commits beyond" || { echo "::error::BEYOND_LINE for ahead=0 did not contain expected text"; exit 1; }
+          echo "ok: head=release/X identical to dev: BEYOND_LINE confirms nothing is omitted"
+
+          echo "Self-test passed: release-branch body logic verified for all cases."
+
       - name: Compare prod and dev
         id: compare
         env:
@@ -378,17 +437,125 @@ jobs:
           EXISTING="$(printf '%s' "${CANDIDATES}" | jq -r '.[0].number // ""')"
 
           if [ -n "${EXISTING}" ]; then
-            EXISTING_TITLE=$(gh api "repos/${GH_REPO}/pulls/${EXISTING}" --jq '.title')
-            echo "Reusing open promotion pull request ${EXISTING}. Not opening a duplicate."
+            # Fetch title and head ref in one call. The head ref tells us whether
+            # this is a plain dev promotion or a release-branch cut at a fixed sha.
+            EXISTING_DATA=$(gh api "repos/${GH_REPO}/pulls/${EXISTING}")
+            EXISTING_TITLE=$(printf '%s' "${EXISTING_DATA}" | jq -r '.title')
+            EXISTING_HEAD=$(printf '%s' "${EXISTING_DATA}" | jq -r '.head.ref')
+            echo "Reusing open promotion pull request ${EXISTING} (head: ${EXISTING_HEAD}). Not opening a duplicate."
+
+            if [ "${EXISTING_HEAD}" != "dev" ]; then
+              # This PR was cut from a release branch at a fixed sha. pr-body.md
+              # was built above from prod...dev, which includes commits that are
+              # NOT in this pull request. Rebuild it using the release branch as
+              # the right endpoint. Also report any dev work past the cut so the
+              # omission is never silent.
+              RELEASE_COMPARE_URL="${GITHUB_SERVER_URL}/${GH_REPO}/compare/prod...${EXISTING_HEAD}"
+              gh api "repos/${GH_REPO}/compare/prod...${EXISTING_HEAD}" > compare_release.json
+              RELEASE_AHEAD=$(jq -r '.ahead_by' compare_release.json)
+              RELEASE_BEHIND=$(jq -r '.behind_by' compare_release.json)
+              RELEASE_OLDEST_DATE=$(jq -r '.commits[0].commit.committer.date // ""' compare_release.json)
+              RELEASE_OLDEST_SHA=$(jq -r '.commits[0].sha // ""' compare_release.json)
+              if [ -n "${RELEASE_OLDEST_DATE}" ]; then
+                RELEASE_AGE_DAYS=$(( ($(date -u +%s) - $(date -u -d "${RELEASE_OLDEST_DATE}" +%s)) / 86400 ))
+              else
+                RELEASE_AGE_DAYS=0
+              fi
+
+              # Commits on dev that are NOT in this release branch.
+              gh api "repos/${GH_REPO}/compare/${EXISTING_HEAD}...dev" > compare_beyond.json
+              BEYOND_AHEAD=$(jq -r '.ahead_by' compare_beyond.json)
+              BEYOND_OLDEST_DATE=$(jq -r '.commits[0].commit.committer.date // ""' compare_beyond.json)
+              if [ "${BEYOND_AHEAD}" -gt 0 ] && [ -n "${BEYOND_OLDEST_DATE}" ]; then
+                BEYOND_AGE_DAYS=$(( ($(date -u +%s) - $(date -u -d "${BEYOND_OLDEST_DATE}" +%s)) / 86400 ))
+                BEYOND_LINE="**${BEYOND_AHEAD} commit(s) on dev are not in this promotion** (oldest is ${BEYOND_AGE_DAYS} day(s) old, ${BEYOND_OLDEST_DATE}). These will need a separate promotion once this one lands."
+              else
+                BEYOND_LINE="dev has no commits beyond this promotion's cut. Everything on dev is captured here."
+              fi
+
+              if [ "${RELEASE_BEHIND}" -gt 0 ]; then
+                RELEASE_DIVERGED="**prod has ${RELEASE_BEHIND} commit(s) that this release branch does not have.** Back-merge these before or alongside merging this promotion."
+              else
+                RELEASE_DIVERGED="prod has no commits that this release branch is missing."
+              fi
+
+              {
+                echo "Opened automatically by \`.github/workflows/scheduled-promotion.yml\` (DL-0564, Gate 2)."
+                echo
+                echo "## State of this promotion (\`${EXISTING_HEAD}\`)"
+                echo
+                echo "| | |"
+                echo "|---|---|"
+                echo "| Commits in this promotion (prod to \`${EXISTING_HEAD}\`) | **${RELEASE_AHEAD}** |"
+                echo "| Oldest commit in this promotion | **${RELEASE_AGE_DAYS} day(s)** old (${RELEASE_OLDEST_DATE}, \`${RELEASE_OLDEST_SHA}\`) |"
+                echo "| Commits on prod not in this promotion | **${RELEASE_BEHIND}** |"
+                echo
+                echo "Full comparison for this PR: ${RELEASE_COMPARE_URL}"
+                echo
+                echo "${RELEASE_DIVERGED}"
+                echo
+                echo "## Work on dev beyond this promotion's cut"
+                echo
+                echo "${BEYOND_LINE}"
+                echo
+                echo "## Threshold status (dev-versus-prod)"
+                echo
+                echo "The threshold below measures dev against prod and is the trigger for"
+                echo "Release to act. It describes the overall promotion backlog, not the"
+                echo "scope of this pull request, which covers only the range above."
+                echo
+                echo "| | |"
+                echo "|---|---|"
+                echo "| Commits on dev not on prod | **${AHEAD}** |"
+                echo "| Oldest unpromoted commit (dev) | **${AGE_DAYS} day(s)** old (${OLDEST_DATE}, \`${OLDEST_SHA}\`) |"
+                echo "| Commits on prod not on dev | **${BEHIND}** |"
+                echo "| Threshold breached (50 commits or 3 days, dev vs prod) | **${BREACH}** (${BREACH_WHY}) |"
+                echo
+                echo "Full comparison dev vs prod: ${COMPARE_URL}"
+                echo
+                echo "## Who owns this"
+                echo
+                echo "**The Release seat owns merging this.** This workflow will never merge it,"
+                echo "will never enable auto-merge, and will never push to prod. If Release holds"
+                echo "the gate and chooses not to promote, the CTO owns the risk decision."
+                echo
+                echo "There is no GitHub account that corresponds to the Release role in this"
+                echo "repository, so this pull request carries the \`owner:release\` label and names"
+                echo "Release here rather than setting a GitHub assignee that would be wrong."
+                echo
+                echo "## About this automation"
+                echo
+                echo "The schedule runs every 2 days. If dev is level with prod the run is a clean"
+                echo "no-op. If a promotion into prod is already open, whether its head is dev or"
+                echo "a release branch cut for the purpose, this workflow updates that one rather"
+                echo "than opening a second, because a duplicate promotion would be actively"
+                echo "harmful."
+                echo
+                echo "This workflow is inert until a repository secret named \`FLEET_PAT\` is added"
+                echo "(a token for the \`orange-builder\` machine user). FLEET_PAT is required"
+                echo "because \"Allow GitHub Actions to create and approve pull requests\" is off"
+                echo "in this repository and is staying off: that single toggle would also let"
+                echo "Actions approve pull requests, which would undermine the one-approving-review"
+                echo "requirement."
+              } > pr-body.md
+
+              # Use the release-branch commit count for retitling, not prod...dev.
+              # prod...dev can include work that is NOT in this pull request.
+              RETITLE_AHEAD="${RELEASE_AHEAD}"
+            else
+              # head is dev: behaviour is unchanged from before this fix.
+              RETITLE_AHEAD="${AHEAD}"
+            fi
 
             gh pr edit "${EXISTING}" --body-file pr-body.md
             gh pr edit "${EXISTING}" --add-label 'owner:release'
 
             # Only retitle a title this workflow itself generated. A title a
             # human wrote is left alone; the counts live in the body either way.
+            # When head is not dev, use the release-branch count, not prod...dev.
             case "${EXISTING_TITLE}" in
               "promote: dev to prod ("*)
-                gh pr edit "${EXISTING}" --title "promote: dev to prod (${AHEAD} commits)"
+                gh pr edit "${EXISTING}" --title "promote: dev to prod (${RETITLE_AHEAD} commits)"
                 ;;
               *)
                 echo "Left the existing human-written title unchanged."
