@@ -17,12 +17,12 @@
  * (Comment-only touch 2026-09-05 to refresh a wedged Cloudflare Pages preview check; no
  * behavior change.)
  *
- * WHERE THE OTHER COPY OF THIS DECISION LIVES, and why it was not enough on its own. The
- * check-pending-migrations job in the deploy workflow already refuses a duplicate version. Two
- * limits: it runs on a push to dev or prod and never on a pull request, and within that
- * workflow it runs AFTER apply-migrations. By the time it goes red the shadowed file has
- * already been skipped against a real database. This gate runs on the pull request, before
- * anything is applied anywhere.
+ * WHERE THE OTHER COPY OF THIS DECISION LIVES. The check-duplicate-migrations job in the deploy
+ * workflow runs the same comparison on a push to dev or prod. apply-migrations needs that job,
+ * so a collision stops the apply before either file reaches a database. This gate covers the
+ * path that workflow does not: it runs on the pull request, before the colliding pair can merge.
+ * Keeping the two implementations in sync remains necessary until OR-T1166 replaces the deploy
+ * workflow's shell comparison with this script.
  *
  * The two must agree. extractVersion below reproduces what that workflow does in shell
  * (`basename | cut -d_ -f1`) rather than asserting a tidier rule of its own, and the self test
