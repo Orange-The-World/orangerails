@@ -1710,7 +1710,18 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
           return { height: h, blockHashHex: h === HIT_HEIGHT ? blockHashHex : bytesToHex(new Uint8Array(32)), filter: fakeFilter };
         },
         fetchBlock: async () => ({ height: HIT_HEIGHT, blockHashHex, raw: blockBuild.raw }),
-        matcher: { matchAny: (filter, _hash, _scripts) => bytesToHex(filter) === bytesToHex(fakeFilter) },
+        // Match by hash, not filter bytes. fetchFilter returns the same fakeFilter
+        // at every height below FAIL_HEIGHT, so a filter-only match also fires at
+        // 800_002, not just HIT_HEIGHT. fetchBlock always hands back the
+        // HIT_HEIGHT fixture regardless of which hash it was asked for, so that
+        // phantom hit paired real block bytes with a hash that does not belong to
+        // them. assertBlockContentMatchesHash (OR-T0999 part 3) correctly rejects
+        // that pairing. Matching by hash keeps this test to its real point: a hit
+        // below the failure point is included.
+        matcher: {
+          matchAny: (_filter, hash) =>
+            bytesToHex(hash) === bytesToHex(reverseBytes(hexToBytes(blockHashHex))),
+        },
       });
 
       // The tx at HIT_HEIGHT (below the failure) must be in the result.
@@ -1769,7 +1780,18 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
           };
         },
         fetchBlock: async () => ({ height: HIT_HEIGHT, blockHashHex, raw: blockBuild.raw }),
-        matcher: { matchAny: (filter, _hash, _scripts) => bytesToHex(filter) === bytesToHex(fakeFilter) },
+        // Match by hash, not filter bytes. fetchFilter returns the same fakeFilter
+        // at every height below FAIL_HEIGHT, so a filter-only match also fires at
+        // 900_002, not just HIT_HEIGHT. fetchBlock always hands back the
+        // HIT_HEIGHT fixture regardless of which hash it was asked for, so that
+        // phantom hit paired real block bytes with a hash that does not belong to
+        // them. assertBlockContentMatchesHash (OR-T0999 part 3) correctly rejects
+        // that pairing. Matching by hash keeps this test to its real point: a hit
+        // below the failure point is included.
+        matcher: {
+          matchAny: (_filter, hash) =>
+            bytesToHex(hash) === bytesToHex(reverseBytes(hexToBytes(blockHashHex))),
+        },
       });
 
       // Both must be present: the library must return non-empty sealedTransactions
