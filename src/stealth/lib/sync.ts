@@ -1558,8 +1558,10 @@ export async function liveFetchFilter(
 
 /**
  * Fetch raw block bytes for the given block hash. The block source attaches
- * X-Block-Hash and X-Block-Height response headers; we trust those for the
- * height field but verify the hash matches what we asked for.
+ * X-Block-Hash and X-Block-Height response headers. The height is taken from
+ * X-Block-Height (defaulting to 0 if absent). The blockHashHex in the returned
+ * record is X-Block-Hash when present, or the requested hash as a fallback;
+ * neither is verified against what was asked for.
  */
 export async function liveFetchBlock(
   blockHashHex: string,
