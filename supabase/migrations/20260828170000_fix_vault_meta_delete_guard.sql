@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: never applied on dev or prod (both ledgers checked
+-- OUT-OF-ORDER-OK: fzwmnzmtqidumdqjdddz never applied on dev or prod (both ledgers checked
 -- 2026-09-05, OR-T2256); merged via PR #940, Auditor-approved
 -- 2026-08-28, before the out-of-order guard (OR-T2147) existed. Only
 -- replaces one existing function definition that no later migration
