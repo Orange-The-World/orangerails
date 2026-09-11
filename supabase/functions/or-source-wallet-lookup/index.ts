@@ -23,6 +23,12 @@
  *   The 404 is indistinguishable from "it belongs to someone else", so a
  *   caller cannot fish for cross-subaccount wallet ownership by observing
  *   the response status.
+ *
+ * or-stealth-transactions-list follows the same rule on its own connection_id
+ * ownership check, for the same reason (OR-T1146). If you are tempted to
+ * return a more specific status for the "exists but not yours" case on
+ * either endpoint, that is a deliberate, shared decision to revisit on both
+ * files together, not a one-file fix.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
