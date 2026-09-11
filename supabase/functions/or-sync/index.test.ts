@@ -556,3 +556,32 @@ Deno.test('DL-1433: redactedUpstreamDetail strips partial numeric refs (card-end
   assert(!out.includes('5678'), 'partial numeric ref must not appear in redacted output');
   assertEquals(out.includes('[redacted]'), true, 'numeric placeholder must be present');
 });
+
+// ── DL-1433 (QA follow-up): a benign upstream message must not be reduced ──
+// to an empty or meaningless line. The regex that stripped every 4+ digit
+// run also ate retry-after seconds, HTTP-status-adjacent numbers, amounts
+// and timestamps that carry no PII. Over-redaction that destroys the
+// diagnostic is a failure of this ticket, not a success (acceptance
+// criterion 2).
+
+Deno.test('DL-1433: redactedUpstreamDetail leaves a retry-after value untouched (no account/card context)', () => {
+  const out = redactedUpstreamDetail('Rate limited by upstream, retry after 3600 seconds');
+  assertEquals(out, 'Rate limited by upstream, retry after 3600 seconds', 'benign message must survive unredacted');
+  assert(!out.includes('[redacted]'), 'no account/card keyword is present, nothing should be redacted');
+});
+
+Deno.test('DL-1433: redactedUpstreamDetail leaves an HTTP-status-adjacent error code untouched', () => {
+  const out = redactedUpstreamDetail('Upstream returned error code 5003 while processing the request');
+  assertEquals(
+    out,
+    'Upstream returned error code 5003 while processing the request',
+    'a bare error code with no account/card keyword must survive unredacted',
+  );
+});
+
+Deno.test('DL-1433: redactedUpstreamDetail still reads as a useful diagnostic after redaction', () => {
+  const out = redactedUpstreamDetail('Account 1234 rejected by upstream: insufficient balance for withdrawal');
+  assert(out.length > 20, 'redaction must not collapse the line to noise');
+  assert(out.includes('insufficient balance for withdrawal'), 'the rest of the diagnostic must remain readable');
+  assert(!out.includes('1234'), 'the account reference itself must still be gone');
+});
