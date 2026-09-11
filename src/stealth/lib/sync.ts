@@ -96,6 +96,14 @@ export interface NormalizedTransaction {
   vout_count: number;
   /** Carries any forward-compat notes. Plaintext, sealed in the envelope. */
   memo: string | null;
+  /** Hex, RPC display order. The hash of the block that included this
+   *  transaction, taken from parseBlockHeader's own dsha256 of the raw
+   *  header bytes and checked by assertBlockContentMatchesHash against the
+   *  hash the block was requested by. Carried through sealing as
+   *  block_hash_hex so a later server-side reorg detector can compare it
+   *  to the canonical chain without ever seeing plaintext. Absent on
+   *  records sealed before this field existed. */
+  block_hash?: string;
 }
 
 export type WalletEnvelopePayload =
@@ -139,6 +147,33 @@ export class WindowExhaustedError extends Error {
     super(message);
     this.name = 'WindowExhaustedError';
     Object.setPrototypeOf(this, WindowExhaustedError.prototype);
+  }
+}
+
+/**
+ * Thrown by runSync when a fetched block's actual bytes do not hash to the
+ * value it was requested by. fetchFilterPair (OR-T1167) already checks that
+ * the filter sidecar's (filter, hash) pair matches the HEIGHT asked; this is
+ * a separate, later check that the BYTES a block source hands back for that
+ * hash really do hash to it. A source or CDN returning the wrong bytes for a
+ * hash (truncated, corrupted, or simply someone else's block) would
+ * otherwise be parsed and recorded as if it were the block requested, with
+ * no error at all.
+ *
+ * The widget's catch (routes/sync.tsx) does not special-case this error: it
+ * falls into the generic branch and is reported retryable:true, same as any
+ * other block-parsing failure. That is deliberate, not an oversight: a
+ * wrong-bytes-for-a-hash response can plausibly come from one stale CDN
+ * edge or cache entry, and a retried sync may hit a different one and
+ * succeed, even though the exact response already in hand is provably
+ * wrong and re-parsing it would only reproduce the same mismatch.
+ */
+export class BlockContentMismatchError extends Error {
+  readonly code = 'BLOCK_CONTENT_MISMATCH' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'BlockContentMismatchError';
+    Object.setPrototypeOf(this, BlockContentMismatchError.prototype);
   }
 }
 
@@ -518,6 +553,26 @@ function parseBlockHeader(raw: Uint8Array): ParsedBlockHeader {
     txCount,
     txStart: cur.pos,
   };
+}
+
+/**
+ * Compare a parsed block header's own hash (dsha256 of the actual header
+ * bytes, computed by parseBlockHeader) against the hash the block was
+ * requested by. Both are RPC display order lowercase hex. A mismatch means
+ * the bytes handed back are not the block that was asked for, whatever
+ * height or hash the response CLAIMED to be: throws BlockContentMismatchError.
+ */
+function assertBlockContentMatchesHash(
+  header: ParsedBlockHeader,
+  requestedHashHex: string,
+  height: number,
+): void {
+  if (header.blockHashHex.toLowerCase() !== requestedHashHex.toLowerCase()) {
+    throw new BlockContentMismatchError(
+      `stealth/sync: block at height ${height} does not hash to the requested value` +
+      ` (requested ${requestedHashHex}, actual bytes hash to ${header.blockHashHex})`,
+    );
+  }
 }
 
 function isoDateFromUnix(ts: number): string {
@@ -931,6 +986,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // block record height can silently arrive as 0.
     const blockHeight = hits[i].height;
     const header = parseBlockHeader(block.raw);
+    assertBlockContentMatchesHash(header, hits[i].blockHashHex, blockHeight);
     const occurredAt = isoDateFromUnix(header.timestamp);
     // Full instant, not just the date. Rides inside the sealed envelope so
     // the server learns nothing new; consumers use it for transaction-time
@@ -999,6 +1055,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         normalized.push({
           txid: tx.txid,
           block_height: blockHeight,
+          block_hash: hits[i].blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
           direction: 'out',
@@ -1022,6 +1079,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         normalized.push({
           txid: tx.txid,
           block_height: blockHeight,
+          block_hash: hits[i].blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
           direction: 'in',
@@ -1191,6 +1249,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       bytesDownloaded += block.raw.length;
       const blockHeight = extHits[ei].height;
       const header = parseBlockHeader(block.raw);
+      assertBlockContentMatchesHash(header, extHits[ei].blockHashHex, blockHeight);
       const occurredAt = isoDateFromUnix(header.timestamp);
       const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
 
@@ -1246,7 +1305,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
             }
           }
           normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            txid: tx.txid, block_height: blockHeight, block_hash: extHits[ei].blockHashHex,
+            occurred_at: occurredAt,
             timestamp: occurredAtInstant, direction: 'out',
             amount_sats: Number(netOut), address: recipientAddress,
             vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
@@ -1255,7 +1315,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
           for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
         } else if (anyReceive && !alreadySeen) {
           normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            txid: tx.txid, block_height: blockHeight, block_hash: extHits[ei].blockHashHex,
+            occurred_at: occurredAt,
             timestamp: occurredAtInstant, direction: 'in',
             amount_sats: Number(receivedAmount), address: receivedAddress,
             vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
@@ -1302,6 +1363,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       ciphertext_b64: env.ciphertext_b64,
       occurred_at: tx.occurred_at,
       block_height: tx.block_height,
+      block_hash_hex: tx.block_hash,
       txid_blind_index_hex: blind,
     });
     if (i % 8 === 0 || i === normalized.length - 1) {

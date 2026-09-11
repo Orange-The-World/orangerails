@@ -344,6 +344,16 @@ export interface SealedTransaction {
   /** Plaintext block height for resume on the next sync. */
   block_height: number;
   /**
+   * Lowercase hex, RPC display order, the hash of the block at block_height,
+   * as computed from the block's own bytes and checked against the hash it
+   * was requested by (see assertBlockContentMatchesHash in sync.ts). Sealed
+   * alongside occurred_at and block_height, all plaintext, ZKA Level 2, so a
+   * later server-side reorg detector can compare it to the canonical chain
+   * without ever seeing the transaction's contents. Optional: absent on
+   * records sealed before this field existed.
+   */
+  block_hash_hex?: string;
+  /**
    * Lowercase hex HMAC-SHA-256 of txid under the per-app blind-index subkey.
    * Server cannot reverse: the subkey is derived from the per-app stealth key
    * (HKDF-SHA-256, info="or-stealth/blind-index/v1"), which the server never holds.
