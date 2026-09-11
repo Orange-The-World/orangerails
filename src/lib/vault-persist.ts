@@ -516,12 +516,12 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       sig_secret_wrapped: string | null;
     }> | null
   )?.[0];
-  if (storedMeta?.kem_secret_wrapped != null && newKemSecretWrapped === null) {
+  if (storedMeta?.kem_secret_wrapped != null && newKemSecretWrapped == null) {
     throw new Error(
       "Refusing to rotate: a stored PQC KEM secret exists but the caller did not supply a re-wrapped value. Nothing was changed.",
     );
   }
-  if (storedMeta?.sig_secret_wrapped != null && newSigSecretWrapped === null) {
+  if (storedMeta?.sig_secret_wrapped != null && newSigSecretWrapped == null) {
     throw new Error(
       "Refusing to rotate: a stored PQC signature secret exists but the caller did not supply a re-wrapped value. Nothing was changed.",
     );
