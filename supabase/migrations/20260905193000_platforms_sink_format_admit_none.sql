@@ -1,0 +1,6 @@
+-- Intentionally empty. See commit message: this filename's timestamp
+-- (19:30:00 UTC) was hand-rounded, not read from the clock, which is
+-- exactly the mistake OR-T1249's acceptance criteria guard against. The
+-- real migration is 20260905221014_platforms_sink_format_admit_none.sql.
+-- Left as a no-op rather than deleted: this tool set has no file-delete
+-- operation, and an empty migration file applies cleanly and does nothing.
