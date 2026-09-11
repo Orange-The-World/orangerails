@@ -108,6 +108,22 @@ chore(deps): upgrade @noble/hashes to 1.4.0
 
 Scope is optional but encouraged. Use the present tense ("add Strike adapter", not "added Strike adapter").
 
+### Commit-message guard (recommended, one-time setup)
+
+This repo scans every pull request's commit messages for internal-only references
+(hostnames, private links, etc.) before merge, but that check runs late: after the
+commit already exists. Enable a local hook that checks the same thing before the
+commit is even written:
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/*
+```
+
+If a commit message trips it, rephrase the message. Do not bypass it with
+`git commit --no-verify`; the PR-range scan will still catch the same value later,
+just after it is already on your branch.
+
 ---
 
 ## Pull requests
