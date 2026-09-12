@@ -215,15 +215,50 @@ fix for a live exposure and should not be cited as evidence of one.
 
 **What that rests on, and how to re-check it.** The database objects were
 checked by querying the databases. They were not inferred from this repository,
-and a code search is not evidence for this claim in either direction. §3.3 is
-why that distinction is load-bearing rather than pedantic: `channel_state` and
-its unique index already exist in the database while the wiring PR ships zero
-DDL, so schema state runs ahead of the diff, and a document that says so cannot
-then make a schema claim out of the diff two sections later. To re-check this
-line, query `information_schema.columns` in the dev and production projects for
-a column that could hold a Lightning payment value, and report which projects
-were reached: a project that could not be reached is not a project that came
-back clean.
+and a code search is not evidence about a database object in either direction.
+§3.3 is why that distinction is load-bearing rather than pedantic:
+`channel_state` and its unique index already exist in the database while the
+wiring PR ships zero DDL, so schema state runs ahead of the diff, and a document
+that says so cannot then make a schema claim out of the diff two sections later.
+
+The claim above reaches over three kinds of object, and one query does not reach
+all three. Re-check it kind by kind, in both the dev and the production project,
+and report which projects were reached: a project that could not be reached is
+not a project that came back clean.
+
+- **Types, tables, views (including materialized views) and their columns:**
+  query `information_schema.columns` for an ordinary table or view column.
+  PostgreSQL omits materialized views from `information_schema` entirely, so
+  that query alone reports clean on a narrower basis than this claim. Also
+  query the catalog directly: `pg_class` joined to `pg_attribute` (relations
+  filtered to `relkind in ('r','v','m','p','f')`) reaches ordinary tables,
+  views, materialized views, partitioned tables and foreign tables alike, and
+  is what actually finds a column a materialized view is storing. A composite
+  type is a separate class again: it declares attributes rather than columns
+  and needs its own pair, `pg_type` joined to `pg_attribute`, for the `type`
+  half of the sentence.
+- **Functions and RPCs:** query `pg_proc` directly. `information_schema.routines`
+  and `pg_proc` are not interchangeable: Postgres does not guarantee they agree,
+  and a routine can exist in a non-system schema with no row in
+  `information_schema.routines` at all, so treating the two as an "or" choice
+  understates what exists. Query `pg_proc`, and use `information_schema.routines`
+  only as a cross-check, never as the sole source. `information_schema.columns`
+  does not list a function or an RPC at all, so a columns-only sweep cannot
+  confirm this part of the claim however clean it comes back.
+- **Edge functions:** read the deployed function list for the project. An edge
+  function is not a database object, so no catalog query reaches it. That list
+  is an inventory of what is deployed rather than a search of this repository,
+  and this is the one kind here where the repository is on the evidence path at
+  all: the deployed list says which functions exist, and the source of a
+  function on that list says what it handles.
+
+**What the claim rests on today, so nobody has to reconstruct it.** In the dev
+project the sweep covered types, tables, columns, views, functions and RPCs. In
+the production project it covered columns only. Production functions, RPCs and
+edge functions have not been enumerated by anyone, so that part of the sentence
+above is carried by the dev result and by the fact that no payment record path
+is implemented, not by a production query. That is the thin spot in this claim,
+and closing it is the first thing the next re-check should do.
 
 Seven consequences, all checkable at review. Read this as the complete list **for
 the LDK payment record surface** as it stands: if a proposal touches that surface,
