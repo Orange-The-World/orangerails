@@ -58,7 +58,8 @@ type SupabaseClient = any;
 /** The fields an envelope replacement writes onto the connection row. */
 export interface EnvelopeReplacementFields {
   sealed_envelope: unknown;
-  wallet_birthday_plaintext: string | null;
+  /** Omit to preserve the birthday already stored on the connection. */
+  wallet_birthday_plaintext?: string | null;
 }
 
 export type EnvelopeReplacementResult =
@@ -96,14 +97,18 @@ export async function applyEnvelopeReplacement(
   //    where the scan starts, but it is still the arm that answers for a
   //    connection with no coverage at all, and both arms must agree that this
   //    connection has read nothing since the new birthday.
+  const updateFields: Record<string, unknown> = {
+    sealed_envelope: fields.sealed_envelope,
+    last_block_scanned: null,
+    updated_at: new Date().toISOString(),
+  };
+  if (Object.prototype.hasOwnProperty.call(fields, 'wallet_birthday_plaintext')) {
+    updateFields.wallet_birthday_plaintext = fields.wallet_birthday_plaintext;
+  }
+
   const { error: updateErr } = await client
     .from('stealth_connections')
-    .update({
-      sealed_envelope: fields.sealed_envelope,
-      wallet_birthday_plaintext: fields.wallet_birthday_plaintext,
-      last_block_scanned: null,
-      updated_at: new Date().toISOString(),
-    })
+    .update(updateFields)
     .eq('id', connectionId);
 
   if (updateErr) {
