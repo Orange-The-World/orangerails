@@ -52,8 +52,8 @@
 --     widens this list on purpose. That is the direction this check should err
 --     in.
 --
---     FIXED 2026-09-05 (OR-T0828, Auditor review 5053481295 on PR #966 at head
---     06738fed): the strip used to remove num_nonnulls together with an
+--     FIXED 2026-09-05 (OR-T0828, Auditor review 5053481295 at head 06738fed):
+--     the strip used to remove num_nonnulls together with an
 --     open-ended run of its own argument characters via
 --     num_nonnulls [a-z0-9_, ]*. That character class has no terminator and
 --     both letters and spaces are in it, so on
