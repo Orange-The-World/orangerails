@@ -57,18 +57,20 @@ const SRC_ROOT = join(REPO_ROOT, 'src');
 const RULES_PATH = join(REPO_ROOT, '.github', 'ship-rules.json');
 
 // Seed set: the files that ARE this product's zero-knowledge crypto layer,
-// per OR-T2160. Two names from that ticket, "co-admin-keyring" and
-// "vault-persist", did not resolve to a file under those names when this
-// script was written (searched the tree, zero matches); rather than guess
-// a path they are left out. If they exist under a different name, add
-// them here, and re-run this script to confirm it still passes.
+// per OR-T2160. "co-admin-keyring" and "vault-persist" did not resolve to a
+// file under those names when this script was first written (searched the
+// tree, zero matches); both now exist on dev at src/lib/co-admin-keyring.ts
+// and src/lib/vault-persist.ts (confirmed present, review on PR #1357,
+// 2026-09-05) and are seeded below.
 const CRYPTO_PRIMITIVES = [
   'src/lib/vault.ts',
   'src/lib/key-derivation.ts',
   'src/lib/key-wrapping.ts',
   'src/lib/co-admin.ts',
+  'src/lib/co-admin-keyring.ts',
   'src/lib/pqc.ts',
   'src/lib/pqc-lifecycle.ts',
+  'src/lib/vault-persist.ts',
   'src/context/VaultContext.tsx',
 ];
 
