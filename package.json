@@ -31,7 +31,7 @@
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
     "@noble/curves": "^2.2.0",
-    "@noble/post-quantum": "^0.6.1",
+    "@noble/post-quantum": "^0.7.0",
     "@quiltt/react": "^6.0.0",
     "@radix-ui/react-accordion": "^1.2.12",
     "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -99,7 +99,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "@vitejs/plugin-react-swc": "^4.3.0",
     "@vitest/ui": "^4.1.4",
-    "ccxt": "4.5.56",
+    "ccxt": "4.5.73",
     "eslint": "^9.32.0",
     "eslint-config-prettier": "^10.1.1",
     "eslint-plugin-prettier": "^5.2.6",
