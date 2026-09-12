@@ -131,7 +131,7 @@ jobs:
           check "empty holds list" "ok" "" "$(printf 'aaa1111\nbbb2222')" "allow-no-holds"
           check "held sha not in range" "ok" "aaa1111 OR-T0001" "bbb2222cccc3333" "allow-clear"
           check "held sha in range" "ok" "aaa1111 OR-T0001" "aaa1111bbb2222cccc" "block-held:aaa1111:OR-T0001:aaa1111bbb2222cccc"
-          check "held sha matches one of many" "ok" "$(printf 'zzz9999 OR-T0002\naaa1111 OR-T0001')" "$(printf 'bbb2222\naaa1111ccc')" "block-held:aaa1111:OR-T0001:aaa1111ccc"
+          check "held sha matches one of many" "ok" "$(printf 'eee9999 OR-T0002\naaa1111 OR-T0001')" "$(printf 'bbb2222\naaa1111ccc')" "block-held:aaa1111:OR-T0001:aaa1111ccc"
           check "held sha match is case-insensitive" "ok" "AAA1111 OR-T0001" "aaa1111bbb2222" "block-held:AAA1111:OR-T0001:aaa1111bbb2222"
           check "prefix too short is refused" "ok" "aaa11 OR-T0001" "aaa1111bbb2222" "block-bad-prefix:aaa11:OR-T0001"
           check "prefix with a glob/regex metacharacter is refused" "ok" "aaa1111* OR-T0001" "aaa1111bbb2222" "block-bad-prefix:aaa1111*:OR-T0001"
