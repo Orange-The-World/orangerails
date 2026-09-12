@@ -1,0 +1,19 @@
+[Unit]
+Description=Alarm that %i entered the failed state
+# No OnFailure= here, deliberately: a handler that triggers itself on its
+# own failure recurses. If this unit fails, its non-zero exit and journal
+# line are the record. Read with:
+#   systemctl is-failed orbi-failure-handler@%i.service
+#   journalctl -u orbi-failure-handler@%i.service -n 50 --no-pager
+
+[Service]
+Type=oneshot
+# Leading dash on purpose: a missing or unreadable env file must NOT stop
+# this unit from starting. That is one of the failure modes this handler
+# exists to report, and a handler that cannot run in that case reports
+# nothing. Without the file the handler still starts, logs what is missing,
+# and exits non-zero so systemctl is-failed can see it.
+EnvironmentFile=-/etc/orbi/orbi-failure-handler.env
+ExecStart=/usr/local/bin/orbi-failure-handler.sh %i
+StandardOutput=journal
+StandardError=journal
