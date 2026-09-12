@@ -61,6 +61,8 @@ interface SelectChain {
   order(column: string, options?: { ascending?: boolean }): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
   eq(column: string, value: unknown): SelectChain;
+  gt(column: string, value: unknown): SelectChain;
+  limit(count: number): Promise<QueryResult>;
 }
 
 /**
@@ -144,7 +146,7 @@ function makeFakeClient(options: FakeOptions = {}) {
         // quietly measuring different sets.
         let counted = stored;
         for (const f of call.filters) {
-          if (f.column === "order" || f.column === "range") continue;
+          if (f.column === "order" || f.column === "range" || f.column === "gt" || f.column === "limit") continue;
           counted = counted.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
         }
         return { data: null, error: null, count: counted.length };
@@ -158,7 +160,7 @@ function makeFakeClient(options: FakeOptions = {}) {
       // column-equals-value filter on the stored rows.
       let view = stored.slice();
       for (const f of call.filters) {
-        if (f.column === "order" || f.column === "range") continue;
+        if (f.column === "order" || f.column === "range" || f.column === "gt" || f.column === "limit") continue;
         view = view.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
       }
 
@@ -178,17 +180,34 @@ function makeFakeClient(options: FakeOptions = {}) {
         });
       }
 
-      // Honour .range(from, to). A fake that always returns the same page
-      // regardless of its arguments can never exercise pagination, and a
-      // fixture of TRANSACTION_PAGE_SIZE or more rows would loop forever
-      // against it instead of failing loudly (see the paging test below).
+      // Honour .gt(column, value), which is how a keyset walk asks for the
+      // rows after its cursor. Applied on the sorted view: a fake that ignored
+      // it would hand back page one for ever.
+      const gtFilter = call.filters.find((f) => f.column === "gt");
+      if (gtFilter) {
+        const [column, value] = gtFilter.value as [string, unknown];
+        view = view.filter(
+          (row) => String((row as Record<string, unknown>)[column]) > String(value),
+        );
+      }
+
+      // Honour .range(from, to) and .limit(count), the two ways a page's size
+      // is capped. A fake that always returned the same page regardless of its
+      // arguments could never exercise pagination, and a fixture of
+      // TRANSACTION_PAGE_SIZE or more rows would loop forever against it
+      // instead of failing loudly (see the paging tests below). .range is kept
+      // even though the source no longer calls it, so a regression back to
+      // positional paging still runs against the fake rather than erroring.
       const rangeFilter = call.filters.find((f) => f.column === "range");
+      const limitFilter = call.filters.find((f) => f.column === "limit");
       const page = rangeFilter
         ? view.slice(
             (rangeFilter.value as [number, number])[0],
             (rangeFilter.value as [number, number])[1] + 1,
           )
-        : view;
+        : limitFilter
+          ? view.slice(0, limitFilter.value as number)
+          : view;
 
       const reorder = options.reorderAfterSelect?.[call.table];
       if (reorder) store[call.table] = reorder(stored.slice());
@@ -256,6 +275,14 @@ function makeFakeClient(options: FakeOptions = {}) {
             eq(column: string, value: unknown) {
               call.filters.push({ column, value });
               return chain;
+            },
+            gt(column: string, value: unknown) {
+              call.filters.push({ column: "gt", value: [column, value] });
+              return chain;
+            },
+            limit(count: number) {
+              call.filters.push({ column: "limit", value: count });
+              return Promise.resolve(resultFor(call));
             },
           };
           return chain;
@@ -893,6 +920,132 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
     const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
     for (const { i } of txnUpdates) expect(i).toBeLessThan(metaIndex);
     expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("migrates the row a delete hides from the CONFIRMING sweep", async () => {
+    // THE RESIDUAL THE COVERAGE SWEEP CANNOT CLOSE ON ITS OWN, and the reason
+    // the walk pages by key. A sweep can only prove what it actually returned,
+    // so a shift that happens DURING the confirming sweep is invisible to it.
+    //
+    // The sequence, at a page size of 500 with the walk paging by OFFSET:
+    //
+    //   Read 1 (positions 0..499) returns conn-0000..conn-0499 and migrates
+    //   them. The page is full, so the walk asks for more.
+    //   Read 2 (positions 500..999) returns nothing, and the walk ends. A row
+    //   conn-0500 then arrives from another session, above the cursor that has
+    //   just stopped, so no walk has ever seen it. It is under the OLD MEK.
+    //   The count is 501 against 500 migrated, so the pass does not settle and
+    //   a confirming sweep runs. So far the sweep is working.
+    //   Read 3 is that sweep's first page, positions 0..499, and returns
+    //   conn-0000..conn-0499, all already migrated. conn-0000 is then deleted
+    //   by another session. conn-0500 shifts from position 500 to 499, inside
+    //   the window the sweep has just consumed.
+    //   Read 4 asks for positions 500..999 and gets nothing. added is 0.
+    //   The delete also lowered the exact count to 500, and conn-0000's id
+    //   stays in the migrated set because it was written before it was removed,
+    //   so migrated is 500 too. added > 0 is false and total > migrated is
+    //   false. The pass SETTLES, the meta write lands, clearMigrationKeys runs,
+    //   and conn-0500 is left wrapped under a MEK that exists nowhere.
+    //
+    // Paging by key removes step 2 of that: read 4 asks for ids above
+    // conn-0499 rather than for position 500, the delete below the cursor moves
+    // nothing, and conn-0500 is returned and migrated.
+    //
+    // PUT `.range(offset, offset + pageSize - 1)` BACK IN walkAndMigrate AND
+    // THIS TEST FAILS: conn-0500 is never updated and the rotation still
+    // resolves. That is the only reason to trust it. The fake still models
+    // .range precisely so that version runs rather than erroring.
+    const clearMigrationKeys = vi.fn();
+    const rows = Array.from({ length: CONNECTION_PAGE_SIZE }, (_, i) => ({
+      id: `conn-${String(i).padStart(4, "0")}`,
+      encrypted_credentials: `creds-${i}`,
+      encrypted_label: null,
+    }));
+    const lateId = `conn-${String(CONNECTION_PAGE_SIZE).padStart(4, "0")}`;
+
+    // Counted rather than flagged, because WHICH read the change lands on is
+    // the whole fixture. Head count reads do not reach here, so the numbering
+    // is the numbering of the paged reads.
+    let pagedReads = 0;
+    const { client, calls } = makeFakeClient({
+      rows: { connections: rows },
+      reorderAfterSelect: {
+        connections: (current) => {
+          pagedReads += 1;
+          if (pagedReads === 2) {
+            // Read 2 is the end of the first walk. The row arrives after the
+            // cursor has passed the end of the table, so it is missed by
+            // construction and only a sweep can find it.
+            return [
+              ...current,
+              { id: lateId, encrypted_credentials: "creds-late", encrypted_label: null },
+            ];
+          }
+          if (pagedReads === 3) {
+            // Read 3 is the first page of the confirming sweep. Deleting an
+            // already-migrated row from the window it has just consumed is what
+            // shifts the late row behind an offset cursor already at 500.
+            return current.filter((row) => (row as { id: string }).id !== "conn-0000");
+          }
+          return current;
+        },
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).resolves.toBeUndefined();
+
+    const connUpdates = calls
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.table === "connections" && c.op === "update");
+    const updatedIds = connUpdates.map(({ c }) => c.filters.find((f) => f.column === "id")?.value);
+
+    // The row the shift would have hidden. This single assertion is the point.
+    expect(updatedIds).toContain(lateId);
+
+    // And every row exactly once, including conn-0000, which was rewritten
+    // before it was deleted and must not be handed to the migration helper a
+    // second time.
+    expect(updatedIds.length).toBe(CONNECTION_PAGE_SIZE + 1);
+    expect(new Set(updatedIds).size).toBe(CONNECTION_PAGE_SIZE + 1);
+
+    // Before the meta write, which is the only moment at which the rotation can
+    // still be finished rather than lost.
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    expect(metaIndex).toBeGreaterThan(-1);
+    for (const { i } of connUpdates) expect(i).toBeLessThan(metaIndex);
+    expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("addresses each page by the last id seen, never by a position", async () => {
+    // The shape, not the outcome. The test above only goes red when a fixture
+    // reproduces the concurrent delete; this one goes red the moment the walk
+    // returns to positional paging at all, which is the edit that would quietly
+    // reopen the case.
+    const rowCount = CONNECTION_PAGE_SIZE + 3;
+    const rows = Array.from({ length: rowCount }, (_, i) => ({
+      id: `conn-${String(i).padStart(4, "0")}`,
+      encrypted_credentials: `creds-${i}`,
+      encrypted_label: null,
+    }));
+    const { client, calls } = makeFakeClient({ rows: { connections: rows } });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const reads = pagedSelects(calls, "connections");
+    expect(reads.length).toBeGreaterThan(1);
+    for (const read of reads) {
+      expect(read.filters).toContainEqual({ column: "limit", value: CONNECTION_PAGE_SIZE });
+      expect(read.filters).toContainEqual({ column: "order", value: ["id", true] });
+      expect(read.filters.some((f) => f.column === "range")).toBe(false);
+    }
+
+    // The first page of a walk has no cursor; the one after it asks for the ids
+    // above the last id the first page returned.
+    const lastOfFirstPage = `conn-${String(CONNECTION_PAGE_SIZE - 1).padStart(4, "0")}`;
+    expect(reads[0].filters.some((f) => f.column === "gt")).toBe(false);
+    expect(reads[1].filters).toContainEqual({ column: "gt", value: ["id", lastOfFirstPage] });
   });
 
   it("stops when a row update reports no error and yet changed no row", async () => {
