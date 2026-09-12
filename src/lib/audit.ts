@@ -8,7 +8,14 @@ export type SecurityEventType =
   | "vault_password_changed"
   | "token_rotated"
   | "coadmin_granted"
-  | "coadmin_revoked";
+  | "coadmin_revoked"
+  // The owner removed a co-admin from their list WITHOUT removing access.
+  // Written when a revocation stopped part way and the owner cleared the
+  // leftover entry on its own. It is NOT coadmin_revoked and must never be
+  // read as though access was removed: metadata.key_removed says which half
+  // of the revocation landed, and false means it was never established
+  // whether the stored key is still there.
+  | "coadmin_list_entry_cleared";
 
 /**
  * Append a security event to vault_security_events.

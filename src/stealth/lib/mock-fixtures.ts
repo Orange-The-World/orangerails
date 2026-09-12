@@ -10,19 +10,35 @@
  * Real production fetchers live inline in `routes/sync.tsx`.
  */
 
+import { CONFIRMATION_DEPTH } from './sync';
 import type {
   BlockRecord,
   FilterRecord,
 } from './sync';
 import type { Bip158Matcher } from './wasm/index';
 
-export const mockFetchTip = async (): Promise<number> => 800_010;
+/**
+ * The mock chain tip.
+ *
+ * runSync stops scanning CONFIRMATION_DEPTH blocks below the tip, so a raw
+ * 800_010 here would leave mock mode covering only 800_000 to 800_004 while
+ * mockFetchFilter still advertised a fixture range up to 800_010. Sitting the
+ * tip CONFIRMATION_DEPTH above the top of the fixture range keeps the whole
+ * range scannable, which is what mock mode did before the buffer existed.
+ *
+ * Heights above 800_010 return a null filter, so the contiguous-cursor walk
+ * still stops at 800_010 and the cursor still lands there.
+ */
+export const MOCK_FIXTURE_TOP_HEIGHT = 800_010;
+
+export const mockFetchTip = async (): Promise<number> =>
+  MOCK_FIXTURE_TOP_HEIGHT + CONFIRMATION_DEPTH;
 
 export const mockFetchFilter = async (
   height: number,
 ): Promise<FilterRecord | null> => {
   // Empty filter for every height in the fixture range.
-  if (height < 800_000 || height > 800_010) return null;
+  if (height < 800_000 || height > MOCK_FIXTURE_TOP_HEIGHT) return null;
   return {
     height,
     blockHashHex:

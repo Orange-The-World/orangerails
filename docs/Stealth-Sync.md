@@ -39,7 +39,7 @@ The customer's xpub never leaves the browser. The Orange Rails server holds a se
 ┌────────────────────────────┐
 │  connect.orangerails.com   │  ← The widget host
 │  Static HTML/JS/WASM       │     Where the math runs
-│  Loaded in popup           │     CSP locked, logged
+│  Loaded in popup           │     Framing denied, see public/_headers
 └────────────┬───────────────┘
              │
    ┌─────────┴─────────────────┐
@@ -85,6 +85,29 @@ When the widget needs to make a network request (fetch filters, fetch a block, s
 ## The cross-domain `postMessage` protocol
 
 Documented in `src/stealth/lib/postmessage.ts` in the orangerails repo. Stable surface for third-party integration. Versioned via `protocol_version` field; bumping it is the migration mechanism.
+
+### Protocol version support window (DEC-0304)
+
+The widget checks membership in a supported set, not equality with a single
+constant: `STEALTH_SUPPORTED_PROTOCOL_VERSIONS` in `postmessage.ts` lists
+every `protocol_version` this build of the widget will accept at INIT.
+`OR_STEALTH_READY` carries that same set as `supported_protocol_versions`,
+alongside the existing `protocol_version` field (the current preferred
+version), so a consuming app can pick a version both sides speak with no
+app deploy of its own, including right after a widget rollback or when a
+stale cached copy of the widget is served.
+
+At most two versions are live at a time: the current version and the one
+before it. A new version stays live for 90 days, measured from the later
+of the new version actually going live and this document being updated to
+say so. After that window the older version is removed in its own
+announced release, and an app still sending it gets back
+`PROTOCOL_VERSION_MISMATCH` naming the version(s) the widget currently
+supports.
+
+Today the supported set is `[1]`: this is the mechanism landing ahead of
+any real version bump. The required CI check that drives a full
+previous-version handshake lands with the first actual bump.
 
 **App → Widget:** one message type, `OR_STEALTH_INIT`, carrying mode (add / sync / list / delete), the per-app key, and the consuming app's identity.
 

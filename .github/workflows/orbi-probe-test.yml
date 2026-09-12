@@ -1,13 +1,20 @@
 name: ORBI probe exit-code tests
 
-# Runs on every pull request or push to dev that touches the probe scripts,
-# the CI workflow itself, or the spec doc. This is the acceptance gate for
-# DL-0430: every exit-code path must be watched going red before the ticket
-# closes. See STALENESS_PROBE_CRON.md for the full exit-code spec.
+# Runs on every pull request that touches the probe scripts, the CI workflow
+# itself, or the spec doc, and on every push to dev touching the same paths.
+#
+# The pull_request trigger is DELIBERATELY NOT filtered by base branch. A PR
+# stacked on another feature branch matched neither trigger, so a change to
+# one of these six files skipped this gate entirely and the PR still read
+# GREEN. The paths filter stays and bounds the cost; the base filter does not
+# come back. See the long note in ci.yml for the same fix there.
+#
+# This is the acceptance gate for DL-0430: every exit-code path must be
+# watched going red before the ticket closes. See STALENESS_PROBE_CRON.md for
+# the full exit-code spec.
 
 on:
   pull_request:
-    branches: [dev]
     paths:
       - 'scripts/ops/orbi-staleness-probe.sh'
       - 'scripts/ops/orbi-forward-fill-liveness.sh'

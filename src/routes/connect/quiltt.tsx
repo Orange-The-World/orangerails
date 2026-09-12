@@ -21,8 +21,10 @@
  *
  * The Quiltt connection_id from onExitSuccess is NOT required on our side —
  * or-quiltt-link-complete only needs (platform_slug, app_user_id, widget_token)
- * because one OR connections row covers all Quiltt links for a Profile (Phase
- * 1 design). The Quiltt connection_id arrives separately via webhook events.
+ * to create the connections row. or-quiltt-link-complete creates one OR
+ * connections row per linked quiltt_connection_id, so a single Profile can
+ * host many bank links. The Quiltt connection_id arrives separately via
+ * webhook events.
  */
 
 import { createFileRoute } from "@tanstack/react-router";

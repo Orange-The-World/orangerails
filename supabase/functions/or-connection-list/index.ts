@@ -16,6 +16,7 @@
  *       id, provider_type, is_stealth, encrypted_label, encrypted_credentials,
  *       status, last_sync_at, last_sync_cursor, last_block_scanned,
  *       encrypted_last_error, credentials_key_version, created_at,
+ *       sync_freshness, hours_since_sync, stale_after_hours,
  *       source_wallets: [{ id, external_wallet_id, is_synced, encrypted_metadata }],
  *
  *       // DL-1490, present ONLY on a failed connection on a sink-mode
@@ -51,6 +52,28 @@
  * `last_sync_cursor` (text, regular rows) and `last_block_scanned` (integer,
  * stealth rows), each null on the row kind that does not carry it.
  *
+ * DL-1737, sync freshness. Three additive fields on every row, regular and
+ * stealth alike:
+ *
+ *   `sync_freshness`     `never` (no usable last_sync_at), `fresh` (synced
+ *                        within `stale_after_hours`) or `stale`.
+ *   `hours_since_sync`   hours since `last_sync_at`, two decimal places, or
+ *                        null when there is no usable stamp.
+ *   `stale_after_hours`  the threshold this response was computed against.
+ *                        Read it rather than hardcoding 72, so the number can
+ *                        be tuned without a client release.
+ *
+ * They exist because a connection silent for 28 days and one synced an hour
+ * ago were previously indistinguishable here: both report `status` active and
+ * `encrypted_last_error` null. `status` is deliberately UNCHANGED, with no new
+ * value added to it, because consumers switch on it and a new value breaks
+ * every one that has no branch for it.
+ *
+ * Computed at read time from one clock read per response. See
+ * ../_shared/sync-freshness.ts for why it is not stored, and for the one case
+ * where the underlying `last_sync_at` is currently not written by the code
+ * that feeds the connection.
+ *
  * `stealth_unavailable` is true when the stealth store could not be read, so
  * the list may be short. It is about the READ, not the result: a user with no
  * stealth connections gets false. Always present, never omitted on success,
@@ -79,6 +102,7 @@ import {
   STEALTH_UNAVAILABLE_ALARM,
   stealthRowToConnection,
   tagRegularConnection,
+  withSyncFreshness,
 } from './stealth-union.ts';
 import type { StealthConnectionRow, UnifiedConnection } from './stealth-union.ts';
 
@@ -248,11 +272,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       c => withErrorCopy(c as unknown as Record<string, unknown>, sinkMode),
     ) as unknown as UnifiedConnection[];
 
-    return jsonResponse(
-      buildListResponse(mergeConnections(decorated, stealthConnections), stealthUnavailable),
-      200,
-      cors,
+    // DL-1737: the clock is read ONCE here and threaded down, so every row in
+    // this response is measured against a single instant. Read per row, two
+    // connections stamped at the same moment could land on opposite sides of
+    // the staleness threshold in the same payload.
+    const merged = withSyncFreshness(
+      mergeConnections(decorated, stealthConnections),
+      new Date(),
     );
+
+    return jsonResponse(buildListResponse(merged, stealthUnavailable), 200, cors);
   } catch (err) {
     console.error('[or-connection-list] fatal:', err);
     return jsonResponse({ error: 'Internal error' }, 500, cors);

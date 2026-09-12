@@ -20,7 +20,7 @@
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { mergeStrikeTransactions, batchHttpStatus, throwOnDbError, handleConnectionError } from './index.ts';
+import { mergeStrikeTransactions, batchHttpStatus, throwOnDbError, handleConnectionError, redactedUpstreamDetail } from './index.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 
 const WALLET_A = 'wallet-aaaa';
@@ -534,4 +534,25 @@ Deno.test('DL-1440: or-sync source code must contain externalToInternalId remap 
     src.includes('externalToInternalId.get(tx.source_wallet_id)'),
     'or-sync must remap tx.source_wallet_id via externalToInternalId (DL-1440 fix)',
   );
+});
+
+// ── DL-1433: redactedUpstreamDetail strips emails and 4-digit refs ────────────
+
+Deno.test('DL-1433: redactedUpstreamDetail strips email addresses before log', () => {
+  const out = redactedUpstreamDetail('Failed auth for user test@example.com in provider');
+  assert(!out.includes('@'), 'email must not appear in redacted output');
+  assert(!out.includes('test@example.com'), 'full email address must be absent');
+  assertEquals(out.includes('<email>'), true, 'email placeholder must be present');
+});
+
+Deno.test('DL-1433: redactedUpstreamDetail strips 4-digit numeric account refs before log', () => {
+  const out = redactedUpstreamDetail('Account 1234 rejected by upstream');
+  assert(!out.includes('1234'), '4-digit ref must not appear in redacted output');
+  assertEquals(out.includes('[redacted]'), true, 'numeric placeholder must be present');
+});
+
+Deno.test('DL-1433: redactedUpstreamDetail strips partial numeric refs (card-ending) before log', () => {
+  const out = redactedUpstreamDetail('Card ending 5678 was declined by issuer');
+  assert(!out.includes('5678'), 'partial numeric ref must not appear in redacted output');
+  assertEquals(out.includes('[redacted]'), true, 'numeric placeholder must be present');
 });

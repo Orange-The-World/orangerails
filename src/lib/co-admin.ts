@@ -10,7 +10,8 @@
  *   2. Run HKDF on the raw bytes to extract credentials + transactions subkeys.
  *   3. Concatenate into a 64-byte blob.
  *   4. Wrap the blob with the admin's hybrid KEM public key (see wrapBlob64).
- *   5. Insert into wrapped_data_keys + workspace_admins.
+ *   5. Insert workspace_admins, then wrapped_data_keys. That order is not
+ *      interchangeable; see persistCoAdminGrant for why.
  *
  * ## Consume flow (admin side, post-unlock)
  *   1. Fetch wrapped_data_keys row for the owner's workspace_key_id.
@@ -19,8 +20,10 @@
  *   4. Return for use in encrypt/decrypt calls.
  *
  * ## Revoke flow (owner side)
- *   1. Delete workspace_admins row (RLS ensures only the owner can do this).
- *   2. Delete the corresponding wrapped_data_keys row.
+ *   1. Delete the wrapped_data_keys row, which is what removes access.
+ *   2. Delete the workspace_admins row, which is only the record of it.
+ *   The reverse of the grant, for the same reason: a stop between the two must
+ *   leave the evidence rather than the access. See revokeCoAdmin.
  *
  * ## Why not KEY_WRAP_STRATEGIES[...].wrapForRecipient?
  *   That function enforces a 32-byte data-key size (it was designed for
@@ -54,6 +57,22 @@ function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary);
+}
+
+/**
+ * Pull the human-readable text out of a Supabase error.
+ *
+ * These errors are objects, and interpolating one straight into a template
+ * literal yields "[object Object]". GrantCoAdminDialog renders whatever message
+ * this module throws directly to the owner, so the Postgres message is the part
+ * that has to survive.
+ */
+function errorText(err: unknown): string {
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string" && message.length > 0) return message;
+  }
+  return String(err);
 }
 
 // ------------------------------------------------------------------
@@ -180,9 +199,27 @@ export async function unwrapBlob64(
 // Public types
 // ------------------------------------------------------------------
 
-/** Narrow Supabase surface needed by the co-admin flows. */
+/**
+ * Narrow Supabase surface needed by the co-admin flows.
+ *
+ * There is deliberately no update() anywhere in here. The only column this
+ * module ever wrote was user_vault_meta.workspace_key_id, and that value must
+ * be assigned by the server: the authenticated role no longer holds the
+ * privilege, and allocate_workspace_key() assigns it instead. Declaring the
+ * method would let the same write back in as something TypeScript accepts and
+ * the database refuses.
+ */
 export interface CoAdminSupabaseLike {
   from(table: string): CoAdminTableBuilder;
+  /**
+   * allocate_workspace_key() takes no argument by design: the caller may not
+   * propose a workspace key id by any path. params stays optional so this
+   * surface still describes the argument-taking RPCs the callers hold.
+   */
+  rpc(
+    fn: string,
+    params?: Record<string, unknown>,
+  ): Promise<{ data: unknown; error: unknown }>;
 }
 
 interface CoAdminTableBuilder {
@@ -191,7 +228,6 @@ interface CoAdminTableBuilder {
     row: Record<string, unknown>,
   ): Promise<{ data: Record<string, unknown>[] | null; error: unknown }>;
   delete(): CoAdminDeleteBuilder;
-  update(values: Record<string, unknown>): CoAdminUpdateBuilder;
 }
 
 interface CoAdminSelectBuilder {
@@ -202,15 +238,29 @@ interface CoAdminEqBuilder {
   eq(col: string, val: string): CoAdminEqBuilder;
   single(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
   maybeSingle(): Promise<{ data: Record<string, unknown> | null; error: unknown }>;
+  /**
+   * A bounded list read. revokeCoAdmin uses it to ask whether a wrapped key
+   * row is still there after a delete removed nothing, because a row count of
+   * zero does not say which of two opposite things happened.
+   */
+  limit(count: number): PromiseLike<{
+    data: Record<string, unknown>[] | null;
+    error: unknown;
+  }>;
 }
 
 interface CoAdminDeleteBuilder {
   eq(col: string, val: string): CoAdminDeleteBuilder;
+  /**
+   * Ask a delete for the rows it removed. This is the only way to tell a
+   * delete that removed something from one that matched nothing: both return
+   * no error. See the note above revokeCoAdmin for what that cost us.
+   */
+  select(columns: string): PromiseLike<{
+    data: Record<string, unknown>[] | null;
+    error: unknown;
+  }>;
   then(fn: (v: { error: unknown }) => void): Promise<{ error: unknown }>;
-}
-
-interface CoAdminUpdateBuilder {
-  eq(col: string, val: string): Promise<{ error: unknown }>;
 }
 
 /** Result returned by grantCoAdmin. */
@@ -229,6 +279,107 @@ export interface AdminSubkeys {
 // ------------------------------------------------------------------
 
 /**
+ * Thrown when a grant recorded the co-admin in the owner's list and then could
+ * not store the key that actually gives them access.
+ *
+ * This needs its own type for the same reason CoAdminRevocationIncompleteError
+ * does: there is a next step to offer and a plain Error gives the caller
+ * nothing to branch on. The state it names is the SAFE half of the pair. The
+ * recipient can open nothing, the owner can see the attempt, and both granting
+ * again and removing the entry are available. The dangerous half, a stored key
+ * with no list entry, is the state the write order exists to make unreachable,
+ * so nothing here ever constructs it.
+ */
+export class CoAdminGrantIncompleteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CoAdminGrantIncompleteError";
+  }
+}
+
+/** Postgres unique_violation, as PostgREST passes it back in error.code. */
+const PG_UNIQUE_VIOLATION = "23505";
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code?: unknown }).code === PG_UNIQUE_VIOLATION
+  );
+}
+
+/**
+ * Write the two rows a grant consists of, in the order that makes a stop
+ * between them safe.
+ *
+ * ORDER, and it is the rule revokeCoAdmin already states: the wrapped key is
+ * what actually grants access, and the admin list row is only the record of who
+ * holds it. Stopping between the two must leave the EVIDENCE rather than the
+ * ACCESS. On revoke that means the key goes first. On grant it means the list
+ * row goes first, so access is the last thing to appear and the first thing
+ * missing when anything goes wrong. Until this function existed, grant did the
+ * opposite of the rule stated in its own file, and the state it could leave had
+ * no way out: a recipient holding a validly signed wrapped key that
+ * loadAdminSubkeysDirect would open, and an owner shown nothing to revoke.
+ *
+ * THE LIST WRITE IS IDEMPOTENT, NARROWLY. workspace_admins carries UNIQUE
+ * (owner_user_id, admin_user_id), so after a stop a second attempt would fail
+ * on the first write and never reach the second. Treating that one conflict as
+ * "already recorded" is what makes granting again the remedy instead of a
+ * second dead end. Only 23505, and only on this insert: a blanket ignore would
+ * hide an RLS refusal, which means something entirely different.
+ *
+ * NOTHING IS COMPENSATED WHEN THE KEY WRITE FAILS. Deleting the list row back
+ * out looks tidier and is wrong. An error from a write is not proof the write
+ * did not land, only that its answer did not come back, so a delete issued on
+ * that assumption is one of the ways the dangerous state gets created. The row
+ * stays, and the owner is told what it means.
+ *
+ * EXPORTED FOR ITS TESTS, not as a second way to write a grant. grantCoAdmin is
+ * the only caller and should stay the only caller: everything it does before
+ * this point, deriving the MEK, wrapping the blob and signing the binding, is
+ * what makes the rows written here mean anything.
+ */
+export async function persistCoAdminGrant(params: {
+  ownerUserId: string;
+  targetUserId: string;
+  workspaceKeyId: string;
+  wrappedCiphertextB64: string;
+  grantSig: string;
+  supabase: CoAdminSupabaseLike;
+}): Promise<void> {
+  const { ownerUserId, targetUserId, workspaceKeyId, wrappedCiphertextB64, grantSig, supabase } =
+    params;
+
+  // The record of who holds access. Deliberately first.
+  const { error: adminErr } = await supabase.from("workspace_admins").insert({
+    owner_user_id: ownerUserId,
+    admin_user_id: targetUserId,
+  });
+  if (adminErr && !isUniqueViolation(adminErr)) {
+    throw new Error(`Failed to insert workspace_admins: ${errorText(adminErr)}`);
+  }
+
+  // The wrapped key. THIS is the write that grants access.
+  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
+    data_key_id: workspaceKeyId,
+    recipient_user_id: targetUserId,
+    wrapped_ciphertext: wrappedCiphertextB64,
+    algorithm: "hybrid-x25519-mlkem768-blob64",
+    grant_sig: grantSig,
+  });
+  if (wdkErr) {
+    throw new CoAdminGrantIncompleteError(
+      "This co-admin was added to your list, but the key that gives them access was not stored, " +
+        "so they cannot open any of your data. They are shown in your list on purpose, so the " +
+        "attempt is visible rather than silent. Reload the page, then either try granting again " +
+        `or remove them from your list. (${errorText(wdkErr)})`,
+    );
+  }
+}
+
+/**
  * Grant full co-admin access to a target user.
  *
  * The owner must re-confirm their vault password so we can derive
@@ -239,7 +390,8 @@ export interface AdminSubkeys {
  * @param params.ownerPassword     Re-confirmed vault password (never leaves the browser).
  * @param params.targetUserId      The recipient's user ID (from pqc-lookup-user).
  * @param params.targetKemPubB64   The recipient's KEM public key, base64 (from pqc-lookup-user).
- * @param params.existingKeyId     Current workspace_key_id from user_vault_meta (null if not yet set).
+ * @param params.existingKeyId     Current workspace_key_id from user_vault_meta (null if not yet
+ *                                 allocated, in which case the server allocates one).
  * @param params.supabase          Authenticated Supabase client for the owner.
  */
 export async function grantCoAdmin(params: {
@@ -274,16 +426,45 @@ export async function grantCoAdmin(params: {
   blob.set(credsRaw, 0);
   blob.set(txnsRaw, 32);
 
-  // Step d , allocate workspace_key_id if not yet set.
+  // Step d , get the workspace key id. The SERVER mints it; this browser must
+  // not, and as of the server-allocation migration it no longer can.
+  //
+  // WHY. Ownership on every wrapped_data_keys policy is decided by the VALUE of
+  // user_vault_meta.workspace_key_id, so that value must be assigned by the
+  // server and must never be proposed by a caller. The authenticated role
+  // therefore holds no INSERT or UPDATE on the column at all (it still holds
+  // SELECT), and allocate_workspace_key() is a SECURITY DEFINER function that
+  // takes no argument on purpose: there is no path by which a caller proposes
+  // an id.
+  //
+  // RETRIES ARE SAFE. A second call returns the id already allocated rather
+  // than raising or minting a second one, so a dropped response needs no guard
+  // here.
+  //
+  // IT CAN REFUSE, AND THAT REFUSAL MUST STOP THE GRANT. It raises when there
+  // is no authenticated session, and when the caller has no user_vault_meta row
+  // yet , allocate AFTER the vault exists, never before. There is deliberately
+  // no fallback to a locally minted id: a fallback would write nothing, because
+  // the privilege is gone, and would then sign an id no row carries.
+  //
+  // ORDER. This runs BEFORE signMemberGrant below, and the id signed there is
+  // the one returned here. signMemberGrant binds the workspace key id and all
+  // four signed fields must match at verify time, so a signature over a locally
+  // minted id verifies against nothing , and that would surface later as a
+  // co-admin who cannot open anything, not as an error at grant time.
   let workspaceKeyId = params.existingKeyId;
   if (!workspaceKeyId) {
-    workspaceKeyId = crypto.randomUUID();
-    const { error: updateErr } = await (
-      supabase
-        .from("user_vault_meta")
-        .update({ workspace_key_id: workspaceKeyId }) as unknown as CoAdminUpdateBuilder
-    ).eq("user_id", ownerUserId);
-    if (updateErr) throw new Error(`Failed to write workspace_key_id: ${updateErr}`);
+    const { data: allocated, error: allocErr } = await supabase.rpc("allocate_workspace_key");
+    if (allocErr) {
+      throw new Error(`Failed to allocate workspace_key_id: ${errorText(allocErr)}`);
+    }
+    if (typeof allocated !== "string" || allocated.length === 0) {
+      throw new Error(
+        "allocate_workspace_key returned no workspace key id. Refusing to continue: a grant signed " +
+          "against an id the vault row does not carry would verify against nothing.",
+      );
+    }
+    workspaceKeyId = allocated;
   }
 
   // Step e , wrap the 64-byte blob for the recipient's KEM public key.
@@ -310,22 +491,18 @@ export async function grantCoAdmin(params: {
     wrappedMekCiphertextB64: wrappedCt,
   });
 
-  // Step f , insert wrapped_data_keys row.
-  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
-    data_key_id: workspaceKeyId,
-    recipient_user_id: targetUserId,
-    wrapped_ciphertext: wrappedCt,
-    algorithm: "hybrid-x25519-mlkem768-blob64",
-    grant_sig: grantSig,
+  // Steps f-g , write the two rows. The list row goes first and the wrapped
+  // key second, so a stop between them leaves the evidence rather than the
+  // access. persistCoAdminGrant is the only path by which this module writes a
+  // grant, and its docstring is where that rule is argued.
+  await persistCoAdminGrant({
+    ownerUserId,
+    targetUserId,
+    workspaceKeyId,
+    wrappedCiphertextB64: wrappedCt,
+    grantSig,
+    supabase,
   });
-  if (wdkErr) throw new Error(`Failed to insert wrapped_data_keys: ${wdkErr}`);
-
-  // Step g , insert workspace_admins row.
-  const { error: adminErr } = await supabase.from("workspace_admins").insert({
-    owner_user_id: ownerUserId,
-    admin_user_id: targetUserId,
-  });
-  if (adminErr) throw new Error(`Failed to insert workspace_admins: ${adminErr}`);
 
   return { workspaceKeyId };
 }
@@ -405,16 +582,58 @@ export async function loadAdminSubkeysDirect(params: {
 /**
  * Revoke a co-admin grant.
  *
- * Deletes both the workspace_admins row and the corresponding
- * wrapped_data_keys row. RLS ensures only the owner can delete either.
+ * WHAT "REVOKED" HAS TO MEAN. This function used to throw only when a delete
+ * returned an error, and neither delete asked how many rows it removed. A
+ * delete that matches no row returns no error, so "revoked" meant "the request
+ * did not fail", which is not the same fact and in this case was usually the
+ * wrong one.
  *
- * MVP: cached subkeys in the admin's browser tab remain valid until that
- * tab is closed. True instant revocation requires subkey rotation (v2).
+ * WHY IT USUALLY REMOVED NOTHING. public.wrapped_data_keys had an owner-scoped
+ * DELETE policy and no owner SELECT policy, and PostgreSQL requires SELECT
+ * rights for a DELETE whose WHERE clause reads columns of the relation, which
+ * every delete here does. Measured on the dev project as an authenticated
+ * owner, not as the service role: 0 rows selected and 0 removed without an
+ * owner SELECT policy, 1 and 1 with it. So the owner deleted their admin list
+ * row, left the wrapped key behind, and was told the revocation succeeded. The
+ * recipient could still read that row under the recipient SELECT policy, the
+ * grant is still validly ML-DSA signed, and loadAdminSubkeysDirect would still
+ * open it.
+ *
+ * SO: both deletes now prove themselves, and zero removed is never reported as
+ * a successful revocation. It throws, deliberately and unlike the recovery-time
+ * cleanup in co-admin-recovery.ts: that one runs after a recovery has already
+ * succeeded and must not report a false failure, while this one is a security
+ * action the owner asked for and must never report a false success.
+ *
+ * WHAT ZERO ROWS DOES NOT PROVE. A delete that removed nothing cannot tell
+ * "there is no such row" from "the row is there and the policy did not permit
+ * this delete", and those two mean opposite things to an owner. So the zero
+ * case asks: it reads the row back before deciding what to say. If the row is
+ * still visible the grant is definitely live and this says so. If the read
+ * comes back empty the honest answer is that it could not tell, because until
+ * the owner SELECT policy lands an owner cannot see this row in either state.
+ *
+ * NO DEAD ENDS. Every path that leaves the list entry behind hands the caller
+ * clearCoAdminListEntry as the next step. An earlier version of this change
+ * told the owner to "remove them again", which re-entered this function with
+ * the key already gone, took the zero-row branch, and answered that they still
+ * had access. That was false, and no amount of retrying could clear it.
+ *
+ * ORDER. The wrapped key is what actually grants access; the admin list row is
+ * the record of who holds it. Stopping between the two must leave the evidence
+ * rather than the access, so the key goes first. The previous order did the
+ * opposite.
+ *
+ * MVP LIMIT, unchanged: cached subkeys in the admin's browser tab remain valid
+ * until that tab is closed. True instant revocation requires subkey rotation.
  *
  * @param params.ownerWorkspaceKeyId  The owner's workspace_key_id.
  * @param params.adminUserId          The admin user's ID to revoke.
  * @param params.ownerUserId          The owner's user ID (for the workspace_admins delete).
  * @param params.supabase             Authenticated Supabase client for the owner.
+ * @throws {CoAdminRevocationIncompleteError} when the list entry is left behind
+ *   and clearing it on its own is the next step.
+ * @throws {Error} when a delete errors, or when the grant is confirmed live.
  */
 export async function revokeCoAdmin(params: {
   ownerWorkspaceKeyId: string;
@@ -424,21 +643,140 @@ export async function revokeCoAdmin(params: {
 }): Promise<void> {
   const { ownerWorkspaceKeyId, adminUserId, ownerUserId, supabase } = params;
 
-  // Delete workspace_admins row first (RLS: only owner can delete).
-  const { error: adminErr } = await (
-    supabase
-      .from("workspace_admins")
-      .delete()
-      .eq("owner_user_id", ownerUserId) as unknown as CoAdminDeleteBuilder
-  ).eq("admin_user_id", adminUserId);
-  if (adminErr) throw new Error(`Failed to delete workspace_admins row: ${adminErr}`);
-
-  // Delete wrapped_data_keys row for this admin (RLS: owner has delete policy).
-  const { error: wdkErr } = await (
+  // The key row first: it is the thing that grants access.
+  const { data: removedKeys, error: wdkErr } = await (
     supabase
       .from("wrapped_data_keys")
       .delete()
       .eq("data_key_id", ownerWorkspaceKeyId) as unknown as CoAdminDeleteBuilder
-  ).eq("recipient_user_id", adminUserId);
+  )
+    .eq("recipient_user_id", adminUserId)
+    .select("recipient_user_id");
   if (wdkErr) throw new Error(`Failed to delete wrapped_data_keys row: ${wdkErr}`);
+
+  if ((removedKeys ?? []).length === 0) {
+    // Nothing was removed and nothing complained, which on its own is not
+    // proof of anything. Ask whether the row is still there before saying what
+    // happened. The admin list row is deliberately left alone in every branch
+    // below: it is the only record of who may still hold access, and removing
+    // it here would hide the problem instead of fixing it.
+    const { data: stillPresent, error: readErr } = await supabase
+      .from("wrapped_data_keys")
+      .select("recipient_user_id")
+      .eq("data_key_id", ownerWorkspaceKeyId)
+      .eq("recipient_user_id", adminUserId)
+      .limit(1);
+
+    if (readErr) {
+      throw new CoAdminRevocationIncompleteError(
+        `Nothing was removed, and checking whether the stored key is still there failed, so it is not known whether this co-admin still has access. Your list has not been changed. (${readErr})`,
+        false,
+      );
+    }
+
+    if ((stillPresent ?? []).length > 0) {
+      // The only branch entitled to state this as a fact: the row was read
+      // back and it is there.
+      throw new Error(
+        "Nothing was revoked: the stored key for this co-admin is still there, so they still have access. Your list has not been changed. Try again in a moment.",
+      );
+    }
+
+    throw new CoAdminRevocationIncompleteError(
+      "Nothing was removed by this attempt, and this cannot tell whether the stored key is already gone or whether the database refused to remove it. Your list has not been changed. If the key is already gone, for example after a vault recovery, clear the list entry on its own. That only tidies the list and does not remove access.",
+      false,
+    );
+  }
+
+  // Then the list row, so the owner is not left with an admin who holds
+  // nothing.
+  const { data: removedAdmins, error: adminErr } = await (
+    supabase
+      .from("workspace_admins")
+      .delete()
+      .eq("owner_user_id", ownerUserId) as unknown as CoAdminDeleteBuilder
+  )
+    .eq("admin_user_id", adminUserId)
+    .select("admin_user_id");
+  if (adminErr) {
+    // Say which half landed. The stored key IS gone here, and an owner told
+    // only that something failed would reasonably assume the opposite.
+    throw new CoAdminRevocationIncompleteError(`${KEY_REMOVED_LIST_LEFT} (${adminErr})`, true);
+  }
+
+  if ((removedAdmins ?? []).length === 0) {
+    throw new CoAdminRevocationIncompleteError(KEY_REMOVED_LIST_LEFT, true);
+  }
+}
+
+/**
+ * Said when the stored key is gone and only the list entry is left behind.
+ *
+ * It deliberately does not say "access was revoked". Subkeys already loaded in
+ * the co-admin's open browser tab keep working until that tab closes, which is
+ * the MVP limit recorded above revokeCoAdmin. After a recovery that caveat is
+ * harmless because those subkeys are dead; here they are the owner's live
+ * subkeys, so the wording has to be narrower than it was.
+ */
+const KEY_REMOVED_LIST_LEFT =
+  "The stored key was removed, so this co-admin cannot open your data in a new session, but they are still shown in your list. Clear the list entry on its own to tidy that up. Keys already loaded in a tab they left open keep working until that tab is closed.";
+
+/**
+ * Thrown when a revocation stopped part way and left the list entry behind.
+ *
+ * The caller needs this as its own type because there is a next step it can
+ * offer, clearCoAdminListEntry, and a plain Error gives it nothing to branch
+ * on. keyRemoved says which half landed, which decides how that offer should
+ * read: true means access really is gone and clearing the entry is tidying,
+ * false means it is not known and clearing the entry removes only the record.
+ */
+export class CoAdminRevocationIncompleteError extends Error {
+  readonly keyRemoved: boolean;
+
+  constructor(message: string, keyRemoved: boolean) {
+    super(message);
+    this.name = "CoAdminRevocationIncompleteError";
+    this.keyRemoved = keyRemoved;
+  }
+}
+
+/**
+ * Remove a co-admin from the owner's list, and nothing else.
+ *
+ * WHY THIS EXISTS. revokeCoAdmin will not touch the list until it has removed a
+ * key row, and that is right: the list entry is the only record of who may
+ * still hold access. But it leaves states an owner cannot get out of. The
+ * recovery cleanup removes stale wrapped keys and can leave the list row
+ * behind, and a retry or a double click lands in the same place. Without a way
+ * to clear the entry on its own, the product tells the owner to revoke again,
+ * and revoking again finds no key row and refuses, every time.
+ *
+ * THIS DOES NOT REMOVE ACCESS and must never be presented as though it does.
+ * Offer it only when the stored key is known to be gone, or when the owner is
+ * told plainly that this clears the record and nothing else.
+ *
+ * @throws if the delete errors, or if it removed no rows.
+ */
+export async function clearCoAdminListEntry(params: {
+  adminUserId: string;
+  ownerUserId: string;
+  supabase: CoAdminSupabaseLike;
+}): Promise<void> {
+  const { adminUserId, ownerUserId, supabase } = params;
+
+  const { data: removed, error } = await (
+    supabase
+      .from("workspace_admins")
+      .delete()
+      .eq("owner_user_id", ownerUserId) as unknown as CoAdminDeleteBuilder
+  )
+    .eq("admin_user_id", adminUserId)
+    .select("admin_user_id");
+  if (error) throw new Error(`Failed to remove this co-admin from your list: ${error}`);
+
+  if ((removed ?? []).length === 0) {
+    throw new Error(
+      "Nothing was removed from your list, so the entry may already be gone. Reload the page to see the current list.",
+    );
+  }
 }

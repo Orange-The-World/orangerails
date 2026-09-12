@@ -29,6 +29,9 @@
  * fields are null, which is a fact about this row, not a placeholder.
  */
 
+import { computeSyncFreshness } from '../_shared/sync-freshness.ts';
+import type { SyncFreshnessFields } from '../_shared/sync-freshness.ts';
+
 /** Columns read from `stealth_connections`. No envelope column, on purpose. */
 export interface StealthConnectionRow {
   id: string;
@@ -183,9 +186,40 @@ export function tagRegularConnection<T extends Record<string, unknown>>(
  */
 export const STEALTH_UNAVAILABLE_ALARM = 'STEALTH_UNION_UNAVAILABLE';
 
+/**
+ * A unified row carrying the DL-1737 freshness fields.
+ *
+ * A separate type rather than three more required fields on
+ * `UnifiedConnection`, so the two projections above stay responsible for
+ * exactly what they read out of their own store, and the freshness fields get
+ * added in one place for both families at once. See
+ * ../_shared/sync-freshness.ts for what the signal measures and, more
+ * importantly, what it does not.
+ */
+export type UnifiedConnectionWithFreshness = UnifiedConnection & SyncFreshnessFields;
+
+/**
+ * Attach the freshness fields to every row in one pass.
+ *
+ * `now` is a parameter, read once by the caller, so every row in a single
+ * response is measured against a single instant. Read per row instead, two
+ * connections stamped at the same moment could land on opposite sides of the
+ * threshold inside the same payload.
+ *
+ * Applied to the MERGED list rather than inside `tagRegularConnection` and
+ * `stealthRowToConnection` separately, because "one shape" only holds if both
+ * families get the fields from the same code.
+ */
+export function withSyncFreshness(
+  connections: ReadonlyArray<UnifiedConnection>,
+  now: Date,
+): UnifiedConnectionWithFreshness[] {
+  return connections.map(c => ({ ...c, ...computeSyncFreshness(c.last_sync_at, now) }));
+}
+
 /** The endpoint's response body. */
 export interface ListResponse {
-  connections: UnifiedConnection[];
+  connections: UnifiedConnectionWithFreshness[];
   /**
    * True when the stealth store could not be read and the list may therefore
    * be short. Lets the client say "some connections could not be loaded"
@@ -208,7 +242,7 @@ export interface ListResponse {
  * ordinary user who has never used Stealth Sync.
  */
 export function buildListResponse(
-  connections: UnifiedConnection[],
+  connections: UnifiedConnectionWithFreshness[],
   stealthUnavailable: boolean,
 ): ListResponse {
   return { connections, stealth_unavailable: stealthUnavailable };

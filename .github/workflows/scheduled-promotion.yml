@@ -69,6 +69,55 @@ jobs:
           # This workflow never pushes. Do not leave a credential in .git.
           persist-credentials: false
 
+      - name: Self-test the candidate-selection logic
+        run: |
+          set -euo pipefail
+
+          # The same decision the CANDIDATES filter below makes, exercised
+          # against the cases that matter before it is trusted to skip
+          # opening a promotion. A guard that has never been shown to reject
+          # a fork head is not known to reject one (OR-T1086).
+          verdict() {
+            head_ref="$1"
+            head_repo="$2"
+            this_repo="$3"
+
+            if [ "${head_repo}" != "${this_repo}" ]; then
+              echo "reject-foreign-repo"
+              return
+            fi
+
+            case "${head_ref}" in
+              dev) echo "candidate" ;;
+              release/*) echo "candidate" ;;
+              *) echo "reject-other-head" ;;
+            esac
+          }
+
+          fail=0
+          check() {
+            got="$(verdict "$2" "$3" "$4")"
+            if [ "${got}" != "$5" ]; then
+              echo "::error::self-test '$1' expected '$5', got '${got}'"
+              fail=1
+            else
+              echo "ok: $1 -> ${got}"
+            fi
+          }
+
+          check "our own promotion PR, head dev" "dev"         "Orange-The-World/orangerails" "Orange-The-World/orangerails" "candidate"
+          check "our own release branch"         "release/x"   "Orange-The-World/orangerails" "Orange-The-World/orangerails" "candidate"
+          check "a fork's dev branch"            "dev"         "someone-else/orangerails"      "Orange-The-World/orangerails" "reject-foreign-repo"
+          check "a fork's release branch"        "release/x"   "someone-else/orangerails"      "Orange-The-World/orangerails" "reject-foreign-repo"
+          check "our own unrelated head"         "fix/thing"   "Orange-The-World/orangerails" "Orange-The-World/orangerails" "reject-other-head"
+          check "a deleted fork head, null repo" "dev"         ""                              "Orange-The-World/orangerails" "reject-foreign-repo"
+
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::candidate-selection self-test failed. The guard is broken, not passing."
+            exit 1
+          fi
+          echo "Self-test passed: 6 cases, all as expected."
+
       - name: Compare prod and dev
         id: compare
         env:
@@ -219,9 +268,10 @@ jobs:
             echo "## About this automation"
             echo
             echo "The schedule runs every 2 days. If dev is level with prod the run is a clean"
-            echo "no-op. If an open dev to prod pull request already exists, this workflow"
-            echo "updates it rather than opening a second one, because a duplicate promotion"
-            echo "would be actively harmful."
+            echo "no-op. If a promotion into prod is already open, whether its head is dev or"
+            echo "a release branch cut for the purpose, this workflow updates that one rather"
+            echo "than opening a second, because a duplicate promotion would be actively"
+            echo "harmful."
             echo
             echo "This workflow is inert until a repository secret named \`FLEET_PAT\` is added"
             echo "(a token for the \`orange-builder\` machine user, being created shortly). That"
@@ -242,11 +292,50 @@ jobs:
           fi
 
           # ---- reuse or open ----------------------------------------------
-          # Duplicate guard. Ask GitHub for any OPEN pull request whose base is
-          # prod and whose head is dev. If one exists we update it. We never
-          # reach gh pr create while one is open.
-          EXISTING=$(gh api "repos/${GH_REPO}/pulls?state=open&base=prod&head=${GH_REPO%%/*}:dev" \
-                       --jq '.[0].number // ""')
+          # Duplicate guard. Ask GitHub for every OPEN pull request whose base
+          # is prod, with NO filter on the head. If a promotion is already open
+          # we update it, and we never reach gh pr create while one is open.
+          #
+          # The head filter that used to be here had to go (OR-T0990). A
+          # promotion is now opened from a release/* branch cut at a fixed sha,
+          # because the prod ruleset requires the last push to be approved and a
+          # promotion whose head IS dev loses its approval every time anything
+          # merges into dev. With a release/* promotion open, a query filtered on
+          # head=dev returns empty and this job opens a SECOND promotion into
+          # prod. The cron runs every two days, so that lands within two days of
+          # the first release-branch promotion.
+          #
+          # Dropping the filter widens the answer to every open pull request into
+          # prod, and not all of those are promotions: a prod-hotfix is one too.
+          # So the candidates are narrowed by head ref, to dev or release/*.
+          # Taking a hotfix as the promotion would be worse than the duplicate
+          # this guard exists to stop. It would rewrite that pull request's body,
+          # and because this job would then believe a promotion was already open,
+          # no promotion would be opened at all. That omission would be silent.
+          # head_repo carries the head branch's OWNING repository, not just
+          # its ref name. A pull request into prod can be opened from a fork,
+          # and a fork's default branch is named dev by GitHub convention, so
+          # the ref alone cannot tell "our promotion" from "someone else's
+          # fork that happens to share a branch name" (OR-T1086). A fork whose
+          # source repo was since deleted reports repo as null, which // ""
+          # turns into an empty string that can never equal GH_REPO, so it is
+          # correctly rejected rather than silently passing.
+          OPEN_INTO_PROD="$(gh api "repos/${GH_REPO}/pulls?state=open&base=prod&per_page=100" \
+                              --jq '[.[] | {number, head: .head.ref, head_repo: (.head.repo.full_name // "")}]')"
+
+          CANDIDATES="$(printf '%s' "${OPEN_INTO_PROD}" \
+                          | jq --arg repo "${GH_REPO}" \
+                              '[.[] | select(.head_repo == $repo and (.head == "dev" or (.head | startswith("release/"))))]')"
+
+          echo "open pull requests into prod: $(printf '%s' "${OPEN_INTO_PROD}" | jq 'length')"
+          printf '%s\n' "${OPEN_INTO_PROD}" | jq -r '.[] | "  pull request \(.number) head=\(.head)"'
+          echo "promotion candidates among them (head dev or release/*): $(printf '%s' "${CANDIDATES}" | jq 'length')"
+
+          if [ "$(printf '%s' "${CANDIDATES}" | jq 'length')" -gt 1 ]; then
+            echo "::warning::More than one promotion into prod is open. Updating the first and leaving the others untouched. Two open promotions is a state a human has to resolve; close the one that is not wanted."
+          fi
+
+          EXISTING="$(printf '%s' "${CANDIDATES}" | jq -r '.[0].number // ""')"
 
           if [ -n "${EXISTING}" ]; then
             EXISTING_TITLE=$(gh api "repos/${GH_REPO}/pulls/${EXISTING}" --jq '.title')
@@ -270,6 +359,14 @@ jobs:
             exit 0
           fi
 
+          # No promotion is open, so open one from dev. This stays --head dev on
+          # purpose. Cutting a release branch is a contents WRITE, which would
+          # mean widening this workflow's token from Contents:read on a public
+          # repository and deleting the persist-credentials: false on the
+          # checkout above, whose comment says this workflow never pushes. That
+          # trade was considered and refused: Release cuts the branch by hand and
+          # owns the runbook. head=dev is still accepted by the source guard, so
+          # when no release branch has been cut this behaves as it always has.
           URL=$(gh pr create \
                   --base prod \
                   --head dev \
