@@ -22,6 +22,12 @@ name: prod commit hold guard
 # promotion cut after the release PR has merged to dev naturally carries the
 # edited file and is not blocked; nothing else needs to be wired up.
 #
+# THE PROMOTION PR ITSELF MAY NOT EDIT THE HOLD FILE. The rule above only
+# holds if this job also refuses any promotion range that touches
+# .github/promotion-holds.json directly, otherwise a promotion PR could
+# clear its own guard by editing the file inside itself. The live step
+# checks the compare diff's file list for that and blocks it.
+#
 # WHY A MISSING OR UNPARSEABLE FILE FAILS RATHER THAN PASSES. An empty JSON
 # array ([]) is a valid state, zero holds, and passes. A file that is
 # missing, or that does not parse as JSON, means this job cannot tell whether
