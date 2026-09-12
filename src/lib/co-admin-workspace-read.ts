@@ -34,7 +34,18 @@
  * wrapped_data_keys is behind row level security and a caller sees only the
  * rows addressed to it. The read this replaces carried no recipient filter
  * either, so adding one here would change what is being compared.
+ *
+ * WHY THE SELECT ASKS FOR THE V3 ENVELOPE COLUMNS TOO. This file used to
+ * select only wrapped_ciphertext and grant_sig, from before a grant could be
+ * written in the v3 shape (wrapped_cak plus coadmin_keyring_ciphertext,
+ * migration 20260828183000). Selecting less than co-admin-grant-row.ts needs
+ * would make every v3 grant look like an empty row to the caller, the same
+ * class of silent misread this file exists to end. See CO_ADMIN_GRANT_COLUMNS
+ * for the column list and readCoAdminGrant for how a row is turned into an
+ * envelope.
  */
+
+import { CO_ADMIN_GRANT_COLUMNS } from "@/lib/co-admin-grant-row";
 
 /**
  * Structural stand-in for the supabase client, so a test can pass a fake in.
@@ -46,8 +57,10 @@
 export type WrappedKeyClient = { from: (table: string) => any };
 
 export interface WrappedDataKeyRow {
-  wrapped_ciphertext: string;
+  wrapped_ciphertext: string | null;
   grant_sig: string | null;
+  wrapped_cak: string | null;
+  coadmin_keyring_ciphertext: string | null;
 }
 
 /**
@@ -94,7 +107,7 @@ export async function readWrappedDataKey(
 ): Promise<WrappedDataKeyRead> {
   const { data, error } = await supabase
     .from("wrapped_data_keys")
-    .select("wrapped_ciphertext, grant_sig")
+    .select(CO_ADMIN_GRANT_COLUMNS)
     .eq("data_key_id", dataKeyId)
     .limit(2);
   // An error is returned rather than thrown so the caller can carry on with the

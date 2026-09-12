@@ -156,7 +156,7 @@ COMMENT ON COLUMN public.user_vault_meta.keyring_ciphertext IS
 -- a new column; on dev it does not, because dev grants INSERT and UPDATE per column.
 -- Naming the column here makes the two projects agree and survives prod being moved
 -- onto the per column shape. anon is deliberately not named: see the header.
-GRANT SELECT, INSERT, UPDATE (keyring_ciphertext) ON TABLE public.user_vault_meta TO authenticated;
+GRANT INSERT (keyring_ciphertext), UPDATE (keyring_ciphertext) ON TABLE public.user_vault_meta TO authenticated;
 
 -- Prove the result inside this transaction or abort. Each assertion checks a property
 -- this file is responsible for. Nothing here checks a property owned by another file,

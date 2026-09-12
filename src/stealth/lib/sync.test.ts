@@ -1317,6 +1317,55 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     // Short-circuit must not touch the network.
     expect(fetchFilter).not.toHaveBeenCalled();
     expect(fetchBlock).not.toHaveBeenCalled();
+    // OR-T1117: the explicit signal, independent of what the numbers equal.
+    expect(result.scanned).toBe(false);
+  });
+
+  it('signals scanned: false when the stored cursor sits inside the confirmation buffer band, not just at the raw chain tip (OR-T1117)', async () => {
+    // Concrete sequence from OR-T1117: with the confirmation buffer
+    // (CONFIRMATION_DEPTH), the short-circuit fires whenever the resume
+    // point is within CONFIRMATION_DEPTH of the RAW chain tip, which is a
+    // band that recurs roughly every hour -- not only when the wallet is
+    // truly caught up to the raw tip. Before scanned existed, a caller
+    // comparing result.lastBlockScanned to the stored cursor could not
+    // tell this case apart from a run that actually scanned something,
+    // because on this path they are always the same number.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cursor-guard-buffer-band',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const rawChainTip = 900_001;
+    // Inside the buffer band: above the buffered ceiling (rawChainTip -
+    // CONFIRMATION_DEPTH) but below the raw tip, so this is NOT the old
+    // "already at the raw tip" case above.
+    const storedCursor = rawChainTip - CONFIRMATION_DEPTH + 1;
+    const fetchFilter = vi.fn();
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: storedCursor,
+      fetchTip: async () => rawChainTip,
+      fetchFilter,
+      fetchBlock,
+    });
+
+    expect(fetchFilter).not.toHaveBeenCalled();
+    expect(fetchBlock).not.toHaveBeenCalled();
+    expect(result.lastBlockScanned).toBe(storedCursor);
+    expect(storedCursor).toBeLessThan(rawChainTip); // not at the raw tip
+    // The fix: a caller gating on this field cannot record coverage for a
+    // run that read nothing, no matter what lastBlockScanned equals.
+    expect(result.scanned).toBe(false);
   });
 
   it('returns stored cursor unchanged when tip is below stored cursor', async () => {
@@ -1351,6 +1400,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(result.txCount).toBe(0);
     expect(fetchFilter).not.toHaveBeenCalled();
     expect(fetchBlock).not.toHaveBeenCalled();
+    expect(result.scanned).toBe(false);
   });
 
   it('advances cursor and fetches filters when behind tip (positive path)', async () => {
@@ -1406,6 +1456,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(result.lastBlockScanned).toBeGreaterThan(storedCursor);
     expect(result.lastBlockScanned).toBe(tip - CONFIRMATION_DEPTH);
     expect(result.txCount).toBe(0);
+    expect(result.scanned).toBe(true);
   });
 
   it('stops cursor at last contiguous height when filter producer lags (404 -> null)', async () => {
@@ -1452,6 +1503,9 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(result.lastBlockScanned).toBe(lastAvailable);
     expect(result.lastBlockScanned).not.toBe(tip);
     expect(result.txCount).toBe(0);
+    // Filters were read (just none matched by lastAvailable+1..tip being
+    // null), so this is not the short-circuit path.
+    expect(result.scanned).toBe(true);
   });
 
   describe('block-prefetch sliding window', () => {
@@ -2399,5 +2453,131 @@ describe('stealth sync , the abort gap and what may be uploaded (OR-T1120)', () 
     for (const sealed of result.sealedTransactions) {
       expect(sealed.block_height).toBeLessThanOrEqual(result.lastBlockScanned);
     }
+  });
+});
+
+// ─── fetchFilterPair sidecar/height binding (OR-T1167) ──────────────────
+//
+// The BIP158 SipHash match proves the filter bytes and the block hash came
+// from the same block. It proves nothing about which HEIGHT that block sits
+// at: a producer or CDN serving height N+1's (filter, hash) pair under the
+// URL for height N passes that match cleanly, and liveFetchFilter used to
+// hand the caller a FilterRecord carrying the wrong height with nobody the
+// wiser. This exercises the real HTTP path (liveFetchFilter -> fetchFilterPair
+// -> global fetch), not the injected fetchFilter callback runSync's other
+// tests use, because the defect is specifically in the code between the raw
+// response and that callback's input.
+
+describe('liveFetchFilter , sidecar height must match the height requested (OR-T1167)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('throws a durable error, on the first attempt only, when the sidecar height disagrees', async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith('.json')) {
+        return new Response(
+          JSON.stringify({
+            block_hash: 'aa'.repeat(32),
+            // Off by one from the requested height (800_002): the misfile
+            // under test.
+            block_height: 800_003,
+            time: 0,
+            filter_size: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      // The .gcs.gz body is never read: the height check in fetchFilterPair
+      // must throw before gunzip runs, so an empty body is enough here.
+      return new Response(new Uint8Array([0]), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(liveFetchFilter(800_002, 'https://filters.example.test')).rejects.toThrow(
+      /sidecar at height 800002 reports block_height 800003/,
+    );
+
+    // Not retried: DurableFilterError is rethrown immediately by
+    // liveFetchFilter's catch, so exactly one .gcs.gz and one .json request
+    // were made, not FILTER_FETCH_ATTEMPTS pairs of them.
+    expect(requestedUrls).toHaveLength(2);
+    expect(requestedUrls).toContain('https://filters.example.test/800002.gcs.gz');
+    expect(requestedUrls).toContain('https://filters.example.test/800002.json');
+  });
+
+  it('accepts a sidecar whose height matches what was requested', async () => {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('.json')) {
+        return new Response(
+          JSON.stringify({ block_hash: 'bb'.repeat(32), block_height: 800_010, time: 0, filter_size: 1 }),
+          { status: 200 },
+        );
+      }
+      return new Response(gzipSync(Buffer.from([1, 2, 3])), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const record = await liveFetchFilter(800_010, 'https://filters.example.test');
+    expect(record.height).toBe(800_010);
+    expect(record.blockHashHex).toBe('bb'.repeat(32));
+  });
+
+  it('throws a durable error, on the first attempt only, when block_hash is not 64 hex chars', async () => {
+    // A sidecar whose block_hash is malformed (wrong length, non-hex) must
+    // throw immediately, without retrying. A record built from it would carry
+    // no block_hash at all, which downstream means "recorded before hashes
+    // were captured" and is treated as permanently unverifiable -- a different
+    // class of error that must not be reachable from a live producer.
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith('.json')) {
+        return new Response(
+          JSON.stringify({
+            block_hash: 'not-valid-hex',
+            block_height: 800_002,
+            time: 0,
+            filter_size: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(new Uint8Array([0]), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(liveFetchFilter(800_002, 'https://filters.example.test')).rejects.toThrow(
+      /carries no usable block_hash/,
+    );
+
+    // Durable: not retried. Exactly one .gcs.gz and one .json, then stop.
+    expect(requestedUrls).toHaveLength(2);
+  });
+
+  it('lowercases a valid all-uppercase block_hash and returns it normalised', async () => {
+    // The detector comparison is case-sensitive text; accept either case at
+    // the door and store exactly one so no valid transaction is ever flagged
+    // as orphaned due to a case mismatch alone.
+    const UPPER_HASH = 'CC'.repeat(32);
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith('.json')) {
+        return new Response(
+          JSON.stringify({ block_hash: UPPER_HASH, block_height: 800_020, time: 0, filter_size: 1 }),
+          { status: 200 },
+        );
+      }
+      return new Response(gzipSync(Buffer.from([1, 2, 3])), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const record = await liveFetchFilter(800_020, 'https://filters.example.test');
+    expect(record.blockHashHex).toBe(UPPER_HASH.toLowerCase());
   });
 });

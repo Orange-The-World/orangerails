@@ -43,7 +43,7 @@ Orange Rails exists so that the next generation of Bitcoin apps does not have to
 
 ## What Orange Rails is
 
-Orange Rails is the open-source rails for Bitcoin financial data. Apps integrate once, customers connect their wallets, exchanges, Lightning nodes, and banks, and the data flows back to the app encrypted in a form Orange Rails' servers cannot read. The server proxies, the server stores, the server schedules. The server does not decrypt.
+Orange Rails is the open-source rails for Bitcoin financial data. Apps integrate once, customers connect their wallets, exchanges, Lightning nodes, and banks, and the data flows back to the app. Provider credentials are encrypted on the user's device and stored as ciphertext under a key we do not keep. On the client sealed path the server never sees transaction content. On the managed sync path the calling application supplies the key with the request, the server decrypts in memory for that request, and it keeps no key afterwards.
 
 What ships in this repository:
 
@@ -52,7 +52,7 @@ What ships in this repository:
 - **SDKs.** Typed clients for integrators, published from `packages/`.
 - **Stealth Sync widget.** The drop-in connect widget that runs the in-browser key derivation and encrypts credentials before they leave the device.
 
-For the full reference, including the session-based zero-knowledge boundary, the hybrid post-quantum key exchange, and the BIP 158 compact block filter design for on-chain wallets, read [docs/OrangeRails-Architecture.md](./docs/OrangeRails-Architecture.md).
+For the full reference, including the session-based zero-knowledge boundary, the hybrid post-quantum key wrapping, and the BIP 158 compact block filter design for on-chain wallets, read [docs/OrangeRails-Architecture.md](./docs/OrangeRails-Architecture.md).
 
 ---
 
@@ -118,7 +118,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the developer certificate of origin
 
 Orange Rails is built around a session-based zero-knowledge boundary. The user's vault password derives keys in the browser via Argon2id and HKDF. Provider credentials are encrypted with those keys before they ever reach the server. When an app requests a sync, a derived key rides along in the TLS request body, the server decrypts in memory, talks to the upstream provider, re-encrypts the result, returns it, and zeros the key.
 
-On the wire, the key exchange is hybrid post-quantum so that recorded traffic stays opaque to a future quantum adversary. On the on-chain side, BIP 158 compact block filters let watch-only wallets reconstruct their transaction history without ever telling the server which addresses to look for.
+Key wrapping uses a hybrid post-quantum KEM, X25519 combined with ML-KEM-768, so a wrapped key stays out of reach of a future quantum adversary. On the on-chain side, BIP 158 compact block filters let watch-only wallets reconstruct their transaction history without ever telling the server which addresses to look for.
 
 For the full reference (13 sections, 60+ cited primary sources, every claim traced to auditable code), see [docs/OrangeRails-Architecture.md](./docs/OrangeRails-Architecture.md).
 

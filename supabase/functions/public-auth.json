@@ -9,6 +9,7 @@
     "none = intentionally public, no auth at all.",
     "internal-worker-token = checks X-Internal-Worker-Token header against a vault secret (service-internal callers only, never exposed to integrators).",
     "platform-api-key-or-widget-token = accepts a platform key header, OR a widget_token in the request BODY when no key header is present. The token is a pending_widget_sessions row id, minted server-to-server by or-link-mint-token; the platform and app_user_id are read off that row and can never be named by the caller. It is a short-lived bearer credential (300s default, 900s max) and is validated WITHOUT being consumed, so its replay window is the remaining TTL rather than a single request. It exists because a host app's user has no OrangeRails JWT and a browser must never hold a platform key. Same credential or-discover-wallets and or-link-complete already accept. See authenticateWidgetToken in _shared/platform-auth.ts.",
+    "widget-token = accepts ONLY a widget_token in the request BODY, no platform-api-key header alternative. Same credential shape as platform-api-key-or-widget-token (a pending_widget_sessions row id, minted server-to-server by or-link-mint-token, short-lived bearer, validated without being consumed) but with no platform-key branch at all: this class of caller never has a platform key. See authenticateWidgetToken in _shared/platform-auth.ts.",
     "CI (scripts/check-public-auth.mjs) asserts this file and config.toml agree in both directions."
   ],
   "functions": {
@@ -19,7 +20,7 @@
     "or-connection-list": "platform-api-key",
     "or-discover-wallets": "platform-api-key",
     "or-institutions-catalog": "none",
-    "or-link-complete": "platform-api-key",
+    "or-link-complete": "widget-token",
     "or-link-mint-token": "platform-api-key",
     "or-platform-bootstrap": "platform-api-key",
     "or-platform-display": "none",

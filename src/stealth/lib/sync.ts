@@ -212,6 +212,21 @@ export interface RunSyncOptions {
 export interface SyncResult {
   txCount: number;
   lastBlockScanned: number;
+  /**
+   * False on the short-circuit path (fromHeight > tip): this run read zero
+   * filters and lastBlockScanned above is the STORED cursor echoed back
+   * unchanged, not a height this run actually scanned. True on every path
+   * that walked the scan range, even when zero filters matched.
+   *
+   * Callers MUST NOT record coverage, advance a cursor, or write a scan
+   * range from this result unless scanned is true. Before this field
+   * existed, the caller inferred "did we scan" by comparing
+   * lastBlockScanned to the stored cursor -- but on the short-circuit path
+   * those are the SAME number, so the comparison was a tautology a
+   * zero-filter run could satisfy (OR-T1117). This field replaces that
+   * inference with a direct signal.
+   */
+  scanned: boolean;
   bytesDownloaded: number;
   sealedTransactions: SealedTransaction[];
   /** The decrypted normalized transactions. Returned to the caller for
@@ -701,6 +716,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       // chain tip is never an accurate cursor value here. Return the stored
       // cursor so the caller does not persist tip as a range never read.
       lastBlockScanned: opts.lastBlockScanned ?? -1,
+      // OR-T1117: this run read zero filters. lastBlockScanned above is an
+      // echo of the stored cursor, not a scanned height, so callers must not
+      // treat this result as new coverage.
+      scanned: false,
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
@@ -1319,6 +1338,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   return {
     txCount: normalized.length,
     lastBlockScanned: lastContiguousScanned,
+    scanned: true,
     bytesDownloaded,
     sealedTransactions,
     normalized,
@@ -1450,12 +1470,60 @@ async function fetchFilterPair(height: number, baseUrl: string): Promise<FilterR
   }
 
   const sidecar = (await jsonResp.json()) as FilterSidecar;
+  // OR-T1167: the SipHash match below proves the filter and the hash came
+  // from the same block; it proves nothing about which HEIGHT that block is
+  // at. A producer or CDN serving one height's pair under another height's
+  // URL passes that match cleanly. Catch it here, before the mismatch is
+  // carried into a stored transaction and read by nobody. Durable, not
+  // retried: a producer serving the wrong sidecar under this height will
+  // serve it again.
+  if (sidecar.block_height !== height) {
+    throw new DurableFilterError(
+      `liveFetchFilter: sidecar at height ${height} reports block_height ` +
+      `${sidecar.block_height} -- the .gcs.gz and .json pair does not match ` +
+      `the height requested. This is a producer/CDN misfile, not a transient ` +
+      `error; retrying would only fetch the same mismatched pair again.`,
+    );
+  }
+  // OR-T1167, second half. The hash has to be well formed and single-cased
+  // HERE, at the one point it enters FilterRecord, or "no hash" stops meaning
+  // one thing.
+  //
+  // Downstream a stored transaction with no block_hash means "recorded before
+  // we captured hashes": permanently unverifiable, not wrong, and the reorg
+  // detector must skip it in silence. If a malformed sidecar could also
+  // produce a record with no hash, the detector cannot tell those apart.
+  //
+  // Case is not cosmetic either. The detector compares this stored hash
+  // against the canonical hash at that height, the column is text with no
+  // CHECK constraint, and the comparison is case sensitive. A producer that
+  // ever emitted uppercase hex would make every affected transaction compare
+  // unequal and be marked orphaned with no reorg having happened: a false
+  // positive on customer money, produced by the check that exists to protect
+  // it. So accept either case at the door and store exactly one.
+  //
+  // Read as unknown on purpose. The declared type says string; this value
+  // came out of JSON.parse and the declaration is a claim, not a check.
+  //
+  // Durable rather than retried, for the same reason as the height mismatch
+  // above: a producer serving a malformed sidecar will serve it again.
+  const rawHash = sidecar.block_hash as unknown;
+  if (typeof rawHash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(rawHash)) {
+    throw new DurableFilterError(
+      `liveFetchFilter: sidecar at height ${height} carries no usable ` +
+      `block_hash (expected 64 hex characters, got ${JSON.stringify(rawHash)}). ` +
+      `A record built from this would carry no hash at all, which downstream ` +
+      `means "recorded before hashes were captured" and is treated as ` +
+      `unverifiable rather than as a failure.`,
+    );
+  }
+
   const gzBuf = new Uint8Array(await gzResp.arrayBuffer());
   const filter = await gunzip(gzBuf);
 
   return {
     height: sidecar.block_height,
-    blockHashHex: sidecar.block_hash,
+    blockHashHex: rawHash.toLowerCase(),
     filter,
   };
 }
@@ -1510,8 +1578,10 @@ export async function liveFetchFilter(
 
 /**
  * Fetch raw block bytes for the given block hash. The block source attaches
- * X-Block-Hash and X-Block-Height response headers; we trust those for the
- * height field but verify the hash matches what we asked for.
+ * X-Block-Hash and X-Block-Height response headers. The height is taken from
+ * X-Block-Height (defaulting to 0 if absent). The blockHashHex in the returned
+ * record is X-Block-Hash when present, or the requested hash as a fallback;
+ * neither is verified against what was asked for.
  */
 export async function liveFetchBlock(
   blockHashHex: string,
