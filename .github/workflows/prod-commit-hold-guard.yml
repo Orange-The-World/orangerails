@@ -48,6 +48,9 @@ name: prod commit hold guard
 # real: open a pull request from a branch carrying a held sha (there is a
 # live one in promotion-holds.json right now) into prod, and watch this job
 # go red naming that sha. Then close the pull request without merging it.
+# Run that proof from a disposable branch, not from this workflow's own PR
+# branch: a forced-red run left in place as the PR's latest check blocks
+# merge with nothing real left to fix.
 
 on:
   pull_request:
