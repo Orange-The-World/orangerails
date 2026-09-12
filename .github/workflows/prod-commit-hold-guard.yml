@@ -72,7 +72,10 @@ jobs:
           # parsed to a newline list of "sha ticket" pairs) and the list of
           # commit shas this PR would add to prod, decide allow or block.
           # No network, no token, so every case here runs on every job with
-          # nothing that can flake.
+          # nothing that can flake. This function is written to a file at
+          # the end of this step (via `declare -f`) and SOURCED, not
+          # re-typed, by the live step below, so the function under test is
+          # the exact function that runs live and the two cannot drift apart.
           verdict() {
             holds_parse_ok="$1"   # "ok" or "bad"
             holds="$2"            # newline-separated "shaprefix ticket"
@@ -90,15 +93,20 @@ jobs:
 
             while IFS=' ' read -r prefix ticket; do
               [ -z "${prefix}" ] && continue
-              if [ "${#prefix}" -lt 7 ]; then
-                echo "block-short-prefix"
+              # A hold prefix must be 7-40 hex characters. Anything else, too
+              # short or carrying a character that means something to a shell
+              # glob, is refused outright rather than handed to a pattern
+              # match, so a malformed hold entry cannot silently fail to
+              # match and let a held commit through.
+              if ! [[ "${prefix}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+                echo "block-bad-prefix:${prefix}:${ticket}"
                 return
               fi
               while IFS= read -r commit_sha; do
                 [ -z "${commit_sha}" ] && continue
-                case "${commit_sha}" in
-                  "${prefix}"*)
-                    echo "block-held:${prefix}:${ticket}"
+                case "${commit_sha,,}" in
+                  "${prefix,,}"*)
+                    echo "block-held:${prefix}:${ticket}:${commit_sha}"
                     return
                     ;;
                 esac
@@ -122,15 +130,19 @@ jobs:
           check "unparseable holds file" "bad" "" "$(printf 'aaa1111\nbbb2222')" "block-unparseable"
           check "empty holds list" "ok" "" "$(printf 'aaa1111\nbbb2222')" "allow-no-holds"
           check "held sha not in range" "ok" "aaa1111 OR-T0001" "bbb2222cccc3333" "allow-clear"
-          check "held sha in range" "ok" "aaa1111 OR-T0001" "aaa1111bbb2222cccc" "block-held:aaa1111:OR-T0001"
-          check "held sha matches one of many" "ok" "$(printf 'zzz9999 OR-T0002\naaa1111 OR-T0001')" "$(printf 'bbb2222\naaa1111ccc')" "block-held:aaa1111:OR-T0001"
-          check "prefix too short is refused" "ok" "aaa11 OR-T0001" "aaa1111bbb2222" "block-short-prefix"
+          check "held sha in range" "ok" "aaa1111 OR-T0001" "aaa1111bbb2222cccc" "block-held:aaa1111:OR-T0001:aaa1111bbb2222cccc"
+          check "held sha matches one of many" "ok" "$(printf 'zzz9999 OR-T0002\naaa1111 OR-T0001')" "$(printf 'bbb2222\naaa1111ccc')" "block-held:aaa1111:OR-T0001:aaa1111ccc"
+          check "held sha match is case-insensitive" "ok" "AAA1111 OR-T0001" "aaa1111bbb2222" "block-held:AAA1111:OR-T0001:aaa1111bbb2222"
+          check "prefix too short is refused" "ok" "aaa11 OR-T0001" "aaa1111bbb2222" "block-bad-prefix:aaa11:OR-T0001"
+          check "prefix with a glob/regex metacharacter is refused" "ok" "aaa1111* OR-T0001" "aaa1111bbb2222" "block-bad-prefix:aaa1111*:OR-T0001"
 
           if [ "${fail}" -ne 0 ]; then
             echo "::error::decision logic self-test failed. The gate is broken, not passing."
             exit 1
           fi
           echo "Self-test passed."
+
+          declare -f verdict > "${RUNNER_TEMP}/promotion-hold-verdict.sh"
 
       - name: Check this pull request for a held commit
         env:
@@ -148,6 +160,10 @@ jobs:
             echo "Not targeting prod (base: ${BASE_REF}). Nothing to enforce here."
             exit 0
           fi
+
+          # Load the exact function the self-test step just proved correct
+          # (see that step's comment: this is sourced, not re-typed).
+          source "${RUNNER_TEMP}/promotion-hold-verdict.sh"
 
           echo ""
           echo "Reading .github/promotion-holds.json at this PR's own head..."
@@ -173,29 +189,69 @@ jobs:
           fi
 
           echo ""
-          echo "Asking which commits this PR would add to prod..."
+          echo "Asking which commits and files this PR would add to prod..."
           echo "Query: compare prod...${HEAD_SHA}"
-          COMMITS="$(gh api "repos/${GH_REPO}/compare/prod...${HEAD_SHA}" --jq '.commits[].sha' 2>/dev/null || true)"
+          COMPARE_JSON="$(gh api "repos/${GH_REPO}/compare/prod...${HEAD_SHA}" 2>/dev/null || true)"
 
-          if [ -z "${COMMITS}" ]; then
-            echo "::error::Could not list the commits this PR would add to prod (compare prod...${HEAD_SHA} returned nothing). Blocked: a hold list exists and this job cannot verify it is clear."
+          if [ -z "${COMPARE_JSON}" ]; then
+            echo "::error::Could not compare prod...${HEAD_SHA}. Blocked: a hold list exists and this job cannot verify it is clear."
             exit 1
           fi
 
-          echo "commits in range: $(printf '%s\n' "${COMMITS}" | wc -l)"
+          # The compare API caps the commits array (documented GitHub
+          # behaviour). total_commits reports the real count regardless of
+          # the cap, so comparing the two catches a silently truncated page
+          # instead of checking an incomplete list and calling it clear.
+          TOTAL_COMMITS="$(printf '%s' "${COMPARE_JSON}" | jq -r '.total_commits // empty')"
+          COMMITS="$(printf '%s' "${COMPARE_JSON}" | jq -r '.commits[]?.sha // empty')"
+          RETURNED_COMMITS="$(printf '%s\n' "${COMMITS}" | grep -c . || true)"
 
-          while IFS=' ' read -r prefix ticket; do
-            [ -z "${prefix}" ] && continue
-            if [ "${#prefix}" -lt 7 ]; then
-              echo "::error::Hold entry has a sha prefix shorter than 7 characters ('${prefix}', ${ticket}). Too short to trust as identifying one commit. Blocked, fix the hold file."
-              exit 1
-            fi
-            MATCH="$(printf '%s\n' "${COMMITS}" | grep -i "^${prefix}" || true)"
-            if [ -n "${MATCH}" ]; then
-              echo "::error::This promotion carries held commit ${MATCH} (matches hold prefix '${prefix}'), held by ${ticket}. It must not reach prod yet. Clear the hold on ${ticket} with its own merged PR to dev before cutting this promotion."
-              exit 1
-            fi
-          done <<< "${HOLDS}"
+          if [ -z "${TOTAL_COMMITS}" ]; then
+            echo "::error::compare prod...${HEAD_SHA} did not report total_commits. Cannot confirm the commit list this job read is complete. Blocked."
+            exit 1
+          fi
 
-          echo ""
-          echo "None of the ${HOLD_COUNT} held commit(s) appear in this promotion's range. Allowed."
+          if [ "${TOTAL_COMMITS}" -ne "${RETURNED_COMMITS}" ]; then
+            echo "::error::compare prod...${HEAD_SHA} reports total_commits=${TOTAL_COMMITS} but the compare API returned only ${RETURNED_COMMITS} commits (it caps the commits array). A held commit outside this page would not be checked, which is exactly the silent pass this job exists to refuse. Blocked: shrink the promotion range, or page the request, before retrying."
+            exit 1
+          fi
+
+          echo "commits in range: ${RETURNED_COMMITS}"
+
+          # A hold may only be cleared by its own merged PR to dev, before the
+          # promotion PR is cut, never by editing the file inside the
+          # promotion PR itself, which would let a promotion clear its own
+          # guard. Refuse any promotion range that touches the hold file.
+          CHANGED_FILES="$(printf '%s' "${COMPARE_JSON}" | jq -r '.files[]?.filename // empty')"
+          if printf '%s\n' "${CHANGED_FILES}" | grep -qxF '.github/promotion-holds.json'; then
+            echo "::error::This promotion range itself modifies .github/promotion-holds.json. A hold may only be cleared by its own merged PR to dev, landed before the promotion PR is cut, never inside the promotion PR itself. Blocked."
+            exit 1
+          fi
+
+          RESULT="$(verdict "ok" "${HOLDS}" "${COMMITS}")"
+          case "${RESULT}" in
+            allow-*)
+              echo ""
+              echo "None of the ${HOLD_COUNT} held commit(s) appear in this promotion's range. Allowed."
+              ;;
+            block-bad-prefix:*)
+              REST="${RESULT#block-bad-prefix:}"
+              PREFIX="${REST%%:*}"
+              TICKET="${REST#*:}"
+              echo "::error::Hold entry for ${TICKET} has a sha prefix ('${PREFIX}') that is not 7-40 hex characters. Refusing to use it as a commit-prefix match. Blocked, fix the hold file."
+              exit 1
+              ;;
+            block-held:*)
+              REST="${RESULT#block-held:}"
+              PREFIX="${REST%%:*}"
+              REST2="${REST#*:}"
+              TICKET="${REST2%%:*}"
+              MATCHED_SHA="${REST2#*:}"
+              echo "::error::This promotion carries held commit ${MATCHED_SHA} (matches hold prefix '${PREFIX}'), held by ${TICKET}. It must not reach prod yet. Clear the hold on ${TICKET} with its own merged PR to dev before cutting this promotion."
+              exit 1
+              ;;
+            *)
+              echo "::error::Unexpected verdict '${RESULT}' from the decision function. Treating as blocked, fail closed."
+              exit 1
+              ;;
+          esac
