@@ -221,14 +221,25 @@ all three. Re-check it kind by kind, in both the dev and the production project,
 and report which projects were reached: a project that could not be reached is
 not a project that came back clean.
 
-- **Types, tables, views and their columns:** query `information_schema.columns`
-  for a column that could hold a Lightning payment value. A composite type
-  declares attributes rather than columns and does not appear there, so
-  `pg_type` joined to `pg_attribute` covers the `type` half of the sentence.
-- **Functions and RPCs:** query `information_schema.routines`, or `pg_proc`.
-  `information_schema.columns` does not list a function or an RPC at all, so a
-  columns-only sweep cannot confirm this part of the claim however clean it
-  comes back.
+- **Types, tables, views (including materialized views) and their columns:**
+  query `information_schema.columns` for an ordinary table or view column.
+  PostgreSQL omits materialized views from `information_schema` entirely, so
+  that query alone reports clean on a narrower basis than this claim. Also
+  query the catalog directly: `pg_class` joined to `pg_attribute` (relations
+  filtered to `relkind in ('r','v','m','p','f')`) reaches ordinary tables,
+  views, materialized views, partitioned tables and foreign tables alike, and
+  is what actually finds a column a materialized view is storing. A composite
+  type is a separate class again: it declares attributes rather than columns
+  and needs its own pair, `pg_type` joined to `pg_attribute`, for the `type`
+  half of the sentence.
+- **Functions and RPCs:** query `pg_proc` directly. `information_schema.routines`
+  and `pg_proc` are not interchangeable: Postgres does not guarantee they agree,
+  and a routine can exist in a non-system schema with no row in
+  `information_schema.routines` at all, so treating the two as an "or" choice
+  understates what exists. Query `pg_proc`, and use `information_schema.routines`
+  only as a cross-check, never as the sole source. `information_schema.columns`
+  does not list a function or an RPC at all, so a columns-only sweep cannot
+  confirm this part of the claim however clean it comes back.
 - **Edge functions:** read the deployed function list for the project. An edge
   function is not a database object, so no catalog query reaches it. That list
   is an inventory of what is deployed rather than a search of this repository,
