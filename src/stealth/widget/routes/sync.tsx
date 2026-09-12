@@ -441,8 +441,18 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         // filled in ground below it. The second arm is new. Without it, a
         // gap-filling scan that stops before overtaking the old cursor throws
         // away everything it just read and the gap never closes.
-        const reachedHigher = result.lastBlockScanned > (envJson.last_block_scanned ?? -1);
-        const filledBelow = scannedFrom <= (envJson.last_block_scanned ?? -1)
+        // OR-T1117: on the short-circuit path result.scanned is false and
+        // result.lastBlockScanned is an ECHO of the stored cursor, not a
+        // height this run actually read. Without gating on scanned, both
+        // conditions below can be satisfied by a run that read zero
+        // filters, which recorded a coverage range for heights nobody
+        // scanned. Gate on the explicit signal rather than re-deriving
+        // "did we scan" from a comparison that collapses to a tautology
+        // on that path.
+        const reachedHigher = result.scanned
+          && result.lastBlockScanned > (envJson.last_block_scanned ?? -1);
+        const filledBelow = result.scanned
+          && scannedFrom <= (envJson.last_block_scanned ?? -1)
           && result.lastBlockScanned >= scannedFrom;
         if ((!useMock || isForceCursor()) && (reachedHigher || filledBelow)) {
           try {

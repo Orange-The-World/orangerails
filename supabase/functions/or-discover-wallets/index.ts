@@ -40,6 +40,7 @@ import { authenticateRequest, resolveSubaccount, isAuthError } from "../_shared/
 import { getProvider, listProviderSlugs, parseCredentials } from "../_shared/providers/dispatch.ts";
 import { wrapSentryHandler } from "../_shared/sentry.ts";
 import { lookupErrorCopy } from "../_shared/error-catalog.ts";
+import { safeErrorLine } from "../_shared/error-redaction.ts";
 
 // -- AES-256-GCM helpers (kept inline for edge-fn isolation) ----------------
 
@@ -169,7 +170,7 @@ Deno.serve(
           .maybeSingle();
 
         if (sessionErr) {
-          console.error("[or-discover-wallets] widget token lookup error:", sessionErr.message);
+          console.error(await safeErrorLine("or-discover-wallets", "widget-token-lookup", sessionErr));
           return jsonResponse({ error: "Invalid widget token" }, 401, cors);
         }
         if (!session) {
@@ -206,7 +207,7 @@ Deno.serve(
           if (insErr) {
             // Without the session rows the write path cannot dedup this
             // discovery, so fail loudly rather than silently degrade.
-            console.error("[or-discover-wallets] discovery_sessions insert failed:", insErr.message);
+            console.error(await safeErrorLine("or-discover-wallets", "discovery-sessions-insert", insErr));
             return jsonResponse({ error: "Could not record discovery session" }, 500, cors);
           }
         }
@@ -248,7 +249,7 @@ Deno.serve(
         .maybeSingle();
 
       if (connErr) {
-        console.error("[or-discover-wallets] connection lookup failed:", connErr);
+        console.error(await safeErrorLine("or-discover-wallets", "connection-lookup", connErr));
         return jsonResponse({ error: "Connection lookup failed" }, 500, cors);
       }
       if (!conn) return jsonResponse({ error: "Connection not found" }, 404, cors);
@@ -289,7 +290,11 @@ Deno.serve(
           : 422;
         return jsonResponse({ error_code: upstreamCode, ...catalog }, status, cors);
       }
-      console.error("[or-discover-wallets] fatal:", err);
+      // Never log `err` itself. On the credential paths this can be a
+      // JSON.parse SyntaxError over decrypted plaintext, and V8 embeds part of
+      // the input string in that message. safeErrorLine emits a code, a class,
+      // a hash and a correlation id, and drops the message.
+      console.error(await safeErrorLine("or-discover-wallets", "fatal", err));
       return jsonResponse({ error: "Internal error" }, 500, cors);
     }
   }, "or-discover-wallets"),

@@ -137,3 +137,39 @@ export function resumeHeightFromCoverage(
   if (!ranges || ranges.length === 0) return undefined;
   return resumeHeightFromRanges(ranges, birthdayHeight);
 }
+
+/** Everything a caller knows about where a connection's scan left off. */
+export interface ScanStartInput {
+  /** Block height of the wallet birthday, resolved in the browser. */
+  birthdayHeight: number;
+  /** The legacy single cursor. One BEHIND the next unread block. */
+  lastBlockScanned?: number | null;
+  /** Already reduced from the coverage map by resumeHeightFromCoverage.
+   *  Undefined or null means the coverage cannot answer, so the cursor is
+   *  used and behaviour is unchanged from before ranges existed. */
+  resumeFromHeight?: number | null;
+}
+
+/**
+ * The block height a sync starts at. This is THE resume rule; there is no
+ * second copy of it anywhere.
+ *
+ * `resumeFromHeight` is already anchored at the birthday by
+ * resumeHeightFromRanges, so it is used as-is rather than incremented: the
+ * coverage rule deliberately re-reads the boundary block instead of risking an
+ * off-by-one gap. The legacy cursor is one behind the next unread block, hence
+ * the +1 on that arm only. Math.max guards both, so neither path can start
+ * before the wallet birthday.
+ *
+ * Read the precedence carefully before changing it, because it is what makes
+ * envelope replacement a real recovery lever rather than a stored number. When
+ * coverage answers, the cursor arm is never evaluated, so clearing the cursor
+ * alone cannot move the start height of a connection that has coverage. Any
+ * path that promises the user a rescan must therefore clear BOTH.
+ */
+export function scanStartHeight(input: ScanStartInput): number {
+  return Math.max(
+    input.birthdayHeight,
+    input.resumeFromHeight ?? (input.lastBlockScanned ?? -1) + 1,
+  );
+}

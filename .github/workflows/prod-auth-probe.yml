@@ -1,0 +1,173 @@
+name: Prod auth probe
+
+# WHAT THIS PROVES: that the production auth service answers, at the URL we
+# think it is at, and accepts the publishable key the deployed site is handing
+# to browsers. That is the failure class OR-T0164 was opened about: a key that
+# is missing, wrong or rotated, and a service or URL that has moved.
+#
+# WHAT THIS DOES NOT PROVE, and nobody should later read it as proving: that a
+# real customer can sign in. A real sign-in needs a real account and a real
+# password, which is a separate and founder-gated question. This probe
+# deliberately uses an address that has no account and a random password, and
+# the ONLY answer it treats as healthy is a refusal. It does not close
+# OR-T0164 criterion 3 and must not be cited as doing so.
+#
+# WHERE THE KEY COMES FROM. It is read out of the deployed production bundle
+# at run time, not stored in a secret or a repository variable. Two reasons.
+# First, it needs no new credential and nothing to rotate. Second, it is
+# stronger evidence: the key a browser actually receives is the thing under
+# test, so a bundle built with the wrong key fails here, which a stored copy
+# would hide. The publishable key is public by design, it is already served to
+# every visitor, and it is masked here anyway so it never reaches the log.
+#
+# NO SERVICE-ROLE KEY. This workflow uses no secrets at all. A service-role key
+# must never be placed near a scheduled public-repository workflow.
+#
+# HOW TO WATCH IT FAIL. Run it from the Actions tab with force_bad_key ticked.
+# It then probes with a deliberately invalid key and must report 401 and exit
+# non-zero. A probe nobody has seen fail is not a probe.
+
+on:
+  schedule:
+    # Hourly, at 17 minutes past. Deliberately off the hour: the top of the
+    # hour is the most contended minute on shared runners.
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_bad_key:
+        description: 'Probe with a deliberately invalid key, to watch this check go red.'
+        required: false
+        default: false
+        type: boolean
+  pull_request:
+    # A change to this file re-proves the probe against production before it
+    # lands. A guard that is edited without being run again is a guard nobody
+    # has tested.
+    paths:
+      - '.github/workflows/prod-auth-probe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-auth-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Production auth reachable and correctly keyed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SITE_URL: https://connect.orangerails.com
+      OR_SUPABASE_URL: https://lcdicqalreskibdfxkzb.supabase.co
+      # A domain we control, with no account behind this address. It is never
+      # created, and the probe would fail loudly if it ever authenticated.
+      PROBE_EMAIL: no-such-account.ci-probe@orangerails.com
+      FORCE_BAD_KEY: ${{ github.event.inputs.force_bad_key || 'false' }}
+    steps:
+      # Extraction and probe are ONE step on purpose: the key never crosses a
+      # step boundary, so it is never written to GITHUB_OUTPUT or to any file.
+      - name: Read the deployed key, then probe production auth with it
+        run: |
+          set -euo pipefail
+
+          echo "Site:     $SITE_URL"
+          echo "Endpoint: $OR_SUPABASE_URL/auth/v1/token?grant_type=password"
+
+          # ---- Phase 1: read the publishable key out of the deployed bundle.
+
+          HTML=$(curl -sS --max-time 30 -L "$SITE_URL/" || true)
+          if [ -z "$HTML" ]; then
+            echo "::error::Could not fetch $SITE_URL. This check could not look, which is a failure and not a skip."
+            exit 1
+          fi
+
+          ASSETS=$(printf '%s' "$HTML" | grep -oE '/assets/[A-Za-z0-9._-]+\.js' | sort -u || true)
+          if [ -z "$ASSETS" ]; then
+            echo "::error::Fetched $SITE_URL but found no JavaScript asset in it, so the key cannot be read. This check could not look."
+            exit 1
+          fi
+          echo "Assets referenced by the page: $(printf '%s\n' "$ASSETS" | wc -l)"
+
+          KEY=""
+          CANDIDATES=0
+          for asset in $ASSETS; do
+            BUNDLE=$(curl -sS --max-time 60 -L "$SITE_URL$asset" || true)
+            [ -z "$BUNDLE" ] && continue
+            # Both key formats: the current publishable prefix, and the older
+            # JWT shape. Matched by SHAPE, never by value, so nothing about the
+            # key itself is committed here.
+            FOUND=$(printf '%s' "$BUNDLE" | grep -oE 'sb_publishable_[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}' || true)
+            if [ -n "$FOUND" ]; then
+              CANDIDATES=$(printf '%s\n' "$FOUND" | sort -u | wc -l)
+              KEY=$(printf '%s\n' "$FOUND" | head -n1)
+              echo "Key-shaped string found in $asset (distinct candidates in that asset: $CANDIDATES)."
+              break
+            fi
+          done
+
+          if [ -z "$KEY" ]; then
+            echo "::error::Read $SITE_URL and its assets but found no key-shaped string, so there is nothing to probe with. This check could not look."
+            exit 1
+          fi
+          # Mask before anything else can echo it. The value is public by
+          # design, but a log is a bad habit to start.
+          echo "::add-mask::$KEY"
+          echo "Key read from the deployed bundle. Length: ${#KEY}."
+          if [ "$CANDIDATES" -gt 1 ]; then
+            echo "::notice::More than one key-shaped string in that asset; the first was used. If this probe reports 401 while the site works, narrow the extraction rather than loosening the assertion below."
+          fi
+
+          if [ "$FORCE_BAD_KEY" = "true" ]; then
+            echo "::warning::force_bad_key is on. Probing with a deliberately invalid key. This run is EXPECTED to fail with 401."
+            KEY="deliberately-invalid-key-for-the-red-demo"
+          fi
+
+          # ---- Phase 2: ask production auth for a token that must be refused.
+
+          PASSWORD=$(openssl rand -hex 24)
+          BODY_FILE="$(mktemp)"
+          STATUS=$(curl -sS --max-time 30 -o "$BODY_FILE" -w '%{http_code}' \
+            -X POST "$OR_SUPABASE_URL/auth/v1/token?grant_type=password" \
+            -H "apikey: $KEY" \
+            -H "Content-Type: application/json" \
+            --data "{\"email\":\"$PROBE_EMAIL\",\"password\":\"$PASSWORD\"}" || true)
+          [ -z "$STATUS" ] && STATUS="000"
+          echo "HTTP status: $STATUS"
+
+          # The body is printed for every status EXCEPT 200, because a 200 body
+          # would carry a real access token.
+          if [ "$STATUS" != "200" ]; then
+            echo "Response body (first 500 bytes): $(head -c 500 "$BODY_FILE")"
+          fi
+          BODY="$(head -c 2000 "$BODY_FILE")"
+          rm -f "$BODY_FILE"
+
+          case "$STATUS" in
+            400)
+              if printf '%s' "$BODY" | grep -qiE 'invalid[_ -]?(grant|login|credentials)'; then
+                echo "PASS: production auth is up, the URL is right, and the deployed key was accepted. It refused a password grant for an account that does not exist, which is the correct answer."
+                echo "Reminder: this proves transport, URL and key. It does NOT prove a real customer can sign in."
+                exit 0
+              fi
+              echo "::error::400, but the body does not name invalid credentials. Either the request shape is wrong or something other than GoTrue answered. Status and body are above."
+              exit 1
+              ;;
+            401)
+              echo "::error::401 from production auth. The publishable key served by the site is not being accepted: missing, wrong, or rotated. This is exactly the failure class this probe exists to catch."
+              exit 1
+              ;;
+            200)
+              echo "::error::200 from a random password on an address that has no account. Stop and escalate: this must never authenticate. Body withheld because it would carry a real token."
+              exit 1
+              ;;
+            000)
+              echo "::error::No HTTP response at all (DNS failure, TLS failure, connection refused or timeout). Production auth is unreachable from CI at $OR_SUPABASE_URL."
+              exit 1
+              ;;
+            *)
+              echo "::error::Unexpected HTTP status $STATUS from production auth. Anything that is not a 400 refusal is a failure here. Status and body are above."
+              exit 1
+              ;;
+          esac

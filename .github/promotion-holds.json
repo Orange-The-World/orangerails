@@ -1,0 +1,7 @@
+[
+  {
+    "sha": "0fa8a425",
+    "ticket": "OR-T1310",
+    "note": "Merge commit for the stealth sync envelope replacement change (OR-T1203) must not reach prod until the fix tracked by OR-T1242 has landed on dev first. See cold_start row or-promotion-commit-holds for the full reasoning. Clear this entry only via its own merged pull request to dev, before the next promotion is cut."
+  }
+]

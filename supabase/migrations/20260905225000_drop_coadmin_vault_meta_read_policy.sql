@@ -1,0 +1,26 @@
+-- Step 3 of the co-admin owner row narrowing (OR-T0783, parent OR-E0015).
+--
+-- The policy this drops let a co-admin SELECT every column of the owner's
+-- user_vault_meta row, including keyring_ciphertext, enc_mek_ciphertext,
+-- recovery_ciphertext, kem_secret_wrapped and sig_secret_wrapped. A policy
+-- grants a ROW, never a column list, so there was no way to narrow it in
+-- place.
+--
+-- The replacement is public.list_coadmin_workspaces() (20260828190000), a
+-- SECURITY DEFINER function that returns only owner_user_id,
+-- workspace_key_id and sig_public_key, which is the full set the consume
+-- flow actually reads. The client (src/routes/app.tsx) switched to this RPC
+-- already. Because the RPC is SECURITY DEFINER it does not depend on this
+-- policy at all, so dropping the policy does not change what the RPC
+-- returns.
+--
+-- Proven on dev before landing, in a rolled back transaction with a
+-- simulated co-admin session: before this change a direct SELECT against
+-- the owner's row returns the full row including keyring_ciphertext; after
+-- dropping the policy the same direct SELECT returns zero rows while
+-- list_coadmin_workspaces() still returns the owner's workspace_key_id and
+-- sig_public_key unchanged. Full output is on OR-T0783.
+--
+-- OUT-OF-ORDER-OK: drops one policy, independent of every migration
+-- currently ahead of it, safe to apply out of order.
+DROP POLICY IF EXISTS "co-admins can read owner vault meta" ON public.user_vault_meta;
