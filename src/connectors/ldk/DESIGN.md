@@ -277,7 +277,7 @@ claim is not licence to route a Lightning amount around it.
 check rests on what counts as describing value, and §3.3 is why that is not
 enough: `channel_state` and its unique index already exist in the dev database
 and the wiring PR ships zero DDL, so a reviewer holding the wiring PR can have
-no schema in the diff to check against. Two requirements turn the check into an
+no schema in the diff to check against. Three requirements turn the check into an
 enumeration:
 
 - **The payment record DDL arrives as a migration pull request in this
@@ -311,7 +311,18 @@ column, so the allowed column set is never consulted. That limit is the reason
 the last consequence above is stated on its own rather than left to be read out
 of these two.
 
-**Metadata trade-off, on the same terms as §3.2 (3).** Every consequence above
+**Metadata trade-off, on the same terms as §3.2 (3).** This disclosure assumes
+a payment record is one row per **logical** payment: a payment split across
+paths (a multi-path payment) shares one payment hash across its parts and is
+written as one row, never one row per part. That assumption is binding, not
+incidental. Without it, rows sharing `payment_bidx` would be parts of one split
+payment rather than a retry of a whole one, the colliding row count would be the
+part count, and how a payment was split would correlate with its size relative
+to the sender's channel capacity, a magnitude signal reaching the server in the
+same paragraph that says no amount leaks. One row per logical payment is what
+closes that gap, and it is the row shape the rest of this paragraph assumes.
+
+Every consequence above
 is about **value**, and none of them is about **existence**. A payment record
 row on the allowed column set carries a `payment_bidx` and a `created_at`, so
 the server can count how many Lightning payments a user made and see when each
