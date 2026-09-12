@@ -2235,6 +2235,51 @@ jobs:
           echo
           echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
 
+  account-deletion-cascade:
+    name: Account deletion clears vault meta (DEV-0323)
+    needs: [target, apply-migrations]
+    # A push to dev ONLY.
+    #
+    # This check writes a fixture (dev holds no auth.users rows, so there is
+    # nothing to delete unless the test seeds one) and rolls it back with a
+    # deliberate raise. That rollback is not a licence to run it against
+    # production, so prod is excluded here AND refused by name inside the
+    # script. Two independent gates, because this one is worth getting wrong
+    # zero times.
+    #
+    # needs: apply-migrations, so it reads the schema this push just produced
+    # rather than the one that was there before it. If the apply fails this job
+    # is skipped, which is correct: the schema state is unknown and
+    # check-pending-migrations already says so.
+    #
+    # A failing run here is picked up by the `notify` job below (this job is in
+    # its `needs` list): an account-deletion check that goes red silently is
+    # close to as bad as not having it at all, since the whole point is
+    # proving customer vault key-material actually gets cleared on deletion.
+    if: ${{ github.event_name == 'push' && github.ref_name == 'dev' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Self-test the runner
+        # The classifier IS the control. Runs first so a broken parser fails as
+        # a broken parser rather than as a silent pass over the assertion.
+        run: node scripts/check-account-deletion-cascade.mjs --selftest
+
+      - name: Assert account removal clears the vault meta rows
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+        run: node scripts/check-account-deletion-cascade.mjs
+
   # ---------------------------------------------------------------------------
   # DEV-0212, 2026-08-28. WHY THIS JOB EXISTS.
   #
@@ -2263,7 +2308,7 @@ jobs:
   # which is the failure that actually happened.
   # ---------------------------------------------------------------------------
   notify:
-    needs: [target, apply-migrations, check-pending-migrations, check-rls-policy-baseline, deploy]
+    needs: [target, apply-migrations, check-pending-migrations, check-rls-policy-baseline, deploy, account-deletion-cascade]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -2282,6 +2327,7 @@ jobs:
           R_GATE: ${{ needs['check-pending-migrations'].result }}
           R_RLS: ${{ needs['check-rls-policy-baseline'].result }}
           R_DEPLOY: ${{ needs.deploy.result }}
+          R_CASCADE: ${{ needs['account-deletion-cascade'].result }}
         run: |
           set -uo pipefail
 
@@ -2294,7 +2340,7 @@ jobs:
           # A deploy that ran and found no changed functions is a SUCCESS and is
           # deliberately not reported.
           REASONS=""
-          for PAIR in "target:${R_TARGET}" "apply-migrations:${R_APPLY}" "check-pending-migrations:${R_GATE}" "check-rls-policy-baseline:${R_RLS}" "deploy:${R_DEPLOY}"; do
+          for PAIR in "target:${R_TARGET}" "apply-migrations:${R_APPLY}" "check-pending-migrations:${R_GATE}" "check-rls-policy-baseline:${R_RLS}" "deploy:${R_DEPLOY}" "account-deletion-cascade:${R_CASCADE}"; do
             JOB="${PAIR%%:*}"
             RES="${PAIR##*:}"
             case "$RES" in
