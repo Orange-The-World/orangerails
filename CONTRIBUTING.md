@@ -108,6 +108,8 @@ chore(deps): upgrade @noble/hashes to 1.4.0
 
 Scope is optional but encouraged. Use the present tense ("add Strike adapter", not "added Strike adapter").
 
+When a commit removes a restricted value (an internal hostname, reserved term, or sensitive string), describe it in the message rather than quoting the literal value. Write `fix: remove CGNAT host references from workflow docs`, not the actual string. Quoting a restricted value puts it back into git history.
+
 ---
 
 ## Pull requests
