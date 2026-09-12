@@ -254,4 +254,5 @@ test.describe("Sparrow v0.1 , discovery + landing", () => {
     ).toBeVisible({ timeout: 5000 });
     await capture(page, "05-stealth-iframe-load-guidance-card");
   });
+
 });
