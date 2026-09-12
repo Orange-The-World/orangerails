@@ -218,7 +218,7 @@ begin
       -- for types or 'n' for schemas. Report the tap rather than dropping it,
       -- and say honestly that the liveness half is unknown. Silently skipping a
       -- row here would be the exact failure this file exists to end.
-      v_kind := 'object of catalogue type ' || v_tap.objtype;
+      v_kind := 'object of catalogue type ' || v_tap.objtype::text;
       v_owned := null;
     end if;
 
