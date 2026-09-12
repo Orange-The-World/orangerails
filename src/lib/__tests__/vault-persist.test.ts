@@ -61,6 +61,8 @@ interface SelectChain {
   order(column: string, options?: { ascending?: boolean }): SelectChain;
   range(from: number, to: number): Promise<QueryResult>;
   eq(column: string, value: unknown): SelectChain;
+  gt(column: string, value: unknown): SelectChain;
+  limit(count: number): Promise<QueryResult>;
 }
 
 /**
@@ -144,7 +146,7 @@ function makeFakeClient(options: FakeOptions = {}) {
         // quietly measuring different sets.
         let counted = stored;
         for (const f of call.filters) {
-          if (f.column === "order" || f.column === "range") continue;
+          if (f.column === "order" || f.column === "range" || f.column === "gt" || f.column === "limit") continue;
           counted = counted.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
         }
         return { data: null, error: null, count: counted.length };
@@ -158,7 +160,7 @@ function makeFakeClient(options: FakeOptions = {}) {
       // column-equals-value filter on the stored rows.
       let view = stored.slice();
       for (const f of call.filters) {
-        if (f.column === "order" || f.column === "range") continue;
+        if (f.column === "order" || f.column === "range" || f.column === "gt" || f.column === "limit") continue;
         view = view.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
       }
 
@@ -178,17 +180,34 @@ function makeFakeClient(options: FakeOptions = {}) {
         });
       }
 
-      // Honour .range(from, to). A fake that always returns the same page
-      // regardless of its arguments can never exercise pagination, and a
-      // fixture of TRANSACTION_PAGE_SIZE or more rows would loop forever
-      // against it instead of failing loudly (see the paging test below).
+      // Honour .gt(column, value), which is how a keyset walk asks for the
+      // rows after its cursor. Applied on the sorted view: a fake that ignored
+      // it would hand back page one for ever.
+      const gtFilter = call.filters.find((f) => f.column === "gt");
+      if (gtFilter) {
+        const [column, value] = gtFilter.value as [string, unknown];
+        view = view.filter(
+          (row) => String((row as Record<string, unknown>)[column]) > String(value),
+        );
+      }
+
+      // Honour .range(from, to) and .limit(count), the two ways a page's size
+      // is capped. A fake that always returned the same page regardless of its
+      // arguments could never exercise pagination, and a fixture of
+      // TRANSACTION_PAGE_SIZE or more rows would loop forever against it
+      // instead of failing loudly (see the paging tests below). .range is kept
+      // even though the source no longer calls it, so a regression back to
+      // positional paging still runs against the fake rather than erroring.
       const rangeFilter = call.filters.find((f) => f.column === "range");
+      const limitFilter = call.filters.find((f) => f.column === "limit");
       const page = rangeFilter
         ? view.slice(
             (rangeFilter.value as [number, number])[0],
             (rangeFilter.value as [number, number])[1] + 1,
           )
-        : view;
+        : limitFilter
+          ? view.slice(0, limitFilter.value as number)
+          : view;
 
       const reorder = options.reorderAfterSelect?.[call.table];
       if (reorder) store[call.table] = reorder(stored.slice());
@@ -256,6 +275,14 @@ function makeFakeClient(options: FakeOptions = {}) {
             eq(column: string, value: unknown) {
               call.filters.push({ column, value });
               return chain;
+            },
+            gt(column: string, value: unknown) {
+              call.filters.push({ column: "gt", value: [column, value] });
+              return chain;
+            },
+            limit(count: number) {
+              call.filters.push({ column: "limit", value: count });
+              return Promise.resolve(resultFor(call));
             },
           };
           return chain;
