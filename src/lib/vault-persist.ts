@@ -372,6 +372,18 @@ async function reconcileEveryRow(
  * skipped between pages, which strands it under a key nothing stores any more,
  * or returned twice.
  *
+ * WHY THIS ADDRESSES EACH PAGE BY THE LAST ID SEEN, NOT BY A POSITION
+ * (OR-T1723). Positional paging (.range(offset, offset + pageSize - 1))
+ * addresses a page by WHERE it sits in the result set. Deleting an
+ * already-migrated row from a page already read shifts every later row one
+ * place toward the start, so exactly one row falls between the window just
+ * consumed and the next window and is never returned at all: silent,
+ * permanent key loss with no error anywhere. Asking instead for `id >
+ * lastSeenId` makes that class of bug structurally impossible, because a
+ * delete anywhere relative to the cursor cannot move a row across it. It does
+ * NOT fix an INSERT that lands with an id below a cursor the walk has already
+ * passed, which reconcileEveryRow below exists to catch.
+ *
  * WHY THE PAGE LENGTH ENDS THE WALK. A capped or empty read raises no error, so
  * the number of rows returned is the only honest signal that there is nothing
  * more to read.
@@ -385,11 +397,13 @@ async function walkAndMigrate<Row extends { id: string }>(
   migrateRow: (row: Row) => Promise<void>,
   filter?: SealFilter,
 ): Promise<void> {
-  let offset = 0;
+  let lastSeenId: string | null = null;
   for (;;) {
-    let query = supabase.from(table).select(columns).order("id", { ascending: true });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let query: any = supabase.from(table).select(columns);
     if (filter) query = filter(query);
-    const { data, error } = await query.range(offset, offset + pageSize - 1);
+    if (lastSeenId !== null) query = query.gt("id", lastSeenId);
+    const { data, error } = await query.order("id", { ascending: true }).limit(pageSize);
     if (error) throw error;
 
     const page = (data ?? []) as Row[];
@@ -400,7 +414,7 @@ async function walkAndMigrate<Row extends { id: string }>(
     }
 
     if (page.length < pageSize) break;
-    offset += pageSize;
+    lastSeenId = page[page.length - 1].id;
   }
 }
 
@@ -543,15 +557,15 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // recoverWithCode() mints a fresh MEK on every call, the key those rows are
   // still wrapped under is gone. Silent and permanent.
   //
-  // WHAT PAGING CANNOT FIX ON ITS OWN, stated rather than hidden. A walk over a
-  // stable order is still not immune to another session changing the table
-  // while it runs. An INSERT below the cursor is missed and is written under the
-  // OLD MEK by construction. A DELETE from a page already read shifts every
-  // later row one place toward the start, so a row falls between two windows and
-  // is never returned at all. Keyset pagination on id removes the second of
-  // those and neither of the first, so it is not the fix either. Both are
-  // handled by reconcileEveryRow below, which drives the walks and keeps
-  // sweeping until a complete walk finds nothing left to migrate.
+  // WHAT KEYSET PAGING CANNOT FIX ON ITS OWN, stated rather than hidden. The
+  // walk below addresses each page by the last id seen (see walkAndMigrate),
+  // which removes the DELETE-shift class of bug entirely: a delete anywhere,
+  // including during the confirming sweep itself, cannot move a row across a
+  // cursor boundary the way a positional offset could. It does NOT fix an
+  // INSERT that lands with an id below the cursor a walk has already passed:
+  // that row is missed and is written under the OLD MEK by construction. That
+  // residual is handled by reconcileEveryRow below, which drives the walks and
+  // keeps sweeping until a complete walk finds nothing left to migrate.
   //
   // Distinct ids, not a running tally, and added only once the UPDATE has
   // returned the row it changed: a read that hands the same row back twice must
