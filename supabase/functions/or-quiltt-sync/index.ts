@@ -438,47 +438,20 @@ export async function handleEvent(
   // Schema note: connections.user_id was dropped in
   // 20260421200000_platforms_subaccounts.sql; the current owning column
   // is subaccount_id.
-  // Route the event to the OR connection row whose quiltt_connection_id
-  // matches the webhook's connectionId. Falls back to a legacy NULL-id
-  // row only if no exact match exists — keeps banks linked before the
-  // multi-connection migration working. If both fail, surface the
-  // mismatch instead of silently writing to the wrong bank's bucket
-  // (which was the pre-fix root cause of Mercury+TD collisions).
-  let conn: { id: string } | null = null;
-  const exactMatch = await client
-    .from('connections')
-    .select('id')
-    .eq('subaccount_id', subaccountId)
-    .eq('provider_type', 'quiltt')
-    .eq('quiltt_connection_id', connectionId)
-    .maybeSingle();
-  if (exactMatch.error) return `connection lookup failed: ${exactMatch.error.message}`;
-  if (exactMatch.data) {
-    conn = exactMatch.data as { id: string };
-  } else {
-    const legacy = await client
-      .from('connections')
-      .select('id')
-      .eq('subaccount_id', subaccountId)
-      .eq('provider_type', 'quiltt')
-      .is('quiltt_connection_id', null)
-      .order('created_at', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
-    // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
-    // connections row (timing race on first connect or reconnect). Return
-    // 'deferred-conn-race' so the drain loop treats this differently from a
-    // plain OPK-deferral (opk_public is already set here, since we passed
-    // that gate above): it is bounded by WALL-CLOCK AGE via
-    // shouldRetireConnRace, not by attempts. Attempts-based bounding
-    // (commit 5418820c, reverted by OR-T1902) reached MAX_ATTEMPTS within
-    // minutes on sink platforms, because reDriveReadyDeferrals's sink branch
-    // re-admits ANY deferred row for a sink subaccount every tick regardless
-    // of why it was deferred, so bumpAttempts fired once per tick.
-    if (!legacy.data) return 'deferred-conn-race';
-    conn = legacy.data as { id: string };
-  }
+  // Route the event to the OR row bound to this exact Quiltt connection.
+  // resolveDataPullConnection retains the legacy NULL-row fallback only when
+  // Quiltt confirms this profile has exactly one connection. With two live
+  // links, a NULL row cannot identify which bank owns its existing traffic;
+  // using it would merge both banks into one OR bucket. In that case the
+  // resolver creates an id-bound row for the incoming connection instead.
+  const resolvedConn = await resolveDataPullConnection(
+    client,
+    subaccountId,
+    connectionId,
+    basic,
+  );
+  if (typeof resolvedConn === 'string') return resolvedConn;
+  const conn = resolvedConn;
 
   // DL-0442: load account selection for this connection once, before paging.
   // A connection with no source_wallets rows keeps the all-sync fallback (pre-feature behaviour).
@@ -778,6 +751,116 @@ export async function handleEvent(
   }
 
   return 'processed';
+}
+
+/**
+ * Resolve the OR row for a data-pull event without guessing across multiple
+ * Quiltt connections.
+ *
+ * Pre-migration rows have a NULL quiltt_connection_id. They remain usable for
+ * a profile that Quiltt confirms has exactly one connection. Once the profile
+ * has multiple connections, the NULL row is ambiguous even when it is the only
+ * OR row for the subaccount, so a new id-bound row is inserted for the incoming
+ * connection. This does not rewrite or move data already stored on the legacy
+ * row; historical repair belongs to the separate data-repair workflow.
+ */
+export async function resolveDataPullConnection(
+  client: SupabaseClient,
+  subaccountId: string,
+  quilttConnectionId: string,
+  basicAuth: string,
+): Promise<{ id: string } | string> {
+  const exactMatch = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', quilttConnectionId)
+    .maybeSingle();
+  if (exactMatch.error) return `connection lookup failed: ${exactMatch.error.message}`;
+  if (exactMatch.data) return exactMatch.data as { id: string };
+
+  const legacy = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .is('quiltt_connection_id', null)
+    .order('created_at', { ascending: true })
+    .limit(2);
+  if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
+
+  const legacyRows = (legacy.data ?? []) as Array<{ id: string }>;
+  if (legacyRows.length === 1) {
+    const upstreamResp = await fetch(QUILTT_GRAPHQL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${basicAuth}`,
+        'Content-Type':  'application/json',
+        'x-region':      QUILTT_REGION_HEADER,
+      },
+      body: JSON.stringify({ query: 'query ConnectionIds { connections { id } }' }),
+    });
+    if (!upstreamResp.ok) {
+      const errBody = await upstreamResp.text().catch(() => '');
+      return `Quiltt connections fetch ${upstreamResp.status}: ${redactProviderError(errBody, 300)}`;
+    }
+    const upstreamJson = await upstreamResp.json();
+    if (Array.isArray(upstreamJson?.errors) && upstreamJson.errors.length > 0) {
+      const messages = upstreamJson.errors
+        .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+        .filter((m: string) => m.length > 0)
+        .join('; ');
+      return `Quiltt connections fetch errors: ${redactProviderError(messages, 400)}`;
+    }
+    if (!Array.isArray(upstreamJson?.data?.connections)) {
+      return 'Quiltt connections fetch returned an invalid response';
+    }
+    const upstreamIds = upstreamJson.data.connections
+      .map((connection: { id?: unknown }) => connection?.id)
+      .filter((id: unknown): id is string => typeof id === 'string');
+    if (
+      upstreamIds.length === upstreamJson.data.connections.length &&
+      upstreamIds.length === 1 &&
+      upstreamIds[0] === quilttConnectionId
+    ) {
+      return legacyRows[0];
+    }
+  }
+
+  // No safe legacy fallback exists. Insert the same provider-managed row shape
+  // used by sink delivery. It is active immediately because this worker has no
+  // consumer confirmation handshake and is about to write the data itself.
+  const inserted = await client
+    .from('connections')
+    .insert({
+      subaccount_id:           subaccountId,
+      provider_type:           'quiltt',
+      quiltt_connection_id:    quilttConnectionId,
+      encrypted_credentials:   'quiltt-managed',
+      credentials_key_version: 1,
+      status:                  'active',
+    })
+    .select('id')
+    .single();
+  if (!inserted.error && inserted.data) return inserted.data as { id: string };
+  if (inserted.error?.code !== '23505') {
+    return `connection insert failed: ${inserted.error?.message ?? 'no row returned'}`;
+  }
+
+  // Another event may have inserted the same id-bound row after our first
+  // lookup. Resolve that race through the partial unique index.
+  const raced = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', quilttConnectionId)
+    .maybeSingle();
+  if (raced.error || !raced.data) {
+    return `connection lookup failed after insert conflict: ${raced.error?.message ?? 'not found'}`;
+  }
+  return raced.data as { id: string };
 }
 
 /**
