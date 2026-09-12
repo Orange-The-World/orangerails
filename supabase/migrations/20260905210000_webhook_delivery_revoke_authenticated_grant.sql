@@ -15,6 +15,16 @@
 --
 -- Fix is REVOKE, not add a policy: the policy already expresses the
 -- intended design (service_role only), the grant just never matched it.
+--
+-- OUT-OF-ORDER-OK: this file's version (20260905210000) sorts below dev's
+-- current applied maximum. Verified 2026-09-12 (DBA): this version has never
+-- applied in ANY environment, zero rows for 20260905210000 in
+-- supabase_migrations.schema_migrations on both fzwmnzmtqidumdqjdddz (dev)
+-- and lcdicqalreskibdfxkzb (prod). The statement is REVOKE ALL, which does
+-- not depend on any table or column shape a later migration might have
+-- introduced, only on webhook_delivery existing, and it is followed by a
+-- self-check assertion that fails loudly if the revoke did not take. Safe
+-- to apply after later dev migrations.
 
 REVOKE ALL ON public.webhook_delivery FROM authenticated;
 
