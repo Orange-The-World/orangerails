@@ -34,3 +34,4 @@ workers_dev = true
 
 [env.production.vars]
 OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
+ORBI_FUNCTIONS_BASE_URL = "https://sqcventmypowhbaceufy.supabase.co"

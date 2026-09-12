@@ -29,6 +29,9 @@
  * fields are null, which is a fact about this row, not a placeholder.
  */
 
+import { computeSyncFreshness } from '../_shared/sync-freshness.ts';
+import type { SyncFreshnessFields } from '../_shared/sync-freshness.ts';
+
 /** Columns read from `stealth_connections`. No envelope column, on purpose. */
 export interface StealthConnectionRow {
   id: string;
@@ -183,9 +186,55 @@ export function tagRegularConnection<T extends Record<string, unknown>>(
  */
 export const STEALTH_UNAVAILABLE_ALARM = 'STEALTH_UNION_UNAVAILABLE';
 
+/**
+ * The single alarmable string for a degraded source_wallets read.
+ *
+ * Distinct from STEALTH_UNAVAILABLE_ALARM on purpose (DL-1038): the
+ * source_wallets bulk load degrades the wallet badges on REGULAR
+ * connections and has nothing to do with the stealth store. A shared token
+ * would let one GlitchTip alarm mean two different failures, which is
+ * worse than two alarms.
+ *
+ * Same bare-uppercase-token shape as STEALTH_UNAVAILABLE_ALARM, for the
+ * same reason: it has to survive log formatting and be greppable as a
+ * literal.
+ */
+export const SOURCE_WALLETS_UNAVAILABLE_ALARM = 'SOURCE_WALLETS_UNAVAILABLE';
+
+/**
+ * A unified row carrying the DL-1737 freshness fields.
+ *
+ * A separate type rather than three more required fields on
+ * `UnifiedConnection`, so the two projections above stay responsible for
+ * exactly what they read out of their own store, and the freshness fields get
+ * added in one place for both families at once. See
+ * ../_shared/sync-freshness.ts for what the signal measures and, more
+ * importantly, what it does not.
+ */
+export type UnifiedConnectionWithFreshness = UnifiedConnection & SyncFreshnessFields;
+
+/**
+ * Attach the freshness fields to every row in one pass.
+ *
+ * `now` is a parameter, read once by the caller, so every row in a single
+ * response is measured against a single instant. Read per row instead, two
+ * connections stamped at the same moment could land on opposite sides of the
+ * threshold inside the same payload.
+ *
+ * Applied to the MERGED list rather than inside `tagRegularConnection` and
+ * `stealthRowToConnection` separately, because "one shape" only holds if both
+ * families get the fields from the same code.
+ */
+export function withSyncFreshness(
+  connections: ReadonlyArray<UnifiedConnection>,
+  now: Date,
+): UnifiedConnectionWithFreshness[] {
+  return connections.map(c => ({ ...c, ...computeSyncFreshness(c.last_sync_at, now) }));
+}
+
 /** The endpoint's response body. */
 export interface ListResponse {
-  connections: UnifiedConnection[];
+  connections: UnifiedConnectionWithFreshness[];
   /**
    * True when the stealth store could not be read and the list may therefore
    * be short. Lets the client say "some connections could not be loaded"
@@ -196,6 +245,22 @@ export interface ListResponse {
    * point of this flag is that the failure stops being invisible.
    */
   stealth_unavailable: boolean;
+  /**
+   * True when the source_wallets bulk read failed for one or more of the
+   * connections in this response, so some of them may be missing their
+   * wallet badges (`source_wallets: []` looks identical to "no wallets set
+   * up" otherwise). DL-1038.
+   *
+   * A separate field from `stealth_unavailable` on purpose: the two are
+   * different failure modes on different stores, and a client that wants to
+   * show a "wallet badge unavailable" notice must be able to do that
+   * without also triggering stealth-mode fallback UI.
+   *
+   * Always present as a boolean, never omitted on the happy path, for the
+   * same reason `stealth_unavailable` is: a key that appears only on
+   * failure is a key clients forget to check.
+   */
+  source_wallets_unavailable: boolean;
 }
 
 /**
@@ -208,10 +273,15 @@ export interface ListResponse {
  * ordinary user who has never used Stealth Sync.
  */
 export function buildListResponse(
-  connections: UnifiedConnection[],
+  connections: UnifiedConnectionWithFreshness[],
   stealthUnavailable: boolean,
+  sourceWalletsUnavailable: boolean,
 ): ListResponse {
-  return { connections, stealth_unavailable: stealthUnavailable };
+  return {
+    connections,
+    stealth_unavailable: stealthUnavailable,
+    source_wallets_unavailable: sourceWalletsUnavailable,
+  };
 }
 
 /** Epoch millis for sorting. Unparseable timestamps sort last, never first. */

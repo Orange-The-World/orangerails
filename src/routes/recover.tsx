@@ -5,6 +5,7 @@ import { useVault } from "@/context/VaultContext";
 import { MIN_PASSWORD_LENGTH, CURRENT_VAULT_KEY_VERSION } from "@/lib/vault";
 import { formatError } from "@/lib/format-error";
 import { logSecurityEvent } from "@/lib/audit";
+import { migrateAndPersistRotatedVault, type VaultPersistClient } from "@/lib/vault-persist";
 
 export const Route = createFileRoute("/recover")({
   component: RecoverPage,
@@ -23,6 +24,10 @@ function RecoverPage() {
   const [step, setStep] = useState<"form" | "new-code">("form");
   const [newRecoveryCode, setNewRecoveryCode] = useState("");
   const [newCodeCopied, setNewCodeCopied] = useState(false);
+  // Set from the recovery result, never worked out here. This component cannot
+  // see which stored secret opened and which did not, so anything it inferred
+  // would be a guess that drifts from what actually happened.
+  const [pqcKeysReplaced, setPqcKeysReplaced] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,7 +59,14 @@ function RecoverPage() {
 
       const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
-        .select("vault_salt, vault_verifier_ciphertext, recovery_ciphertext")
+        // kem_secret_wrapped and sig_secret_wrapped are read here because they are
+        // wrapped under an HKDF subkey of the MEK, and the recovery below rotates
+        // the MEK. They are not data rows, so the migration never sees them: if
+        // they are not carried across in the same write, the only key that opens
+        // them is discarded and nothing ever regenerates them.
+        .select(
+          "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
+        )
         .eq("user_id", session.user.id)
         .single();
 
@@ -65,101 +77,52 @@ function RecoverPage() {
         );
       }
 
-      const { newEncMekCiphertext, newRecoveryCode: freshCode, newRecoveryCiphertext, newVerifierCiphertext } =
-        await recoverWithCode({
-          recoveryCode,
-          recoveryCiphertext: meta.recovery_ciphertext,
-          saltB64: meta.vault_salt,
-          verifierCiphertext: meta.vault_verifier_ciphertext,
-          newPassword,
-        });
+      const {
+        newEncMekCiphertext,
+        newRecoveryCode: freshCode,
+        newRecoveryCiphertext,
+        newVerifierCiphertext,
+        newKemSecretWrapped,
+        newSigSecretWrapped,
+        pqcKeysReplaced: keysReplaced,
+      } = await recoverWithCode({
+        recoveryCode,
+        recoveryCiphertext: meta.recovery_ciphertext,
+        saltB64: meta.vault_salt,
+        verifierCiphertext: meta.vault_verifier_ciphertext,
+        newPassword,
+        kemSecretWrapped: meta.kem_secret_wrapped ?? null,
+        sigSecretWrapped: meta.sig_secret_wrapped ?? null,
+      });
 
-      // Re-encrypt connections first. Meta is written only after all rows
-      // are migrated so a partial failure leaves the old MEK wrappers intact.
-      // credentials subkey changes with the MEK.
-      const { data: conns, error: connsErr } = await (supabase as any)
-        .from("connections")
-        .select("id, encrypted_credentials, encrypted_label");
-      if (connsErr) throw connsErr;
-
-      for (const conn of (conns ?? []) as Array<{
-        id: string;
-        encrypted_credentials: string;
-        encrypted_label: string | null;
-      }>) {
-        const newCreds = await migrateCredentialsCiphertext(conn.encrypted_credentials);
-        const connUpdate: Record<string, unknown> = { encrypted_credentials: newCreds };
-        if (conn.encrypted_label) {
-          try {
-            connUpdate.encrypted_label = await migrateCredentialsCiphertext(conn.encrypted_label);
-          } catch {
-            try {
-              connUpdate.encrypted_label = await migrateTransactionCiphertext(conn.encrypted_label);
-            } catch {
-              // Label migration failed with both keys. Leave the stale ciphertext.
-              // encrypted_label is cosmetic and the connection remains usable.
-            }
-          }
-        }
-        const { error: connErr } = await (supabase as any)
-          .from("connections")
-          .update(connUpdate)
-          .eq("id", conn.id);
-        if (connErr) throw connErr;
-      }
-
-      // Re-encrypt transactions in pages of 500.
-      // encrypted_payload uses the transactions subkey, which changes with the MEK.
-      const PAGE_SIZE = 500;
-      let offset = 0;
-      for (;;) {
-        const { data: txns, error: txnsErr } = await (supabase as any)
-          .from("encrypted_transactions")
-          .select("id, encrypted_payload")
-          .range(offset, offset + PAGE_SIZE - 1);
-        if (txnsErr) throw txnsErr;
-        if (!txns || (txns as unknown[]).length === 0) break;
-
-        await Promise.all(
-          (txns as Array<{ id: string; encrypted_payload: string }>).map(async (txn) => {
-            const newPayload = await migrateTransactionCiphertext(txn.encrypted_payload);
-            const { error: txnErr } = await (supabase as any)
-              .from("encrypted_transactions")
-              .update({ encrypted_payload: newPayload })
-              .eq("id", txn.id);
-            if (txnErr) throw txnErr;
-          }),
-        );
-
-        if ((txns as unknown[]).length < PAGE_SIZE) break;
-        offset += PAGE_SIZE;
-      }
-
-      // All ciphertexts migrated. Persist rotated vault meta now that every
-      // row is safely under the new MEK. Writing meta last means the old
-      // enc_mek_ciphertext and recovery_ciphertext remain valid for a retry
-      // if any row migration above threw -- the user is never left with
-      // invalidated wrappers and un-migrated rows simultaneously.
-      // vault_verifier_ciphertext MUST be updated: it is derived from the MEK.
-      const { error: updateErr } = await (supabase as any)
-        .from("user_vault_meta")
-        .update({
-          enc_mek_ciphertext: newEncMekCiphertext,
-          recovery_ciphertext: newRecoveryCiphertext,
-          vault_verifier_ciphertext: newVerifierCiphertext,
-          vault_key_version: CURRENT_VAULT_KEY_VERSION,
-        })
-        .eq("user_id", session.user.id);
-      if (updateErr) throw updateErr;
-
-      // Zero old key material.
-      // clearMigrationKeys is intentionally NOT called in the catch branch below
-      // so in-session retry can reuse the stashed old keys.
-      clearMigrationKeys();
+      // Everything from here to the meta write lives in src/lib/vault-persist.ts.
+      // It is the part that loses vaults when it is wrong, and while it sat
+      // inline in this component no test could reach it without mounting the
+      // page, so a green suite said nothing about it. The order, the
+      // compare-and-swap and the row-count check are unchanged; read the
+      // comments there for what writing meta last does and does not buy.
+      //
+      // It throws unless the meta write is proven to have landed, and it only
+      // zeroes the old key material once that proof exists.
+      await migrateAndPersistRotatedVault({
+        supabase: supabase as unknown as VaultPersistClient,
+        userId: session.user.id,
+        priorRecoveryCiphertext: meta.recovery_ciphertext,
+        newEncMekCiphertext,
+        newRecoveryCiphertext,
+        newVerifierCiphertext,
+        vaultKeyVersion: CURRENT_VAULT_KEY_VERSION,
+        newKemSecretWrapped,
+        newSigSecretWrapped,
+        migrateCredentialsCiphertext,
+        migrateTransactionCiphertext,
+        clearMigrationKeys,
+      });
 
       void logSecurityEvent(supabase, session.user.id, "vault_recover");
 
       setNewRecoveryCode(freshCode);
+      setPqcKeysReplaced(keysReplaced);
       setStep("new-code");
     } catch (err) {
       setError(formatError(err));
@@ -178,6 +141,13 @@ function RecoverPage() {
               again.
             </p>
           </div>
+
+          {pqcKeysReplaced && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+              Your post-quantum keys could not be carried across and have been replaced. Anything
+              encrypted to the old keys cannot be read.
+            </div>
+          )}
 
           <div className="rounded-md border-2 border-orange-500/40 bg-orange-500/5 p-4 space-y-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-orange-600">
