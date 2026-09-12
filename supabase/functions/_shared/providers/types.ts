@@ -337,7 +337,7 @@ export function parseCredentials(
     // throws a FIXED string: the underlying exception is discarded, never
     // composed into this message. Keep it that way, and do not reintroduce
     // the caught error into the text.
-    throw new Error(`[${adapter.slug}] credentials are not valid JSON`);
+    throw new Error(`[${adapter.slug}] credentials JSON parse failed`);
   }
   if (!parsed || typeof parsed !== 'object') {
     throw new Error(`[${adapter.slug}] credentials must be an object`);
