@@ -438,6 +438,17 @@ export interface RotateVaultArgs {
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
+  /**
+   * user_vault_meta.workspace_key_id for this owner, or null if no co-admin
+   * has ever been granted.
+   *
+   * recoverWithCode() mints a FRESH MEK, so every wrapped_data_keys row this
+   * owner has ever granted a co-admin (see co-admin.ts) still carries a blob
+   * of subkeys HKDF-derived from the OLD MEK once this rotation lands. Those
+   * rows are cleaned up below, after the meta write is proven to have landed
+   * (OR-T2403).
+   */
+  workspaceKeyId: string | null;
 }
 
 /**
@@ -491,6 +502,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     migrateCredentialsCiphertext,
     migrateTransactionCiphertext,
     clearMigrationKeys,
+    workspaceKeyId,
   } = args;
 
   // Refuse before anything irreversible happens if a stored PQC secret would
@@ -814,6 +826,32 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   if (updateErr) raiseRotationFailure(updateErr, anyRowWritten);
   if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
     throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
+  }
+
+  // recoverWithCode() mints a FRESH MEK, so every wrapped_data_keys row this
+  // owner has ever granted a co-admin (see co-admin.ts) still carries a blob
+  // of subkeys HKDF-derived from the OLD MEK. Left in place, a co-admin would
+  // silently decrypt garbage instead of failing visibly. Found in OR-T1939,
+  // this cleanup is the Option A decision made in OR-T2403.
+  //
+  // Delete those rows so a co-admin fails CLOSED and VISIBLY: the next time
+  // they use the grant they get a clear access-revoked signal rather than a
+  // decrypt failure that reads like data corruption.
+  //
+  // Deliberately AFTER the meta write is proven landed, not before: the meta
+  // write is what actually rotates the MEK, so deleting these rows earlier
+  // would strip the co-admin's access before the rotation that justifies it
+  // is even confirmed to have happened.
+  //
+  // A raw throw here, not raiseRotationFailure: the meta write above has
+  // already durably succeeded, so this is not a partial-migration failure the
+  // user's own vault is exposed to. It is reported as-is.
+  if (workspaceKeyId) {
+    const { error: wdkErr } = await supabase
+      .from("wrapped_data_keys")
+      .delete()
+      .eq("data_key_id", workspaceKeyId);
+    if (wdkErr) throw wdkErr;
   }
 
   // Zero old key material. Only reached once the meta write above is proven to
