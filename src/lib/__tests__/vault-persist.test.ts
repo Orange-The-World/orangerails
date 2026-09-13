@@ -35,7 +35,7 @@ type QueryResult = { data: unknown[] | null; error: unknown; count?: number | nu
 
 interface RecordedCall {
   table: string;
-  op: "select" | "update";
+  op: "select" | "update" | "delete";
   /** columns passed to .select(), which is what makes the row count readable */
   columns?: string;
   values?: Record<string, unknown>;
@@ -51,6 +51,14 @@ interface UpdateChain {
   ): Promise<unknown>;
   eq(column: string, value: unknown): UpdateChain;
   select(columns: string): Promise<QueryResult>;
+}
+
+interface DeleteChain {
+  then(
+    onFulfilled: (value: QueryResult) => unknown,
+    onRejected?: (reason: unknown) => unknown,
+  ): Promise<unknown>;
+  eq(column: string, value: unknown): DeleteChain;
 }
 
 interface SelectChain {
@@ -104,6 +112,8 @@ interface FakeOptions {
    * SAME table already succeeded, not only on the very first write of a run.
    */
   failUpdateFromCall?: { table: string; call: number; error: unknown };
+  /** what a DELETE on any table returns, for the wrapped_data_keys cleanup tests */
+  deleteResult?: QueryResult;
 }
 
 /**
@@ -195,6 +205,9 @@ function makeFakeClient(options: FakeOptions = {}) {
 
       return { data: page, error: null };
     }
+    if (call.op === "delete") {
+      return options.deleteResult ?? { data: [], error: null };
+    }
     if (call.table === "user_vault_meta") {
       return options.metaUpdate ?? { data: [{ user_id: "user-1" }], error: null };
     }
@@ -276,6 +289,18 @@ function makeFakeClient(options: FakeOptions = {}) {
           };
           return chain;
         },
+        delete() {
+          const call: RecordedCall = { table, op: "delete", filters: [] };
+          calls.push(call);
+          const chain: DeleteChain = {
+            ...thenable(call),
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
+            },
+          };
+          return chain;
+        },
       };
     },
   };
@@ -300,6 +325,10 @@ function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) 
     migrateCredentialsCiphertext: async (c: string) => `${c}-migrated`,
     migrateTransactionCiphertext: async (c: string) => `${c}-migrated`,
     clearMigrationKeys,
+    // null is the ordinary case: no co-admin has ever been granted, so the
+    // wrapped_data_keys cleanup below is a no-op. Set per test where a
+    // co-admin grant is being modelled.
+    workspaceKeyId: null as string | null,
   };
 }
 
