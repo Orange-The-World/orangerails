@@ -15,8 +15,8 @@
  *            widget mode (absent/'widget'): or_stealth_key_b64 required
  *            app mode ('app'): or_stealth_key_b64 must be absent, AND the
  *            INIT is refused outright until the app-mode routes exist
- *   3. Once INIT is captured, render one of four route stubs based on
- *      init.mode: 'add' | 'sync' | 'list' | 'delete'.
+ *   3. Once INIT is captured, render the requested wallet route or the
+ *      keyless storage-management route.
  *
  * Fail closed on purpose, not by accident: the four routes below are
  * widget-mode routes, they seal with a key. An app-mode INIT carries no key,
@@ -41,6 +41,7 @@ import { AddRoute } from "./routes/add";
 import { SyncRoute } from "./routes/sync";
 import { ListRoute } from "./routes/list";
 import { DeleteRoute } from "./routes/delete";
+import { StorageRoute } from "./routes/storage";
 import { DirectLoadCard } from "./components/DirectLoadCard";
 import { StealthInitProvider } from "./StealthInitContext";
 import { parseAllowedOrigins, isAllowedOrigin } from "./allowed-origins";
@@ -204,10 +205,6 @@ export function App() {
         return;
       }
 
-      // Determine seal mode. Anything other than the explicit string 'app'
-      // resolves to widget mode, preserving backward compatibility.
-      const sealMode = data.seal_mode === "app" ? "app" : "widget";
-
       // Validate required fields shared by both modes.
       if (
         typeof data.app_slug !== "string" ||
@@ -215,7 +212,8 @@ export function App() {
         (data.mode !== "add" &&
           data.mode !== "sync" &&
           data.mode !== "list" &&
-          data.mode !== "delete")
+          data.mode !== "delete" &&
+          data.mode !== "storage")
       ) {
         setError("INIT message is missing required fields");
         postError(event.source as Window | null, event.origin, {
@@ -225,6 +223,29 @@ export function App() {
         });
         return;
       }
+
+      // Storage management owns only public downloaded chain data. It is a
+      // deliberately keyless route and does not identify a wallet.
+      if (data.mode === "storage") {
+        if (typeof data.or_stealth_key_b64 === "string") {
+          setError("storage mode must not carry or_stealth_key_b64");
+          postError(event.source as Window | null, event.origin, {
+            code: "INTERNAL",
+            message: "Storage mode must not include or_stealth_key_b64.",
+            retryable: false,
+          });
+          return;
+        }
+        setInit(data as StealthInitMessage);
+        setParent((event.source as Window | null) ?? parentWin);
+        setAwaitingInit(false);
+        setError(null);
+        return;
+      }
+
+      // Determine seal mode. Anything other than the explicit string 'app'
+      // resolves to widget mode, preserving backward compatibility.
+      const sealMode = data.seal_mode === "app" ? "app" : "widget";
 
       // Key enforcement: gated on seal mode.
       if (sealMode === "app") {
@@ -273,8 +294,9 @@ export function App() {
       }
 
       // Optional gap_limit: reject explicitly rather than silently coercing.
-      if (data.gap_limit !== undefined) {
-        const g = data.gap_limit;
+      const gapLimit = "gap_limit" in data ? data.gap_limit : undefined;
+      if (gapLimit !== undefined) {
+        const g = gapLimit;
         if (!Number.isInteger(g) || g < 1 || g > 1000) {
           setError("INIT gap_limit out of range");
           postError(event.source as Window | null, event.origin, {
@@ -350,6 +372,10 @@ export function App() {
         </div>
       </div>
     );
+  }
+
+  if (init.mode === "storage") {
+    return <StorageRoute init={init} parent={parent} />;
   }
 
   // Every route below is a widget-mode route: it seals with a key. App mode is

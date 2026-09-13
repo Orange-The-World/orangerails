@@ -109,7 +109,7 @@ Today the supported set is `[1]`: this is the mechanism landing ahead of
 any real version bump. The required CI check that drives a full
 previous-version handshake lands with the first actual bump.
 
-**App → Widget:** one message type, `OR_STEALTH_INIT`, carrying mode (add / sync / list / delete), the per-app key, and the consuming app's identity.
+**App → Widget:** one message type, `OR_STEALTH_INIT`, carrying mode (add / sync / list / delete / storage) and the consuming app's identity. Wallet modes carry the per-app key; storage mode is deliberately keyless because it manages public chain data only.
 
 **Widget → App:** seven message types: `OR_STEALTH_READY`, `OR_STEALTH_PROGRESS` (with eight stages), `OR_STEALTH_ADD_COMPLETE`, `OR_STEALTH_SYNC_COMPLETE` (with sealed transactions array), `OR_STEALTH_LIST_RESULT`, `OR_STEALTH_DELETE_COMPLETE`, `OR_STEALTH_ERROR` (with nine error codes).
 
@@ -303,7 +303,7 @@ const initMessage = {
   protocol_version: 1,
   app_slug: 'bitbooks-v2',        // your platform slug, agreed with OR
   app_user_id: organizationId,    // your own user/org identifier
-  mode: 'add',                    // 'add' | 'sync' | 'list' | 'delete'
+  mode: 'add',                    // 'add' | 'sync' | 'list' | 'delete' | 'storage'
   or_stealth_key_b64: derivedKeyB64,   // see Vault setup section above
   return_callback_origin: window.location.origin,
   // connection_id required for sync / list / delete, omit for add
@@ -334,11 +334,12 @@ over if wrong:
   `https://staging.app.yourdomain.com/` (rare, but some frameworks
   normalize this inconsistently) make sure the value you send matches
   what the browser actually reports as your page's origin.
-- **`app_slug`, `app_user_id`, `or_stealth_key_b64`, and `mode` are all
-  required** on every INIT. Missing any one gets you back an
-  `OR_STEALTH_ERROR` with code `INTERNAL`, not a silent hang.
-- **`mode` other than `'add'` requires `connection_id`.** Missing it
-  gets you `CONNECTION_NOT_FOUND`.
+- **`app_slug`, `app_user_id`, and `mode` are required** on every INIT.
+  Wallet modes also require `or_stealth_key_b64`. Storage mode must omit
+  both the key and `connection_id`; the widget rejects key material on that
+  public-data-only route.
+- **`sync`, `list`, and `delete` require `connection_id`.** Missing it gets
+  you `CONNECTION_NOT_FOUND`. Add and storage omit it.
 
 If the widget rejects your INIT for an origin reason, you get back:
 
@@ -409,10 +410,37 @@ or change-chain address has an index >= `gap_limit` within the
 `gap_limit * 2` window. This is the BIP44 signal that the window needs
 extending, implemented client-side with no new network calls.
 
-### Implementation status: `add` and `sync` are live, `list` and `delete` are not yet
+### Downloaded block storage
 
-As of this writing, `mode: 'add'` and `mode: 'sync'` are real, shipped
-implementations. `mode: 'list'` and `mode: 'delete'` currently render a
+Before its first sync, the popup asks the user to keep downloaded public
+filters and matching raw blocks in a Chromium-selected folder, in
+origin-private browser storage (OPFS), or not at all. The folder choice is
+absent when `showDirectoryPicker` is unavailable. A selected folder handle is
+remembered by the widget origin in IndexedDB; it never crosses `postMessage`.
+
+The cache is shared across wallets. A later wallet reads a cached height before
+calling the filter or block source, so an overlapping range is not downloaded
+again. Open the manager without a vault key by sending:
+
+```js
+{
+  type: 'OR_STEALTH_INIT',
+  protocol_version: 1,
+  app_slug: 'bitbooks-v2',
+  app_user_id: organizationId,
+  mode: 'storage',
+  return_callback_origin: window.location.origin,
+}
+```
+
+The popup reports the active location, logical file size, and number of wallets
+that completed a sync using it. Delete removes only cached public chain data;
+sealed transaction records are stored separately and are not touched.
+
+### Source implementation status: `add`, `sync`, and `storage`; `list` and `delete` are placeholders
+
+The source contains implementations for `mode: 'add'`, `mode: 'sync'`, and
+`mode: 'storage'`. `mode: 'list'` and `mode: 'delete'` currently render a
 "Coming soon" placeholder and do not call any backend function yet. If
 you send `OR_STEALTH_INIT` with `mode: 'list'` or `mode: 'delete'`, the
 widget accepts the handshake but shows a placeholder screen instead of

@@ -1452,8 +1452,11 @@ class DurableFilterError extends Error {}
 /** One attempt at the .gcs.gz + .json pair. Throws; never returns null. */
 async function fetchFilterPair(height: number, baseUrl: string): Promise<FilterRecord> {
   const [gzResp, jsonResp] = await Promise.all([
-    fetch(`${baseUrl}/${height}.gcs.gz`),
-    fetch(`${baseUrl}/${height}.json`),
+    // The widget's selected folder/OPFS cache is authoritative. Bypassing the
+    // opaque HTTP cache means "do not keep" really keeps no block data, and
+    // deleting the managed cache does not leave an invisible second copy.
+    fetch(`${baseUrl}/${height}.gcs.gz`, { cache: 'no-store' }),
+    fetch(`${baseUrl}/${height}.json`, { cache: 'no-store' }),
   ]);
   if (gzResp.status === 404 || jsonResp.status === 404) {
     throw new DurableFilterError(
@@ -1587,7 +1590,7 @@ export async function liveFetchBlock(
   blockHashHex: string,
   baseUrl: string = DEFAULT_BLOCK_SOURCE_BASE,
 ): Promise<BlockRecord> {
-  const resp = await fetch(`${baseUrl}/block/${blockHashHex}`);
+  const resp = await fetch(`${baseUrl}/block/${blockHashHex}`, { cache: 'no-store' });
   if (!resp.ok) throw new Error(`fetchBlock ${blockHashHex} failed: ${resp.status}`);
   const buf = new Uint8Array(await resp.arrayBuffer());
   const headerHash = resp.headers.get('X-Block-Hash');
