@@ -73,6 +73,7 @@ Adding your app is the v0.1 path. The contract is the same one BitBooks and Oran
 git clone https://github.com/Orange-The-World/orangerails
 cd orangerails
 npm install
+bash scripts/install-git-hooks.sh
 npm run dev
 ```
 

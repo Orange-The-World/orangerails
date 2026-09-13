@@ -7,6 +7,10 @@
 # URLs, milestone tags from prior internal audits, dead PR refs, and
 # personally identifiable email addresses.
 #
+# Usage:
+#   bash scripts/pre-publish-scan.sh
+#   bash scripts/pre-publish-scan.sh --commit-message <message-file>
+#
 # Exit code:
 #   0  — tree is clean, safe to publish or merge
 #   1  : one or more categories reported an issue; review output, clean up,
@@ -21,6 +25,27 @@
 # lock-step. PRs that change this script require a second reviewer.
 
 set -uo pipefail
+
+MODE="tree"
+MESSAGE_FILE=""
+case "${1:-}" in
+  "") ;;
+  --commit-message)
+    if [[ "$#" -ne 2 ]]; then
+      printf "usage: %s --commit-message <message-file>\n" "$0" >&2
+      exit 2
+    fi
+    MODE="commit-message"
+    MESSAGE_FILE="$2"
+    if [[ "$MESSAGE_FILE" != /* ]]; then
+      MESSAGE_FILE="$PWD/$MESSAGE_FILE"
+    fi
+    ;;
+  *)
+    printf "usage: %s [--commit-message <message-file>]\n" "$0" >&2
+    exit 2
+    ;;
+esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -48,6 +73,103 @@ cd "$REPO_ROOT"
 RESERVED_TERMS="${OR_RESERVED_TERMS:-}"
 if [[ -z "$RESERVED_TERMS" && -f .reserved-terms ]]; then
   RESERVED_TERMS="$(grep -vE '^[[:space:]]*(#|$)' .reserved-terms | paste -sd'|' -)"
+fi
+
+# ----------------------------------------------------------------------
+# Commit-metadata patterns
+# ----------------------------------------------------------------------
+#
+# Keep these in lock-step with GENERIC_PATTERN in
+# .github/workflows/pr-commit-metadata-scan.yml. The hook scans only the
+# proposed message; the workflow remains the backstop and also scans author
+# and committer identity across every commit in the pull-request range.
+COMMIT_MESSAGE_CLASS_NAMES=(
+  "tailnet hostname"
+  "CGNAT-range address"
+  "knowledge-base document link"
+  "chat permalink"
+  "home-directory path"
+)
+
+COMMIT_MESSAGE_CLASS_PATTERNS=(
+  'tail[a-z0-9]+\.ts\.net|\.tailnet\b'
+  '100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+  'https?://[A-Za-z0-9.-]+/doc/[A-Za-z0-9_-]{6,}'
+  '/#narrow/'
+  '/home/[a-z][a-z0-9_-]*/'
+)
+
+COMMIT_MESSAGE_DOC_STRIP_CGNAT='100\.64\.0\.0/10'
+COMMIT_MESSAGE_DOC_STRIP_REGEX_ALT='\([0-9]+(\|[0-9]+)+\)'
+
+scan_commit_message() {
+  if [[ ! -f "$MESSAGE_FILE" || ! -r "$MESSAGE_FILE" ]]; then
+    printf "commit-msg: cannot read proposed commit message file\n" >&2
+    return 2
+  fi
+
+  local -a matched=()
+  local i rc line cleaned
+  for ((i = 0; i < ${#COMMIT_MESSAGE_CLASS_PATTERNS[@]}; i++)); do
+    matched[i]=0
+    printf '' | grep -qEi "${COMMIT_MESSAGE_CLASS_PATTERNS[i]}"
+    rc=$?
+    if [[ "$rc" -gt 1 ]]; then
+      printf "commit-msg: invalid pattern for class '%s'; refusing without scanning\n" \
+        "${COMMIT_MESSAGE_CLASS_NAMES[i]}" >&2
+      return 2
+    fi
+  done
+
+  if [[ -n "$RESERVED_TERMS" ]]; then
+    printf '' | grep -qEi "$RESERVED_TERMS"
+    rc=$?
+    if [[ "$rc" -gt 1 ]]; then
+      printf "commit-msg: invalid reserved-term pattern; refusing without scanning\n" >&2
+      return 2
+    fi
+  elif [[ "${REQUIRE_RESERVED_TERMS:-}" == "true" ]]; then
+    printf "commit-msg: reserved-term list is required but not configured; refusing without scanning\n" >&2
+    return 2
+  fi
+
+  local reserved_matched=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    cleaned=$(printf '%s\n' "$line" | sed -E \
+      "s|${COMMIT_MESSAGE_DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${COMMIT_MESSAGE_DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+    for ((i = 0; i < ${#COMMIT_MESSAGE_CLASS_PATTERNS[@]}; i++)); do
+      if printf '%s\n' "$cleaned" | grep -qEi "${COMMIT_MESSAGE_CLASS_PATTERNS[i]}"; then
+        matched[i]=1
+      fi
+    done
+    if [[ -n "$RESERVED_TERMS" ]] && printf '%s\n' "$cleaned" | grep -qEi "$RESERVED_TERMS"; then
+      reserved_matched=1
+    fi
+  done < "$MESSAGE_FILE"
+
+  local finding_count=0
+  for ((i = 0; i < ${#COMMIT_MESSAGE_CLASS_PATTERNS[@]}; i++)); do
+    if [[ "${matched[i]}" -eq 1 ]]; then
+      printf "commit-msg: refused: proposed message matches restricted pattern class '%s' (matched text withheld)\n" \
+        "${COMMIT_MESSAGE_CLASS_NAMES[i]}" >&2
+      finding_count=$((finding_count + 1))
+    fi
+  done
+  if [[ "$reserved_matched" -eq 1 ]]; then
+    printf "commit-msg: refused: proposed message matches restricted pattern class 'reserved internal term' (matched text withheld)\n" >&2
+    finding_count=$((finding_count + 1))
+  fi
+
+  if [[ "$finding_count" -gt 0 ]]; then
+    printf "commit-msg: commit refused; remove the restricted value from the message and retry\n" >&2
+    return 1
+  fi
+  return 0
+}
+
+if [[ "$MODE" == "commit-message" ]]; then
+  scan_commit_message
+  exit $?
 fi
 
 # ----------------------------------------------------------------------
