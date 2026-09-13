@@ -298,18 +298,22 @@ enumeration:
   value and reveals no amount, and still sorts a user's rows into groups that
   share a destination. Keyed on the payment hash it groups nothing beyond a
   single payment: a payment hash is fixed for the life of one payment and is
-  not shared across payments, and because the index is computed under a key
-  derived from the user's own MEK (§2), two users paying the same invoice do
-  not produce the same term. Choosing a different term is a change to this
+  not shared across payments, and because the index is computed under its own
+  domain-separated subkey derived from the user's own MEK (§2), distinct from
+  the key that seals payment envelopes so that one key doing both jobs cannot
+  become a side channel later, two users paying the same invoice do not
+  produce the same term. Choosing a different term is a change to this
   section rather than an implementer's call, and the disclosure below has to
   change with it.
 
-Both of those requirements describe a table that does not exist yet, and neither
-one fires on a table that already does: a write to a surface that is already
-there ships no DDL, so it raises no migration pull request, and it adds no
-column, so the allowed column set is never consulted. That limit is the reason
-the last consequence above is stated on its own rather than left to be read out
-of these two.
+The first two of those requirements describe a table that does not exist yet,
+and neither one fires on a table that already does: a write to a surface that
+is already there ships no DDL, so it raises no migration pull request, and it
+adds no column, so the allowed column set is never consulted. The keying
+requirement is not DDL shaped and is not exempted the same way: it constrains
+what the index term is derived from, wherever the row lands, including a
+surface that already exists. That is why the last consequence above is stated
+on its own rather than left to be read out of the other two.
 
 **Metadata trade-off, on the same terms as §3.2 (3).** This disclosure assumes
 a payment record is one row per **logical** payment: a payment split across
