@@ -55,6 +55,22 @@ Open an issue describing the work before submitting a PR:
 - Bun (for marketing site) or npm (for server)
 - Docker (for local Supabase + self-hosted deployment testing)
 
+### Install repository hooks
+
+Run this once in every clone before making commits:
+
+```bash
+bash scripts/install-git-hooks.sh
+```
+
+The setup activates the repository's `commit-msg` hook, which refuses
+restricted values before they enter Git history. Maintainers should also copy
+`.reserved-terms.example` to the gitignored `.reserved-terms` file and replace
+its placeholders; without that local list, the hook still checks the public
+structural pattern classes but cannot check the withheld reserved terms. The
+pull-request metadata scan stays in place as a backstop for commits created
+without the hook.
+
 ### Running the API server locally
 
 ```bash
