@@ -2161,7 +2161,7 @@ describe('runSync , spend arithmetic and change tracking', () => {
       orStealthKey,
       birthdayHeight: 840_000,
       lastBlockScanned: 840_000,
-      fetchTip: async () => 840_002,
+      fetchTip: async () => 840_002 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 840_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xf1]) };
         if (h === 840_002) return { height: h, blockHashHex: spendHash, filter: new Uint8Array([0xf2]) };
