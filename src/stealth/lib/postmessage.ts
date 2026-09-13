@@ -118,7 +118,7 @@ export class StealthKeyLeakError extends Error {
 // App → Widget messages
 // ─────────────────────────────────────────────────────────────────────
 
-export type StealthMode = 'add' | 'sync' | 'list' | 'delete';
+export type StealthMode = 'add' | 'sync' | 'list' | 'delete' | 'storage';
 
 /**
  * Widget mode (default, backward-compatible).
@@ -136,7 +136,7 @@ export interface StealthInitWidgetMessage {
   protocol_version: StealthProtocolVersion;
   app_slug: 'v2' | 'v3' | 'ow' | string;
   app_user_id: string;
-  mode: StealthMode;
+  mode: Exclude<StealthMode, 'storage'>;
   /** Required for sync, list, delete. Omitted for add. */
   connection_id?: string;
   /**
@@ -241,7 +241,7 @@ export interface StealthInitAppMessage {
   protocol_version: StealthProtocolVersion;
   app_slug: 'v2' | 'v3' | 'ow' | string;
   app_user_id: string;
-  mode: StealthMode;
+  mode: Exclude<StealthMode, 'storage'>;
   /** Required for sync, list, delete. Omitted for add. */
   connection_id?: string;
   /**
@@ -276,7 +276,28 @@ export interface StealthInitAppMessage {
  * so it is unrepresentable through literals and spreads alike.
  * The 'widget' variant requires or_stealth_key_b64.
  */
-export type StealthInitMessage = StealthInitWidgetMessage | StealthInitAppMessage;
+/**
+ * Storage management is deliberately keyless. The downloaded filters and raw
+ * blocks are public chain data owned by the widget origin; opening the storage
+ * screen must not require a vault unlock or move a sealing key across origins.
+ */
+export interface StealthInitStorageMessage {
+  type: 'OR_STEALTH_INIT';
+  mode: 'storage';
+  protocol_version: StealthProtocolVersion;
+  app_slug: 'v2' | 'v3' | 'ow' | string;
+  app_user_id: string;
+  return_callback_origin: string;
+  locale?: string;
+  seal_mode?: never;
+  or_stealth_key_b64?: never;
+  connection_id?: never;
+}
+
+export type StealthInitMessage =
+  | StealthInitWidgetMessage
+  | StealthInitAppMessage
+  | StealthInitStorageMessage;
 
 // ─────────────────────────────────────────────────────────────────────
 // Widget → App messages
@@ -623,7 +644,7 @@ export async function deriveOrStealthKey(mek: CryptoKey): Promise<string> {
 }
 
 /**
- * Sender-side key discipline for app mode.
+ * Sender-side key discipline for keyless app and storage modes.
  *
  * The widget's runtime guard is defense in depth, but it runs after the key
  * has already crossed into the widget origin's memory. App mode means the key
@@ -634,9 +655,15 @@ export async function deriveOrStealthKey(mek: CryptoKey): Promise<string> {
  * Exported for tests and for apps that build their own popup plumbing.
  */
 export function assertNoKeyInAppMode(init: StealthInitMessage): StealthInitMessage {
+  if (init.mode === 'storage') {
+    const candidate = init as unknown as Record<string, unknown>;
+    const scrubbed: Record<string, unknown> = { ...candidate };
+    delete scrubbed.or_stealth_key_b64;
+    return scrubbed as unknown as StealthInitStorageMessage;
+  }
   if (init.seal_mode !== 'app') return init;
 
-  const candidate = init as Record<string, unknown>;
+  const candidate = init as unknown as Record<string, unknown>;
   const key = candidate.or_stealth_key_b64;
   if (typeof key === 'string' && key.length > 0) {
     throw new StealthKeyLeakError();
@@ -651,7 +678,7 @@ export function assertNoKeyInAppMode(init: StealthInitMessage): StealthInitMessa
 
 /**
  * Open the OR Connect widget popup and return a typed message bus.
- * Consuming apps call this when the user clicks Add or Sync.
+ * Consuming apps call this when the user clicks Add, Sync, or Storage.
  *
  * The popup opens `/connect/stealth`, the Stealth Sync widget. It is a
  * different page from `/connect`, which is the older Link widget.
