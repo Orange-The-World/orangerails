@@ -35,6 +35,8 @@
  * Repost suppression: when firing continuously, posts at most once per
  * SUPPRESSION_COOLDOWN_MINUTES (60 min, ~6 posts/day instead of 144).
  * zulip_post_sent in the report reflects whether the post actually went out.
+ * When a post is attempted and fails, zulip_post_error carries the sanitized
+ * reason so pg_net output distinguishes notifier failure from suppression.
  *
  * Env vars:
  *   OR_INTERNAL_WORKER_TOKEN  -- caller auth (required)
@@ -63,8 +65,10 @@ interface DrainCronStats {
 interface HealthReport {
   checked_at:      string;
   alert_firing:    boolean;
-  /** true = Zulip post sent this run; false = suppressed or env vars missing; null = not firing */
+  /** true = Zulip post sent; false = suppressed or failed; null = not firing */
   zulip_post_sent: boolean | null;
+  /** Present only when a Zulip post was attempted and failed. */
+  zulip_post_error?: string;
   error?:          string;
   signals: {
     failure_rate: {
@@ -284,6 +288,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   // zulip_post_sent: null when not firing, true/false when firing based on outcome.
   let zulipPostSent: boolean | null = null;
+  let zulipPostError: string | undefined;
 
   if (alertFiring) {
     // Suppression: only post if we have never posted, or cooldown has elapsed.
@@ -344,6 +349,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
       const postResult = await postZulipAlert(message);
       zulipPostSent = postResult.sent;
+      zulipPostError = postResult.error;
 
       // Record the ATTEMPT regardless of outcome, so a dead notifier leaves a
       // trace any SQL query can find (OR-T1135, following a failure that went
@@ -373,6 +379,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     checked_at:      checkedAt,
     alert_firing:    alertFiring,
     zulip_post_sent: zulipPostSent,
+    ...(zulipPostError !== undefined ? { zulip_post_error: zulipPostError } : {}),
     ...(queryError !== undefined ? { error: queryError } : {}),
     signals: {
       failure_rate: {

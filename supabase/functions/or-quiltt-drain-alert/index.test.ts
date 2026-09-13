@@ -93,3 +93,35 @@ Deno.test('signal C still excludes retirements, so D is the only one that sees t
     'signal C must keep excluding retired rows',
   );
 });
+
+Deno.test('a failed Zulip attempt exposes its reason in the health report', () => {
+  const src = readSource('./index.ts');
+
+  // pg_net stores the response body from each scheduled invocation. A bare
+  // zulip_post_sent=false cannot distinguish a failed post from intentional
+  // cooldown suppression, which is how a dead notifier remained silent. The
+  // already-sanitized post result must therefore reach the report body.
+  assertEquals(
+    /zulipPostError\s*=\s*postResult\.error/.test(src),
+    true,
+    'the handler must retain the failure reason returned by postZulipAlert',
+  );
+  assertEquals(
+    /zulip_post_error:\s*zulipPostError/.test(src),
+    true,
+    'the health report must expose the retained Zulip failure reason',
+  );
+});
+
+Deno.test('the health report omits Zulip error when no post failed', () => {
+  const src = readSource('./index.ts');
+
+  // Absence has meaning here: no error field means either the alert did not
+  // fire, the post was suppressed, or it succeeded. Emitting a stale/null
+  // error would make successful and intentionally suppressed runs look failed.
+  assertEquals(
+    /zulipPostError\s*!==\s*undefined\s*\?\s*\{\s*zulip_post_error:\s*zulipPostError\s*\}\s*:\s*\{\}/.test(src),
+    true,
+    'zulip_post_error must be included only when postZulipAlert returned a reason',
+  );
+});
