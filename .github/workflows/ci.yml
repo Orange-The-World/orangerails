@@ -20,9 +20,86 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          # Needed so the migration policy-drop check (OR-T1376) can git diff base...head;
-          # the default shallow checkout only has the merge commit and cannot resolve either.
+          # Full history, because the migration ORDER check below compares this branch
+          # against the base branch and a depth-1 checkout has no base to compare against.
+          # It refuses rather than passing when the base is unreachable, so a shallow
+          # checkout here would turn a real gate into a red build, not a silent one.
           fetch-depth: 0
+
+      - name: Migration version self-test
+        # First, and before the toolchain, deliberately. This needs nothing but the node the
+        # runner already ships, so an install failure cannot silently take the answer with it.
+        # The self-test runs BEFORE the check for the same reason the anon RPC gate does: a
+        # broken comparison must fail as a broken comparison, not as a silent pass over every
+        # migration. One of its cases asserts the gate goes red on a collision and another
+        # asserts it does not go red without one, so both directions are exercised on every run.
+        run: node scripts/check-migration-versions.mjs --selftest
+
+      - name: Migration version uniqueness check
+        # A real gate, no continue-on-error. Two files sharing a version prefix means the
+        # ledger can only ever track one of them and the other is skipped in silence on every
+        # project. The deploy workflow refuses this too, but only on a push and only after the
+        # apply has already run, so on a pull request nothing was looking. It fails hard when
+        # it enumerates zero files: a run that checked nothing is not a run that passed.
+        run: node scripts/check-migration-versions.mjs
+
+      - name: Migration dependency self-test
+        # The parser IS the control, so it is tested here rather than trusted. Runs before the
+        # check itself so a broken comparison fails as a broken comparison, not as a silent
+        # pass over every migration.
+        run: node scripts/check-migration-requires.mjs --selftest
+
+      - name: "Migration dependency check (-- Requires: headers)"
+        # A real gate, no continue-on-error. A migration can declare, on a line of its own,
+        # "-- Requires: <version>", naming a migration version it depends on and does not
+        # itself create. This fails the pull request when the named version has no matching
+        # file in this tree yet -- most often because the prerequisite pull request has not
+        # merged. It says nothing about a dependency nobody declared (OR-T1176): a declared
+        # header enforces what an author states, it does not discover what an author forgot.
+        run: node scripts/check-migration-requires.mjs
+
+      - name: Migration order self-test
+        # Same reasoning as the uniqueness self-test above and for the same reason it runs
+        # first: a broken comparison must fail as a broken comparison rather than as a silent
+        # pass. Its eighteen cases exercise both directions, including the ordinary in-order
+        # file with no marker, which is the path every normal migration takes.
+        run: node scripts/check-migration-order.mjs --selftest
+
+      - name: Migration order check
+        # A real gate, no continue-on-error, and it only has anything to say on a pull
+        # request that adds a migration.
+        #
+        # WHY IT IS HERE AND NOT ONLY IN THE DEPLOY WORKFLOW. supabase-deploy.yml already
+        # refuses an out-of-order migration, and it does it well. It runs on a push to dev
+        # and prod. It never runs on a pull request. So a pull request can be green,
+        # approved and CLEAN while carrying a file that makes the apply job refuse the WHOLE
+        # run the moment it lands: apply-migrations fails, check-pending-migrations fails,
+        # deploy is skipped, and every unrelated change queued behind it stops with them.
+        # On 2026-09-05 dev spent most of the day in that state, and the set of open pull
+        # requests queued to do it again grew from sixteen to twenty six inside one hour
+        # without a single author touching anything, because the bar is the highest applied
+        # version and it rises every time any migration merges. Nothing told any of them.
+        #
+        # The escape hatch is the same OUT-OF-ORDER-OK line the deploy guard reads, so an
+        # author who satisfies this satisfies that one too.
+        #
+        # SCOPED TO base == dev/prod (OR-T2554). Only those two bases ever get a real
+        # apply-migrations run, so they are the only bases this comparison means anything
+        # for. Without this, a housekeeping PR that brings a stale feature branch up to
+        # date with dev (head=dev, base=some-old-branch) compares dev's already-applied
+        # migrations against that old branch's watermark and reports pre-existing,
+        # already-applied migrations as new findings. That failing check-run then attaches
+        # to dev's own tip commit (the PR's head sha), so dev itself reads red afterward
+        # and every other PR with head=dev inherits it. Observed directly: a housekeeping
+        # branch-update PR reported 14 findings this way, none of them a real new
+        # out-of-order migration. (No PR number here on purpose: scripts/pre-publish-scan.sh
+        # flags bare #NNNN references in shipping files as dead PR refs.)
+        if: |
+          github.event_name == 'pull_request' &&
+          contains(fromJSON('["dev", "prod"]'), github.event.pull_request.base.ref)
+        run: |
+          node scripts/check-migration-order.mjs \
+            --base="origin/${{ github.event.pull_request.base.ref }}"
 
       # The project is managed with Bun (bun.lock, bunfig.toml).
       - name: Setup Bun
@@ -77,6 +154,24 @@ jobs:
         # the script header for that boundary in full.
         run: node scripts/check-anon-rpc-grants.mjs
 
+      - name: Credential column grant self-test
+        # Same reasoning as the step above: the parser IS the control. This one has more to
+        # get wrong, because the migrations it reads run their GRANT and REVOKE inside DO
+        # blocks as EXECUTE format(...), so a parser that skips dollar quoted bodies reports
+        # green over a file it never read.
+        run: node scripts/check-credential-column-grants.mjs --selftest
+
+      - name: Credential column grant check
+        # A real gate, no continue-on-error. Replays the migrations in order and fails if anon,
+        # authenticated or PUBLIC is left holding any privilege on a server side credential
+        # column of public.platforms or public.apps, whether by a column grant or by a table
+        # wide GRANT that covers every column at once. Two migrations assert this end state
+        # already, but a migration is applied once and never runs again, and nothing in this
+        # workflow replays migrations against a database, so those assertions cannot keep
+        # watching. Source scan only: a grant typed straight into a SQL console never reaches a
+        # migration and is not visible here. See the script header for that boundary in full.
+        run: node scripts/check-credential-column-grants.mjs
+
       - name: Anon ACL snapshot self-test
         # The other half of the same control, and the half that reads a real database rather
         # than our SQL. No credential lives in CI, so the check itself runs against a catalog
@@ -86,6 +181,26 @@ jobs:
         # PUBLIC, and a NULL acl, which means the built in default stands and PUBLIC holds
         # EXECUTE. Needs nothing but node, so it is unconditional.
         run: node scripts/check-anon-acl-snapshot.mjs --selftest
+
+      - name: Plaintext credential grant self-test
+        # Same principle as the anon RPC self-test above: the parser IS the control, so it runs
+        # before the check itself. This one carries more weight than usual, because the parser
+        # deliberately reads INSIDE DO blocks and EXECUTE format() strings, which is where every
+        # grant in this repository's scoping migrations actually lives. A parser that stopped
+        # doing that would report green over migrations it never read.
+        run: node scripts/check-plaintext-credential-grants.mjs --selftest
+
+      - name: Plaintext credential grant check
+        # A real gate, no continue-on-error. Replays the migrations in order and fails if anon,
+        # authenticated or PUBLIC is left holding any column applicable privilege on
+        # platforms.webhook_secret, platforms.quiltt_api_key, platforms.quiltt_api_key_ciphertext
+        # or apps.client_secret, by a column grant or by a table wide GRANT. This is the standing
+        # assertion the accepted risk on those columns names as its condition: before this, the
+        # only assertions lived inside two migrations, and no job here stands up a Postgres or
+        # applies migrations, so they ran once and never again. Source scan only: a grant typed
+        # straight into a SQL console, or inherited from schema default privileges, is not visible
+        # here. See the script header for that boundary in full.
+        run: node scripts/check-plaintext-credential-grants.mjs
 
       - name: Migration policy-drop self-test
         # Exercises the parser and the marker-suppression logic in isolation (no git, no
