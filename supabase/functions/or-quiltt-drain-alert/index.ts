@@ -35,7 +35,7 @@
  * Repost suppression: when firing continuously, posts at most once per
  * SUPPRESSION_COOLDOWN_MINUTES (60 min, ~6 posts/day instead of 144).
  * zulip_post_sent in the report reflects whether the post actually went out.
- * When a post is attempted and fails, zulip_post_error carries the sanitized
+ * When a post is attempted and fails, zulip_post_error carries the bounded
  * reason so pg_net output distinguishes notifier failure from suppression.
  *
  * Env vars:

@@ -100,7 +100,7 @@ Deno.test('a failed Zulip attempt exposes its reason in the health report', () =
   // pg_net stores the response body from each scheduled invocation. A bare
   // zulip_post_sent=false cannot distinguish a failed post from intentional
   // cooldown suppression, which is how a dead notifier remained silent. The
-  // already-sanitized post result must therefore reach the report body.
+  // already-bounded post result must therefore reach the report body.
   assertEquals(
     /zulipPostError\s*=\s*postResult\.error/.test(src),
     true,
