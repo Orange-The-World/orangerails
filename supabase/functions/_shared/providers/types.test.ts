@@ -1,4 +1,5 @@
 import { assert, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import { classifyUpstreamError } from '../upstream-errors.ts';
 import { parseCredentials, type ProviderAdapter } from './types.ts';
 
 /**
@@ -24,9 +25,17 @@ Deno.test('parseCredentials: a parse failure throws a fixed string', () => {
     Error,
   ) as Error;
   assert(
-    err.message === '[test-provider] credentials are not valid JSON',
+    err.message === '[test-provider] credentials JSON parse failed',
     `expected the fixed message, got: ${err.message.slice(0, 40)}`,
   );
+});
+
+Deno.test('parseCredentials: a parse failure keeps its upstream error classification', () => {
+  const err = assertThrows(
+    () => parseCredentials(adapter, `{"api_key":"${MARKER}"`),
+    Error,
+  ) as Error;
+  assert(classifyUpstreamError(err.message) === 'UPSTREAM_PARSE_FAILED');
 });
 
 Deno.test('parseCredentials: no part of the input reaches the thrown message', () => {
