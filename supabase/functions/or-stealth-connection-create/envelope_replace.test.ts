@@ -67,6 +67,7 @@ interface RecordedCall {
 interface FailurePoint {
   table: string;
   op: 'delete' | 'update';
+  field?: string;
 }
 
 function makeClient(db: FakeDb, failAt: FailurePoint | null = null) {
@@ -84,7 +85,12 @@ function makeClient(db: FakeDb, failAt: FailurePoint | null = null) {
       then(resolve: (r: { error: unknown }) => void) {
         calls.push({ table, op, filters });
 
-        if (failAt && failAt.table === table && failAt.op === op) {
+        if (
+          failAt &&
+          failAt.table === table &&
+          failAt.op === op &&
+          (!failAt.field || (payload && failAt.field in payload))
+        ) {
           resolve({ error: { message: 'simulated database failure' } });
           return;
         }
@@ -295,6 +301,26 @@ Deno.test('the coverage clear is scoped to the connection being replaced', async
 
 // ── 5. failure is reported, and fails on the safe side ────────────────────
 
+Deno.test('a failed cursor clear reports an error and leaves coverage and envelope intact', async () => {
+  const db = dbWithCoverage();
+  const { client, calls } = makeClient(db, {
+    table: 'stealth_connections',
+    op: 'update',
+    field: 'last_block_scanned',
+  });
+
+  const result = await applyEnvelopeReplacement(client, CONNECTION, {
+    sealed_envelope: NEW_ENVELOPE,
+    wallet_birthday_plaintext: '2023-06-01',
+  });
+
+  assert(isEnvelopeReplacementError(result), 'a failed cursor clear must not answer ok');
+  assertEquals(db.connections[0].sealed_envelope, OLD_ENVELOPE);
+  assertEquals(db.connections[0].last_block_scanned, COVERAGE_TOP);
+  assertEquals(db.ranges.length, 1);
+  assertEquals(calls.length, 1, 'a failed first statement must stop the reset');
+});
+
 Deno.test('a failed coverage clear reports an error and does not replace the envelope', async () => {
   const db = dbWithCoverage();
   const { client } = makeClient(db, { table: 'stealth_scan_ranges', op: 'delete' });
@@ -312,12 +338,43 @@ Deno.test('a failed coverage clear reports an error and does not replace the env
     'the envelope must not be replaced when the coverage could not be cleared, or the ' +
       'user would hold a new envelope with stale coverage and no rescan',
   );
+  assertEquals(
+    db.connections[0].last_block_scanned,
+    null,
+    'the cursor is cleared first, so retained coverage is the only resume source',
+  );
   assertEquals(db.ranges.length, 1);
 });
 
-Deno.test('a failed envelope write reports an error and leaves the connection rescanning', async () => {
-  const db = dbWithCoverage();
-  const { client } = makeClient(db, { table: 'stealth_connections', op: 'update' });
+Deno.test('after coverage is deleted, a failed envelope write resumes at the wallet birthday', async () => {
+  const GAP_BIRTHDAY = 700_000;
+  const GAP_START = 800_000;
+  const GAP_CURSOR = 850_000;
+  const db: FakeDb = {
+    connections: [
+      {
+        id: CONNECTION,
+        sealed_envelope: OLD_ENVELOPE,
+        wallet_birthday_plaintext: '2011-02-23',
+        last_block_scanned: GAP_CURSOR,
+      },
+    ],
+    ranges: [
+      { connection_id: CONNECTION, from_height: GAP_START, to_height: GAP_CURSOR },
+    ],
+  };
+
+  assertEquals(
+    nextSyncStartHeight(db, CONNECTION, GAP_BIRTHDAY),
+    GAP_BIRTHDAY,
+    'precondition: coverage above the birthday leaves the unread gap visible',
+  );
+
+  const { client } = makeClient(db, {
+    table: 'stealth_connections',
+    op: 'update',
+    field: 'sealed_envelope',
+  });
 
   const result = await applyEnvelopeReplacement(client, CONNECTION, {
     sealed_envelope: NEW_ENVELOPE,
@@ -325,15 +382,16 @@ Deno.test('a failed envelope write reports an error and leaves the connection re
   });
 
   assert(isEnvelopeReplacementError(result), 'a failed envelope write must not answer ok');
-  assertEquals(db.ranges.length, 0, 'coverage went first, so this half already landed');
+  assertEquals(db.ranges.length, 0, 'coverage was deleted before the envelope write failed');
 
-  // The residual state is the OLD envelope with its cursor untouched, so the
-  // connection resumes exactly where it was: one block past the cursor. That
-  // is the safe half to lose. Losing them the other way round would store the
-  // NEW envelope, carrying the birthday the user just asked for, behind
-  // coverage that still blocks the rescan, and a caller who does not retry is
-  // then back in the silent failure this whole change is about.
+  // The residual state is the OLD envelope with no coverage and a cleared
+  // cursor. The browser therefore falls back to the old wallet birthday, not
+  // one block past the old cursor, so an unscanned gap cannot be hidden.
   assertEquals(db.connections[0].sealed_envelope, OLD_ENVELOPE);
-  assertEquals(db.connections[0].last_block_scanned, COVERAGE_TOP);
-  assertEquals(nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT), COVERAGE_TOP + 1);
+  assertEquals(db.connections[0].last_block_scanned, null);
+  assertEquals(
+    nextSyncStartHeight(db, CONNECTION, GAP_BIRTHDAY),
+    GAP_BIRTHDAY,
+    'the half-applied reset must resume at the birthday, not the old cursor plus one',
+  );
 });
