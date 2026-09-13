@@ -724,6 +724,81 @@ describe("vault recovery: the rotated meta write", () => {
   });
 });
 
+describe("vault recovery: co-admin wrapped_data_keys cleanup (OR-T2403)", () => {
+  it("does not touch wrapped_data_keys when the owner never granted a co-admin", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(calls.some((c) => c.table === "wrapped_data_keys")).toBe(false);
+  });
+
+  it("deletes every wrapped_data_keys row for the owner's workspace_key_id", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      workspaceKeyId: "workspace-key-1",
+    });
+
+    const wdkDelete = calls.find((c) => c.table === "wrapped_data_keys" && c.op === "delete");
+    expect(wdkDelete).toBeTruthy();
+    expect(wdkDelete?.filters).toContainEqual({ column: "data_key_id", value: "workspace-key-1" });
+  });
+
+  it("runs the cleanup only after the meta write is proven to have landed", async () => {
+    const { client, calls } = makeFakeClient(oneConnection);
+
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(client, vi.fn()),
+      workspaceKeyId: "workspace-key-1",
+    });
+
+    const metaIndex = calls.findIndex((c) => c.table === "user_vault_meta" && c.op === "update");
+    const wdkIndex = calls.findIndex((c) => c.table === "wrapped_data_keys" && c.op === "delete");
+    expect(metaIndex).toBeGreaterThan(-1);
+    expect(wdkIndex).toBeGreaterThan(metaIndex);
+  });
+
+  it("throws when the wrapped_data_keys delete errors", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      deleteResult: { data: null, error: { message: "wdk delete boom" } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        workspaceKeyId: "workspace-key-1",
+      }),
+    ).rejects.toThrow("wdk delete boom");
+
+    // The meta write has already durably succeeded by this point, so this is
+    // reported as-is rather than folded into the do-not-close-this-page
+    // warning: the user's own vault is not at risk from this failure.
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("never reaches the cleanup when the meta write itself fails", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      metaUpdate: { data: [], error: null },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        workspaceKeyId: "workspace-key-1",
+      }),
+    ).rejects.toThrow(RECOVERY_META_NOT_SAVED_MESSAGE);
+
+    expect(calls.some((c) => c.table === "wrapped_data_keys")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+});
+
 describe("vault recovery: reconciling the row counts before the meta write", () => {
   function metaUpdates(calls: RecordedCall[]) {
     return calls.filter((c) => c.table === "user_vault_meta" && c.op === "update");
