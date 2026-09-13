@@ -249,11 +249,12 @@ not a project that came back clean.
 
 **What the claim rests on today, so nobody has to reconstruct it.** In the dev
 project the sweep covered types, tables, columns, views, functions and RPCs. In
-the production project it covered columns only. Production functions, RPCs and
-edge functions have not been enumerated by anyone, so that part of the sentence
-above is carried by the dev result and by the fact that no payment record path
-is implemented, not by a production query. That is the thin spot in this claim,
-and closing it is the first thing the next re-check should do.
+the production project it now also covers functions, RPCs and the deployed edge
+function list, alongside columns: nothing holding a Lightning payment value was
+found in production functions, RPCs or edge functions either, closing the thin
+spot an earlier version of this section left open. The enumeration itself is
+recorded on the tracking ticket, not here, so this section stays a design
+constraint rather than a running log of checks.
 
 Seven consequences, all checkable at review. Read this as the complete list **for
 the LDK payment record surface** as it stands: if a proposal touches that surface,
