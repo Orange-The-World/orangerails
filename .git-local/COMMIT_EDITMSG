@@ -1,0 +1,16 @@
+fix(vault-persist): refuse a mixed-seal page before any row is rewritten
+
+Vault recovery already filters encrypted_transactions to sealed_under=ort, but
+the per-row check still ran inside the migrate loop: a page of [vault-key, opk]
+would rewrite the first row, then throw, splitting the user's rows across two
+MEKs with no retry. A read-only seal walk now runs before either table is
+updated, and a test that hands the fake a mixed page with the filter ignored
+proves no UPDATE fires.
+
+Answered on the ticket's first acceptance item in the SEALED_UNDER_VAULT_KEY
+comment: a direct-platform subaccount CAN hold an opk row. or-quiltt-sync
+writes sealed_under='opk' for any subaccount with opk_public and does not
+exclude slug 'direct'; there is no CHECK tying seal to platform.
+
+Did not verify against a live /recover session or a deployed direct-platform
+row. Did not push or merge.

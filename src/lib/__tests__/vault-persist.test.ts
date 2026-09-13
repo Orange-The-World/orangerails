@@ -28,6 +28,7 @@ import {
   RECONCILE_MAX_PASSES,
   SEALED_UNDER_VAULT_KEY,
   CREDENTIALS_HELD_BY_PROVIDER,
+  rotationUnexpectedSealMessage,
   type VaultPersistClient,
 } from "../vault-persist";
 
@@ -104,6 +105,15 @@ interface FakeOptions {
    * SAME table already succeeded, not only on the very first write of a run.
    */
   failUpdateFromCall?: { table: string; call: number; error: unknown };
+  /**
+   * Equality filters on these columns are recorded but not applied. Models a
+   * query that asked for sealed_under = the vault key and was handed a mixed
+   * page anyway: the filter dropped, the server ignoring it, a row whose
+   * stored value does not match what the filter claimed. The named-error
+   * test below needs this; a fake that always honours .eq() can never
+   * exercise the defence-in-depth path.
+   */
+  ignoreFilters?: string[];
 }
 
 /**
@@ -145,6 +155,7 @@ function makeFakeClient(options: FakeOptions = {}) {
         let counted = stored;
         for (const f of call.filters) {
           if (f.column === "order" || f.column === "range") continue;
+          if (options.ignoreFilters?.includes(f.column)) continue;
           counted = counted.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
         }
         return { data: null, error: null, count: counted.length };
@@ -159,6 +170,7 @@ function makeFakeClient(options: FakeOptions = {}) {
       let view = stored.slice();
       for (const f of call.filters) {
         if (f.column === "order" || f.column === "range") continue;
+        if (options.ignoreFilters?.includes(f.column)) continue;
         view = view.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
       }
 
@@ -190,7 +202,17 @@ function makeFakeClient(options: FakeOptions = {}) {
           )
         : view;
 
-      const reorder = options.reorderAfterSelect?.[call.table];
+      // Concurrent INSERT/DELETE/reorder is a property of the migrate walk,
+      // which selects encrypted_payload or encrypted_credentials. The seal
+      // preflight selects only id and sealed_under; applying reorder there
+      // would steal the first mutation from the tests that model churn
+      // mid-migration, and would make those tests assert a different
+      // sequence than the one they name.
+      const isMigrateRead =
+        typeof call.columns === "string" &&
+        (call.columns.includes("encrypted_payload") ||
+          call.columns.includes("encrypted_credentials"));
+      const reorder = isMigrateRead ? options.reorderAfterSelect?.[call.table] : undefined;
       if (reorder) store[call.table] = reorder(stored.slice());
 
       return { data: page, error: null };
@@ -634,11 +656,11 @@ describe("vault recovery: the rotated meta write", () => {
     expect(txnUpdates.length).toBe(rowCount);
     expect(new Set(updatedIds).size).toBe(rowCount);
 
-    // One full page plus one short page ends each walk, and there are two
-    // walks: the migrating one and the sweep that confirms it left nothing
-    // behind. Four paged reads is the direct evidence both happened and that
-    // the cursor advanced within each.
-    expect(pagedSelects(calls, "encrypted_transactions").length).toBe(4);
+    // One full page plus one short page ends each walk. Three walks: the
+    // seal preflight, the migrating one, and the sweep that confirms it
+    // left nothing behind. Six paged reads is the direct evidence all three
+    // happened and that the cursor advanced within each.
+    expect(pagedSelects(calls, "encrypted_transactions").length).toBe(6);
   });
 
   it("pages the connections read instead of trusting one capped select", async () => {
@@ -962,8 +984,9 @@ describe("vault recovery: reconciling the row counts before the meta write", () 
       migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
     ).rejects.toThrow("migrated 4 of 5 transactions");
 
-    // One walk plus exactly RECONCILE_MAX_PASSES sweeps, and then it stops.
-    expect(pagedSelects(calls, "encrypted_transactions").length).toBe(1 + RECONCILE_MAX_PASSES);
+    // Seal preflight, then one walk plus exactly RECONCILE_MAX_PASSES sweeps,
+    // and then it stops.
+    expect(pagedSelects(calls, "encrypted_transactions").length).toBe(2 + RECONCILE_MAX_PASSES);
     expect(metaUpdates(calls).length).toBe(0);
     expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
@@ -1225,6 +1248,39 @@ describe("vault recovery: rows sealed under a key this rotation does not manage"
         SEALED_UNDER_VAULT_KEY,
       );
     }
+  });
+
+  it("fails with a named error and rewrites no row when a mixed-seal page is returned despite the filter", async () => {
+    // The vault-key row is FIRST so a per-row check inside the migrate loop
+    // would already have rewritten it by the time the opk row throws. The
+    // seal preflight has to refuse the page before any UPDATE, including
+    // the connection sitting in the same recovery.
+    const migrateTransactionCiphertext = vi.fn(async (c: string) => `${c}-migrated`);
+    const migrateCredentialsCiphertext = vi.fn(async (c: string) => `${c}-migrated`);
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ignoreFilters: ["sealed_under"],
+      rows: {
+        connections: [{ id: "conn-1", encrypted_credentials: "creds-v0", encrypted_label: null }],
+        encrypted_transactions: [
+          { id: "txn-1", encrypted_payload: "payload-1", sealed_under: SEALED_UNDER_VAULT_KEY },
+          { id: "txn-2", encrypted_payload: "payload-2", sealed_under: "opk" },
+        ],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault({
+        ...rotateArgs(client, clearMigrationKeys),
+        migrateTransactionCiphertext,
+        migrateCredentialsCiphertext,
+      }),
+    ).rejects.toThrow(rotationUnexpectedSealMessage("transaction", "txn-2", "opk"));
+
+    expect(migrateTransactionCiphertext).not.toHaveBeenCalled();
+    expect(migrateCredentialsCiphertext).not.toHaveBeenCalled();
+    expect(calls.filter((c) => c.op === "update")).toHaveLength(0);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
 
   it("skips a provider-held connection credential without writing it, but still migrates a real label on the same row", async () => {
