@@ -1039,7 +1039,8 @@ function randomCorrelationId(): string {
 }
 
 /**
- * When Quiltt reports a successful connection sync, flip any error row back to active.
+ * When Quiltt reports a successful connection sync, flip any error row back to active
+ * and clear its persisted error so clients do not render stale recovery state.
  * Uses the same lookup pattern as reconcileConnectionError: exact quiltt_connection_id
  * match first, legacy NULL-id fallback for pre-migration rows.
  * Transitions error -> active always, and pending -> active ONLY on the exact
@@ -1083,7 +1084,11 @@ export async function reconcileConnectionSuccess(
   if (!orConnId) return null;
   const { error: statusErr } = await client
     .from('connections')
-    .update({ status: 'active', updated_at: new Date().toISOString() })
+    .update({
+      status:               'active',
+      encrypted_last_error: null,
+      updated_at:           new Date().toISOString(),
+    })
     .eq('id', orConnId)
     // DL-1409: 'pending' is promotable here so rows stranded by the old sink
     // insert heal themselves on the next successful Quiltt sync, instead of

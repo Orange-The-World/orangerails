@@ -1220,6 +1220,49 @@ Deno.test('DL-1409: a successful Quiltt sync clears pending as well as error', a
   );
 });
 
+Deno.test('OR-T2658: error-to-active recovery clears the stored connection error', async () => {
+  let updatePatch: Record<string, unknown> | undefined;
+  let statusFilter: string[] | undefined;
+
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() { return Promise.resolve({ data: { id: 'conn-or-1' }, error: null }); },
+        update(patch: Record<string, unknown>) {
+          updatePatch = patch;
+          return chain;
+        },
+        in(_col: string, vals: string[]) {
+          statusFilter = vals;
+          return Promise.resolve({ error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-1', 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(
+    statusFilter?.includes('error'),
+    true,
+    'the captured update must include the error-to-active recovery transition',
+  );
+  assertEquals(
+    updatePatch?.encrypted_last_error,
+    null,
+    'recovery must clear the stale error that the UI renders independently of connection status',
+  );
+});
+
 Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending', async () => {
   // The fallback resolves "oldest quiltt row for this subaccount with a NULL
   // quiltt_connection_id", which is not necessarily the connection this event
