@@ -166,6 +166,22 @@ export const CONNECTION_PAGE_SIZE = 500;
  * Visibility answers "may this session touch the row"; it does not answer
  * "was this row sealed under the key this walk holds", and only the second
  * question is the one reconcileEveryRow needs an honest answer to.
+ *
+ * CAN A DIRECT-PLATFORM SUBACCOUNT HOLD AN OPK ROW? Yes. There is no CHECK
+ * tying sealed_under to platforms.slug, and or-quiltt-sync upserts
+ * sealed_under='opk' for any connection whose subaccount has opk_public set.
+ * That writer looks up the platform slug only to decide sink-delivery
+ * (bitbooks-v2 / bbv2stg); slug 'direct' is not excluded from the OPK path.
+ * or-sync-key-register refuses direct-mode today, so a typical /app user
+ * cannot opt in through that endpoint, but opk_public itself has no platform
+ * CHECK either: a service_role write, a future direct-mode register, or a
+ * connection that lands on a direct subaccount after an OPK was set, is
+ * enough. Authenticated RLS on encrypted_transactions is
+ * connections -> subaccounts -> platforms(slug='direct') -> auth.uid(), so
+ * those rows are visible AND writable on /recover. Treating "direct cannot
+ * hold an OPK row" as a guarantee would re-open this rotation to a row it
+ * cannot decrypt, halfway through an irreversible rewrite. Filter, do not
+ * assume.
  */
 export const SEALED_UNDER_VAULT_KEY = "ort";
 
@@ -288,9 +304,11 @@ interface TableReconcile {
  * against the next mechanism nobody has thought of.
  *
  * THE COST, stated because it is not free. A clean rotation now walks each
- * table twice. The second walk is what turns the first walk's completeness from
- * an assumption into evidence, and it issues no updates, because every row it
- * sees is already in the migrated set.
+ * table twice, and encrypted_transactions a third time up front for the seal
+ * preflight (id and sealed_under only, no ciphertext, no writes). The second
+ * walk is what turns the first walk's completeness from an assumption into
+ * evidence, and it issues no updates, because every row it sees is already in
+ * the migrated set.
  *
  * WHY THE COUNT IS STILL HERE. A sweep cannot see a row the read never returns
  * at all. If the project's server-side maximum row count is ever lowered below
@@ -402,6 +420,48 @@ async function walkAndMigrate<Row extends { id: string }>(
     if (page.length < pageSize) break;
     offset += pageSize;
   }
+}
+
+/**
+ * Refuse any transaction the upcoming migrate walk would be handed that is
+ * not sealed under the vault key, and do it before a single row on either
+ * table is rewritten.
+ *
+ * WHY A SEPARATE WALK AND NOT A CHECK INSIDE migrateTransaction. That check
+ * still exists (defence in depth). It fires per row, in id order, so a page
+ * that is [vault-key, opk] would already have rewritten the vault-key row
+ * by the time the opk row throws. recoverWithCode() mints a fresh MEK on
+ * every call and nothing records which rows moved, so that one write is
+ * already the unrecoverable split this file warns about. Walking seals
+ * first, with no UPDATE, keeps anyRowWritten false when the named error
+ * fires.
+ *
+ * Uses the same filter as the migrate walk on purpose. An unfiltered
+ * preflight would see legitimate OPK rows in this user's RLS scope and
+ * abort a recovery that should skip them. If the filter is later dropped
+ * from both, this pass sees the mixed page and fails closed. If it is
+ * dropped from only one side, the per-row check in migrateTransaction is
+ * what remains.
+ */
+async function assertEveryTransactionSeal(
+  supabase: VaultPersistClient,
+  filter: SealFilter,
+): Promise<void> {
+  await walkAndMigrate<{ id: string; sealed_under: string }>(
+    supabase,
+    "encrypted_transactions",
+    "id, sealed_under",
+    TRANSACTION_PAGE_SIZE,
+    new Set(),
+    async (txn) => {
+      if (txn.sealed_under !== SEALED_UNDER_VAULT_KEY) {
+        throw new VaultRotationSafeError(
+          rotationUnexpectedSealMessage("transaction", txn.id, txn.sealed_under),
+        );
+      }
+    },
+    filter,
+  );
 }
 
 export interface RotateVaultArgs {
@@ -622,6 +682,10 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
       migratedConnectionIds,
       migrateConnection,
     );
+  // connections has no sealed_under. The analogous "this is not ciphertext
+  // this MEK can open" case is CREDENTIALS_HELD_BY_PROVIDER, which
+  // migrateConnection skips rather than aborting on. There is nothing on
+  // that marker to rotate.
 
   // encrypted_payload uses the transactions subkey, which changes with the MEK.
   //
@@ -692,6 +756,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // deliberately: a row inserted into connections DURING the transaction walk
   // is caught only by a check that runs after both.
   try {
+    await assertEveryTransactionSeal(supabase, transactionSealFilter);
     await reconcileEveryRow(supabase, [
       {
         table: "connections",
