@@ -93,3 +93,115 @@ Deno.test('signal C still excludes retirements, so D is the only one that sees t
     'signal C must keep excluding retired rows',
   );
 });
+
+Deno.test('delivery failures retain a bounded reason that names the cause', () => {
+  const src = readSource('./index.ts');
+
+  for (
+    const [localName, envName] of [
+      ['botEmail', 'ZULIP_BOT_EMAIL'],
+      ['apiKey', 'ZULIP_API_KEY'],
+      ['apiUrl', 'ZULIP_API_URL'],
+    ]
+  ) {
+    assertEquals(
+      new RegExp(`!${localName}\\s*\\?\\s*'${envName}'\\s*:\\s*null`).test(src),
+      true,
+      `missing ${envName} must be detected and named`,
+    );
+  }
+  assertEquals(
+    /`HTTP \$\{res\.status\}: \$\{text\.slice\(0, 200\)\}`/.test(src),
+    true,
+    'HTTP failures must retain the status and at most the first 200 body characters',
+  );
+});
+
+Deno.test('delivery state read errors are surfaced and fail towards posting', () => {
+  const src = readSource('./index.ts');
+
+  assertEquals(
+    src.includes("const { data: stateRow, error: stateReadErr }"),
+    true,
+    'the cooldown state read must retain its error',
+  );
+  assertEquals(
+    src.includes(".select('last_notified_at, consecutive_failures')"),
+    true,
+    'the state read must load both the cooldown timestamp and delivery failure count',
+  );
+  assertEquals(
+    src.includes('state read failed: ${stateReadErr.message}'),
+    true,
+    'the response must carry a failed state read',
+  );
+  assertEquals(
+    /const\s+lastNotifiedAt[^=]*=\s*stateReadErr\s*\?\s*null/.test(src),
+    true,
+    'a failed state read must ignore partial data and bypass cooldown',
+  );
+});
+
+Deno.test('failed posts remain outside cooldown and increment durable failure health', () => {
+  const src = readSource('./index.ts');
+  const stateWrite = src.slice(
+    src.indexOf('const { error: stateWriteErr }'),
+    src.indexOf('const report: HealthReport'),
+  );
+
+  assertEquals(
+    /const\s+withinCooldown\s*=\s*lastNotifiedAt\s*!==\s*null[^;]*lastNotifiedAt/.test(src),
+    true,
+    'cooldown must remain keyed only to last_notified_at',
+  );
+  assertEquals(
+    stateWrite.includes('...(postResult.sent ? { last_notified_at: checkedAt } : {})'),
+    true,
+    'a failed post must not advance last_notified_at',
+  );
+  assertEquals(
+    /last_attempt_at:\s*checkedAt/.test(stateWrite),
+    true,
+    'every actual post attempt must persist its timestamp',
+  );
+  assertEquals(
+    /last_error:\s*postResult\.error\s*\?\?\s*null/.test(stateWrite),
+    true,
+    'the durable attempt row must retain the short delivery error',
+  );
+  assertEquals(
+    stateWrite.includes('consecutive_failures: nextConsecutiveFailures'),
+    true,
+    'every actual post attempt must persist delivery failure health',
+  );
+  assertEquals(
+    /postResult\.sent\s*\?\s*0\s*:\s*\(stateReadErr\s*\?\s*0\s*:\s*\(stateRow\?\.consecutive_failures\s*\?\?\s*0\)\)\s*\+\s*1/.test(src),
+    true,
+    'success must reset the counter and failure must increment it',
+  );
+});
+
+Deno.test('state write failures and delivery health are present in the report', () => {
+  const src = readSource('./index.ts');
+
+  assertEquals(
+    src.includes('state write failed: ${stateWriteErr.message}'),
+    true,
+    'the durable attempt write error must not be discarded',
+  );
+  assertEquals(src.includes('delivery_health: {'), true);
+  assertEquals(src.includes('attempted: deliveryAttempted'), true);
+  assertEquals(src.includes('suppressed_by_cooldown: deliverySuppressed'), true);
+  assertEquals(src.includes('consecutive_failures: consecutiveFailures'), true);
+  assertEquals(src.includes('state_error: deliveryStateError'), true);
+});
+
+Deno.test('migration adds a non-negative consecutive delivery failure counter', () => {
+  const migration = readSource('../../migrations/20260913030000_drain_alert_delivery_failure_counter.sql');
+
+  assertEquals(
+    /ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0/.test(migration),
+    true,
+  );
+  assertEquals(/CHECK \(consecutive_failures >= 0\)/.test(migration), true);
+});
