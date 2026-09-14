@@ -14,6 +14,9 @@
  * in front of the rpc, and this is it. The May 2026 migration that created the two
  * functions already named "the or-agent-invite-redeem edge function" as their caller.
  *
+ * (OR-T0993 sync commit: forces a fresh CI run against dev's current auth-marker gate,
+ * which added the invitation-token exemption after this branch was cut, see OR-T1983.)
+ *
  * WHAT IT DOES NOT DO. It does not make redemption non public. A pre-auth endpoint is
  * reachable by anyone on the internet whether the gateway JWT check is off or it merely
  * accepts the anon key, which ships in every browser bundle. The raw token remains the only
