@@ -476,8 +476,33 @@ jobs:
           # edge runtime is deno 2.1.4, so tests run on the runtime that ships.
           deno-version: v2.1.4
 
+      - name: Apply channel_state schema for the OR-T1721 pg execution test
+        # A minimal auth.users table and an auth.uid() stub are enough for
+        # the real migration file's own RLS policy to CREATE (Postgres
+        # resolves the function name at CREATE POLICY time). Nothing in
+        # this job reads through RLS, so the stub only ever needs to exist,
+        # never to return a real caller.
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          create schema if not exists auth;
+          create table if not exists auth.users (id uuid primary key);
+          create or replace function auth.uid() returns uuid language sql stable as $$ select null::uuid $$;
+          SQL
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f supabase/migrations/20260711120000_channel_state.sql
+
       - name: deno test supabase/functions
         shell: bash
+        env:
+          # OR-T1721: gives index.pg.test.ts a real database to execute
+          # UPSERT_CHANNEL_STATE_SQL against. Unset in any environment
+          # without the postgres service above, in which case that file's
+          # own tests report ignored (a real, honest skip), never a
+          # silent pass.
+          TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: |
           set -euo pipefail
 
