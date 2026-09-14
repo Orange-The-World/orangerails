@@ -289,6 +289,35 @@ export interface SyncResult {
   filterFetchError?: { failedHeight: number; cause: string };
 }
 
+/**
+ * Whether the widget should POST or-stealth-envelope-update (cursor and
+ * coverage range) from this run.
+ *
+ * False whenever `scanned` is false. That is the short-circuit path:
+ * lastBlockScanned is an echo of the stored cursor, not a height this run
+ * read, and comparing the two is a tautology a zero-filter run can
+ * satisfy (OR-T1117). The confirmation buffer makes that path reachable
+ * every hour: any resume point inside CONFIRMATION_DEPTH of the raw tip
+ * short-circuits, including a gap-filling resume that sits below the
+ * stored cursor.
+ *
+ * When scanned is true the two historical arms still apply: the run
+ * reached higher than the stored cursor, or it filled ground below it.
+ * Do not re-derive "did we scan" from lastBlockScanned versus stored --
+ * on the short-circuit path those are the same number.
+ */
+export function shouldWriteScanCoverage(args: {
+  scanned: boolean;
+  lastBlockScanned: number;
+  storedCursor: number | null | undefined;
+  scannedFrom: number;
+}): boolean {
+  if (!args.scanned) return false;
+  const stored = args.storedCursor ?? -1;
+  if (args.lastBlockScanned > stored) return true;
+  return args.scannedFrom <= stored && args.lastBlockScanned >= args.scannedFrom;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 function hexToBytes(hex: string): Uint8Array {
