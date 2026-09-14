@@ -322,3 +322,16 @@ Deno.test('redactProviderError is idempotent, so a second pass cannot mangle its
     assertEquals(twice, once, `not idempotent for input: ${input.slice(0, 60)}`);
   }
 });
+
+Deno.test('chooseFallbackConnection: no legacy row -> no-row, regardless of ambiguity', () => {
+  assertEquals(chooseFallbackConnection(null, false), 'no-row');
+  assertEquals(chooseFallbackConnection(null, true), 'no-row');
+});
+
+Deno.test('chooseFallbackConnection: legacy row, no other connection seen -> use-legacy', () => {
+  assertEquals(chooseFallbackConnection({ id: 'conn-legacy-1' }, false), 'use-legacy');
+});
+
+Deno.test('chooseFallbackConnection: legacy row, another connection already seen -> create-new', () => {
+  assertEquals(chooseFallbackConnection({ id: 'conn-legacy-1' }, true), 'create-new');
+});
