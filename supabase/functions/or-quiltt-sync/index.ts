@@ -1151,6 +1151,85 @@ export async function reconcileConnectionSuccess(
   return null;
 }
 
+// ─── OR-T2475: ambiguous legacy-row detection ──────────────────────────
+
+// quiltt_webhook_inbox keeps event_id/type/timestamps forever but
+// cleanup_quiltt_inbox_payloads truncates `payload` to {_truncated_at} 30
+// days after processed_at, so only recent rows carry a readable
+// connectionId at all. Bounding the scan is therefore not a shortcut, it is
+// the honest limit of what this signal can answer: whether a SECOND LIVE
+// connection is already using the legacy row. A connection with no event in
+// the last 30 days / AMBIGUITY_SCAN_SIZE rows is not "live" in the sense
+// this fallback needs to worry about colliding with.
+const AMBIGUITY_SCAN_SIZE = 200;
+
+/**
+ * Has a Quiltt connection OTHER than connectionId already produced an event
+ * for this subaccount? quiltt_webhook_inbox has no dedicated connection-id
+ * column; connectionId lives at payload.record.id, the same place
+ * handleEvent reads it from for its own dispatch.
+ */
+async function hasOtherQuilttConnection(
+  client: SupabaseClient,
+  subaccountId: string,
+  connectionId: string,
+): Promise<{ seen: boolean; error: string | null }> {
+  const { data, error } = await client
+    .from('quiltt_webhook_inbox')
+    .select('payload')
+    .eq('subaccount_id', subaccountId)
+    .order('received_at', { ascending: false })
+    .limit(AMBIGUITY_SCAN_SIZE);
+  if (error) return { seen: false, error: `ambiguity check failed: ${error.message}` };
+  const seen = (data ?? []).some((row: { payload: any }) => {
+    const otherId = typeof row?.payload?.record?.id === 'string' ? row.payload.record.id : null;
+    return otherId !== null && otherId !== connectionId;
+  });
+  return { seen, error: null };
+}
+
+/**
+ * Create a fresh connections row for a Quiltt connectionId that turned out
+ * to be ambiguous against the legacy NULL-id row (OR-T2475). Same shape as
+ * or-quiltt-link-complete's own insert -- encrypted_credentials is NOT NULL
+ * and Quiltt holds the real bank credentials, never OR, so the sentinel is
+ * the correct value here too -- and the same insert-then-look-up pattern
+ * handleEventSinkDelivery already uses for the identical race: the partial
+ * unique index on (subaccount_id, quiltt_connection_id) can fire a
+ * concurrent 23505 if two events for the same new connection dispatch in
+ * the same tick, and that is success, not failure.
+ */
+async function createConnectionForAmbiguousMatch(
+  client: SupabaseClient,
+  subaccountId: string,
+  connectionId: string,
+): Promise<{ id: string } | string> {
+  const { error: insertErr } = await client
+    .from('connections')
+    .insert({
+      subaccount_id:           subaccountId,
+      provider_type:           'quiltt',
+      quiltt_connection_id:    connectionId,
+      encrypted_credentials:   'quiltt-managed',
+      credentials_key_version: 1,
+      status:                  'active',
+    });
+  if (insertErr && insertErr.code !== '23505') {
+    return `ambiguous-connection insert failed: ${insertErr.message}`;
+  }
+  const { data: row, error: lookupErr } = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', connectionId)
+    .maybeSingle();
+  if (lookupErr || !row) {
+    return `ambiguous-connection lookup failed after insert: ${lookupErr?.message ?? 'not found'}`;
+  }
+  return row as { id: string };
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────
 
 async function markProcessed(client: SupabaseClient, eventId: string) {
