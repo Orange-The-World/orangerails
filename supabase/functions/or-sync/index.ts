@@ -283,7 +283,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const format = resolvedFormat;
 
     // Mode selection -- `format` flips into protocol-driven sink mode.
-    const sinkMode = typeof format === 'string' && format.length > 0;
+    const sinkMode = typeof format === 'string' && format.length > 0 && format !== 'none';
     let sinkAdapter: ReturnType<typeof getSinkAdapter> = null;
     if (sinkMode) {
       sinkAdapter = getSinkAdapter(format!);
