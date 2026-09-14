@@ -231,3 +231,49 @@ export function chooseProfileId(
     ? { profileId: fromPayload, source: 'payload-rebound' }
     : { profileId: fromPayload, source: 'payload' };
 }
+
+/** The "legacy" connections row a fallback lookup found: subaccount_id +
+ * provider_type='quiltt' + quiltt_connection_id IS NULL, oldest first. Or
+ * null when the lookup found nothing. */
+export interface LegacyConnectionRow {
+  id: unknown;
+}
+
+export type FallbackConnectionDecision = 'no-row' | 'use-legacy' | 'create-new';
+
+/**
+ * OR-T2475. Decide what an incoming Quiltt event may do with the "legacy"
+ * NULL-id connections row when its own connectionId did not match any row
+ * exactly.
+ *
+ * The bug this closes: index.ts used to trust "the oldest NULL-id row for
+ * this subaccount" as if that were the same claim as "the row this
+ * connectionId already owns". It is not. Two independently-scheduled
+ * Quiltt connections at one subaccount (7 accounts since 2026-06-12, 13
+ * accounts since 2026-06-16) silently shared one such row in production for
+ * three months, because nothing ever asked whether a DIFFERENT connectionId
+ * had already been routing through it. This is the exact Mercury+TD
+ * collision the surrounding code comment in index.ts already warns about.
+ *
+ * 'no-row'     — legacyRow is null: no legacy row exists at all for this
+ *                subaccount. Not this function's call. index.ts treats that
+ *                separately, as DL-1414-C (the or-quiltt-link-complete
+ *                timing race), and defers/retries it by wall-clock age via
+ *                shouldRetireConnRace. That path is unchanged by OR-T2475.
+ * 'use-legacy' — a legacy row exists and otherConnectionSeen is false:
+ *                nothing suggests a second live Quiltt connection has ever
+ *                routed through it. Same behaviour as before this fix.
+ * 'create-new' — a legacy row exists AND otherConnectionSeen is true: a
+ *                DIFFERENT Quiltt connectionId has already produced traffic
+ *                for this subaccount, so the legacy row is no longer a safe
+ *                guess for who this event belongs to. Every genuinely new
+ *                Quiltt connection gets its own row instead of merging into
+ *                one a different connection is already using.
+ */
+export function chooseFallbackConnection(
+  legacyRow: LegacyConnectionRow | null,
+  otherConnectionSeen: boolean,
+): FallbackConnectionDecision {
+  if (!legacyRow) return 'no-row';
+  return otherConnectionSeen ? 'create-new' : 'use-legacy';
+}
