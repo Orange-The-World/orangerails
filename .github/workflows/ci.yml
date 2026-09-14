@@ -420,6 +420,27 @@ jobs:
     name: Test edge functions (Deno)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d testdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGDATABASE: testdb
+      PGUSER: testuser
+      PGPASSWORD: testpass
+      LDK_CHANNEL_STATE_DB_TEST: "1"
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
@@ -457,6 +478,35 @@ jobs:
           # Same pin and same reason as the typecheck job above: the Supabase
           # edge runtime is deno 2.1.4, so tests run on the runtime that ships.
           deno-version: v2.1.4
+
+      - name: Build channel_state integration-test schema from migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql --no-password --set ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE authenticated NOLOGIN;
+          CREATE SCHEMA auth;
+          CREATE TABLE auth.users (id uuid PRIMARY KEY);
+          CREATE FUNCTION auth.uid()
+          RETURNS uuid
+          LANGUAGE sql
+          STABLE
+          AS $$
+            SELECT nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+          $$;
+          SQL
+          psql --no-password --set ON_ERROR_STOP=1 \
+            --file supabase/migrations/20260711120000_channel_state.sql
+          psql --no-password --set ON_ERROR_STOP=1 \
+            --file supabase/migrations/20260712000000_channel_state_seal_version_no_default.sql
+          psql --no-password --set ON_ERROR_STOP=1 \
+            --file supabase/migrations/20260712120000_channel_state_update_id_monotonic.sql
+          psql --no-password --set ON_ERROR_STOP=1 \
+            --file supabase/migrations/20260712121000_channel_state_write_policies.sql
+          psql --no-password --set ON_ERROR_STOP=1 <<'SQL'
+          GRANT USAGE ON SCHEMA public, auth TO authenticated;
+          GRANT SELECT, INSERT, UPDATE ON TABLE public.channel_state TO authenticated;
+          SQL
 
       - name: deno test supabase/functions
         shell: bash

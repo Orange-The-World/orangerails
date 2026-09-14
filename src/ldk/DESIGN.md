@@ -66,15 +66,20 @@ Single statement, row lock held for the whole upsert so a concurrent restore can
 interleave:
 
 ```sql
-INSERT INTO channel_state (outpoint_bidx, update_id, sealed_blob)
-VALUES (:bidx, :new_id, :blob)
-ON CONFLICT (outpoint_bidx) DO UPDATE
-  SET update_id   = EXCLUDED.update_id,
-      sealed_blob = EXCLUDED.sealed_blob,
-      updated_at  = now()
+INSERT INTO channel_state (user_id, outpoint_bidx, update_id, seal_version, sealed_iv, sealed_ct)
+VALUES (:user_id, :bidx, :new_id, :seal_version, :sealed_iv, :sealed_ct)
+ON CONFLICT (user_id, outpoint_bidx) DO UPDATE
+  SET update_id    = EXCLUDED.update_id,
+      seal_version = EXCLUDED.seal_version,
+      sealed_iv    = EXCLUDED.sealed_iv,
+      sealed_ct    = EXCLUDED.sealed_ct
   WHERE channel_state.update_id < EXCLUDED.update_id
 RETURNING update_id;
 ```
+
+The live table stores the sealed envelope in `seal_version`, `sealed_iv`, and
+`sealed_ct`; there is no `sealed_blob` column. `user_id` is derived from the
+verified JWT and the composite conflict target preserves per-user ownership.
 
 The `WHERE ... < EXCLUDED.update_id` lives **inside** the `ON CONFLICT`, so the
 compare-and-set is one atomic op, not application logic. This is a DB-level conditional
