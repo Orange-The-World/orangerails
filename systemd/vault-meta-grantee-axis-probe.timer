@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the vault meta grantee-axis probe every hour
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1h
+Unit=vault-meta-grantee-axis-probe.service
+
+[Install]
+WantedBy=timers.target
