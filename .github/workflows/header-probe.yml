@@ -1,0 +1,119 @@
+name: Header probe
+
+# Manual only, on purpose. Reads one response-header block from one of our
+# own hosts and posts the result as a comment on the tracking issue below,
+# so a seat holding only github-read can answer "is production serving the
+# header we shipped" without a terminal. See OR-T0601: no tool in this org
+# could answer that before this existed.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Full URL on one of our own hosts to probe (https://...)'
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  # Where every run posts its result. See OR-T0601.
+  TRACKING_ISSUE: '1324'
+  # The only header names this workflow will ever print, from our own
+  # hosts or otherwise. Everything else is dropped before it reaches the
+  # (public) Actions log -- set-cookie and similar must never land here.
+  ALLOWED_HEADERS: >-
+    content-security-policy
+    content-security-policy-report-only
+    x-frame-options
+    x-content-type-options
+    referrer-policy
+    strict-transport-security
+    permissions-policy
+    cross-origin-opener-policy
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate URL is one of our own hosts
+        id: validate
+        shell: bash
+        env:
+          RAW_URL: ${{ inputs.url }}
+        run: |
+          set -euo pipefail
+          URL="$RAW_URL"
+          # A probe tool that can be pointed anywhere is an outbound request
+          # generator with our name on it. Refuse anything off this list
+          # rather than trying to sanitize an arbitrary URL.
+          HOST="$(node -e "try{console.log(new URL(process.argv[1]).host)}catch{}" "$URL")"
+          if [ -z "$HOST" ]; then
+            echo "::error::Could not parse a host out of '$URL' -- refusing."
+            exit 1
+          fi
+          case "$HOST" in
+            connect.orangerails.com|app.orangerails.com|docs.orangerails.com|orangerails.com|www.orangerails.com|dev.orangerails.com)
+              ;;
+            *.pages.dev)
+              ;;
+            *)
+              echo "::error::REFUSED: host '$HOST' is not in the allowlist. This tool only probes Orange Rails' own hosts (connect/app/docs/dev/www.orangerails.com, orangerails.com, *.pages.dev)."
+              exit 1
+              ;;
+          esac
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+
+      - name: Probe headers
+        id: probe
+        shell: bash
+        env:
+          RAW_URL: ${{ steps.validate.outputs.url }}
+        run: |
+          set -uo pipefail
+          URL="$RAW_URL"
+          # A normal browser UA: some of our own Cloudflare-fronted hosts 403
+          # the default curl UA. No redirects followed, body discarded (-o
+          # /dev/null) -- we never need it and must never echo it, since an
+          # allowlisted host's page content is not something to put in a
+          # public Actions log either. -D- writes the header block to stdout.
+          RAW="$(curl -sS --max-time 15 -D- -o /dev/null \
+            -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+            "$URL" || true)"
+          if [ -z "$RAW" ]; then
+            echo "::error::No response from $URL (connection failed or timed out). Treat this as a probe failure, not an ABSENT header."
+            exit 1
+          fi
+          STATUS_LINE="$(printf '%s\n' "$RAW" | head -1 | tr -d '\r')"
+          {
+            echo "## Header probe: $URL"
+            echo ""
+            echo "Status: \`$STATUS_LINE\`"
+            echo ""
+            for h in $ALLOWED_HEADERS; do
+              VALUE="$(printf '%s\n' "$RAW" | grep -i "^$h:" | head -1 | sed -E 's/^[^:]+:[[:space:]]*//' | tr -d '\r')"
+              if [ -z "$VALUE" ]; then
+                echo "- \`$h\`: ABSENT"
+              else
+                echo "- \`$h\`: \`$VALUE\`"
+              fi
+            done
+          } > /tmp/probe-result.md
+          cat /tmp/probe-result.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post result to tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if ! gh issue comment "$TRACKING_ISSUE" --repo "$GITHUB_REPOSITORY" --body-file /tmp/probe-result.md; then
+            echo "::error::gh issue comment was refused (token scope or API). The result above is the same text that would have posted."
+            exit 1
+          fi

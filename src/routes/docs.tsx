@@ -4,7 +4,7 @@ import { Navbar } from "@/components/landing/Navbar";
 import { Footer } from "@/components/landing/Footer";
 import {
   ArrowRight, Rocket, Code2, Server,
-  Wrench, Lock, FileText, Shield, Users,
+  Wrench, FileText, Shield, Users,
 } from "lucide-react";
 
 export const Route = createFileRoute("/docs")({
@@ -27,7 +27,7 @@ export const Route = createFileRoute("/docs")({
       { name: "twitter:title", content: "Developer documentation , OrangeRails" },
       { name: "twitter:description", content: "Quickstart, API reference, self-hosting, adapter SDK." },
       { name: "twitter:image", content: "/og-image.jpg" },
-      { rel: "canonical", href: "https://orangerails.com/docs" },
+      { rel: "canonical", href: "https://connect.orangerails.com/docs" },
     ],
     scripts: [
       {
@@ -40,7 +40,7 @@ export const Route = createFileRoute("/docs")({
             "Quickstart, REST API reference, self-hosting with Docker and Helm, adapter SDK, and zero-knowledge architecture.",
           author: { "@type": "Organization", name: "OrangeRails" },
           about: { "@type": "SoftwareApplication", name: "OrangeRails", applicationCategory: "FinanceApplication" },
-          url: "https://orangerails.com/docs",
+          url: "https://connect.orangerails.com/docs",
         }),
       },
       {
@@ -50,7 +50,7 @@ export const Route = createFileRoute("/docs")({
           "@type": "BreadcrumbList",
           itemListElement: [
             { "@type": "ListItem", position: 1, name: "Home", item: "https://orangerails.com/" },
-            { "@type": "ListItem", position: 2, name: "Docs", item: "https://orangerails.com/docs" },
+            { "@type": "ListItem", position: 2, name: "Docs", item: "https://connect.orangerails.com/docs" },
           ],
         }),
       },
@@ -85,7 +85,6 @@ const primary = [
 
 const secondary = [
   { icon: Wrench, title: "Adapter SDK guide", body: "Build a typed adapter in a day.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933751-adapter-sdk-guide" },
-  { icon: Lock, title: "How authentication works", body: "Three-layer model (app, source, zero-knowledge wrapper).", href: "/docs/authentication" },
   { icon: FileText, title: "Open API spec (v0 draft)", body: "OpenAPI 3.1, published and versioned.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933754-openapi-spec-v0-draft" },
   { icon: Shield, title: "Security and threat model", body: "What we trust, and what we cannot.", href: "https://support.orangerails.com/hc/orangerails/articles/1778933752-security-and-threat-model" },
   { icon: FileText, title: "How to export your xpub", body: "Find your extended public key in Sparrow, Specter, BlueWallet, Electrum, Wasabi.", href: "/docs/xpub-export" },
@@ -182,13 +181,13 @@ function DocsIndexPage() {
             </div>
 
             <div className="mt-12 grid gap-4 md:grid-cols-2">
-              <a href="https://docs.orangerails.com/support" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
+              <a href="https://support.orangerails.com" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
                 <h3 className="font-semibold">Need support?</h3>
-                <p className="mt-1 text-sm text-muted-foreground">Open a ticket at docs.orangerails.com/support.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Open a ticket at support.orangerails.com.</p>
               </a>
-              <a href="https://docs.orangerails.com/feedback" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
+              <a href="https://support.orangerails.com/feedback" target="_blank" rel="noreferrer" className="rounded-xl border border-border bg-background p-6 transition-colors hover:bg-card">
                 <h3 className="font-semibold">Request a feature</h3>
-                <p className="mt-1 text-sm text-muted-foreground">Vote and propose at docs.orangerails.com/feedback.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Vote and propose at support.orangerails.com/feedback.</p>
               </a>
             </div>
           </div>
