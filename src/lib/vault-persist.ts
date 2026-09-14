@@ -816,6 +816,31 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // silently replacing the key that was meant to survive; that is more code
   // and more to get right on a self-custody path, not less.
   //
+  // UNDOCUMENTED UNTIL NOW, FLAGGED BY THE AUDITOR ON PR #1336: THIS COUPLES
+  // TWO PREVIOUSLY-INDEPENDENT FAILURE DOMAINS. sig_public_key is what
+  // co-admin.ts's loadAdminSubkeys verifies a stored grant's signature
+  // against (see grantCoAdmin / VaultContext.loadAdminSubkeys). If a recovery
+  // hits the rare case where the KEM secret alone fails to carry (the sig
+  // secret is fine), this write clears sig_public_key too, even though
+  // sig_secret_wrapped is written as the genuinely-carried value in the same
+  // statement. The next unlock's ensurePqcKeypairs() then sees kem_public_key
+  // null, regenerates BOTH keypairs from scratch, and the fresh
+  // sig_public_key no longer matches any grantSigB64 signed under the old
+  // one. Every co-admin this owner had previously granted access to silently
+  // loses it: loadAdminSubkeys fails closed and the workspace just
+  // disappears from that co-admin's list, with nothing telling either party
+  // why. RecoveryResult.pqcKeysReplaced tells the recovery screen "a key was
+  // replaced", not "your co-admins have been cut off".
+  //
+  // This is a narrower instance of the already-accepted, already-rare
+  // all-or-nothing cost above (still needs an AES-GCM tag failure on one
+  // specific secret during a recovery). Not fixed here; tracked as an open
+  // fast follow on OR-T1977. Two real options if someone picks it up: (a)
+  // stop coupling the two keys, i.e. only clear the public key whose own
+  // secret died, which reopens the read-side gate problem OR-T1977 exists to
+  // avoid; or (b) keep this write as-is and add a notice to the owner and
+  // affected co-admins when a sig key is regenerated. Neither is implemented.
+
   // A dead secret is deliberately left in place rather than nulled. It is
   // unreadable either way, and ensurePqcKeypairs() overwrites all four columns
   // when it regenerates on the next unlock. Nothing consumes a secret without
