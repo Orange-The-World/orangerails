@@ -815,7 +815,6 @@ jobs:
           # empty by default so today "any row is a regression" holds exactly
           # as DEV-0226 measured it.
           IFS=',' read -ra ALLOWED_ARR <<< "${ALLOWLIST}"
-          ROWS=$(echo "$RESPONSE" | jq -r '.[] | "\(.nspname).\(.proname)\t\(.reason)\t\(.ace)"')
 
           # Name the ROUTE, not just the function. "anon holds a direct grant"
           # is the wrong sentence for a PUBLIC row: it sends the next reader
@@ -833,25 +832,70 @@ jobs:
             esac
           }
 
+          # Extracted so it can be proven able to refuse (OR-T0714), the same
+          # way shadow_scan and out_of_order_scan above prove themselves before
+          # a clean answer on real data is trusted. Sets OFFENDING and
+          # ALLOWED_HIT; the caller resets both before each call.
+          scan_anon_rows () {
+            local rows="$1"
+            while IFS=$'\t' read -r QUALIFIED REASON ACE; do
+              [ -z "$QUALIFIED" ] && continue
+              FUNC="${QUALIFIED#public.}"
+              WHY=$(explain "$REASON")
+              IS_ALLOWED=0
+              for A in "${ALLOWED_ARR[@]}"; do
+                TRIMMED=$(echo "$A" | tr -d '[:space:]')
+                if [ -n "$TRIMMED" ] && [ "$TRIMMED" = "$FUNC" ]; then
+                  IS_ALLOWED=1
+                fi
+              done
+              if [ "$IS_ALLOWED" -eq 1 ]; then
+                ALLOWED_HIT="${ALLOWED_HIT}- \`${QUALIFIED}\` -- ${WHY} -- acl: \`${ACE}\` -- allowlisted via ANON_EXECUTE_RPC_ALLOWLIST\n"
+              else
+                OFFENDING="${OFFENDING}- \`${QUALIFIED}\` -- ${WHY} -- acl: \`${ACE}\`\n"
+              fi
+            done <<< "$rows"
+          }
+
+          # The check must be able to go RED before it is trusted on real data
+          # (OR-T0714 acceptance criterion 2). No live grant is created and no
+          # project is touched: this is pure string/array logic against a
+          # synthetic Management API row, the same standard this file already
+          # applies to shadow_scan and the order guard above.
+          SELFTEST_ALLOWLIST_SAVE="${ALLOWLIST}"
+
+          OFFENDING=""; ALLOWED_HIT=""
+          scan_anon_rows $'public.or_selftest_evil_fn\tanon-direct\tanon=X/postgres'
+          if [ -z "$OFFENDING" ]; then
+            echo "::error::anon-EXECUTE self-test FAILED: a synthetic anon-direct row was not flagged. Refusing to trust this check on real data."
+            exit 1
+          fi
+          echo "anon-EXECUTE self-test ok (1/3): fires on a synthetic anon-direct row."
+
+          ALLOWLIST="or_selftest_evil_fn"
+          IFS=',' read -ra ALLOWED_ARR <<< "${ALLOWLIST}"
+          OFFENDING=""; ALLOWED_HIT=""
+          scan_anon_rows $'public.or_selftest_evil_fn\tanon-direct\tanon=X/postgres'
+          if [ -n "$OFFENDING" ] || [ -z "$ALLOWED_HIT" ]; then
+            echo "::error::anon-EXECUTE self-test FAILED: an allowlisted function did not clear the check, or was not recorded as allowed."
+            exit 1
+          fi
+          echo "anon-EXECUTE self-test ok (2/3): an allowlisted function is reported, not failed."
+
+          ALLOWLIST="${SELFTEST_ALLOWLIST_SAVE}"
+          IFS=',' read -ra ALLOWED_ARR <<< "${ALLOWLIST}"
+          OFFENDING=""; ALLOWED_HIT=""
+          scan_anon_rows ""
+          if [ -n "$OFFENDING" ]; then
+            echo "::error::anon-EXECUTE self-test FAILED: an empty result set was reported as offending."
+            exit 1
+          fi
+          echo "anon-EXECUTE self-test ok (3/3): silent on an empty result. Running against ${SUPABASE_REF} now."
+
+          ROWS=$(echo "$RESPONSE" | jq -r '.[] | "\(.nspname).\(.proname)\t\(.reason)\t\(.ace)"')
           OFFENDING=""
           ALLOWED_HIT=""
-          while IFS=$'\t' read -r QUALIFIED REASON ACE; do
-            [ -z "$QUALIFIED" ] && continue
-            FUNC="${QUALIFIED#public.}"
-            WHY=$(explain "$REASON")
-            IS_ALLOWED=0
-            for A in "${ALLOWED_ARR[@]}"; do
-              TRIMMED=$(echo "$A" | tr -d '[:space:]')
-              if [ -n "$TRIMMED" ] && [ "$TRIMMED" = "$FUNC" ]; then
-                IS_ALLOWED=1
-              fi
-            done
-            if [ "$IS_ALLOWED" -eq 1 ]; then
-              ALLOWED_HIT="${ALLOWED_HIT}- \`${QUALIFIED}\` -- ${WHY} -- acl: \`${ACE}\` -- allowlisted via ANON_EXECUTE_RPC_ALLOWLIST\n"
-            else
-              OFFENDING="${OFFENDING}- \`${QUALIFIED}\` -- ${WHY} -- acl: \`${ACE}\`\n"
-            fi
-          done <<< "$ROWS"
+          scan_anon_rows "$ROWS"
 
           if [ -n "$ALLOWED_HIT" ]; then
             {
