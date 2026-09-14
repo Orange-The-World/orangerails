@@ -16,3 +16,7 @@ second push supersedes it.
 Push 3 (45e94227) sat queued:active for several minutes under real queue
 load before this push superseded it, per orangerails-dev's live deployment
 queue at the time.
+
+Push 5 (this commit) carries the [cf-sweep-force-fail] marker in its own
+message, per OR-T1344 acceptance item 3: proving the fail-loud path does
+not require winning the supersede race, only a commit with the marker.
