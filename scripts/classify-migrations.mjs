@@ -916,6 +916,59 @@ const RULES = [
   },
 ];
 
+/**
+ * UPDATE table name, if this (already flattened) statement's leading keyword
+ * is UPDATE. Same shape as ROUTINE_NAME: schema qualified, quoted or not.
+ */
+const UPDATE_TABLE =
+  /^\s*UPDATE\s+(?:ONLY\s+)?((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))*)/i;
+
+/**
+ * WARNINGS. The ruling on OR-T1537 (option C): an UPDATE with no WHERE clause
+ * is surfaced on a prod apply, not hard-stopped the way a DROP or an
+ * unqualified DELETE is. A wrong UPDATE overwrites data but the row still
+ * exists afterward, so it does not belong in RULES above: a warning never
+ * touches `findings`, the verdict, or the exit code.
+ *
+ * THE TRAP THIS EXISTS TO AVOID (named on OR-T1518's own step 6). Appending
+ * an UPDATE-without-WHERE test to RULES the obvious way does not implement
+ * option C, it implements option A: every match in RULES sets the verdict to
+ * IRREVERSIBLE, and run()'s exit code is `counts[IRREVERSIBLE] > 0 ? 2 : 0`.
+ * WARNING_RULES is a wholly separate array and classifySql keeps its matches
+ * in a separate `warnings` list for exactly this reason.
+ */
+const WARNING_RULES = [
+  {
+    id: 'UNBOUNDED_WRITE',
+    // Reuses deleteHasOwnWhere's WHERE scan. That function is statement-shape
+    // agnostic: given an offset, it looks forward for a WHERE before the next
+    // statement-start keyword (skipping parenthesised text). The same scan
+    // that proves a DELETE has its own WHERE proves an UPDATE does too.
+    test: (s) => {
+      const re = /\bUPDATE\b/gi;
+      let m = re.exec(s);
+      while (m !== null) {
+        if (!deleteHasOwnWhere(s, m.index + m[0].length)) return true;
+        m = re.exec(s);
+      }
+      return false;
+    },
+    // The fixed, machine countable token this ticket exists for. Its exact
+    // shape must never be reused for anything else in this script's output,
+    // and it must never share a log line with other text: that is what makes
+    // "how often does this fire" a single grep.
+    message: (s) => {
+      const m = UPDATE_TABLE.exec(s);
+      const table = m ? normalizeQualifiedName(m[1]) : 'unknown table';
+      return `UNBOUNDED_WRITE: UPDATE ${table} (no WHERE)`;
+    },
+    why:
+      'updates every row in the table: an UPDATE with no WHERE clause. Warned, not refused ' +
+      '(OR-T1537 ruling, option C): the row still exists afterward, unlike a DROP or an ' +
+      'unqualified DELETE',
+  },
+];
+
 /** Classify one already read SQL string. Returns a verdict plus findings. */
 export function classifySql(sql) {
   const scrubbed = scrub(sql);
