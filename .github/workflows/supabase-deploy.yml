@@ -1787,6 +1787,86 @@ jobs:
           echo
 
           # -------------------------------------------------------------------
+          # OR-T1252 (challenge OR-C1886). CONTENT-HASH LEDGER, read before the
+          # shadow scan below so its own scan can use it.
+          #
+          # The shadow scan compares a FILE NAME to the name the ledger
+          # recorded. It cannot see a file edited IN PLACE: same name,
+          # changed SQL, reads as a match either way. That is the other half
+          # of the exact defect OR-T1252 was opened for, just separated by an
+          # edit instead of a rename, and it is why the Auditor sent this
+          # ticket back to working after the first fix merged.
+          #
+          # This does NOT touch supabase_migrations.schema_migrations, which
+          # the Supabase CLI also writes and reads (OR-T1252's own "blast
+          # radius" note about that table): it is a second, small table this
+          # workflow owns start to finish. Bootstrap is CREATE TABLE IF NOT
+          # EXISTS, safe to run on every dispatch. A hash is written ONCE, at
+          # the moment a file first applies (later in this job), and never
+          # afterwards: it is evidence of what the SQL was when it ran, not a
+          # rolling fingerprint of whatever the file says today.
+          #
+          # A version applied before this scan existed has no row here and
+          # is UNVERIFIABLE for content, the same accepted, disclosed shape
+          # as a NULL name in the shadow scan above (OR-T1271 tracks
+          # backfilling the name column separately; not this run's job, and
+          # backfilling a hash for SQL nobody kept a copy of is not possible
+          # at all).
+          # -------------------------------------------------------------------
+          HASH_BOOTSTRAP=$(mktemp); chmod 600 "$HASH_BOOTSTRAP"
+          jq -n '{query:"CREATE TABLE IF NOT EXISTS public._or_migration_hashes (version text PRIMARY KEY, sha256 text NOT NULL, recorded_at timestamptz NOT NULL DEFAULT now());"}' > "$HASH_BOOTSTRAP"
+          HASH_BOOT_OK=0
+          for attempt in 1 2 3; do
+            if curl -sS --fail-with-body -o /dev/null \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$HASH_BOOTSTRAP"; then
+              HASH_BOOT_OK=1
+              break
+            fi
+            echo "content-hash table bootstrap attempt ${attempt}/3 did not return a success status"
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          rm -f "$HASH_BOOTSTRAP"
+          if [ "$HASH_BOOT_OK" -ne 1 ]; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: could not create or confirm public._or_migration_hashes, the table the content scan needs, after 3 attempts. NOTHING was applied. I-could-not-check must never read as clean."
+            exit 1
+          fi
+
+          HASH_PAYLOAD=$(mktemp); chmod 600 "$HASH_PAYLOAD"
+          jq -n '{query:"SELECT version, sha256 FROM public._or_migration_hashes ORDER BY version;"}' > "$HASH_PAYLOAD"
+          HASH_RESPONSE=""; HASH_OK=0
+          for attempt in 1 2 3; do
+            if HASH_RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$HASH_PAYLOAD"); then
+              HASH_OK=1
+              break
+            fi
+            echo "content-hash ledger query attempt ${attempt}/3 did not return a success status"
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          rm -f "$HASH_PAYLOAD"
+          # Reuses ledger_shape_ok, already self-tested above: an array of
+          # versioned rows is required, or empty; anything else is UNKNOWN,
+          # not zero.
+          if [ "$HASH_OK" -ne 1 ] || ! ledger_shape_ok "$HASH_RESPONSE"; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the content-hash table query did not return a usable array of rows. NOTHING was applied."
+            exit 1
+          fi
+          HASH_MAP=$(mktemp); chmod 600 "$HASH_MAP"
+          echo "$HASH_RESPONSE" | jq -r '.[] | "\(.version)=\(.sha256 // "")"' | sort -u > "$HASH_MAP"
+          echo "-- ${SUPABASE_REF} content-hash table has $(wc -l < "$HASH_MAP" | tr -d ' ') recorded version(s) --"
+          echo
+
+          # -------------------------------------------------------------------
           # OR-T1252. SHADOW SCAN, before anything is applied.
           #
           # "Applied" in this loop means "a row with that version number exists",
