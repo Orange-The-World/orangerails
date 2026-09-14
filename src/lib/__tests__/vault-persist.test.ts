@@ -671,6 +671,27 @@ describe("vault recovery: the rotated meta write", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("refuses to rotate, before touching any row, if the pre-write meta read returns zero rows", async () => {
+    // No error and no row: a .eq() select answers this way on a dropped
+    // session, an RLS predicate that stopped matching, or a deleted row.
+    // It must never be read the same as "vault has no stored PQC secrets".
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(/Could not confirm your vault's stored keys/);
+
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
   it("migrates every row BEFORE the meta write, never after", async () => {
     const { client, calls } = makeFakeClient({
       rows: {

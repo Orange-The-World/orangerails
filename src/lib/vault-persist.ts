@@ -83,6 +83,19 @@ export const PASSWORD_CHANGE_NOT_PROVEN_MESSAGE =
   "Vault password change did not complete. The keys the server returned do not re-open your vault, so neither your old nor your new password can be relied on. Do not close or reload this page, and contact support with this message.";
 
 /**
+ * Shown when migrateAndPersistRotatedVault's own pre-write read of
+ * user_vault_meta (the read that decides whether a stored PQC secret would
+ * be dropped) returns zero rows with no error.
+ *
+ * This function only runs mid-rotation, which requires an existing
+ * user_vault_meta row, so zero rows here is never a legitimate answer: it
+ * is a session drop, an RLS predicate that stopped matching, or a deleted
+ * row, and it must not be read as "nothing stored, safe to proceed" (OR-T2371).
+ */
+export const VAULT_META_GUARD_UNREADABLE_MESSAGE =
+  "Could not confirm your vault's stored keys before rotating. Nothing was changed. Reload the page and try again.";
+
+/**
  * Shown when the reconciliation below the paging loops finds that this run did
  * not re-encrypt every row the table holds for this user.
  *
@@ -511,6 +524,17 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     .select("kem_secret_wrapped, sig_secret_wrapped, workspace_key_id")
     .eq("user_id", userId);
   if (storedMetaErr) throw storedMetaErr;
+  // A caller only reaches this function mid-rotation, which requires an
+  // existing user_vault_meta row. A .eq() select with no error still comes
+  // back as an empty array on zero rows (RLS edge case, transient read, a
+  // deleted row), and storedMeta below would then be undefined, so both
+  // drop checks compare against `undefined != null`, which is false, and
+  // the rotation proceeds as if there were nothing to drop. Refuse here,
+  // before either check, rather than let an unreadable row look like a
+  // vault with no PQC secrets to protect (OR-T2371).
+  if (!storedMetaRows || (storedMetaRows as unknown[]).length === 0) {
+    throw new Error(VAULT_META_GUARD_UNREADABLE_MESSAGE);
+  }
   const storedMeta = (
     storedMetaRows as Array<{
       kem_secret_wrapped: string | null;
