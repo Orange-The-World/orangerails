@@ -67,6 +67,13 @@ It is not the decision, and it cannot be used to change one.
 
 A pull request that changes `MIGRATION_APPLY_ALLOWED_ACTORS_PROD` in `baseline.json` must
 update the block quoted above in the same pull request, so a reviewed value and the reason
-recorded for it cannot part company. That is a rule a person has to remember, which is the
-weakest kind of control this directory has, so making it a check that fails on its own is
-tracked as OR-T1804.
+recorded for it cannot part company.
+
+That is no longer only a rule someone has to remember. `scripts/change-control-annotation.mjs`
+reads the value out of `baseline.json` and the value out of the block quoted above, and the
+drift workflow fails and names both when they differ. Order inside the list is not compared,
+because order carries no meaning in an allowlist; an added, removed or changed identity does.
+A quoted block that is missing, duplicated or unparseable is its own distinct failure rather
+than a pass, for the same reason the drift check answers an unreadable API with an error
+instead of silence. Both files are in the workflow's pull request path list, so the check runs
+on the pull request that would break it.
