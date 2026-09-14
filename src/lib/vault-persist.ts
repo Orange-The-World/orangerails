@@ -439,6 +439,11 @@ export interface RotateVaultArgs {
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
+  /**
+   * Overridable for tests. Real callers get a setTimeout-based sleep; a test
+   * can pass an instant no-op so a retry loop does not actually wait.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -471,6 +476,119 @@ function raiseRotationFailure(cause: unknown, rowsAlreadyWritten: boolean): neve
   );
 }
 
+/** Real sleep, used everywhere except tests. */
+function realSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** How many times the meta write is re-read after a transport failure before giving up. */
+export const META_WRITE_ATTEMPTS = 4;
+
+/** Delay between re-reads, in milliseconds. */
+export const META_WRITE_RETRY_MS = 1000;
+
+type MetaReconcileOutcome = "written" | "pending" | "conflict";
+
+/**
+ * A network failure on the meta UPDATE (a thrown exception: a dropped
+ * connection or a gateway timeout) leaves the outcome genuinely unknown. The
+ * request may have reached Postgres and committed with the response lost on
+ * the way back, in which case retrying the same compare-and-swap would match
+ * zero rows and read as a conflict that never happened. This re-reads the row
+ * instead of guessing:
+ *
+ *   "written"  the stored row now matches every field this rotation just
+ *              tried to write. The update landed; there is nothing to retry.
+ *   "pending"  the stored row still matches priorRecoveryCiphertext, meaning
+ *              our write never reached the table. Safe to retry the same
+ *              compare-and-swap.
+ *   "conflict" the stored row matches neither: some other write landed
+ *              first. Retrying would overwrite it, so this is definitive
+ *              and must not be retried.
+ *
+ * This is a THROWN exception's aftermath only. A structured {error} response
+ * from Supabase is definitive on its own and is handled by the caller before
+ * this is ever reached.
+ */
+async function reconcileVaultMetaWrite(
+  supabase: VaultPersistClient,
+  userId: string,
+  priorRecoveryCiphertext: string,
+  rotatedMeta: Record<string, unknown>,
+): Promise<MetaReconcileOutcome> {
+  const { data, error } = await supabase
+    .from("user_vault_meta")
+    .select("recovery_ciphertext, vault_verifier_ciphertext, vault_key_version")
+    .eq("user_id", userId)
+    .single();
+  if (error || !data) return "conflict";
+  const row = data as Record<string, unknown>;
+  const matchesRotated =
+    row.recovery_ciphertext === rotatedMeta.recovery_ciphertext &&
+    row.vault_verifier_ciphertext === rotatedMeta.vault_verifier_ciphertext &&
+    row.vault_key_version === rotatedMeta.vault_key_version;
+  if (matchesRotated) return "written";
+  if (row.recovery_ciphertext === priorRecoveryCiphertext) return "pending";
+  return "conflict";
+}
+
+/**
+ * Issue the rotated meta compare-and-swap, and if the response is a thrown
+ * transport failure rather than a structured error, find out what actually
+ * happened before giving up.
+ *
+ * A structured {error} response, or an update that matched zero rows, is
+ * definitive: Postgres answered, so there is nothing to reconcile and this
+ * throws immediately. Only a THROWN exception is retried, because only that
+ * case leaves the outcome unknown.
+ */
+async function updateVaultMetaWithReconcile(
+  supabase: VaultPersistClient,
+  userId: string,
+  priorRecoveryCiphertext: string,
+  rotatedMeta: Record<string, unknown>,
+  sleep: (ms: number) => Promise<void>,
+): Promise<void> {
+  let lastTransportError: unknown;
+  for (let attempt = 1; attempt <= META_WRITE_ATTEMPTS; attempt++) {
+    let result: { data: unknown; error: unknown };
+    try {
+      result = await supabase
+        .from("user_vault_meta")
+        .update(rotatedMeta)
+        .eq("user_id", userId)
+        .eq("recovery_ciphertext", priorRecoveryCiphertext)
+        .select("user_id");
+    } catch (cause) {
+      lastTransportError = cause;
+      const outcome = await reconcileVaultMetaWrite(
+        supabase,
+        userId,
+        priorRecoveryCiphertext,
+        rotatedMeta,
+      );
+      if (outcome === "written") return;
+      if (outcome === "conflict") {
+        throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
+      }
+      // "pending": our write never landed. Retry the same compare-and-swap.
+      if (attempt < META_WRITE_ATTEMPTS) await sleep(META_WRITE_RETRY_MS);
+      continue;
+    }
+    const { data: updatedRows, error: updateErr } = result;
+    if (updateErr) throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
+    if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
+      throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
+    }
+    return;
+  }
+  throw new Error(
+    `${RECOVERY_META_NOT_SAVED_MESSAGE} (lost the response ${META_WRITE_ATTEMPTS} times in a row: ${
+      lastTransportError instanceof Error ? lastTransportError.message : String(lastTransportError)
+    })`,
+  );
+}
+
 /**
  * Re-encrypt every ciphertext this user owns under the new MEK, then persist
  * the rotated vault meta, then zero the old key material.
@@ -492,6 +610,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     migrateCredentialsCiphertext,
     migrateTransactionCiphertext,
     clearMigrationKeys,
+    sleep = realSleep,
   } = args;
 
   // Refuse before anything irreversible happens if a stored PQC secret would
@@ -837,21 +956,16 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     rotatedMeta.sig_public_key = null;
   }
 
-  let metaUpdateResult: { data: unknown; error: unknown };
   try {
-    metaUpdateResult = await supabase
-      .from("user_vault_meta")
-      .update(rotatedMeta)
-      .eq("user_id", userId)
-      .eq("recovery_ciphertext", priorRecoveryCiphertext)
-      .select("user_id");
+    await updateVaultMetaWithReconcile(
+      supabase,
+      userId,
+      priorRecoveryCiphertext,
+      rotatedMeta,
+      sleep,
+    );
   } catch (cause) {
     raiseRotationFailure(cause, anyRowWritten);
-  }
-  const { data: updatedRows, error: updateErr } = metaUpdateResult;
-  if (updateErr) raiseRotationFailure(updateErr, anyRowWritten);
-  if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
-    throw new Error(RECOVERY_META_NOT_SAVED_MESSAGE);
   }
 
   // Zero old key material. Only reached once the meta write above is proven to
