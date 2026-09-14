@@ -1220,6 +1220,41 @@ Deno.test('DL-1409: a successful Quiltt sync clears pending as well as error', a
   );
 });
 
+Deno.test('OR-T2658: a successful Quiltt sync clears encrypted_last_error along with status', async () => {
+  let capturedPatch: Record<string, unknown> | undefined;
+
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() { return Promise.resolve({ data: { id: 'conn-or-1' }, error: null }); },
+        update(patch: Record<string, unknown>) {
+          capturedPatch = patch;
+          return chain;
+        },
+        in(_col: string, _vals: string[]) { return Promise.resolve({ error: null }); },
+      };
+      return chain;
+    },
+  };
+
+  const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-1', 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(
+    capturedPatch?.encrypted_last_error,
+    null,
+    'the recovery patch must clear encrypted_last_error, or the UI keeps rendering the stale error banner on an active connection (OR-T2658)',
+  );
+  assertEquals(capturedPatch?.status, 'active', 'status must still be set to active');
+});
+
 Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending', async () => {
   // The fallback resolves "oldest quiltt row for this subaccount with a NULL
   // quiltt_connection_id", which is not necessarily the connection this event

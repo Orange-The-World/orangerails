@@ -1083,7 +1083,7 @@ export async function reconcileConnectionSuccess(
   if (!orConnId) return null;
   const { error: statusErr } = await client
     .from('connections')
-    .update({ status: 'active', updated_at: new Date().toISOString() })
+    .update({ status: 'active', updated_at: new Date().toISOString(), encrypted_last_error: null })
     .eq('id', orConnId)
     // DL-1409: 'pending' is promotable here so rows stranded by the old sink
     // insert heal themselves on the next successful Quiltt sync, instead of
