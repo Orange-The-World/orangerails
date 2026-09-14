@@ -1312,6 +1312,26 @@ const EXPECTED = {
   // back UNPARSEABLE for the whole file.
   '20990101000030_reversible_dollar_quoted_argument.sql': { verdict: REVERSIBLE, id: null },
   '20990101000031_irreversible_dollar_quoted_argument.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
+  // OR-T1537 ruling, option C: WARN on an UPDATE with no WHERE clause, do not
+  // refuse it. All three stay REVERSIBLE with zero findings; `warn` pins what
+  // the SEPARATE warnings list must (or must not) contain. The DETECTION
+  // QUALITY the ruling required: red on a real unbounded UPDATE, quiet on a
+  // WHERE clause that spans a newline and on one that sits after a comment.
+  '20990101000033_warn_unbounded_update_no_where.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+    warn: 'UNBOUNDED_WRITE',
+  },
+  '20990101000034_reversible_update_where_spans_newline.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+    warn: null,
+  },
+  '20990101000035_reversible_update_where_after_comment.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+    warn: null,
+  },
 };
 
 function selftest() {
@@ -1342,18 +1362,27 @@ function selftest() {
     // removes none.
     const lineOk =
       want.line === undefined || got.findings.some((f) => f.id === want.id && f.line === want.line);
+    // Same shape for `warn`: a fixture that does not carry the field is not
+    // checked at all, so every fixture written before OR-T1537 is unaffected.
+    // `warn: null` asserts the warnings list is empty; `warn: 'ID'` asserts it
+    // is present.
+    const warnIds = (got.warnings || []).map((w) => w.id);
+    const warnOk =
+      want.warn === undefined ? true : want.warn === null ? warnIds.length === 0 : warnIds.includes(want.warn);
     const wantWhere = want.line === undefined ? '' : ` at line ${want.line}`;
-    if (verdictOk && ruleOk && lineOk) {
-      console.log(`  ok   ${name}: ${got.verdict}${want.id ? ` [${want.id}]` : ''}${wantWhere}`);
+    const wantWarnWhere = want.warn === undefined ? '' : want.warn === null ? ' warn[none]' : ` warn[${want.warn}]`;
+    if (verdictOk && ruleOk && lineOk && warnOk) {
+      console.log(`  ok   ${name}: ${got.verdict}${want.id ? ` [${want.id}]` : ''}${wantWhere}${wantWarnWhere}`);
     } else {
       failures += 1;
       const gotWhere =
         want.line === undefined
           ? ''
           : ` at line(s) ${got.findings.map((f) => f.line).join(', ') || 'none'}`;
+      const gotWarnWhere = want.warn === undefined ? '' : `; wanted warn ${want.warn === null ? 'none' : want.warn}, got warn [${warnIds.join(', ') || 'none'}]`;
       console.error(
         `  FAIL ${name}: wanted ${want.verdict}${want.id ? ` [${want.id}]` : ' with no finding'}${wantWhere}, ` +
-          `got ${got.verdict} [${ids.join(', ') || 'no finding'}]${gotWhere}`,
+          `got ${got.verdict} [${ids.join(', ') || 'no finding'}]${gotWhere}${gotWarnWhere}`,
       );
     }
   }
