@@ -139,9 +139,10 @@ export function redactedUpstreamDetail(raw: string): string {
     //
     // The captured digit run includes internal spaces and hyphens so a value
     // written as several groups (1234-5678-9012-3456) is matched and redacted
-    // WHOLE. Stopping after the first group was the defect the Auditor
-    // blocked on PR #957: the global pass then needs another keyword before
-    // it will match again, so every later group survived untouched.
+    // WHOLE. An earlier attempt stopped after the first group: the global
+    // pass then needed another keyword before it would match again, so every
+    // later group survived untouched. That completeness gap is what this
+    // version fixes.
     .replace(
       /\b(account|acct|card|reference|ref)\b([^0-9]{0,20})(\d(?:[\d\s-]*\d)?)/gi,
       (whole: string, keyword: string, gap: string, digits: string): string => {
