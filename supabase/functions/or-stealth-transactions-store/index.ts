@@ -288,6 +288,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         400, cors,
       );
     }
+    if (body.sealed_utxos !== undefined && !isSealedUtxosInput(body.sealed_utxos)) {
+      return jsonResponse({ error: 'sealed_utxos is malformed' }, 400, cors);
+    }
 
     if (ctx.mode === 'direct' && body.app_user_id !== ctx.userId) {
       return jsonResponse(
@@ -452,9 +455,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // never disagree about what height they describe.
     let utxo_persist_failed = false;
     if (body.sealed_utxos !== undefined) {
-      if (!isSealedUtxosInput(body.sealed_utxos)) {
-        return jsonResponse({ error: 'sealed_utxos is malformed' }, 400, cors);
-      }
       const scannedTo = Math.max(cursorAdvanceTo, storedCursor, 0);
       const { error: utxoErr } = await ctx.serviceClient.rpc('upsert_stealth_utxos', {
         p_connection_id: body.connection_id,
