@@ -916,11 +916,64 @@ const RULES = [
   },
 ];
 
+/**
+ * UPDATE table name, if this (already flattened) statement's leading keyword
+ * is UPDATE. Same shape as ROUTINE_NAME: schema qualified, quoted or not.
+ */
+const UPDATE_TABLE =
+  /^\s*UPDATE\s+(?:ONLY\s+)?((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))*)/i;
+
+/**
+ * WARNINGS. The ruling on OR-T1537 (option C): an UPDATE with no WHERE clause
+ * is surfaced on a prod apply, not hard-stopped the way a DROP or an
+ * unqualified DELETE is. A wrong UPDATE overwrites data but the row still
+ * exists afterward, so it does not belong in RULES above: a warning never
+ * touches `findings`, the verdict, or the exit code.
+ *
+ * THE TRAP THIS EXISTS TO AVOID (named on OR-T1518's own step 6). Appending
+ * an UPDATE-without-WHERE test to RULES the obvious way does not implement
+ * option C, it implements option A: every match in RULES sets the verdict to
+ * IRREVERSIBLE, and run()'s exit code is `counts[IRREVERSIBLE] > 0 ? 2 : 0`.
+ * WARNING_RULES is a wholly separate array and classifySql keeps its matches
+ * in a separate `warnings` list for exactly this reason.
+ */
+const WARNING_RULES = [
+  {
+    id: 'UNBOUNDED_WRITE',
+    // Reuses deleteHasOwnWhere's WHERE scan. That function is statement-shape
+    // agnostic: given an offset, it looks forward for a WHERE before the next
+    // statement-start keyword (skipping parenthesised text). The same scan
+    // that proves a DELETE has its own WHERE proves an UPDATE does too.
+    test: (s) => {
+      const re = /\bUPDATE\b/gi;
+      let m = re.exec(s);
+      while (m !== null) {
+        if (!deleteHasOwnWhere(s, m.index + m[0].length)) return true;
+        m = re.exec(s);
+      }
+      return false;
+    },
+    // The fixed, machine countable token this ticket exists for. Its exact
+    // shape must never be reused for anything else in this script's output,
+    // and it must never share a log line with other text: that is what makes
+    // "how often does this fire" a single grep.
+    message: (s) => {
+      const m = UPDATE_TABLE.exec(s);
+      const table = m ? normalizeQualifiedName(m[1]) : 'unknown table';
+      return `UNBOUNDED_WRITE: UPDATE ${table} (no WHERE)`;
+    },
+    why:
+      'updates every row in the table: an UPDATE with no WHERE clause. Warned, not refused ' +
+      '(OR-T1537 ruling, option C): the row still exists afterward, unlike a DROP or an ' +
+      'unqualified DELETE',
+  },
+];
+
 /** Classify one already read SQL string. Returns a verdict plus findings. */
 export function classifySql(sql) {
   const scrubbed = scrub(sql);
   if (scrubbed.error) {
-    return { verdict: UNPARSEABLE, findings: [{ line: 0, id: 'UNPARSEABLE', why: scrubbed.error, snippet: '' }], notes: [] };
+    return { verdict: UNPARSEABLE, findings: [{ line: 0, id: 'UNPARSEABLE', why: scrubbed.error, snippet: '' }], warnings: [], notes: [] };
   }
 
   const sts = statements(scrubbed.text);
@@ -938,11 +991,13 @@ export function classifySql(sql) {
           snippet: '',
         },
       ],
+      warnings: [],
       notes: scrubbed.notes,
     };
   }
 
   const findings = [];
+  const warnings = [];
   const notes = [...scrubbed.notes];
 
   const applyRules = (flat, line) => {
@@ -952,6 +1007,22 @@ export function classifySql(sql) {
           line,
           id: rule.id,
           why: rule.why,
+          snippet: flat.length > 160 ? `${flat.slice(0, 160)} ...` : flat,
+        });
+      }
+    }
+    // WARNINGS never touch findings or the verdict (OR-T1537 ruling, option
+    // C). Kept in a wholly separate array on purpose: this loop runs for
+    // every statement this script examines, top level and invoked routine
+    // bodies alike, so an UNBOUNDED_WRITE inside a called routine is caught
+    // the same way a DROP inside one already is.
+    for (const rule of WARNING_RULES) {
+      if (rule.test(flat)) {
+        warnings.push({
+          line,
+          id: rule.id,
+          why: rule.why,
+          token: rule.message(flat),
           snippet: flat.length > 160 ? `${flat.slice(0, 160)} ...` : flat,
         });
       }
@@ -998,6 +1069,7 @@ export function classifySql(sql) {
               snippet: '',
             },
           ],
+          warnings: [],
           notes,
         };
       }
@@ -1015,6 +1087,7 @@ export function classifySql(sql) {
               snippet: '',
             },
           ],
+          warnings: [],
           notes,
         };
       }
@@ -1048,6 +1121,7 @@ export function classifySql(sql) {
   return {
     verdict: findings.length > 0 ? IRREVERSIBLE : REVERSIBLE,
     findings,
+    warnings,
     notes,
     statementCount: sts.length,
   };
@@ -1072,6 +1146,7 @@ export function classifyFile(path) {
 
 function report(results) {
   const counts = { [REVERSIBLE]: 0, [IRREVERSIBLE]: 0, [UNPARSEABLE]: 0 };
+  let warningCount = 0;
   for (const r of results) {
     counts[r.verdict] += 1;
     console.log(`== ${r.file}: ${r.verdict}`);
@@ -1081,11 +1156,22 @@ function report(results) {
       console.log(`   ${r.verdict}  ${where}  [${f.id}]  ${f.why}`);
       if (f.snippet) console.log(`     ${f.snippet}`);
     }
+    // OR-T1537 ruling, option C, the missing half named on OR-T1518's own
+    // step 6. This is the fixed, machine countable token: it must be the
+    // only thing on its log line, so counting how often it fires is one
+    // grep for "UNBOUNDED_WRITE: " rather than a parse of prose.
+    for (const w of r.warnings || []) {
+      warningCount += 1;
+      const where = w.line > 0 ? `line ${w.line}` : 'whole file';
+      console.log(`   WARNING  ${where}  [${w.id}]  ${w.why}`);
+      console.log(w.token);
+    }
   }
   console.log('');
   console.log(
     `EXAMINED ${results.length} file(s): ${counts[REVERSIBLE]} REVERSIBLE, ` +
-      `${counts[IRREVERSIBLE]} IRREVERSIBLE, ${counts[UNPARSEABLE]} UNPARSEABLE`,
+      `${counts[IRREVERSIBLE]} IRREVERSIBLE, ${counts[UNPARSEABLE]} UNPARSEABLE, ` +
+      `${warningCount} WARNING(s) (does not affect the verdict or the exit code)`,
   );
   return counts;
 }
@@ -1226,6 +1312,26 @@ const EXPECTED = {
   // back UNPARSEABLE for the whole file.
   '20990101000030_reversible_dollar_quoted_argument.sql': { verdict: REVERSIBLE, id: null },
   '20990101000031_irreversible_dollar_quoted_argument.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
+  // OR-T1537 ruling, option C: WARN on an UPDATE with no WHERE clause, do not
+  // refuse it. All three stay REVERSIBLE with zero findings; `warn` pins what
+  // the SEPARATE warnings list must (or must not) contain. The DETECTION
+  // QUALITY the ruling required: red on a real unbounded UPDATE, quiet on a
+  // WHERE clause that spans a newline and on one that sits after a comment.
+  '20990101000033_warn_unbounded_update_no_where.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+    warn: 'UNBOUNDED_WRITE',
+  },
+  '20990101000034_reversible_update_where_spans_newline.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+    warn: null,
+  },
+  '20990101000035_reversible_update_where_after_comment.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+    warn: null,
+  },
 };
 
 function selftest() {
@@ -1256,18 +1362,27 @@ function selftest() {
     // removes none.
     const lineOk =
       want.line === undefined || got.findings.some((f) => f.id === want.id && f.line === want.line);
+    // Same shape for `warn`: a fixture that does not carry the field is not
+    // checked at all, so every fixture written before OR-T1537 is unaffected.
+    // `warn: null` asserts the warnings list is empty; `warn: 'ID'` asserts it
+    // is present.
+    const warnIds = (got.warnings || []).map((w) => w.id);
+    const warnOk =
+      want.warn === undefined ? true : want.warn === null ? warnIds.length === 0 : warnIds.includes(want.warn);
     const wantWhere = want.line === undefined ? '' : ` at line ${want.line}`;
-    if (verdictOk && ruleOk && lineOk) {
-      console.log(`  ok   ${name}: ${got.verdict}${want.id ? ` [${want.id}]` : ''}${wantWhere}`);
+    const wantWarnWhere = want.warn === undefined ? '' : want.warn === null ? ' warn[none]' : ` warn[${want.warn}]`;
+    if (verdictOk && ruleOk && lineOk && warnOk) {
+      console.log(`  ok   ${name}: ${got.verdict}${want.id ? ` [${want.id}]` : ''}${wantWhere}${wantWarnWhere}`);
     } else {
       failures += 1;
       const gotWhere =
         want.line === undefined
           ? ''
           : ` at line(s) ${got.findings.map((f) => f.line).join(', ') || 'none'}`;
+      const gotWarnWhere = want.warn === undefined ? '' : `; wanted warn ${want.warn === null ? 'none' : want.warn}, got warn [${warnIds.join(', ') || 'none'}]`;
       console.error(
         `  FAIL ${name}: wanted ${want.verdict}${want.id ? ` [${want.id}]` : ' with no finding'}${wantWhere}, ` +
-          `got ${got.verdict} [${ids.join(', ') || 'no finding'}]${gotWhere}`,
+          `got ${got.verdict} [${ids.join(', ') || 'no finding'}]${gotWhere}${gotWarnWhere}`,
       );
     }
   }
@@ -1311,7 +1426,13 @@ function run(paths, jsonPath) {
           reversible: counts[REVERSIBLE],
           irreversible: counts[IRREVERSIBLE],
           unparseable: counts[UNPARSEABLE],
-          files: results.map((r) => ({ file: r.file, verdict: r.verdict, findings: r.findings })),
+          warnings: results.reduce((n, r) => n + (r.warnings ? r.warnings.length : 0), 0),
+          files: results.map((r) => ({
+            file: r.file,
+            verdict: r.verdict,
+            findings: r.findings,
+            warnings: r.warnings || [],
+          })),
         },
         null,
         2,
