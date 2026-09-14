@@ -14,6 +14,8 @@
 #
 # Run locally before pushing:   bash scripts/pre-publish-scan.sh
 # Runs in CI as a required check (see .github/workflows/repo-hygiene.yml).
+# CI replaces a stale checkout's copy with this file from dev HEAD before
+# executing it, so an old branch cannot restore an earlier output policy.
 #
 # Updating the allowlist: if you introduce a brand or product reference
 # that is intentional and acceptable (for example a new sibling project),
