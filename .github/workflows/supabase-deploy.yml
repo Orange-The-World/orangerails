@@ -1924,6 +1924,15 @@ jobs:
 
           out_of_order_scan () {
             local applied="$1" files="$2" dir="$3" allowlist="${4:-$OUT_OF_ORDER_ALLOWLIST}"
+            # OR-T2362. Optional 5th arg: a file path to append each REFUSED
+            # filename to (one per line), so the call site can skip only those
+            # files and still apply every safe sibling instead of aborting the
+            # whole run the moment one file is refused. Omitted, this function
+            # behaves exactly as before: nothing is appended anywhere, and
+            # every self-test below (which never passes a 5th arg) is
+            # unaffected.
+            local refused_out="${5:-}"
+            [ -n "$refused_out" ] && : > "$refused_out"
             local max base version reason below=0 unmarked=0 allowlisted=0 unknown=0 skipped=0 examined=0
             local applied_rows=0 max_label
             # The highest applied version comes from the SAME set this function
@@ -1970,6 +1979,7 @@ jobs:
                 fi
                 unknown=$((unknown + 1))
                 echo "  ? UNCOMPARABLE: ${base} -- the ledger holds ${applied_rows} applied version(s) and not one of them is numeric, so there is no highest applied version to order against."
+                [ -n "$refused_out" ] && printf '%s\n' "$base" >> "$refused_out"
                 continue
               fi
               # A version this cannot compare is FATAL, not skipped. Two ways it
@@ -1979,6 +1989,7 @@ jobs:
               if ! printf '%s' "$version" | grep -qE '^[0-9]+$' || [ "${#version}" -ne "${#max}" ]; then
                 unknown=$((unknown + 1))
                 echo "  ? UNCOMPARABLE: ${base} -- version '${version}' cannot be ordered against the highest applied version ${max}. Same-width numeric timestamps are what makes filename order mean chronological order."
+                [ -n "$refused_out" ] && printf '%s\n' "$base" >> "$refused_out"
                 continue
               fi
               [[ "$version" < "$max" ]] || continue
@@ -2000,6 +2011,7 @@ jobs:
               else
                 unmarked=$((unmarked + 1))
                 echo "  x OUT-OF-ORDER: ${base} (version ${version}) sorts BELOW the highest applied version ${max} and carries no '-- OUT-OF-ORDER-OK: <reason>' line, at column one, with a non-empty reason, and is not on the OR-T2147 allowlist."
+                [ -n "$refused_out" ] && printf '%s\n' "$base" >> "$refused_out"
               fi
             done <<< "$files"
             # OR-T2152. Say WHICH of the two empty-max cases this run was. A
@@ -2122,18 +2134,41 @@ jobs:
           # a different database than the one being written to. It does its own
           # already-applied skip, with the same expression that loop uses, so
           # the two cannot select different files.
-          if [ -n "$TREE_FILES" ] && ! out_of_order_scan "$APPLIED" "$TREE_FILES" "$MIG_DIR"; then
-            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the order guard refused this run and NOTHING was applied. Two different things cause this and they have DIFFERENT remedies. (1) A pending file numbered BELOW the highest applied version named in the scan above, carrying no acknowledgement. It would run against a database already past it, where an absolute REVOKE, a DROP IF EXISTS or an UPDATE whose WHERE clause a later migration changed can silently undo later work. If that file has NEVER been applied in ANY environment, give it a new unused timestamp above the highest applied version. If it is ALREADY APPLIED somewhere else, DO NOT rename it: renaming changes its version, the environment that already ran it no longer finds that version in its ledger, and it applies the file a SECOND time, which is safe only if the migration is idempotent and nothing in this repo requires or checks that. For that case add a line at column one reading -- OUT-OF-ORDER-OK: followed by why applying it late is correct here. (2) A version the guard could not compare, listed above as UNCOMPARABLE. Give the file the same-width numeric timestamp prefix every other migration uses; I-could-not-check is never treated as clean. Do not switch this check off: filename order is a within-run property and cannot be a cross-run guarantee (OR-T0419, OR-T1481)."
-            exit 1
+          #
+          # OR-T2362. Before this change a single refused file aborted the
+          # WHOLE run: every OTHER pending file, safe or not, queued behind it
+          # and was blocked too, so one bad migration froze the entire
+          # backlog. Now the guard names the refused file(s) in REFUSED_FILE
+          # and the run continues: the apply loop below skips only those
+          # files by name and still applies every safe sibling. The run still
+          # ends in failure if anything was refused (see the end of the apply
+          # loop), so deploy still does not ship on a refused file. Only the
+          # blast radius of one bad file changes, not the safety property.
+          REFUSED_FILE=$(mktemp)
+          if [ -n "$TREE_FILES" ] && ! out_of_order_scan "$APPLIED" "$TREE_FILES" "$MIG_DIR" "$OUT_OF_ORDER_ALLOWLIST" "$REFUSED_FILE"; then
+            echo "::warning::the order guard refused one or more files on ${SUPABASE_REF}. They are named below and will be SKIPPED; every other pending file still applies. This run still ends in failure so deploy does not ship it. Two different things cause a refusal and they have DIFFERENT remedies. (1) A pending file numbered BELOW the highest applied version named in the scan above, carrying no acknowledgement. It would run against a database already past it, where an absolute REVOKE, a DROP IF EXISTS or an UPDATE whose WHERE clause a later migration changed can silently undo later work. If that file has NEVER been applied in ANY environment, give it a new unused timestamp above the highest applied version. If it is ALREADY APPLIED somewhere else, DO NOT rename it: renaming changes its version, the environment that already ran it no longer finds that version in its ledger, and it applies the file a SECOND time, which is safe only if the migration is idempotent and nothing in this repo requires or checks that. For that case add a line at column one reading -- OUT-OF-ORDER-OK: followed by why applying it late is correct here. (2) A version the guard could not compare, listed above as UNCOMPARABLE. Give the file the same-width numeric timestamp prefix every other migration uses; I-could-not-check is never treated as clean. Do not switch this check off: filename order is a within-run property and cannot be a cross-run guarantee (OR-T0419, OR-T1481, OR-T2362)."
+            while IFS= read -r REFUSED_NAME; do
+              [ -n "$REFUSED_NAME" ] || continue
+              echo "::error title=Migration refused by the order guard::${REFUSED_NAME} sorts out of order or is uncomparable, see the ORDER SCAN and warning above. Skipped, not applied, this run."
+            done < "$REFUSED_FILE"
           fi
           echo
 
           # For each migration file, apply if not in the applied set
           APPLIED_COUNT=0
+          REFUSED_SKIPPED=0
           for FILE in $(ls "$MIG_DIR"/*.sql 2>/dev/null | sort); do
             BASENAME=$(basename "$FILE")
             VERSION="${BASENAME%%_*}"
             if echo "$APPLIED" | grep -qx "$VERSION"; then
+              continue
+            fi
+            # OR-T2362. The order guard above named this file in REFUSED_FILE
+            # rather than aborting the whole run. Skip only this file; every
+            # other pending file still gets a chance to apply.
+            if grep -qxF "$BASENAME" "$REFUSED_FILE" 2>/dev/null; then
+              echo "  x SKIPPED (refused by the order guard, see annotations above): ${BASENAME}"
+              REFUSED_SKIPPED=$((REFUSED_SKIPPED + 1))
               continue
             fi
             echo "-- applying ${BASENAME} --"
@@ -2232,8 +2267,13 @@ jobs:
             APPLIED_COUNT=$((APPLIED_COUNT + 1))
           done
 
+          rm -f "$REFUSED_FILE"
           echo
-          echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
+          echo "-- ${APPLIED_COUNT} migration(s) applied this run, ${REFUSED_SKIPPED} refused and skipped --"
+          if [ "$REFUSED_SKIPPED" -gt 0 ]; then
+            echo "::error::APPLY INCOMPLETE on ${SUPABASE_REF}: ${REFUSED_SKIPPED} file(s) were refused by the order guard and skipped (named above). ${APPLIED_COUNT} safe file(s) were still applied. This run fails so deploy does not ship it; fix the refused file(s) per the guidance above and re-run (OR-T2362)."
+            exit 1
+          fi
 
   account-deletion-cascade:
     name: Account deletion clears vault meta (DEV-0323)
