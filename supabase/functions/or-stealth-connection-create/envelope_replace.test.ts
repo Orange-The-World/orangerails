@@ -237,6 +237,35 @@ Deno.test('with no coverage recorded, behaviour is what it was before ranges exi
   );
 });
 
+Deno.test('an omitted birthday preserves the stored birthday during replacement', async () => {
+  const db = dbWithCoverage();
+  const { client } = makeClient(db);
+
+  const result = await applyEnvelopeReplacement(client, CONNECTION, {
+    sealed_envelope: NEW_ENVELOPE,
+  });
+
+  assertEquals(isEnvelopeReplacementError(result), false, JSON.stringify(result));
+  assertEquals(
+    db.connections[0].wallet_birthday_plaintext,
+    '2024-01-01',
+    'an omitted birthday must not clear the stored value',
+  );
+});
+
+Deno.test('an explicit null clears the stored birthday during replacement', async () => {
+  const db = dbWithCoverage();
+  const { client } = makeClient(db);
+
+  const result = await applyEnvelopeReplacement(client, CONNECTION, {
+    sealed_envelope: NEW_ENVELOPE,
+    wallet_birthday_plaintext: null,
+  });
+
+  assertEquals(isEnvelopeReplacementError(result), false, JSON.stringify(result));
+  assertEquals(db.connections[0].wallet_birthday_plaintext, null);
+});
+
 // ── 3. a finding, not a fix: the birthday move the coverage map handled ────
 
 Deno.test('a birthday moved below every recorded range already resumed at the birthday', async () => {
