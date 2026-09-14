@@ -141,7 +141,7 @@ Deno.test('retireConnRace: sets retirement_reason without the max-attempts prefi
 Deno.test('fetchPendingBatch: filters processed_at AND opk_deferred_at as null', async () => {
   const isFilters: Array<[string, unknown]> = [];
 
-  const mockClient = {
+  const mockClient = chainable({
     from(_table: string) {
       const chain = {
         select(_cols: string) { return chain; },
@@ -156,7 +156,7 @@ Deno.test('fetchPendingBatch: filters processed_at AND opk_deferred_at as null',
       };
       return chain;
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   await fetchPendingBatch(mockClient as any, 20);
@@ -173,7 +173,7 @@ Deno.test('fetchPendingBatch: filters processed_at AND opk_deferred_at as null',
 // ── handleEvent: deferred return when opk_public is null ─────────────
 
 Deno.test('handleEvent: returns deferred when subaccount has no opk_public', async () => {
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -195,7 +195,7 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
       };
       return chain;
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-1',
@@ -223,7 +223,7 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
 Deno.test('handleEvent: dispatches errored event, reconciles connection to error, returns processed', async () => {
   let updateCalled = false;
 
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -254,7 +254,7 @@ Deno.test('handleEvent: dispatches errored event, reconciles connection to error
       };
       return chain;
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-err-1',
