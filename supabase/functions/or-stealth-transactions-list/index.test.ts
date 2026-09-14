@@ -37,6 +37,7 @@ import {
   nextCursorFrom,
   isBlindIndexHex,
   isUuid,
+  validateCursorOrResponse,
 } from './index.ts';
 import type { PageCursor } from './index.ts';
 
@@ -75,6 +76,42 @@ Deno.test('isUuid rejects a uuid followed by a newline', () => {
   assert(!isUuid(VALID_UUID.slice(0, 35)));
   assert(!isUuid(''));
   assert(!isUuid(null));
+});
+
+// ── the HTTP boundary itself, not just the predicate (OR-T1144) ─────────
+//
+// isBlindIndexHex rejecting a trailing newline proves the predicate is
+// exact. It does not prove the request handler actually answers 400 for a
+// caller who sends one: that requires driving the same code path the
+// handler drives. validateCursorOrResponse IS that code path (the handler
+// calls it directly, unchanged), so asserting on its Response here is
+// asserting on the real HTTP status a caller would receive.
+
+Deno.test('a cursor with 64 hex characters followed by a newline is rejected with HTTP 400', () => {
+  const res = validateCursorOrResponse(
+    { before_block: 800, before_txid_blind_index_hex: VALID_BLIND_INDEX + '\n' },
+    {},
+  );
+  assert(res !== null, 'a trailing-newline blind index must be rejected, not silently accepted');
+  assertEquals(res!.status, 400);
+});
+
+Deno.test('a well-formed cursor (both halves, valid hex) is accepted (null, no 400)', () => {
+  const res = validateCursorOrResponse(
+    { before_block: 800, before_txid_blind_index_hex: VALID_BLIND_INDEX },
+    {},
+  );
+  assertEquals(res, null);
+});
+
+Deno.test('a half cursor (before_block with no before_txid_blind_index_hex) is rejected with HTTP 400', () => {
+  const res = validateCursorOrResponse({ before_block: 800 }, {});
+  assert(res !== null);
+  assertEquals(res!.status, 400);
+});
+
+Deno.test('no cursor at all (neither half) is accepted (null, no 400)', () => {
+  assertEquals(validateCursorOrResponse({}, {}), null);
 });
 
 interface Row {
