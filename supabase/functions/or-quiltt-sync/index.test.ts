@@ -219,6 +219,128 @@ Deno.test('handleEvent: dispatches errored event, reconciles connection to error
   assertEquals(updateCalled, true, 'must call update on connections table to flip status to error');
 });
 
+// ── reconcileConnectionError: ordering guard (OR-T2694) ────────────────
+//
+// OR-T2694: reconcileConnectionError used to write status='error'
+// unconditionally. An errored event stuck retrying routing resolution stays
+// at its original queue position (received_at never changes on retry), so it
+// can be dispatched AFTER a newer successful event for the same connection
+// already ran reconcileConnectionSuccess and flipped it to 'active'. These
+// tests are the regression guard: they fail if the updated_at/received_at
+// comparison is removed.
+
+Deno.test('reconcileConnectionError: does not regress status when a newer success already reconciled the connection', async () => {
+  let connectionsUpdateCalled = false;
+
+  const mockClient = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select() { return chain; },
+        eq()     { return chain; },
+        is()     { return chain; },
+        order()  { return chain; },
+        limit()  { return chain; },
+        update(_patch: unknown) {
+          if (table === 'connections') connectionsUpdateCalled = true;
+          return chain;
+        },
+        maybeSingle() {
+          if (table === 'connections') {
+            // Connection was already reconciled to active AFTER this event
+            // was received: updated_at is newer than ev.received_at below.
+            return Promise.resolve({
+              data: { id: 'conn-or-1', updated_at: '2026-09-14T12:00:00.000Z' },
+              error: null,
+            });
+          }
+          if (table === 'platforms') {
+            return Promise.resolve({ data: { sink_format: 'json' }, error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-stale-err',
+    event_type:    'connection.synced.errored.repairable',
+    payload:       { record: { id: 'quiltt-conn-1' } },
+    platform_id:   'plat-1',
+    subaccount_id: 'sub-1',
+    attempts:      3,
+    // Older than the connection's updated_at above: this event was received
+    // before a newer success already reconciled the connection to active.
+    received_at:   '2026-09-14T11:00:00.000Z',
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const result = await reconcileConnectionError(mockClient as any, ev, 'sub-1');
+  assertEquals(result, null, 'must return null (processed, no error) rather than surface a failure');
+  assertEquals(
+    connectionsUpdateCalled,
+    false,
+    'must NOT write status=error when a newer success already reconciled this connection',
+  );
+});
+
+Deno.test('reconcileConnectionError: still flips status to error in the ordinary in-order case', async () => {
+  let connectionsUpdateCalled = false;
+
+  const mockClient = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select() { return chain; },
+        eq()     { return chain; },
+        is()     { return chain; },
+        order()  { return chain; },
+        limit()  { return chain; },
+        update(_patch: unknown) {
+          if (table === 'connections') connectionsUpdateCalled = true;
+          return chain;
+        },
+        maybeSingle() {
+          if (table === 'connections') {
+            // Connection's last update is OLDER than this errored event:
+            // no newer success has run, the write must proceed as normal.
+            return Promise.resolve({
+              data: { id: 'conn-or-1', updated_at: '2026-09-14T09:00:00.000Z' },
+              error: null,
+            });
+          }
+          if (table === 'platforms') {
+            return Promise.resolve({ data: { sink_format: 'json' }, error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-inorder-err',
+    event_type:    'connection.synced.errored.repairable',
+    payload:       { record: { id: 'quiltt-conn-1' } },
+    platform_id:   'plat-1',
+    subaccount_id: 'sub-1',
+    attempts:      0,
+    received_at:   '2026-09-14T11:00:00.000Z',
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const result = await reconcileConnectionError(mockClient as any, ev, 'sub-1');
+  assertEquals(result, null, 'reconcileConnectionError succeeds (string|null contract)');
+  assertEquals(
+    connectionsUpdateCalled,
+    true,
+    'must still write status=error in the ordinary case where no newer success has run',
+  );
+});
+
 // ── reDriveReadyDeferrals ─────────────────────────────────────────────
 //
 // Guards for the three-step sweep that re-admits OPK-deferred rows
