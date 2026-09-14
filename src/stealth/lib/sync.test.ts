@@ -2352,6 +2352,81 @@ describe('runSync , confirmation buffer and coverage watermark', () => {
     expect(CONFIRMATION_DEPTH).toBe(6);
   });
 
+  // OR-T1117. A sync that scans nothing can still write a coverage range
+  // claiming it scanned something, because the widget's write guard used to
+  // compare result.lastBlockScanned (an ECHO of the stored cursor on the
+  // short-circuit path) back against that same stored cursor -- a
+  // comparison that is a tautology on exactly this path. The fix adds an
+  // explicit scanned:boolean; these two tests prove it is set correctly on
+  // both return sites so a caller gating on it is actually safe.
+  it('signals scanned:false on the short-circuit path (OR-T1117 worked example)', async () => {
+    // Exact numbers from the ticket. A connection's stored cursor sits at
+    // the old raw chain tip, 900_000. The next sync's buffered ceiling is
+    // chainTip(900_001) - CONFIRMATION_DEPTH(6) = 899_995, which is BELOW
+    // the stored cursor, so fromHeight (900_001) > tip (899_995) and the
+    // short circuit fires having read zero filters.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'confirmation-buffer-short-circuit',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    let filterCalled = false;
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 900_000,
+      fetchTip: async () => 900_001,
+      fetchFilter: async () => {
+        filterCalled = true;
+        return null;
+      },
+      fetchBlock: async () => { throw new Error('should not be called'); },
+      matcher: { matchAny: () => false },
+    });
+
+    expect(filterCalled).toBe(false);
+    // The result echoes the stored cursor unchanged. THIS is the value the
+    // pre-fix widget guard compared back against the same stored cursor --
+    // the two sides are identical on this path, which is why that
+    // comparison could never catch the defect. The explicit flag below is
+    // the only honest signal.
+    expect(result.lastBlockScanned).toBe(900_000);
+    expect(result.scanned).toBe(false);
+  });
+
+  it('signals scanned:true on a normal completion, so a caller may record coverage', async () => {
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'normal-completion-scanned-flag',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 910_000,
+      lastBlockScanned: 910_000,
+      fetchTip: async () => 910_001 + CONFIRMATION_DEPTH,
+      fetchFilter: async () => null,
+      fetchBlock: async () => { throw new Error('should not be called'); },
+      matcher: { matchAny: () => false },
+    });
+
+    expect(result.scanned).toBe(true);
+  });
+
   it('never advances the cursor past the highest block it actually scanned', async () => {
     // Three shapes, because the cursor is arrived at differently in each:
     // everything available, a filter producer that lags, and a permanent
