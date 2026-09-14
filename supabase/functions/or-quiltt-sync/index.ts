@@ -904,21 +904,21 @@ export async function reconcileConnectionError(
 
   // Prefer an exact quiltt_connection_id match; fall back to the legacy
   // NULL-id row only if no exact match exists -- same pattern as handleEvent.
-  let conn: { id: string } | null = null;
+  let conn: { id: string; updated_at: string | null } | null = null;
   const exactMatch = await client
     .from('connections')
-    .select('id')
+    .select('id, updated_at')
     .eq('subaccount_id', subaccountId)
     .eq('provider_type', 'quiltt')
     .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
   if (exactMatch.error) return `connection lookup failed: ${exactMatch.error.message}`;
   if (exactMatch.data) {
-    conn = exactMatch.data as { id: string };
+    conn = exactMatch.data as { id: string; updated_at: string | null };
   } else {
     const legacy = await client
       .from('connections')
-      .select('id')
+      .select('id, updated_at')
       .eq('subaccount_id', subaccountId)
       .eq('provider_type', 'quiltt')
       .is('quiltt_connection_id', null)
@@ -935,7 +935,32 @@ export async function reconcileConnectionError(
       );
       return null;
     }
-    conn = legacy.data as { id: string };
+    conn = legacy.data as { id: string; updated_at: string | null };
+  }
+
+  // OR-T2694: ordering guard. An errored event can be stuck retrying routing
+  // resolution (bumpAttempts) while staying at its original queue position,
+  // because received_at does not change on retry. So a newer
+  // connection.synced.successful.* event for the SAME connection can run
+  // reconcileConnectionSuccess (flip to 'active') before this older errored
+  // event finally gets dispatched. That success event is marked processed
+  // and never re-runs, so writing status='error' here would leave the
+  // connection stuck showing a stale, chronologically superseded error until
+  // the next real Quiltt sync. If the connection's updated_at is already
+  // newer than this event's received_at, a fresher reconciliation has
+  // already run: skip the write and mark this event processed as-is (return
+  // null), rather than regress a connection a newer success already fixed.
+  if (
+    ev.received_at &&
+    conn.updated_at &&
+    new Date(conn.updated_at).getTime() > new Date(ev.received_at).getTime()
+  ) {
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} updated_at ` +
+        `(${conn.updated_at}) is newer than this errored event's received_at ` +
+        `(${ev.received_at}); a newer reconciliation already ran, not regressing status to error`,
+    );
+    return null;
   }
 
   // DL-1445: record WHY, not just THAT. This block used to write status alone,
