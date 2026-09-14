@@ -194,3 +194,38 @@ export async function recordScanRange(client: any, req: ScanRangeRequest): Promi
   );
   return outcome;
 }
+
+/** The response field this module is allowed to add. See EnvelopeUpdateResponseBody. */
+export interface ScanRangeResponseFields {
+  scan_range_failed?: { code: string };
+}
+
+/**
+ * Decide what, if anything, a scan-range outcome adds to the caller's response,
+ * and report it to Sentry when it is loud (DL-1663).
+ *
+ * Only 'failed' produces output here. 'skipped' and 'rejected' are both healthy
+ * outcomes from the caller's point of view (opt-out and ownership rejection,
+ * respectively) and must not be reported or surfaced, or a rate of normal
+ * ownership rejections would be indistinguishable from a broken deployment.
+ *
+ * `report` is a required parameter, not a default: this module does not import
+ * reportError, so it stays free of the Sentry wiring and is trivial to unit
+ * test with a spy. index.ts supplies the real reportError. Only the error CODE
+ * goes into the thrown Error's message; the driver message (which can carry an
+ * app_user_id) never leaves the function log.
+ */
+export function reportScanRangeOutcome(
+  outcome: ScanRangeOutcome,
+  fnName: string,
+  req: Request,
+  report: (err: Error, fnName: string, req: Request) => void,
+): ScanRangeResponseFields {
+  if (outcome.status !== 'failed') return {};
+  report(
+    new Error(`record_stealth_scan_range failed: code=${outcome.code}`),
+    fnName,
+    req,
+  );
+  return { scan_range_failed: { code: outcome.code } };
+}
