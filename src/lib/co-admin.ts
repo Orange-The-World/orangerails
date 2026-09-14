@@ -427,8 +427,8 @@ export async function persistCoAdminGrant(params: {
     throw new CoAdminGrantIncompleteError(
       "This co-admin was added to your list, but the key that gives them access was not stored, " +
         "so they cannot open any of your data. They are shown in your list on purpose, so the " +
-        "attempt is visible rather than silent. Reload the page, then either try granting again " +
-        `or remove them from your list. (${formatError(wdkErr)})`,
+        "attempt is visible rather than silent. Try granting again or remove them from your list. " +
+        `(${formatError(wdkErr)})`,
     );
   }
 }
