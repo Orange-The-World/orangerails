@@ -403,7 +403,7 @@ Deno.test('reDriveReadyDeferrals: clears opk_deferred_at for OPK-ready subaccoun
   let inFilter: string[] = [];
   let callSeq = 0;
 
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       callSeq++;
       const seq = callSeq;
@@ -455,7 +455,7 @@ Deno.test('reDriveReadyDeferrals: clears opk_deferred_at for OPK-ready subaccoun
       }
       return { select() { return this; }, is() { return this; }, not() { return Promise.resolve({ data: [], error: null }); } };
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   const result = await reDriveReadyDeferrals(mockClient as any);
@@ -515,7 +515,7 @@ Deno.test('reDriveReadyDeferrals: re-drives sink platform subaccounts with no op
   let callSeq = 0;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(table: string) {
       callSeq++;
       const seq = callSeq;
@@ -581,7 +581,7 @@ Deno.test('reDriveReadyDeferrals: re-drives sink platform subaccounts with no op
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, is() { return this as any; }, not() { return Promise.resolve({ data: [], error: null }); } };
     },
-  };
+  });
 
   const result = await reDriveReadyDeferrals(mockClient);
   assertEquals(result.reDriven, 1, 'reDriven must be 1: the sink event is cleared');
