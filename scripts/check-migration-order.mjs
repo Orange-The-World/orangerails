@@ -7,9 +7,13 @@
  * .github/workflows/supabase-deploy.yml already refuses an out-of-order migration, and it has
  * a self test with ten cases. It runs on `push` to dev and prod. It does not run on a pull
  * request. So a pull request can be green, approved, and report mergeStateStatus CLEAN while
- * carrying a file that will make the apply job refuse the WHOLE run the moment it lands, not
- * just that one file: apply-migrations fails, check-pending-migrations fails, deploy is
- * skipped, and every unrelated change queued behind it stops with them.
+ * carrying a file that will make the apply job refuse it the moment it lands: apply-migrations
+ * still ends in failure, check-pending-migrations still reports UNKNOWN, and deploy is still
+ * skipped for that run (OR-T2362, 2026-09-14). Before OR-T2362 that refusal aborted the WHOLE
+ * apply before anything ran, so every OTHER pending file queued behind it was blocked too; now
+ * the apply job skips only the refused file by name and still applies every safe sibling, so
+ * the backlog shrinks instead of freezing, but the run this file lands in is still red and
+ * deploy still does not ship it.
  *
  * That is not hypothetical and it is not rare. On 2026-09-05 dev spent most of the day in
  * exactly that state, and a sweep of the open pull requests that afternoon found SIXTEEN more
