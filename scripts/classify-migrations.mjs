@@ -973,7 +973,7 @@ const WARNING_RULES = [
 export function classifySql(sql) {
   const scrubbed = scrub(sql);
   if (scrubbed.error) {
-    return { verdict: UNPARSEABLE, findings: [{ line: 0, id: 'UNPARSEABLE', why: scrubbed.error, snippet: '' }], notes: [] };
+    return { verdict: UNPARSEABLE, findings: [{ line: 0, id: 'UNPARSEABLE', why: scrubbed.error, snippet: '' }], warnings: [], notes: [] };
   }
 
   const sts = statements(scrubbed.text);
@@ -991,11 +991,13 @@ export function classifySql(sql) {
           snippet: '',
         },
       ],
+      warnings: [],
       notes: scrubbed.notes,
     };
   }
 
   const findings = [];
+  const warnings = [];
   const notes = [...scrubbed.notes];
 
   const applyRules = (flat, line) => {
@@ -1005,6 +1007,22 @@ export function classifySql(sql) {
           line,
           id: rule.id,
           why: rule.why,
+          snippet: flat.length > 160 ? `${flat.slice(0, 160)} ...` : flat,
+        });
+      }
+    }
+    // WARNINGS never touch findings or the verdict (OR-T1537 ruling, option
+    // C). Kept in a wholly separate array on purpose: this loop runs for
+    // every statement this script examines, top level and invoked routine
+    // bodies alike, so an UNBOUNDED_WRITE inside a called routine is caught
+    // the same way a DROP inside one already is.
+    for (const rule of WARNING_RULES) {
+      if (rule.test(flat)) {
+        warnings.push({
+          line,
+          id: rule.id,
+          why: rule.why,
+          token: rule.message(flat),
           snippet: flat.length > 160 ? `${flat.slice(0, 160)} ...` : flat,
         });
       }
@@ -1051,6 +1069,7 @@ export function classifySql(sql) {
               snippet: '',
             },
           ],
+          warnings: [],
           notes,
         };
       }
@@ -1068,6 +1087,7 @@ export function classifySql(sql) {
               snippet: '',
             },
           ],
+          warnings: [],
           notes,
         };
       }
@@ -1101,6 +1121,7 @@ export function classifySql(sql) {
   return {
     verdict: findings.length > 0 ? IRREVERSIBLE : REVERSIBLE,
     findings,
+    warnings,
     notes,
     statementCount: sts.length,
   };
