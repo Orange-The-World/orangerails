@@ -50,7 +50,7 @@
         },
         {
             "risk": "high",
-            "pattern": "(vault|deriv|kdf|hkdf|key-wrap|keyring|pqc|co-admin|rekey)"
+            "pattern": "(vault|deriv|kdf|hkdf|key-wrap|keyring|pqc|co-admin|rekey|crypto-fields)"
         },
         {
             "risk": "high",
