@@ -14,6 +14,58 @@
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
+// ── OR-T0256: shared chainable mock builder ───────────────────────────
+//
+// The hand-rolled Supabase mocks below only implement the query-builder
+// methods each test happens to call today. Twice already (see this
+// ticket's history) a production change added a call the mock did not implement (a new .in()),
+// and the failure surfaced as a TypeError in an UNRELATED, already-passing
+// test rather than anywhere near the real change.
+//
+// chainable() wraps a mock object in a Proxy so any method NOT explicitly
+// defined returns the same live chain instead of throwing. Every method a
+// test DOES define still behaves exactly as written; this only changes
+// what happens for a chain call nobody anticipated. It also auto-wraps
+// whatever an existing method returns (recursively), so wrapping just the
+// outermost client is enough -- individual chain/ch objects nested inside
+// from() do not need to be touched.
+// deno-lint-ignore no-explicit-any
+function chainable<T extends object>(target: T): T {
+  // deno-lint-ignore no-explicit-any
+  let proxy: any;
+  // deno-lint-ignore no-explicit-any
+  const handler: ProxyHandler<any> = {
+    get(obj, prop, receiver) {
+      if (typeof prop === 'symbol') return Reflect.get(obj, prop, receiver);
+      if (!(prop in obj)) {
+        // Never synthesize `.then`. If we did, an unfinished mock chain
+        // would become a thenable whose promise never settles, so
+        // `await chain.someUnimplementedCall()` would hang forever instead
+        // of either throwing (the old, loud failure mode) or resolving to
+        // the chain itself (plain-object await semantics, unaffected by
+        // this wrapper). undefined here keeps `await proxy` behaving like
+        // `await` on a normal, non-thenable object.
+        if (prop === 'then') return undefined;
+        // Unimplemented chain method (e.g. a new .in() or .not()): swallow
+        // the call and stay chainable instead of "X is not a function".
+        return (..._args: unknown[]) => proxy;
+      }
+      const value = obj[prop];
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const result = value.apply(receiver, args);
+        // Never wrap a live Promise -- terminal calls must resolve untouched.
+        if (result && typeof result === 'object' && !(result instanceof Promise)) {
+          return chainable(result);
+        }
+        return result;
+      };
+    },
+  };
+  proxy = new Proxy(target as Record<string, unknown>, handler);
+  return proxy as T;
+}
+
 // ── shouldRetireConnRace / retireConnRace (OR-T1902) ───────────────────
 //
 // OR-T1902: commit 5418820c bounded the 'deferred-conn-race' path with
@@ -54,7 +106,7 @@ Deno.test('retireConnRace: sets retirement_reason without the max-attempts prefi
   let patch: Record<string, unknown> | undefined;
   let targetId: string | undefined;
 
-  const mockClient = {
+  const mockClient = chainable({
     from(_table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -63,7 +115,7 @@ Deno.test('retireConnRace: sets retirement_reason without the max-attempts prefi
       };
       return chain;
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   await retireConnRace(mockClient as any, 'evt-aged-out');
