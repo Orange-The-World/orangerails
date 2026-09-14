@@ -35,7 +35,7 @@ type QueryResult = { data: unknown[] | null; error: unknown; count?: number | nu
 
 interface RecordedCall {
   table: string;
-  op: "select" | "update";
+  op: "select" | "update" | "delete";
   /** columns passed to .select(), which is what makes the row count readable */
   columns?: string;
   values?: Record<string, unknown>;
@@ -82,6 +82,8 @@ interface FakeOptions {
   otherUpdate?: QueryResult;
   /** what a select returns instead of rows, for the error cases */
   selectResult?: Record<string, QueryResult>;
+  /** what a delete returns instead of removing matching rows, for the error cases */
+  deleteResult?: Record<string, QueryResult>;
   /**
    * Rewrites a table's backing rows immediately AFTER each select on it, so a
    * test can model another session changing the table mid-walk. The real
@@ -127,6 +129,18 @@ function makeFakeClient(options: FakeOptions = {}) {
   const updateCallCounts: Record<string, number> = {};
 
   function resultFor(call: RecordedCall): QueryResult {
+    if (call.op === "delete") {
+      const override = options.deleteResult?.[call.table];
+      if (override) return override;
+      const stored = store[call.table] ?? [];
+      let removed = stored;
+      for (const f of call.filters) {
+        removed = removed.filter((row) => (row as Record<string, unknown>)[f.column] === f.value);
+      }
+      const removedSet = new Set(removed);
+      store[call.table] = stored.filter((row) => !removedSet.has(row));
+      return { data: removed, error: null };
+    }
     if (call.op === "select") {
       const stored = store[call.table] ?? [];
 
@@ -276,11 +290,23 @@ function makeFakeClient(options: FakeOptions = {}) {
           };
           return chain;
         },
+        delete() {
+          const call: RecordedCall = { table, op: "delete", filters: [] };
+          calls.push(call);
+          const chain = {
+            ...thenable(call),
+            eq(column: string, value: unknown) {
+              call.filters.push({ column, value });
+              return chain;
+            },
+          };
+          return chain;
+        },
       };
     },
   };
 
-  return { client: client as VaultPersistClient, calls };
+  return { client: client as VaultPersistClient, calls, store };
 }
 
 function rotateArgs(client: VaultPersistClient, clearMigrationKeys: () => void) {
@@ -350,6 +376,77 @@ describe("vault recovery: the rotated meta write", () => {
     await migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys));
 
     expect(clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes stale co-admin wrapped_data_keys under the owner's pre-rotation workspace key, and leaves a different owner's key alone", async () => {
+    const { client, calls, store } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          {
+            user_id: "user-1",
+            kem_secret_wrapped: null,
+            sig_secret_wrapped: null,
+            workspace_key_id: "wk-1",
+          },
+        ],
+        wrapped_data_keys: [
+          { data_key_id: "wk-1", recipient_user_id: "admin-1" },
+          { data_key_id: "wk-2", recipient_user_id: "admin-2" },
+        ],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    const wdkDelete = calls.find((c) => c.table === "wrapped_data_keys" && c.op === "delete");
+    expect(wdkDelete?.filters).toContainEqual({ column: "data_key_id", value: "wk-1" });
+    // The store proves it, not just the call: only the owner's own key is gone.
+    expect(store.wrapped_data_keys).toEqual([
+      { data_key_id: "wk-2", recipient_user_id: "admin-2" },
+    ]);
+  });
+
+  it("does not attempt a wrapped_data_keys delete when the owner has no workspace_key_id", async () => {
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          { user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: null, workspace_key_id: null },
+        ],
+      },
+    });
+
+    await migrateAndPersistRotatedVault(rotateArgs(client, vi.fn()));
+
+    expect(calls.some((c) => c.table === "wrapped_data_keys")).toBe(false);
+  });
+
+  it("throws and does NOT clear the migration keys when the wrapped_data_keys delete errors", async () => {
+    const clearMigrationKeys = vi.fn();
+    const { client } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [
+          {
+            user_id: "user-1",
+            kem_secret_wrapped: null,
+            sig_secret_wrapped: null,
+            workspace_key_id: "wk-1",
+          },
+        ],
+      },
+      deleteResult: { wrapped_data_keys: { data: null, error: { message: "boom" } } },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toBeTruthy();
+    // The meta write must not be reached, let alone succeed, once this throws.
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
 
   it("asks for the updated rows back, because the row count is the only signal", async () => {
