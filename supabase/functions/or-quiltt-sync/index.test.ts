@@ -9,10 +9,11 @@
  *     This test fails if the opk_deferred_at filter is removed (Auditor req 2).
  *   - handleEvent returns 'deferred' when subaccount.opk_public is null.
  *   - markDeferred writes opk_deferred_at, not processed_at.
+ *   - ambiguous legacy NULL rows do not absorb a second Quiltt connection.
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, resolveDataPullConnection, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── shouldRetireConnRace / retireConnRace (OR-T1902) ───────────────────
 //
@@ -924,6 +925,111 @@ Deno.test('handleEventSinkDelivery: non-23505 insert error surfaces as error str
     true,
     'a non-23505 insert error must surface as an error string, not be silently swallowed',
   );
+});
+
+// ── OR-T2475: an ambiguous legacy row must not absorb a second connection ──
+
+function legacyResolutionClient(upstreamConnectionIds: string[]) {
+  let connectionsCall = 0;
+  let insertedRow: Record<string, unknown> | null = null;
+  const client = {
+    from(table: string) {
+      if (table !== 'connections') throw new Error(`unexpected table: ${table}`);
+      connectionsCall++;
+      if (connectionsCall === 1) {
+        // Exact quiltt_connection_id lookup: miss.
+        // deno-lint-ignore no-explicit-any
+        const chain: any = {
+          select(_cols: string) { return chain; },
+          eq(_col: string, _value: unknown) { return chain; },
+          maybeSingle() { return Promise.resolve({ data: null, error: null }); },
+        };
+        return chain;
+      }
+      if (connectionsCall === 2) {
+        // Exactly one legacy NULL-id row exists.
+        // deno-lint-ignore no-explicit-any
+        const chain: any = {
+          select(_cols: string) { return chain; },
+          eq(_col: string, _value: unknown) { return chain; },
+          is(_col: string, _value: unknown) { return chain; },
+          order(_col: string, _opts: unknown) { return chain; },
+          limit(_count: number) {
+            return Promise.resolve({ data: [{ id: 'conn-legacy' }], error: null });
+          },
+        };
+        return chain;
+      }
+      if (connectionsCall === 3) {
+        return {
+          insert(row: Record<string, unknown>) {
+            insertedRow = row;
+            return {
+              select(_cols: string) {
+                return {
+                  single() {
+                    return Promise.resolve({ data: { id: 'conn-new' }, error: null });
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+      throw new Error(`unexpected connections call: ${connectionsCall}`);
+    },
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(new Response(JSON.stringify({
+    data: { connections: upstreamConnectionIds.map((id) => ({ id })) },
+  }), { status: 200, headers: { 'content-type': 'application/json' } }));
+
+  return {
+    client,
+    inserted: () => insertedRow,
+    restore: () => { globalThis.fetch = originalFetch; },
+  };
+}
+
+Deno.test('OR-T2475 repro: a second live Quiltt connection gets a new row instead of the legacy NULL row', async () => {
+  const mock = legacyResolutionClient(['quiltt-conn-first', 'quiltt-conn-second']);
+  try {
+    // deno-lint-ignore no-explicit-any
+    const result = await resolveDataPullConnection(
+      mock.client as any,
+      'sub-with-two-connections',
+      'quiltt-conn-second',
+      'profile-auth',
+    );
+
+    assertEquals(result, { id: 'conn-new' });
+    assertEquals(
+      mock.inserted()?.quiltt_connection_id,
+      'quiltt-conn-second',
+      'the incoming connection must be persisted on its own id-bound row',
+    );
+  } finally {
+    mock.restore();
+  }
+});
+
+Deno.test('OR-T2475: a sole upstream connection still uses the single legacy NULL row', async () => {
+  const mock = legacyResolutionClient(['quiltt-conn-only']);
+  try {
+    // deno-lint-ignore no-explicit-any
+    const result = await resolveDataPullConnection(
+      mock.client as any,
+      'sub-with-one-connection',
+      'quiltt-conn-only',
+      'profile-auth',
+    );
+
+    assertEquals(result, { id: 'conn-legacy' });
+    assertEquals(mock.inserted(), null, 'the unambiguous legacy fallback must not insert a duplicate');
+  } finally {
+    mock.restore();
+  }
 });
 
 // ── DL-0747 accounts query shape regression guard ─────────────────────────────
