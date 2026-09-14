@@ -1146,6 +1146,7 @@ export function classifyFile(path) {
 
 function report(results) {
   const counts = { [REVERSIBLE]: 0, [IRREVERSIBLE]: 0, [UNPARSEABLE]: 0 };
+  let warningCount = 0;
   for (const r of results) {
     counts[r.verdict] += 1;
     console.log(`== ${r.file}: ${r.verdict}`);
@@ -1155,11 +1156,22 @@ function report(results) {
       console.log(`   ${r.verdict}  ${where}  [${f.id}]  ${f.why}`);
       if (f.snippet) console.log(`     ${f.snippet}`);
     }
+    // OR-T1537 ruling, option C, the missing half named on OR-T1518's own
+    // step 6. This is the fixed, machine countable token: it must be the
+    // only thing on its log line, so counting how often it fires is one
+    // grep for "UNBOUNDED_WRITE: " rather than a parse of prose.
+    for (const w of r.warnings || []) {
+      warningCount += 1;
+      const where = w.line > 0 ? `line ${w.line}` : 'whole file';
+      console.log(`   WARNING  ${where}  [${w.id}]  ${w.why}`);
+      console.log(w.token);
+    }
   }
   console.log('');
   console.log(
     `EXAMINED ${results.length} file(s): ${counts[REVERSIBLE]} REVERSIBLE, ` +
-      `${counts[IRREVERSIBLE]} IRREVERSIBLE, ${counts[UNPARSEABLE]} UNPARSEABLE`,
+      `${counts[IRREVERSIBLE]} IRREVERSIBLE, ${counts[UNPARSEABLE]} UNPARSEABLE, ` +
+      `${warningCount} WARNING(s) (does not affect the verdict or the exit code)`,
   );
   return counts;
 }
@@ -1385,7 +1397,13 @@ function run(paths, jsonPath) {
           reversible: counts[REVERSIBLE],
           irreversible: counts[IRREVERSIBLE],
           unparseable: counts[UNPARSEABLE],
-          files: results.map((r) => ({ file: r.file, verdict: r.verdict, findings: r.findings })),
+          warnings: results.reduce((n, r) => n + (r.warnings ? r.warnings.length : 0), 0),
+          files: results.map((r) => ({
+            file: r.file,
+            verdict: r.verdict,
+            findings: r.findings,
+            warnings: r.warnings || [],
+          })),
         },
         null,
         2,
