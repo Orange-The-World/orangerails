@@ -1,0 +1,55 @@
+name: scheduled dev to prod promotion (OR-T1132 scratch negative-proof)
+
+# SCRATCH BRANCH, NEVER MERGED TO DEV. This is a trimmed copy of the
+# self-test logic in .github/workflows/scheduled-promotion.yml, carrying
+# ONLY the checkout and self-test steps. Every step that could call the
+# GitHub API, open a pull request, or escalate has been deliberately left
+# out, so this run has no side effect beyond itself. SHAPE_FILTER below is
+# deliberately broken (.head.label instead of .head.ref) to produce an
+# executed, observed-RED run for OR-T1132's negative-proof acceptance item.
+
+on:
+  push:
+    branches: ['senior-developer/or-t1132-negative-proof']
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    name: Self-test the candidate-selection logic (OR-T1132 negative proof)
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      SHAPE_FILTER: '{number, head: .head.label, head_repo: (.head.repo.full_name // "")}'
+      CANDIDATE_FILTER: '.[] | select(.head_repo == $repo and (.head == "dev" or (.head | startswith("release/"))))'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Self-test the candidate-selection logic
+        run: |
+          set -euo pipefail
+          OWN="${GH_REPO}"
+
+          RAW_FIXTURES='[
+            {"number":1,"head":{"ref":"dev","repo":{"full_name":"'"${OWN}"'"}}},
+            {"number":2,"head":{"ref":"release/x","repo":{"full_name":"'"${OWN}"'"}}},
+            {"number":3,"head":{"ref":"dev","repo":{"full_name":"someone-else/orangerails"}}},
+            {"number":4,"head":{"ref":"release/x","repo":{"full_name":"someone-else/orangerails"}}},
+            {"number":5,"head":{"ref":"fix/thing","repo":{"full_name":"'"${OWN}"'"}}},
+            {"number":6,"head":{"ref":"dev","repo":null}}
+          ]'
+
+          SHAPED="$(printf '%s' "${RAW_FIXTURES}" | jq -c "[.[] | ${SHAPE_FILTER}]")"
+          GOT="$(printf '%s' "${SHAPED}" | jq --arg repo "${OWN}" -c "[${CANDIDATE_FILTER}] | map(.number)")"
+          EXPECTED='[1,2]'
+
+          if [ "${GOT}" != "${EXPECTED}" ]; then
+            echo "::error::candidate-selection self-test failed. Expected candidates ${EXPECTED} (our dev, our release/x), the real filter returned ${GOT}."
+            echo "::error::decision logic self-test failed. The guard is broken, not passing."
+            exit 1
+          fi
+          echo "ok: 6 RAW pull-request-shaped fixtures through SHAPE_FILTER then CANDIDATE_FILTER -> ${GOT} (fork and unrelated heads correctly rejected)"
