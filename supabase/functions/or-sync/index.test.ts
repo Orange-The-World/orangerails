@@ -556,3 +556,30 @@ Deno.test('DL-1433: redactedUpstreamDetail strips partial numeric refs (card-end
   assert(!out.includes('5678'), 'partial numeric ref must not appear in redacted output');
   assertEquals(out.includes('[redacted]'), true, 'numeric placeholder must be present');
 });
+
+// PR #957 was blocked by the Auditor here: the narrowed rule stopped after the
+// FIRST digit group following a keyword, so a value written as several groups
+// only had its first group redacted. This pins the fix: the whole run,
+// including groups separated by spaces or hyphens, must be gone.
+Deno.test('DL-1433: redactedUpstreamDetail redacts every group of a multi-group account value, not just the first', () => {
+  const out = redactedUpstreamDetail('Account 1234-5678-9012-3456 declined by issuer');
+  assert(!out.includes('1234'), 'first group must not survive');
+  assert(!out.includes('5678'), 'second group must not survive');
+  assert(!out.includes('9012'), 'third group must not survive');
+  assert(!out.includes('3456'), 'fourth group must not survive');
+  assertEquals(out.includes('[redacted]'), true, 'numeric placeholder must be present');
+});
+
+// Acceptance criterion 2 (QA, 2026-08-28): a benign upstream message must not
+// be reduced to an empty or meaningless line. The old blanket \d{4,} rule
+// stripped these numbers too, even with no PII or account context anywhere
+// in the line. Byte-identical survival, not just "still has some words".
+Deno.test('DL-1433: redactedUpstreamDetail leaves a retry-after value untouched with no account/card context', () => {
+  const input = 'Rate limited by upstream, retry after 30 seconds';
+  assertEquals(redactedUpstreamDetail(input), input, 'a benign retry-after message must survive byte-identical');
+});
+
+Deno.test('DL-1433: redactedUpstreamDetail leaves an HTTP-status-adjacent error code untouched with no account/card context', () => {
+  const input = 'Upstream returned error code 5032 for this request';
+  assertEquals(redactedUpstreamDetail(input), input, 'a benign error-code message must survive byte-identical');
+});
