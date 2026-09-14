@@ -77,6 +77,31 @@ interface SealedTransactionInput {
   txid_blind_index_hex: string;
 }
 
+/**
+ * The sealed UTXO set built by sync.ts's in-run tracker (OR-T0049 PR 2).
+ * Opaque end to end: this function stores and returns the bytes without
+ * ever parsing or decrypting them, exactly like SealedTransactionInput
+ * above. Optional so every existing caller (which does not send this yet)
+ * is unaffected.
+ */
+interface SealedUtxosInput {
+  version: 1;
+  algorithm: 'AES-256-GCM';
+  iv_b64: string;
+  ciphertext_b64: string;
+}
+
+function isSealedUtxosInput(x: unknown): x is SealedUtxosInput {
+  if (!x || typeof x !== 'object') return false;
+  const o = x as Record<string, unknown>;
+  return (
+    o.version === 1 &&
+    o.algorithm === 'AES-256-GCM' &&
+    typeof o.iv_b64 === 'string' &&
+    typeof o.ciphertext_b64 === 'string'
+  );
+}
+
 interface TransactionsStoreRequestBody {
   connection_id?: string;
   app_user_id?: string;
@@ -88,6 +113,14 @@ interface TransactionsStoreRequestBody {
    * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
    */
   widget_token?: string;
+  /**
+   * The sealed UTXO set as of this sync run (OR-T0049 PR 2), optional.
+   * When present and well-formed, persisted via upsert_stealth_utxos keyed
+   * to the same bounded cursor height this call would otherwise return, so
+   * a future sync can fetch it (or-stealth-utxos-fetch) and seed its
+   * in-run matcher instead of starting from an empty UTXO map.
+   */
+  sealed_utxos?: SealedUtxosInput;
 }
 
 interface TransactionsStoreResponseBody {
@@ -96,6 +129,14 @@ interface TransactionsStoreResponseBody {
   total: number;
   skipped_duplicates: number;
   last_block_scanned: number | null;
+  /**
+   * Present ONLY when the caller sent sealed_utxos and the persist RPC
+   * failed. Absence means either no sealed_utxos was sent, or it was
+   * persisted successfully -- both healthy outcomes. The sealed
+   * transactions above are the primary record and are not rolled back on
+   * this failure.
+   */
+  utxo_persist_failed?: boolean;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -403,6 +444,29 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Failed to update connection sync metadata' }, 500, cors);
     }
 
+    // Optional UTXO-set persist (OR-T0049 PR 2a). Non-fatal: the sealed
+    // transactions above are already committed, and failing the whole
+    // request over this secondary write would discard them for no reason.
+    // scanned_to uses the same bounded height boundCursorAdvance already
+    // computed above, so the persisted UTXO set and the persisted cursor
+    // never disagree about what height they describe.
+    let utxo_persist_failed = false;
+    if (body.sealed_utxos !== undefined) {
+      if (!isSealedUtxosInput(body.sealed_utxos)) {
+        return jsonResponse({ error: 'sealed_utxos is malformed' }, 400, cors);
+      }
+      const scannedTo = Math.max(cursorAdvanceTo, storedCursor, 0);
+      const { error: utxoErr } = await ctx.serviceClient.rpc('upsert_stealth_utxos', {
+        p_connection_id: body.connection_id,
+        p_sealed_utxos: body.sealed_utxos,
+        p_scanned_to: scannedTo,
+      });
+      if (utxoErr) {
+        console.error('[or-stealth-transactions-store] upsert_stealth_utxos failed:', utxoErr);
+        utxo_persist_failed = true;
+      }
+    }
+
     // Return the effective stored cursor so callers can distinguish "cursor
     // advanced" from "no new rows, cursor unchanged." Derived only from stored
     // state: on a fresh connection with no stored cursor and zero inserts this
@@ -419,6 +483,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       total,
       skipped_duplicates,
       last_block_scanned: effectiveCursor,
+      ...(utxo_persist_failed ? { utxo_persist_failed: true } : {}),
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {
