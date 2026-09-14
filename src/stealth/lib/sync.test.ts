@@ -29,10 +29,12 @@ import {
   liveFetchTip,
   liveResolveBirthdayHeight,
   runSync,
+  shouldWriteScanCoverage,
   type BlockRecord,
   type WalletEnvelopePayload,
 } from './sync';
 import { deriveAddress, deriveScriptPubkeyBytes } from './derive';
+import { scanStartHeight } from './ranges';
 import type { StealthStage } from './postmessage';
 
 // BIP84 official test vector (https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki).
@@ -1298,18 +1300,54 @@ describe('live fetchers', () => {
   });
 });
 
-describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
-  // sync.tsx:298 guards the or-stealth-envelope-update POST with:
-  //
-  //   if (!useMock && result.lastBlockScanned > (envJson.last_block_scanned ?? -1))
-  //
-  // The correctness of that guard depends entirely on runSync returning the
-  // STORED cursor unchanged when the wallet is already current (fromHeight > tip).
-  // If runSync returned tip instead, the guard would be true and future syncs
-  // would silently skip blocks that were never scanned.
-  //
-  // These tests pin that contract at the library boundary so the route-level
-  // guard can be reasoned about in isolation.
+describe('cursor guard -- short-circuit path (sync.tsx write gate)', () => {
+  // The widget posts or-stealth-envelope-update only when
+  // shouldWriteScanCoverage({ scanned, lastBlockScanned, storedCursor,
+  // scannedFrom }) is true. That function refuses the short-circuit path
+  // (scanned === false) so a run that read zero filters cannot record a
+  // coverage range. These tests pin the contract at the library boundary
+  // the widget imports.
+
+  describe('shouldWriteScanCoverage', () => {
+    it('refuses a short-circuit result even when the old filledBelow numbers are true', () => {
+      // The tautology: scannedFrom <= stored and lastBlockScanned (echoed
+      // stored) >= scannedFrom. True for any gap-fill resume below the
+      // cursor. The scanned flag is what stops the write.
+      expect(shouldWriteScanCoverage({
+        scanned: false,
+        lastBlockScanned: 900_000,
+        storedCursor: 900_000,
+        scannedFrom: 899_998,
+      })).toBe(false);
+    });
+
+    it('writes when a real scan filled ground below the stored cursor', () => {
+      expect(shouldWriteScanCoverage({
+        scanned: true,
+        lastBlockScanned: 800_003,
+        storedCursor: 900_000,
+        scannedFrom: 800_000,
+      })).toBe(true);
+    });
+
+    it('writes when a real scan reached higher than the stored cursor', () => {
+      expect(shouldWriteScanCoverage({
+        scanned: true,
+        lastBlockScanned: 800_010,
+        storedCursor: 800_000,
+        scannedFrom: 800_001,
+      })).toBe(true);
+    });
+
+    it('does not write when a real scan neither advanced nor filled below', () => {
+      expect(shouldWriteScanCoverage({
+        scanned: true,
+        lastBlockScanned: 800_000,
+        storedCursor: 800_000,
+        scannedFrom: 800_001,
+      })).toBe(false);
+    });
+  });
 
   it('returns stored cursor unchanged when already at tip (fromHeight > tip)', async () => {
     const orStealthKey = randomKeyB64();
@@ -1396,6 +1434,134 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     // The fix: a caller gating on this field cannot record coverage for a
     // run that read nothing, no matter what lastBlockScanned equals.
     expect(result.scanned).toBe(false);
+  });
+
+  it('does not write cursor or coverage when a gap-fill resume sits inside the confirmation buffer (OR-T1117)', async () => {
+    // Concrete sequence from OR-T1117. A pre-buffer sync left the cursor
+    // at the old raw tip. Coverage's first uncovered height is two blocks
+    // below that. The next sync's buffered ceiling is CONFIRMATION_DEPTH
+    // below the new raw tip, so fromHeight > tip, zero filters are read,
+    // and lastBlockScanned comes back as the stored cursor. The old
+    // filledBelow comparison (scannedFrom <= stored && lastBlockScanned
+    // >= scannedFrom) is then a tautology: both sides are the stored
+    // cursor. That recorded [resume, stored] as covered -- exactly the
+    // reorg-window heights the buffer decided are not trustworthy yet.
+    //
+    // shouldWriteScanCoverage is what the widget calls before POSTing
+    // or-stealth-envelope-update. False here means neither a cursor write
+    // nor a record_stealth_scan_range coverage write is attempted.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'or-t1117-gap-fill-buffer-band',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 900_000;
+    const resumeFromHeight = 899_998;
+    const rawChainTip = 900_001;
+    const birthdayHeight = 800_000;
+    const fetchFilter = vi.fn();
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight,
+      lastBlockScanned: storedCursor,
+      resumeFromHeight,
+      fetchTip: async () => rawChainTip,
+      fetchFilter,
+      fetchBlock,
+    });
+
+    expect(rawChainTip - CONFIRMATION_DEPTH).toBe(899_995);
+    expect(resumeFromHeight).toBeGreaterThan(rawChainTip - CONFIRMATION_DEPTH);
+    expect(fetchFilter).not.toHaveBeenCalled();
+    expect(fetchBlock).not.toHaveBeenCalled();
+    expect(result.scanned).toBe(false);
+    expect(result.lastBlockScanned).toBe(storedCursor);
+
+    const scannedFrom = scanStartHeight({
+      birthdayHeight,
+      lastBlockScanned: storedCursor,
+      resumeFromHeight,
+    });
+    expect(scannedFrom).toBe(resumeFromHeight);
+
+    // Prove the pre-fix comparison WOULD have fired on this run. If this
+    // is ever false, the test is no longer exercising the tautology.
+    const preFixFilledBelow =
+      scannedFrom <= storedCursor && result.lastBlockScanned >= scannedFrom;
+    expect(preFixFilledBelow).toBe(true);
+
+    expect(shouldWriteScanCoverage({
+      scanned: result.scanned,
+      lastBlockScanned: result.lastBlockScanned,
+      storedCursor,
+      scannedFrom,
+    })).toBe(false);
+  });
+
+  it('still writes coverage for a gap-fill that actually scanned below the stored cursor', async () => {
+    // The filledBelow arm is not itself wrong (OR-T1117). A run that
+    // walked filters below the stored cursor must still persist that
+    // range, even if it never overtakes the old tip.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'or-t1117-real-gap-fill',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 5,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const storedCursor = 900_000;
+    const resumeFromHeight = 800_000;
+    const birthdayHeight = 800_000;
+    const rawChainTip = 800_003 + CONFIRMATION_DEPTH;
+    const fakeFilter = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const zeroHashHex = bytesToHex(new Uint8Array(32));
+    const fetchFilter = vi.fn(async (h: number) => ({
+      height: h,
+      blockHashHex: zeroHashHex,
+      filter: fakeFilter,
+    }));
+    const fetchBlock = vi.fn();
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight,
+      lastBlockScanned: storedCursor,
+      resumeFromHeight,
+      fetchTip: async () => rawChainTip,
+      fetchFilter,
+      fetchBlock,
+      matcher: { matchAny: () => false },
+    });
+
+    expect(fetchFilter).toHaveBeenCalled();
+    expect(result.scanned).toBe(true);
+    expect(result.lastBlockScanned).toBeLessThan(storedCursor);
+
+    const scannedFrom = scanStartHeight({
+      birthdayHeight,
+      lastBlockScanned: storedCursor,
+      resumeFromHeight,
+    });
+    expect(shouldWriteScanCoverage({
+      scanned: result.scanned,
+      lastBlockScanned: result.lastBlockScanned,
+      storedCursor,
+      scannedFrom,
+    })).toBe(true);
   });
 
   it('returns stored cursor unchanged when tip is below stored cursor', async () => {
