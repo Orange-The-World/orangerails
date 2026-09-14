@@ -308,7 +308,7 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred rows 
   };
 
   // Build a simpler mock: step-1 promise returns empty.
-  const simpleMock = {
+  const simpleMock = chainable({
     from(_table: string) {
       return {
         select() { return this; },
@@ -328,7 +328,7 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred rows 
         },
       };
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   const result = await reDriveReadyDeferrals(simpleMock as any);
@@ -344,7 +344,7 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred subac
   let updateCalled = false;
   let callCount    = 0;
 
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       callCount++;
       const call = callCount;
@@ -388,7 +388,7 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred subac
       // unexpected table
       return chain;
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   const result = await reDriveReadyDeferrals(mockClient as any);
@@ -480,7 +480,7 @@ Deno.test('reDriveReadyDeferrals: clears opk_deferred_at for OPK-ready subaccoun
 });
 
 Deno.test('reDriveReadyDeferrals: returns error string when first query fails, does not throw', async () => {
-  const mockClient = {
+  const mockClient = chainable({
     from(_table: string) {
       return {
         select() { return this; },
@@ -492,7 +492,7 @@ Deno.test('reDriveReadyDeferrals: returns error string when first query fails, d
         },
       };
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   const result = await reDriveReadyDeferrals(mockClient as any);
