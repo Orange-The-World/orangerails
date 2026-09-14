@@ -959,6 +959,19 @@ export async function reconcileConnectionError(
       );
       return null;
     }
+    // OR-T2475: same ambiguity risk as handleEvent's data-pull path -- do not
+    // flip a row's status to 'error' when it may belong to a different, still
+    // healthy Quiltt connection.
+    const ambiguity = await hasOtherQuilttConnection(client, subaccountId, connectionId);
+    if (ambiguity.error) return ambiguity.error;
+    if (chooseFallbackConnection(legacy.data, ambiguity.seen) === 'create-new') {
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: error event's legacy row ${legacy.data.id} ` +
+          `for subaccount ${subaccountId} is ambiguous with another Quiltt connection; ` +
+          `skipping status update rather than guessing which connection this belongs to`,
+      );
+      return null;
+    }
     conn = legacy.data as { id: string };
   }
 
