@@ -319,10 +319,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Failed to verify connection' }, 500, cors);
     }
     if (!ownerRow) {
-      return jsonResponse({ error: 'Connection not found' }, 404, cors);
+      console.error('[or-stealth-transactions-list] connection not found:', body.connection_id);
+      return jsonResponse({ error: 'Not found' }, 404, cors);
     }
     if ((ownerRow.app_user_id as string) !== body.app_user_id) {
-      return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
+      // Return 404, not 403, matching or-source-wallet-lookup's ownership
+      // check: a real connection_id belonging to another caller must read the
+      // same as one that does not exist, so the status code cannot confirm the
+      // id is real. See OR-T1146.
+      console.error(
+        '[or-stealth-transactions-list] connection belongs to a different caller:',
+        body.connection_id,
+      );
+      return jsonResponse({ error: 'Not found' }, 404, cors);
     }
 
     // Count total rows for this connection. Returned on every page so the
