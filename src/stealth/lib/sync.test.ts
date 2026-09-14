@@ -451,6 +451,51 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     expect(result.txCount).toBe(0);
   });
 
+  it('advances lastBlockScanned to tip when filter coverage is complete and zero transactions match (OR-T0309)', async () => {
+    // A wallet with no matching activity in the scanned range is not a
+    // visible failure: txCount stays 0 either way. Without this assertion,
+    // a regression that pins the cursor at fromHeight instead of advancing
+    // it to tip would ship silently -- every subsequent sync would rescan
+    // the exact same range forever, at real RPC cost, with nothing in the
+    // UI to notice.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'no-activity-wallet',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    let blockCalled = false;
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 810_000,
+      lastBlockScanned: null,
+      fetchTip: async () => 810_010 + CONFIRMATION_DEPTH,
+      // Every height in range returns a real (non-null) filter, so
+      // coverage is complete -- the point being tested is that a complete
+      // scan with zero matches still advances the cursor to tip.
+      fetchFilter: async (h) => ({
+        height: h,
+        blockHashHex: '00'.repeat(32),
+        filter: new Uint8Array([1, 2, 3]),
+      }),
+      fetchBlock: async () => {
+        blockCalled = true;
+        throw new Error('should not be called: matcher never matches');
+      },
+      matcher: { matchAny: () => false },
+    });
+
+    expect(blockCalled).toBe(false);
+    expect(result.txCount).toBe(0);
+    expect(result.lastBlockScanned).toBe(810_010);
+  });
+
   // Condition 4 of issue #335: birthdayHeight outside [0, tip] must REJECT,
   // never clamp. Clamping would silently claim a scan range the user never
   // requested and is not recoverable; rejection is.
