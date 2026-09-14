@@ -30,7 +30,7 @@
  */
 
 import { encoding, importAesKey } from "./vault";
-import { deriveKeyringWrapKey } from "./key-derivation";
+import { deriveKeyringWrapKey, deriveCredentialsKey, deriveTransactionsKey } from "./key-derivation";
 
 // ------------------------------------------------------------------
 // Constants
@@ -77,7 +77,15 @@ export type DataKeyKind = "credentials" | "transactions";
  */
 export interface DataKeyEntry {
   generation: number;
-  /** Raw 32 random bytes, base64. Never derived from the MEK. */
+  /**
+   * Raw 32 bytes, base64.
+   *
+   * For new vaults: always a fresh random value, never derived from the MEK.
+   * For upgraded v2 vaults: generation 1 is the frozen v2 HKDF-derived value
+   * (see buildUpgradeKeyringFromV2). All subsequent generations (2, 3, ...) are
+   * random. The "never derived from MEK" invariant holds for everything written
+   * after the one-time upgrade.
+   */
   keyB64: string;
 }
 
@@ -579,4 +587,91 @@ export async function rewrapKeyringUnderNewMek(params: {
     keyringEpoch,
   });
   return { keyring, ciphertextB64, keyringEpoch };
+}
+
+// ------------------------------------------------------------------
+// v2-to-v3 upgrade: freeze existing derived keys as generation 1.
+// ------------------------------------------------------------------
+
+/**
+ * Build a v3 keyring that preserves continuity for an existing v2 vault.
+ *
+ * In v2, the credentials and transactions data keys are HKDF subkeys of the
+ * MEK. Every existing data row was encrypted under those derived values, and
+ * every row's data_key_generation column defaults to 1. For those rows to
+ * remain readable after the upgrade, generation 1 of the new keyring MUST
+ * hold the exact same byte values that the v2 HKDF derivation produced.
+ *
+ * After this call returns, those bytes are frozen into the keyring. The caller
+ * MUST NOT call this function again on the same vault, and MUST NOT re-derive
+ * those values from the MEK. Future data-key generations (2, 3, ...) are
+ * always random and are never derived from the MEK, so the "data keys are
+ * independent of the MEK" invariant holds for all generations after the upgrade.
+ *
+ * CRITICAL: the freeze uses the identical HKDF context strings and identical
+ * salt that the live v2 derivation uses. If either drifts between this call
+ * and the values actually written to pre-upgrade rows, the upgrade silently
+ * produces the wrong generation-1 key and makes every pre-upgrade row
+ * permanently unreadable, because there is no per-row sweep to repair them.
+ *
+ * The round-trip test in vault-envelope-v3.test.ts is the mechanical guard:
+ *   1. encrypt a known plaintext through TODAY's live deriveCredentialsKey path
+ *   2. call buildUpgradeKeyringFromV2
+ *   3. decrypt the stored ciphertext via dataKeyFor(keyring, 'credentials', 1)
+ *   4. assert the plaintext round-trips byte for byte
+ * That test MUST go red if the HKDF context or salt ever diverges. It MUST
+ * use the real pre-upgrade encryption call, not a value produced by the same
+ * freeze code under test, or a matching bug in both halves would hide the drift.
+ *
+ * @param mek           The unlocked v2 MEK (non-extractable HKDF CryptoKey).
+ * @param saltB64       The vault salt (user_vault_meta.vault_salt) -- the
+ *                      same value passed to Argon2id and all HKDF derivations.
+ * @param kemSecretB64  PQC KEM secret already wrapped in the vault, or null.
+ * @param sigSecretB64  PQC signing secret already wrapped in the vault, or null.
+ */
+export async function buildUpgradeKeyringFromV2(
+  mek: CryptoKey,
+  saltB64: string,
+  kemSecretB64: string | null,
+  sigSecretB64: string | null,
+): Promise<VaultKeyring> {
+  // Derive the same subkeys that every pre-upgrade row was encrypted under.
+  // deriveCredentialsKey and deriveTransactionsKey default to extractable=true,
+  // which is required so we can call crypto.subtle.exportKey('raw', ...).
+  const [credsKey, txnKey] = await Promise.all([
+    deriveCredentialsKey(mek, saltB64),
+    deriveTransactionsKey(mek, saltB64),
+  ]);
+
+  // Export the raw bytes. These are what the v3 keyring stores as generation 1.
+  // After this export the caller owns the bytes; neither this function nor any
+  // downstream path re-derives them from the MEK.
+  const [credsRaw, txnRaw] = await Promise.all([
+    crypto.subtle.exportKey("raw", credsKey),
+    crypto.subtle.exportKey("raw", txnKey),
+  ]);
+
+  const credsBytes = new Uint8Array(credsRaw);
+  const txnBytes = new Uint8Array(txnRaw);
+
+  if (credsBytes.length !== DATA_KEY_BYTES) {
+    throw new Error(
+      `Derived credentials key is ${credsBytes.length} bytes, expected ${DATA_KEY_BYTES}. ` +
+        "This should never happen with HKDF-SHA-256 at 256 bits.",
+    );
+  }
+  if (txnBytes.length !== DATA_KEY_BYTES) {
+    throw new Error(
+      `Derived transactions key is ${txnBytes.length} bytes, expected ${DATA_KEY_BYTES}. ` +
+        "This should never happen with HKDF-SHA-256 at 256 bits.",
+    );
+  }
+
+  return {
+    version: KEYRING_VERSION,
+    credentials: [{ generation: 1, keyB64: encoding.bytesToBase64(credsBytes) }],
+    transactions: [{ generation: 1, keyB64: encoding.bytesToBase64(txnBytes) }],
+    kemSecretB64,
+    sigSecretB64,
+  };
 }
