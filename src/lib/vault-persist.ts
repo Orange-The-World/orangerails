@@ -523,6 +523,17 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     .select("kem_secret_wrapped, sig_secret_wrapped, workspace_key_id")
     .eq("user_id", userId);
   if (storedMetaErr) throw storedMetaErr;
+  // A caller only reaches this function mid-rotation, which requires an
+  // existing user_vault_meta row. A .eq() select with no error still comes
+  // back as an empty array on zero rows (RLS edge case, transient read, a
+  // deleted row), and storedMeta below would then be undefined, so both
+  // drop checks compare against `undefined != null`, which is false, and
+  // the rotation proceeds as if there were nothing to drop. Refuse here,
+  // before either check, rather than let an unreadable row look like a
+  // vault with no PQC secrets to protect (OR-T2371).
+  if (!storedMetaRows || (storedMetaRows as unknown[]).length === 0) {
+    throw new Error(VAULT_META_GUARD_UNREADABLE_MESSAGE);
+  }
   const storedMeta = (
     storedMetaRows as Array<{
       kem_secret_wrapped: string | null;
