@@ -1318,6 +1318,29 @@ jobs:
           fi
           echo "classifier refuses the irreversible class, passes the reversible one, and refuses an empty list."
 
+      - name: Sweep every file in supabase/migrations (OR-T1696)
+        # Not a fixture proof: this runs the real classifier, as it exists on
+        # this ref, over every migration file that has ever been applied
+        # anywhere, so the change in verdicts is known rather than discovered
+        # on a prod dispatch. Report, not a gate: a non-zero exit here is
+        # EXPECTED (the tree holds applied drops) and must never fail the job.
+        run: |
+          set -uo pipefail
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+          mapfile -t MIGS < <(find supabase/migrations -name '*.sql' -type f | sort)
+          OUT=$(node scripts/classify-migrations.mjs "${MIGS[@]}" 2>&1) || true
+          {
+            echo ""
+            echo "### OR-T1696: full supabase/migrations sweep (${#MIGS[@]} files on disk)"
+            echo ""
+            echo "Command: \`node scripts/classify-migrations.mjs \$(find supabase/migrations -name '*.sql' -type f | sort)\`"
+            echo ""
+            echo '```'
+            echo "$OUT"
+            echo '```'
+          } >> "$DEMO"
+          cat "$DEMO"
+
       - name: Publish the demonstration to the pull request
         # The seats that review changes in this repo hold GitHub read tools and
         # no shell. An Actions log is not reachable from a review seat and the
