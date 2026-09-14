@@ -672,6 +672,21 @@ const PRIVILEGE_LIST_PREFIX =
   /\b(?:GRANT|REVOKE)\s+(?:[A-Za-z]+(?:\s*\([^()]*\))?\s*,\s*)*$/i;
 
 /**
+ * CREATE TRIGGER ... FOR EACH ROW EXECUTE FUNCTION name(args), and the legacy
+ * spelling EXECUTE PROCEDURE, name which routine to attach. Nothing is
+ * assembled at run time here: the routine identifier is written out in the
+ * file, same as any other call, and classifySql already reads that routine's
+ * body separately once it proves the trigger is invoked (see the routine scan
+ * in classifySql). Treating this EXECUTE as a dynamic-SQL statement made every
+ * migration that creates an ordinary trigger classify IRREVERSIBLE regardless
+ * of what the trigger actually does, which is exactly the false-positive
+ * noise that pushes a pipeline to route around a gate instead of trusting it.
+ * Anchored the same way as the GRANT/REVOKE exemption below: only the token
+ * immediately after EXECUTE is tested, never the whole statement.
+ */
+const TRIGGER_EXECUTE_ROUTINE = /^\s*(?:FUNCTION|PROCEDURE)\b/i;
+
+/**
  * True when this statement runs SQL that cannot be read from the file.
  *
  * GRANT EXECUTE and REVOKE EXECUTE name a privilege on a function. They run
@@ -694,8 +709,9 @@ function executeIsUnreadable(flat) {
   const re = /\bEXECUTE\b/gi;
   let m = re.exec(flat);
   while (m !== null) {
-    if (!PRIVILEGE_LIST_PREFIX.test(flat.slice(0, m.index))) {
-      const arg = executeArgument(flat.slice(m.index + 'EXECUTE'.length));
+    const rest = flat.slice(m.index + 'EXECUTE'.length);
+    if (!PRIVILEGE_LIST_PREFIX.test(flat.slice(0, m.index)) && !TRIGGER_EXECUTE_ROUTINE.test(rest)) {
+      const arg = executeArgument(rest);
       if (!splitTop(arg, '||').every(readablePiece)) return true;
     }
     m = re.exec(flat);
@@ -1188,7 +1204,20 @@ const EXPECTED = {
   // not a direct call), so both are kept rather than one standing in for the
   // other.
   '20990101000028_irreversible_routine_invoked_via_quoted_identifier_trigger.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 27 },
-  '20990101000029_irreversible_routine_invoked_via_quoted_identifier_trigger_with_space.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 24 },
+  // Line 23 is `begin`, not line 24's `truncate`: PL/pgSQL has no semicolon
+  // between BEGIN and the first statement in the block, so the splitter's one
+  // statement runs from BEGIN through the first `;`, and the reported line is
+  // where that statement starts. Fixtures 24 and 28 above hit the identical
+  // shape and are asserted at their own `begin` line for the same reason.
+  '20990101000029_irreversible_routine_invoked_via_quoted_identifier_trigger_with_space.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 23 },
+  // OR-T1518. CREATE TRIGGER ... EXECUTE FUNCTION names which routine to
+  // attach; it assembles no SQL at run time. Before this fixture existed,
+  // executeIsUnreadable treated that EXECUTE exactly like a dynamic plpgsql
+  // EXECUTE, so ANY migration creating an ordinary trigger classified
+  // IRREVERSIBLE no matter what the trigger did. This asserts the harmless
+  // case comes back REVERSIBLE with zero findings; 24/28/29 above already
+  // cover the case where the attached routine is genuinely dangerous.
+  '20990101000032_reversible_trigger_execute_function_is_not_dynamic_sql.sql': { verdict: REVERSIBLE, id: null },
   // OR-T1705. A dollar quoted block in ARGUMENT position (the cron.schedule
   // pattern) is a plain string constant, not a routine body and not a DO
   // block. These two assert both directions: a scheduled statement that is

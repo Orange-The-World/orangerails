@@ -166,7 +166,8 @@ jobs:
             echo "Target project: ${{ steps.t.outputs.supabase_ref }} (environment ${{ steps.t.outputs.environment_name }})"
             echo "Event: ${{ github.event_name }} on ${{ github.ref_name }}"
             echo "Dispatching actor: ${{ github.actor }}"
-            echo "This step ran (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "This summary was written at (UTC): $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "(that is when this step ran, not when the run was created; the two differ by queue time)"
             echo ""
             if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
               echo "Apply migrations requested: ${APPLY_MIGRATIONS:-false}"
@@ -187,8 +188,130 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # OR-T1801. The step above makes a MISSING reason loud. It does nothing about a
+      # reason that is present and worthless, which is the likelier failure: "x", or
+      # "redeploy", or yesterday's reason pasted forward, all produce a summary that is
+      # structurally identical to a correct one, so an approver cannot tell them apart.
+      #
+      # The predicate is written to a file HERE, proven able to refuse and able to pass
+      # against synthetic reasons, and then reused verbatim by the guard step below. A
+      # checker re-typed in the step that uses it is a checker nobody proved. This runs
+      # on every run of this workflow, pushes included, so the guard cannot rot into
+      # something that only ever says yes.
+      #
+      # It tests SHAPE, not wording, on purpose. The refusal sentence carried inside the
+      # reason input will be reworded, and a guard matching that sentence would quietly
+      # stop firing when it was. The floor is a timestamp a machine can parse, an explicit
+      # UTC marker, and enough text to be a restore point rather than a word.
+      - name: "Self-test: prove the restore point check can refuse and can pass"
+        run: |
+          set -uo pipefail
+          CHECK="${RUNNER_TEMP}/restore-point-check.sh"
+          cat > "$CHECK" <<'SH'
+          #!/usr/bin/env bash
+          # Reads a candidate reason on stdin.
+          # exit 0: it carries a restore point. exit 1: it does not, and why is on stderr.
+          REASON=$(cat)
+          COLLAPSED=$(printf '%s' "$REASON" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+          MIN_CHARS=40
+          if [ "${#COLLAPSED}" -lt "$MIN_CHARS" ]; then
+            echo "the reason is ${#COLLAPSED} characters long; a restore point needs at least ${MIN_CHARS}" >&2
+            exit 1
+          fi
+          STAMP=$(printf '%s' "$COLLAPSED" | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?' | head -n 1)
+          if [ -z "$STAMP" ]; then
+            echo "no timestamp shaped like YYYY-MM-DDTHH:MM appears anywhere in the reason" >&2
+            exit 1
+          fi
+          if ! date -u -d "$STAMP" >/dev/null 2>&1; then
+            echo "the timestamp '${STAMP}' is not a real date and time" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$COLLAPSED" | grep -Eq '(UTC|utc|[0-9]Z|\+00:?00)'; then
+            echo "the reason names no timezone; write the restore point in UTC (a trailing Z, the word UTC, or +00:00)" >&2
+            exit 1
+          fi
+          exit 0
+          SH
+          chmod +x "$CHECK"
+
+          refuses () {
+            if printf '%s' "$2" | bash "$CHECK" 2>/dev/null; then
+              echo "::error::self-test failed: ${1} was accepted as a restore point"
+              exit 1
+            fi
+            echo "refused, correctly: ${1}"
+          }
+
+          accepts () {
+            if ! printf '%s' "$2" | bash "$CHECK"; then
+              echo "::error::self-test failed: ${1} was refused, and it does carry a restore point"
+              exit 1
+            fi
+            echo "accepted, correctly: ${1}"
+          }
+
+          refuses "an empty reason" ""
+          refuses "a one word reason" "redeploy"
+          refuses "a long reason carrying no timestamp at all" "re-running this because the earlier deploy was cancelled by a merge train and the assets never shipped"
+          refuses "a timestamp with no timezone on it" "newest completed backup 2026-09-03 10:47, catalogue read 2026-09-03 11:05, 41 migrations, forward only"
+          refuses "a timestamp that is not a real date and time" "newest completed backup 2026-13-45T99:99Z, catalogue read 2026-13-45T99:99Z UTC, forward only, no undo"
+          accepts "the shape a prod dispatch is asked to carry" "APPROVE ONLY IF THE CLOCK NOW READS BEFORE 2026-09-03T16:47 UTC. LATER THAN THAT, REJECT. 41 migrations, forward only, no undo. Newest COMPLETED backup 2026-09-03T10:47Z, catalogue read 2026-09-03T11:05Z."
+          accepts "the same shape said in completely different words" "no undo on this batch. the restore point is the backup at 2026-09-03T10:47:00+00:00, catalogue read 2026-09-03T11:05:00+00:00."
+
+          echo "the restore point check refused 5 worthless reasons and accepted 2 good ones"
+
+      # OR-T1801. This refusal fires HERE, in target, and not in apply-migrations, for the
+      # same reason the summary above lives here: target has no environment binding of its
+      # own, so it runs BEFORE the supabase-prod pause. A refusal evaluated inside the
+      # paused job would be evaluated after the approval it exists to prevent.
+      # apply_migrations false is untouched: a redeploy writes to no database and needs no
+      # restore point. A push is untouched too, because a push cannot set this input.
+      - name: Refuse an apply whose reason carries no restore point
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.apply_migrations }}
+        env:
+          # Read through env, never interpolated into the script body, for the same reason
+          # as the step above: a dispatch input is attacker-controlled text.
+          RUN_REASON: ${{ inputs.reason }}
+        run: |
+          set -uo pipefail
+          CHECK="${RUNNER_TEMP}/restore-point-check.sh"
+          if [ ! -x "$CHECK" ]; then
+            echo "::error::the restore point checker is missing, so this apply was never checked. Refusing rather than assuming."
+            exit 1
+          fi
+
+          if WHY=$(printf '%s' "${RUN_REASON}" | bash "$CHECK" 2>&1); then
+            echo "The reason input carries a restore point. Continuing to the environment pause."
+            exit 0
+          fi
+
+          {
+            echo ""
+            echo "## :no_entry: Refused before the pause: this apply carries no restore point"
+            echo ""
+            echo "apply_migrations is ON and the reason input does not carry a restore point an"
+            echo "approver could check a backup age against: ${WHY}."
+            echo ""
+            echo "Nothing was applied and nothing was deployed on this run."
+            echo ""
+            echo "Dispatch again with a reason naming, in UTC, the newest COMPLETED backup on the"
+            echo "target project and when that catalogue was read. The shape:"
+            echo ""
+            echo '```text'
+            echo "APPROVE ONLY IF THE CLOCK NOW READS BEFORE 2026-09-03T16:47 UTC. LATER THAN THAT, REJECT."
+            echo "41 migrations, forward only, no undo. Newest COMPLETED backup 2026-09-03T10:47Z,"
+            echo "catalogue read 2026-09-03T11:05Z."
+            echo '```'
+            echo ""
+            echo "The check is on shape, not on wording: a timestamp a machine can parse, an"
+            echo "explicit UTC marker, and more than 40 characters. Reword the sentence freely."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::apply_migrations is on and the reason input carries no restore point: ${WHY}. Nothing applied, nothing deployed."
+          exit 1
+
   deploy:
-    needs: [target, check-pending-migrations, check-rls-policy-baseline]
+    needs: [target, check-pending-migrations, check-rls-policy-baseline, check-types-drift]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -327,6 +450,26 @@ jobs:
               done || true)
               echo "Targeted deploy: $(echo "$DEPLOY_FUNCS" | tr '\n' ' ')"
             fi
+          fi
+
+          # v1-rate's real serving deployment is a separate Supabase project
+          # (orbi-prod), reached through workers/api-gateway's own routing
+          # target. The copy this workflow would otherwise ship to
+          # lcdicqalreskibdfxkzb (orangerails-prod) has never served a live
+          # request: it holds zero rows in orbi_api_keys and orbi_usage_log,
+          # so every call to it 401s or 503s today. Keep deploying it to dev,
+          # where it is genuinely exercised; never redeploy it to
+          # orangerails-prod, or the next force push or workflow_dispatch full
+          # deploy silently recreates the stray deployment this exclusion
+          # exists to prevent.
+          PROD_EXCLUDE="v1-rate"
+          if [ "${{ steps.target.outputs.supabase_ref }}" = "lcdicqalreskibdfxkzb" ]; then
+            for EXCL in $PROD_EXCLUDE; do
+              if echo "$DEPLOY_FUNCS" | grep -qx "$EXCL"; then
+                echo "Excluding $EXCL from the orangerails-prod deploy set: it serves from orbi-prod, not this project."
+                DEPLOY_FUNCS=$(echo "$DEPLOY_FUNCS" | grep -vx "$EXCL" || true)
+              fi
+            done
           fi
 
           if [ -z "$DEPLOY_FUNCS" ]; then
@@ -764,12 +907,19 @@ jobs:
   # means an intentional RLS edit must update the baseline in the SAME PR, so
   # the diff is reviewed rather than silently absorbed.
   #
-  # SCOPE, stated so a green check is not read as more than it is: this
-  # compares the POLICY SET. It does not assert that row level security is
-  # switched ON, because pg_policies carries no relrowsecurity column and
-  # lists a table's policies whether or not RLS is enabled. Disabling RLS on
-  # a table changes not one byte of this baseline. That gap is tracked
-  # separately (OR-T1601) and is not closed here.
+  # SCOPE, stated so a green check is not read as more than it is: the
+  # comparison covers the POLICY SET and nothing else. It does not assert
+  # that row level security is switched ON, because pg_policies carries no
+  # relrowsecurity column and lists a table's policies whether or not RLS is
+  # enabled. Disabling RLS on a table changes not one byte of this baseline.
+  # That gap is closed by the SEPARATE step at the end of this job, which
+  # enumerates pg_class and asserts the enable bit directly (OR-T1601).
+  #
+  # The two are deliberately different shapes. The policy set is a BASELINE,
+  # because it legitimately differs per cluster and moves with every release.
+  # RLS being switched on is an INVARIANT: it should hold everywhere, always,
+  # and recording an exception as "expected" is precisely the failure a
+  # baseline invites and an assertion does not.
   #
   # Self-test runs first, against synthetic rows, and proves the diff can go
   # both red and green before the live comparison is trusted -- the same
@@ -810,9 +960,9 @@ jobs:
           # Three synthetic policies, the same shape as a live baseline row,
           # so this exercises the real comparison rather than a stand-in.
           cat > "$WORKDIR/baseline.tsv" <<'TSV'
-          public\tdemo_table\tdemo select\tSELECT\t{authenticated}\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\td41d8cd98f00b204e9800998ecf8427e
-          public\tdemo_table\tdemo insert\tINSERT\t{authenticated}\td41d8cd98f00b204e9800998ecf8427e\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-          public\tdemo_table\tdemo update\tUPDATE\t{authenticated}\tcccccccccccccccccccccccccccccccc\tcccccccccccccccccccccccccccccccc
+          public	demo_table	demo select	SELECT	{authenticated}	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	d41d8cd98f00b204e9800998ecf8427e
+          public	demo_table	demo insert	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          public	demo_table	demo update	UPDATE	{authenticated}	cccccccccccccccccccccccccccccccc	cccccccccccccccccccccccccccccccc
           TSV
 
           # GREEN: an identical set compares clean.
@@ -870,7 +1020,59 @@ jobs:
             exit 1
           fi
 
-          echo "self-test passed: the diff goes red on a removed policy, red on an added policy, red on a changed expression, red on a widened cmd, red on widened roles, and green on a match"
+          # RED: row level security switched OFF with the policy set left
+          # exactly as it was. This is the class the diff above structurally
+          # CANNOT see, so both halves are asserted here: the policy
+          # comparison must stay GREEN (that is the defect) and the
+          # enablement assertion must go RED (that is the fix). Proving only
+          # the second half would leave it unclear that the first is blind.
+          printf 'demo_table\tt\tf\t3\nother_table\tt\tf\t1\n' > "$WORKDIR/enablement-clean.tsv"
+          printf 'demo_table\tf\tf\t3\nother_table\tt\tf\t1\n' > "$WORKDIR/enablement-off.tsv"
+
+          if ! diff -u "$WORKDIR/baseline.tsv" "$WORKDIR/live-clean.tsv" >/dev/null; then
+            echo "::error::self-test failed: flipping the RLS enable bit must leave the policy comparison unchanged, and this fixture pair is unchanged"
+            exit 1
+          fi
+
+          if [ -n "$(awk -F'\t' '$2 != "t" { print $1 }' "$WORKDIR/enablement-clean.tsv")" ]; then
+            echo "::error::self-test failed: a table set with RLS enabled everywhere was reported as having it off"
+            exit 1
+          fi
+
+          if [ -z "$(awk -F'\t' '$2 != "t" { print $1 }' "$WORKDIR/enablement-off.tsv")" ]; then
+            echo "::error::self-test failed: a table with row level security switched OFF was reported as clean. That is the exact regression the policy baseline cannot see."
+            exit 1
+          fi
+
+          # RED: a table born with RLS off and no policies. It emits no
+          # pg_policies row at all, so the policy baseline is byte-identical
+          # and only an enumeration of pg_class can see it.
+          printf 'demo_table\tt\tf\t3\nother_table\tt\tf\t1\nnew_table\tf\tf\t0\n' > "$WORKDIR/enablement-newborn.tsv"
+          if [ -z "$(awk -F'\t' '$2 != "t" { print $1 }' "$WORKDIR/enablement-newborn.tsv")" ]; then
+            echo "::error::self-test failed: a new table created with RLS off and zero policies was reported as clean"
+            exit 1
+          fi
+
+          # RED / GREEN: OR-T1601 finding 2, the RESTRICTIVE-policy invariant.
+          # An empty report is the PASS state (green); any row in it is a
+          # RESTRICTIVE policy the assertion step below must fail on (red).
+          # This is deliberately not exercised through the diff above: a
+          # policy recreated AS PERMISSIVE with the same name, cmd, roles and
+          # expressions is byte-identical in every column that diff compares.
+          printf '' > "$WORKDIR/restrictive-clean.tsv"
+          printf 'public\tdemo_table\tdemo select\tSELECT\t{authenticated}\n' > "$WORKDIR/restrictive-found.tsv"
+
+          if [ -s "$WORKDIR/restrictive-clean.tsv" ]; then
+            echo "::error::self-test failed: an empty restrictive-policy report must be empty"
+            exit 1
+          fi
+
+          if [ ! -s "$WORKDIR/restrictive-found.tsv" ]; then
+            echo "::error::self-test failed: a RESTRICTIVE policy present live was reported as empty (clean)"
+            exit 1
+          fi
+
+          echo "self-test passed: the policy diff goes red on a removed policy, red on an added policy, red on a changed expression, red on a widened cmd, red on widened roles, and green on a match; the enablement assertion goes red on RLS switched off with the policy set unchanged, and red on a table born with RLS off and zero policies, both of which the policy diff reports as clean; and the restrictive-policy assertion goes red when a RESTRICTIVE policy is present and green when none are"
 
       - name: Compare live RLS policies to the committed baseline
         env:
@@ -972,7 +1174,202 @@ jobs:
             exit 1
           fi
 
-          echo "RLS policy set on ${SUPABASE_PROJECT_REF} matches ${BASELINE} (${BASELINE_COUNT} policies). This compares the POLICY SET only; it does not assert that RLS is enabled on any table."
+          echo "RLS policy set on ${SUPABASE_PROJECT_REF} matches ${BASELINE} (${BASELINE_COUNT} policies)."
+          echo "That is the POLICY SET only. Whether row level security is switched ON is asserted by the next step, not by this one."
+
+      # -------------------------------------------------------------------
+      # OR-T1601. The comparison above is blind to whether RLS is switched
+      # ON. pg_policies has no relrowsecurity column and joins nothing to
+      # pg_class, so disabling row level security on a table changes not one
+      # byte of the baseline: the job prints "matches", goes green, and the
+      # table is readable by anyone holding the grant.
+      #
+      # Measured on dev 2026-09-02: 52 base tables in schema public, all 52
+      # with RLS enabled, none forced, 13 carrying ZERO policies, and four of
+      # those thirteen with SELECT granted to the anonymous role. For those
+      # four, deny-all rests on the enable bit alone.
+      #
+      # An INVARIANT, not a second baseline. A committed per-cluster file
+      # would record "RLS is off on table X" as the expected state the moment
+      # anyone regenerated it, and would go red on every legitimate new table,
+      # which teaches people to regenerate without reading. This goes red only
+      # when RLS is actually off, and it sees a table created with RLS off and
+      # no policies, which emits no pg_policies row and is invisible to a
+      # policy baseline by construction.
+      #
+      # relforcerowsecurity is REPORTED and NOT asserted. It is off on all 52
+      # dev tables today, so asserting it would be a posture change across
+      # every table rather than drift detection, and that is a decision.
+      #
+      # A deliberate exception goes in the RLS_DISABLED_TABLE_ALLOWLIST
+      # repository variable, comma separated, so it is a reviewed value with a
+      # name on it rather than a silent hole.
+      # -------------------------------------------------------------------
+      - name: Assert row level security is enabled on every table in schema public
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ needs.target.outputs.supabase_ref }}
+          APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+          ALLOWLIST: ${{ vars.RLS_DISABLED_TABLE_ALLOWLIST }}
+        run: |
+          set -uo pipefail
+
+          # Same reasoning as the step above. A half-applied schema cannot be
+          # compared to anything, and "I could not look" must never print as a
+          # pass.
+          if [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "cancelled" ]; then
+            echo "::error::RLS enablement UNKNOWN on ${SUPABASE_PROJECT_REF:-unresolved}: apply-migrations ended '${APPLY_RESULT}', so the schema state is not known."
+            exit 1
+          fi
+
+          if [ -z "${SUPABASE_PROJECT_REF}" ]; then
+            echo "::error::RLS enablement UNKNOWN: the target job produced no supabase_ref output."
+            exit 1
+          fi
+
+          LIVE_EN=$(mktemp)
+          ALLOW=$(mktemp)
+          trap 'rm -f "$LIVE_EN" "$ALLOW"' EXIT
+
+          if ! node scripts/generate-rls-policy-baseline.mjs --enablement --stdout > "$LIVE_EN"; then
+            echo "::error::RLS enablement UNKNOWN on ${SUPABASE_PROJECT_REF}: the read did not complete. See the script's own error above; it never echoes the token."
+            exit 1
+          fi
+
+          TOTAL=$(wc -l < "$LIVE_EN")
+          if [ "${TOTAL}" -eq 0 ]; then
+            echo "::error::RLS enablement UNKNOWN on ${SUPABASE_PROJECT_REF}: zero base tables reported for schema public. An empty answer and an unreadable one must not be allowed to look the same."
+            exit 1
+          fi
+
+          ENABLED=$(awk -F'\t' '$2 == "t"' "$LIVE_EN" | wc -l)
+          FORCED=$(awk -F'\t' '$3 == "t"' "$LIVE_EN" | wc -l)
+          NOPOLICY=$(awk -F'\t' '$4 == "0"' "$LIVE_EN" | wc -l)
+
+          printf '%s\n' "${ALLOWLIST}" | tr ',' '\n' | sed 's/[[:space:]]//g' | grep -v '^$' > "$ALLOW" || true
+          OFFENDING=$(awk -F'\t' '$2 != "t" { print $1 }' "$LIVE_EN" | grep -vxF -f "$ALLOW" || true)
+
+          echo "${TOTAL} base table(s) in schema public on ${SUPABASE_PROJECT_REF}: ${ENABLED} with row level security ENABLED, ${FORCED} with it FORCED, ${NOPOLICY} carrying zero policies."
+          echo "relforcerowsecurity is reported and not asserted here: it is off everywhere today, so asserting it would be a posture change rather than drift detection."
+
+          if [ -n "${OFFENDING}" ]; then
+            {
+              echo "## :no_entry: Row level security is OFF in schema \`public\` on \`${SUPABASE_PROJECT_REF}\`"
+              echo ""
+              echo "These base tables have row level security switched off. For a table"
+              echo "carrying no policies that bit is the whole of its protection, so the"
+              echo "table is readable by every role holding the grant."
+              echo ""
+              echo "The policy baseline check above CANNOT see this: \`pg_policies\` has no"
+              echo "\`relrowsecurity\` column, so its baseline is byte-identical either way."
+              echo ""
+              echo '```'
+              printf '%s\n' "${OFFENDING}"
+              echo '```'
+              echo ""
+              echo "Re-enable it, or add the table to the \`RLS_DISABLED_TABLE_ALLOWLIST\`"
+              echo "repository variable with the reason stated in the pull request."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::row level security is off on one or more tables in schema public on ${SUPABASE_PROJECT_REF}. See step summary."
+            exit 1
+          fi
+
+          {
+            echo "### RLS enablement on \`${SUPABASE_PROJECT_REF}\`"
+            echo ""
+            echo "Read at \`$(date -u '+%Y-%m-%d %H:%M UTC')\`. ${TOTAL} base tables in schema"
+            echo "\`public\`, ${ENABLED} with row level security enabled, ${FORCED} with it"
+            echo "forced, ${NOPOLICY} carrying zero policies. For those, the enable bit is"
+            echo "the whole of the protection and nothing in \`pg_policies\` describes them."
+            echo ""
+            echo '```'
+            cat "$LIVE_EN"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # -------------------------------------------------------------------
+      # OR-T1601 finding 2. permissive is not among the columns the main
+      # baseline compares (schemaname, tablename, policyname, cmd, roles,
+      # qual_md5, with_check_md5). Recreate a RESTRICTIVE policy AS
+      # PERMISSIVE, same name, cmd, roles and expressions, and every one of
+      # those columns is byte-identical: the diff above stays clean while
+      # the policy flips from a mandatory filter (RESTRICTIVE, ANDs with
+      # every other policy on the same table and command) into an
+      # alternative grant (PERMISSIVE, ORs with them).
+      #
+      # An INVARIANT, not a baseline column, asserted the same way RLS
+      # enablement is above: measured on dev 2026-09-05, zero RESTRICTIVE
+      # policies exist in schema public today. Widening the main baseline's
+      # row shape instead would require regenerating BOTH cluster baselines
+      # in this same PR, including the production one, which the CI token
+      # can reach and this change's author cannot read; an invariant needs
+      # no baseline file to go stale on the cluster nobody regenerated.
+      #
+      # A deliberate exception goes in RESTRICTIVE_POLICY_ALLOWLIST, keyed
+      # `table.policyname`, comma separated, the same shape as
+      # RLS_DISABLED_TABLE_ALLOWLIST above: a reviewed value with a name on
+      # it rather than a silent hole.
+      # -------------------------------------------------------------------
+      - name: Assert no RESTRICTIVE policies exist in schema public
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ needs.target.outputs.supabase_ref }}
+          APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+          ALLOWLIST: ${{ vars.RESTRICTIVE_POLICY_ALLOWLIST }}
+        run: |
+          set -uo pipefail
+
+          if [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "cancelled" ]; then
+            echo "::error::restrictive-policy state UNKNOWN on ${SUPABASE_PROJECT_REF:-unresolved}: apply-migrations ended '${APPLY_RESULT}', so the schema state is not known."
+            exit 1
+          fi
+
+          if [ -z "${SUPABASE_PROJECT_REF}" ]; then
+            echo "::error::restrictive-policy state UNKNOWN: the target job produced no supabase_ref output."
+            exit 1
+          fi
+
+          LIVE_RESTRICTIVE=$(mktemp)
+          ALLOW=$(mktemp)
+          trap 'rm -f "$LIVE_RESTRICTIVE" "$ALLOW"' EXIT
+
+          if ! node scripts/generate-rls-policy-baseline.mjs --restrictive --stdout > "$LIVE_RESTRICTIVE"; then
+            echo "::error::restrictive-policy state UNKNOWN on ${SUPABASE_PROJECT_REF}: the read did not complete. See the script's own error above; it never echoes the token."
+            exit 1
+          fi
+
+          printf '%s\n' "${ALLOWLIST}" | tr ',' '\n' | sed 's/[[:space:]]//g' | grep -v '^$' > "$ALLOW" || true
+
+          OFFENDING=""
+          while IFS=$'\t' read -r SCHEMA TABLE POLICY CMD ROLES; do
+            [ -z "$TABLE" ] && continue
+            KEY="${TABLE}.${POLICY}"
+            if grep -qxF "$KEY" "$ALLOW"; then
+              continue
+            fi
+            OFFENDING="${OFFENDING}- \`${SCHEMA}.${TABLE}\` policy \`${POLICY}\` (${CMD}, roles ${ROLES})\n"
+          done < "$LIVE_RESTRICTIVE"
+
+          if [ -n "${OFFENDING}" ]; then
+            {
+              echo "## :no_entry: RESTRICTIVE polic(y/ies) found in schema \`public\` on \`${SUPABASE_PROJECT_REF}\`"
+              echo ""
+              echo "A RESTRICTIVE policy ANDs with every other policy on its table and"
+              echo "command. Recreating it AS PERMISSIVE leaves the main policy baseline"
+              echo "byte-identical (same name, cmd, roles, expressions) while turning it"
+              echo "into an alternative grant instead of a mandatory filter (OR-T1601)."
+              echo ""
+              printf '%b' "${OFFENDING}"
+              echo ""
+              echo "If this is deliberate, add \`table.policyname\` to the"
+              echo "\`RESTRICTIVE_POLICY_ALLOWLIST\` repository variable with the reason"
+              echo "stated in the pull request."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::RESTRICTIVE polic(y/ies) found in schema public on ${SUPABASE_PROJECT_REF}. See step summary."
+            exit 1
+          fi
+
+          echo "0 RESTRICTIVE polic(y/ies) in schema public on ${SUPABASE_PROJECT_REF} (outside the allowlist)."
 
   # ---------------------------------------------------------------------------
   # OR-T1189. This comparison used to live inside check-pending-migrations, and
@@ -1050,11 +1447,10 @@ jobs:
     runs-on: ubuntu-latest
     # environment: binds this job to a GitHub Environment whose required-reviewer list
     # is set in repo Settings -> Environments. prod dispatches bind to supabase-prod
-    # (configure required reviewers there); dev dispatches bind to supabase-dev (open
-    # for DBA applies). The environment name is resolved from the deploy job output so
-    # the right project is always protected. Add reviewers to supabase-prod in repo
-    # Settings -> Environments once this PR merges -- the job will pause for approval
-    # before any steps run.
+    # (reviewer configured: MorningRevolution, confirmed 2026-08-23); dev dispatches
+    # bind to supabase-dev (open for DBA applies). The environment name is resolved
+    # from the deploy job output so the right project is always protected. The job
+    # pauses for approval before any steps run.
     environment: ${{ needs.target.outputs.environment_name }}
     permissions:
       contents: read
@@ -1072,10 +1468,23 @@ jobs:
         # human bottleneck that produced the 37-migration backlog. This never loosens
         # prod: prod cannot be reached by a push, so prod always takes the branch below.
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        # Fallback gate. The primary gate is meant to be the required-reviewer list on
-        # the GitHub Environment this job binds to; until reviewers are configured on
-        # supabase-prod, this step is the only thing standing in front of the prod
-        # database, so it must not be looser than the prod path deserves.
+        # WHAT THIS GATE CAN AND CANNOT DO. It answers whether this login is
+        # allowed to apply on this target, and nothing finer than that. Every seat
+        # in this org with github-write acts through ONE shared builder login, so
+        # github.actor is the same string whichever seat dispatched. This gate
+        # therefore separates the builder fleet from every other login (the
+        # reviewing identity and any outside collaborator are refused), but it
+        # cannot tell one seat from another, and no allowlist can while the login
+        # is shared.
+        #
+        # The control that discriminates a person is the required-reviewer list on
+        # the supabase-prod GitHub Environment, which is configured (reviewer:
+        # MorningRevolution, confirmed 2026-08-23). The two party property on a
+        # prod apply comes from that pause, not from this step.
+        #
+        # Keep this gate anyway. It fails closed when the variable is unset, it has
+        # no dev to prod inheritance, and it is what stops a login outside the
+        # fleet from reaching the prod database at all.
         #
         # ONE allowlist per target, resolved from the environment the deploy job
         # computed. There is deliberately NO fallback from prod to dev: a single shared
@@ -1428,6 +1837,23 @@ jobs:
         # does NOT need the DB password. We track applied versions in
         # supabase_migrations.schema_migrations the same way supabase db push would, so
         # manual recovery via the CLI later stays clean.
+        #
+        # ORDERING is the reason this loop is not replaced by the CLI, and it is the
+        # stronger of the two. The loop below applies EVERY migration file that is
+        # absent from the ledger, whether or not its version sorts below the newest
+        # version already applied. There is no newer-than-last-applied filter here,
+        # and its absence is deliberate. supabase db push refuses exactly that case
+        # unless it is given --include-all, so swapping this loop for db push would
+        # silently skip an out-of-order pending file and then run the later files
+        # that depend on it. The failure then surfaces inside an unrelated migration
+        # and looks nothing like the change that caused it.
+        #
+        # This is not hypothetical for this repo: it has already happened, and it
+        # is the reason this comment exists. Worked example: ticket DEV-0303. See
+        # that ticket for the specifics; this file deliberately does not carry a
+        # live snapshot of which migrations are pending on any project, because
+        # that state changes over time and a stale copy here would mislead more
+        # than it helps.
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
@@ -1470,9 +1896,15 @@ jobs:
           # (--fail-with-body, retry exhaustion). That branch is reviewed and not
           # demonstrated, and it is written down that way rather than counted as
           # coverage.
+          #
+          # OR-T2190. "Is an array" was not enough: a 2xx array of rows with no
+          # version key (or an array of non-objects) passed this rule, then
+          # `.[].version` yielded nulls, the applied set came back empty, and
+          # every file on disk read as pending -- a full replay. An empty array
+          # must still pass; that is the legitimate answer on a fresh project.
           # -------------------------------------------------------------------
           ledger_shape_ok () {
-            printf '%s' "$1" | jq -e 'type == "array"' >/dev/null 2>&1
+            printf '%s' "$1" | jq -e 'type == "array" and (length == 0 or (.[0] | type == "object" and has("version")))' >/dev/null 2>&1
           }
 
           # refuses <fn> <payload> is true when <fn> REJECTS the payload. It is a
@@ -1492,6 +1924,14 @@ jobs:
           fi
           if ! ledger_shape_ok '[]'; then
             echo "::error::ledger shape self-test FAILED: an empty JSON array was refused. An empty ledger is a legitimate answer on a fresh project and must be readable as zero applied versions."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '[{"foo":1}]'; then
+            echo "::error::ledger shape self-test FAILED: an array of objects with no version key was accepted as a ledger (OR-T2190). That is the exact defect this guard exists for: .[].version over a versionless row yields null, APPLIED comes back empty, and every file in the tree is treated as unapplied."
+            LEDGER_ST_FAIL=1
+          fi
+          if ! refuses ledger_shape_ok '[1,2,3]'; then
+            echo "::error::ledger shape self-test FAILED: an array of non-object elements was accepted as a ledger (OR-T2190)."
             LEDGER_ST_FAIL=1
           fi
           if ! refuses ledger_shape_ok '{"message":"Unauthorized"}'; then
@@ -1518,7 +1958,7 @@ jobs:
             echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the ledger response shape rule does not behave as required, so the applied-version set cannot be trusted even if the query succeeds. NOTHING was applied."
             exit 1
           fi
-          echo "ledger shape self-test ok: array accepted, empty array accepted, object refused, error body refused, non-JSON refused, empty body refused, and the negative assertions shown able to fire."
+          echo "ledger shape self-test ok: array of versioned rows accepted, empty array accepted, array with no version key refused (OR-T2190), array of non-objects refused (OR-T2190), object refused, error body refused, non-JSON refused, empty body refused, and the negative assertions shown able to fire."
 
           PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
           trap 'rm -f "$PAYLOAD"' EXIT
@@ -1571,6 +2011,80 @@ jobs:
           echo
 
           # -------------------------------------------------------------------
+          # OR-T0957. An empty ledger has two different causes and only one of
+          # them is safe to read as "nothing to apply against, run every
+          # file": a genuinely fresh Supabase project, or a restore or
+          # truncate that emptied supabase_migrations.schema_migrations while
+          # the database it describes is still fully populated. Before this
+          # guard an empty APPLIED meant every .sql file in the tree was
+          # treated as pending and replayed against whatever the target
+          # already held, silently, on a prod dispatch included.
+          #
+          # The decision itself lives in scripts/ledger-freshness.sh, sourced
+          # rather than duplicated here, so the self-test in
+          # test-ledger-freshness.yml is proving the function that actually
+          # runs. It is a THIRD, independent read: a count of objects in the
+          # schemas our own migrations create. The ledger records what RAN;
+          # the catalog records what EXISTS, and the failure this guard
+          # exists for is precisely a case where those two disagree.
+          APPLIED_ROWS=$(printf '%s\n' "$APPLIED" | grep -c '[^[:space:]]' || true)
+          if [ "$APPLIED_ROWS" -eq 0 ]; then
+            source scripts/ledger-freshness.sh
+
+            # Schemas OUR migrations create objects in, discovered from the
+            # tree rather than hardcoded so a future migration opening a new
+            # schema is covered with no edit needed here. Always include
+            # public: most migrations write there with no CREATE SCHEMA
+            # statement at all. Deliberately NOT the Supabase platform
+            # schemas (auth, storage, realtime, ...): those carry objects on
+            # every project, fresh or not, and counting them would make the
+            # fresh branch permanently unreachable.
+            APP_SCHEMAS=$( { echo public; grep -hoE 'CREATE SCHEMA( IF NOT EXISTS)? [a-zA-Z_][a-zA-Z0-9_]*' "$MIG_DIR"/*.sql 2>/dev/null | awk '{print $NF}'; } | sort -u)
+            SCHEMA_LIST_SQL=$(printf "'%s'," $APP_SCHEMAS | sed 's/,$//')
+
+            PROBE_PAYLOAD=$(mktemp); chmod 600 "$PROBE_PAYLOAD"
+            jq -n --arg q "SELECT count(*) AS n FROM information_schema.tables WHERE table_schema IN (${SCHEMA_LIST_SQL});" '{query:$q}' > "$PROBE_PAYLOAD"
+
+            PROBE_OK=0
+            OBJECT_COUNT=0
+            for attempt in 1 2 3; do
+              if PROBE_RESP=$(curl -sS --fail-with-body \
+                -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+                -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data-binary "@$PROBE_PAYLOAD") && N=$(echo "$PROBE_RESP" | jq -r '.[0].n' 2>/dev/null) && printf '%s' "$N" | grep -qE '^[0-9]+$'; then
+                PROBE_OK=1
+                OBJECT_COUNT="$N"
+                break
+              fi
+              echo "freshness probe attempt ${attempt}/3 did not return a usable object count"
+              if [ "$attempt" -lt 3 ]; then
+                sleep 10
+              fi
+            done
+            rm -f "$PROBE_PAYLOAD"
+
+            set +e
+            VERDICT=$(classify_ledger_freshness "$APPLIED_ROWS" "$PROBE_OK" "$OBJECT_COUNT")
+            VERDICT_RC=$?
+            set -e
+
+            # VERDICT_RC, not the string, is the gate: the function's contract
+            # is 0 only for SKIP or FRESH. The string is read only to choose
+            # which message to print.
+            if [ "$VERDICT_RC" -ne 0 ]; then
+              if [ "$VERDICT" = "POPULATED" ]; then
+                echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger is empty but ${OBJECT_COUNT} object(s) already exist in the schema(s) this repo's migrations create (${APP_SCHEMAS}). That is an emptied ledger sitting on a populated database, most often a restore or truncate that did not carry supabase_migrations, not a fresh project. Replaying the full migration history here would run every CREATE against objects that already exist. Recovery: backfill supabase_migrations.schema_migrations with the versions that are genuinely applied, a deliberate reviewed DBA action, then re-run. NOTHING was applied on this run."
+              else
+                echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the migration ledger is empty and the independent check of whether the database is actually empty could not get a usable answer after 3 attempts. Absence of evidence is not evidence of absence: this could be a fresh project or a populated one with an emptied ledger, and applying the wrong one is expensive. NOTHING was applied on this run. Re-run once the Supabase Management API is reachable, or read the schema directly before dispatching again."
+              fi
+              exit 1
+            fi
+            echo "FRESH: the ledger on ${SUPABASE_REF} is empty and so are the schema(s) this repo's migrations create (${APP_SCHEMAS}). Proceeding as a first apply, not a replay."
+          fi
+          echo
+
+          # -------------------------------------------------------------------
           # OR-T1252. SHADOW SCAN, before anything is applied.
           #
           # "Applied" in this loop means "a row with that version number exists",
@@ -1581,6 +2095,14 @@ jobs:
           # it, on this run and on every future run. check-duplicate-migrations
           # cannot see this, because it compares the tree with itself and there
           # is exactly one file.
+          #
+          # OR-T1270. A mismatch has TWO possible causes and this scan cannot
+          # distinguish them: a file renamed BEFORE it ever ran (the SQL is not
+          # in the database), or a file renamed AFTER it ran (the SQL is already
+          # applied). Their remedies are opposites, so the abort below must name
+          # both rather than printing the one that is destructive in the other
+          # case. The two-case guidance is spelled out in full where the
+          # abort actually fires, below.
           #
           # The ledger carries a name column, so the shadow IS detectable: the
           # version is recorded under one file name and the tree carries another.
@@ -1614,6 +2136,13 @@ jobs:
               fi
             done <<< "$files"
             echo "SHADOW SCAN: ${checked} already-recorded file(s) compared, ${matched} name-matched, ${unverifiable} unverifiable (ledger row predates name recording), ${mismatched} shadowed."
+            # A count buried in a summary line is not visible enough. If most of
+            # the tree is unverifiable, this scan proves almost nothing, and a
+            # run that verified nothing must not look like a run that verified
+            # everything. Surface it on the run itself.
+            if [ "$unverifiable" -gt 0 ]; then
+              echo "::warning::${unverifiable} of ${checked} already-recorded migration file(s) could NOT be checked for a rename: those ledger rows carry no file name, so a rename or a re-add of those files would be invisible here. This scan verified ${matched} of ${checked}."
+            fi
             [ "$mismatched" -eq 0 ]
           }
 
@@ -1641,7 +2170,33 @@ jobs:
             echo "SHADOW SCAN: no .sql files in $MIG_DIR to compare."
           elif ! shadow_scan "$LEDGER_MAP" "$TREE_FILES"; then
             rm -f "$LEDGER_MAP"
-            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more migration files carry a version that the ledger recorded under a DIFFERENT file name. Those files have never run and never will, because a version already in the ledger is skipped. Give each one a new, unused version timestamp and push again. NOTHING was applied on this run."
+            echo
+            echo "TWO DIFFERENT THINGS PRODUCE THE LINES ABOVE, AND THIS WORKFLOW CANNOT"
+            echo "TELL THEM APART. All it can see is that the ledger recorded the version"
+            echo "under one file name and the tree now carries another. Establish which"
+            echo "case you are in BEFORE you act: the two remedies are opposites, and"
+            echo "applying the wrong one runs a migration twice."
+            echo
+            echo "  CASE A, the SQL has NEVER run. The file was renamed, or reverted and"
+            echo "  re-added under a different name, before it was ever applied. The"
+            echo "  change is NOT in the database."
+            echo "    Remedy: give the file a new, unused version timestamp and push"
+            echo "    again, so that it actually runs."
+            echo
+            echo "  CASE B, the SQL ALREADY ran and the file was renamed afterwards, as"
+            echo "  a cosmetic tidy-up. The change IS in the database."
+            echo "    Remedy: correct the name on the existing ledger row so it matches"
+            echo "    the file. Do NOT mint a new version. That would apply this"
+            echo "    migration a SECOND time: against dev on the next push, and against"
+            echo "    production on a dispatch. Nothing in this repo requires or checks"
+            echo "    that a migration is idempotent, so a second run either fails part"
+            echo "    way through or silently re-executes DML."
+            echo
+            echo "  IF YOU CANNOT TELL, ask the target database. Does the object this"
+            echo "  migration creates already exist on ${SUPABASE_REF}? Present means"
+            echo "  case B. Absent means case A."
+            echo
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more migration files carry a version that the ledger recorded under a DIFFERENT file name, so those files are skipped on every run. NOTHING was applied. Two causes produce this and the workflow cannot tell them apart: a file renamed BEFORE it ran (mint a new unused version so it runs) or a file renamed AFTER it ran (correct the ledger row name instead; minting a new version would re-execute an applied migration). Read the two cases printed above and establish which one you are in before acting."
             exit 1
           fi
           rm -f "$LEDGER_MAP"
@@ -1824,6 +2379,9 @@ jobs:
           # been bitten by exactly that.
           ST_DIR=$(mktemp -d)
           ST_APPLIED=$(printf '%s\n' '20990101000000' '20990101000005')
+          ST_APPLIED_MAX=$(printf '%s\n' "$ST_APPLIED" | grep -E '^[0-9]+$' | sort | tail -1 || true)
+          ST_ALLOWLISTED_FILE='20990101000001_below_allowlisted.sql'
+          ST_ALLOWLISTED_VERSION="${ST_ALLOWLISTED_FILE%%_*}"
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000000_already_applied.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000002_below_unmarked.sql"
           printf '%s\n' '-- OUT-OF-ORDER-OK: synthetic self-test, a branch cut before the merge' 'select 1;' > "${ST_DIR}/20990101000003_below_marked.sql"
@@ -1831,7 +2389,7 @@ jobs:
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/2099010100000X_notanumber.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/209901010000091_toowide.sql"
-          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000001_below_allowlisted.sql"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/${ST_ALLOWLISTED_FILE}"
 
           if out_of_order_scan "$ST_APPLIED" '20990101000002_below_unmarked.sql' "$ST_DIR" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
@@ -1882,7 +2440,18 @@ jobs:
           # at all and passes for the wrong reason. That is exactly what
           # 20990101000006 did before this fix: 6 is not below 5, so it took
           # the in-order short-circuit and the allowlist check was never run.
-          if ! out_of_order_scan "$ST_APPLIED" '20990101000001_below_allowlisted.sql' "$ST_DIR" '20990101000001' >/dev/null 2>&1; then
+          # OR-T2178: make that premise executable, not only a comment. The
+          # fixture must pass the same comparability checks as the real scan
+          # and make its below-max condition true before either direction of
+          # the allowlist test can claim to cover that branch.
+          if ! printf '%s' "$ST_ALLOWLISTED_VERSION" | grep -qE '^[0-9]+$' \
+              || [ "${#ST_ALLOWLISTED_VERSION}" -ne "${#ST_APPLIED_MAX}" ] \
+              || ! [[ "$ST_ALLOWLISTED_VERSION" < "$ST_APPLIED_MAX" ]]; then
+            rm -rf "$ST_DIR"
+            echo "::error::order self-test FAILED: allowlist fixture version ${ST_ALLOWLISTED_VERSION} is not a same-width numeric version strictly below the synthetic applied max ${ST_APPLIED_MAX:-none}. It cannot reach the allowlist branch."
+            exit 1
+          fi
+          if ! out_of_order_scan "$ST_APPLIED" "$ST_ALLOWLISTED_FILE" "$ST_DIR" "$ST_ALLOWLISTED_VERSION" >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
             echo "::error::order self-test FAILED: the guard fired on a file whose version is on the allowlist, which needs no marker. Refusing to apply."
             exit 1
@@ -1891,7 +2460,7 @@ jobs:
           # synthetic allowlist that does NOT contain this file's version:
           # with no matching entry and no marker, the guard must report it
           # unmarked (non-silent), or this test can never go red.
-          if out_of_order_scan "$ST_APPLIED" '20990101000001_below_allowlisted.sql' "$ST_DIR" '99999999999999' >/dev/null 2>&1; then
+          if out_of_order_scan "$ST_APPLIED" "$ST_ALLOWLISTED_FILE" "$ST_DIR" '99999999999999' >/dev/null 2>&1; then
             rm -rf "$ST_DIR"
             echo "::error::order self-test FAILED: the guard stayed silent on a file whose version is NOT on the synthetic allowlist passed in, so the allowlist-branch self-test cannot fail and proves nothing."
             exit 1
@@ -2001,7 +2570,7 @@ jobs:
             rm -f "$SQL_PAYLOAD"
 
             if [[ ! "$CODE" =~ ^2 ]]; then
-              echo "  x FAILED (HTTP $CODE): $(head -c 400 /tmp/mig.resp)"
+              echo "  x FAILED (HTTP $CODE) applying ${BASENAME}. The response body is not printed here: this repo is public and Actions logs are world readable."
               rm -f /tmp/mig.resp
               exit 1
             fi
@@ -2088,6 +2657,51 @@ jobs:
           echo
           echo "-- ${APPLIED_COUNT} migration(s) applied this run --"
 
+  account-deletion-cascade:
+    name: Account deletion clears vault meta (DEV-0323)
+    needs: [target, apply-migrations]
+    # A push to dev ONLY.
+    #
+    # This check writes a fixture (dev holds no auth.users rows, so there is
+    # nothing to delete unless the test seeds one) and rolls it back with a
+    # deliberate raise. That rollback is not a licence to run it against
+    # production, so prod is excluded here AND refused by name inside the
+    # script. Two independent gates, because this one is worth getting wrong
+    # zero times.
+    #
+    # needs: apply-migrations, so it reads the schema this push just produced
+    # rather than the one that was there before it. If the apply fails this job
+    # is skipped, which is correct: the schema state is unknown and
+    # check-pending-migrations already says so.
+    #
+    # A failing run here is picked up by the `notify` job below (this job is in
+    # its `needs` list): an account-deletion check that goes red silently is
+    # close to as bad as not having it at all, since the whole point is
+    # proving customer vault key-material actually gets cleared on deletion.
+    if: ${{ github.event_name == 'push' && github.ref_name == 'dev' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Self-test the runner
+        # The classifier IS the control. Runs first so a broken parser fails as
+        # a broken parser rather than as a silent pass over the assertion.
+        run: node scripts/check-account-deletion-cascade.mjs --selftest
+
+      - name: Assert account removal clears the vault meta rows
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+        run: node scripts/check-account-deletion-cascade.mjs
+
   # ---------------------------------------------------------------------------
   # DEV-0212, 2026-08-28. WHY THIS JOB EXISTS.
   #
@@ -2115,8 +2729,54 @@ jobs:
   # or if this file fails to parse. It covers job failure and a skipped deploy,
   # which is the failure that actually happened.
   # ---------------------------------------------------------------------------
+  check-types-drift:
+    needs: [target, apply-migrations]
+    # Runs against the schema that is APPLIED, after apply-migrations and before
+    # deploy, for the same reason check-pending-migrations does. A migration PR
+    # legitimately carries a type file that does not match the database until
+    # its own migration runs, so comparing any earlier would report every
+    # correct migration PR as drift.
+    #
+    # `if: always()` for the reason given on the job above: apply-migrations is
+    # SKIPPED on every prod push, a skipped dependency would otherwise cancel
+    # this job, and a skipped check-run renders NEUTRAL rather than red, which
+    # reads exactly like a run that looked and found nothing wrong.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Compare the generated types against the applied schema
+        # No install step on purpose: the check has no dependencies and reads
+        # the schema through the same Management API endpoint and token the
+        # jobs above use.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+          APPLY_RESULT: ${{ needs['apply-migrations'].result }}
+        run: |
+          set -uo pipefail
+
+          # An apply that started and did not finish leaves the schema in a
+          # state nothing here knows. Comparing against it would produce a
+          # confident answer about a database mid-migration.
+          if [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "cancelled" ]; then
+            echo "::error::apply-migrations ended '${APPLY_RESULT}', so the applied schema is not known from here. Nothing was compared, and this is not a pass."
+            exit 1
+          fi
+
+          node scripts/check-types-drift.mjs
+
   notify:
-    needs: [target, apply-migrations, check-pending-migrations, deploy]
+    needs: [target, apply-migrations, check-pending-migrations, check-rls-policy-baseline, deploy, account-deletion-cascade, check-types-drift]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -2133,7 +2793,10 @@ jobs:
           R_TARGET: ${{ needs.target.result }}
           R_APPLY: ${{ needs['apply-migrations'].result }}
           R_GATE: ${{ needs['check-pending-migrations'].result }}
+          R_RLS: ${{ needs['check-rls-policy-baseline'].result }}
           R_DEPLOY: ${{ needs.deploy.result }}
+          R_CASCADE: ${{ needs['account-deletion-cascade'].result }}
+          R_TYPES_DRIFT: ${{ needs['check-types-drift'].result }}
         run: |
           set -uo pipefail
 
@@ -2146,7 +2809,7 @@ jobs:
           # A deploy that ran and found no changed functions is a SUCCESS and is
           # deliberately not reported.
           REASONS=""
-          for PAIR in "target:${R_TARGET}" "apply-migrations:${R_APPLY}" "check-pending-migrations:${R_GATE}" "deploy:${R_DEPLOY}"; do
+          for PAIR in "target:${R_TARGET}" "apply-migrations:${R_APPLY}" "check-pending-migrations:${R_GATE}" "check-rls-policy-baseline:${R_RLS}" "check-types-drift:${R_TYPES_DRIFT}" "deploy:${R_DEPLOY}" "account-deletion-cascade:${R_CASCADE}"; do
             JOB="${PAIR%%:*}"
             RES="${PAIR##*:}"
             case "$RES" in

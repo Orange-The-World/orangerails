@@ -12,7 +12,72 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, upstreamCodeForErroredEvent } from './index.ts';
+import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+
+// ── shouldRetireConnRace / retireConnRace (OR-T1902) ───────────────────
+//
+// OR-T1902: commit 5418820c bounded the 'deferred-conn-race' path with
+// bumpAttempts, which reintroduced permanent retirement within minutes on
+// sink platforms (reDriveReadyDeferrals's sink branch re-admits ANY deferred
+// row for a sink subaccount every tick, so bumpAttempts fired once per
+// tick). The fix bounds this path by wall-clock age instead. These tests
+// are the regression guard: they fail if a future change goes back to an
+// attempts-based bound for this specific path.
+
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
+Deno.test('shouldRetireConnRace: false while under the wall-clock bound', () => {
+  const receivedAt = new Date(Date.now() - 23 * ONE_HOUR_MS).toISOString();
+  assertEquals(
+    shouldRetireConnRace(receivedAt),
+    false,
+    'an event received under 24h ago must not be retired yet, no matter how many ticks it has cycled through',
+  );
+});
+
+Deno.test('shouldRetireConnRace: true once the wall-clock bound is reached', () => {
+  const receivedAt = new Date(Date.now() - 25 * ONE_HOUR_MS).toISOString();
+  assertEquals(
+    shouldRetireConnRace(receivedAt),
+    true,
+    'an event received over 24h ago with no connections row must be eligible for retirement',
+  );
+});
+
+Deno.test('shouldRetireConnRace: fail-safe false when received_at is missing or unparseable', () => {
+  assertEquals(shouldRetireConnRace(undefined), false, 'missing received_at must not be treated as ancient');
+  assertEquals(shouldRetireConnRace(null), false, 'null received_at must not be treated as ancient');
+  assertEquals(shouldRetireConnRace('not-a-date'), false, 'an unparseable received_at must fail safe, not retire');
+});
+
+Deno.test('retireConnRace: sets retirement_reason without the max-attempts prefix, never touches attempts', async () => {
+  let patch: Record<string, unknown> | undefined;
+  let targetId: string | undefined;
+
+  const mockClient = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        update(p: Record<string, unknown>) { patch = p; return chain; },
+        eq(_col: string, val: string) { targetId = val; return Promise.resolve({ error: null }); },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await retireConnRace(mockClient as any, 'evt-aged-out');
+
+  assertEquals(targetId, 'evt-aged-out', 'must target the correct event_id');
+  assertEquals(patch?.retirement_reason, 'or-connection row never created (DL-1414-C)');
+  assertEquals(
+    (patch?.retirement_reason as string ?? '').startsWith('max-attempts:'),
+    false,
+    'this is an age-based retirement, not an attempts-based one -- it must not look like a bumpAttempts retirement',
+  );
+  assertEquals('attempts' in (patch ?? {}), false, 'retireConnRace must never write attempts, that is bumpAttempts territory');
+  assertEquals('processed_at' in (patch ?? {}), true, 'must set processed_at so the row leaves the pending batch');
+});
 
 // ── fetchPendingBatch: batch query filter ─────────────────────────────
 //
@@ -1153,6 +1218,41 @@ Deno.test('DL-1409: a successful Quiltt sync clears pending as well as error', a
     true,
     "'error' must stay promotable: this is the existing reconnect-recovery behaviour and must not regress",
   );
+});
+
+Deno.test('OR-T2658: a successful Quiltt sync clears encrypted_last_error along with status', async () => {
+  let capturedPatch: Record<string, unknown> | undefined;
+
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_c: string) { return chain; },
+        eq(_c: string, _v: unknown) { return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() { return Promise.resolve({ data: { id: 'conn-or-1' }, error: null }); },
+        update(patch: Record<string, unknown>) {
+          capturedPatch = patch;
+          return chain;
+        },
+        in(_col: string, _vals: string[]) { return Promise.resolve({ error: null }); },
+      };
+      return chain;
+    },
+  };
+
+  const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-1', 'sub-1');
+
+  assertEquals(err, null, 'a clean reconcile returns null');
+  assertEquals(
+    capturedPatch?.encrypted_last_error,
+    null,
+    'the recovery patch must clear encrypted_last_error, or the UI keeps rendering the stale error banner on an active connection (OR-T2658)',
+  );
+  assertEquals(capturedPatch?.status, 'active', 'status must still be set to active');
 });
 
 Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending', async () => {
