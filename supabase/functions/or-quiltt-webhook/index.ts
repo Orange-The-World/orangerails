@@ -80,7 +80,12 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { alarmOnUnknownQuilttEventTypes } from '../_shared/quiltt-event-types.ts';
 import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
-import { applyRouting, buildRows, type QuilttEventLike } from './routing.ts';
+import {
+  applyRouting,
+  buildRows,
+  type QuilttEventLike,
+  warnOnDroppedEvents,
+} from './routing.ts';
 
 const MAX_BODY = 256 * 1024;             // 256KB , generous for batched events
 const MAX_TS_SKEW_MS = 5 * 60 * 1000;    // ±5 minutes
@@ -160,8 +165,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // events are dropped inside buildRows, and the hint travels on the row
     // rather than being recomputed from an index into a differently-filtered
     // array. See routing.ts for what that used to cost.
-    const { rows, hints, profileIds, metaSubaccountIds } = buildRows(
+    const { rows, hints, profileIds, metaSubaccountIds, droppedCount } = buildRows(
       parsed.events as QuilttEvent[],
+    );
+    warnOnDroppedEvents(
+      droppedCount,
+      parsed.events.length,
+      (line) => console.warn(line),
     );
 
     if (rows.length === 0) {
