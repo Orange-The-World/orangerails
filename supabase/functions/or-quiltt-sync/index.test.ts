@@ -1378,6 +1378,109 @@ Deno.test('OR-T2475 handleEvent: ambiguous legacy row on the errored-event path 
   assertEquals(updateCalled(), false, 'handleEvent must not write to a legacy row that a different Quiltt connection already owns');
 });
 
+// ── OR-T2475 zero-rows: the or-link-complete race is not the ambiguity case ──
+//
+// Design call (senior-developer, msg#5425): a webhook arriving before
+// or-quiltt-link-complete has created ANY connections row for this
+// subaccount is a different situation from an ambiguous legacy row, and
+// must keep deferring by wall-clock age (shouldRetireConnRace /
+// retireConnRace, DL-1414-C), never insert a placeholder row immediately.
+// Inserting here would race the real row-creation and leave two rows for
+// one bank link. This is the fixture two earlier codex attempts both
+// dropped: both collapsed the zero-rows case into the ambiguous-row
+// insert-immediately path with no test catching it.
+
+function zeroRowsClient() {
+  let connectionsInsertCalled = false;
+  let webhookInboxCalled = false;
+
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      if (table === 'quiltt_webhook_inbox') webhookInboxCalled = true;
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select() { return chain; },
+        eq()     { return chain; },
+        is()     { return chain; },
+        order()  { return chain; },
+        limit()  { return chain; },
+        insert(_row: unknown) {
+          connectionsInsertCalled = true;
+          return Promise.resolve({ data: null, error: null });
+        },
+        single() {
+          if (table === 'subaccounts') {
+            return Promise.resolve({
+              data: {
+                id:         'sub-1',
+                opk_public: 'CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+                opk_alg:    'libsodium-crypto_box_seal-v1',
+              },
+              error: null,
+            });
+          }
+          return Promise.resolve({ data: null, error: { message: `unexpected single() on ${table}` } });
+        },
+        maybeSingle() {
+          if (table === 'quiltt_profile_map') {
+            // Not the thing under test: give handleEvent a usable auth profile
+            // so it reaches the connections routing block below.
+            return Promise.resolve({ data: { quiltt_profile_id: 'qp-1' }, error: null });
+          }
+          // platforms (sink check) and connections (both the exact match and
+          // the legacy NULL-id fallback, in reconcileConnectionSuccess AND in
+          // the main routing block) all miss: zero rows, not one ambiguous row.
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  return {
+    client,
+    connectionsInsertCalled: () => connectionsInsertCalled,
+    webhookInboxCalled:      () => webhookInboxCalled,
+  };
+}
+
+Deno.test('OR-T2475 zero-rows: no connections row exists yet -- defers the race, never inserts a placeholder', async () => {
+  const { client, connectionsInsertCalled, webhookInboxCalled } = zeroRowsClient();
+
+  const ev = {
+    event_id:      'evt-zero-rows',
+    event_type:    'connection.synced.successful.initial',
+    payload:       { record: { id: 'quiltt-conn-brand-new' } },
+    platform_id:   'plat-1',
+    subaccount_id: 'sub-1',
+    attempts:      0,
+  };
+
+  const result = await handleEvent(client, ev, 'plat-1', 'sub-1', 'api-key');
+
+  assertEquals(
+    result,
+    'deferred-conn-race',
+    'DL-1414-C: the webhook arrived before or-quiltt-link-complete created the connections row. ' +
+      'This is a timing race, not an ambiguity, and must be deferred by wall-clock age ' +
+      '(shouldRetireConnRace), never treated as a reason to insert a new row immediately.',
+  );
+  assertEquals(
+    connectionsInsertCalled(),
+    false,
+    'OR-T2475 must never insert a placeholder connections row while the race is open: ' +
+      'or-quiltt-link-complete may create the real row moments later, and inserting here ' +
+      'would leave two rows for one bank link',
+  );
+  assertEquals(
+    webhookInboxCalled(),
+    false,
+    'the ambiguity check (hasOtherQuilttConnection) must not run at all here: with zero ' +
+      'legacy rows there is nothing to disambiguate, and the zero-rows branch returns before it',
+  );
+});
+
 Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending', async () => {
   // The fallback resolves "oldest quiltt row for this subaccount with a NULL
   // quiltt_connection_id", which is not necessarily the connection this event
