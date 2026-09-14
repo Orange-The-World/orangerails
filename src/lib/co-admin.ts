@@ -530,7 +530,12 @@ export async function grantCoAdmin(params: {
   // therefore holds no INSERT or UPDATE on the column at all (it still holds
   // SELECT), and allocate_workspace_key() is a SECURITY DEFINER function that
   // takes no argument on purpose: there is no path by which a caller proposes
-  // an id.
+  // an id. Unique and write-once on the column
+  // (20260828214500_user_vault_meta_workspace_key_write_once.sql) still have
+  // to hold for any role that can write it: a second row must not claim a
+  // value already in use, and a set value must not be pointed somewhere else.
+  // The authenticated non-owner refusal is Case E of
+  // supabase/tests/workspace_key_id_write_once.verify.sql.
   //
   // RETRIES ARE SAFE. A second call returns the id already allocated rather
   // than raising or minting a second one, so a dropped response needs no guard
