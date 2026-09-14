@@ -557,10 +557,10 @@ Deno.test('DL-1433: redactedUpstreamDetail strips partial numeric refs (card-end
   assertEquals(out.includes('[redacted]'), true, 'numeric placeholder must be present');
 });
 
-// PR #957 was blocked by the Auditor here: the narrowed rule stopped after the
-// FIRST digit group following a keyword, so a value written as several groups
-// only had its first group redacted. This pins the fix: the whole run,
-// including groups separated by spaces or hyphens, must be gone.
+// An earlier narrowed rule stopped after the FIRST digit group following a
+// keyword, so a value written as several groups only had its first group
+// redacted. This pins the fix: the whole run, including groups separated by
+// spaces or hyphens, must be gone.
 Deno.test('DL-1433: redactedUpstreamDetail redacts every group of a multi-group account value, not just the first', () => {
   const out = redactedUpstreamDetail('Account 1234-5678-9012-3456 declined by issuer');
   assert(!out.includes('1234'), 'first group must not survive');
