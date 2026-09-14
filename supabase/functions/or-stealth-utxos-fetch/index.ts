@@ -6,7 +6,7 @@
  * The client's UTXO tracker in sync.ts is in-memory for a single sync run:
  * a spend of a UTXO received in an earlier run is never detected unless
  * that run's ending UTXO set is fed back in as the starting point of the
- * next one. upsert_stealth_utxos (PR #855, OR-T0549/OR-T0554) already
+ * next one. upsert_stealth_utxos (OR-T0549/OR-T0554) already
  * persists that set after a run. This function is the read half: the
  * widget calls it BEFORE a sync starts, to seed the matcher.
  *
