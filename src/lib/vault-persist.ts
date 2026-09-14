@@ -83,6 +83,19 @@ export const PASSWORD_CHANGE_NOT_PROVEN_MESSAGE =
   "Vault password change did not complete. The keys the server returned do not re-open your vault, so neither your old nor your new password can be relied on. Do not close or reload this page, and contact support with this message.";
 
 /**
+ * Shown when migrateAndPersistRotatedVault's own pre-write read of
+ * user_vault_meta (the read that decides whether a stored PQC secret would
+ * be dropped) returns zero rows with no error.
+ *
+ * This function only runs mid-rotation, which requires an existing
+ * user_vault_meta row, so zero rows here is never a legitimate answer: it
+ * is a session drop, an RLS predicate that stopped matching, or a deleted
+ * row, and it must not be read as "nothing stored, safe to proceed" (OR-T2371).
+ */
+export const VAULT_META_GUARD_UNREADABLE_MESSAGE =
+  "Could not confirm your vault's stored keys before rotating. Nothing was changed. Reload the page and try again.";
+
+/**
  * Shown when the reconciliation below the paging loops finds that this run did
  * not re-encrypt every row the table holds for this user.
  *
