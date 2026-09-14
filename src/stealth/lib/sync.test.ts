@@ -506,6 +506,36 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
     ).rejects.toThrow(/out of range/);
   });
 
+  it('rejects when birthdayHeight is NaN, does not scan with a NaN window (OR-T1197)', async () => {
+    // Every comparison against NaN is false in JS, so a `< 0 || > tip` guard
+    // alone lets NaN through and Math.max(NaN, x) makes fromHeight NaN too.
+    // The guard must use Number.isInteger to catch this before it reaches
+    // the scan window math.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'birthday-nan',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    await expect(
+      runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: NaN,
+        lastBlockScanned: null,
+        fetchTip: async () => 800_000,
+        fetchFilter: async () => { throw new Error('must not reach filter fetch'); },
+        fetchBlock: async () => { throw new Error('must not reach block fetch'); },
+        matcher: { matchAny: () => false },
+      }),
+    ).rejects.toThrow(/out of range/);
+  });
+
   it('rejects when fetchBlock rejects, does not silently advance lastBlockScanned (DL-0629)', async () => {
     const orStealthKey = randomKeyB64();
     const payload: WalletEnvelopePayload = {
