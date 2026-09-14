@@ -69,15 +69,15 @@ function makeRecoveryClient(state: RecoveryState): any {
             }
             const id = filters.find((f) => f.op === "eq" && f.column === "id")?.value;
             const status = filters.find((f) => f.op === "eq" && f.column === "status")?.value;
-            if (state.connection?.id !== id || state.connection.status !== status) {
+            const conn = state.connection;
+            if (!conn || conn.id !== id || conn.status !== status) {
               return Promise.resolve({ data: null, error: null });
             }
-            const deleted = state.connection;
             state.connection = null;
             state.sourceWalletConnectionIds = state.sourceWalletConnectionIds.filter(
-              (connectionId) => connectionId !== deleted.id,
+              (connectionId) => connectionId !== conn.id,
             );
-            return Promise.resolve({ data: { id: deleted.id }, error: null });
+            return Promise.resolve({ data: { id: conn.id }, error: null });
           }
 
           if (table === "pending_widget_sessions" && mutation === "update") {
