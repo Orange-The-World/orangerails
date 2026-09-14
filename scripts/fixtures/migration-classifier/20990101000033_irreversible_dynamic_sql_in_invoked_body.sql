@@ -12,11 +12,11 @@
 -- is empty, readablePiece('') is false, so the EXECUTE is unreadable and the
 -- statement is refused.
 --
--- This fixture exists to PROVE that live, not to add new code: it was
--- written to close the same hole PR #1172 patched on a since-dead branch of
--- the migration-classifier stack, and running it against current dev shows
--- the hole was already closed by the general rule before #1172 could land.
--- See OR-T2363 for the full trace.
+-- This fixture exists to PROVE that live, not to add new code: OR-T1715
+-- set out to close this exact hole on a branch of the migration-classifier
+-- stack that later collapsed, and running this fixture against current dev
+-- shows the hole was already closed by the general rule before that branch
+-- could land. See OR-T2363 for the full trace.
 --
 -- Expected: IRREVERSIBLE, rule DYNAMIC EXECUTE, reported at the BEGIN line
 -- of the invoked body (the same line convention as fixtures 23/24/28/29:
