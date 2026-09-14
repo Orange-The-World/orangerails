@@ -4,9 +4,13 @@ name: scheduled dev to prod promotion (OR-T1132 scratch negative-proof)
 # self-test logic in .github/workflows/scheduled-promotion.yml, carrying
 # ONLY the checkout and self-test steps. Every step that could call the
 # GitHub API, open a pull request, or escalate has been deliberately left
-# out, so this run has no side effect beyond itself. SHAPE_FILTER below is
-# deliberately broken (.head.label instead of .head.ref) to produce an
-# executed, observed-RED run for OR-T1132's negative-proof acceptance item.
+# out, so this run has no side effect beyond itself.
+#
+# NEGATIVE PROOF FOR OR-T1132, captured 2026-09-14: the previous commit on
+# this branch (02ad651b) broke SHAPE_FILTER to .head.label and the self-test
+# job went RED, observed at
+# https://github.com/Orange-The-World/orangerails/actions/runs/34803124693/job/103849612118
+# This commit reverts SHAPE_FILTER to the correct .head.ref, matching dev.
 
 on:
   push:
@@ -21,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}
-      SHAPE_FILTER: '{number, head: .head.label, head_repo: (.head.repo.full_name // "")}'
+      SHAPE_FILTER: '{number, head: .head.ref, head_repo: (.head.repo.full_name // "")}'
       CANDIDATE_FILTER: '.[] | select(.head_repo == $repo and (.head == "dev" or (.head | startswith("release/"))))'
     steps:
       - name: Checkout
