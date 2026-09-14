@@ -6,3 +6,9 @@ reads queued:skipped and the stuck-check-run sweep
 (cf-pages-check-sweep.yml) has something real to resolve.
 
 This file and branch are throwaway, per OR-T1344 acceptance item 2.
+
+Attempt 2: pushes 1 and 2 landed 6s apart and Cloudflare skipped push 1's
+deployment before ever posting a check-run for it (0 check-runs on
+b063c8b3), so there was nothing for the sweep to resolve. Widening the
+gap this time so the first check-run has time to be created before the
+second push supersedes it.
