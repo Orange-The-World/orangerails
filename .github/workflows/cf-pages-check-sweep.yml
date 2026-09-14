@@ -148,6 +148,7 @@ jobs:
 
           found=0
           resolved=0
+          retried_unconfirmed=0
           left_building=0
           unresolved=0
           transient_failed=0
@@ -208,6 +209,31 @@ jobs:
             fi
           }
 
+          # Cloudflare accepting a retry (success:true) is a request, not a
+          # result. This confirms the check-run itself actually left
+          # in_progress before we trust that a retry really closed it,
+          # rather than only ever checking again once no one is looking
+          # (OR-C1888). Bounded to ~2 minutes so a genuinely still-building
+          # retry is not mistaken for a broken one.
+          confirm_retry() {
+            local check_id="$1"
+            local attempt=0 status="in_progress" conclusion="none"
+            while [ "$attempt" -lt 8 ]; do
+              local cr
+              cr=$(gh api "repos/${GITHUB_REPOSITORY}/check-runs/${check_id}" 2>/dev/null || echo '{}')
+              status=$(printf '%s' "$cr" | jq -r '.status // "unknown"')
+              conclusion=$(printf '%s' "$cr" | jq -r '.conclusion // "none"')
+              [ "$status" = "completed" ] && break
+              attempt=$((attempt + 1))
+              sleep 15
+            done
+            if [ "$status" = "completed" ]; then
+              echo "CONFIRMED:${conclusion}"
+            else
+              echo "UNCONFIRMED:${status}"
+            fi
+          }
+
           if [ "${GITHUB_EVENT_NAME}" = "check_run" ]; then
             check_id="${EVENT_CHECK_RUN_ID}"
             check_name="${EVENT_CHECK_RUN_NAME}"
@@ -256,7 +282,19 @@ jobs:
             found=1
             age_min=$((attempt * 15 / 60))
             case "$result" in
-              RETRIED:*) resolved=1 ;;
+              RETRIED:*)
+                confirm=$(confirm_retry "$check_id")
+                case "$confirm" in
+                  CONFIRMED:*)
+                    resolved=1
+                    report="- check ${check_id} (${check_name}): ${result}, confirmed closed (${confirm#CONFIRMED:})\n"
+                    ;;
+                  *)
+                    retried_unconfirmed=1
+                    report="- check ${check_id} (${check_name}): ${result}, retry accepted but NOT confirmed closed within poll window (${confirm}). Not failing this reactive run for it, a real build can still be running; the scheduled sweep re-checks this check-run directly.\n"
+                    ;;
+                esac
+                ;;
               BUILDING:*) left_building=1; report="- check ${check_id} (${check_name}): ${result}, still building after ${age_min}m, leaving it\n" ;;
               *)
                 if [ "$force_fail" = "1" ]; then
@@ -294,7 +332,20 @@ jobs:
                 fi
                 result=$(resolve_one "$check_name" "$details_url" "0")
                 case "$result" in
-                  RETRIED:*) resolved=$((resolved + 1)) ;;
+                  RETRIED:*)
+                    confirm=$(confirm_retry "$check_id")
+                    case "$confirm" in
+                      CONFIRMED:*)
+                        resolved=$((resolved + 1))
+                        report="${report}- PR check ${check_id} (${check_name}), ${age_min}m: ${result}, confirmed closed (${confirm#CONFIRMED:})\n"
+                        ;;
+                      *)
+                        retried_unconfirmed=$((retried_unconfirmed + 1))
+                        unresolved=$((unresolved + 1))
+                        report="${report}- PR check ${check_id} (${check_name}), ${age_min}m: ${result}, retry accepted but NOT confirmed closed (${confirm})\n"
+                        ;;
+                    esac
+                    ;;
                   BUILDING:*) left_building=$((left_building + 1)); report="${report}- PR check ${check_id} (${check_name}), ${age_min}m: ${result}\n" ;;
                   *) unresolved=$((unresolved + 1)); report="${report}- PR check ${check_id} (${check_name}), ${age_min}m: ${result}\n" ;;
                 esac
@@ -302,11 +353,11 @@ jobs:
             done < <(echo "$prs" | jq -c '.[]')
           fi
 
-          echo "Cloudflare Pages stuck check-run sweep: found ${found}, retried ${resolved}, left building ${left_building}, transient failures ${transient_failed}, unresolved ${unresolved}."
+          echo "Cloudflare Pages stuck check-run sweep: found ${found}, confirmed closed ${resolved}, retried but unconfirmed ${retried_unconfirmed}, left building ${left_building}, transient failures ${transient_failed}, unresolved ${unresolved}."
           {
             echo "## Cloudflare Pages stuck check-run sweep"
             echo
-            echo "Found **${found}**, retried **${resolved}**, left building (not our bug) **${left_building}**, transient failures (not failing this run) **${transient_failed}**, unresolved **${unresolved}**."
+            echo "Found **${found}**, confirmed closed **${resolved}**, retried but unconfirmed **${retried_unconfirmed}**, left building (not our bug) **${left_building}**, transient failures (not failing this run) **${transient_failed}**, unresolved **${unresolved}**."
             if [ -n "$report" ]; then
               echo
               printf '%b' "$report"
