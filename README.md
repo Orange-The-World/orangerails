@@ -5,6 +5,8 @@
 ### The open-source rails for Bitcoin financial data.
 
 **Open-source, self-hostable, Bitcoin-native.**
+<!-- OR-T1064 greenproof: this line proves nothing, it only creates a diff for a throwaway PR -->
+
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-F7931A.svg)](./LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/Orange-The-World/orangerails/ci.yml?branch=prod&label=CI)](https://github.com/Orange-The-World/orangerails/actions/workflows/ci.yml)
