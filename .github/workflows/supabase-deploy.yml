@@ -876,7 +876,8 @@ jobs:
           # in the database), or a file renamed AFTER it ran (the SQL is already
           # applied). Their remedies are opposites, so the abort below must name
           # both rather than printing the one that is destructive in the other
-          # case.
+          # case. The two-case guidance is spelled out in full where the
+          # abort actually fires, below.
           #
           # The ledger carries a name column, so the shadow IS detectable: the
           # version is recorded under one file name and the tree carries another.
