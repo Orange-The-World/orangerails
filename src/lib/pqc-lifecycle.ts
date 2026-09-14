@@ -244,6 +244,34 @@ export interface CarriedPqcSecrets {
  * vault, not merely the salt that was to hand. In recoverWithCode that proof is
  * the verifier check: deriveVerifierKey(oldMek, storedSalt) opened the stored
  * verifier ciphertext, which a wrong salt could not have done.
+ *
+ * A TAG FAILURE ALONE IS NOT ENOUGH TO DISCARD A KEYPAIR, and that is the
+ * second thing this function checks, on top of assertPqcWrapKeyMatchesSalt.
+ * That probe proves the caller derived oldWrapKey correctly; it says nothing
+ * about whether oldWrapKey is the key the STORED ciphertext was actually
+ * wrapped under (see the HONEST LIMIT note on that function). A tag failure
+ * from rewrapPqcSecretKey is consistent with two different worlds: the secret
+ * is genuinely dead, or oldWrapKey is not reproducible from this ciphertext at
+ * all (a salt-migration step that missed these two columns, an HKDF context
+ * change, a secret written by an older client). Nothing about the failure
+ * itself distinguishes them.
+ *
+ * The corroborating signal is the sibling secret. kem_secret_wrapped and
+ * sig_secret_wrapped are wrapped under the SAME oldWrapKey. If oldWrapKey
+ * genuinely cannot open ciphertext sealed under whatever key this vault's
+ * secrets actually used, it fails on BOTH of them, not just one: a wrong key
+ * does not selectively open one AES-GCM ciphertext and reject its sibling. So:
+ *   - one dead, one rewrapped: the rewrapped sibling proves oldWrapKey does
+ *     open ciphertext from this vault, which means the dead one is dead on its
+ *     own terms, not a symptom of the wrong key being used. Safe to report.
+ *   - both dead, or one dead with the other absent: there is no live sibling
+ *     to prove oldWrapKey works at all, so a wrong-key explanation cannot be
+ *     ruled out. Throw instead of discarding. This is deliberately the same
+ *     trade the "permanent stuck recovery" tests elsewhere in this file argue
+ *     against for a SINGLE confirmed-dead secret: here the concern runs the
+ *     other way, an uncorroborated tag failure risks destroying keys for
+ *     every affected user silently, and a loud stuck recovery is the failure
+ *     mode that gets found and fixed instead.
  */
 export async function carryPqcSecretsAcrossRotation(args: {
   oldWrapKey: CryptoKey;
@@ -272,21 +300,50 @@ export async function carryPqcSecretsAcrossRotation(args: {
     saltB64: authenticatedSaltB64,
   });
 
-  let pqcKeysReplaced = false;
+  type CarryOutcome =
+    | { kind: "absent" }
+    | { kind: "rewrapped"; secretWrapped: string }
+    | { kind: "dead" };
 
-  async function carry(secretWrappedB64: string | null): Promise<string | null> {
-    if (!secretWrappedB64) return null;
+  async function carry(secretWrappedB64: string | null): Promise<CarryOutcome> {
+    if (!secretWrappedB64) return { kind: "absent" };
     const result = await rewrapPqcSecretKey(oldWrapKey, newWrapKey, secretWrappedB64);
-    if (result.status === "rewrapped") return result.secretWrapped;
-    pqcKeysReplaced = true;
-    return null;
+    return result.status === "rewrapped"
+      ? { kind: "rewrapped", secretWrapped: result.secretWrapped }
+      : { kind: "dead" };
   }
 
-  // Sequential on purpose. Both calls write pqcKeysReplaced, and concurrency
-  // buys nothing: two AES-GCM operations on a few hundred bytes are not what a
-  // recovery costs.
-  const newKemSecretWrapped = await carry(kemSecretWrapped);
-  const newSigSecretWrapped = await carry(sigSecretWrapped);
+  // Sequential on purpose. Neither call depends on the other's result, but this
+  // is the branch where being wrong destroys keys, and two AES-GCM operations
+  // on a few hundred bytes are not what a recovery costs. Both outcomes are
+  // gathered before either is judged: the decision below needs both.
+  const kemOutcome = await carry(kemSecretWrapped);
+  const sigOutcome = await carry(sigSecretWrapped);
+
+  // A dead outcome is only trustworthy when the sibling rewrapped successfully
+  // under the same oldWrapKey, proving that key can open ciphertext from this
+  // vault at all. Without that corroboration, refuse to guess: a tag failure
+  // alone does not get to authorise clearing a public key.
+  if (kemOutcome.kind === "dead" && sigOutcome.kind !== "rewrapped") {
+    throw new Error(
+      "PQC KEM secret failed to open under the old wrap key, and there is no live sibling " +
+        "secret wrapped under the same key to prove that key can open anything from this " +
+        "vault. Refusing to treat an uncorroborated tag failure as authorisation to discard " +
+        "the keypair; aborting the recovery instead.",
+    );
+  }
+  if (sigOutcome.kind === "dead" && kemOutcome.kind !== "rewrapped") {
+    throw new Error(
+      "PQC signing secret failed to open under the old wrap key, and there is no live sibling " +
+        "secret wrapped under the same key to prove that key can open anything from this " +
+        "vault. Refusing to treat an uncorroborated tag failure as authorisation to discard " +
+        "the keypair; aborting the recovery instead.",
+    );
+  }
+
+  const newKemSecretWrapped = kemOutcome.kind === "rewrapped" ? kemOutcome.secretWrapped : null;
+  const newSigSecretWrapped = sigOutcome.kind === "rewrapped" ? sigOutcome.secretWrapped : null;
+  const pqcKeysReplaced = kemOutcome.kind === "dead" || sigOutcome.kind === "dead";
 
   return { newKemSecretWrapped, newSigSecretWrapped, pqcKeysReplaced };
 }
@@ -336,15 +393,19 @@ const PQC_WRAP_KEY_PROBE = "orangerails-pqc-wrap-key-probe-v1";
  * was wrapped under a derivation this code no longer reproduces: a rotation
  * that carries the other ciphertexts across and leaves these two behind, a
  * change to the HKDF context string, or a secret written by an older client. In
- * each of those the probe passes, the rewrap tag fails, and the keypair is
- * discarded as though the secret were dead.
+ * each of those the probe passes and the rewrap tag fails.
  *
- * A better probe cannot close that. Opening the stored ciphertext IS the
- * rewrap: if it opens, nothing was dead, and if it does not, the tag failure is
- * the same observation either way. Closing it needs either a derivation
- * identifier stored alongside the wrapped secret, or a dead path that a tag
- * failure alone cannot authorise. Neither is here yet, and both are tracked
- * separately. Do not read this function as covering them.
+ * A better probe cannot close that gap, and this function does not try:
+ * opening the stored ciphertext IS the rewrap, so a probe run beforehand can
+ * never tell a dead secret apart from a wrong key. THAT GAP IS CLOSED ONE
+ * LEVEL UP, in carryPqcSecretsAcrossRotation, not here: it does not let a tag
+ * failure alone authorise discarding a keypair. kem_secret_wrapped and
+ * sig_secret_wrapped are wrapped under this same oldWrapKey, so it requires
+ * the sibling secret to rewrap successfully before it will trust a "dead" on
+ * the other one; a tag failure with no corroborating sibling throws instead of
+ * clearing a public key. Read this function as covering only the caller-salt
+ * mistake described above, and read carryPqcSecretsAcrossRotation for how an
+ * uncorroborated tag failure is handled.
  *
  * It also cannot prove the caller named the right salt, because a caller that
  * derives from salt B and also names salt B is self consistent and wrong. What
