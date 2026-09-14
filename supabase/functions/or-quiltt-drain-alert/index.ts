@@ -63,8 +63,17 @@ interface DrainCronStats {
 interface HealthReport {
   checked_at:      string;
   alert_firing:    boolean;
-  /** true = Zulip post sent this run; false = suppressed or env vars missing; null = not firing */
+  /** true = Zulip post sent; false = suppressed or delivery failed; null = not firing */
   zulip_post_sent: boolean | null;
+  delivery_health: {
+    /** Whether this evaluation actually attempted a Zulip POST. */
+    attempted:              boolean;
+    suppressed_by_cooldown: boolean;
+    /** Null when state was not read or could not be persisted. */
+    consecutive_failures:   number | null;
+    /** Present when the durable delivery-state read or write failed. */
+    state_error?:           string;
+  };
   error?:          string;
   signals: {
     failure_rate: {
@@ -284,29 +293,50 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
   // zulip_post_sent: null when not firing, true/false when firing based on outcome.
   let zulipPostSent: boolean | null = null;
+  let deliveryAttempted = false;
+  let deliverySuppressed = false;
+  let consecutiveFailures: number | null = null;
+  let deliveryStateError: string | undefined;
 
   if (alertFiring) {
     // Suppression: only post if we have never posted, or cooldown has elapsed.
     // Prevents ~144 posts/day (every 10 min) when alerts fire continuously.
-    const { data: stateRow } = await client
+    const { data: stateRow, error: stateReadErr } = await client
       .from('drain_alert_state')
-      .select('last_notified_at')
+      .select('last_notified_at, consecutive_failures')
       .eq('id', 1)
       .maybeSingle();
 
-    const lastNotifiedAt: string | null = stateRow?.last_notified_at ?? null;
+    if (stateReadErr) {
+      // Fail towards posting. An unreadable cooldown must not silence an alert.
+      // Keep the error in the response as well as the log so the caller can
+      // assert on the notifier's own health.
+      deliveryStateError = `state read failed: ${stateReadErr.message}`;
+      console.error(
+        '[or-quiltt-drain-alert] cooldown state read failed, posting anyway:',
+        stateReadErr.message,
+      );
+    } else {
+      consecutiveFailures = stateRow?.consecutive_failures ?? 0;
+    }
+
+    const lastNotifiedAt: string | null = stateReadErr
+      ? null
+      : stateRow?.last_notified_at ?? null;
     const cooldownMs   = SUPPRESSION_COOLDOWN_MINUTES * 60 * 1000;
     const withinCooldown =
       lastNotifiedAt !== null &&
       Date.now() - new Date(lastNotifiedAt).getTime() < cooldownMs;
 
     if (withinCooldown) {
+      deliverySuppressed = true;
       console.log(
         `[or-quiltt-drain-alert] alert firing but suppressed ` +
         `(last post: ${lastNotifiedAt}, cooldown: ${SUPPRESSION_COOLDOWN_MINUTES} min)`,
       );
       zulipPostSent = false;
     } else {
+      deliveryAttempted = true;
       const parts: string[] = [];
       if (failureRateFiring) {
         parts.push(
@@ -344,6 +374,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
       const postResult = await postZulipAlert(message);
       zulipPostSent = postResult.sent;
+      const nextConsecutiveFailures = postResult.sent
+        ? 0
+        : (stateReadErr ? 0 : (stateRow?.consecutive_failures ?? 0)) + 1;
 
       // Record the ATTEMPT regardless of outcome, so a dead notifier leaves a
       // trace any SQL query can find (OR-T1135, following a failure that went
@@ -354,17 +387,25 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       const { error: stateWriteErr } = await client
         .from('drain_alert_state')
         .upsert({
-          id:              1,
-          last_attempt_at: checkedAt,
-          last_error:      postResult.error ?? null,
+          id:                   1,
+          last_attempt_at:      checkedAt,
+          last_error:           postResult.error ?? null,
+          consecutive_failures: nextConsecutiveFailures,
           ...(postResult.sent ? { last_notified_at: checkedAt } : {}),
         });
 
       if (stateWriteErr) {
+        const writeError = `state write failed: ${stateWriteErr.message}`;
+        deliveryStateError = deliveryStateError
+          ? `${deliveryStateError}; ${writeError}`
+          : writeError;
+        consecutiveFailures = null;
         console.error(
           '[or-quiltt-drain-alert] failed to record drain_alert_state attempt:',
           stateWriteErr.message,
         );
+      } else {
+        consecutiveFailures = nextConsecutiveFailures;
       }
     }
   }
@@ -373,6 +414,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     checked_at:      checkedAt,
     alert_firing:    alertFiring,
     zulip_post_sent: zulipPostSent,
+    delivery_health: {
+      attempted: deliveryAttempted,
+      suppressed_by_cooldown: deliverySuppressed,
+      consecutive_failures: consecutiveFailures,
+      ...(deliveryStateError !== undefined ? { state_error: deliveryStateError } : {}),
+    },
     ...(queryError !== undefined ? { error: queryError } : {}),
     signals: {
       failure_rate: {
