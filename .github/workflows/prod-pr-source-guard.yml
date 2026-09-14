@@ -65,11 +65,21 @@ name: prod pr source guard
 # the correct direction, and such a pull request is unmergeable anyway.
 #
 # THE JOB NAME BELOW NO LONGER DESCRIBES THE WHOLE BEHAVIOUR, ON PURPOSE.
-# "prod pull requests must come from dev" is the required-check context name in
-# the prod ruleset. Renaming it would leave the ruleset waiting for a check that
-# never reports, and every future promotion would deadlock with nothing pointing
-# at the cause. It stays byte-identical. Read it as "must come from dev, or from
-# a branch that dev already contains".
+# "prod pull requests must come from dev" is this job's context name. Read the
+# job as "must come from dev, or from a branch that dev already contains".
+#
+# AS OF 2026-09-02 THIS CONTEXT IS NOT REQUIRED BY THE PROD RULESET. It is
+# advisory: it can go red on a bad prod PR and nothing stops that PR from
+# merging. Verified independently against the live rules API three times
+# (OR-T1169, OR-T1112, OR-C0489), which listed the prod ruleset's effective
+# required contexts and this name is not among them. OR-T1179 tracks adding
+# it to ruleset 20252464.
+#
+# The job name still stays byte-identical. Once OR-T1179 lands, a rename here
+# would leave the ruleset waiting for a check that never reports, and every
+# future promotion would deadlock with nothing pointing at the cause. If you
+# are reading this well after 2026-09-02, re-check the live ruleset before
+# trusting the claim above: it is dated because it can go stale.
 
 on:
   pull_request:
