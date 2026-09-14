@@ -2454,6 +2454,38 @@ jobs:
             fi
             rm -f /tmp/mig.resp
             echo "  v migration recorded in ledger and read back (version ${VERSION}, name ${NAME})"
+
+            # OR-T1252 (challenge OR-C1886). Record the content hash this
+            # file had at the moment it ran, so a future dispatch's content
+            # scan (above) can tell a rename from an in-place edit. See the
+            # commit message on this block for why a failure here warns
+            # rather than aborts.
+            FILE_HASH=$(sha256sum "$FILE" | cut -d' ' -f1)
+            HASH_REC=$(mktemp); chmod 600 "$HASH_REC"
+            HASH_REC_SQL="INSERT INTO public._or_migration_hashes (version, sha256) VALUES ('${V_SQL}', '${FILE_HASH}') ON CONFLICT (version) DO NOTHING;"
+            jq -n --arg q "$HASH_REC_SQL" '{query:$q}' > "$HASH_REC"
+            HASH_REC_OK=0
+            HASH_REC_CODE=""
+            for attempt in 1 2 3; do
+              HASH_REC_CODE=$(curl -sS -o /tmp/hash.resp -w "%{http_code}" \
+                -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+                -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data-binary "@$HASH_REC")
+              if [[ "$HASH_REC_CODE" =~ ^2 ]]; then
+                HASH_REC_OK=1
+                break
+              fi
+              echo "  ! content-hash record attempt ${attempt}/3 returned HTTP ${HASH_REC_CODE}"
+              if [ "$attempt" -lt 3 ]; then
+                sleep 10
+              fi
+            done
+            rm -f "$HASH_REC" /tmp/hash.resp
+            if [ "$HASH_REC_OK" -ne 1 ]; then
+              echo "  ! WARNING: could not record the content hash for ${BASENAME} after 3 attempts (last HTTP ${HASH_REC_CODE}). Not blocking: ${BASENAME} is already correctly applied and recorded above. To restore in-place-edit detection for this one file, run by hand: INSERT INTO public._or_migration_hashes (version, sha256) VALUES ('${V_SQL}', '${FILE_HASH}') ON CONFLICT (version) DO NOTHING;"
+            fi
+
             APPLIED_COUNT=$((APPLIED_COUNT + 1))
           done
 
