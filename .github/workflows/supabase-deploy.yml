@@ -884,6 +884,309 @@ jobs:
 
           echo "0 anon-executable function(s) in schema public on ${SUPABASE_REF} (outside the allowlist)."
 
+      - name: Check schema net is not in PostgREST exposed schemas
+        # Runs even when a step above exited 1. Same reason as the anon-EXECUTE
+        # check: steps default to if: success(), and "no answer" must never
+        # look like "schema net is not exposed".
+        if: always()
+        # OR-T1529, out of the OR-T1507 ruling. pg_net grants schema net and
+        # net.http_request_queue to PUBLIC, so any role in the cluster can
+        # queue an outbound HTTP request. Revoking that grant is not available:
+        # postgres holds INSERT on the queue ONLY through PUBLIC, and prod cron
+        # jobs run as postgres and use pg_net. PUBLIC is also not a role a
+        # session can decline. The accept therefore rests on schema net not
+        # being in PostgREST's exposed schema list, which is what keeps the
+        # PUBLIC grant unreachable by anon and authenticated: they reach this
+        # database only through PostgREST, and PostgREST serves only its
+        # exposed schemas. If net were added to that list, an unauthenticated
+        # caller could POST rows into net.http_request_queue and the ruling
+        # flips the same day.
+        #
+        # Read off the authenticator role's rolconfig, not from a document:
+        #   select rolconfig from pg_roles where rolname = 'authenticator';
+        # The load-bearing difficulty is the ABSENT case. "No pgrst.db_schemas
+        # setting" and "pgrst.db_schemas exists and does not contain net" are
+        # different facts, and only the second is a positive answer. An absent
+        # setting means the effective list comes from the PostgREST deployment
+        # config, which is not readable from SQL. If this step cannot resolve
+        # the effective list it exits UNKNOWN and non-zero. It must never
+        # print a pass because it could not look.
+        #
+        # DETECTION ONLY. This step does not REVOKE anything on schema net or
+        # any net object. Per the ruling that would break production.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+        run: |
+          set -uo pipefail
+
+          # Same shape as the anon-EXECUTE check above, duplicated rather than
+          # shared because each `run:` block is its own shell process. EMPTY
+          # is not the pass condition here: zero rows means the authenticator
+          # role is missing, which is UNKNOWN, not "net is not exposed".
+          unknown () {
+            {
+              echo "## :grey_question: schema-net exposure check UNKNOWN on \`${SUPABASE_REF:-unresolved}\`"
+              echo ""
+              echo "$1"
+              echo ""
+              echo "This is **not** a report that schema net is PostgREST-exposed, and **not**"
+              echo "a report that it is hidden. The check could not resolve the effective"
+              echo "exposed-schema list. Re-run it, or read authenticator rolconfig (and the"
+              echo "PostgREST deployment config) directly, before promoting."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::schema-net exposure check state UNKNOWN on ${SUPABASE_REF:-unresolved}: $1"
+            exit 1
+          }
+
+          if [ -z "${SUPABASE_REF}" ]; then
+            unknown "The target job produced no supabase_ref output."
+          fi
+
+          PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
+          SQL_FILE=$(mktemp); chmod 600 "$SQL_FILE"
+          trap 'rm -f "$PAYLOAD" "$SQL_FILE"' EXIT
+
+          # array_to_string, not the raw text[] column: a JSON array of GUC
+          # settings must not be mistaken for a JSON array of rows. Newline
+          # separated because a pgrst.db_schemas value itself contains commas.
+          cat > "$SQL_FILE" <<'SQL'
+          SELECT r.rolname AS rolname,
+                 coalesce(array_to_string(r.rolconfig, E'\n'), '') AS rolconfig_text
+            FROM pg_roles r
+           WHERE r.rolname = 'authenticator';
+          SQL
+          jq -Rs '{query:.}' < "$SQL_FILE" > "$PAYLOAD"
+
+          # --fail-with-body, not bare -sS: without it curl exits 0 on a 401,
+          # 403 or 500, the error body parses as valid JSON, row extraction
+          # yields nothing, and an auth failure reads as a clean pass.
+          RESPONSE=""
+          HTTP_OK=0
+          for attempt in 1 2 3; do
+            if RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$PAYLOAD"); then
+              HTTP_OK=1
+              break
+            fi
+            echo "schema-net exposure query attempt ${attempt}/3 did not return a success status"
+            # An `if`, not `[ "$attempt" -lt 3 ] && sleep 10`. Same reasoning as
+            # check-pending-migrations above: this step's `set -uo pipefail`
+            # does not clear the `-e` GitHub Actions already applies by default,
+            # so a bare AND-list here can exit the step before the `unknown`
+            # call right after this loop (OR-T1536).
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          # Response body not echoed on failure -- the one place a
+          # token-shaped string could reach a public build log.
+          [ "$HTTP_OK" -eq 1 ] || unknown "The Supabase Management API did not return a success status after 3 attempts. Most often an expired or rotated SUPABASE_ACCESS_TOKEN, or the project being paused."
+
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            unknown "The schema-net exposure query returned a success status but not a JSON array of rows."
+          fi
+
+          N=$(echo "$RESPONSE" | jq 'length')
+          if ! [ "$N" -eq "$N" ] 2>/dev/null; then
+            unknown "Could not read a row count from the query result, so the effective exposed-schema list cannot be resolved."
+          fi
+          if [ "$N" -eq 0 ]; then
+            unknown "Role authenticator is absent on this project, so pgrst.db_schemas cannot be read from its rolconfig. Absence of the role is not a pass: the effective list was not resolved."
+          fi
+          if [ "$N" -ne 1 ]; then
+            unknown "Expected 0 or 1 row for role authenticator, got ${N}. Refusing to guess the exposed-schema list from an unexpected shape."
+          fi
+
+          CFG_TYPE=$(echo "$RESPONSE" | jq -r '.[0].rolconfig_text | type')
+          if [ "$CFG_TYPE" != "string" ]; then
+            unknown "authenticator rolconfig_text was type ${CFG_TYPE}, not a string. Refusing to guess the exposed-schema list from a shape we cannot read."
+          fi
+          CONFIG=$(echo "$RESPONSE" | jq -r '.[0].rolconfig_text')
+
+          FOUND=0
+          EXPOSED=0
+          RESOLVED=""
+          while IFS= read -r LINE || [ -n "$LINE" ]; do
+            [ -z "$LINE" ] && continue
+            case "$LINE" in
+              pgrst.db_schemas=*)
+                FOUND=1
+                VALUE="${LINE#pgrst.db_schemas=}"
+                case "$VALUE" in
+                  \"*\") VALUE="${VALUE#\"}"; VALUE="${VALUE%\"}" ;;
+                esac
+                if [ -n "$RESOLVED" ]; then
+                  RESOLVED="${RESOLVED},${VALUE}"
+                else
+                  RESOLVED="$VALUE"
+                fi
+                IFS=',' read -ra TOKENS <<< "$VALUE"
+                for TOKEN in "${TOKENS[@]}"; do
+                  TRIMMED=$(printf '%s' "$TOKEN" | tr -d '[:space:]"')
+                  if [ "$TRIMMED" = "net" ]; then
+                    EXPOSED=1
+                  fi
+                done
+                ;;
+            esac
+          done <<< "$CONFIG"
+
+          if [ "$FOUND" -eq 0 ]; then
+            unknown "authenticator rolconfig has no pgrst.db_schemas setting. An absent setting is not a pass: the effective exposed-schema list comes from the PostgREST deployment config, which is not readable from SQL. Set pgrst.db_schemas on role authenticator to an explicit list that does not include schema net, then re-run. Rolconfig (newline-separated, empty if none): ${CONFIG:-empty}"
+          fi
+
+          if [ "$EXPOSED" -eq 1 ]; then
+            {
+              echo "## :no_entry: schema net is in PostgREST exposed schemas on \`${SUPABASE_REF}\`"
+              echo ""
+              echo "authenticator \`pgrst.db_schemas\` resolved to: \`${RESOLVED}\`"
+              echo ""
+              echo "anon and authenticated reach this database through PostgREST. If schema"
+              echo "net is exposed, an unauthenticated caller can POST rows into"
+              echo "net.http_request_queue (PUBLIC holds INSERT; OR-T1507 / OR-T1529)."
+              echo "Remove \`net\` from authenticator's pgrst.db_schemas. Do not REVOKE"
+              echo "the PUBLIC grant on schema net: postgres holds INSERT on the queue"
+              echo "only through PUBLIC, and prod cron uses pg_net as postgres."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::schema net is in authenticator pgrst.db_schemas on ${SUPABASE_REF} (resolved list: ${RESOLVED}). See step summary."
+            exit 1
+          fi
+
+          echo "schema net is not in authenticator pgrst.db_schemas on ${SUPABASE_REF} (resolved list: ${RESOLVED})."
+
+      - name: Check or_agent_reader is NOLOGIN
+        # Runs even when a step above exited 1. Same reason as the checks
+        # above: "no answer" and "role cannot log in" must never look the same.
+        if: always()
+        # OR-T1529, the cheap half of the OR-T1507 accept. Wherever
+        # or_agent_reader exists, rolcanlogin must be false. The restricted
+        # read role inherits PUBLIC's INSERT on net.http_request_queue, so a
+        # login-capable or_agent_reader can queue outbound HTTP. Zero rows is
+        # a PASS and is reported as "role absent on this project", not as
+        # clean: they are different states, and the role is absent on prod
+        # today. One row with rolcanlogin true is a hard fail.
+        #
+        # DETECTION ONLY. This step does not CREATE, ALTER, or DROP the role,
+        # and it does not REVOKE anything on schema net.
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: ${{ needs.target.outputs.supabase_ref }}
+        run: |
+          set -uo pipefail
+
+          # Same shape as the anon-EXECUTE check above, duplicated rather than
+          # shared because each `run:` block is its own shell process. Zero
+          # rows is a pass, but it is the "role absent" pass, never the
+          # "rolcanlogin is false" pass.
+          unknown () {
+            {
+              echo "## :grey_question: or_agent_reader NOLOGIN check UNKNOWN on \`${SUPABASE_REF:-unresolved}\`"
+              echo ""
+              echo "$1"
+              echo ""
+              echo "This is **not** a report that or_agent_reader can log in, and **not**"
+              echo "a report that it cannot, and **not** a report that the role is absent."
+              echo "The check could not determine the state. Re-run it, or read pg_roles"
+              echo "directly, before promoting."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::or_agent_reader NOLOGIN check state UNKNOWN on ${SUPABASE_REF:-unresolved}: $1"
+            exit 1
+          }
+
+          if [ -z "${SUPABASE_REF}" ]; then
+            unknown "The target job produced no supabase_ref output."
+          fi
+
+          PAYLOAD=$(mktemp); chmod 600 "$PAYLOAD"
+          SQL_FILE=$(mktemp); chmod 600 "$SQL_FILE"
+          trap 'rm -f "$PAYLOAD" "$SQL_FILE"' EXIT
+
+          # rolcanlogin::text so the JSON shape does not depend on whether the
+          # Management API encodes a boolean as true or as "t".
+          cat > "$SQL_FILE" <<'SQL'
+          SELECT r.rolname AS rolname,
+                 r.rolcanlogin::text AS rolcanlogin
+            FROM pg_roles r
+           WHERE r.rolname = 'or_agent_reader';
+          SQL
+          jq -Rs '{query:.}' < "$SQL_FILE" > "$PAYLOAD"
+
+          # --fail-with-body, not bare -sS: without it curl exits 0 on a 401,
+          # 403 or 500, the error body parses as valid JSON, row extraction
+          # yields nothing, and an auth failure reads as a clean pass.
+          RESPONSE=""
+          HTTP_OK=0
+          for attempt in 1 2 3; do
+            if RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$PAYLOAD"); then
+              HTTP_OK=1
+              break
+            fi
+            echo "or_agent_reader NOLOGIN query attempt ${attempt}/3 did not return a success status"
+            # An `if`, not `[ "$attempt" -lt 3 ] && sleep 10`. Same reasoning as
+            # check-pending-migrations above: this step's `set -uo pipefail`
+            # does not clear the `-e` GitHub Actions already applies by default,
+            # so a bare AND-list here can exit the step before the `unknown`
+            # call right after this loop (OR-T1536).
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          # Response body not echoed on failure -- the one place a
+          # token-shaped string could reach a public build log.
+          [ "$HTTP_OK" -eq 1 ] || unknown "The Supabase Management API did not return a success status after 3 attempts. Most often an expired or rotated SUPABASE_ACCESS_TOKEN, or the project being paused."
+
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            unknown "The or_agent_reader NOLOGIN query returned a success status but not a JSON array of rows."
+          fi
+
+          N=$(echo "$RESPONSE" | jq 'length')
+          if ! [ "$N" -eq "$N" ] 2>/dev/null; then
+            unknown "Could not read a row count from the query result, so or_agent_reader's login flag cannot be resolved."
+          fi
+          if [ "$N" -eq 0 ]; then
+            {
+              echo "## or_agent_reader on \`${SUPABASE_REF}\`"
+              echo ""
+              echo "role absent on this project"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "role absent on this project"
+            exit 0
+          fi
+          if [ "$N" -ne 1 ]; then
+            unknown "Expected 0 or 1 row for role or_agent_reader, got ${N}. Refusing to guess rolcanlogin from an unexpected shape."
+          fi
+
+          LOGIN=$(echo "$RESPONSE" | jq -r '.[0].rolcanlogin')
+          case "$LOGIN" in
+            t|true|True|TRUE)
+              {
+                echo "## :no_entry: or_agent_reader can log in on \`${SUPABASE_REF}\`"
+                echo ""
+                echo "rolcanlogin is true. The restricted read role inherits PUBLIC's INSERT"
+                echo "on net.http_request_queue, so a login-capable or_agent_reader can queue"
+                echo "outbound HTTP (OR-T1507 / OR-T1529). ALTER ROLE or_agent_reader NOLOGIN."
+                echo "Do not REVOKE the PUBLIC grant on schema net."
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::or_agent_reader exists on ${SUPABASE_REF} with rolcanlogin=true. See step summary."
+              exit 1
+              ;;
+            f|false|False|FALSE)
+              echo "or_agent_reader exists on ${SUPABASE_REF} with rolcanlogin=false"
+              exit 0
+              ;;
+            *)
+              unknown "Could not interpret or_agent_reader.rolcanlogin value '${LOGIN}'. Expected t/true or f/false. Refusing to treat an unreadable flag as NOLOGIN."
+              ;;
+          esac
+
   # ---------------------------------------------------------------------------
   # OR-T1340. RLS regresses the same silent way anon-EXECUTE grants do: a
   # migration drops or rewrites a policy and nothing throws, it just returns
