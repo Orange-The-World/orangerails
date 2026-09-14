@@ -121,7 +121,7 @@ def _pg_env():
         "PGDATABASE": (p.path or "/").lstrip("/"),
         # Covers every psql session this script opens: derive_needs_orbi_row
         # DISTINCT scan, anchor SELECT, and INSERT. No per-call flag needed.
-        "PGOPTIONS": "-c max_parallel_workers_per_gather=0",
+        "PGOPTIONS": "-c max_parallel_workers_per_gather=0 -c dynamic_shared_memory_type=mmap",
     }
 
 
