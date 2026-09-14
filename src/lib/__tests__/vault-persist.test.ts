@@ -18,8 +18,10 @@ import { describe, it, expect, vi } from "vitest";
 import {
   migrateAndPersistRotatedVault,
   persistRewrappedVaultMeta,
+  loadVaultMetaForRecovery,
   rowNotWrittenMessage,
   VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE,
+  VAULT_META_UNREADABLE_MESSAGE,
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
@@ -1416,5 +1418,50 @@ describe("vault recovery: a raw failure after rows are already rewritten (OR-T10
     expect(caught).toBeTruthy();
     expect((caught as { message?: string }).message).toBe("connection refused");
     expect(clearMigrationKeys).not.toHaveBeenCalled();
+  });
+});
+
+describe("loadVaultMetaForRecovery", () => {
+  /** A minimal fake for the .from().select().eq().single() shape this function uses. */
+  function fakeSingleClient(result: { data: unknown; error: unknown }): VaultPersistClient {
+    return {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            single: async () => result,
+          }),
+        }),
+      }),
+    };
+  }
+
+  const row = {
+    vault_salt: "salt-1",
+    vault_verifier_ciphertext: "verifier-1",
+    recovery_ciphertext: "recovery-1",
+    kem_secret_wrapped: null,
+    sig_secret_wrapped: null,
+  };
+
+  it("returns the row when the read is proven to have landed", async () => {
+    const client = fakeSingleClient({ data: row, error: null });
+    await expect(loadVaultMetaForRecovery(client, "user-1")).resolves.toEqual(row);
+  });
+
+  it("refuses a structured error rather than treating it as no row", async () => {
+    const client = fakeSingleClient({ data: null, error: { message: "RLS denied" } });
+    await expect(loadVaultMetaForRecovery(client, "user-1")).rejects.toThrow(
+      VAULT_META_UNREADABLE_MESSAGE,
+    );
+  });
+
+  it("refuses a successful-looking empty result, not just an error", async () => {
+    // No error at all: exactly the shape a capped or filtered-out read comes
+    // back as. Silently treating this as "no PQC secrets stored" is the
+    // defect this guard exists to catch, so it must throw here too.
+    const client = fakeSingleClient({ data: null, error: null });
+    await expect(loadVaultMetaForRecovery(client, "user-1")).rejects.toThrow(
+      VAULT_META_UNREADABLE_MESSAGE,
+    );
   });
 });
