@@ -420,6 +420,24 @@ jobs:
     name: Test edge functions (Deno)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # OR-T1721: a real postgres service container so a test can execute a
+    # SQL statement against a real schema, not just match its shape as a
+    # string. No tool-only seat here holds a Supabase write credential (the
+    # sb_query grant is read-only SELECT and refuses even an EXPLAIN of an
+    # INSERT), so this ephemeral, disposable database is how that gap
+    # closes without needing one. It never touches Supabase dev or prod.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
