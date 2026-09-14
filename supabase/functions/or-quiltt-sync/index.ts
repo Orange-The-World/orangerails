@@ -1115,7 +1115,13 @@ export async function reconcileConnectionSuccess(
       .limit(1)
       .maybeSingle();
     if (legacyErr) return `connection lookup failed: ${legacyErr.message}`;
-    if (legacy) orConnId = legacy.id;
+    if (legacy) {
+      const ambiguity = await hasOtherQuilttConnection(client, subaccountId, connectionId);
+      if (ambiguity.error) return ambiguity.error;
+      if (chooseFallbackConnection(legacy, ambiguity.seen) === 'use-legacy') {
+        orConnId = legacy.id;
+      }
+    }
   }
   if (!orConnId) return null;
   const { error: statusErr } = await client
