@@ -441,10 +441,11 @@ export async function handleEvent(
   // is subaccount_id.
   // Route the event to the OR connection row whose quiltt_connection_id
   // matches the webhook's connectionId. Falls back to a legacy NULL-id
-  // row only if no exact match exists — keeps banks linked before the
-  // multi-connection migration working. If both fail, surface the
-  // mismatch instead of silently writing to the wrong bank's bucket
-  // (which was the pre-fix root cause of Mercury+TD collisions).
+  // row only if no exact match exists -- keeps banks linked before the
+  // multi-connection migration working, AND only when nothing suggests a
+  // second live connection is already using it (OR-T2475). If both fail,
+  // surface the mismatch instead of silently writing to the wrong bank's
+  // bucket (which was the pre-fix root cause of Mercury+TD collisions).
   let conn: { id: string } | null = null;
   const exactMatch = await client
     .from('connections')
@@ -478,7 +479,29 @@ export async function handleEvent(
     // re-admits ANY deferred row for a sink subaccount every tick regardless
     // of why it was deferred, so bumpAttempts fired once per tick.
     if (!legacy.data) return 'deferred-conn-race';
-    conn = legacy.data as { id: string };
+
+    // OR-T2475: a legacy row exists, but "oldest NULL row for this
+    // subaccount" is not the same claim as "the row this connectionId
+    // already owns". Two independently-scheduled Quiltt connections at one
+    // subaccount silently shared this exact row for three months in
+    // production because nothing here ever asked whether a DIFFERENT
+    // connectionId had already been using it. See hasOtherQuilttConnection
+    // for how that is checked; a lookup failure fails the event rather than
+    // guessing.
+    const ambiguity = await hasOtherQuilttConnection(client, subaccountId, connectionId);
+    if (ambiguity.error) return ambiguity.error;
+    if (chooseFallbackConnection(legacy.data, ambiguity.seen) === 'create-new') {
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: legacy row ${legacy.data.id} for ` +
+          `subaccount ${subaccountId} already has traffic from a different Quiltt ` +
+          `connection; creating a new connections row instead of merging`,
+      );
+      const created = await createConnectionForAmbiguousMatch(client, subaccountId, connectionId);
+      if (typeof created === 'string') return created;
+      conn = created;
+    } else {
+      conn = legacy.data as { id: string };
+    }
   }
 
   // DL-0442: load account selection for this connection once, before paging.
