@@ -1488,9 +1488,15 @@ function AppHome() {
 
 const STALE_THRESHOLD_DAYS = 7;
 
-function isStaleConnection(lastSyncAt: string): boolean {
+// 30-day nudge threshold (OR-T0066, DL-0382 Option A). Separate from the
+// 7-day reconnect banner above: that one flags a broken/erroring
+// connection, this one flags a connection nobody has synced in a month,
+// which is a different problem and gets its own, more urgent, treatment.
+const STALE_NUDGE_THRESHOLD_DAYS = 30;
+
+function isStaleConnection(lastSyncAt: string, thresholdDays: number = STALE_THRESHOLD_DAYS): boolean {
   const ageMs = Date.now() - new Date(lastSyncAt).getTime();
-  return ageMs > STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
+  return ageMs > thresholdDays * 24 * 60 * 60 * 1000;
 }
 
 // ------------------------------------------------------------------
@@ -1519,21 +1525,49 @@ function ConnectionRow({
 
   const neverSynced = conn.last_sync_at === null;
   const stale = !neverSynced && isStaleConnection(conn.last_sync_at!);
+  // Takes precedence over `stale` when both are true: 30+ days is always
+  // also 7+ days, and the nudge is the more urgent, more specific case.
+  const staleNudge = !neverSynced && isStaleConnection(conn.last_sync_at!, STALE_NUDGE_THRESHOLD_DAYS);
 
   return (
     <div className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
-      {stale && (
+      {staleNudge ? (
         <span
           aria-hidden="true"
-          className="shrink-0 w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400"
+          data-testid="stale-nudge-dot"
+          className="shrink-0 w-2 h-2 rounded-full bg-red-500 dark:bg-red-400"
         />
+      ) : (
+        stale && (
+          <span
+            aria-hidden="true"
+            className="shrink-0 w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400"
+          />
+        )
       )}
       <div className="flex-1 min-w-0 space-y-1">
         <div className="font-medium truncate">{conn.decrypted_label || conn.provider_type}</div>
-        {stale && (
-          <div className="text-xs text-amber-600 dark:text-amber-400">
-            Not syncing. Select to reconnect.
+        {staleNudge ? (
+          <div
+            data-testid="stale-nudge-banner"
+            className="text-xs text-red-600 dark:text-red-400 flex items-center gap-2"
+          >
+            <span>No sync in over 30 days.</span>
+            <button
+              type="button"
+              onClick={onSync}
+              disabled={syncing}
+              className="underline font-medium disabled:opacity-50"
+            >
+              {syncing ? "Syncing..." : "Re-sync now"}
+            </button>
           </div>
+        ) : (
+          stale && (
+            <div className="text-xs text-amber-600 dark:text-amber-400">
+              Not syncing. Select to reconnect.
+            </div>
+          )
         )}
         {neverSynced && (
           <div className="text-xs text-muted-foreground">
