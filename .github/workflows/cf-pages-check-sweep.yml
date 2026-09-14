@@ -62,6 +62,16 @@ name: Cloudflare Pages stuck check-run sweep
 # any unresolved check, because there a red run is a monitoring signal, not
 # a merge gate.
 #
+# CONFIRMING A RETRY ACTUALLY CLOSED THE CHECK-RUN (OR-T1344, OR-C1888).
+# Cloudflare accepting a retry (success:true) is a request, not a result.
+# If the "same check-run" assumption above is ever violated for one
+# deployment, an accepted-but-never-fulfilled retry was previously counted
+# as fully resolved and never looked at again. confirm_retry() re-polls the
+# check-run itself for up to ~2 minutes after a retry is accepted. The
+# reactive path reports an unconfirmed retry without failing the run (a
+# real build can still be running); the sweep path counts it as unresolved,
+# because the sweep is this workflow's own monitoring backstop.
+#
 # The FORCE_FAIL marker below is the one deliberate exception: it exists
 # ONLY so the fail-loud path can be proven before it is trusted, per this
 # ticket's acceptance criteria. Push a commit whose message contains
