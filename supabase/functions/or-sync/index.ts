@@ -130,7 +130,25 @@ export function redactedUpstreamDetail(raw: string): string {
     .replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
     .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
-    .replace(/\b\d{4,}\b/g, '[redacted]')
+    // Only redact a digit run when an account/card/reference keyword sits
+    // within 20 non-digit characters before it. A blanket \d{4,} match here
+    // used to strip every 4+ digit number in the line, including HTTP status
+    // codes, retry-after seconds, amounts and timestamps that carry no PII at
+    // all (QA, OR-T0362, 2026-08-28: "over-redaction destroys the diagnostic
+    // is a failure of this ticket, not a success").
+    //
+    // The captured digit run includes internal spaces and hyphens so a value
+    // written as several groups (1234-5678-9012-3456) is matched and redacted
+    // WHOLE. Stopping after the first group was the defect the Auditor
+    // blocked on PR #957: the global pass then needs another keyword before
+    // it will match again, so every later group survived untouched.
+    .replace(
+      /\b(account|acct|card|reference|ref)\b([^0-9]{0,20})(\d(?:[\d\s-]*\d)?)/gi,
+      (whole: string, keyword: string, gap: string, digits: string): string => {
+        const digitCount = digits.replace(/[^0-9]/g, '').length;
+        return digitCount >= 4 ? `${keyword}${gap}[redacted]` : whole;
+      },
+    )
     .slice(0, 300);
 }
 
