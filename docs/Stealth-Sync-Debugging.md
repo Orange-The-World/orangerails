@@ -158,13 +158,21 @@ and `OR_STEALTH_SYNC_COMPLETE` is never sent. It fails loudly on purpose:
 a silently NULL cursor makes every future sync rescan from the wallet
 birthday. If you are behind a proxy, read section 9b first.
 
-**Cursor rules, so you do not fight them:**
+**Resume rules, so you do not fight them:**
 
 - The cursor only moves **forward** through `or-stealth-envelope-update`.
-- The cursor **resets to null** whenever the envelope is replaced, which
-  is the only way a user triggers a full rescan: either re-adding the
-  wallet, or changing the wallet birthday (a birthday change is itself
-  an envelope replacement).
+- Two things decide where a sync starts, not one: the recorded scan
+  coverage (`stealth_scan_ranges`) and the legacy cursor
+  (`last_block_scanned`). **Coverage wins.** The single rule is
+  `scanStartHeight()` in `src/stealth/lib/ranges.ts`; when a recorded
+  range covers the wallet birthday, the cursor is never consulted.
+- Replacing the envelope **clears both**, which is the only way a user
+  triggers a full rescan: either re-adding the wallet, or changing the
+  wallet birthday (a birthday change is itself an envelope replacement).
+  Clearing the cursor alone is **not** enough for a connection that has
+  coverage: it changes a stored number and the scan starts in exactly
+  the same place. If you are clearing state by hand to force a rescan,
+  clear the coverage rows too or nothing will happen.
 
 ## 6. Symptom: user changed the wallet birthday but the sync ignores it
 
@@ -176,14 +184,21 @@ privacy model (a date alone reveals nothing about addresses, balances,
 or history), and it is what makes the probe below possible. Changing the
 birthday means re-sealing and re-submitting the envelope through
 `or-stealth-connection-create`, which detects the re-add of the same
-wallet (by blind index), replaces the stored envelope, and resets the
-sync cursor.
+wallet (by blind index), replaces the stored envelope, and clears both
+halves of the resume state: the sync cursor and the recorded scan
+coverage.
 
 If a re-added wallet still syncs with the old birthday, probe the
 envelope the server actually has (same envelope-fetch call as §5) and
 check `wallet_birthday_plaintext`. If it shows the OLD date, the replace
 never landed: you are running edge functions from before the re-add fix,
 or the create call failed and the UI swallowed it.
+
+If the date is the NEW one and the sync still starts high, check the
+coverage rows for that connection. A range that covers the new birthday
+pins the start height regardless of the cursor, so a replacement that
+left coverage behind produces exactly this symptom: no rescan, no error.
+Edge functions from before that fix cleared the cursor only.
 
 ## 7. Symptom: "we deployed the fix but behavior did not change"
 

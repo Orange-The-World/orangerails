@@ -22,6 +22,7 @@ import { gzipSync } from 'node:zlib';
 
 import { sealEnvelope, unsealEnvelope } from './seal';
 import {
+  CONFIRMATION_DEPTH,
   FILTER_FETCH_ATTEMPTS,
   liveFetchBlock,
   liveFetchFilter,
@@ -31,7 +32,7 @@ import {
   type BlockRecord,
   type WalletEnvelopePayload,
 } from './sync';
-import { deriveScriptPubkeyBytes } from './derive';
+import { deriveAddress, deriveScriptPubkeyBytes } from './derive';
 import type { StealthStage } from './postmessage';
 
 // BIP84 official test vector (https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki).
@@ -101,24 +102,97 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/** One input of a fixture transaction: a genuine previous outpoint. */
+interface FixtureTxInput {
+  /** Previous txid in RPC display order, which is what parseTx reports. */
+  prevTxidHex: string;
+  voutIdx: number;
+}
+
+/** One output of a fixture transaction. */
+interface FixtureTxOutput {
+  script: Uint8Array;
+  amountSats: bigint;
+}
+
+interface FixtureTx {
+  /**
+   * Omit for the all-zero outpoint the single-output fixtures have always
+   * used. parseTx drops that input as coinbase-like, which is correct and
+   * is exactly why a spend test has to supply real outpoints here.
+   */
+  inputs?: FixtureTxInput[];
+  outputs: FixtureTxOutput[];
+}
+
 /**
- * Build a minimal valid block containing a single non-segwit transaction
- * with one input and one output that pays to the given scriptPubKey for
- * the given amount in sats.
+ * Serialize one legacy (non-witness) transaction.
  *
  * Layout:
- *   [80-byte header][varint(txCount=1)][tx]
- * Tx layout (legacy, no witness):
- *   [version=2 LE 4][vin count=1 varint][outpoint 36 + scriptSig 0 + seq 0xffffffff][
- *    vout count=1 varint][value 8 LE][scriptPubKey varint+bytes][locktime 4]
+ *   [version=2 LE 4][vin count varint]
+ *   [per input: outpoint 36 + scriptSig 0 + seq 0xffffffff]
+ *   [vout count varint][per output: value 8 LE + scriptPubKey varint+bytes]
+ *   [locktime 4]
+ *
+ * Because there is no witness, this serialization IS the pre-image the
+ * orchestrator hashes for the txid, so fixtureTxid below can hash it
+ * directly and get the same value parseTx will report.
+ */
+function serializeFixtureTx(tx: FixtureTx): Uint8Array {
+  const inputs: FixtureTxInput[] = tx.inputs ?? [
+    { prevTxidHex: '00'.repeat(32), voutIdx: 0xffffffff },
+  ];
+
+  const parts: Uint8Array[] = [
+    u32LE(2),                 // version
+    varInt(inputs.length),    // vin count
+  ];
+  for (const inp of inputs) {
+    // On the wire the previous txid is internal little-endian; parseTx
+    // reverses it back to display order. Write it reversed here so the
+    // caller can pass the txid string the orchestrator hands back.
+    parts.push(reverseBytes(hexToBytes(inp.prevTxidHex)));
+    parts.push(u32LE(inp.voutIdx));
+    parts.push(varInt(0));            // empty scriptSig
+    parts.push(u32LE(0xffffffff));    // sequence
+  }
+
+  parts.push(varInt(tx.outputs.length));
+  for (const out of tx.outputs) {
+    parts.push(u64LE(out.amountSats));
+    parts.push(varInt(out.script.length));
+    parts.push(out.script);
+  }
+  parts.push(u32LE(0));               // locktime
+
+  return concat(...parts);
+}
+
+/**
+ * Build a minimal valid block.
+ *
+ * Two call shapes:
+ *   { payToScript, amountSats, timestamp }  one transaction, one
+ *     coinbase-like input, one output. The original shape; every existing
+ *     call site produces byte-identical blocks.
+ *   { txs, timestamp }                      any number of transactions,
+ *     each with real previous outpoints and any number of outputs. This is
+ *     what makes a spend expressible.
+ *
+ * Layout:
+ *   [80-byte header][varint(txCount)][tx...]
  *
  * Header timestamp is bytes 68..72.
+ *
+ * Returns the serialized bytes of each transaction alongside the block so
+ * the caller can derive txids for use as inputs in a later block.
  */
 function buildFixtureBlock(opts: {
-  payToScript: Uint8Array;
-  amountSats: bigint;
+  payToScript?: Uint8Array;
+  amountSats?: bigint;
   timestamp: number;
-}): { raw: Uint8Array; blockHashHex: string } {
+  txs?: FixtureTx[];
+}): { raw: Uint8Array; blockHashHex: string; txs: Uint8Array[] } {
   // Header: version + prev hash + merkle + ts + bits + nonce. We do not
   // bother making the merkle root match (the orchestrator does not verify);
   // for txid we hash the legacy serialization independently.
@@ -129,21 +203,23 @@ function buildFixtureBlock(opts: {
   header.set(u32LE(0x1d00ffff), 72);   // bits
   header.set(u32LE(0), 76);            // nonce
 
-  const tx = concat(
-    u32LE(2),                                          // version
-    varInt(1),                                         // vin count
-    new Uint8Array(32),                                // prev txid (zero)
-    u32LE(0xffffffff),                                 // prev vout (coinbase-like, fine for fixture)
-    varInt(0),                                         // empty scriptSig
-    u32LE(0xffffffff),                                 // sequence
-    varInt(1),                                         // vout count
-    u64LE(opts.amountSats),                            // value
-    varInt(opts.payToScript.length),
-    opts.payToScript,
-    u32LE(0),                                          // locktime
-  );
+  let txList: FixtureTx[];
+  if (opts.txs !== undefined) {
+    txList = opts.txs;
+  } else {
+    if (opts.payToScript === undefined || opts.amountSats === undefined) {
+      // Loud rather than quietly building an empty block: a fixture that
+      // silently contains nothing would make an assertion pass for the
+      // wrong reason.
+      throw new Error(
+        'buildFixtureBlock: pass either txs, or payToScript together with amountSats',
+      );
+    }
+    txList = [{ outputs: [{ script: opts.payToScript, amountSats: opts.amountSats }] }];
+  }
 
-  const raw = concat(header, varInt(1), tx);
+  const serialized = txList.map(serializeFixtureTx);
+  const raw = concat(header, varInt(serialized.length), ...serialized);
 
   // We do NOT compute the real block hash from the header double-sha256
   // here; the orchestrator's parseBlockHeader does that itself. We need
@@ -151,7 +227,16 @@ function buildFixtureBlock(opts: {
   // it inline using SubtleCrypto.
   // Vitest's node env has globalThis.crypto.subtle.digest with SHA-256.
   // But for synchronous fixture creation we use a tiny inline routine.
-  return { raw, blockHashHex: '' /* filled in by caller using async sha */ };
+  return { raw, blockHashHex: '' /* filled in by caller using async sha */, txs: serialized };
+}
+
+/**
+ * The txid the orchestrator will report for a fixture transaction. These
+ * fixtures carry no witness, so the whole serialization is the legacy
+ * serialization parseTx hashes.
+ */
+async function fixtureTxid(txBytes: Uint8Array): Promise<string> {
+  return bytesToHex(reverseBytes(await dsha256Async(txBytes)));
 }
 
 async function dsha256Async(b: Uint8Array): Promise<Uint8Array> {
@@ -208,7 +293,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 700_000,
       lastBlockScanned: 700_000,
-      fetchTip: async () => 700_001,
+      fetchTip: async () => 700_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 700_001) {
           return { height: h, blockHashHex, filter: fakeFilter };
@@ -353,7 +438,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 800_000,
       lastBlockScanned: null,
-      fetchTip: async () => 800_010,
+      fetchTip: async () => 800_010 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h >= 800_005) return null;
         return { height: h, blockHashHex: '00'.repeat(32), filter: new Uint8Array(0) };
@@ -439,7 +524,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
         orStealthKey,
         birthdayHeight: 850_000,
         lastBlockScanned: 850_000,
-        fetchTip: async () => 850_001,
+        fetchTip: async () => 850_001 + CONFIRMATION_DEPTH,
         fetchFilter: async (h) => ({
           height: h,
           blockHashHex: 'ab'.repeat(32),
@@ -484,7 +569,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 850_000,
       lastBlockScanned: 850_000,
-      fetchTip: async () => 850_001,
+      fetchTip: async () => 850_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 850_001) {
           return { height: h, blockHashHex, filter: new Uint8Array([1, 2, 3]) };
@@ -537,7 +622,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 900_000,
       lastBlockScanned: 900_000,
-      fetchTip: async () => 900_001,
+      fetchTip: async () => 900_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) =>
         h === 900_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
       fetchBlock: async () => ({ height: 900_001, blockHashHex, raw: blockBuild.raw }),
@@ -575,7 +660,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 910_000,
       lastBlockScanned: 910_000,
-      fetchTip: async () => 910_001,
+      fetchTip: async () => 910_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) =>
         h === 910_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
       fetchBlock: async () => ({ height: 910_001, blockHashHex, raw: blockBuild.raw }),
@@ -625,7 +710,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 800_000,
       lastBlockScanned: 800_000,
-      fetchTip: async () => 800_002,
+      fetchTip: async () => 800_002 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         if (h === 800_001) return { height: h, blockHashHex: hashHexA, filter: filterA };
         if (h === 800_002) return { height: h, blockHashHex: hashHexB, filter: filterB };
@@ -708,7 +793,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 800_000,
       lastBlockScanned: 800_000,
-      fetchTip: async () => 800_001,
+      fetchTip: async () => 800_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) => {
         fetchFilterCalls.push(h);
         if (h === 800_001) return { height: h, blockHashHex, filter: fakeFilter };
@@ -770,7 +855,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
       orStealthKey,
       birthdayHeight: 900_000,
       lastBlockScanned: 900_000,
-      fetchTip: async () => 900_001,
+      fetchTip: async () => 900_001 + CONFIRMATION_DEPTH,
       // Simulate liveFetchFilter throwing on 404 for the only height in range.
       fetchFilter: async (_h) => { throw fetchFilterError; },
       fetchBlock: async () => { throw new Error('should not be reached'); },
@@ -826,7 +911,7 @@ describe('runSync , orchestrator end-to-end with fixtures', () => {
         orStealthKey,
         birthdayHeight: 900_001,
         lastBlockScanned: null,
-        fetchTip: async () => 900_002,
+        fetchTip: async () => 900_002 + CONFIRMATION_DEPTH,
         fetchFilter: async (h) => {
           if (h === 900_001) return { height: h, blockHashHex: hash1Hex, filter: fakeFilter };
           if (h === 900_002) return { height: h, blockHashHex: hash2Hex, filter: fakeFilter };
@@ -889,7 +974,7 @@ describe('runSync height source and block ordering regressions', () => {
       orStealthKey,
       birthdayHeight: 700_000,
       lastBlockScanned: 700_000,
-      fetchTip: async () => 700_001,
+      fetchTip: async () => 700_001 + CONFIRMATION_DEPTH,
       fetchFilter: async (h) =>
         h === 700_001 ? { height: h, blockHashHex, filter: fakeFilter } : null,
       // Simulate the browser CORS reality: the block record carries
@@ -938,7 +1023,7 @@ describe('runSync height source and block ordering regressions', () => {
       orStealthKey,
       birthdayHeight: 700_000,
       lastBlockScanned: 700_000,
-      fetchTip: async () => 700_002,
+      fetchTip: async () => 700_002 + CONFIRMATION_DEPTH,
       // The LOWER height resolves LAST (40ms delay), so completion order
       // is high-then-low. Without the ascending sort, the low block
       // would be processed second.
@@ -1285,7 +1370,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     const envelope = await sealEnvelope(payload, orStealthKey);
 
     const storedCursor = 800_000;
-    const tip = 800_003;
+    const tip = 800_003 + CONFIRMATION_DEPTH;
     const fakeFilter = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
     const zeroHashHex = bytesToHex(new Uint8Array(32));
 
@@ -1314,9 +1399,12 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     expect(fetchFilter).toHaveBeenCalled();
     // No filter matched, so no block fetch happened...
     expect(fetchBlock).not.toHaveBeenCalled();
-    // ...but the cursor still advanced above the stored value, up to tip.
+    // ...but the cursor still advanced above the stored value, up to the scan
+    // ceiling. The ceiling is CONFIRMATION_DEPTH below the chain tip, never the
+    // chain tip itself: see the confirmation-buffer describe at the end of this
+    // file for why, and for the guard on that specific gap.
     expect(result.lastBlockScanned).toBeGreaterThan(storedCursor);
-    expect(result.lastBlockScanned).toBe(tip);
+    expect(result.lastBlockScanned).toBe(tip - CONFIRMATION_DEPTH);
     expect(result.txCount).toBe(0);
   });
 
@@ -1337,7 +1425,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
     const envelope = await sealEnvelope(payload, orStealthKey);
 
     const storedCursor = 800_000;
-    const tip = 800_005;
+    const tip = 800_005 + CONFIRMATION_DEPTH;
     // Heights 800001 and 800002 have filters; 800003-800005 are not yet
     // produced by the filter service (404 -> null). The cursor must stop at
     // 800002 so the next sync retries 800003-800005 once they are available.
@@ -1414,7 +1502,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
         orStealthKey,
         birthdayHeight: BASE_HEIGHT - 1,
         lastBlockScanned: BASE_HEIGHT - 1,
-        fetchTip: async () => BASE_HEIGHT + 2,
+        fetchTip: async () => BASE_HEIGHT + 2 + CONFIRMATION_DEPTH,
         fetchFilter: async (h: number) => {
           const idx = h - BASE_HEIGHT;
           if (idx >= 0 && idx < 3) {
@@ -1488,7 +1576,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
           orStealthKey,
           birthdayHeight: BASE_HEIGHT - 1,
           lastBlockScanned: BASE_HEIGHT - 1,
-          fetchTip: async () => BASE_HEIGHT + 2,
+          fetchTip: async () => BASE_HEIGHT + 2 + CONFIRMATION_DEPTH,
           fetchFilter: async (h: number) => {
             const idx = h - BASE_HEIGHT;
             if (idx >= 0 && idx < 3) {
@@ -1552,7 +1640,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
       const envelope = await sealEnvelope(payload, orStealthKey);
 
       const storedCursor = 800_000;
-      const tip = 800_005;
+      const tip = 800_005 + CONFIRMATION_DEPTH;
       const failHeight = 800_003; // heights 800001 and 800002 succeed; 800003 fails
       const zeroHashHex = bytesToHex(new Uint8Array(32));
       const fakeFilter = new Uint8Array([0xde, 0xad]);
@@ -1615,7 +1703,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
         orStealthKey,
         birthdayHeight: 800_000,
         lastBlockScanned: 800_000,
-        fetchTip: async () => 800_005,
+        fetchTip: async () => 800_005 + CONFIRMATION_DEPTH,
         fetchFilter: async (h) => {
           if (h >= FAIL_HEIGHT) throw new Error('transient-gone');
           return { height: h, blockHashHex: h === HIT_HEIGHT ? blockHashHex : bytesToHex(new Uint8Array(32)), filter: fakeFilter };
@@ -1670,7 +1758,7 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
         orStealthKey,
         birthdayHeight: 900_000,
         lastBlockScanned: 900_000,
-        fetchTip: async () => 900_005,
+        fetchTip: async () => 900_005 + CONFIRMATION_DEPTH,
         fetchFilter: async (h) => {
           if (h >= FAIL_HEIGHT) throw new Error('gone-permanent');
           return {
@@ -1691,5 +1779,625 @@ describe('cursor guard -- short-circuit path (sync.tsx:298 invariant)', () => {
       // Cursor must stop at the last successfully scanned height.
       expect(result.lastBlockScanned).toBe(FAIL_HEIGHT - 1);
     });
+  });
+});
+
+// ─── Spend arithmetic and change tracking ───────────────────────────────
+//
+// Why these exist. Until the fixture builder above grew real previous
+// outpoints, every transaction this file produced carried a single
+// all-zero input. parseTx drops those as coinbase-like, which is correct,
+// so tx.inputs was always empty and spentInputs was always 0n. The whole
+// `if (spentInputs > 0n)` arm of runSync, and its twin in the extension
+// loop, had therefore never run in any test while the suite reported
+// green. That arm is what decides what a customer spent and what came
+// back to them as change.
+//
+// The UTXO map is private to runSync, so these tests do not reach into
+// it. They assert on what the caller can see: the normalized records, and
+// whether spending an earlier change output is detected at all.
+
+describe('runSync , spend arithmetic and change tracking', () => {
+  // gap_limit 5 gives an initial window of indices [0, 10) on each chain.
+  const GAP_LIMIT = 5;
+
+  const RECEIVE_0 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+  const CHANGE_0 = deriveScriptPubkeyBytes(BIP84_XPUB, 1, 0, 'p2wpkh');
+  const CHANGE_0_ADDRESS = deriveAddress(BIP84_XPUB, 1, 0, 'p2wpkh');
+
+  // Index 50 sits far outside any window these tests derive, so the
+  // orchestrator treats it as somebody else's address, while the test
+  // still knows the exact string the recipient label must equal. That is
+  // stronger than a bech32 shaped regex: it pins the bytes as well.
+  const STRANGER = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 50, 'p2wpkh');
+  const STRANGER_ADDRESS = deriveAddress(BIP84_XPUB, 0, 50, 'p2wpkh');
+
+  async function sealedEnvelopeFor(label: string, key: string) {
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label,
+      wallet_birthday: '2024-01-01',
+      gap_limit: GAP_LIMIT,
+      script_type: 'p2wpkh',
+    };
+    return sealEnvelope(payload, key);
+  }
+
+  async function blockHashOf(raw: Uint8Array): Promise<string> {
+    return bytesToHex(reverseBytes(await dsha256Async(raw.subarray(0, 80))));
+  }
+
+  it('records a spend: amount net of change, recipient labelled, change kept as ours', async () => {
+    const orStealthKey = randomKeyB64();
+    const envelope = await sealedEnvelopeFor('spend-arithmetic', orStealthKey);
+    const ts = Math.floor(new Date('2024-06-01T00:00:00Z').getTime() / 1000);
+
+    // Block 1 funds us with 100,000 sats on receive index 0.
+    const fund = buildFixtureBlock({
+      timestamp: ts,
+      txs: [{ outputs: [{ script: RECEIVE_0, amountSats: 100_000n }] }],
+    });
+    const fundTxid = await fixtureTxid(fund.txs[0]);
+
+    // Block 2 spends it: 60,000 to a stranger, 39,000 back to change
+    // index 0, and the missing 1,000 is the network fee.
+    const spend = buildFixtureBlock({
+      timestamp: ts + 600,
+      txs: [
+        {
+          inputs: [{ prevTxidHex: fundTxid, voutIdx: 0 }],
+          outputs: [
+            { script: STRANGER, amountSats: 60_000n },
+            { script: CHANGE_0, amountSats: 39_000n },
+          ],
+        },
+      ],
+    });
+    const spendTxid = await fixtureTxid(spend.txs[0]);
+
+    // Block 3 spends the CHANGE output of block 2. This is the only
+    // observable proof that the change output was recorded as ours: if it
+    // had not been, this transaction pays nobody we know and spends
+    // nothing we own, so it produces no record at all.
+    const spendChange = buildFixtureBlock({
+      timestamp: ts + 1200,
+      txs: [
+        {
+          inputs: [{ prevTxidHex: spendTxid, voutIdx: 1 }],
+          outputs: [{ script: STRANGER, amountSats: 38_500n }],
+        },
+      ],
+    });
+
+    const fundHash = await blockHashOf(fund.raw);
+    const spendHash = await blockHashOf(spend.raw);
+    const changeHash = await blockHashOf(spendChange.raw);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => 800_003 + CONFIRMATION_DEPTH,
+      fetchFilter: async (h) => {
+        if (h === 800_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xb1]) };
+        if (h === 800_002) return { height: h, blockHashHex: spendHash, filter: new Uint8Array([0xb2]) };
+        if (h === 800_003) return { height: h, blockHashHex: changeHash, filter: new Uint8Array([0xb3]) };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === fundHash) return { height: 0, blockHashHex: fundHash, raw: fund.raw };
+        if (hashHex === spendHash) return { height: 0, blockHashHex: spendHash, raw: spend.raw };
+        if (hashHex === changeHash) return { height: 0, blockHashHex: changeHash, raw: spendChange.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.normalized).toHaveLength(3);
+    const [received, sent, sentChange] = result.normalized;
+
+    expect(received.direction).toBe('in');
+    expect(received.amount_sats).toBe(100_000);
+    expect(received.txid).toBe(fundTxid);
+
+    // The arithmetic under test: amount = spent inputs minus change back.
+    // 100,000 - 39,000 = 61,000. Note what it is NOT: not the 60,000 that
+    // went to the stranger, and not the 100,000 that was consumed. A sign
+    // flip or an off-by-one lands on neither number.
+    expect(sent.direction).toBe('out');
+    expect(sent.amount_sats).toBe(61_000);
+    expect(sent.address).toBe(STRANGER_ADDRESS);
+    expect(sent.txid).toBe(spendTxid);
+    expect(sent.block_height).toBe(800_002);
+    expect(sent.vin_count).toBe(1);
+    expect(sent.vout_count).toBe(2);
+
+    // Change tracking. Block 3 spends the 39,000 change output, so it is
+    // reported as an outgoing 39,000 with no change of its own. If the
+    // change output had never been recorded as ours, result.normalized
+    // would have two entries here, not three.
+    expect(sentChange.direction).toBe('out');
+    expect(sentChange.amount_sats).toBe(39_000);
+    expect(sentChange.block_height).toBe(800_003);
+
+    // The whole set round-trips through sealing, extension included.
+    expect(result.sealedTransactions).toHaveLength(3);
+    expect(result.txCount).toBe(3);
+  });
+
+  it('a pure self transfer nets to the fee alone and has no recipient to label', async () => {
+    const orStealthKey = randomKeyB64();
+    const envelope = await sealedEnvelopeFor('self-transfer', orStealthKey);
+    const ts = Math.floor(new Date('2024-06-05T00:00:00Z').getTime() / 1000);
+
+    const fund = buildFixtureBlock({
+      timestamp: ts,
+      txs: [{ outputs: [{ script: RECEIVE_0, amountSats: 100_000n }] }],
+    });
+    const fundTxid = await fixtureTxid(fund.txs[0]);
+
+    // Everything comes back to our own change address. Nothing left the
+    // wallet except the fee, so the amount must be exactly 500.
+    const consolidate = buildFixtureBlock({
+      timestamp: ts + 600,
+      txs: [
+        {
+          inputs: [{ prevTxidHex: fundTxid, voutIdx: 0 }],
+          outputs: [{ script: CHANGE_0, amountSats: 99_500n }],
+        },
+      ],
+    });
+
+    const fundHash = await blockHashOf(fund.raw);
+    const consolidateHash = await blockHashOf(consolidate.raw);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 810_000,
+      lastBlockScanned: 810_000,
+      fetchTip: async () => 810_002 + CONFIRMATION_DEPTH,
+      fetchFilter: async (h) => {
+        if (h === 810_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xc1]) };
+        if (h === 810_002) return { height: h, blockHashHex: consolidateHash, filter: new Uint8Array([0xc2]) };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === fundHash) return { height: 0, blockHashHex: fundHash, raw: fund.raw };
+        if (hashHex === consolidateHash) return { height: 0, blockHashHex: consolidateHash, raw: consolidate.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.normalized).toHaveLength(2);
+    const sent = result.normalized[1];
+    expect(sent.direction).toBe('out');
+    // 100,000 spent, 99,500 back to us: the fee, and nothing else.
+    expect(sent.amount_sats).toBe(500);
+    // Every output pays us, so there is no recipient to name. An empty
+    // string is the documented answer, not a placeholder for a failure.
+    expect(sent.address).toBe('');
+    expect(sent.vout_count).toBe(1);
+  });
+
+  it('labels a receive on the change chain with its chain 1 address', async () => {
+    // Threading a chain 1 script through the fixture is what makes the
+    // change branch of address derivation observable. If derivation ever
+    // stopped walking both chains, this receive would not be seen at all.
+    const orStealthKey = randomKeyB64();
+    const envelope = await sealedEnvelopeFor('change-chain-receive', orStealthKey);
+    const ts = Math.floor(new Date('2024-06-10T00:00:00Z').getTime() / 1000);
+
+    const block = buildFixtureBlock({
+      timestamp: ts,
+      txs: [{ outputs: [{ script: CHANGE_0, amountSats: 25_000n }] }],
+    });
+    const blockHash = await blockHashOf(block.raw);
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 820_000,
+      lastBlockScanned: 820_000,
+      fetchTip: async () => 820_001 + CONFIRMATION_DEPTH,
+      fetchFilter: async (h) =>
+        h === 820_001 ? { height: h, blockHashHex: blockHash, filter: new Uint8Array([0xd1]) } : null,
+      fetchBlock: async () => ({ height: 0, blockHashHex: blockHash, raw: block.raw }),
+      matcher: { matchAny: () => true },
+    });
+
+    expect(result.normalized).toHaveLength(1);
+    expect(result.normalized[0].direction).toBe('in');
+    expect(result.normalized[0].amount_sats).toBe(25_000);
+    expect(result.normalized[0].address).toBe(CHANGE_0_ADDRESS);
+    // Sanity: the change address is genuinely a different string from the
+    // receive-chain address at the same index, so this assertion cannot
+    // pass by accident on a chain 0 label.
+    expect(CHANGE_0_ADDRESS).not.toBe(deriveAddress(BIP84_XPUB, 0, 0, 'p2wpkh'));
+  });
+
+  it('detects a spend that is only found in a rolling window extension pass', async () => {
+    // The extension loop carries its own copy of the spend arithmetic,
+    // and it was as unreached as the main one. Setup:
+    //   block 1 pays receive index 5, which is inside the initial window
+    //     [0, 10) and at the near-edge threshold, so extension fires.
+    //   block 2 spends that outpoint and pays 39,000 to receive index 12,
+    //     which no initial-window scan can match. The stub matcher models
+    //     that honestly: it matches a block only when the script that
+    //     block pays is among the scripts it was handed.
+    // So the spending transaction is seen for the first time inside the
+    // extension pass, which is the branch under test.
+    const orStealthKey = randomKeyB64();
+    const envelope = await sealedEnvelopeFor('spend-in-extension', orStealthKey);
+    const ts = Math.floor(new Date('2024-06-20T00:00:00Z').getTime() / 1000);
+
+    const nearEdge = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 5, 'p2wpkh');
+    const beyondWindow = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 12, 'p2wpkh');
+
+    const fund = buildFixtureBlock({
+      timestamp: ts,
+      txs: [{ outputs: [{ script: nearEdge, amountSats: 100_000n }] }],
+    });
+    const fundTxid = await fixtureTxid(fund.txs[0]);
+
+    const spend = buildFixtureBlock({
+      timestamp: ts + 600,
+      txs: [
+        {
+          inputs: [{ prevTxidHex: fundTxid, voutIdx: 0 }],
+          outputs: [
+            { script: STRANGER, amountSats: 60_000n },
+            { script: beyondWindow, amountSats: 39_000n },
+          ],
+        },
+      ],
+    });
+    const spendTxid = await fixtureTxid(spend.txs[0]);
+
+    const fundHash = await blockHashOf(fund.raw);
+    const spendHash = await blockHashOf(spend.raw);
+
+    const scriptPresent = (scripts: readonly Uint8Array[], target: Uint8Array): boolean =>
+      scripts.some((s) => s.length === target.length && s.every((b, i) => b === target[i]));
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 830_000,
+      lastBlockScanned: 830_000,
+      fetchTip: async () => 830_002 + CONFIRMATION_DEPTH,
+      fetchFilter: async (h) => {
+        if (h === 830_001) return { height: h, blockHashHex: fundHash, filter: new Uint8Array([0xe1]) };
+        if (h === 830_002) return { height: h, blockHashHex: spendHash, filter: new Uint8Array([0xe2]) };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === fundHash) return { height: 0, blockHashHex: fundHash, raw: fund.raw };
+        if (hashHex === spendHash) return { height: 0, blockHashHex: spendHash, raw: spend.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      // GCS semantics without WASM: a filter matches only when the script
+      // its block actually pays is in the list handed to the matcher.
+      matcher: {
+        matchAny: (filter, _hash, scripts) => {
+          if (filter[0] === 0xe1) return scriptPresent(scripts, nearEdge);
+          if (filter[0] === 0xe2) return scriptPresent(scripts, beyondWindow);
+          return false;
+        },
+      },
+    });
+
+    expect(result.normalized).toHaveLength(2);
+
+    const received = result.normalized.find((t) => t.txid === fundTxid);
+    expect(received).toBeDefined();
+    expect(received!.direction).toBe('in');
+    expect(received!.amount_sats).toBe(100_000);
+
+    const sent = result.normalized.find((t) => t.txid === spendTxid);
+    expect(sent).toBeDefined();
+    expect(sent!.direction).toBe('out');
+    // Same arithmetic as the main loop: 100,000 spent, 39,000 back to an
+    // address only the extension pass knows about, so 61,000 left.
+    expect(sent!.amount_sats).toBe(61_000);
+    expect(sent!.address).toBe(STRANGER_ADDRESS);
+    expect(sent!.block_height).toBe(830_002);
+
+    // The match landed at the near-edge threshold, so the caller is told
+    // the window was extended.
+    expect(result.windowExhausted).toBe(true);
+    expect(result.sealedTransactions).toHaveLength(2);
+  });
+});
+
+// ─── Reorg safety: the confirmation buffer ──────────────────────────────
+//
+// Bitcoin occasionally rewrites its most recent block or two. That is normal.
+// A transaction recorded from a block that is then replaced stops existing,
+// and runSync never revisits a height it has already covered, so the wrong
+// balance is permanent rather than brief.
+//
+// The prevention is a scan ceiling at chainTip - CONFIRMATION_DEPTH. The trap
+// inside that change, and the reason for the second test below, is that the
+// coverage watermark has to move with the ceiling. A watermark that advanced
+// to the raw chain tip while the scan stopped six blocks short would leave
+// those six blocks unscanned by every future sync as well, because coverage
+// would already claim them. A delayed balance would become a permanently
+// missing one, which is worse than the defect being fixed.
+
+describe('runSync , confirmation buffer and coverage watermark', () => {
+  async function envelopeFor(label: string, key: string, gapLimit = 2) {
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label,
+      wallet_birthday: '2024-01-01',
+      gap_limit: gapLimit,
+      script_type: 'p2wpkh',
+    };
+    return sealEnvelope(payload, key);
+  }
+
+  it('scans no higher than CONFIRMATION_DEPTH below the chain tip', async () => {
+    const orStealthKey = randomKeyB64();
+    const envelope = await envelopeFor('buffer-ceiling', orStealthKey);
+
+    // Every height up to the RAW tip has a filter, so nothing except the
+    // buffer can stop the walk. Without the buffer both assertions below
+    // land on chainTip instead.
+    const chainTip = 800_020;
+    const heightsAsked: number[] = [];
+    const zeroHashHex = bytesToHex(new Uint8Array(32));
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => chainTip,
+      fetchFilter: async (h) => {
+        heightsAsked.push(h);
+        return { height: h, blockHashHex: zeroHashHex, filter: new Uint8Array([0xf0]) };
+      },
+      fetchBlock: async () => { throw new Error('no block fetch expected'); },
+      matcher: { matchAny: () => false },
+    });
+
+    expect(Math.max(...heightsAsked)).toBe(chainTip - CONFIRMATION_DEPTH);
+    expect(result.lastBlockScanned).toBe(chainTip - CONFIRMATION_DEPTH);
+
+    // Pin the value, not just the behaviour. 6 is the Bitcoin convention and
+    // it decides how long a customer waits before money appears; changing it
+    // should require changing a test that says so out loud.
+    expect(CONFIRMATION_DEPTH).toBe(6);
+  });
+
+  it('never advances the cursor past the highest block it actually scanned', async () => {
+    // Three shapes, because the cursor is arrived at differently in each:
+    // everything available, a filter producer that lags, and a permanent
+    // fetch failure part way through the range.
+    const shapes = [
+      { name: 'all filters available', gapAt: null, throwAt: null },
+      { name: 'filter producer lags', gapAt: 800_004, throwAt: null },
+      { name: 'filter fetch fails permanently', gapAt: null, throwAt: 800_004 },
+    ] as const;
+
+    for (const shape of shapes) {
+      const orStealthKey = randomKeyB64();
+      const envelope = await envelopeFor(`watermark-${shape.name}`, orStealthKey);
+
+      const chainTip = 800_020;
+      const scanned: number[] = [];
+      const zeroHashHex = bytesToHex(new Uint8Array(32));
+
+      const result = await runSync({
+        envelope,
+        orStealthKey,
+        birthdayHeight: 800_000,
+        lastBlockScanned: 800_000,
+        fetchTip: async () => chainTip,
+        fetchFilter: async (h) => {
+          if (shape.throwAt !== null && h >= shape.throwAt) {
+            throw new Error('permanent-fetch-failure');
+          }
+          if (shape.gapAt !== null && h >= shape.gapAt) return null;
+          scanned.push(h);
+          return { height: h, blockHashHex: zeroHashHex, filter: new Uint8Array([0xf1]) };
+        },
+        fetchBlock: async () => { throw new Error('no block fetch expected'); },
+        matcher: { matchAny: () => false },
+      });
+
+      // Stated as an invariant rather than as a number, so it keeps holding
+      // when the fixtures move: the watermark may never claim a height that
+      // was not actually read...
+      expect(result.lastBlockScanned).toBeLessThanOrEqual(Math.max(...scanned));
+      // ...and may never reach into the confirmation buffer.
+      expect(result.lastBlockScanned).toBeLessThanOrEqual(chainTip - CONFIRMATION_DEPTH);
+    }
+  });
+
+  it('withholds a transaction while its block is unconfirmed, then records it once buried', async () => {
+    // The whole point, from the customer's side. Same block, same
+    // transaction, two syncs, and the only thing that changes between them is
+    // how deep the block sits.
+    const orStealthKey = randomKeyB64();
+    const envelope = await envelopeFor('buffer-then-record', orStealthKey);
+
+    const targetScript = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 0, 'p2wpkh');
+    const ts = Math.floor(new Date('2024-06-01T12:00:00Z').getTime() / 1000);
+    const blockBuild = buildFixtureBlock({
+      payToScript: targetScript,
+      amountSats: 5_000_000n,
+      timestamp: ts,
+    });
+    const blockHashHex = bytesToHex(
+      reverseBytes(await dsha256Async(blockBuild.raw.subarray(0, 80))),
+    );
+    const fakeFilter = new Uint8Array([0xf2]);
+    const PAYING_HEIGHT = 900_000;
+
+    const io = (chainTip: number) => ({
+      envelope,
+      orStealthKey,
+      birthdayHeight: PAYING_HEIGHT,
+      lastBlockScanned: PAYING_HEIGHT - 1,
+      fetchTip: async () => chainTip,
+      fetchFilter: async (h: number) => ({
+        height: h,
+        blockHashHex: h === PAYING_HEIGHT ? blockHashHex : bytesToHex(new Uint8Array(32)),
+        filter: fakeFilter,
+      }),
+      fetchBlock: async () => ({ height: PAYING_HEIGHT, blockHashHex, raw: blockBuild.raw }),
+      // Matches only the paying block, by hash. The orchestrator hands the
+      // hash over in internal little-endian order, hence the reversal here.
+      matcher: {
+        matchAny: (_filter: Uint8Array, hash: Uint8Array) =>
+          bytesToHex(hash) === bytesToHex(reverseBytes(hexToBytes(blockHashHex))),
+      },
+    });
+
+    // Sync one. The paying block is 2 deep, inside the 6-block buffer.
+    const early = await runSync(io(PAYING_HEIGHT + 2));
+    expect(early.txCount).toBe(0);
+    expect(early.normalized).toEqual([]);
+    // And the cursor must NOT have moved past the paying block. If it had,
+    // the money would never be found by any later sync either, which is the
+    // failure this whole change is trying not to introduce.
+    expect(early.lastBlockScanned).toBeLessThan(PAYING_HEIGHT);
+
+    // Sync two. Nothing about the chain data changed; only its depth did.
+    const later = await runSync(io(PAYING_HEIGHT + CONFIRMATION_DEPTH));
+    expect(later.txCount).toBe(1);
+    expect(later.normalized[0].amount_sats).toBe(5_000_000);
+    expect(later.normalized[0].block_height).toBe(PAYING_HEIGHT);
+    expect(later.lastBlockScanned).toBe(PAYING_HEIGHT);
+  });
+});
+
+describe('stealth sync , the abort gap and what may be uploaded (OR-T1120)', () => {
+  it('does not seal an extension-pass match found above an aborted filter fetch', async () => {
+    // THE FAILURE THIS GUARDS. A filter fetch fails permanently part way
+    // through a sync. The main scan trims its own hits back to the last
+    // contiguous height it read. The rolling-window extension pass builds a
+    // SEPARATE array and, before the fix, had no equivalent trim: its
+    // cache-miss branch skips a broken height and keeps walking, so it can
+    // match a block ABOVE the gap. That transaction is sealed and uploaded,
+    // and the server advances the stored cursor to the height it landed at.
+    // The next sync then resumes above heights nobody ever read, and any
+    // payment inside them is missing from the customer's balance for good,
+    // with no error and no retry path.
+    //
+    // LAYOUT. gap_limit=2 gives an initial window of indices 0..3 per chain,
+    // so a match at index 3 sits near the edge and fires the extension loop.
+    //   800_001  pays index 3, inside the scanned range, must be kept
+    //   800_002  filter fetch throws permanently, this is the gap
+    //   800_003  pays index 4, matchable ONLY by the extension pass, above the gap
+    //   800_004  no filter
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'abort-gap-extension',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const scriptIdx3 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 3, 'p2wpkh');
+    const scriptIdx4 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 4, 'p2wpkh');
+
+    const tsA = Math.floor(new Date('2024-09-01T10:00:00Z').getTime() / 1000);
+    const tsC = Math.floor(new Date('2024-09-03T10:00:00Z').getTime() / 1000);
+    const blockA = buildFixtureBlock({ payToScript: scriptIdx3, amountSats: 11_000n, timestamp: tsA });
+    const blockC = buildFixtureBlock({ payToScript: scriptIdx4, amountSats: 22_000n, timestamp: tsC });
+
+    const hashHexA = bytesToHex(reverseBytes(await dsha256Async(blockA.raw.subarray(0, 80))));
+    const hashHexC = bytesToHex(reverseBytes(await dsha256Async(blockC.raw.subarray(0, 80))));
+
+    // Filters are distinguishable by first byte so the stub matcher can answer
+    // per-block without a WASM GCS implementation, same trick as the tests above.
+    const filterA = new Uint8Array([0xb1]);
+    const filterC = new Uint8Array([0xb3]);
+
+    // Every height the filter fetcher is asked for, in the order it is asked.
+    // Used below to prove the run really had something above the gap to trim,
+    // rather than passing because the extension pass found nothing up there.
+    const heightsAsked: number[] = [];
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 800_000,
+      lastBlockScanned: 800_000,
+      fetchTip: async () => 800_004 + CONFIRMATION_DEPTH,
+      fetchFilter: async (h) => {
+        heightsAsked.push(h);
+        if (h === 800_001) return { height: h, blockHashHex: hashHexA, filter: filterA };
+        // A PERMANENT failure. opts.fetchFilter is the layer that retries, so a
+        // throw here is exactly what the orchestrator sees once attempts are
+        // exhausted, not a transient blip it would recover from.
+        if (h === 800_002) throw new Error('filter 800_002 permanently unavailable');
+        if (h === 800_003) return { height: h, blockHashHex: hashHexC, filter: filterC };
+        return null;
+      },
+      fetchBlock: async (hashHex) => {
+        if (hashHex === hashHexA) return { height: 0, blockHashHex: hashHexA, raw: blockA.raw };
+        if (hashHex === hashHexC) return { height: 0, blockHashHex: hashHexC, raw: blockC.raw };
+        throw new Error(`unexpected block hash ${hashHex}`);
+      },
+      //   filterA (pays idx3): matches while idx3 is in scripts, the initial scan only.
+      //   filterC (pays idx4): matches only once idx4 exists, the extension pass only.
+      matcher: {
+        matchAny: (filter, _hash, scripts) => {
+          const target = filter[0] === 0xb1 ? scriptIdx3
+            : filter[0] === 0xb3 ? scriptIdx4
+            : null;
+          if (!target) return false;
+          return scripts.some((s) => s.length === target.length && s.every((b, i) => b === target[i]));
+        },
+      },
+    });
+
+    // The abort is real and not merely assumed: the run names the height that failed.
+    expect(result.filterFetchError?.failedHeight).toBe(800_002);
+
+    // WHAT MAKES THIS CASE DISCRIMINATING, asserted rather than assumed.
+    //
+    // The assertions further down only fail on the parent commit if the run
+    // actually produced an extension-pass hit at 800_003. Two things have to
+    // hold for that, and neither is guaranteed by the fixture on its own:
+    //
+    // 1. The filter at 800_003 was read. The initial scan dispatches it
+    //    concurrently with the abort at 800_002, and the extension pass re-reads
+    //    it on a cache miss, so it should be asked for either way. If it were
+    //    never asked there would be no filter above the gap to match, the trim
+    //    would remove nothing, and every assertion below would hold on the
+    //    parent commit too.
+    expect(heightsAsked).toContain(800_003);
+    // 2. The rolling-window extension pass ran. It derives index 4, and index 4
+    //    is the only thing that can match 800_003 at all: the initial scan's
+    //    window stops at index 3. windowExhausted is set on entry to that loop,
+    //    so it is the honest signal that the pass happened.
+    expect(result.windowExhausted).toBe(true);
+
+    // The cursor stops below the gap. This part was already correct.
+    expect(result.lastBlockScanned).toBe(800_001);
+
+    // THE ASSERTIONS THAT FAIL WITHOUT THE TRIM. The extension match at 800_003
+    // sits above the gap, so it must not be recorded, sealed or uploaded.
+    expect(result.normalized.map((t) => t.block_height)).toEqual([800_001]);
+    expect(result.normalized.find((t) => t.amount_sats === 22_000)).toBeUndefined();
+    expect(result.sealedTransactions).toHaveLength(1);
+
+    // The invariant, stated directly rather than pinned to this fixture's counts:
+    // nothing is ever uploaded from a height above the last one actually scanned.
+    for (const sealed of result.sealedTransactions) {
+      expect(sealed.block_height).toBeLessThanOrEqual(result.lastBlockScanned);
+    }
   });
 });

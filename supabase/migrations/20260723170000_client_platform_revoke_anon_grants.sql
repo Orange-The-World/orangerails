@@ -69,7 +69,7 @@ BEGIN;
 
 -- 1. Future tables in this schema must not inherit anon SELECT. This is the
 --    actual point of the migration.
-ALTER DEFAULT PRIVILEGES IN SCHEMA client_platform
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA client_platform
   REVOKE SELECT ON TABLES FROM anon;
 
 -- 2. Drop the standing blanket grant on the tables that already exist.
@@ -90,7 +90,16 @@ GRANT SELECT ON client_platform.api_plans TO anon;
 REVOKE EXECUTE ON FUNCTION client_platform.is_member_of(uuid) FROM anon, PUBLIC;
 REVOKE EXECUTE ON FUNCTION client_platform.has_role(uuid, text) FROM anon, PUBLIC;
 
--- 5. Prove it, in this transaction, or abort.
+-- 5. Remove all anon privileges on public.data_keys.
+--    data_keys inherits INSERT, SELECT, UPDATE and DELETE from the public-schema default
+--    table ACL (pg_default_acl objtype=r, acl=anon=arwd/postgres). RLS is enabled and
+--    the only policy scopes to authenticated, so anon cannot reach any row today.
+--    Removing all four grants ensures a future permissive policy on this table cannot
+--    turn them live without a migration and review. Placed here (file 4) per CTO ruling;
+--    file 5 does not duplicate it.
+REVOKE ALL ON public.data_keys FROM anon;
+
+-- 6. Prove it, in this transaction, or abort.
 --    (a) covers all 7 tables step 2 must close, each named. The schema holds 8
 --    tables and every one of them carries an anon SELECT entry; api_plans is
 --    deliberately re-granted at step 3, so 7 must end with none. Named, not
@@ -119,6 +128,14 @@ BEGIN
   END IF;
   IF has_table_privilege('anon', 'client_platform.organizations', 'SELECT') THEN
     RAISE EXCEPTION 'FAIL: anon still holds SELECT on client_platform.organizations';
+  END IF;
+
+  -- (c) step 5: all four anon grants on public.data_keys are gone
+  IF has_table_privilege('anon', 'public.data_keys', 'SELECT')
+     OR has_table_privilege('anon', 'public.data_keys', 'INSERT')
+     OR has_table_privilege('anon', 'public.data_keys', 'UPDATE')
+     OR has_table_privilege('anon', 'public.data_keys', 'DELETE') THEN
+    RAISE EXCEPTION 'FAIL: anon still holds privileges on public.data_keys';
   END IF;
 
   -- (b) nothing broke

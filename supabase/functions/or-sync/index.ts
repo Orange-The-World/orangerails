@@ -119,17 +119,18 @@ async function errorFingerprint(raw: string, errorClass: string): Promise<string
 //
 // The hard rule: never emit a shape the fingerprint hash path
 // (errorFingerprint) would have scrubbed. So it removes the SAME UUIDs and
-// base64/token blobs that path removes, PLUS provider ids (foo_ab12cd) and
-// 6+ digit runs. Every redaction runs on the FULL first line and the 300-char
+// base64/token blobs that path removes, PLUS email addresses, provider ids
+// (foo_ab12cd), and 4+ digit runs. Every redaction runs on the FULL first line and the 300-char
 // limit is applied LAST, so truncation can only ever cut text that is already
 // safe. Nothing here reaches the HTTP response body or encrypted_last_error.
 export function redactedUpstreamDetail(raw: string): string {
   const firstLine = raw.split('\n')[0] ?? raw;
   return firstLine
+    .replace(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g, '<email>')
     .replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
     .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
-    .replace(/\b\d{6,}\b/g, '[redacted]')
+    .replace(/\b\d{4,}\b/g, '[redacted]')
     .slice(0, 300);
 }
 

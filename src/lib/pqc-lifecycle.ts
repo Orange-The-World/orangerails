@@ -112,6 +112,33 @@ export async function unwrapPqcSecretKey(
   return base64ToBytes(secretBase64);
 }
 
+/**
+ * Move an already-wrapped PQC secret key from one wrapping key to another.
+ *
+ * WHY THIS EXISTS. The wrap key here is derived from the MEK
+ * (derivePqcSecretWrapKey), so anything that rotates the MEK must carry these
+ * secrets across in the same operation or the only key that opens them is gone.
+ * There is no way back from that: the vault row still holds a valid-looking
+ * kem_public_key, so ensurePqcKeypairs() short-circuits and never regenerates,
+ * and anything anyone encrypts to that public key afterwards is undecryptable
+ * from the moment it is written.
+ *
+ * Decrypts and re-encrypts the stored base64 string as-is rather than round
+ * tripping through bytes, so the encoding cannot drift here.
+ *
+ * Throws if the old wrap key does not open the ciphertext. A caller mid-rotation
+ * must let that throw and abort: continuing would discard the old key while the
+ * secret is still wrapped under it.
+ */
+export async function rewrapPqcSecretKey(
+  oldWrapKey: CryptoKey,
+  newWrapKey: CryptoKey,
+  secretWrappedB64: string,
+): Promise<string> {
+  const secretBase64 = await decryptString(secretWrappedB64, oldWrapKey);
+  return encryptString(secretBase64, newWrapKey);
+}
+
 // ------------------------------------------------------------------
 // High-level entry point , checks, generates, publishes.
 // ------------------------------------------------------------------

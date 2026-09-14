@@ -1,0 +1,15 @@
+# Cloudflare Pages response headers. Applied at the edge to every response
+# served from the publish root (the main SPA on orangerails.com, the connect
+# flow on connect.orangerails.com, and the docs.* host).
+#
+# Scope note: this file sets framing and content hardening headers only. It does
+# NOT set a script/style/frame Content-Security-Policy. A restrictive script-src
+# needs a full inventory of every origin the app talks to (Supabase, Quiltt, the
+# stealth block source, analytics) plus QA, or it silently breaks the SPA. That
+# is deliberately left as a separate follow up.
+
+/*
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin

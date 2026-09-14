@@ -17,8 +17,9 @@ A reference implementation is maintained by the BitBooks team; see their integra
 7. [Syncing transactions: protocol-driven sink mode](#syncing-transactions-protocol-driven-sink-mode)
 8. [App Profile (sink configuration)](#app-profile-sink-configuration)
 9. [Provider catalog (dynamic discovery)](#provider-catalog-dynamic-discovery)
-10. [Wire-format gotchas (read before integrating)](#wire-format-gotchas-read-before-integrating)
-11. [Adding a provider (for OR maintainers)](#adding-a-provider-for-or-maintainers)
+10. [Mining pool events: earnings and payouts](#mining-pool-events-earnings-and-payouts)
+11. [Wire-format gotchas (read before integrating)](#wire-format-gotchas-read-before-integrating)
+12. [Adding a provider (for OR maintainers)](#adding-a-provider-for-or-maintainers)
 
 
 ## Quickstart
@@ -421,6 +422,74 @@ const tile = provider.status === 'coming_soon'
 Reference: V2 `components/admin/add-connection-modal.tsx` (in the consuming app's repo) `ProviderTiles` component.
 
 
+## Mining pool events: earnings and payouts
+
+Mining pools are OR's first source where income is created, not moved. Every other source today reports value moving between parties (a deposit, a withdrawal, a trade, an on-chain transfer). A mining pool reports that too, eventually, but first it reports something new: a block is found, the pool credits it to the miner's balance, and later the pool sends bitcoin to settle some of that balance. Those are two different events, at two different times, on two different schedules, with different evidence behind each one.
+
+CTO ruling: DL-1306 (2026-08-27). This section is that ruling written down as a contract, so ViaBTC (DL-1269) and OCEAN (DL-1305) build against one shape instead of inventing two.
+
+### Two event types, never one event with a flag
+
+| `type` value | What it means | Has a `txid`? |
+|---|---|---|
+| `mining_earning` | Income created: a block was found and credited to the miner's pool balance. No bitcoin has moved on chain for this row by itself. | No |
+| `mining_payout` | Settlement: the pool sent bitcoin to the miner's payout address. This is an on chain transaction. | Yes, always |
+
+Both are `direction: 'in'` (a miner never pays a pool). Both carry the base `NormalizedTransaction` fields already defined (`id`, `adapter`, `amount_sats`, `currency`, `timestamp`, `source_wallet_id`, etc). Collapsing the two into one flagged event would make the accrual invisible: a consumer that only ever sees payout rows has no record of what the miner actually earned between payouts, only what the pool chose to send.
+
+### Fields new to these two types
+
+| Field | Type | On `mining_earning` | On `mining_payout` |
+|---|---|---|---|
+| `txid` | `string` | absent | required. The on chain transaction id that settled this payout. |
+| `vout` | `number` | absent | required. The output index within `txid` that paid the miner. |
+| `from_coinbase` | `boolean` | n/a | optional, only when the provider states it. `true` when the payout came straight from the block's coinbase transaction rather than a pool hot wallet. Carry the provider's own flag through unchanged, never infer it. |
+
+### Source tags
+
+`adapter` alone (`'ocean'`, `'viabtc'`) says which provider produced a row, not which of that provider's transports did, and mining is the second case, after Strike's API versus CSV fallback (DL-1519), where one logical source can hand OR the same kind of fact by more than one path. New optional field on `NormalizedTransaction`: `source_tag: string`, shaped `<adapter-slug>.<transport>.v<version>`. Registered for this ticket:
+
+- `ocean.api.v1`
+- `viabtc.api.v1`
+
+A consumer that does not care which transport produced a row keeps reading `adapter`. A consumer that does (audit trail, or choosing a dedup strategy per transport) reads `source_tag`.
+
+Note on where this belongs: `OrangeRails-Protocol.html` (cited elsewhere in this codebase as living in the `orangerails-docs` repo) is where a numbered source-tag registry would normally sit, but that repo returned a 404 to this seat's GitHub grant and no wiki copy was found either (searched wiki and the fleet index, 2026-08-27). This section is the tag registry until that access gap is closed. Whoever can reach `orangerails-docs` should fold these two entries into it rather than let two registries drift apart.
+
+### The deduplication rule: a join, not a suppression
+
+A pool payout and the wallet's own on chain receipt of that same payout are the same logical bitcoin movement, reported by two different sources. If the miner also has the payout address connected to OR as its own wallet (an `xpub` connection, say), both a `mining_payout` row (from the pool connector) and an `onchain` row (from the wallet connector) will describe the same coins moving.
+
+OR emits both. Neither is suppressed at the source. The join key is `(txid, vout)`, the on chain output identifier, present on both rows. A consumer that wants one line per real world event collapses on that key. A consumer that does not care leaves both and has slightly redundant history, never a missing one.
+
+Why neither row is dropped, stated plainly:
+
+- Suppressing the `mining_payout` row breaks the balance the day the pool disconnects. That row is the only place the pool's own accounting of the settlement lives. If OR only ever emitted the wallet side `onchain` row and treated the pool row as redundant, disconnecting the pool (or never connecting it) would leave a bitcoin arrival with no record of which pool paid it or why.
+- Suppressing the wallet's `onchain` receipt destroys the earning history. That row is not just a duplicate of the payout, it is the general on chain ingestion path the rest of OR already understands. Treating it as noise the moment a matching pool row exists means a miner who later disconnects the pool loses the ability to see that history at all.
+
+This is the ratified split (the engine emits economic facts, the consumer classifies and presents) applied to exactly this pair. OR's job is to make the join possible, not to decide for the consumer which row wins.
+
+### Why `(txid, vout)` is safe to dedupe on and Strike's `Reference` was not
+
+Read DL-1519 before writing or reviewing anything that dedupes across sources. OR once shipped customer-facing copy claiming Strike's `Reference` field was globally unique and safe to key dedup on. A real Strike export disproved it inside a week: the row that opened a target order and the row that later cancelled it share the same `Reference`, carry opposite amounts, and sit three weeks apart. Deduping on `Reference` alone silently collapsed the two into one and left a real sale on the books that never happened. The claim was retracted and the dedup key was rebuilt as a composite of reference plus normalized date plus type plus both signed amounts, which is a better heuristic, not a guarantee, because it is still built from fields the provider's software fills in and could get wrong again. (Full history, including the retraction and the rebuilt key, is on DL-1519 in the delivery board.)
+
+The mining case is not the same shape of risk, and the reason has to be stated out loud so nobody generalizes DL-1519 into "never trust an id from a provider": the question is not who supplies an identifier, it is what enforces its uniqueness. Strike's `Reference` is unique only because Strike's software is expected to make it so, a vendor's promise, and vendor promises have already broken once in this codebase. `txid` plus `vout` identifies one output of one transaction that has been mined into the Bitcoin blockchain. Its uniqueness is enforced by Bitcoin consensus, not by OCEAN's or ViaBTC's application code. Two independent sources reporting the same `(txid, vout)` are, by the definition of the protocol, reporting the same spend of the same coin. That is why this is the one cross-source join key OR treats as trustworthy, and it does not license deduping on any other provider-supplied reference by analogy.
+
+### Privacy: OCEAN is called from the browser, ViaBTC is sealed like any exchange key
+
+**OCEAN**: called directly from the user's browser (the Link widget / connect flow), never proxied through an OR server-side edge function. This is a deliberate deviation from the normal `ProviderAdapter` pattern of running `discoverWallets` / `syncByWallets` server-side; OCEAN needs no credential at all, it keys entirely on the payout address, so calling it reveals that address to whoever makes the call.
+
+The reason, recorded so it is not quietly reversed for convenience later: OCEAN already knows this user's payout address and already sees the caller's IP, because that address is the one the user mines to and the user is already OCEAN's customer for it. Calling OCEAN from the browser reveals nothing OCEAN does not already hold. Proxying it server side would, for the first time, put a mining payout address in front of OR's own server, which OR does not currently have and has no reason to acquire. That is a real loss on our own platform's privacy posture in exchange for a convenience benefit to a party that gains nothing new. Do not build the proxy path "for consistency" with other providers.
+
+The one thing that forces a reversal: OCEAN's API refusing browser calls outright, CORS closed, or a required header a browser cannot set. That is a build constraint, not a preference. If DL-1305 hits it, stop and take it back to DL-1306 rather than proxying quietly. A server-side proxy that learns payout addresses is a change to OR's privacy posture and has to be recorded as one, not discovered later in a diff.
+
+**ViaBTC**: the ordinary path. An API key plus an HMAC-SHA256 secret is a credential, so it is sealed exactly like any existing exchange credential, client side, under the vault's `credentials_key` (see [Vault setup](#vault-setup-path-b-client-sealed)), never readable as plaintext by an OR server. No new mechanism; DL-1269 implements it as a standard `ProviderAdapter.credentialFields` entry.
+
+### Accounting treatment: explicitly out of scope here
+
+OR emits `mining_earning` (amount, time, source) and `mining_payout` (amount, time, txid, vout). It does not emit "income." Taxability lives in the consumer's chart of accounts, per the ratified engine and consumer split, and is not reopened by this section. The contract must not be shaped around any one consumer's chart of accounts: if a consumer's mapping has no account these events should land in, that is a conversation with that consumer about their mapping, not a reason to change what OR emits.
+
+
 ## Wire-format gotchas (read before integrating)
 
 Every error V2's integration hit. Each one is something you can step on too. Each links to the section above where it is documented in context.
@@ -515,6 +584,10 @@ export interface ProviderAdapter {
 ```
 
 Pure pass-through. No DB calls. No platform-auth concerns. Edge functions handle auth and persistence; the adapter just speaks upstream and translates to canonical.
+
+### Providers that cannot run server-side
+
+Most adapters implement `discoverWallets` / `syncByWallets` as server-side edge-function code, by design (see the contract above: pure pass-through, no DB calls, no platform-auth concerns). OCEAN (mining, DL-1305) is the first documented exception: it is called directly from the browser instead, because proxying it server-side would hand OR's own server a payout address it has no reason to hold. See [Mining pool events, Privacy](#mining-pool-events-earnings-and-payouts) for the full reasoning and the one constraint that would force it back to the normal pattern. Treat this as the precedent for any future provider whose privacy story is better served by a direct browser call. Do not treat "OCEAN needed it" as license to skip the server-side path by default.
 
 Adapters MUST emit `source_wallet_id` on every `NormalizedTransaction` they return. Plaintext consumers (V2 via sink mode) require per-wallet attribution and throw on null source_wallet_id.
 
