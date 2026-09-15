@@ -87,7 +87,7 @@ export function decodeTokenEnvelope(token: string): SurgeTokenEnvelope {
     // here throws a FIXED string: the underlying exception is discarded,
     // never composed into this message. Same contract as parseCredentials in
     // ../types.ts (OR-T2643); this call site was the gap OR-T2697 found.
-    throw new Error('[surge] bearer_token is not valid base64url');
+    throw new Error('[surge] bearer_token is invalid base64url');
   }
   let env: unknown;
   try {
