@@ -130,8 +130,17 @@ export function redactedUpstreamDetail(raw: string): string {
     .replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
     .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
-    // Only redact a digit run when an account/card/reference keyword sits
-    // within 20 non-digit characters before it. A blanket \d{4,} match here
+    // Redact ANY standalone 6+ digit run unconditionally: long enough on its
+    // own to be an identifier (member/account/phone-like), so a keyword
+    // allowlist at this length is inherently incomplete -- the pre-existing
+    // pinned test (redact-detail.test.ts) uses "member 998877665544", and
+    // "member", "user", "customer", "wallet" and others could equally well
+    // precede a real one. Same threshold the sibling helper already uses
+    // with no keyword gate at all: redactProviderError, or-quiltt-sync/
+    // resolve.ts (`\b\d{6,}\b`).
+    .replace(/\b\d{6,}\b/g, '[redacted]')
+    // Below 6 digits, only redact a digit run when an account/card/reference
+    // keyword sits within 20 non-digit characters before it. A blanket \d{4,} match here
     // used to strip every 4+ digit number in the line, including HTTP status
     // codes, retry-after seconds, amounts and timestamps that carry no PII at
     // all (QA, OR-T0362, 2026-08-28: "over-redaction destroys the diagnostic
