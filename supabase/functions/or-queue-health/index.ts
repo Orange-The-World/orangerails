@@ -13,8 +13,10 @@
  * report green: that is how a monitor becomes a source of false comfort, which
  * is worse than having no monitor at all because somebody trusts it.
  *
- * Always returns HTTP 200 with a JSON report, so a cron run is marked failed
- * only when the invocation itself failed.
+ * Always returns HTTP 200 with a JSON report. The database-side tracked cron
+ * wrapper persists pg_net's request id and checks that exact response on the
+ * following invocation, so a missing, timed-out, errored, or non-2xx delivery
+ * still makes cron visibly red even though enqueueing was asynchronous.
  *
  * Env vars:
  *   OR_INTERNAL_WORKER_TOKEN                 caller auth (required)
