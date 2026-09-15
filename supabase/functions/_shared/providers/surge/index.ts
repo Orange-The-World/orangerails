@@ -97,7 +97,7 @@ export function decodeTokenEnvelope(token: string): SurgeTokenEnvelope {
     // JSON.parse SyntaxError text can itself contain a literal fragment of
     // the malformed input, so this throws a FIXED string too, same reasoning
     // as the block above.
-    throw new Error('[surge] bearer_token envelope is not valid JSON');
+    throw new Error('[surge] bearer_token envelope is invalid JSON');
   }
   if (!env || typeof env !== 'object') {
     throw new Error('[surge] bearer_token envelope must be an object');
