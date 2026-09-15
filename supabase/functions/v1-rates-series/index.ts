@@ -64,7 +64,7 @@ interface SeriesRow {
 // Page through exchange_rates for one currency pair/product/granularity,
 // inclusive of [fromIso, toIso], up to `cap` rows, ordered ascending.
 async function fetchSeries(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   base: string,
   quote: string,
   product: string,
