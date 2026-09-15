@@ -83,9 +83,30 @@ export const PASSWORD_CHANGE_NOT_PROVEN_MESSAGE =
   "Vault password change did not complete. The keys the server returned do not re-open your vault, so neither your old nor your new password can be relied on. Do not close or reload this page, and contact support with this message.";
 
 /**
+ * Shown when the pre-recovery read of user_vault_meta cannot be trusted: it
+ * returned an error, or it returned no row at all, for an account that is
+ * about to rotate its vault key.
+ *
+ * Zero rows does not prove the row is missing. It proves the row is not
+ * visible right now, whether because the session dropped, an RLS predicate
+ * stopped matching, or the row was deleted. Treating that as "nothing
+ * stored, proceed" would let a caller carry on with a vault whose row simply
+ * failed to read at that moment: the migration below re-encrypts every row
+ * under a fresh MEK, the final meta write matches its own row and lands
+ * normally, and nothing reports that the account's real stored secrets were
+ * never read at all. Refusing here, before anything is migrated, is the last
+ * point at which that is still reversible.
+ */
+export const VAULT_META_UNREADABLE_MESSAGE =
+  "Could not load vault metadata. Reload the page and try again.";
+
+/**
  * Shown when migrateAndPersistRotatedVault's own pre-write read of
  * user_vault_meta (the read that decides whether a stored PQC secret would
- * be dropped) returns zero rows with no error.
+ * be dropped) returns zero rows with no error. This is a DIFFERENT guard
+ * from VAULT_META_UNREADABLE_MESSAGE above, which covers
+ * loadVaultMetaForRecovery's read before a recovery attempt begins; this one
+ * covers the read migrateAndPersistRotatedVault itself takes mid-rotation.
  *
  * This function only runs mid-rotation, which requires an existing
  * user_vault_meta row, so zero rows here is never a legitimate answer: it
@@ -441,16 +462,59 @@ export interface RotateVaultArgs {
    * nothing regenerates them.
    *
    * NULL IS AN INSTRUCTION, not just an absence. It means "nothing was carried
-   * for this key", and the write below answers it by CLEARING the matching
-   * public key in the same statement, so the next unlock regenerates a working
-   * pair instead of short-circuiting forever on a public key whose secret is
-   * gone. Pass null only when nothing was genuinely carried.
+   * for this key", and the write below answers it by CLEARING BOTH public
+   * keys in the same statement, not just the one whose secret died (OR-T1977):
+   * ensurePqcKeypairs() gates on kem_public_key alone, so the two public keys
+   * must always travel together or that gate stops regenerating a missing
+   * signing key forever. Pass null only when nothing was genuinely carried.
    */
   newKemSecretWrapped: string | null;
   newSigSecretWrapped: string | null;
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
+}
+
+/** The user_vault_meta columns a vault recovery needs before it can begin. */
+export interface VaultMetaForRecovery {
+  vault_salt: string;
+  vault_verifier_ciphertext: string;
+  recovery_ciphertext: string | null;
+  kem_secret_wrapped: string | null;
+  sig_secret_wrapped: string | null;
+}
+
+/**
+ * Read the row this account needs before vault recovery can begin, and
+ * refuse outright rather than let an unreadable row pass as an empty one.
+ *
+ * `.single()` is the guard: PostgREST answers a query that matches anything
+ * other than exactly one row with an error, for zero rows and for more than
+ * one alike. That is what makes the throw below unconditional on WHY the row
+ * could not be read, instead of having to enumerate every way a read can
+ * come back empty. The `!meta` half of the check is defensive in the same
+ * direction: it refuses even a client that returned an empty result with no
+ * error attached, rather than trusting that every failure is reported.
+ *
+ * This does not decide whether the vault has PQC secrets to carry. Once the
+ * row is proven readable, kem_secret_wrapped and sig_secret_wrapped coming
+ * back null is a legitimate answer: a vault with nothing stored yet.
+ */
+export async function loadVaultMetaForRecovery(
+  supabase: VaultPersistClient,
+  userId: string,
+): Promise<VaultMetaForRecovery> {
+  const { data: meta, error } = await supabase
+    .from("user_vault_meta")
+    .select(
+      "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
+    )
+    .eq("user_id", userId)
+    .single();
+
+  if (error || !meta) throw new Error(VAULT_META_UNREADABLE_MESSAGE);
+
+  return meta as VaultMetaForRecovery;
 }
 
 /**
@@ -793,38 +857,56 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // would overwrite a real ciphertext with null if a caller ever failed to read
   // the columns first, which is the same silent destruction this is fixing.
   //
-  // AND WHEN NOTHING WAS CARRIED, THE MATCHING PUBLIC KEY IS CLEARED. That is
-  // the invariant this write exists to hold: a rotation that completes without
-  // carrying a PQC secret across must not leave the public key behind.
+  // AND WHEN EITHER SECRET WAS NOT CARRIED, BOTH PUBLIC KEYS ARE CLEARED. That
+  // is the invariant this write exists to hold, and it is deliberately
+  // ALL-OR-NOTHING rather than per-key (OR-T1977). ensurePqcKeypairs() gates on
+  // kem_public_key alone: if it is populated it returns early and never looks
+  // at sig_public_key. A write that cleared each public key independently
+  // could leave kem_public_key populated while sig_public_key was null, and
+  // that gate would then short-circuit forever without ever regenerating the
+  // missing signing keypair. Clearing both together keeps the two public keys
+  // travelling as a pair, which is what makes the single-column gate correct.
   //
-  // Leaving it behind is what makes the loss permanent rather than temporary.
-  // ensurePqcKeypairs() short-circuits on a populated kem_public_key, so the row
-  // keeps a public key whose secret is wrapped under a MEK that no longer
-  // exists, and everything encrypted to it from then on is unreadable from the
-  // moment it is written. Clearing it lets the next unlock regenerate a working
-  // pair.
+  // Leaving a stale key behind is what makes the loss permanent rather than
+  // temporary: the row keeps a public key whose secret is wrapped under a MEK
+  // that no longer exists, and everything encrypted to it from then on is
+  // unreadable from the moment it is written. Clearing both lets the next
+  // unlock regenerate a fresh, matched pair.
   //
   // Two different situations arrive here and both need the same treatment.
   //
-  //   1. The stored secret existed and would not open. It is already dead.
+  //   1. A stored secret existed and would not open. It is already dead.
   //
-  //   2. The secret column was null when the recovery READ the row, and another
+  //   2. A secret column was null when the recovery READ the row, and another
   //      session created a keypair while the migration loop above was running.
   //      The old password still unlocks throughout that loop, deliberately,
   //      because meta is written last, so another tab loading the app is enough
-  //      to backfill a keypair under the OLD MEK. This write then omits the
-  //      secret column, because it was null at read time, and the
-  //      compare-and-swap does not catch it, because nothing in that backfill
-  //      touches recovery_ciphertext.
+  //      to backfill a keypair under the OLD MEK. This write then has nothing
+  //      to carry for that column, and the compare-and-swap does not catch it,
+  //      because nothing in that backfill touches recovery_ciphertext.
   //
   // In case 2 this clears a public key a legitimate concurrent write just made.
   // That is deliberate and it is correct: that keypair's secret is wrapped under
   // the MEK this recovery is discarding, so it is already dead as well.
   //
-  // A dead kem_secret_wrapped is deliberately left in place rather than nulled.
-  // It is unreadable either way, and ensurePqcKeypairs() overwrites all four
-  // columns when it regenerates on the next unlock. Nothing consumes a secret
-  // without its public key.
+  // THE COST OF ALL-OR-NOTHING, stated rather than hidden: if only one secret
+  // died, the OTHER keypair is discarded too even though it genuinely carried
+  // and its public key is still live. That keypair's own wrapped secret is
+  // still written below when present, so nothing is lost bit-for-bit, but its
+  // public key is cleared and the next unlock regenerates both keypairs from
+  // scratch. That is the trade this fix makes: one place owns the invariant,
+  // at the price of discarding a keypair that did not have to die. The
+  // alternative, widening ensurePqcKeypairs to gate on both columns and
+  // regenerate only the missing one, was considered and rejected here because
+  // buildPqcKeyMaterial() overwrites all four columns in one call, so a
+  // regenerate-one-key path needs its own partial-write function to avoid
+  // silently replacing the key that was meant to survive; that is more code
+  // and more to get right on a self-custody path, not less.
+  //
+  // A dead secret is deliberately left in place rather than nulled. It is
+  // unreadable either way, and ensurePqcKeypairs() overwrites all four columns
+  // when it regenerates on the next unlock. Nothing consumes a secret without
+  // its public key.
   const rotatedMeta: Record<string, unknown> = {
     enc_mek_ciphertext: newEncMekCiphertext,
     recovery_ciphertext: newRecoveryCiphertext,
@@ -833,12 +915,12 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   };
   if (newKemSecretWrapped !== null) {
     rotatedMeta.kem_secret_wrapped = newKemSecretWrapped;
-  } else {
-    rotatedMeta.kem_public_key = null;
   }
   if (newSigSecretWrapped !== null) {
     rotatedMeta.sig_secret_wrapped = newSigSecretWrapped;
-  } else {
+  }
+  if (newKemSecretWrapped === null || newSigSecretWrapped === null) {
+    rotatedMeta.kem_public_key = null;
     rotatedMeta.sig_public_key = null;
   }
 
