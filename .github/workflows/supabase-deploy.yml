@@ -1991,7 +1991,7 @@ jobs:
           printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000009_in_order.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/2099010100000X_notanumber.sql"
           printf '%s\n' 'select 1;' > "${ST_DIR}/209901010000091_toowide.sql"
-          printf '%s\n' 'select 1;' > "${ST_DIR}/${ST_ALLOWLISTED_FILE}"
+          printf '%s\n' 'select 1;' > "${ST_DIR}/20990101000001_below_allowlisted.sql"
           # OR-T2561. Same reason text as below_marked, a DIFFERENT project
           # ref: proves a marker judged safe for one project is rejected,
           # not silently honored, when this run targets another.
