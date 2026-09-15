@@ -23,6 +23,12 @@
  *   The 404 is indistinguishable from "it belongs to someone else", so a
  *   caller cannot fish for cross-subaccount wallet ownership by observing
  *   the response status.
+ *
+ * or-stealth-transactions-list follows the same rule on its own connection_id
+ * ownership check, for the same reason (OR-T1146). If you are tempted to
+ * return a more specific status for the "exists but not yours" case on
+ * either endpoint, that is a deliberate, shared decision to revisit on both
+ * files together, not a one-file fix.
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
@@ -30,6 +36,14 @@ import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Length of a canonical UUID in its hyphenated 8-4-4-4-12 form, checked beside
+ * the pattern because JavaScript has no end-of-string anchor: without the m
+ * flag `$` matches at the end of the string OR immediately before a final
+ * newline, so UUID_RE alone accepts a UUID with a trailing "\n".
+ */
+const UUID_LENGTH = 36;
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -51,7 +65,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (!body.source_wallet_id || typeof body.source_wallet_id !== 'string') {
       return jsonResponse({ error: 'source_wallet_id required' }, 400, cors);
     }
-    if (!UUID_RE.test(body.source_wallet_id)) {
+    if (body.source_wallet_id.length !== UUID_LENGTH || !UUID_RE.test(body.source_wallet_id)) {
       return jsonResponse({ error: 'source_wallet_id must be a UUID' }, 400, cors);
     }
 
