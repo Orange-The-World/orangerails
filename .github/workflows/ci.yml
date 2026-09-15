@@ -489,7 +489,8 @@ jobs:
           psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c 'create schema if not exists auth;' \
             -c 'create table if not exists auth.users (id uuid primary key);' \
-            -c 'create or replace function auth.uid() returns uuid language sql stable as $$ select null::uuid $$;'
+            -c 'create or replace function auth.uid() returns uuid language sql stable as $$ select null::uuid $$;' \
+            -c "do \$\$ begin if not exists (select from pg_catalog.pg_roles where rolname = 'authenticated') then create role authenticated; end if; end \$\$;"
           psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -f supabase/migrations/20260711120000_channel_state.sql
 
