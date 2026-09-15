@@ -423,7 +423,8 @@ jobs:
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
-    # scoped to `src/**/*.test.ts`, and no workflow invoked `deno test` at all.
+    # scoped to src/**/*.test.ts(x) and tests/**/*.test.ts, and no workflow
+    # invoked `deno test` at all.
     # Nine test files, zero enforcement.
     #
     # That is not a theoretical gap. When these were first executed, one had
@@ -532,10 +533,11 @@ jobs:
     name: Unit tests (vitest)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Why this job exists: src/**/*.test.ts carries discriminating tests for the
-    # stealth/sync orchestrator: birthday height rejection and the stored-cursor
-    # short-circuit requirement. Without this job those tests sit in the tree
-    # and never gate a merge. Runner note: bun test cannot run this suite
+    # Why this job exists: src/**/*.test.ts and src/**/*.test.tsx carry
+    # discriminating tests for the stealth/sync orchestrator (birthday height
+    # rejection, stored-cursor short-circuit) and for the /app route (co-admin
+    # workspace-load banner surviving refresh). Without this job those tests sit
+    # in the tree and never gate a merge. Runner note: bun test cannot run this suite
     # because vitest uses vi.stubGlobal, which bun's runner does not implement.
     # It fails every case for a tooling reason unrelated to the code. npx vitest
     # run matches the test script in package.json and is the correct runner for
@@ -562,8 +564,8 @@ jobs:
     name: Unit tests (api-gateway worker)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Why this job exists: the root vitest job above collects src/**/*.test.ts
-    # and tests/**/*.test.ts. The gateway is its own package under
+    # Why this job exists: the root vitest job above collects src/**/*.test.ts,
+    # src/**/*.test.tsx and tests/**/*.test.ts. The gateway is its own package under
     # workers/api-gateway with its own vitest config and its own test
     # directory, so NONE of its tests were collected by any job: they ran
     # nowhere while CI reported green. That includes the tests asserting a

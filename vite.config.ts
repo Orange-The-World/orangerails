@@ -17,6 +17,9 @@ export default defineConfig(({ mode }) => ({
       autoCodeSplitting: true,
       routesDirectory: "./src/routes",
       generatedRouteTree: "./src/routeTree.gen.ts",
+      // Route-mount tests live next to the route they prove (src/routes/*.test.tsx).
+      // Without this, the generator treats app.test.tsx as a real /app/test route.
+      routeFileIgnorePattern: "\\.test\\.(ts|tsx)$",
     }),
     react(),
     tailwindcss(),
