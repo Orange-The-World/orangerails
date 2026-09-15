@@ -1,5 +1,5 @@
 [Unit]
-Description=ORBI BTC/USD staleness probe
+Description=ORBI BTC/USD age and per-pair density probe
 After=network.target
 # Backstop for the paths the probe cannot report itself: it never started, it
 # died before reaching its own alarm helper, or its alarm delivery failed.
