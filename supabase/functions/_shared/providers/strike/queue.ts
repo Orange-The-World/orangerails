@@ -112,10 +112,26 @@ export interface DrainConnection {
    * sync path check instead of wait.
    */
   subscription_checked_at?: string | null;
+  /**
+   * Last time the subscription was actually deleted and recreated with a
+   * fresh HMAC secret. Distinct from subscription_checked_at, which is
+   * stamped on every successful liveness verification. Null means never
+   * rotated under the periodic-rotation scheme (OR-T0386): the sync path
+   * treats null as "rotation overdue" and forces a resubscribe.
+   */
+  subscription_rotated_at?: string | null;
 }
 
 /** Verify the stored subscription at most this often per connection. */
 const SUBSCRIPTION_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Force a full delete+recreate (secret rotation) at most this often.
+ * The liveness check (enabled + URL) cannot detect a secret mismatch
+ * because Strike never returns the secret in GET /subscriptions responses.
+ * Periodic rotation ensures drift is self-healed on a bounded schedule.
+ */
+const SUBSCRIPTION_SECRET_REFRESH_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Resolve the source_wallet_id for a Strike invoice at drain time.
@@ -178,6 +194,23 @@ export async function drainStrikeQueue(args: {
   // and left for the next check.
   let needsResubscribe = conn.needs_resubscribe ?? false;
   const webhookUrl = `${args.webhookBaseUrl}?conn=${conn.id}`;
+
+  // Step 1a-pre: periodic secret rotation. The liveness check below (enabled +
+  // webhookUrl) cannot detect a secret mismatch because Strike's API never
+  // returns the stored secret. Force a full resubscribe when the secret has
+  // not been rotated recently (or never), so any drift is self-healed on a
+  // bounded schedule without waiting for a bad-sig failure to accumulate (OR-T0386).
+  if (conn.strike_subscription_id && !needsResubscribe) {
+    const lastRotated = conn.subscription_rotated_at ? new Date(conn.subscription_rotated_at).getTime() : 0;
+    if (Date.now() - lastRotated > SUBSCRIPTION_SECRET_REFRESH_INTERVAL_MS) {
+      console.warn(
+        `[strike-queue] connection ${conn.id}: secret rotation due ` +
+        `(last rotated: ${conn.subscription_rotated_at ?? 'never'}), forcing resubscribe`,
+      );
+      needsResubscribe = true;
+    }
+  }
+
   if (conn.strike_subscription_id && !needsResubscribe) {
     const lastChecked = conn.subscription_checked_at ? new Date(conn.subscription_checked_at).getTime() : 0;
     if (Date.now() - lastChecked > SUBSCRIPTION_CHECK_INTERVAL_MS) {
@@ -247,6 +280,7 @@ export async function drainStrikeQueue(args: {
           strike_webhook_secret: secret,
           strike_needs_resubscribe: false,
           strike_subscription_checked_at: new Date().toISOString(),
+          strike_subscription_rotated_at: new Date().toISOString(),
         })
         .eq('id', conn.id);
       if (error) throw error;
