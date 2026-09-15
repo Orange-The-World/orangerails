@@ -44,6 +44,7 @@ import {
   type ScriptType,
 } from './derive';
 import { scanStartHeight } from './ranges';
+import { sortByAscendingHeight } from "./sync-ordering";
 import { sealEnvelope, unsealEnvelope, blindIndex } from './seal';
 import { loadBip158Matcher, type Bip158Matcher } from './wasm/index';
 import {
@@ -932,7 +933,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // not chain order. The UTXO tracker below is order-sensitive: a spend
   // processed before the receive that funded it is silently missed.
   // Process blocks strictly by ascending height.
-  hits.sort((a, b) => a.height - b.height);
+  sortByAscendingHeight(hits);
 
   // ── fetching_blocks + building_txs ───────────────────────────────────
   emit(opts, progress('fetching_blocks', 0, `${hits.length} blocks to fetch.`));
@@ -1227,7 +1228,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       }
     };
     await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, extWorker));
-    extHits.sort((a, b) => a.height - b.height);
+    sortByAscendingHeight(extHits);
 
     // Same reason as the trim on `hits` after the initial scan, and it has to
     // be repeated here because this is a SEPARATE array that the earlier trim
