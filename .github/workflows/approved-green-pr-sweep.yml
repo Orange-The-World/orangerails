@@ -53,6 +53,40 @@ jobs:
           }
           trap fail_loud ERR
 
+          # OR-T1280: every observed failure of this workflow (2026-09-11 through
+          # 2026-09-14, 8 for 8 on the daily schedule) was a transient GitHub API
+          # error surfacing through gh with no retry: "HTTP 504: 504 Gateway Timeout
+          # (https://api.github.com/graphql)" twice, and gh's own "unexpected end of
+          # JSON input" (a truncated response body) twice, both on the gh issue list
+          # call in the no-chat fallback path. gh pr list uses the same REST/GraphQL
+          # surface and can fail the same way even though it has not yet, so both
+          # get the same guard. A short retry-with-backoff turns a single flaky
+          # API round trip into the job's occasional failure mode rather than its
+          # near-certain one.
+          gh_retry() {
+            local attempt=1
+            local max_attempts=4
+            local delay=3
+            local output status
+            while true; do
+              if output=$("$@" 2>&1); then
+                printf '%s' "$output"
+                return 0
+              else
+                status=$?
+              fi
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "::warning::gh_retry: giving up after ${attempt} attempts on: $*" >&2
+                printf '%s' "$output" >&2
+                return "$status"
+              fi
+              echo "::warning::gh_retry: attempt ${attempt} failed (exit ${status}), retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              delay=$((delay * 2))
+              attempt=$((attempt + 1))
+            done
+          }
+
           chat_ready=1
           if [ -z "${ZULIP_SITE:-}" ] || [ -z "${ZULIP_BOT_EMAIL:-}" ] || [ -z "${ZULIP_API_KEY:-}" ]; then
             chat_ready=0
@@ -67,7 +101,7 @@ jobs:
           report=""
 
           phase="scan:list-open-prs"
-          prs=$(gh pr list \
+          prs=$(gh_retry gh pr list \
             --repo "$GITHUB_REPOSITORY" \
             --state open \
             --json number,title,url,reviewDecision,statusCheckRollup,createdAt \
@@ -157,20 +191,21 @@ jobs:
             "${report}")
 
           phase="delivery:list-fallback-issue"
-          existing=$(gh issue list \
+          existing_issues=$(gh_retry gh issue list \
             --repo "$GITHUB_REPOSITORY" \
             --state open \
             --limit 100 \
-            --json number,title \
-            | jq -r --arg t "$ISSUE_TITLE" 'map(select(.title == $t)) | .[0].number // empty')
+            --json number,title)
+          printf '%s' "$existing_issues" | jq -e 'type == "array"' >/dev/null
+          existing=$(printf '%s' "$existing_issues" | jq -r --arg t "$ISSUE_TITLE" 'map(select(.title == $t)) | .[0].number // empty')
 
           if [ -n "$existing" ]; then
             phase="delivery:comment-fallback-issue"
-            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$issue_body"
+            gh_retry gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$issue_body"
             echo "Reported ${count} approved-and-green result(s) on existing issue #${existing}."
           else
             phase="delivery:create-fallback-issue"
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$issue_body"
+            gh_retry gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$issue_body"
             echo "Reported ${count} approved-and-green result(s) on a new issue."
           fi
 
