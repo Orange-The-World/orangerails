@@ -1,6 +1,6 @@
 import { assert, assertEquals, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { decodeTokenEnvelope } from './index.ts';
-import { classifyUpstreamError } from '../upstream-errors.ts';
+import { classifyUpstreamError } from '../../upstream-errors.ts';
 
 /**
  * A value that appears nowhere except in the input we hand the decoder, so if
