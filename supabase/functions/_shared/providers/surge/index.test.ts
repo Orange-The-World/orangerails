@@ -18,7 +18,7 @@ Deno.test('decodeTokenEnvelope: invalid base64url throws a fixed string', () => 
     () => decodeTokenEnvelope(`not-valid-base64url-${MARKER}!!!`),
     Error,
   ) as Error;
-  assertEquals(err.message, '[surge] bearer_token is not valid base64url');
+  assertEquals(err.message, '[surge] bearer_token is invalid base64url');
 });
 
 Deno.test('decodeTokenEnvelope: invalid base64url classifies as UPSTREAM_PARSE_FAILED', () => {
