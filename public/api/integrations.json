@@ -16,7 +16,7 @@
     { "id": "river", "name": "River", "category": "Exchange", "status": "Planned", "description": "DCA and treasury management." },
     { "id": "ocean", "name": "Ocean Pool", "category": "Mining", "status": "Planned", "description": "Non-custodial mining payouts (BOLT12 Lightning)." },
     { "id": "braiins", "name": "Braiins Pool", "category": "Mining", "status": "Planned", "description": "API + CSV/JSON payout export." },
-    { "id": "viabtc", "name": "ViaBTC Pool", "category": "Mining", "status": "Planned", "description": "Mining rewards and payouts." },
+    { "id": "viabtc", "name": "ViaBTC Pool", "category": "Mining", "status": "Beta", "description": "Mining rewards and payouts via the pool API." },
     { "id": "lnd", "name": "LND", "category": "Lightning", "status": "Planned", "description": "gRPC + Faraday accounting." },
     { "id": "cln", "name": "Core Lightning (CLN)", "category": "Lightning", "status": "Planned", "description": "Self-hosted Lightning node." },
     { "id": "ldk", "name": "LDK", "category": "Lightning", "status": "Planned", "description": "Library adapter. WASM-capable." },
