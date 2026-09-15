@@ -475,7 +475,12 @@ jobs:
           # ephemeral runner. Capture its output because a successful start
           # prints local keys that do not belong in the Actions log.
           START_LOG="$RUNNER_TEMP/supabase-start.log"
-          if ! supabase start > "$START_LOG" 2>&1; then
+          # edge-runtime cannot boot inside a GitHub Actions runner (verified
+          # on OR-T1955 / PR #1231), and this job only needs Postgres and
+          # PostgREST. mailpit and imgproxy are excluded too: neither is used
+          # by any test here. "inbucket" is NOT a valid value on CLI 2.111.0;
+          # this generation names the mail-catcher service "mailpit".
+          if ! supabase start --exclude edge-runtime,mailpit,imgproxy > "$START_LOG" 2>&1; then
             # Preserve startup and migration diagnostics while removing the
             # credential lines the CLI may have emitted before a later error.
             sed -E \
