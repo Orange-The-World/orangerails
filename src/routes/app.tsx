@@ -206,6 +206,15 @@ function AppHome() {
   const [myKemSecretWrapped, setMyKemSecretWrapped] = useState<string | null>(null);
   const [adminWorkspaces, setAdminWorkspaces] = useState<WorkspaceOption[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceOption | null>(null);
+  // Per-workspace load problems (duplicate wrapped key, read error), keyed by
+  // owner. Deliberately separate from `err`: `err` is cleared unconditionally
+  // by refresh() on every run (OR-T1291), which made this message disappear
+  // the moment the page did anything else. This state is only ever set by the
+  // co-admin workspace loader effect below, and only cleared when that effect
+  // re-runs, so it survives every refresh() in between.
+  const [workspaceLoadIssues, setWorkspaceLoadIssues] = useState<
+    { ownerUserId: string; ownerEmail: string; message: string }[]
+  >([]);
   // Cached admin subkeys , persists until tab closes (MVP limitation).
   const adminSubkeysRef = useRef<
     Map<string, { credentialsKey: CryptoKey; transactionsKey: CryptoKey }>
@@ -348,6 +357,7 @@ function AppHome() {
       }
 
       const workspaces: WorkspaceOption[] = [];
+      const issues: { ownerUserId: string; message: string }[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
         for (const ownerRow of myAdminOf) {
           const ownerId = ownerRow.owner_user_id;
@@ -370,11 +380,11 @@ function AppHome() {
             ownerKeyId,
           );
           if (wdkRead.status === "ambiguous") {
-            setErr(DUPLICATE_WRAPPED_KEY_MESSAGE);
+            issues.push({ ownerUserId: ownerId, message: DUPLICATE_WRAPPED_KEY_MESSAGE });
             continue;
           }
           if (wdkRead.status === "error") {
-            setErr(formatError(wdkRead.error));
+            issues.push({ ownerUserId: ownerId, message: formatError(wdkRead.error) });
             continue;
           }
           // No grant at all is ordinary: this user is in the owner's list but
@@ -410,6 +420,7 @@ function AppHome() {
       const allIds = [
         ...adminRows.map((r) => r.admin_user_id),
         ...workspaces.map((w) => w.ownerUserId),
+        ...issues.map((i) => i.ownerUserId),
       ];
       const emailMap = new Map<string, string>();
       if (allIds.length > 0) {
@@ -424,6 +435,12 @@ function AppHome() {
       setCoAdmins(adminRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
       setAdminWorkspaces(
         workspaces.map((w) => ({ ...w, ownerEmail: emailMap.get(w.ownerUserId) ?? w.ownerUserId })),
+      );
+      // Replaces the previous list wholesale: this effect only re-runs on
+      // [isUnlocked, navigate], so a duplicate row the owner has since fixed
+      // clears on the next real reload rather than lingering forever.
+      setWorkspaceLoadIssues(
+        issues.map((i) => ({ ...i, ownerEmail: emailMap.get(i.ownerUserId) ?? i.ownerUserId })),
       );
     })();
   }, [isUnlocked, navigate]);
@@ -1087,6 +1104,23 @@ function AppHome() {
             {err}
           </div>
         )}
+        {/* Surfaced next to the workspace list itself (OR-T1291), not as a
+            page-level error: it does not share a slot with `err`, so it is
+            not cleared by refresh(), and each ambiguous owner gets their own
+            line so a second ambiguous workspace does not overwrite the first. */}
+        {workspaceLoadIssues.length > 0 && (
+          <div className="space-y-2">
+            {workspaceLoadIssues.map((issue) => (
+              <div
+                key={issue.ownerUserId}
+                className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              >
+                <span className="font-medium">{issue.ownerEmail}: </span>
+                {issue.message}
+              </div>
+            ))}
+          </div>
+        )}
 
         <section className="space-y-3">
           <div className="flex items-center justify-between">
@@ -1267,24 +1301,35 @@ function AppHome() {
                     }
                     setChangePwLoading(true);
                     try {
-                      const { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext } =
-                        await changeVaultPassword({
-                          currentPassword: changePwForm.current,
-                          newPassword: changePwForm.next,
-                          storedSaltB64: vaultSalt,
-                          storedEncMekCiphertext: vaultEncMekCiphertext,
-                          storedVerifierCiphertext: vaultVerifierCiphertext,
-                          keyVersion: vaultKeyVersion,
-                        });
+                      const {
+                        newEncMekCiphertext,
+                        newRecoveryCode,
+                        newRecoveryCiphertext,
+                        verifyPersistedEnvelopes,
+                      } = await changeVaultPassword({
+                        currentPassword: changePwForm.current,
+                        newPassword: changePwForm.next,
+                        storedSaltB64: vaultSalt,
+                        storedEncMekCiphertext: vaultEncMekCiphertext,
+                        storedVerifierCiphertext: vaultVerifierCiphertext,
+                        keyVersion: vaultKeyVersion,
+                      });
                       // Persist new wrapping to user_vault_meta. Same CAS guard, same
                       // conflict handling, same table: src/lib/vault-persist.ts is the
                       // single copy of this write, covered by its own tests.
+                      //
+                      // verifyPersisted is what makes the next line safe. The new
+                      // recovery code is shown immediately below, so this call has to
+                      // resolve only when the bytes the database RETURNED re-open the
+                      // vault, not merely when a row matched. The closure carries the
+                      // keys; nothing key-shaped passes through this component.
                       await persistRewrappedVaultMeta({
                         supabase: supabase as unknown as VaultPersistClient,
                         userId: userId as string,
                         priorEncMekCiphertext: vaultEncMekCiphertext,
                         newEncMekCiphertext,
                         newRecoveryCiphertext,
+                        verifyPersisted: verifyPersistedEnvelopes,
                       });
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
@@ -1477,9 +1522,15 @@ function AppHome() {
 
 const STALE_THRESHOLD_DAYS = 7;
 
-function isStaleConnection(lastSyncAt: string): boolean {
+// 30-day nudge threshold (OR-T0066, DL-0382 Option A). Separate from the
+// 7-day reconnect banner above: that one flags a broken/erroring
+// connection, this one flags a connection nobody has synced in a month,
+// which is a different problem and gets its own, more urgent, treatment.
+const STALE_NUDGE_THRESHOLD_DAYS = 30;
+
+function isStaleConnection(lastSyncAt: string, thresholdDays: number = STALE_THRESHOLD_DAYS): boolean {
   const ageMs = Date.now() - new Date(lastSyncAt).getTime();
-  return ageMs > STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
+  return ageMs > thresholdDays * 24 * 60 * 60 * 1000;
 }
 
 // ------------------------------------------------------------------
@@ -1508,21 +1559,49 @@ function ConnectionRow({
 
   const neverSynced = conn.last_sync_at === null;
   const stale = !neverSynced && isStaleConnection(conn.last_sync_at!);
+  // Takes precedence over `stale` when both are true: 30+ days is always
+  // also 7+ days, and the nudge is the more urgent, more specific case.
+  const staleNudge = !neverSynced && isStaleConnection(conn.last_sync_at!, STALE_NUDGE_THRESHOLD_DAYS);
 
   return (
     <div className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
-      {stale && (
+      {staleNudge ? (
         <span
           aria-hidden="true"
-          className="shrink-0 w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400"
+          data-testid="stale-nudge-dot"
+          className="shrink-0 w-2 h-2 rounded-full bg-red-500 dark:bg-red-400"
         />
+      ) : (
+        stale && (
+          <span
+            aria-hidden="true"
+            className="shrink-0 w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400"
+          />
+        )
       )}
       <div className="flex-1 min-w-0 space-y-1">
         <div className="font-medium truncate">{conn.decrypted_label || conn.provider_type}</div>
-        {stale && (
-          <div className="text-xs text-amber-600 dark:text-amber-400">
-            Not syncing. Select to reconnect.
+        {staleNudge ? (
+          <div
+            data-testid="stale-nudge-banner"
+            className="text-xs text-red-600 dark:text-red-400 flex items-center gap-2"
+          >
+            <span>No sync in over 30 days.</span>
+            <button
+              type="button"
+              onClick={onSync}
+              disabled={syncing}
+              className="underline font-medium disabled:opacity-50"
+            >
+              {syncing ? "Syncing..." : "Re-sync now"}
+            </button>
           </div>
+        ) : (
+          stale && (
+            <div className="text-xs text-amber-600 dark:text-amber-400">
+              Not syncing. Select to reconnect.
+            </div>
+          )
         )}
         {neverSynced && (
           <div className="text-xs text-muted-foreground">

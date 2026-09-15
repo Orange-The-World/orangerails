@@ -314,18 +314,49 @@ BEGIN
   --    they are unreachable for want of a privilege. If that ever stops being
   --    true, this file is the wrong shape and should say so out loud. A table
   --    that is not present simply does not match, so this needs no guard.
-  SELECT coalesce(string_agg(DISTINCT c.relname || ':' || a.privilege_type, ', '), 'NONE') INTO actual
-    FROM pg_class c
-    JOIN pg_namespace ns ON ns.oid = c.relnamespace,
-         aclexplode(c.relacl) a
-   WHERE ns.nspname = 'public'
-     AND c.relname = ANY(six)
-     AND a.grantee = 'anon'::regrole
-     AND a.privilege_type <> 'SELECT';
+  --
+  --    BOTH CATALOGUES, AND IT HAS TO BE BOTH. A privilege can be granted on a
+  --    table, which lands in pg_class.relacl, or on named columns of it, which
+  --    lands in pg_attribute.attacl and does NOT appear in relacl at all. An
+  --    earlier version of this check read relacl only, so a column scoped
+  --    INSERT on one of these six would have left a TO public write policy
+  --    reachable while this assertion still printed NONE. That is not a remote
+  --    shape on this schema: wrapped_data_keys already carries column scoped
+  --    SELECT grants today, and column scoped INSERT and UPDATE are an idiom
+  --    this tree uses elsewhere.
+  --
+  --    Only INSERT and UPDATE can actually arrive by the column route, because
+  --    PostgreSQL has no column level DELETE, so the two DELETE policies left
+  --    addressed to public are not reachable this way. The leg is written for
+  --    any non SELECT privilege regardless, so it needs no revisiting.
+  SELECT coalesce(string_agg(DISTINCT g, ', '), 'NONE') INTO actual
+    FROM (
+      SELECT c.relname || ':' || a.privilege_type AS g
+        FROM pg_class c
+        JOIN pg_namespace ns ON ns.oid = c.relnamespace,
+             aclexplode(c.relacl) a
+       WHERE ns.nspname = 'public'
+         AND c.relname = ANY(six)
+         AND a.grantee = 'anon'::regrole
+         AND a.privilege_type <> 'SELECT'
+      UNION ALL
+      SELECT c.relname || '.' || att.attname || ':' || a.privilege_type AS g
+        FROM pg_attribute att
+        JOIN pg_class c ON c.oid = att.attrelid
+        JOIN pg_namespace ns ON ns.oid = c.relnamespace,
+             aclexplode(att.attacl) a
+       WHERE ns.nspname = 'public'
+         AND c.relname = ANY(six)
+         AND att.attacl IS NOT NULL
+         AND att.attnum > 0
+         AND NOT att.attisdropped
+         AND a.grantee = 'anon'::regrole
+         AND a.privilege_type <> 'SELECT'
+    ) both_catalogues;
 
   IF actual <> 'NONE' THEN
     RAISE EXCEPTION
-      'stealth and vault tables: the anonymous role holds more than SELECT [%], so the write policies left addressed to public are reachable',
+      'stealth and vault tables: the anonymous role holds more than SELECT [%] (table.column form means a column scoped grant), so the write policies left addressed to public are reachable',
       actual;
   END IF;
 

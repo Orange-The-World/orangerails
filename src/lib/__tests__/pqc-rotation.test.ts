@@ -384,6 +384,73 @@ describe("vault recovery: the old wrap key has to be the right key", () => {
     );
   });
 
+  it("throws instead of reporting dead when both secrets fail with no live sibling to corroborate", async () => {
+    // THE CASE assertPqcWrapKeyMatchesSalt CANNOT CATCH. oldWrapKey here is
+    // honestly derived from (oldMek, authenticatedSaltB64): the probe in
+    // assertPqcWrapKeyMatchesSalt passes. The STORED secrets, though, were
+    // sealed under a completely different key, which is what a derivation this
+    // code no longer reproduces looks like in practice (a salt-migration step
+    // that missed these two columns, an HKDF context bump, a secret written by
+    // an older client). Both tag checks fail identically, exactly what a wrong
+    // key does, and there is no live sibling to prove oldWrapKey opens
+    // anything at all from this vault. Before the corroboration requirement
+    // this returned pqcKeysReplaced: true with both secrets cleared, which is
+    // the "every user, silently, with no error" failure this ticket exists to
+    // close.
+    const saltB64 = generateVaultSalt();
+    const oldMek = await importMekAsHkdf(generateMekBytes());
+    const oldWrapKey = await derivePqcSecretWrapKey(oldMek, saltB64);
+    const after = await mekWithPqcWrapKey(saltB64);
+
+    const unreproducible = await mekWithPqcWrapKey(saltB64);
+    const stored = await buildPqcKeyMaterial(unreproducible.wrapKey);
+
+    await expect(
+      carryPqcSecretsAcrossRotation({
+        oldWrapKey,
+        newWrapKey: after.wrapKey,
+        oldMek,
+        authenticatedSaltB64: saltB64,
+        kemSecretWrapped: stored.kem_secret_wrapped,
+        sigSecretWrapped: stored.sig_secret_wrapped,
+      }),
+    ).rejects.toBeTruthy();
+
+    // And nothing was touched: both secrets are still readable under the key
+    // they were really sealed with. Throwing is only safe because nothing was
+    // written.
+    expect(
+      await unwrapPqcSecretKey(unreproducible.wrapKey, stored.kem_secret_wrapped),
+    ).toBeTruthy();
+    expect(
+      await unwrapPqcSecretKey(unreproducible.wrapKey, stored.sig_secret_wrapped),
+    ).toBeTruthy();
+  });
+
+  it("throws instead of reporting dead when one secret fails and the other was never stored", async () => {
+    // No sibling at all, so there is nothing to corroborate against. Same
+    // ambiguity as the case above: a genuinely dead secret and an
+    // unreproducible derivation are both a bare tag failure from here.
+    const saltB64 = generateVaultSalt();
+    const oldMek = await importMekAsHkdf(generateMekBytes());
+    const oldWrapKey = await derivePqcSecretWrapKey(oldMek, saltB64);
+    const after = await mekWithPqcWrapKey(saltB64);
+
+    const unreproducible = await mekWithPqcWrapKey(saltB64);
+    const stored = await buildPqcKeyMaterial(unreproducible.wrapKey);
+
+    await expect(
+      carryPqcSecretsAcrossRotation({
+        oldWrapKey,
+        newWrapKey: after.wrapKey,
+        oldMek,
+        authenticatedSaltB64: saltB64,
+        kemSecretWrapped: stored.kem_secret_wrapped,
+        sigSecretWrapped: null,
+      }),
+    ).rejects.toBeTruthy();
+  });
+
   it("rejects a wrap key that is not derived from this MEK at all", async () => {
     // Same salt, different MEK. The salt rotation is the failure I expect, but
     // the guard is really about the key being the right key, and a swapped MEK

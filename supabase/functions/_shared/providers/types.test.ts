@@ -1,5 +1,6 @@
-import { assert, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import { assert, assertEquals, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { parseCredentials, type ProviderAdapter } from './types.ts';
+import { classifyUpstreamError } from '../upstream-errors.ts';
 
 /**
  * Minimal stand-in for a real adapter. parseCredentials only reads `slug` and
@@ -24,9 +25,21 @@ Deno.test('parseCredentials: a parse failure throws a fixed string', () => {
     Error,
   ) as Error;
   assert(
-    err.message === '[test-provider] credentials are not valid JSON',
+    err.message === '[test-provider] credentials JSON parse failed',
     `expected the fixed message, got: ${err.message.slice(0, 40)}`,
   );
+});
+
+Deno.test('parseCredentials: the thrown message classifies as UPSTREAM_PARSE_FAILED', () => {
+  // Regression coupling test (OR-T2643): the fixed string above must stay
+  // inside the tier 2 pattern in upstream-errors.ts, or a JSON parse failure
+  // silently reclassifies as UPSTREAM_OTHER with a different customer-facing
+  // code and a different connections.encrypted_last_error value.
+  const err = assertThrows(
+    () => parseCredentials(adapter, `{"api_key":"${MARKER}"`),
+    Error,
+  ) as Error;
+  assertEquals(classifyUpstreamError(err.message), 'UPSTREAM_PARSE_FAILED');
 });
 
 Deno.test('parseCredentials: no part of the input reaches the thrown message', () => {
