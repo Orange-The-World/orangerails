@@ -8,6 +8,11 @@
 // reused from v1-rate exactly, per spec section "Error codes".
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
+// Bare SupabaseClient, not ReturnType<typeof createClient>: the latter resolves
+// the generic defaults to a schema of never, which breaks .from()/.rpc() calls
+// on the object a helper receives as a parameter. Same convention as
+// _shared/connection-state.ts, _shared/quiltt-config.ts and or-strike-webhook.
+import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -61,7 +66,7 @@ interface LatestRow {
 
 // Fetch the single most recent CONFIRMED, non-superseded row for a direct pair.
 async function fetchLatestDirect(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   base: string,
   quote: string,
   product: string,
