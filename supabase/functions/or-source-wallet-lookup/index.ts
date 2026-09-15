@@ -43,7 +43,33 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * flag `$` matches at the end of the string OR immediately before a final
  * newline, so UUID_RE alone accepts a UUID with a trailing "\n".
  */
-const UUID_LENGTH = 36;
+export const UUID_LENGTH = 36;
+
+/**
+ * Same shape as or-stealth-envelope-update/cursor.ts's AdvanceCursorResult:
+ * a discriminated union carrying the real HTTP status, so a test can assert
+ * what the handler actually sends rather than re-deriving it from a bare
+ * boolean predicate.
+ */
+export type SourceWalletIdValidation =
+  | { ok: true; value: string }
+  | { ok: false; error: string; status: number };
+
+export function isSourceWalletIdInvalid(
+  r: SourceWalletIdValidation,
+): r is { ok: false; error: string; status: number } {
+  return !r.ok;
+}
+
+export function validateSourceWalletId(raw: unknown): SourceWalletIdValidation {
+  if (!raw || typeof raw !== 'string') {
+    return { ok: false, error: 'source_wallet_id required', status: 400 };
+  }
+  if (raw.length !== UUID_LENGTH || !UUID_RE.test(raw)) {
+    return { ok: false, error: 'source_wallet_id must be a UUID', status: 400 };
+  }
+  return { ok: true, value: raw };
+}
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
@@ -62,12 +88,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       source_wallet_id?: string;
     };
 
-    if (!body.source_wallet_id || typeof body.source_wallet_id !== 'string') {
-      return jsonResponse({ error: 'source_wallet_id required' }, 400, cors);
+    const walletIdValidation = validateSourceWalletId(body.source_wallet_id);
+    if (isSourceWalletIdInvalid(walletIdValidation)) {
+      return jsonResponse({ error: walletIdValidation.error }, walletIdValidation.status, cors);
     }
-    if (body.source_wallet_id.length !== UUID_LENGTH || !UUID_RE.test(body.source_wallet_id)) {
-      return jsonResponse({ error: 'source_wallet_id must be a UUID' }, 400, cors);
-    }
+    const sourceWalletId = walletIdValidation.value;
 
     const subaccountId = await resolveSubaccount(ctx, body.subaccount_id);
     if (isAuthError(subaccountId)) {
@@ -79,7 +104,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const { data: wallet, error: walletErr } = await ctx.serviceClient
       .from('source_wallets')
       .select('connection_id')
-      .eq('id', body.source_wallet_id)
+      .eq('id', sourceWalletId)
       .maybeSingle();
 
     if (walletErr) {
