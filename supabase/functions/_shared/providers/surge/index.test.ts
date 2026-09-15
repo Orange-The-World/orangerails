@@ -38,7 +38,7 @@ Deno.test('decodeTokenEnvelope: invalid JSON envelope throws a fixed string', ()
     () => decodeTokenEnvelope(toBase64url(`{"borrower":"${MARKER}"`)),
     Error,
   ) as Error;
-  assertEquals(err.message, '[surge] bearer_token envelope is not valid JSON');
+  assertEquals(err.message, '[surge] bearer_token envelope is invalid JSON');
 });
 
 Deno.test('decodeTokenEnvelope: invalid JSON envelope classifies as UPSTREAM_PARSE_FAILED', () => {
