@@ -11,8 +11,17 @@ lerna-debug.log*
 node_modules
 node_modules/
 
-# npm lockfile — the project uses Bun. package-lock.json would go stale
-# bun.lockb is the single source of truth.
+# npm lockfile — the project uses Bun. package-lock.json would go stale.
+# STALE COMMENT, corrected 2026-09-15: this used to say "bun.lockb is the
+# single source of truth". Verified live: `bun install --frozen-lockfile`
+# (bun 1.3.13, matching the 1.3.14 CI pins) reads and validates bun.lock
+# (the text format), not bun.lockb -- Bun's default lockfile format moved
+# from the binary bun.lockb to the text bun.lock at some point after
+# 2026-05-05 (bun.lockb's last real update), and this comment was never
+# updated to match. bun.lockb is left in the tree untouched rather than
+# deleted here, since removing it is a separate decision outside this
+# change's scope; .github/workflows/dependabot-lockfile.yml already commits
+# whichever of the two exists. See OR-E0018 step 1 (app.tsx test harness).
 package-lock.json
 
 # Build outputs
