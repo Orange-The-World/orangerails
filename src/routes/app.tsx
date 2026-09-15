@@ -11,6 +11,7 @@ import {
 } from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
 import { classifyRead } from "@/lib/read-outcome";
+import { describeCoAdminWorkspacesLoadFailure } from "@/lib/co-admin-workspaces-load-error";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
@@ -351,9 +352,10 @@ function AppHome() {
       // co-admin of nothing", so unlike the other reads on this page it is
       // loud: setErr as well as the log, because an empty list here is
       // indistinguishable to the user from a real answer.
-      if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
+      const myAdminOfLoad = describeCoAdminWorkspacesLoadFailure(myAdminOf, myAdminOfErr);
+      if (myAdminOfLoad.failed) {
         console.error("Failed to load co-admin workspaces:", myAdminOfErr);
-        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
+        setErr(myAdminOfLoad.message);
       }
 
       const workspaces: WorkspaceOption[] = [];
