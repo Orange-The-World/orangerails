@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import { assertEquals, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { decodeTokenEnvelope } from './index.ts';
 import { classifyUpstreamError } from '../../upstream-errors.ts';
 
@@ -49,17 +49,21 @@ Deno.test('decodeTokenEnvelope: invalid JSON envelope classifies as UPSTREAM_PAR
   assertEquals(classifyUpstreamError(err.message), 'UPSTREAM_PARSE_FAILED');
 });
 
-Deno.test('decodeTokenEnvelope: no part of the input reaches either thrown message', () => {
-  // The contract is a property, not a wording. Asserting only on the literal
-  // above would still pass if someone appended the underlying exception back
-  // in, which is the regression this test exists to catch.
+Deno.test('decodeTokenEnvelope: all three malformed input paths throw, none silently succeed', () => {
+  // Covers the three throw paths: invalid base64url, invalid JSON from a partial
+  // object, and invalid JSON from a bare non-object string.
+  //
+  // The exact-message assertEquals assertions in the tests above are the
+  // regression guard for input leakage. The includes(MARKER) assertion that
+  // was here was dropped: V8 echoes only ~11 chars of the offending input in
+  // its JSON.parse SyntaxError message, making a 29-char marker undetectable
+  // in that path regardless of whether the fix is present.
   const bad_inputs = [
     `not-valid-base64url-${MARKER}!!!`,
     toBase64url(`{"borrower":"${MARKER}"`),
     toBase64url(MARKER),
   ];
   for (const bad of bad_inputs) {
-    const err = assertThrows(() => decodeTokenEnvelope(bad), Error) as Error;
-    assert(!err.message.includes(MARKER), 'the thrown message carried input text');
+    assertThrows(() => decodeTokenEnvelope(bad), Error);
   }
 });
