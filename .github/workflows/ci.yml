@@ -345,7 +345,17 @@ jobs:
     # prove row level security and it says so.
     services:
       postgres:
-        image: postgres:16-alpine
+        # Matches the major version the real Supabase projects run (dev
+        # fzwmnzmtqidumdqjdddz reads PostgreSQL 17.6, checked live 2026-09-15,
+        # OR-C1871). A pinned 16-alpine here was a full major version behind:
+        # harmless while every migration this job applied only used syntax
+        # common to both, but a migration matched into this job's set by the
+        # discovery grep below (20260903013000_authenticated_maintenance_privilege_revoke.sql)
+        # revokes the MAINTAIN privilege, which does not exist before
+        # PostgreSQL 17 -- "ERROR: unrecognized privilege type maintain" is
+        # not a bug in that migration, it is this job running the wrong
+        # engine. Bump this again if the real project's major version moves.
+        image: postgres:17-alpine
         env:
           # No password appears anywhere in this file. The container listens
           # only inside the runner and is destroyed with it, so trust auth is
@@ -402,7 +412,52 @@ jobs:
           # Discovered, not hardcoded, so a later migration that alters the
           # function is picked up without anyone remembering to edit this list.
           # Filename order is chronological because the names are timestamped.
-          mapfile -t MIGRATIONS < <(grep -lE 'stealth_scan_ranges|record_stealth_scan_range' supabase/migrations/*.sql | sort)
+          #
+          # ONE FILE DELIBERATELY EXCLUDED (OR-C1871, 2026-09-15):
+          # 20260903000000_revoke_anon_unpoliced_table_select.sql names
+          # stealth_scan_ranges and stealth_connections only as two of nine
+          # tables in a whole-schema anon-grant sweep. Unlike its sibling
+          # sweeps (20260902154500, 20260903001500, 20260903013000), it has
+          # no to_regclass guard, and its self-check is not "this table's
+          # privileges are right" but an EXACT SET-EQUALITY check across
+          # every RLS-enabled table in all of public: it raises unless the
+          # anon-SELECT-granted set is precisely those nine names and the
+          # column-level-SELECT set is precisely {apps, platforms}. Passing
+          # that here would mean this shim maintaining a live mirror of the
+          # ENTIRE production privilege surface -- exchange_rates,
+          # quiltt_institutions_cache, wrapped_data_keys, apps, platforms,
+          # every one of them re-created with matching RLS just to satisfy
+          # an assertion about tables this suite does not test -- which is
+          # exactly the "convincing imitation" the harness's own header
+          # forbids, and it would need editing again every time an unrelated
+          # RLS table is added anywhere in the schema. This migration is
+          # written to run only against the complete database (real dev or
+          # prod), where it already ran and where to_regclass would find no
+          # reason to skip anything; it was never written to run in
+          # isolation. Precedent for a named, justified exclusion instead of
+          # silently widening the harness: 20260902154500's own header
+          # excludes webhook_delivery from ITS sweep for the same reason --
+          # "putting an unadjudicated table into an adjudicated sweep is how
+          # a sweep stops being worth trusting."
+          #
+          # A SECOND FILE EXCLUDED FOR A DIFFERENT REASON (OR-C1871, 2026-09-15):
+          # 20260905223000_revoke_anon_execute_vault_meta_delete_guard_fns.sql
+          # matches this grep on a single word in a COMMENT ("Same shape as
+          # 20260822031500 (record_stealth_scan_range): guarded with
+          # to_regprocedure...") -- it is an analogy, not a reference. The
+          # migration itself revokes EXECUTE on two vault-meta delete-guard
+          # trigger functions and touches no table or function this suite
+          # creates. Its own post-condition requires at least one of those
+          # two functions to exist or it raises by design ("neither
+          # vault-meta-delete-guard function exists here, so this migration
+          # revoked nothing"), so it can never pass in this harness and was
+          # never testing scan-range in the first place. A false positive on
+          # the discovery grep, not a partial-schema problem like the first
+          # exclusion.
+          mapfile -t MIGRATIONS < <(grep -lE 'stealth_scan_ranges|record_stealth_scan_range' supabase/migrations/*.sql \
+            | grep -v '20260903000000_revoke_anon_unpoliced_table_select.sql' \
+            | grep -v '20260905223000_revoke_anon_execute_vault_meta_delete_guard_fns.sql' \
+            | sort)
 
           if [ "${#MIGRATIONS[@]}" -eq 0 ]; then
             echo "::error::No file under supabase/migrations mentions stealth_scan_ranges or record_stealth_scan_range. This job would then be testing nothing. Fix the path rather than let it report green."
