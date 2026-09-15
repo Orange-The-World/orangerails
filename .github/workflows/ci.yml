@@ -458,6 +458,74 @@ jobs:
           # edge runtime is deno 2.1.4, so tests run on the runtime that ships.
           deno-version: v2.1.4
 
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          # Keep this aligned with the deliberately pinned CLI in the deploy
+          # workflow. This job exercises config.toml against the pin by using
+          # it to start the local stack on every run.
+          version: 2.111.0
+
+      - name: Start local Supabase stack and apply migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # supabase start applies every migration to a fresh database on this
+          # ephemeral runner. Capture its output because a successful start
+          # prints local keys that do not belong in the Actions log.
+          START_LOG="$RUNNER_TEMP/supabase-start.log"
+          if ! supabase start > "$START_LOG" 2>&1; then
+            # Preserve startup and migration diagnostics while removing the
+            # credential lines the CLI may have emitted before a later error.
+            sed -E \
+              -e '/(anon key|service_role key|JWT secret|publishable key|secret key):/Id' \
+              -e 's/eyJ[A-Za-z0-9._-]+/[redacted local JWT]/g' \
+              -e 's/sb_(publishable|secret)_[A-Za-z0-9._-]+/[redacted local key]/g' \
+              "$START_LOG"
+            echo "::error::Local Supabase failed to start or a migration failed to apply. See the diagnostics above."
+            exit 1
+          fi
+          echo "Local Supabase started and migrations applied."
+
+      - name: Export local Supabase test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Read the URL and keys from the running CLI instead of copying its
+          # static local values into this workflow. Do not print this file.
+          umask 077
+          STATUS_ENV="$RUNNER_TEMP/supabase-status.env"
+          supabase status --output env > "$STATUS_ENV"
+          set -a
+          source "$STATUS_ENV"
+          set +a
+
+          : "${API_URL:?supabase status did not provide API_URL}"
+          : "${ANON_KEY:?supabase status did not provide ANON_KEY}"
+          : "${SERVICE_ROLE_KEY:?supabase status did not provide SERVICE_ROLE_KEY}"
+
+          case "$API_URL" in
+            http://127.0.0.1:*|http://localhost:*) ;;
+            *)
+              echo "::error::Supabase test URL is not loopback. Refusing to expose a hosted project to this test job."
+              exit 1
+              ;;
+          esac
+
+          # GITHUB_ENV makes these available to later steps in this job. The
+          # ORANGERAILS_TEST aliases match the existing database test contract;
+          # the standard names support edge-function tests directly.
+          {
+            printf 'SUPABASE_URL=%s\n' "$API_URL"
+            printf 'SUPABASE_ANON_KEY=%s\n' "$ANON_KEY"
+            printf 'SUPABASE_SERVICE_ROLE_KEY=%s\n' "$SERVICE_ROLE_KEY"
+            printf 'ORANGERAILS_TEST_SUPABASE_URL=%s\n' "$API_URL"
+            printf 'ORANGERAILS_TEST_ANON_KEY=%s\n' "$ANON_KEY"
+            printf 'ORANGERAILS_TEST_SERVICE_ROLE_KEY=%s\n' "$SERVICE_ROLE_KEY"
+          } >> "$GITHUB_ENV"
+
       - name: deno test supabase/functions
         shell: bash
         run: |
@@ -526,7 +594,28 @@ jobs:
           # what makes that visible in the log without a rerun.
           printf '%s\n' "${TEST_FILES[@]}" | sed 's/^/  collected: /'
           echo "Found ${FILE_COUNT} test file(s) (baseline: ${DENO_TEST_FILE_BASELINE})"
-          deno test --no-check --allow-all supabase/functions/
+
+          # Deno exits zero when it loads test files that register no tests, so
+          # file count alone cannot prevent a silent green run. Its JUnit report
+          # records what the runner actually executed. Count non-skipped cases
+          # after the command succeeds and fail if that count is zero.
+          JUNIT_REPORT="$RUNNER_TEMP/deno-test.junit.xml"
+          deno test --no-check --allow-all --junit-path="$JUNIT_REPORT" "${TEST_FILES[@]}"
+          if [ ! -s "$JUNIT_REPORT" ]; then
+            echo "::error::Deno produced no JUnit report, so the executed test count is unknown."
+            exit 1
+          fi
+          TEST_COUNT=$(node -e '
+            const report = require("fs").readFileSync(process.argv[1], "utf8");
+            const cases = report.match(/<testcase(?:\s|>)/g) ?? [];
+            const skipped = report.match(/<skipped(?:\s|\/|>)/g) ?? [];
+            console.log(cases.length - skipped.length);
+          ' "$JUNIT_REPORT")
+          if [ "$TEST_COUNT" -le 0 ]; then
+            echo "::error::Deno executed zero non-skipped tests. A collected but empty suite cannot report green."
+            exit 1
+          fi
+          echo "Deno executed ${TEST_COUNT} non-skipped test(s)."
 
   vitest:
     name: Unit tests (vitest)
