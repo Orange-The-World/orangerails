@@ -45,6 +45,30 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  */
 const UUID_LENGTH = 36;
 
+/**
+ * Validates body.source_wallet_id and returns the exact 400 Response the
+ * handler sends on a bad value, or null when it is a well-formed UUID.
+ *
+ * Exported and called by the handler below, rather than duplicated, so a
+ * test can drive this ONE implementation and assert on the real Response
+ * status a caller would receive -- not just on UUID_RE in isolation, which
+ * proves the pattern is exact but not that the HTTP layer enforces it
+ * (OR-T1144, same reasoning as or-stealth-transactions-list's
+ * validateCursorOrResponse).
+ */
+export function validateSourceWalletIdOrResponse(
+  body: { source_wallet_id?: string },
+  cors: Record<string, string>,
+): Response | null {
+  if (!body.source_wallet_id || typeof body.source_wallet_id !== 'string') {
+    return jsonResponse({ error: 'source_wallet_id required' }, 400, cors);
+  }
+  if (body.source_wallet_id.length !== UUID_LENGTH || !UUID_RE.test(body.source_wallet_id)) {
+    return jsonResponse({ error: 'source_wallet_id must be a UUID' }, 400, cors);
+  }
+  return null;
+}
+
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
@@ -62,12 +86,8 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       source_wallet_id?: string;
     };
 
-    if (!body.source_wallet_id || typeof body.source_wallet_id !== 'string') {
-      return jsonResponse({ error: 'source_wallet_id required' }, 400, cors);
-    }
-    if (body.source_wallet_id.length !== UUID_LENGTH || !UUID_RE.test(body.source_wallet_id)) {
-      return jsonResponse({ error: 'source_wallet_id must be a UUID' }, 400, cors);
-    }
+    const walletIdErr = validateSourceWalletIdOrResponse(body, cors);
+    if (walletIdErr) return walletIdErr;
 
     const subaccountId = await resolveSubaccount(ctx, body.subaccount_id);
     if (isAuthError(subaccountId)) {
