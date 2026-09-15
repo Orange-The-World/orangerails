@@ -2,8 +2,8 @@
 //
 // The first test that ever mounts src/routes/app.tsx (OR-E0018 step 1,
 // folded from OR-T0837). Until this file existed, package.json's own
-// "test": "vitest run" never touched this route: `code_search` over the
-// repo found zero *.test.tsx files anywhere (verified 2026-09-15).
+// "test": "vitest run" never touched this route: the repo had zero
+// *.test.tsx files anywhere.
 //
 // The second test below is OR-T0834's acceptance criterion 2: the co-admin
 // workspace loader must not report "no workspaces" when the read that would
