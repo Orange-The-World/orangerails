@@ -12,7 +12,113 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { claimRetiredEventForReplay, fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+
+// ── explicit retired-event replay (OR-T0128) ────────────────────────
+
+function replayClaimClient(initialRow: Record<string, unknown>) {
+  let row = { ...initialRow };
+  let updateCalls = 0;
+  const client = {
+    from(_table: string) {
+      let patch: Record<string, unknown> | null = null;
+      const predicates: Array<[string, unknown]> = [];
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_columns: string) { return chain; },
+        update(next: Record<string, unknown>) {
+          patch = next;
+          updateCalls++;
+          return chain;
+        },
+        eq(column: string, value: unknown) {
+          predicates.push([column, value]);
+          return chain;
+        },
+        maybeSingle() {
+          const matches = predicates.every(([column, value]) => row[column] === value);
+          if (!matches) return Promise.resolve({ data: null, error: null });
+          if (patch) row = { ...row, ...patch };
+          return Promise.resolve({ data: { ...row }, error: null });
+        },
+      };
+      return chain;
+    },
+  };
+  return {
+    client,
+    row: () => ({ ...row }),
+    updateCalls: () => updateCalls,
+  };
+}
+
+Deno.test('claimRetiredEventForReplay: mapping-missing retirement is re-admitted with a fresh attempt budget', async () => {
+  const mock = replayClaimClient({
+    event_id: 'evt-map-retired',
+    event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-1' } },
+    platform_id: null,
+    subaccount_id: null,
+    attempts: 25,
+    received_at: '2026-09-01T00:00:00.000Z',
+    processed_at: '2026-09-02T00:00:00.000Z',
+    retirement_reason: 'max-attempts-pre-dispatch',
+    last_error: 'mapping-missing',
+    opk_deferred_at: null,
+  });
+
+  // deno-lint-ignore no-explicit-any
+  const result = await claimRetiredEventForReplay(mock.client as any, 'evt-map-retired');
+
+  assertEquals(result.status, 'claimed');
+  assertEquals(result.status === 'claimed' ? result.event.attempts : -1, 0);
+  assertEquals(mock.row().processed_at, null, 'claim must put the event back into deliverable state');
+  assertEquals(mock.row().retirement_reason, null, 'claim must clear the terminal marker before dispatch');
+  assertEquals(mock.row().last_error, null, 'the repaired attempt must not retain the obsolete prerequisite error');
+});
+
+Deno.test('claimRetiredEventForReplay: historical connection-race retirement can be claimed only once', async () => {
+  const mock = replayClaimClient({
+    event_id: 'evt-conn-retired',
+    event_type: 'connection.synced.successful.initial',
+    payload: { record: { id: 'qconn-2' } },
+    platform_id: 'plat-1',
+    subaccount_id: 'sub-1',
+    attempts: 25,
+    received_at: '2026-09-01T00:00:00.000Z',
+    processed_at: '2026-09-02T00:00:00.000Z',
+    retirement_reason: 'max-attempts:or-connection row not yet created',
+    last_error: 'or-connection row not yet created',
+    opk_deferred_at: '2026-09-01T01:00:00.000Z',
+  });
+
+  // deno-lint-ignore no-explicit-any
+  const first = await claimRetiredEventForReplay(mock.client as any, 'evt-conn-retired');
+  // This models the second invocation reaching the replay gate. Because only a
+  // claimed result enters handleEvent, not-retired proves it cannot dispatch a
+  // second downstream connection/transaction write.
+  // deno-lint-ignore no-explicit-any
+  const second = await claimRetiredEventForReplay(mock.client as any, 'evt-conn-retired');
+
+  assertEquals(first.status, 'claimed');
+  assertEquals(second.status, 'not-retired');
+  assertEquals(mock.updateCalls(), 1, 'a repeated replay must not claim or dispatch the event twice');
+  assertEquals(mock.row().opk_deferred_at, null, 'a stale deferral marker must not hide the claimed event');
+});
+
+Deno.test('claimRetiredEventForReplay: unrelated retirement is refused', async () => {
+  const mock = replayClaimClient({
+    event_id: 'evt-provider-retired',
+    retirement_reason: 'max-attempts:Quiltt GraphQL 503',
+    last_error: 'Quiltt GraphQL 503',
+  });
+
+  // deno-lint-ignore no-explicit-any
+  const result = await claimRetiredEventForReplay(mock.client as any, 'evt-provider-retired');
+
+  assertEquals(result.status, 'not-replayable');
+  assertEquals(mock.updateCalls(), 0, 'the replay path is scoped to repaired prerequisite failures');
+});
 
 // ── shouldRetireConnRace / retireConnRace (OR-T1902) ───────────────────
 //

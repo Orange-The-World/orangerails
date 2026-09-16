@@ -2,9 +2,10 @@
  * or-quiltt-sync — drain quiltt_webhook_inbox, pull data from Quiltt
  * GraphQL, seal under each user's OPK, persist as encrypted_transactions.
  *
- * Trigger: HTTP POST (callable manually for testing; wire to supabase_cron
- * on a schedule later). One call processes a bounded batch of pending
- * events and returns metrics.
+ * Trigger: HTTP POST. An empty/{} body processes a bounded pending batch.
+ * An authenticated operator can instead POST
+ * {"replay_event_id":"<event id>"} to claim and synchronously dispatch one
+ * recoverably-retired event after repairing its mapping/connection prerequisite.
  *
  * Phase 1 scope:
  *   - Only events for subaccounts with opk_public set are processed
@@ -96,6 +97,32 @@ interface PendingEvent {
   received_at?:  string;
 }
 
+interface QuilttTransactionsResponse {
+  errors?: Array<{ message?: unknown }>;
+  data?: {
+    transactions?: {
+      nodes?: Array<{
+        id: string;
+        amount: unknown;
+        currencyCode: unknown;
+        date: string;
+        description: unknown;
+        entryType: unknown;
+        status: unknown;
+        account?: { id?: string | null } | null;
+      }>;
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+    };
+  };
+}
+
+export type ReplayClaimResult =
+  | { status: 'claimed'; event: PendingEvent }
+  | { status: 'not-found'; event: null }
+  | { status: 'not-retired'; event: null }
+  | { status: 'not-replayable'; event: null }
+  | { status: 'error'; event: null; error: string };
+
 const _drainHandler = wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
 
@@ -125,30 +152,78 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
   const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
   if (!quilttApiKey) return new Response('QUILTT_API_KEY missing', { status: 503 });
 
+  // A normal cron invocation has no body. Ops can instead name one retired
+  // event to replay synchronously after repairing its mapping/connection
+  // prerequisite. Claiming the row below clears its terminal markers before
+  // this same invocation sends it through the ordinary dispatch path; merely
+  // changing processed_at is not reported as successful replay.
+  let replayEventId: string | null = null;
+  const rawBody = await req.text();
+  if (rawBody.length > 0) {
+    let body: unknown;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      return jsonResponse({ error: 'invalid JSON body' }, 400);
+    }
+    const candidate = (body as { replay_event_id?: unknown } | null)?.replay_event_id;
+    if (candidate !== undefined) {
+      if (typeof candidate !== 'string' || candidate.trim().length === 0) {
+        return jsonResponse({ error: 'replay_event_id must be a non-empty string' }, 400);
+      }
+      replayEventId = candidate.trim();
+    }
+  }
+
   let processed = 0;
   let failed    = 0;
   let skipped   = 0;
+  let reDriven  = 0;
+  let reDriveErr: string | null = null;
+  let pending: PendingEvent[] | null = null;
 
-  // DL-0643: Re-admit OPK-deferred rows whose subaccounts have since
-  // registered a public key. Runs each tick so subaccounts that registered
-  // before or-sync-key-register's clearDeferredRows shipped are unblocked
-  // without waiting for a new registration event.
-  const { reDriven, error: reDriveErr } = await reDriveReadyDeferrals(client);
-  if (reDriveErr) {
-    console.error('[or-quiltt-sync] reDriveReadyDeferrals failed:', reDriveErr);
-  }
-  if (reDriven > 0) {
-    console.log(`[or-quiltt-sync] re-admitted ${reDriven} OPK-deferred rows`);
-  }
+  if (replayEventId) {
+    const claim = await claimRetiredEventForReplay(client, replayEventId);
+    if (claim.status === 'error') {
+      console.error(`[or-quiltt-sync] replay claim failed for event ${replayEventId}:`, claim.error);
+      return jsonResponse({ error: 'replay claim failed', event_id: replayEventId }, 500);
+    }
+    if (claim.status === 'not-found') {
+      return jsonResponse({ error: 'event not found', event_id: replayEventId }, 404);
+    }
+    if (claim.status === 'not-replayable') {
+      return jsonResponse({ error: 'event retirement is not replayable by this path', event_id: replayEventId }, 409);
+    }
+    if (claim.status === 'not-retired') {
+      // Includes a repeated request after a successful claim. Returning a
+      // no-op makes the operator command idempotent without redispatching.
+      return jsonResponse({ replay: 'not-retired', event_id: replayEventId, processed: 0, failed: 0, skipped: 0 }, 200);
+    }
+    pending = [claim.event];
+  } else {
+    // DL-0643: Re-admit OPK-deferred rows whose subaccounts have since
+    // registered a public key. Runs each tick so subaccounts that registered
+    // before or-sync-key-register's clearDeferredRows shipped are unblocked
+    // without waiting for a new registration event.
+    const reDrive = await reDriveReadyDeferrals(client);
+    reDriven = reDrive.reDriven;
+    reDriveErr = reDrive.error;
+    if (reDriveErr) {
+      console.error('[or-quiltt-sync] reDriveReadyDeferrals failed:', reDriveErr);
+    }
+    if (reDriven > 0) {
+      console.log(`[or-quiltt-sync] re-admitted ${reDriven} OPK-deferred rows`);
+    }
 
-  // Pull a batch of pending, non-deferred events.
-  // fetchPendingBatch filters both processed_at IS NULL and opk_deferred_at IS NULL
-  // so opk-deferred rows never pile up at the head and starve drainable events.
-  const { data: pending, error: pendErr } = await fetchPendingBatch(client, BATCH_SIZE);
-
-  if (pendErr) {
-    console.error('[or-quiltt-sync] inbox query failed:', pendErr.message);
-    return jsonResponse({ error: 'inbox query failed', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 500);
+    // Pull a batch of pending, non-deferred events.
+    // fetchPendingBatch filters both processed_at IS NULL and opk_deferred_at IS NULL
+    // so opk-deferred rows never pile up at the head and starve drainable events.
+    const fetched = await fetchPendingBatch(client, BATCH_SIZE);
+    if (fetched.error) {
+      console.error('[or-quiltt-sync] inbox query failed:', fetched.error.message);
+      return jsonResponse({ error: 'inbox query failed', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 500);
+    }
+    pending = fetched.data as PendingEvent[] | null;
   }
   if (!pending || pending.length === 0) {
     return jsonResponse({ processed: 0, failed: 0, skipped: 0, message: 'inbox empty', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 200);
@@ -287,7 +362,20 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
     }
   }
 
-  return jsonResponse({ processed, failed, skipped, reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}), batch: pending.length }, 200);
+  return jsonResponse({
+    processed,
+    failed,
+    skipped,
+    reDriven,
+    ...(reDriveErr ? { reDriveError: reDriveErr } : {}),
+    batch: pending.length,
+    ...(replayEventId
+      ? {
+          replay: processed > 0 ? 'dispatched' : failed > 0 ? 'failed' : 'not-delivered',
+          event_id: replayEventId,
+        }
+      : {}),
+  }, 200);
 }, 'or-quiltt-sync');
 if (import.meta.main) Deno.serve(_drainHandler);
 
@@ -624,7 +712,7 @@ export async function handleEvent(
         }
       }
     `;
-    const resp = await fetch(QUILTT_GRAPHQL, {
+    const resp: Response = await fetch(QUILTT_GRAPHQL, {
       method: 'POST',
       headers: {
         'Authorization': `Basic ${basic}`,
@@ -640,7 +728,7 @@ export async function handleEvent(
       const errBody = await resp.text().catch(() => '');
       return `Quiltt GraphQL ${resp.status}: ${redactProviderError(errBody, 300)}`;
     }
-    const json = await resp.json();
+    const json = await resp.json() as QuilttTransactionsResponse;
 
     // GraphQL can return HTTP 200 with an `errors` array when a query
     // partially or fully fails (bad connectionId, expired profile,
@@ -661,7 +749,7 @@ export async function handleEvent(
     // conditional describes that conditional and nothing else.
     if (Array.isArray(json?.errors) && json.errors.length > 0) {
       const messages = json.errors
-        .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+        .map((e) => (typeof e?.message === 'string' ? e.message : ''))
         .filter((m: string) => m.length > 0)
         .join('; ');
       const summary = redactProviderError(messages, 400);
@@ -670,7 +758,8 @@ export async function handleEvent(
     }
 
     const txs = json?.data?.transactions?.nodes ?? [];
-    const pageInfo = json?.data?.transactions?.pageInfo;
+    const pageInfo: { hasNextPage?: boolean; endCursor?: string | null } | undefined =
+      json?.data?.transactions?.pageInfo;
 
     for (const tx of txs) {
       // DL-0442: skip transactions for accounts the user has not selected.
@@ -1311,6 +1400,88 @@ export async function fetchPendingBatch(client: SupabaseClient, batchSize: numbe
     .is('opk_deferred_at', null)
     .order('received_at', { ascending: true })
     .limit(batchSize);
+}
+
+/**
+ * Conditionally re-admit one retired event for an explicit operator replay.
+ *
+ * Only the two recoverable prerequisite failures tracked by OR-T0128 are
+ * eligible: a missing route, or an OR connections row that had not yet been
+ * created. The first read supplies a useful not-found/not-replayable result;
+ * the UPDATE repeats the exact retirement_reason predicate, so two concurrent
+ * replay requests cannot both claim the same event. A later request sees the
+ * now-NULL retirement_reason and becomes a no-op.
+ *
+ * attempts must return to zero before normal dispatch. Otherwise every
+ * max-attempts:mapping-missing row would immediately trip the pre-dispatch
+ * ceiling and retire again without trying the repaired prerequisite.
+ */
+export async function claimRetiredEventForReplay(
+  client: SupabaseClient,
+  eventId: string,
+): Promise<ReplayClaimResult> {
+  const columns =
+    'event_id, event_type, payload, platform_id, subaccount_id, attempts, received_at, retirement_reason, last_error';
+  const { data: retired, error: readErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select(columns)
+    .eq('event_id', eventId)
+    .maybeSingle();
+  if (readErr) {
+    return { status: 'error', event: null, error: `replay lookup failed: ${readErr.message}` };
+  }
+  if (!retired) return { status: 'not-found', event: null };
+
+  const reason = typeof retired.retirement_reason === 'string'
+    ? retired.retirement_reason
+    : null;
+  if (!reason) return { status: 'not-retired', event: null };
+
+  // Historical rows reached the same terminal state through more than one
+  // generation of wording. Match the stable failure names in either audit
+  // field, including the pre-dispatch cap whose reason itself did not retain
+  // the underlying mapping error.
+  const retirementEvidence = `${reason}\n${typeof retired.last_error === 'string' ? retired.last_error : ''}`
+    .toLowerCase();
+  const replayable =
+    retirementEvidence.includes('mapping-missing') ||
+    retirementEvidence.includes('connection-not-yet-created') ||
+    retirementEvidence.includes('connection not yet created') ||
+    retirementEvidence.includes('connection row not yet created') ||
+    retirementEvidence.includes('connection row never created') ||
+    retirementEvidence.includes('deferred-conn-race');
+  if (!replayable) return { status: 'not-replayable', event: null };
+
+  const { data: claimed, error: claimErr } = await client
+    .from('quiltt_webhook_inbox')
+    .update({
+      processed_at:      null,
+      retirement_reason: null,
+      attempts:          0,
+      last_error:        null,
+      opk_deferred_at:   null,
+    })
+    .eq('event_id', eventId)
+    .eq('retirement_reason', reason)
+    .select(columns)
+    .maybeSingle();
+  if (claimErr) {
+    return { status: 'error', event: null, error: `replay claim failed: ${claimErr.message}` };
+  }
+  if (!claimed) return { status: 'not-retired', event: null };
+
+  return {
+    status: 'claimed',
+    event: {
+      event_id:      claimed.event_id,
+      event_type:    claimed.event_type,
+      payload:       claimed.payload,
+      platform_id:   claimed.platform_id,
+      subaccount_id: claimed.subaccount_id,
+      attempts:      claimed.attempts,
+      received_at:   claimed.received_at,
+    },
+  };
 }
 
 export async function markDeferred(client: SupabaseClient, eventId: string) {
