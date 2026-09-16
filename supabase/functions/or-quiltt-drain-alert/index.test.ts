@@ -93,3 +93,58 @@ Deno.test('signal C still excludes retirements, so D is the only one that sees t
     'signal C must keep excluding retired rows',
   );
 });
+
+/**
+ * Wiring guards for signal E of or-quiltt-drain-alert (OR-T2583).
+ *
+ * Signal E is the starvation bound proven in OR-T2581: the fetch batch is
+ * fully occupied (>= BATCH_SIZE rows) by non-deferred rows older than the
+ * proven worst-case retirement bound. It shares its column filters with
+ * fetchPendingBatch in or-quiltt-sync, and it must use those exact columns
+ * or it stops measuring the same queue fetchPendingBatch actually drains.
+ */
+
+Deno.test('signal E filters on processed_at and opk_deferred_at, same as fetchPendingBatch', () => {
+  const src = readSource('./index.ts');
+
+  // These are the exact two columns or-quiltt-sync's fetchPendingBatch uses
+  // to decide what is eligible to be picked up. Signal E must measure the
+  // same set, or it can be green while the real fetch batch is starved.
+  assertEquals(
+    /\.is\('processed_at',\s*null\)\s*\n\s*\.is\('opk_deferred_at',\s*null\)/.test(src),
+    true,
+    'signal E must filter processed_at IS NULL AND opk_deferred_at IS NULL',
+  );
+});
+
+Deno.test('signal E threshold is >= 20 rows AND > 25 minutes, both required', () => {
+  const src = readSource('./index.ts');
+
+  assertEquals(
+    /STARVATION_UNPROCESSED_MIN\s*=\s*20/.test(src),
+    true,
+    'signal E unprocessed threshold must be 20 (BATCH_SIZE in or-quiltt-sync)',
+  );
+  assertEquals(
+    /STARVATION_AGE_MINUTES\s*=\s*25/.test(src),
+    true,
+    'signal E age threshold must be 25 minutes (proven worst-case bound, OR-T2581)',
+  );
+  assertEquals(
+    /const\s+starvationFiring\s*=[\s\S]*unprocessedNonDeferred\s*>=\s*STARVATION_UNPROCESSED_MIN[\s\S]*oldestUnprocessedAgeMinutes\s*>\s*STARVATION_AGE_MINUTES/.test(src),
+    true,
+    'signal E must require BOTH the row count and the age bound, not either alone',
+  );
+});
+
+Deno.test('signal E actually raises the alert', () => {
+  const src = readSource('./index.ts');
+
+  // Same failure mode as signal D: a signal computed and reported but left
+  // out of alertFiring is a metric, not an alarm.
+  assertEquals(
+    /const\s+alertFiring\s*=[^;]*starvationFiring/.test(src),
+    true,
+    'starvationFiring must be part of alertFiring or the signal never pages',
+  );
+});
