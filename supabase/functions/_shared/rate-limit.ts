@@ -8,8 +8,9 @@
  *     set to "true" to actually reject. Otherwise the throttle just records
  *     the violation in console.error so we can baseline usage before
  *     enforcing.
- *   - **Atomic UPSERT** — one round trip per request; no read-then-write
- *     race window.
+ *   - **Atomic increment in the database** (increment_platform_rate_limit):
+ *     one round trip per request, no read-then-write race window. This file
+ *     must not write the bucket row itself; doing so resets the window.
  *
  * Caller pattern (or-link-complete is the first integration):
  *
@@ -64,43 +65,14 @@ export async function checkPlatformRateLimit(
       : 'log-only';
 
   try {
-    // Upsert with increment. Postgres ON CONFLICT returns the updated row.
-    const { data, error } = await supabase
-      .from('platform_rate_limits')
-      .upsert(
-        {
-          key,
-          scope,
-          window_start: windowStart.toISOString(),
-          count: 1,
-        },
-        {
-          onConflict: 'key,scope,window_start',
-          ignoreDuplicates: false,
-        },
-      )
-      .select('count')
-      .single();
-
-    if (error || !data) {
-      // Fail open. Log so operators can see the rate-limit machinery is
-      // flapping but don't block the request.
-      console.error('[rate-limit] upsert failed; failing open:', error?.message);
-      return {
-        allowed: true,
-        count: 0,
-        limit: maxPerMinute,
-        retryAfterSeconds: 0,
-        mode,
-      };
-    }
-
-    // The upsert above wrote count=1 on insert OR re-applied count=1 on
-    // conflict (because we passed count: 1 in the values). That's wrong for
-    // a true increment. To get atomic increment with upsert we need a
-    // post-write update, or a stored function. Do the increment here as a
-    // separate atomic update — the SELECT in the next call gives us the
-    // accurate post-increment count.
+    // ONE round trip. The RPC does INSERT ... ON CONFLICT DO UPDATE SET
+    // count = count + 1 and returns the post-increment count, so it creates
+    // the bucket row itself.
+    //
+    // Do NOT write the row from here first. An upsert carrying count: 1 is an
+    // UPDATE on conflict, so it reset the window counter on every request:
+    // the count could never climb past 2 and no limit above 1 could ever be
+    // reached, in log-only mode or in enforce mode.
     const { data: incremented, error: incErr } = await supabase.rpc(
       'increment_platform_rate_limit',
       {
@@ -113,7 +85,7 @@ export async function checkPlatformRateLimit(
       console.error('[rate-limit] increment RPC failed; failing open:', incErr?.message);
       return {
         allowed: true,
-        count: data.count,
+        count: 0,
         limit: maxPerMinute,
         retryAfterSeconds: 0,
         mode,

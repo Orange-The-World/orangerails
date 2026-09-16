@@ -1,0 +1,257 @@
+name: prod commit hold guard
+
+# Why this gate exists.
+#
+# A commit-level promotion hold used to live only in prose: a ticket note and
+# a cold_start row that a seat had to remember to read at promotion time. That
+# already failed once (OR-T1170): the constraint was written down, and the
+# seat cutting the promotion did not read the place it was written. Writing
+# it down again does not fix a control that depends on someone choosing to
+# look. This makes the machine look instead.
+#
+# The rule: a commit sha listed in .github/promotion-holds.json may not reach
+# prod. The list is a normal repo file, so a hold and its release are both
+# ordinary reviewed PRs to dev, and the diff is the audit trail. CI reads it
+# with no credential beyond the read-only token this job already needs.
+#
+# HOW A HOLD IS RELEASED: only by its own merged PR to dev that removes (or
+# narrows) its entry in promotion-holds.json, landed BEFORE the promotion PR
+# is cut. Never by editing the file inside the promotion PR itself -- that
+# would let a promotion clear its own guard, which defeats the point.
+# Because this check reads the file at the PROMOTION PR's OWN head, a
+# promotion cut after the release PR has merged to dev naturally carries the
+# edited file and is not blocked; nothing else needs to be wired up.
+#
+# THE PROMOTION PR ITSELF MAY NOT EDIT THE HOLD FILE. The rule above only
+# holds if this job also refuses any promotion range that touches
+# .github/promotion-holds.json directly, otherwise a promotion PR could
+# clear its own guard by editing the file inside itself. The live step
+# checks the compare diff's file list for that and blocks it.
+#
+# WHY A MISSING OR UNPARSEABLE FILE FAILS RATHER THAN PASSES. An empty JSON
+# array ([]) is a valid state, zero holds, and passes. A file that is
+# missing, or that does not parse as JSON, means this job cannot tell whether
+# a hold applies, and "I could not check" is not a pass here any more than it
+# is in the ancestry lookup in prod-pr-source-guard.yml.
+#
+# WHY PREFIX MATCH ON THE SHA. Holds get written down by a human copying a
+# short sha out of a ticket or a cold_start row (see .github/promotion-holds.json).
+# The compare API returns full 40-character shas. Requiring an exact 40-char
+# match in the hold file would silently stop matching the moment anyone wrote
+# a short one. A held value of 7+ hex characters that is a PREFIX of a real
+# commit sha in the PR's range is treated as a match; anything shorter is
+# rejected as unparseable, because a short prefix stops meaning one commit.
+#
+# HOW THIS WAS PROVEN ABLE TO FAIL, and how to prove it again. The self-test
+# step covers the pure decision logic. The live step's file-read and
+# compare-API calls are not unit-testable, so they must be shown to fail for
+# real: open a pull request from a branch carrying a held sha (there is a
+# live one in promotion-holds.json right now) into prod, and watch this job
+# go red naming that sha. Then close the pull request without merging it.
+# Run that proof from a disposable branch, not from this workflow's own PR
+# branch: a forced-red run left in place as the PR's latest check blocks
+# merge with nothing real left to fix.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  commit-hold-guard:
+    name: prod promotion must not carry a held commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Self-test the decision logic
+        run: |
+          set -euo pipefail
+
+          # Pure function: given the hold list (as a JSON array already
+          # parsed to a newline list of "sha ticket" pairs) and the list of
+          # commit shas this PR would add to prod, decide allow or block.
+          # No network, no token, so every case here runs on every job with
+          # nothing that can flake. This function is written to a file at
+          # the end of this step (via `declare -f`) and SOURCED, not
+          # re-typed, by the live step below, so the function under test is
+          # the exact function that runs live and the two cannot drift apart.
+          verdict() {
+            holds_parse_ok="$1"   # "ok" or "bad"
+            holds="$2"            # newline-separated "shaprefix ticket"
+            commits="$3"          # newline-separated full shas
+
+            if [ "${holds_parse_ok}" != "ok" ]; then
+              echo "block-unparseable"
+              return
+            fi
+
+            if [ -z "${holds}" ]; then
+              echo "allow-no-holds"
+              return
+            fi
+
+            while IFS=' ' read -r prefix ticket; do
+              [ -z "${prefix}" ] && continue
+              # A hold prefix must be 7-40 hex characters. Anything else, too
+              # short or carrying a character that means something to a shell
+              # glob, is refused outright rather than handed to a pattern
+              # match, so a malformed hold entry cannot silently fail to
+              # match and let a held commit through.
+              if ! [[ "${prefix}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+                echo "block-bad-prefix:${prefix}:${ticket}"
+                return
+              fi
+              while IFS= read -r commit_sha; do
+                [ -z "${commit_sha}" ] && continue
+                case "${commit_sha,,}" in
+                  "${prefix,,}"*)
+                    echo "block-held:${prefix}:${ticket}:${commit_sha}"
+                    return
+                    ;;
+                esac
+              done <<< "${commits}"
+            done <<< "${holds}"
+
+            echo "allow-clear"
+          }
+
+          fail=0
+          check() {
+            got="$(verdict "$2" "$3" "$4")"
+            if [ "${got}" != "$5" ]; then
+              echo "::error::self-test '$1' expected '$5', got '${got}'"
+              fail=1
+            else
+              echo "ok: $1 -> ${got}"
+            fi
+          }
+
+          check "unparseable holds file" "bad" "" "$(printf 'aaa1111\nbbb2222')" "block-unparseable"
+          check "empty holds list" "ok" "" "$(printf 'aaa1111\nbbb2222')" "allow-no-holds"
+          check "held sha not in range" "ok" "aaa1111 OR-T0001" "bbb2222cccc3333" "allow-clear"
+          check "held sha in range" "ok" "aaa1111 OR-T0001" "aaa1111bbb2222cccc" "block-held:aaa1111:OR-T0001:aaa1111bbb2222cccc"
+          check "held sha matches one of many" "ok" "$(printf 'eee9999 OR-T0002\naaa1111 OR-T0001')" "$(printf 'bbb2222\naaa1111ccc')" "block-held:aaa1111:OR-T0001:aaa1111ccc"
+          check "held sha match is case-insensitive" "ok" "AAA1111 OR-T0001" "aaa1111bbb2222" "block-held:AAA1111:OR-T0001:aaa1111bbb2222"
+          check "prefix too short is refused" "ok" "aaa11 OR-T0001" "aaa1111bbb2222" "block-bad-prefix:aaa11:OR-T0001"
+          check "prefix with a glob/regex metacharacter is refused" "ok" "aaa1111* OR-T0001" "aaa1111bbb2222" "block-bad-prefix:aaa1111*:OR-T0001"
+
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::decision logic self-test failed. The gate is broken, not passing."
+            exit 1
+          fi
+          echo "Self-test passed."
+
+          declare -f verdict > "${RUNNER_TEMP}/promotion-hold-verdict.sh"
+
+      - name: Check this pull request for a held commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          echo "base: ${BASE_REF}"
+          echo "head sha: ${HEAD_SHA}"
+
+          if [ "${BASE_REF}" != "prod" ]; then
+            echo "Not targeting prod (base: ${BASE_REF}). Nothing to enforce here."
+            exit 0
+          fi
+
+          # Load the exact function the self-test step just proved correct
+          # (see that step's comment: this is sourced, not re-typed).
+          source "${RUNNER_TEMP}/promotion-hold-verdict.sh"
+
+          echo ""
+          echo "Reading .github/promotion-holds.json at this PR's own head..."
+          RAW="$(gh api "repos/${GH_REPO}/contents/.github/promotion-holds.json?ref=${HEAD_SHA}" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)"
+
+          if [ -z "${RAW}" ]; then
+            echo "::error::Could not read .github/promotion-holds.json at ${HEAD_SHA}. A missing hold file is treated as unparseable, not as zero holds. Blocked."
+            exit 1
+          fi
+
+          if ! printf '%s' "${RAW}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            echo "::error::.github/promotion-holds.json does not parse as a JSON array. A file this job cannot parse is treated as unparseable, never as zero holds. Blocked."
+            exit 1
+          fi
+
+          HOLDS="$(printf '%s' "${RAW}" | jq -r '.[] | "\(.sha) \(.ticket)"')"
+          HOLD_COUNT="$(printf '%s' "${RAW}" | jq 'length')"
+          echo "holds on file: ${HOLD_COUNT}"
+
+          if [ "${HOLD_COUNT}" -eq 0 ]; then
+            echo "No holds on file. Allowed."
+            exit 0
+          fi
+
+          echo ""
+          echo "Asking which commits and files this PR would add to prod..."
+          echo "Query: compare prod...${HEAD_SHA}"
+          COMPARE_JSON="$(gh api "repos/${GH_REPO}/compare/prod...${HEAD_SHA}" 2>/dev/null || true)"
+
+          if [ -z "${COMPARE_JSON}" ]; then
+            echo "::error::Could not compare prod...${HEAD_SHA}. Blocked: a hold list exists and this job cannot verify it is clear."
+            exit 1
+          fi
+
+          # The compare API caps the commits array (documented GitHub
+          # behaviour). total_commits reports the real count regardless of
+          # the cap, so comparing the two catches a silently truncated page
+          # instead of checking an incomplete list and calling it clear.
+          TOTAL_COMMITS="$(printf '%s' "${COMPARE_JSON}" | jq -r '.total_commits // empty')"
+          COMMITS="$(printf '%s' "${COMPARE_JSON}" | jq -r '.commits[]?.sha // empty')"
+          RETURNED_COMMITS="$(printf '%s\n' "${COMMITS}" | grep -c . || true)"
+
+          if [ -z "${TOTAL_COMMITS}" ]; then
+            echo "::error::compare prod...${HEAD_SHA} did not report total_commits. Cannot confirm the commit list this job read is complete. Blocked."
+            exit 1
+          fi
+
+          if [ "${TOTAL_COMMITS}" -ne "${RETURNED_COMMITS}" ]; then
+            echo "::error::compare prod...${HEAD_SHA} reports total_commits=${TOTAL_COMMITS} but the compare API returned only ${RETURNED_COMMITS} commits (it caps the commits array). A held commit outside this page would not be checked, which is exactly the silent pass this job exists to refuse. Blocked: shrink the promotion range, or page the request, before retrying."
+            exit 1
+          fi
+
+          echo "commits in range: ${RETURNED_COMMITS}"
+
+          # A hold may only be cleared by its own merged PR to dev, before the
+          # promotion PR is cut, never by editing the file inside the
+          # promotion PR itself, which would let a promotion clear its own
+          # guard. Refuse any promotion range that touches the hold file.
+          CHANGED_FILES="$(printf '%s' "${COMPARE_JSON}" | jq -r '.files[]?.filename // empty')"
+          if printf '%s\n' "${CHANGED_FILES}" | grep -qxF '.github/promotion-holds.json'; then
+            echo "::error::This promotion range itself modifies .github/promotion-holds.json. A hold may only be cleared by its own merged PR to dev, landed before the promotion PR is cut, never inside the promotion PR itself. Blocked."
+            exit 1
+          fi
+
+          RESULT="$(verdict "ok" "${HOLDS}" "${COMMITS}")"
+          case "${RESULT}" in
+            allow-*)
+              echo ""
+              echo "None of the ${HOLD_COUNT} held commit(s) appear in this promotion's range. Allowed."
+              ;;
+            block-bad-prefix:*)
+              REST="${RESULT#block-bad-prefix:}"
+              PREFIX="${REST%%:*}"
+              TICKET="${REST#*:}"
+              echo "::error::Hold entry for ${TICKET} has a sha prefix ('${PREFIX}') that is not 7-40 hex characters. Refusing to use it as a commit-prefix match. Blocked, fix the hold file."
+              exit 1
+              ;;
+            block-held:*)
+              REST="${RESULT#block-held:}"
+              PREFIX="${REST%%:*}"
+              REST2="${REST#*:}"
+              TICKET="${REST2%%:*}"
+              MATCHED_SHA="${REST2#*:}"
+              echo "::error::This promotion carries held commit ${MATCHED_SHA} (matches hold prefix '${PREFIX}'), held by ${TICKET}. It must not reach prod yet. Clear the hold on ${TICKET} with its own merged PR to dev before cutting this promotion."
+              exit 1
+              ;;
+            *)
+              echo "::error::Unexpected verdict '${RESULT}' from the decision function. Treating as blocked, fail closed."
+              exit 1
+              ;;
+          esac

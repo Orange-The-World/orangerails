@@ -10,6 +10,7 @@ import {
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
+import { classifyRead } from "@/lib/read-outcome";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
 import { decryptString } from "@/lib/vault";
 import { persistRewrappedVaultMeta, type VaultPersistClient } from "@/lib/vault-persist";
@@ -18,6 +19,7 @@ import {
   DUPLICATE_WRAPPED_KEY_MESSAGE,
   type WrappedKeyClient,
 } from "@/lib/co-admin-workspace-read";
+import { readCoAdminGrant } from "@/lib/co-admin-grant-row";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
@@ -157,7 +159,9 @@ const PROVIDERS = [
 // Component
 // ------------------------------------------------------------------
 
-function AppHome() {
+// Exported so a test can mount this screen directly (RTL) instead of only
+// reading the code -- see app.test.tsx (OR-E0018 step 1 / OR-T0834).
+export function AppHome() {
   const navigate = useNavigate();
   const {
     isUnlocked,
@@ -204,6 +208,15 @@ function AppHome() {
   const [myKemSecretWrapped, setMyKemSecretWrapped] = useState<string | null>(null);
   const [adminWorkspaces, setAdminWorkspaces] = useState<WorkspaceOption[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceOption | null>(null);
+  // Per-workspace load problems (duplicate wrapped key, read error), keyed by
+  // owner. Deliberately separate from `err`: `err` is cleared unconditionally
+  // by refresh() on every run (OR-T1291), which made this message disappear
+  // the moment the page did anything else. This state is only ever set by the
+  // co-admin workspace loader effect below, and only cleared when that effect
+  // re-runs, so it survives every refresh() in between.
+  const [workspaceLoadIssues, setWorkspaceLoadIssues] = useState<
+    { ownerUserId: string; ownerEmail: string; message: string }[]
+  >([]);
   // Cached admin subkeys , persists until tab closes (MVP limitation).
   const adminSubkeysRef = useRef<
     Map<string, { credentialsKey: CryptoKey; transactionsKey: CryptoKey }>
@@ -260,11 +273,14 @@ function AppHome() {
       }
 
       // Load vault salt + workspace_key_id + co-admin list.
-      const { data: meta } = await (supabase as any)
+      const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
         .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
+      if (classifyRead(meta, metaErr) === "error") {
+        console.warn(`Failed to load vault meta: ${formatError(metaErr)}`);
+      }
       if (meta) {
         setVaultSalt(((meta as Record<string, unknown>).vault_salt as string) ?? null);
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
@@ -303,35 +319,57 @@ function AppHome() {
       }
 
       // Load list of users this person has granted co-admin to.
-      const { data: admins } = await supabase
+      const { data: admins, error: adminsErr } = await supabase
         .from("workspace_admins")
         .select("id, admin_user_id, added_at")
         .eq("owner_user_id", session.user.id);
+      if (classifyRead(admins, adminsErr) === "error") {
+        console.warn(`Failed to load co-admin list: ${formatError(adminsErr)}`);
+      }
       const adminRows = (admins ?? []) as CoAdminRow[];
 
       // Load workspaces where this user is a co-admin.
-      const { data: myAdminOf } = await supabase
-        .from("workspace_admins")
-        .select("owner_user_id")
-        .eq("admin_user_id", session.user.id);
+      //
+      // ONE RPC, deliberately, instead of selecting from workspace_admins and
+      // then reading the owner's user_vault_meta row once per owner. A policy
+      // grants a ROW, never a column, so that shape handed this co-admin every
+      // column of the owner's row, including sig_secret_wrapped: the owner's
+      // ML-DSA signing secret. Sealed under the owner's master key, so not
+      // readable, and nothing was broken by it. It goes anyway, because the
+      // whole point of the projection is that an admin never holds that
+      // material in any form.
+      //
+      // list_coadmin_workspaces returns the same three values the loop built,
+      // and it excludes an owner with no workspace_key_id and an owner with no
+      // sig_public_key, which are the two cases the loop skipped with continue.
+      // Fail closed is preserved by the function, not dropped here.
+      const { data: myAdminOf, error: myAdminOfErr } = await supabase.rpc(
+        "list_coadmin_workspaces",
+      );
+      // classifyRead separates the three outcomes this call really has, which
+      // is what dev now does for every read on this page (OR-T1768). "empty"
+      // is the ordinary case of administering nothing and stays silent; only
+      // "error" is surfaced. A failed call must never look like "you are a
+      // co-admin of nothing", so unlike the other reads on this page it is
+      // loud: setErr as well as the log, because an empty list here is
+      // indistinguishable to the user from a real answer.
+      if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
+        console.error("Failed to load co-admin workspaces:", myAdminOfErr);
+        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
+      }
 
       const workspaces: WorkspaceOption[] = [];
+      const issues: { ownerUserId: string; message: string }[] = [];
       if (myAdminOf && myAdminOf.length > 0) {
-        const ownerIds = (myAdminOf as { owner_user_id: string }[]).map((r) => r.owner_user_id);
-        for (const ownerId of ownerIds) {
-          const { data: ownerMeta } = await supabase
-            .from("user_vault_meta")
-            .select("workspace_key_id, sig_public_key")
-            .eq("user_id", ownerId)
-            .single();
-          if (!ownerMeta) continue;
-          const ownerKeyId = (ownerMeta as Record<string, unknown>).workspace_key_id as string | null;
-          if (!ownerKeyId) continue;
+        for (const ownerRow of myAdminOf) {
+          const ownerId = ownerRow.owner_user_id;
+          const ownerKeyId = ownerRow.workspace_key_id;
           // Owner's ML-DSA-65 public signing key, needed to verify the grant
-          // signature before decrypting. Fail closed: skip a workspace we cannot
-          // verify rather than surface one the co-admin cannot safely open.
-          const ownerSigPubB64 = (ownerMeta as Record<string, unknown>).sig_public_key as string | null;
-          if (!ownerSigPubB64) continue;
+          // signature before decrypting. Fail closed: a workspace we cannot
+          // verify is never surfaced to the co-admin. The function already
+          // excludes an owner missing either value, so there is nothing left to
+          // skip at this point.
+          const ownerSigPubB64 = ownerRow.sig_public_key;
           // This used to be a maybeSingle() whose error was discarded, which
           // meant TWO wrapped key rows arrived here as NO row: the workspace
           // vanished from this co-admin's list with nothing shown to anybody,
@@ -344,23 +382,36 @@ function AppHome() {
             ownerKeyId,
           );
           if (wdkRead.status === "ambiguous") {
-            setErr(DUPLICATE_WRAPPED_KEY_MESSAGE);
+            issues.push({ ownerUserId: ownerId, message: DUPLICATE_WRAPPED_KEY_MESSAGE });
             continue;
           }
           if (wdkRead.status === "error") {
-            setErr(formatError(wdkRead.error));
+            issues.push({ ownerUserId: ownerId, message: formatError(wdkRead.error) });
             continue;
           }
           // No grant at all is ordinary: this user is in the owner's list but
           // has not been given a key. Skipping it quietly is correct.
           if (wdkRead.status === "none") continue;
-          const wdk = wdkRead.row;
+          // Decide which envelope this grant is from the columns it actually
+          // carries. This used to cast wrapped_ciphertext straight to string
+          // with the row existing as its only guard, and that column is
+          // nullable from migration 20260828183000 onward, so a v3 grant would
+          // have carried a null into loadAdminSubkeys typed as a string.
+          // readCoAdminGrant returns null for anything that is not exactly one
+          // complete envelope, and skipping is the fail closed answer, the
+          // same as the unverifiable grant skipped a few lines above.
+          const grant = readCoAdminGrant(wdkRead.row);
+          if (!grant) continue;
+          // A v3 grant is recognised here but cannot be opened yet: the per
+          // grant keyring primitive that unseals one is not wired into the
+          // consume path. Decline it rather than half handle it. See DEV-0308.
+          if (grant.version !== 2) continue;
           workspaces.push({
             ownerUserId: ownerId,
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: wdk.wrapped_ciphertext,
-            grantSigB64: wdk.grant_sig ?? null,
+            wrappedCiphertextB64: grant.wrappedCiphertextB64,
+            grantSigB64: grant.grantSigB64,
             ownerSigPubB64,
             granteeUserId: session.user.id,
           });
@@ -371,12 +422,17 @@ function AppHome() {
       const allIds = [
         ...adminRows.map((r) => r.admin_user_id),
         ...workspaces.map((w) => w.ownerUserId),
+        ...issues.map((i) => i.ownerUserId),
       ];
       const emailMap = new Map<string, string>();
       if (allIds.length > 0) {
-        const { data: emailRows } = await supabase.rpc("get_coadmin_emails", {
-          user_ids: allIds,
-        });
+        const { data: emailRows, error: emailRowsErr } = await supabase.rpc(
+          "get_coadmin_emails",
+          { user_ids: allIds },
+        );
+        if (classifyRead(emailRows, emailRowsErr) === "error") {
+          console.warn(`Failed to load co-admin emails: ${formatError(emailRowsErr)}`);
+        }
         for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
           emailMap.set(row.user_id, row.email);
         }
@@ -385,6 +441,12 @@ function AppHome() {
       setCoAdmins(adminRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
       setAdminWorkspaces(
         workspaces.map((w) => ({ ...w, ownerEmail: emailMap.get(w.ownerUserId) ?? w.ownerUserId })),
+      );
+      // Replaces the previous list wholesale: this effect only re-runs on
+      // [isUnlocked, navigate], so a duplicate row the owner has since fixed
+      // clears on the next real reload rather than lingering forever.
+      setWorkspaceLoadIssues(
+        issues.map((i) => ({ ...i, ownerEmail: emailMap.get(i.ownerUserId) ?? i.ownerUserId })),
       );
     })();
   }, [isUnlocked, navigate]);
@@ -925,13 +987,17 @@ function AppHome() {
         supabase: supabase as unknown as CoAdminSupabaseLike,
       });
       // Not coadmin_revoked: this removed a record, not an access grant.
-      void logSecurityEvent(supabase, userId, "coadmin_list_entry_cleared", {
+      const logged = await logSecurityEvent(supabase, userId, "coadmin_list_entry_cleared", {
         admin_user_id: a.admin_user_id,
         key_removed: keyRemoved,
       });
       setCoAdmins((prev) => prev.filter((x) => x.id !== a.id));
       setErr("");
-      setNotice("Removed from your list. This did not remove their access.");
+      setNotice(
+        logged
+          ? "Removed from your list. This did not remove their access."
+          : "Removed from your list, but the record of this could not be saved. This did not remove their access.",
+      );
     } catch (e) {
       setErr(formatError(e));
     }
@@ -1042,6 +1108,23 @@ function AppHome() {
         {err && (
           <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
             {err}
+          </div>
+        )}
+        {/* Surfaced next to the workspace list itself (OR-T1291), not as a
+            page-level error: it does not share a slot with `err`, so it is
+            not cleared by refresh(), and each ambiguous owner gets their own
+            line so a second ambiguous workspace does not overwrite the first. */}
+        {workspaceLoadIssues.length > 0 && (
+          <div className="space-y-2">
+            {workspaceLoadIssues.map((issue) => (
+              <div
+                key={issue.ownerUserId}
+                className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              >
+                <span className="font-medium">{issue.ownerEmail}: </span>
+                {issue.message}
+              </div>
+            ))}
           </div>
         )}
 
@@ -1224,24 +1307,35 @@ function AppHome() {
                     }
                     setChangePwLoading(true);
                     try {
-                      const { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext } =
-                        await changeVaultPassword({
-                          currentPassword: changePwForm.current,
-                          newPassword: changePwForm.next,
-                          storedSaltB64: vaultSalt,
-                          storedEncMekCiphertext: vaultEncMekCiphertext,
-                          storedVerifierCiphertext: vaultVerifierCiphertext,
-                          keyVersion: vaultKeyVersion,
-                        });
+                      const {
+                        newEncMekCiphertext,
+                        newRecoveryCode,
+                        newRecoveryCiphertext,
+                        verifyPersistedEnvelopes,
+                      } = await changeVaultPassword({
+                        currentPassword: changePwForm.current,
+                        newPassword: changePwForm.next,
+                        storedSaltB64: vaultSalt,
+                        storedEncMekCiphertext: vaultEncMekCiphertext,
+                        storedVerifierCiphertext: vaultVerifierCiphertext,
+                        keyVersion: vaultKeyVersion,
+                      });
                       // Persist new wrapping to user_vault_meta. Same CAS guard, same
                       // conflict handling, same table: src/lib/vault-persist.ts is the
                       // single copy of this write, covered by its own tests.
+                      //
+                      // verifyPersisted is what makes the next line safe. The new
+                      // recovery code is shown immediately below, so this call has to
+                      // resolve only when the bytes the database RETURNED re-open the
+                      // vault, not merely when a row matched. The closure carries the
+                      // keys; nothing key-shaped passes through this component.
                       await persistRewrappedVaultMeta({
                         supabase: supabase as unknown as VaultPersistClient,
                         userId: userId as string,
                         priorEncMekCiphertext: vaultEncMekCiphertext,
                         newEncMekCiphertext,
                         newRecoveryCiphertext,
+                        verifyPersisted: verifyPersistedEnvelopes,
                       });
                       setVaultEncMekCiphertext(newEncMekCiphertext);
                       if (userId) void logSecurityEvent(supabase, userId, "vault_password_changed");
@@ -1434,9 +1528,15 @@ function AppHome() {
 
 const STALE_THRESHOLD_DAYS = 7;
 
-function isStaleConnection(lastSyncAt: string): boolean {
+// 30-day nudge threshold (OR-T0066, DL-0382 Option A). Separate from the
+// 7-day reconnect banner above: that one flags a broken/erroring
+// connection, this one flags a connection nobody has synced in a month,
+// which is a different problem and gets its own, more urgent, treatment.
+const STALE_NUDGE_THRESHOLD_DAYS = 30;
+
+function isStaleConnection(lastSyncAt: string, thresholdDays: number = STALE_THRESHOLD_DAYS): boolean {
   const ageMs = Date.now() - new Date(lastSyncAt).getTime();
-  return ageMs > STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
+  return ageMs > thresholdDays * 24 * 60 * 60 * 1000;
 }
 
 // ------------------------------------------------------------------
@@ -1465,21 +1565,49 @@ function ConnectionRow({
 
   const neverSynced = conn.last_sync_at === null;
   const stale = !neverSynced && isStaleConnection(conn.last_sync_at!);
+  // Takes precedence over `stale` when both are true: 30+ days is always
+  // also 7+ days, and the nudge is the more urgent, more specific case.
+  const staleNudge = !neverSynced && isStaleConnection(conn.last_sync_at!, STALE_NUDGE_THRESHOLD_DAYS);
 
   return (
     <div className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
-      {stale && (
+      {staleNudge ? (
         <span
           aria-hidden="true"
-          className="shrink-0 w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400"
+          data-testid="stale-nudge-dot"
+          className="shrink-0 w-2 h-2 rounded-full bg-red-500 dark:bg-red-400"
         />
+      ) : (
+        stale && (
+          <span
+            aria-hidden="true"
+            className="shrink-0 w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400"
+          />
+        )
       )}
       <div className="flex-1 min-w-0 space-y-1">
         <div className="font-medium truncate">{conn.decrypted_label || conn.provider_type}</div>
-        {stale && (
-          <div className="text-xs text-amber-600 dark:text-amber-400">
-            Not syncing. Select to reconnect.
+        {staleNudge ? (
+          <div
+            data-testid="stale-nudge-banner"
+            className="text-xs text-red-600 dark:text-red-400 flex items-center gap-2"
+          >
+            <span>No sync in over 30 days.</span>
+            <button
+              type="button"
+              onClick={onSync}
+              disabled={syncing}
+              className="underline font-medium disabled:opacity-50"
+            >
+              {syncing ? "Syncing..." : "Re-sync now"}
+            </button>
           </div>
+        ) : (
+          stale && (
+            <div className="text-xs text-amber-600 dark:text-amber-400">
+              Not syncing. Select to reconnect.
+            </div>
+          )
         )}
         {neverSynced && (
           <div className="text-xs text-muted-foreground">

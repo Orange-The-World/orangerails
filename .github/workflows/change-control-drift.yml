@@ -41,6 +41,12 @@ on:
       - '.github/workflows/change-control-drift.yml'
       - 'scripts/change-control-settings.mjs'
       - 'ops/change-control/baseline.json'
+      # OR-T1804. The annotation job below compares baseline.json against the
+      # value quoted in the README, so a pull request that touches either file
+      # is exactly the pull request that can break it. Leave either name out
+      # and the job does not run on the change it exists to catch.
+      - 'scripts/change-control-annotation.mjs'
+      - 'ops/change-control/README.md'
 
 permissions:
   contents: read
@@ -219,6 +225,100 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # OR-T1804, out of OR-T1794. baseline.json records the reviewed production
+  # apply allowlist and cannot explain itself: JSON carries no comments, and the
+  # comparison reports any key added to that file as a difference, so an
+  # annotation inside it would turn the daily run red until someone removed it.
+  # The reason therefore lives in ops/change-control/README.md, which quotes the
+  # recorded value verbatim beside the reasoning.
+  #
+  # The README asks that a pull request changing the value update the quoted
+  # block in the same pull request. Nothing enforced that, so the value and the
+  # reason recorded for it could part company silently, and each would still
+  # read as correct on its own. These two jobs are the part that does not depend
+  # on anyone remembering.
+  #
+  # Two committed files, compared. No network, no token, no secret, so neither
+  # job can be flaky and neither has a "could not look" state to pass from.
+  # ---------------------------------------------------------------------------
+  annotation-matches-baseline:
+    name: The recorded value and the reason beside it agree
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Compare the recorded value against the block quoted beside it
+        run: node scripts/change-control-annotation.mjs
+
+  # A consistency check nobody has watched go red is not a check. This mutates
+  # COPIES in the runner workspace and asserts the alarm fires on each class of
+  # failure. The committed files are never written. The case that is easiest to
+  # get wrong is the second one: an annotation that is not there at all must be
+  # its own loud non-zero, never a pass.
+  annotation-check-goes-red:
+    name: The annotation check goes red on a changed value and on a missing block
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Mutate copies and assert each alarm fires
+        run: |
+          set -uo pipefail
+          WORK="${RUNNER_TEMP}/change-control-annotation"
+          mkdir -p "${WORK}"
+          cp ops/change-control/baseline.json "${WORK}/baseline.json"
+          cp ops/change-control/README.md "${WORK}/README.md"
+          export CHANGE_CONTROL_BASELINE="${WORK}/baseline.json"
+          export CHANGE_CONTROL_README="${WORK}/README.md"
+
+          # Control first. Untouched copies must pass, or the two assertions
+          # below would be satisfied by a check that simply shouts at everything.
+          STATUS=0
+          node scripts/change-control-annotation.mjs > control.txt 2>&1 || STATUS=$?
+          echo "control exit ${STATUS}: $(cat control.txt)"
+          if [ "${STATUS}" != "0" ]; then
+            echo "::error::the committed baseline and README already disagree, or the check cannot read them. Exit ${STATUS}."
+            exit 1
+          fi
+
+          # 1. The recorded value changes and the quoted reason does not.
+          node -e 'const fs=require("fs");const p=process.env.CHANGE_CONTROL_BASELINE;const b=JSON.parse(fs.readFileSync(p,"utf8"));b.variables.MIGRATION_APPLY_ALLOWED_ACTORS_PROD=["MorningRevolution"];fs.writeFileSync(p,JSON.stringify(b,null,2)+"\n");'
+          STATUS=0
+          node scripts/change-control-annotation.mjs > differ.txt 2>&1 || STATUS=$?
+          echo "differ exit ${STATUS}: $(cat differ.txt)"
+          if [ "${STATUS}" != "6" ]; then
+            echo "::error::a changed recorded value exited ${STATUS}, expected 6. The value and the reason recorded for it could part company with nothing reporting it."
+            exit 1
+          fi
+          if ! grep -q 'MorningRevolution' differ.txt || ! grep -q 'the-Orange-Juicer' differ.txt; then
+            echo "::error::the failure did not name both values, so a reader has to open two files to learn what changed."
+            exit 1
+          fi
+
+          # 2. The quoted block is gone. This must NOT read as agreement.
+          cp ops/change-control/baseline.json "${WORK}/baseline.json"
+          node -e 'const fs=require("fs");const p=process.env.CHANGE_CONTROL_README;fs.writeFileSync(p,fs.readFileSync(p,"utf8").replace(/```json[\s\S]*?```/g,""));'
+          STATUS=0
+          node scripts/change-control-annotation.mjs > missing.txt 2>&1 || STATUS=$?
+          echo "missing exit ${STATUS}: $(cat missing.txt)"
+          if [ "${STATUS}" != "7" ]; then
+            echo "::error::a missing quoted block exited ${STATUS}, expected 7. An annotation nobody can read must not pass as one that agrees."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
   # The self-test above proves the comparison goes red on every class of change,
   # but it does that against a fixture written inside the script, and it never
   # runs the --compare path the daily job actually calls. So the single promise
@@ -359,6 +459,17 @@ jobs:
               echo "that the settings are unchanged. Read the step log: each failure has its"
               echo "own code and message (3 refused, 4 not found, 5 unusable)."
             } >> "$GITHUB_STEP_SUMMARY"
+            # An annotation as well as the step summary, and this is the whole
+            # point rather than a nicety. A step summary is returned by no API:
+            # it is readable by a person who opens this run and by nothing else.
+            # An annotation comes back from the check-runs API, so a component
+            # watching this workflow can tell "could not look" from "drift" from
+            # "clean" with no log access and no shell. Without this line, a run
+            # that could not read the settings looks, to anything automated,
+            # exactly like a run that found drift: red, and carrying nothing.
+            # A check that cannot look and reports nothing a machine can act on
+            # is the exact failure the rest of this file exists to refuse.
+            echo "::error::change-control settings could NOT be read (exit ${STATUS}), so NOTHING was compared. This is not a report that the settings are unchanged. 3 = the API refused the token, 4 = the repository was not found, 5 = the recorded values were unusable."
             exit 1
           fi
           echo "Read at $(date -u '+%Y-%m-%d %H:%M UTC'), which is $(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')."
@@ -388,7 +499,12 @@ jobs:
         run: |
           set -uo pipefail
           STATUS=0
-          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json || STATUS=$?
+          # Captured, not just printed, so the summary below and the annotation
+          # below both describe the SAME comparison. This used to run once here
+          # and a second time inside the summary block, and two runs that
+          # disagreed about what drifted would be worse than either one alone.
+          DIFF=$(node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json 2>&1) || STATUS=$?
+          printf '%s\n' "${DIFF}"
 
           if [ "${STATUS}" = "6" ]; then
             {
@@ -425,7 +541,7 @@ jobs:
               echo "turned off, admins allowed to bypass."
               echo ""
               echo '```'
-              node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json 2>&1 || true
+              printf '%s\n' "${DIFF}"
               echo '```'
               echo ""
               echo "If the change was intended, update the baseline in a pull request so the"
@@ -439,7 +555,20 @@ jobs:
               echo "a ticket or a citation. If it was not intended, that is an unreviewed"
               echo "change to who may touch production."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::production change-control settings differ from the committed baseline. See step summary."
+            # "See step summary" is an instruction nothing automated can follow,
+            # so the annotation carries the comparison itself. A workflow command
+            # is a single line: a literal newline would truncate this alert at
+            # the first one, and a truncated alert that looks complete is worse
+            # than no alert. Newlines therefore go out as %0A and a literal %
+            # as %25, which is the encoding the runner decodes on the way in.
+            ENCODED=$(printf '%s' "${DIFF}" | node -e '
+              let s = "";
+              process.stdin.on("data", d => s += d);
+              process.stdin.on("end", () => process.stdout.write(
+                s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")
+              ));
+            ')
+            echo "::error::production change-control settings differ from the committed baseline. Each line below names what moved, what it was, and what it is now.%0A${ENCODED}"
             exit 1
           fi
 
