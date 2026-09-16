@@ -131,6 +131,12 @@ stale widget bundle (see §7).
 A sync's scan window is `max(birthday_height, last_block_scanned + 1)`
 to tip.
 
+The popup source also has a persistent public-data cache. Confirm the user
+chose either a folder or browser storage rather than "Do not keep downloaded
+blocks." For two wallets whose ranges overlap, a cached height should cause no
+request for either `<height>.gcs.gz` or `<height>.json`. The storage manager is
+the keyless `mode: 'storage'` popup route and shows the active location and size.
+
 - **First sync**: scanning from the wallet birthday is correct and can
   legitimately be tens of thousands of filters for an old wallet. The
   filter files are small; this is minutes, not hours.

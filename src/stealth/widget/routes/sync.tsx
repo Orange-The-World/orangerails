@@ -25,6 +25,12 @@
 import { useEffect, useState } from "react";
 
 import { parseDescriptor, type ParsedDescriptor } from "@/stealth/lib/derive";
+import {
+  cachedSyncFetchers,
+  createActiveBlockCache,
+  getBlockCachePreference,
+  type BlockCache,
+} from "@/stealth/lib/block-cache";
 import { resumeHeightFromCoverage, type ScanRange } from "@/stealth/lib/ranges";
 import {
   runSync,
@@ -54,6 +60,7 @@ import type {
   StealthSyncCompleteMessage,
 } from "@/stealth/lib/postmessage";
 import { ProgressModal } from "../components/ProgressModal";
+import { PostSyncStoragePrompt, StorageSetup } from "../components/BlockStorage";
 import { useStealthInit } from "../StealthInitContext";
 import { proxyFetch } from "../lib/proxyFetch";
 import { resolveFunctionUrl } from "../lib/resolveFunctionUrl";
@@ -107,6 +114,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
   const [error, setError] = useState<{ message: string; retryable: boolean } | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [isFirstSync, setIsFirstSync] = useState<boolean | null>(null);
+  const [storageConfigured, setStorageConfigured] = useState(
+    () => getBlockCachePreference() !== null,
+  );
+  const [finishedCache, setFinishedCache] = useState<BlockCache | null>(null);
+  const [storageDecisionMade, setStorageDecisionMade] = useState(false);
 
   function postWidgetError(code: StealthErrorCode, message: string, retryable: boolean) {
     if (!parent) return;
@@ -140,6 +152,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
   }
 
   useEffect(() => {
+    if (!storageConfigured) return;
     let cancelled = false;
     const startedAt = Date.now();
 
@@ -147,6 +160,19 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
       try {
         if (!init.connection_id) {
           throw new Error("connection_id is required for mode=sync");
+        }
+        const useMock = isMockMode();
+        let activeCache: BlockCache | null = null;
+        if (!useMock) {
+          try {
+            activeCache = await createActiveBlockCache();
+          } catch {
+            // A remembered directory can lose permission between sessions.
+            // Return to the explicit chooser so the user can re-select it,
+            // switch to OPFS, or choose not to keep the download.
+            setStorageConfigured(false);
+            return;
+          }
         }
 
         // 1. Fetch sealed envelope. Routes through parent postMessage proxy
@@ -219,7 +245,10 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           envJson.sealed_envelope,
           init.or_stealth_key_b64,
         );
-        const useMock = isMockMode();
+        const fetchers = cachedSyncFetchers(activeCache, {
+          fetchFilter: liveFetchFilter,
+          fetchBlock: liveFetchBlock,
+        });
         const birthdayHeight = useMock
           ? approximateHeightFromDate(envelopePayload.wallet_birthday)
           : await liveResolveBirthdayHeight(envelopePayload.wallet_birthday, BLOCK_SOURCE_BASE);
@@ -255,8 +284,8 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           birthdayHeight,
           descriptor,
           fetchTip: useMock ? mockFetchTip : liveFetchTip,
-          fetchFilter: useMock ? mockFetchFilter : liveFetchFilter,
-          fetchBlock: useMock ? mockFetchBlock : liveFetchBlock,
+          fetchFilter: useMock ? mockFetchFilter : fetchers.fetchFilter,
+          fetchBlock: useMock ? mockFetchBlock : fetchers.fetchBlock,
           matcher: useMock ? mockNeverMatcher : undefined,
           onProgress: (ev) => {
             if (cancelled) return;
@@ -631,6 +660,17 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         }
 
         if (cancelled) return;
+        if (activeCache) {
+          try {
+            await activeCache.registerWallet(init.connection_id);
+          } catch (cause) {
+            // Usage metadata must not turn a successfully persisted sync into
+            // a failure. The cache contents remain reusable without it.
+            console.warn("[stealth/cache] could not update wallet usage count:", cause);
+          }
+        }
+        setFinishedCache(activeCache);
+        setStorageDecisionMade(false);
         setDone({ txCount: result.txCount, bytes: result.bytesDownloaded, windowExhausted: result.windowExhausted });
       } catch (e) {
         if (cancelled) return;
@@ -660,7 +700,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
     // retryKey increments when the user clicks "Try again"; the effect
     // re-runs as a fresh sync attempt. All other deps are stable on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [retryKey]);
+  }, [retryKey, storageConfigured]);
+
+  if (!storageConfigured) {
+    return <StorageSetup onConfigured={() => setStorageConfigured(true)} />;
+  }
 
   if (error) {
     return (
@@ -713,6 +757,14 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
                 transactions may not have been found. To recover the full history,
                 re-add this wallet from the app with a wider gap limit.
               </p>
+            </div>
+          )}
+          {finishedCache && !storageDecisionMade && (
+            <div className="mt-4">
+              <PostSyncStoragePrompt
+                cache={finishedCache}
+                onKeep={() => setStorageDecisionMade(true)}
+              />
             </div>
           )}
           <button
