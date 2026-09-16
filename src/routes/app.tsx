@@ -159,7 +159,9 @@ const PROVIDERS = [
 // Component
 // ------------------------------------------------------------------
 
-function AppHome() {
+// Exported so a test can mount this screen directly (RTL) instead of only
+// reading the code -- see app.test.tsx (OR-E0018 step 1 / OR-T0834).
+export function AppHome() {
   const navigate = useNavigate();
   const {
     isUnlocked,

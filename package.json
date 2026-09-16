@@ -95,6 +95,8 @@
   "devDependencies": {
     "@eslint/js": "^9.32.0",
     "@playwright/test": "^1.49.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^22.16.5",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
@@ -108,6 +110,7 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^15.15.0",
+    "jsdom": "^30.0.1",
     "lovable-tagger": "^1.1.13",
     "prettier": "^3.7.3",
     "typescript": "^5.8.3",
