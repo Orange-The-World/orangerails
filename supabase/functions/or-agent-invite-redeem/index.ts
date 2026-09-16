@@ -45,15 +45,15 @@ import { create as createJwt, getNumericDate } from 'https://deno.land/x/djwt@v3
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 const ACCESS_TOKEN_TTL_SECONDS = 3600; // 1 hour, per Decision 2
-async function sha256Hex(input) {
+async function sha256Hex(input: string) {
   const data = new TextEncoder().encode(input);
   const digest = await crypto.subtle.digest('SHA-256', data);
   return Array.from(new Uint8Array(digest)).map((b)=>b.toString(16).padStart(2, '0')).join('');
 }
-function isHex64(s) {
+function isHex64(s: string) {
   return /^[a-f0-9]{64}$/.test(s);
 }
-function isBase64ish(s) {
+function isBase64ish(s: string) {
   return /^[A-Za-z0-9+/=_-]+$/.test(s) && s.length >= 40 && s.length <= 4096;
 }
 Deno.serve(wrapSentryHandler(async (req)=>{

@@ -11,16 +11,16 @@ import { wrapSentryHandler } from '../_shared/sentry.ts';
 const ACCESS_TOKEN_TTL_SECONDS = 3600;
 const NONCE_WINDOW_SECONDS = 60;
 const EXPECTED_PREFIX = 'or-agent-refresh';
-function base64ToBytes(b64) {
+function base64ToBytes(b64: string) {
   const bin = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
   const out = new Uint8Array(bin.length);
   for(let i = 0; i < bin.length; i++)out[i] = bin.charCodeAt(i);
   return out;
 }
-function isUuid(s) {
+function isUuid(s: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 }
-function parseAndValidatePayload(payload, agentMemberId) {
+function parseAndValidatePayload(payload: string, agentMemberId: string) {
   const parts = payload.split('|');
   if (parts.length !== 3) return {
     ok: false,
@@ -201,17 +201,25 @@ Deno.serve(wrapSentryHandler(async (req)=>{
     }, cryptoKey);
     // Best-effort: bump activity + write audit entry. Neither failure
     // should fail the request (the JWT is already minted).
-    await admin.rpc('touch_agent_activity', {
-      p_agent_member_id: body.agent_member_id
-    }).catch((e)=>console.warn('[or-agent-token-refresh] touch failed:', String(e)));
+    try {
+      await admin.rpc('touch_agent_activity', {
+        p_agent_member_id: body.agent_member_id
+      });
+    } catch (e) {
+      console.warn('[or-agent-token-refresh] touch failed:', String(e));
+    }
     const fwdIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
     const ua = req.headers.get('user-agent') ?? null;
-    await admin.rpc('log_agent_token_refresh', {
-      p_agent_member_id: body.agent_member_id,
-      p_shadow_user_id: row.shadow_user_id,
-      p_client_ip: fwdIp,
-      p_client_user_agent: ua
-    }).catch((e)=>console.warn('[or-agent-token-refresh] audit log failed:', String(e)));
+    try {
+      await admin.rpc('log_agent_token_refresh', {
+        p_agent_member_id: body.agent_member_id,
+        p_shadow_user_id: row.shadow_user_id,
+        p_client_ip: fwdIp,
+        p_client_user_agent: ua
+      });
+    } catch (e) {
+      console.warn('[or-agent-token-refresh] audit log failed:', String(e));
+    }
     return jsonResponse({
       access_token: jwt,
       expires_at: new Date(expiresUnix * 1000).toISOString(),

@@ -40,7 +40,13 @@ const TOOLS = [
     }
   }
 ];
-function decodeJwtPayload(jwt) {
+type AgentClaims = {
+  agent_member_id: string;
+  owner_user_id: string;
+  shadow_user_id: string;
+  agent_role: string;
+};
+function decodeJwtPayload(jwt: string) {
   const parts = jwt.split('.');
   if (parts.length !== 3) return null;
   try {
@@ -52,7 +58,7 @@ function decodeJwtPayload(jwt) {
     return null;
   }
 }
-function extractAgentClaims(jwt) {
+function extractAgentClaims(jwt: string): AgentClaims | null {
   const payload = decodeJwtPayload(jwt);
   if (!payload) return null;
   const userMeta = payload.user_metadata ?? {};
@@ -71,10 +77,10 @@ function extractAgentClaims(jwt) {
     agent_role: String(agentRole)
   };
 }
-function sseEvent(payload) {
+function sseEvent(payload: unknown) {
   return `data: ${JSON.stringify(payload)}\n\n`;
 }
-function sseResponse(body, status = 200, extraHeaders = {}) {
+function sseResponse(body: BodyInit, status = 200, extraHeaders = {}) {
   return new Response(body, {
     status,
     headers: {
@@ -85,7 +91,7 @@ function sseResponse(body, status = 200, extraHeaders = {}) {
     }
   });
 }
-function jsonResponse(payload, status, extraHeaders = {}) {
+function jsonResponse(payload: unknown, status: number, extraHeaders = {}) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
@@ -94,7 +100,7 @@ function jsonResponse(payload, status, extraHeaders = {}) {
     }
   });
 }
-async function handleToolCall(toolName, args, claims, jwt, supabaseUrl) {
+async function handleToolCall(toolName: string, args: Record<string, unknown>, claims: AgentClaims, jwt: string, supabaseUrl: string) {
   if (toolName === 'orca.ping') {
     // Validate the token by calling Supabase auth introspection, same as
     // the stdio path. Surfaces 401 if revoked.
@@ -167,7 +173,15 @@ Deno.serve(wrapSentryHandler(async (req)=>{
     }, 400, cors);
   }
   const id = rpc.id ?? null;
-  const response = {
+  const response: {
+    jsonrpc: '2.0';
+    id: unknown;
+    result?: unknown;
+    error?: {
+      code: number;
+      message: string;
+    };
+  } = {
     jsonrpc: '2.0',
     id
   };

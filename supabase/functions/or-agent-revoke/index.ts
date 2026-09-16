@@ -27,7 +27,7 @@
  */ import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
-function isUuid(s) {
+function isUuid(s: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 }
 Deno.serve(wrapSentryHandler(async (req)=>{
