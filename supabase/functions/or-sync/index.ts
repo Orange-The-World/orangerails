@@ -130,7 +130,11 @@ export function redactedUpstreamDetail(raw: string): string {
     .replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
     .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
-    .replace(/\b\d{4,}\b/g, '[redacted]')
+    // Only redact a 4+ digit run when it sits near an account/card keyword.
+    // A bare 4+ digit number with no such context (HTTP status code, a
+    // retry-after value in seconds, an amount, a timestamp) is left alone so
+    // the operator still gets a readable diagnostic line.
+    .replace(/\b(account|acct|card|reference|ref)\b([^0-9]{0,20})(\d{4,})\b/gi, '$1$2[redacted]')
     .slice(0, 300);
 }
 
