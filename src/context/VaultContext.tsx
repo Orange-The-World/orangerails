@@ -708,6 +708,26 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
       const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
 
+      // 4b. Prove BOTH freshly built envelopes re-open to mekRaw before we ever
+      //     hand them back to the caller. This is deliberately in addition to
+      //     verifyPersistedEnvelopes below, not instead of it: that closure
+      //     proves what the DATABASE returned after the write, this proves
+      //     what we are about to send it. A wrap that is already corrupt
+      //     costs nothing to catch here; found only after the write, it is a
+      //     permanent lockout, because the old envelope pair is gone.
+      await assertMekEnvelopeReopens(
+        "The freshly built password key envelope",
+        newEncMekCiphertext,
+        newKek,
+        mekRaw,
+      );
+      await assertMekEnvelopeReopens(
+        "The freshly built recovery code envelope",
+        newRecoveryCiphertext,
+        newRecoveryKek,
+        mekRaw,
+      );
+
       // 5. Let the caller prove what the DATABASE stored, not merely what we
       //    sent it. Both wrappers go out in one UPDATE and the old pair is
       //    discarded, so a stored envelope that does not re-open is a permanent
