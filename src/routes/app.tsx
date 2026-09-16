@@ -9,6 +9,7 @@ import {
   CoAdminRevocationIncompleteError,
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
+import { grantCoAdminAndRefresh } from "@/lib/co-admin-grant-submit";
 import { formatError } from "@/lib/format-error";
 import { classifyRead } from "@/lib/read-outcome";
 import type { NormalizedTransaction } from "@/lib/crypto-fields";
@@ -969,6 +970,32 @@ function AppHome() {
    * it is the difference between "the stored key was known to be gone" and
    * "nobody established whether it is still there".
    */
+  /**
+   * Re-read the co-admin list and resolve emails, then update state.
+   *
+   * Shared by a successful grant and a CoAdminGrantIncompleteError: the list
+   * row is written before the key row (see persistCoAdminGrant), so a grant
+   * that fails on the second write still leaves a real workspace_admins row
+   * the owner cannot see until this runs. See grantCoAdminAndRefresh, which
+   * decides when the failure path calls this.
+   */
+  async function refreshCoAdminList(ownerUserId: string) {
+    const { data: admins } = await supabase
+      .from("workspace_admins")
+      .select("id, admin_user_id, added_at")
+      .eq("owner_user_id", ownerUserId);
+    const freshRows = (admins ?? []) as CoAdminRow[];
+    const freshIds = freshRows.map((r) => r.admin_user_id);
+    const emailMap = new Map<string, string>();
+    if (freshIds.length > 0) {
+      const { data: emailRows } = await supabase.rpc("get_coadmin_emails", { user_ids: freshIds });
+      for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
+        emailMap.set(row.user_id, row.email);
+      }
+    }
+    setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
+  }
+
   async function confirmClearCoAdminListEntry(a: CoAdminRow, keyRemoved: boolean) {
     if (!userId) {
       setErr("Missing user , try reloading.");
@@ -1481,33 +1508,29 @@ function AppHome() {
         <GrantCoAdminDialog
           onClose={() => setGrantDialogOpen(false)}
           onSubmit={async ({ targetEmail, password }) => {
-            const result = await grantCoAdmin({
-              ownerUserId: userId,
-              ownerSaltB64: vaultSalt,
-              ownerPassword: password,
-              targetEmail,
-              existingKeyId: workspaceKeyId,
-              supabase: supabase as unknown as GrantSupabaseLike,
+            // grantCoAdminAndRefresh re-reads the co-admin list itself when
+            // the grant fails with CoAdminGrantIncompleteError, since that is
+            // the one failure that can still leave a real list row behind.
+            // Any other throw (bad password, allocation failure, an RLS
+            // refusal on workspace_admins itself) left nothing new, and
+            // grantCoAdminAndRefresh does not refresh for those.
+            const result = await grantCoAdminAndRefresh({
+              grant: () =>
+                grantCoAdmin({
+                  ownerUserId: userId,
+                  ownerSaltB64: vaultSalt,
+                  ownerPassword: password,
+                  targetEmail,
+                  existingKeyId: workspaceKeyId,
+                  supabase: supabase as unknown as GrantSupabaseLike,
+                }),
+              refreshList: () => refreshCoAdminList(userId),
             });
             void logSecurityEvent(supabase, userId, "coadmin_granted", { target_email: targetEmail });
             if (result.workspaceKeyId !== workspaceKeyId) {
               setWorkspaceKeyId(result.workspaceKeyId);
             }
-            // Reload co-admin list with resolved emails.
-            const { data: admins } = await supabase
-              .from("workspace_admins")
-              .select("id, admin_user_id, added_at")
-              .eq("owner_user_id", userId);
-            const freshRows = (admins ?? []) as CoAdminRow[];
-            const freshIds = freshRows.map((r) => r.admin_user_id);
-            const emailMap = new Map<string, string>();
-            if (freshIds.length > 0) {
-              const { data: emailRows } = await supabase.rpc("get_coadmin_emails", { user_ids: freshIds });
-              for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
-                emailMap.set(row.user_id, row.email);
-              }
-            }
-            setCoAdmins(freshRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
+            await refreshCoAdminList(userId);
             setNotice("Co-admin added. They'll see your data on their next unlock.");
           }}
         />
