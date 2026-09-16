@@ -14,7 +14,7 @@ and exits with the appropriate severity code.
 | Exit | Meaning | When to alert |
 |------|---------|---------------|
 | 0 | OK -- newest row is within threshold | no action |
-| 1 | STALE -- newest row is older than `STALE_THRESHOLD_MINUTES` (default 10) **and the page was delivered** | page on-call |
+| 1 | STALE -- newest row is older than `STALE_THRESHOLD_MINUTES` (default 90) **and the page was delivered** | page on-call |
 | 2 | ERROR -- could not reach DB, query failed, table empty, `ORBI_ALERT_SCRIPT` unset or not executable, **or the page could not be delivered** | page on-call (higher priority) |
 
 Exit 1 always means someone was actually told. If the alert script exits
@@ -26,9 +26,10 @@ rather than reporting a healthy probe that can page nobody.
 
 | Variable | Required | Default | Notes |
 |----------|----------|---------|-------|
-| `ORBI_PROBE_DSN` | yes (or `DATABASE_URL`) | -- | postgres DSN |
+| `ORBI_PROBE_DSN` | yes (or `DATABASE_URL`) | -- | postgres URI. Prefer a passwordless URI and supply `PGPASSWORD` from the protected environment file. URI passwords are stripped before `psql` is invoked; unsupported DSN shapes are rejected rather than exposed in argv. |
 | `DATABASE_URL` | fallback | -- | used if `ORBI_PROBE_DSN` unset |
-| `STALE_THRESHOLD_MINUTES` | no | 10 | minutes before exit 1 fires |
+| `STALE_THRESHOLD_MINUTES` | no | 90 | minutes before exit 1 fires |
+| `PGPASSWORD` | no | -- | libpq password; preferred over embedding a password in the DSN |
 | `ORBI_ALERT_SCRIPT` | yes | -- | absolute path to the host's existing alert script, called as `<script> <level> <body>`. Supplied by the systemd unit environment so no host path lives in this repo. The probe exits 2 before querying anything if it is unset, missing, or not executable. |
 
 ### Cron setup (on the maintainer host)
@@ -53,6 +54,9 @@ nobody.
 
 The probe env lives at `/etc/orbi/orbi-staleness-probe.env` and is read by both
 the probe unit and the handler, so the alarm webhook is configured once.
+The probe adds `connect_timeout=10` to the password-free DSN passed to `psql`.
+The oneshot unit uses `TimeoutStartSec=120` as a second bound;
+`RuntimeMaxSec` is not a substitute because systemd ignores it for oneshots.
 
 Then `systemctl daemon-reload` and `systemctl enable --now orbi-staleness-probe.timer`.
 
@@ -113,10 +117,14 @@ has been watched going red.
 |------|--------|-------|---------------|
 | Fresh data | staleness probe | postgres fixture, `bucket_ts = now() - 1 minute` | 0 |
 | Stale data | staleness probe | postgres fixture, `bucket_ts = now() - 20 minutes` | 1 |
+| Shipped threshold | staleness probe | postgres fixture, 20-minute row, no threshold override | 0 |
 | Bad DSN | staleness probe | `ORBI_PROBE_DSN=postgres://nobody:x@unreachable:5432/db` | 2 |
 | Alert path unset | staleness probe | fresh data, `ORBI_ALERT_SCRIPT=""` | 2 |
 | Alert path not executable | staleness probe | fresh data, `ORBI_ALERT_SCRIPT` points at a missing file | 2 |
 | Page undeliverable | staleness probe | stale data, alert stub exits 1 | 2 |
+| Credential-safe argv | staleness probe | fake `psql` checks decoded `PGPASSWORD`, password-free argv, and `connect_timeout=10` | 0 |
+| Unsupported/password-query DSN | staleness probe | sanitizer refuses the DSN before invoking `psql` | 2 |
+| Oneshot timeout | systemd unit | `TimeoutStartSec=120` present and `RuntimeMaxSec` absent | pass |
 | Service active | liveness | `SYSTEMCTL_BIN=mock-systemctl.sh`, `MOCK_STATE=active` | 0 |
 | Service inactive | liveness | `SYSTEMCTL_BIN=mock-systemctl.sh`, `MOCK_STATE=inactive` | 1 |
 | Service failed | liveness | `SYSTEMCTL_BIN=mock-systemctl.sh`, `MOCK_STATE=failed` | 1 |
