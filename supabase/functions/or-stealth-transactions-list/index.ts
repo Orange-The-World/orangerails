@@ -113,6 +113,54 @@ export function isBlindIndexHex(v: unknown): v is string {
 }
 
 /**
+ * Validates the pagination cursor fields on a request body: both halves or
+ * neither, before_block a non-negative integer, and
+ * before_txid_blind_index_hex passing isBlindIndexHex. Returns the exact 400
+ * Response the handler sends on a bad cursor, or null when the cursor is
+ * valid (absent or well-formed).
+ *
+ * Exported and called by the handler below, rather than duplicated, so a
+ * test can drive this ONE implementation and assert on the real Response
+ * status. Before this existed, the only test coverage was on isBlindIndexHex
+ * and isUuid directly (true, but not proof the HTTP layer answers 400 for a
+ * value one of them rejects) -- OR-T1144.
+ */
+export function validateCursorOrResponse(
+  body: { before_block?: number; before_txid_blind_index_hex?: string },
+  cors: Record<string, string>,
+): Response | null {
+  const hasBlock = body.before_block !== undefined;
+  const hasTxid = body.before_txid_blind_index_hex !== undefined;
+  if (hasBlock !== hasTxid) {
+    return jsonResponse(
+      {
+        error:
+          'before_block and before_txid_blind_index_hex must be supplied together; ' +
+          'send the next_cursor from the previous page unchanged',
+      },
+      400, cors,
+    );
+  }
+  if (
+    hasBlock &&
+    (typeof body.before_block !== 'number' ||
+      !Number.isInteger(body.before_block) ||
+      (body.before_block as number) < 0)
+  ) {
+    return jsonResponse({ error: 'before_block must be a non-negative integer' }, 400, cors);
+  }
+  // Strict hex, because this value is interpolated into a PostgREST filter
+  // expression. See BLIND_INDEX_HEX_RE.
+  if (hasTxid && !isBlindIndexHex(body.before_txid_blind_index_hex)) {
+    return jsonResponse(
+      { error: 'before_txid_blind_index_hex must be 64 lowercase hex characters' },
+      400, cors,
+    );
+  }
+  return null;
+}
+
+/**
  * The page ordering, as data rather than as two .order() calls, so the
  * pagination test can build its comparator from the very same array that
  * production sorts by. A test that hardcodes its own copy of the ordering
@@ -263,41 +311,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     // Validate the cursor. Both halves or neither: a half cursor is exactly
     // the lossy partial-order cursor this endpoint must not offer, so it is
-    // rejected rather than quietly interpreted as "block_height < n".
-    const hasBlock = body.before_block !== undefined;
-    const hasTxid = body.before_txid_blind_index_hex !== undefined;
-    if (hasBlock !== hasTxid) {
-      return jsonResponse(
-        {
-          error:
-            'before_block and before_txid_blind_index_hex must be supplied together; ' +
-            'send the next_cursor from the previous page unchanged',
-        },
-        400, cors,
-      );
-    }
-    if (
-      hasBlock &&
-      (typeof body.before_block !== 'number' ||
-        !Number.isInteger(body.before_block) ||
-        body.before_block < 0)
-    ) {
-      return jsonResponse({ error: 'before_block must be a non-negative integer' }, 400, cors);
-    }
-    // Strict hex, because this value is interpolated into a PostgREST filter
-    // expression. See BLIND_INDEX_HEX_RE.
-    if (hasTxid && !isBlindIndexHex(body.before_txid_blind_index_hex)) {
-      return jsonResponse(
-        { error: 'before_txid_blind_index_hex must be 64 lowercase hex characters' },
-        400, cors,
-      );
-    }
-    const cursor: PageCursor | null = hasBlock
-      ? {
-          before_block: body.before_block as number,
-          before_txid_blind_index_hex: body.before_txid_blind_index_hex as string,
-        }
-      : null;
+    // rejected rather than quietly interpreted as "block_height < n". See
+    // validateCursorOrResponse above: this is the one implementation, also
+    // called directly by the test.
+    const cursorErr = validateCursorOrResponse(body, cors);
+    if (cursorErr) return cursorErr;
+    const cursor: PageCursor | null =
+      body.before_block !== undefined
+        ? {
+            before_block: body.before_block as number,
+            before_txid_blind_index_hex: body.before_txid_blind_index_hex as string,
+          }
+        : null;
 
     // Bind to calling platform (audit 2026-05-16 High #2).
     const platformIdOrErr = await getCallerPlatformId(ctx);
