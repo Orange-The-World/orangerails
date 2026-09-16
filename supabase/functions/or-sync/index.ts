@@ -349,7 +349,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     let connQuery = ctx.serviceClient
       .from('connections')
-      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at, strike_subscription_id, strike_needs_resubscribe, strike_subscription_checked_at')
+      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at, strike_subscription_id, strike_needs_resubscribe, strike_subscription_checked_at, strike_subscription_rotated_at')
       .eq('subaccount_id', subaccountId)
       .neq('status', 'disconnected');
     if (connection_ids?.length) connQuery = connQuery.in('id', connection_ids);
@@ -365,6 +365,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         last_sync_cursor: string | null; created_at: string;
         strike_subscription_id: string | null; strike_needs_resubscribe: boolean | null;
         strike_subscription_checked_at: string | null;
+        strike_subscription_rotated_at: string | null;
       }> | null;
       error: unknown;
     };
@@ -1291,6 +1292,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               last_sync_cursor: conn.last_sync_cursor ?? null,
               needs_resubscribe: (conn as { strike_needs_resubscribe?: boolean | null }).strike_needs_resubscribe ?? false,
               subscription_checked_at: (conn as { strike_subscription_checked_at?: string | null }).strike_subscription_checked_at ?? null,
+              subscription_rotated_at: (conn as { strike_subscription_rotated_at?: string | null }).strike_subscription_rotated_at ?? null,
             },
             credentials,
             subaccountId: subaccountId as string,
