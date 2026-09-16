@@ -426,9 +426,13 @@ export function AppHome() {
       ];
       const emailMap = new Map<string, string>();
       if (allIds.length > 0) {
-        const { data: emailRows } = await supabase.rpc("get_coadmin_emails", {
-          user_ids: allIds,
-        });
+        const { data: emailRows, error: emailRowsErr } = await supabase.rpc(
+          "get_coadmin_emails",
+          { user_ids: allIds },
+        );
+        if (classifyRead(emailRows, emailRowsErr) === "error") {
+          console.warn(`Failed to load co-admin emails: ${formatError(emailRowsErr)}`);
+        }
         for (const row of (emailRows ?? []) as { user_id: string; email: string }[]) {
           emailMap.set(row.user_id, row.email);
         }
