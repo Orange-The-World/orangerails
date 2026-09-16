@@ -13,6 +13,9 @@
  *     (we assert by feeding the mock such a row and confirming it is filtered).
  *   - Payload shape: event=sync.completed, subaccount_id, connection_id,
  *     synced_count, ts.
+ *   - Circuit breaker (OR-T0335): N identical failures in one batch stop
+ *     processing for the remaining rows and page onBreakerTrip once;
+ *     distinct failures, or a lone failure among healthy rows, never trip it.
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
@@ -77,6 +80,20 @@ function makeMockClient(opts: {
     return chain;
   };
   return { from: builder };
+}
+
+/** Build N delivery rows sharing a platform, distinct ids, ready to run now. */
+function makeRows(n: number, prefix: string): Array<Record<string, unknown>> {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `${prefix}-${i}`,
+    platform_id: 'plat-1',
+    subaccount_id: null,
+    event_type: 'sync.completed',
+    payload: { event: 'sync.completed' },
+    attempts: 0,
+    last_attempt_at: null,
+    event_id: `${prefix}-event-${i}`,
+  }));
 }
 
 // ── Signature test ────────────────────────────────────────────────────
@@ -233,6 +250,7 @@ Deno.test('dispatchBatch: 500 response bumps attempts and records last_error', a
 
   assertEquals(result.failed, 1);
   assertEquals(result.succeeded, 0);
+  assertEquals(result.breaker_tripped, false);
   const u = updates[0];
   assertEquals(u.patch.attempts, 3);
   assertEquals(u.patch.last_error, 'HTTP 500');
@@ -408,4 +426,131 @@ Deno.test('dispatchBatch: platform with NULL webhook_url marks row abandoned', a
   assertEquals(fetchCalls, 0);
   assertEquals(updates[0].patch.last_error, 'platform_webhook_disabled');
   assert(updates[0].patch.succeeded_at, 'abandoned row should have succeeded_at set to remove it from the queue');
+});
+
+// ── Circuit breaker (OR-T0335) ────────────────────────────────────────
+//
+// A single systemic failure (a dead downstream host, a broken deploy, a
+// bad secret rotation) used to be retried and retired one row at a time,
+// indistinguishable from many unrelated bad rows, until every row involved
+// had aged past its own 5-attempt cap with no alert in between. These
+// tests pin the fix: N identical failures stop the batch and page a
+// human; anything else runs exactly as before.
+
+Deno.test('dispatchBatch: N identical failures trip the breaker and leave the rest of the batch untouched', async () => {
+  const updates: UpdateCall[] = [];
+  const mockClient = makeMockClient({
+    deliveryRows: makeRows(5, 'row-trip'),
+    platformRows: [{
+      id: 'plat-1',
+      webhook_url: 'https://example.com/hooks/or',
+      webhook_secret: 'f'.repeat(64),
+    }],
+    updates,
+  });
+  const mockFetch: typeof fetch = () =>
+    Promise.resolve(new Response('boom', { status: 500 }));
+
+  const trips: Array<{ reason: string; failureCount: number; remainingSkipped: number }> = [];
+
+  const result = await dispatchBatch({
+    // deno-lint-ignore no-explicit-any
+    serviceClient: mockClient as any,
+    fetchImpl: mockFetch,
+    now: () => new Date('2026-05-22T12:00:00Z'),
+    onBreakerTrip: (info) => { trips.push(info); },
+  });
+
+  assertEquals(result.scanned, 5);
+  // Rows 1-3 fail identically and trip the breaker on the 3rd; rows 4-5
+  // are left completely untouched, not even attempted.
+  assertEquals(result.attempted, 3);
+  assertEquals(result.failed, 3);
+  assertEquals(result.skipped_breaker, 2);
+  assertEquals(result.breaker_tripped, true);
+  assertEquals(result.breaker_reason, 'HTTP 500');
+
+  // Only the first 3 rows got any update call at all , the remaining 2
+  // were left exactly as retryable as they started, no attempts bump.
+  assertEquals(updates.length, 3);
+  assertEquals(updates.map((u) => u.whereId), ['row-trip-0', 'row-trip-1', 'row-trip-2']);
+
+  assertEquals(trips.length, 1);
+  assertEquals(trips[0].reason, 'HTTP 500');
+  assertEquals(trips[0].failureCount, 3);
+  assertEquals(trips[0].remainingSkipped, 2);
+});
+
+Deno.test('dispatchBatch: distinct failure reasons never trip the breaker', async () => {
+  const updates: UpdateCall[] = [];
+  const mockClient = makeMockClient({
+    deliveryRows: makeRows(3, 'row-distinct'),
+    platformRows: [{
+      id: 'plat-1',
+      webhook_url: 'https://example.com/hooks/or',
+      webhook_secret: 'g'.repeat(64),
+    }],
+    updates,
+  });
+  const statuses = [500, 502, 503];
+  let call = 0;
+  const mockFetch: typeof fetch = () => {
+    const status = statuses[call];
+    call += 1;
+    return Promise.resolve(new Response('boom', { status }));
+  };
+
+  const trips: unknown[] = [];
+
+  const result = await dispatchBatch({
+    // deno-lint-ignore no-explicit-any
+    serviceClient: mockClient as any,
+    fetchImpl: mockFetch,
+    now: () => new Date('2026-05-22T12:00:00Z'),
+    onBreakerTrip: (info) => { trips.push(info); },
+  });
+
+  // Every row still gets processed and retired normally: three different
+  // error strings never reach the same-reason threshold.
+  assertEquals(result.attempted, 3);
+  assertEquals(result.failed, 3);
+  assertEquals(result.skipped_breaker, 0);
+  assertEquals(result.breaker_tripped, false);
+  assertEquals(result.breaker_reason, null);
+  assertEquals(updates.length, 3);
+  assertEquals(trips.length, 0);
+});
+
+Deno.test('dispatchBatch: a lone bad row among healthy rows is retired normally, breaker stays cold', async () => {
+  const updates: UpdateCall[] = [];
+  const rows = makeRows(3, 'row-mixed');
+  const mockClient = makeMockClient({
+    deliveryRows: rows,
+    platformRows: [{
+      id: 'plat-1',
+      webhook_url: 'https://example.com/hooks/or',
+      webhook_secret: 'h'.repeat(64),
+    }],
+    updates,
+  });
+  let call = 0;
+  const mockFetch: typeof fetch = () => {
+    const status = call === 0 ? 500 : 200;
+    call += 1;
+    return Promise.resolve(new Response(status === 200 ? 'ok' : 'boom', { status }));
+  };
+
+  const result = await dispatchBatch({
+    // deno-lint-ignore no-explicit-any
+    serviceClient: mockClient as any,
+    fetchImpl: mockFetch,
+    now: () => new Date('2026-05-22T12:00:00Z'),
+  });
+
+  assertEquals(result.attempted, 3);
+  assertEquals(result.failed, 1);
+  assertEquals(result.succeeded, 2);
+  assertEquals(result.skipped_breaker, 0);
+  assertEquals(result.breaker_tripped, false);
+  assertEquals(updates.length, 3);
 });
