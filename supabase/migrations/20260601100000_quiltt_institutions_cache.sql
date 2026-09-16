@@ -39,9 +39,9 @@ CREATE INDEX IF NOT EXISTS quiltt_institutions_cache_searchable_idx
   ON public.quiltt_institutions_cache (connector_id, searchable text_pattern_ops);
 
 -- Whole-catalog age. NOT currently read by anything (see the header
--- comment); intended for a future refresher to decide whether to
--- refresh. Per-row refreshed_at lets us partially update if Quiltt's
--- paginated response splits across multiple calls.
+-- comment). The refresher this was meant to support (OR-T1076) is dead;
+-- see the header for the current plan. Per-row refreshed_at lets us
+-- partially update if a future writer's response splits across calls.
 CREATE INDEX IF NOT EXISTS quiltt_institutions_cache_refreshed_idx
   ON public.quiltt_institutions_cache (connector_id, refreshed_at);
 
