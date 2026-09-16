@@ -3,8 +3,8 @@ Description=ORBI BTC/USD staleness probe
 After=network.target
 # Backstop for the paths the probe cannot report itself: it never started, it
 # died before reaching its own alarm helper, or its alarm delivery failed.
-# Install orbi-probe-failed@.service and its script BEFORE enabling this unit.
-OnFailure=orbi-probe-failed@%n.service
+# Install orbi-failure-handler@.service and its script BEFORE enabling this unit.
+OnFailure=orbi-failure-handler@%n.service
 
 [Service]
 Type=oneshot
