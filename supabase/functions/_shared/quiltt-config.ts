@@ -45,7 +45,6 @@ export interface PlatformQuilttConfig {
 
 interface PlatformRow {
   slug: string;
-  quiltt_api_key: string | null;
   quiltt_api_key_id: string | null;
   quiltt_connector_id_link: string | null;
   quiltt_connector_id_reconnect: string | null;
@@ -66,7 +65,7 @@ export async function resolveQuilttConfigForPlatform(
   const { data, error } = await service
     .from('platforms')
     .select(
-      'slug, quiltt_api_key, quiltt_api_key_id, quiltt_connector_id_link, quiltt_connector_id_reconnect, quiltt_catalog_profile_id',
+      'slug, quiltt_api_key_id, quiltt_connector_id_link, quiltt_connector_id_reconnect, quiltt_catalog_profile_id',
     )
     .eq('id', platformId)
     .maybeSingle<PlatformRow>();
@@ -83,7 +82,7 @@ export async function resolveQuilttConfigForPlatform(
   const envConnectorIdReconnect = Deno.env.get('QUILTT_CONNECTOR_ID_RECONNECT') ?? '';
   const envCatalogProfileId = Deno.env.get('QUILTT_CATALOG_PROFILE_ID') ?? '';
 
-  const apiKey = data.quiltt_api_key ?? envApiKey;
+  const apiKey = envApiKey;
   const connectorIdLink = data.quiltt_connector_id_link ?? envConnectorIdLink;
   const connectorIdReconnect =
     data.quiltt_connector_id_reconnect || envConnectorIdReconnect || connectorIdLink;
@@ -114,7 +113,7 @@ export async function resolveQuilttConfigForPlatform(
     apiKeyId: data.quiltt_api_key_id ?? '',
     platformSlug: data.slug,
     source: {
-      apiKey: data.quiltt_api_key ? 'platform' : (envApiKey ? 'env' : 'missing'),
+      apiKey: envApiKey ? 'env' : 'missing',
       connectorIdLink: data.quiltt_connector_id_link
         ? 'platform'
         : (envConnectorIdLink ? 'env' : 'missing'),

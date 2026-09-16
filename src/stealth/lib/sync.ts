@@ -43,6 +43,8 @@ import {
   type ParsedDescriptor,
   type ScriptType,
 } from './derive';
+import { scanStartHeight } from './ranges';
+import { sortByAscendingHeight } from "./sync-ordering";
 import { sealEnvelope, unsealEnvelope, blindIndex } from './seal';
 import { loadBip158Matcher, type Bip158Matcher } from './wasm/index';
 import {
@@ -95,6 +97,14 @@ export interface NormalizedTransaction {
   vout_count: number;
   /** Carries any forward-compat notes. Plaintext, sealed in the envelope. */
   memo: string | null;
+  /** Hex, RPC display order. The hash of the block that included this
+   *  transaction, taken from parseBlockHeader's own dsha256 of the raw
+   *  header bytes and checked by assertBlockContentMatchesHash against the
+   *  hash the block was requested by. Carried through sealing as
+   *  block_hash_hex so a later server-side reorg detector can compare it
+   *  to the canonical chain without ever seeing plaintext. Absent on
+   *  records sealed before this field existed. */
+  block_hash?: string;
 }
 
 export type WalletEnvelopePayload =
@@ -140,6 +150,56 @@ export class WindowExhaustedError extends Error {
     Object.setPrototypeOf(this, WindowExhaustedError.prototype);
   }
 }
+
+/**
+ * Thrown by runSync when a fetched block's actual bytes do not hash to the
+ * value it was requested by. fetchFilterPair (OR-T1167) already checks that
+ * the filter sidecar's (filter, hash) pair matches the HEIGHT asked; this is
+ * a separate, later check that the BYTES a block source hands back for that
+ * hash really do hash to it. A source or CDN returning the wrong bytes for a
+ * hash (truncated, corrupted, or simply someone else's block) would
+ * otherwise be parsed and recorded as if it were the block requested, with
+ * no error at all.
+ *
+ * The widget's catch (routes/sync.tsx) does not special-case this error: it
+ * falls into the generic branch and is reported retryable:true, same as any
+ * other block-parsing failure. That is deliberate, not an oversight: a
+ * wrong-bytes-for-a-hash response can plausibly come from one stale CDN
+ * edge or cache entry, and a retried sync may hit a different one and
+ * succeed, even though the exact response already in hand is provably
+ * wrong and re-parsing it would only reproduce the same mismatch.
+ */
+export class BlockContentMismatchError extends Error {
+  readonly code = 'BLOCK_CONTENT_MISMATCH' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'BlockContentMismatchError';
+    Object.setPrototypeOf(this, BlockContentMismatchError.prototype);
+  }
+}
+
+/**
+ * How far below the chain tip a block must sit before we will record a
+ * transaction from it.
+ *
+ * Bitcoin occasionally rewrites its most recent block or two. That is normal.
+ * When it happens, a transaction we already recorded can stop existing, and
+ * nothing in this orchestrator ever looks back at a height it has covered, so
+ * the wrong balance is permanent rather than temporary. Six confirmations is
+ * the long-standing Bitcoin convention and covers every reorg observed on
+ * mainnet since 2013.
+ *
+ * The cost is visible to the customer and is accepted: an incoming payment
+ * does not appear for roughly an hour. Showing money that might vanish is
+ * worse than showing it late.
+ *
+ * This constant is only the PREVENTION. The DETECTION half re-checks the
+ * stored block hash of already-recorded transactions over a window an order
+ * of magnitude deeper than this, so that the single event which defeats this
+ * buffer is not also the event that defeats the detector. The two numbers are
+ * deliberately far apart and must not be collapsed into one.
+ */
+export const CONFIRMATION_DEPTH = 6;
 
 export interface RunSyncOptions {
   envelope: SealedEnvelope;
@@ -188,6 +248,21 @@ export interface RunSyncOptions {
 export interface SyncResult {
   txCount: number;
   lastBlockScanned: number;
+  /**
+   * False on the short-circuit path (fromHeight > tip): this run read zero
+   * filters and lastBlockScanned above is the STORED cursor echoed back
+   * unchanged, not a height this run actually scanned. True on every path
+   * that walked the scan range, even when zero filters matched.
+   *
+   * Callers MUST NOT record coverage, advance a cursor, or write a scan
+   * range from this result unless scanned is true. Before this field
+   * existed, the caller inferred "did we scan" by comparing
+   * lastBlockScanned to the stored cursor -- but on the short-circuit path
+   * those are the SAME number, so the comparison was a tautology a
+   * zero-filter run could satisfy (OR-T1117). This field replaces that
+   * inference with a direct signal.
+   */
+  scanned: boolean;
   bytesDownloaded: number;
   sealedTransactions: SealedTransaction[];
   /** The decrypted normalized transactions. Returned to the caller for
@@ -496,6 +571,26 @@ function parseBlockHeader(raw: Uint8Array): ParsedBlockHeader {
   };
 }
 
+/**
+ * Compare a parsed block header's own hash (dsha256 of the actual header
+ * bytes, computed by parseBlockHeader) against the hash the block was
+ * requested by. Both are RPC display order lowercase hex. A mismatch means
+ * the bytes handed back are not the block that was asked for, whatever
+ * height or hash the response CLAIMED to be: throws BlockContentMismatchError.
+ */
+function assertBlockContentMatchesHash(
+  header: ParsedBlockHeader,
+  requestedHashHex: string,
+  height: number,
+): void {
+  if (header.blockHashHex.toLowerCase() !== requestedHashHex.toLowerCase()) {
+    throw new BlockContentMismatchError(
+      `stealth/sync: block at height ${height} does not hash to the requested value` +
+      ` (requested ${requestedHashHex}, actual bytes hash to ${header.blockHashHex})`,
+    );
+  }
+}
+
 function isoDateFromUnix(ts: number): string {
   const d = new Date(ts * 1000);
   const yyyy = d.getUTCFullYear().toString().padStart(4, '0');
@@ -611,29 +706,58 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('deriving', 100, `${derived.length} addresses ready`));
 
   // ── fetching_filters + matching (interleaved by height for fast-fail UX) ──
-  const tip = await opts.fetchTip();
+  const chainTip = await opts.fetchTip();
 
-  // Requirement 1 (issue #335): reject a birthday height outside [0, tip]
+  // Requirement 1 (issue #335): reject a birthday height outside [0, chainTip]
   // before any scan. Coercing a known-wrong start onto the chain tip would
   // silently claim a range was scanned that was not, and that is not
   // recoverable. Rejection is recoverable: fix wallet_birthday, retry.
-  if (opts.birthdayHeight < 0 || opts.birthdayHeight > tip) {
+  //
+  // This checks the RAW chain tip, not the buffered scan ceiling below. A
+  // birthday that lands inside the confirmation buffer is a legitimate date
+  // the user picked, not a mistake they could correct, so rejecting it would
+  // be wrong and unactionable. The already-up-to-date short-circuit below
+  // handles that case, and the blocks are picked up by a later sync once they
+  // are buried deep enough.
+  if (!Number.isInteger(opts.birthdayHeight) || opts.birthdayHeight < 0 || opts.birthdayHeight > chainTip) {
     throw new Error(
-      `stealth/sync: birthday height ${opts.birthdayHeight} is out of range [0, ${tip}] -- ` +
+      `stealth/sync: birthday height ${opts.birthdayHeight} is out of range [0, ${chainTip}] -- ` +
       `abort before scanning; fix wallet_birthday and retry`,
     );
   }
 
-  // Resume point. `resumeFromHeight` is already anchored at the birthday by
-  // resumeHeightFromRanges, so it is used as-is rather than incremented: the
-  // coverage rule deliberately re-reads the boundary block instead of risking
-  // an off-by-one gap. The legacy cursor is one BEHIND the next unread block,
-  // hence the +1 on that arm only. Math.max still guards both, so neither path
-  // can start before the wallet birthday.
-  const fromHeight = Math.max(
-    opts.birthdayHeight,
-    opts.resumeFromHeight ?? (opts.lastBlockScanned ?? -1) + 1,
-  );
+  // The scan ceiling, and the only thing this function treats as "the tip"
+  // from here down: the filter workers, the contiguous-cursor walk, and the
+  // rolling-window extension passes are all bounded by it.
+  //
+  // Deriving the ceiling once, here, is the point. lastBlockScanned is
+  // computed from this same bounded walk, so the coverage watermark cannot
+  // advance past the last block actually scanned. If the scan stopped at
+  // chainTip - CONFIRMATION_DEPTH while coverage was still recorded up to
+  // chainTip, those blocks would never be scanned by anyone, ever, and the
+  // money in them would never appear at all. That failure is worse than the
+  // one the buffer fixes: a delayed balance would become a permanently
+  // missing one. Keeping it to a single expression means there is no second
+  // place that has to remember to agree with this one.
+  //
+  // Goes negative on a chain shorter than CONFIRMATION_DEPTH blocks. That is
+  // handled rather than special-cased: birthdayHeight is >= 0, so fromHeight
+  // is > tip and the short-circuit below returns the stored cursor without
+  // scanning anything or advancing coverage.
+  const tip = chainTip - CONFIRMATION_DEPTH;
+
+  // Resume point. The rule itself lives in ./ranges.ts as scanStartHeight, in
+  // one place, so that a caller which must reason about where the next sync
+  // will start (the envelope replacement path, which promises the user a full
+  // rescan) can import it rather than restate it. Restating it is what went
+  // wrong before: a comment in an edge function quoted a two term version of
+  // this expression that had already grown a third term, and the recovery path
+  // written against that comment quietly stopped working.
+  const fromHeight = scanStartHeight({
+    birthdayHeight: opts.birthdayHeight,
+    lastBlockScanned: opts.lastBlockScanned,
+    resumeFromHeight: opts.resumeFromHeight,
+  });
   if (fromHeight > tip) {
     // Already current. Short-circuit with empty result.
     emit(opts, progress('fetching_filters', 100, 'Already up to date.'));
@@ -648,6 +772,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       // chain tip is never an accurate cursor value here. Return the stored
       // cursor so the caller does not persist tip as a range never read.
       lastBlockScanned: opts.lastBlockScanned ?? -1,
+      // OR-T1117: this run read zero filters. lastBlockScanned above is an
+      // echo of the stored cursor, not a scanned height, so callers must not
+      // treat this result as new coverage.
+      scanned: false,
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
@@ -805,7 +933,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // not chain order. The UTXO tracker below is order-sensitive: a spend
   // processed before the receive that funded it is silently missed.
   // Process blocks strictly by ascending height.
-  hits.sort((a, b) => a.height - b.height);
+  sortByAscendingHeight(hits);
 
   // ── fetching_blocks + building_txs ───────────────────────────────────
   emit(opts, progress('fetching_blocks', 0, `${hits.length} blocks to fetch.`));
@@ -878,6 +1006,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // block record height can silently arrive as 0.
     const blockHeight = hits[i].height;
     const header = parseBlockHeader(block.raw);
+    assertBlockContentMatchesHash(header, hits[i].blockHashHex, blockHeight);
     const occurredAt = isoDateFromUnix(header.timestamp);
     // Full instant, not just the date. Rides inside the sealed envelope so
     // the server learns nothing new; consumers use it for transaction-time
@@ -946,6 +1075,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         normalized.push({
           txid: tx.txid,
           block_height: blockHeight,
+          block_hash: hits[i].blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
           direction: 'out',
@@ -969,6 +1099,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         normalized.push({
           txid: tx.txid,
           block_height: blockHeight,
+          block_hash: hits[i].blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
           direction: 'in',
@@ -1097,7 +1228,25 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       }
     };
     await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, extWorker));
-    extHits.sort((a, b) => a.height - b.height);
+    sortByAscendingHeight(extHits);
+
+    // Same reason as the trim on `hits` after the initial scan, and it has to
+    // be repeated here because this is a SEPARATE array that the earlier trim
+    // never touched. On an aborted filter fetch, heights above
+    // lastContiguousScanned were never contiguously scanned, and this pass can
+    // still produce a hit up there: its cache-miss branch `continue`s past a
+    // broken height instead of stopping, and concurrent workers may have raced
+    // past the failure point before the abort landed. A transaction recorded
+    // above the gap is sealed and uploaded, and the server then advances the
+    // stored cursor to the height it landed at, so the next sync resumes ABOVE
+    // heights nobody ever read. Those heights are never scanned again and any
+    // payment in them is missing from the balance permanently, with no error
+    // and no retry path. Trim in place so everything below sees only the safe,
+    // contiguous range.
+    if (fetchAborted && extHits.length > 0) {
+      const extSafe = extHits.filter((hit) => hit.height <= lastContiguousScanned);
+      extHits.splice(0, extHits.length, ...extSafe);
+    }
 
     // Process extension hits. Only new-address outputs are checked for receives
     // (passNewDerived), but inputs are checked against the full UTXO map so a
@@ -1120,6 +1269,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       bytesDownloaded += block.raw.length;
       const blockHeight = extHits[ei].height;
       const header = parseBlockHeader(block.raw);
+      assertBlockContentMatchesHash(header, extHits[ei].blockHashHex, blockHeight);
       const occurredAt = isoDateFromUnix(header.timestamp);
       const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
 
@@ -1175,7 +1325,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
             }
           }
           normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            txid: tx.txid, block_height: blockHeight, block_hash: extHits[ei].blockHashHex,
+            occurred_at: occurredAt,
             timestamp: occurredAtInstant, direction: 'out',
             amount_sats: Number(netOut), address: recipientAddress,
             vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
@@ -1184,7 +1335,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
           for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
         } else if (anyReceive && !alreadySeen) {
           normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
+            txid: tx.txid, block_height: blockHeight, block_hash: extHits[ei].blockHashHex,
+            occurred_at: occurredAt,
             timestamp: occurredAtInstant, direction: 'in',
             amount_sats: Number(receivedAmount), address: receivedAddress,
             vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
@@ -1231,6 +1383,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       ciphertext_b64: env.ciphertext_b64,
       occurred_at: tx.occurred_at,
       block_height: tx.block_height,
+      block_hash_hex: tx.block_hash,
       txid_blind_index_hex: blind,
     });
     if (i % 8 === 0 || i === normalized.length - 1) {
@@ -1248,6 +1401,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   return {
     txCount: normalized.length,
     lastBlockScanned: lastContiguousScanned,
+    scanned: true,
     bytesDownloaded,
     sealedTransactions,
     normalized,
@@ -1379,12 +1533,60 @@ async function fetchFilterPair(height: number, baseUrl: string): Promise<FilterR
   }
 
   const sidecar = (await jsonResp.json()) as FilterSidecar;
+  // OR-T1167: the SipHash match below proves the filter and the hash came
+  // from the same block; it proves nothing about which HEIGHT that block is
+  // at. A producer or CDN serving one height's pair under another height's
+  // URL passes that match cleanly. Catch it here, before the mismatch is
+  // carried into a stored transaction and read by nobody. Durable, not
+  // retried: a producer serving the wrong sidecar under this height will
+  // serve it again.
+  if (sidecar.block_height !== height) {
+    throw new DurableFilterError(
+      `liveFetchFilter: sidecar at height ${height} reports block_height ` +
+      `${sidecar.block_height} -- the .gcs.gz and .json pair does not match ` +
+      `the height requested. This is a producer/CDN misfile, not a transient ` +
+      `error; retrying would only fetch the same mismatched pair again.`,
+    );
+  }
+  // OR-T1167, second half. The hash has to be well formed and single-cased
+  // HERE, at the one point it enters FilterRecord, or "no hash" stops meaning
+  // one thing.
+  //
+  // Downstream a stored transaction with no block_hash means "recorded before
+  // we captured hashes": permanently unverifiable, not wrong, and the reorg
+  // detector must skip it in silence. If a malformed sidecar could also
+  // produce a record with no hash, the detector cannot tell those apart.
+  //
+  // Case is not cosmetic either. The detector compares this stored hash
+  // against the canonical hash at that height, the column is text with no
+  // CHECK constraint, and the comparison is case sensitive. A producer that
+  // ever emitted uppercase hex would make every affected transaction compare
+  // unequal and be marked orphaned with no reorg having happened: a false
+  // positive on customer money, produced by the check that exists to protect
+  // it. So accept either case at the door and store exactly one.
+  //
+  // Read as unknown on purpose. The declared type says string; this value
+  // came out of JSON.parse and the declaration is a claim, not a check.
+  //
+  // Durable rather than retried, for the same reason as the height mismatch
+  // above: a producer serving a malformed sidecar will serve it again.
+  const rawHash = sidecar.block_hash as unknown;
+  if (typeof rawHash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(rawHash)) {
+    throw new DurableFilterError(
+      `liveFetchFilter: sidecar at height ${height} carries no usable ` +
+      `block_hash (expected 64 hex characters, got ${JSON.stringify(rawHash)}). ` +
+      `A record built from this would carry no hash at all, which downstream ` +
+      `means "recorded before hashes were captured" and is treated as ` +
+      `unverifiable rather than as a failure.`,
+    );
+  }
+
   const gzBuf = new Uint8Array(await gzResp.arrayBuffer());
   const filter = await gunzip(gzBuf);
 
   return {
     height: sidecar.block_height,
-    blockHashHex: sidecar.block_hash,
+    blockHashHex: rawHash.toLowerCase(),
     filter,
   };
 }
@@ -1439,8 +1641,10 @@ export async function liveFetchFilter(
 
 /**
  * Fetch raw block bytes for the given block hash. The block source attaches
- * X-Block-Hash and X-Block-Height response headers; we trust those for the
- * height field but verify the hash matches what we asked for.
+ * X-Block-Hash and X-Block-Height response headers. The height is taken from
+ * X-Block-Height (defaulting to 0 if absent). The blockHashHex in the returned
+ * record is X-Block-Hash when present, or the requested hash as a fallback;
+ * neither is verified against what was asked for.
  */
 export async function liveFetchBlock(
   blockHashHex: string,
